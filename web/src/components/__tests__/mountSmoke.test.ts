@@ -19,6 +19,14 @@ vi.mock('../../lib/api', () => {
   const responses: Record<string, unknown> = {
     '/api/instance/pause': { paused: false, reason: '', paused_at: '', paused_by: '' },
     '/api/settings': { device_name: 'testbox', dispatch_schedules: true },
+    '/api/settings/providers': {
+      keys: {
+        ANTHROPIC_API_KEY: { label: 'Anthropic API key', description: '', configured: true },
+        OPENAI_API_KEY: { label: 'OpenAI API key', description: '', configured: false },
+      },
+      requires_restart: true,
+      env_path: '/tmp/workspace/.env',
+    },
     '/api/local/status': { device_name: 'testbox', device_branch: 'dev/testbox', branch: 'dev/testbox', on_device_branch: true, dirty: false },
     '/api/admin/skills': {
       counts: { custom: 1, github: 1 },

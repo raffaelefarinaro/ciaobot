@@ -283,6 +283,47 @@
         </template>
       </template>
 
+      <!-- PROVIDERS TAB -->
+      <template v-if="currentTab === 'providers'">
+        <div v-if="!providerKeysLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
+        <template v-else-if="providerKeysError">
+          <div class="card"><p class="hint">{{ providerKeysError }}</p></div>
+        </template>
+        <template v-else-if="providerKeys">
+          <div class="card">
+            <p class="section-title">LLM Providers Configuration</p>
+            <p class="hint">
+              Manage API keys and developer credentials. Changes are written directly to your local <code>.env</code> file and will automatically reboot the server.
+            </p>
+
+            <div v-for="(meta, key) in providerKeys.keys" :key="key" class="routine-row" style="flex-direction: column; align-items: stretch; gap: 8px;">
+              <div class="routine-info" style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                <span class="routine-name">{{ meta.label }}</span>
+                <span class="badge" :class="meta.configured ? 'badge--success' : 'badge--error'">
+                  {{ meta.configured ? '✓ Configured' : '✗ Unconfigured' }}
+                </span>
+              </div>
+              <p class="hint" style="margin-top: 0; margin-bottom: 4px;">{{ meta.description }}</p>
+              <input
+                type="password"
+                class="routine-input"
+                v-model="providerKeyInputs[key]"
+                :placeholder="meta.configured ? '•••••••••••• (Leave blank to keep existing, or type empty space to clear)' : 'Enter API Key'"
+                :disabled="providerKeysSaving"
+                style="max-width: 100%; width: 100%; font-family: monospace; box-sizing: border-box;"
+              />
+            </div>
+
+            <div class="action-row" style="margin-top: 20px;">
+              <button class="btn-primary" @click="saveProviderKeys" :disabled="providerKeysSaving">
+                {{ providerKeysSaving ? 'Saving...' : 'Save Keys' }}
+              </button>
+            </div>
+            <div v-if="providerKeysResult" class="action-result">{{ providerKeysResult }}</div>
+          </div>
+        </template>
+      </template>
+
       <!-- SKILLS TAB -->
       <template v-if="currentTab === 'skills'">
         <div class="card">
@@ -404,7 +445,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '../lib/api'
 import { formatTime, formatDuration } from '../lib/time'
-import type { AutomationProcess, DeployResult, LocalStatus, RoutineSettings, SkillInventory } from '../lib/types'
+import type { AutomationProcess, DeployResult, LocalStatus, RoutineSettings, SkillInventory, ProviderConfigSettings } from '../lib/types'
 import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSupported } from '../lib/push'
 import { useAuthStore } from '../stores/auth'
 import PaneHeader from './PaneHeader.vue'
@@ -515,6 +556,67 @@ async function saveRoutines(patch: Record<string, string>) {
     routinesSaving.value = false
   }
 }
+
+// ── Provider API Key settings (Providers tab) ─────────────────────────────────
+const providerKeys = ref<ProviderConfigSettings | null>(null)
+const providerKeysLoaded = ref(false)
+const providerKeysError = ref('')
+const providerKeysSaving = ref(false)
+const providerKeysResult = ref('')
+const providerKeyInputs = ref<Record<string, string>>({})
+
+async function fetchProviderKeys() {
+  try {
+    const res = await api.get<ProviderConfigSettings>('/api/settings/providers')
+    providerKeys.value = res
+    for (const key in res.keys) {
+      providerKeyInputs.value[key] = ''
+    }
+  } catch (e: any) {
+    providerKeysError.value = `Failed to load provider keys: ${e?.message || e}`
+  } finally {
+    providerKeysLoaded.value = true
+  }
+}
+
+async function saveProviderKeys() {
+  if (!providerKeys.value) return
+  providerKeysSaving.value = true
+  providerKeysResult.value = ''
+  
+  const patchKeys: Record<string, string> = {}
+  for (const key in providerKeys.value.keys) {
+    const val = providerKeyInputs.value[key]
+    if (val !== '') {
+      patchKeys[key] = val
+    }
+  }
+  
+  if (Object.keys(patchKeys).length === 0) {
+    providerKeysResult.value = 'No changes to save.'
+    providerKeysSaving.value = false
+    setTimeout(() => { providerKeysResult.value = '' }, 2000)
+    return
+  }
+  
+  try {
+    const res = await api.patch<ProviderConfigSettings>('/api/settings/providers', { keys: patchKeys })
+    providerKeys.value = res
+    for (const key in res.keys) {
+      providerKeyInputs.value[key] = ''
+    }
+    providerKeysResult.value = 'Saved keys. Restarting server to apply...'
+    setTimeout(() => {
+      providerKeysResult.value = ''
+      window.location.reload()
+    }, 2500)
+  } catch (e: any) {
+    providerKeysResult.value = `Error: ${e?.message || e}`
+  } finally {
+    providerKeysSaving.value = false
+  }
+}
+
 
 const voiceInstalling = ref(false)
 
@@ -634,6 +736,7 @@ onMounted(async () => {
   fetchRoutines()
   fetchAutomation()
   fetchPackageStatus()
+  fetchProviderKeys()
   pushSupportedFlag.value = pushSupported()
   if (isIos() && !isStandalone()) {
     needsIosInstall.value = true

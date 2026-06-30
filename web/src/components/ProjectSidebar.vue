@@ -148,6 +148,20 @@
           Models
         </router-link>
         <router-link
+          to="/settings/providers"
+          class="settings-nav-item"
+          :class="{ active: route.path === '/settings/providers' }"
+        >
+          Providers
+        </router-link>
+        <router-link
+          to="/settings/workspaces"
+          class="settings-nav-item"
+          :class="{ active: route.path === '/settings/workspaces' }"
+        >
+          Workspaces
+        </router-link>
+        <router-link
           to="/settings/skills"
           class="settings-nav-item"
           :class="{ active: route.path === '/settings/skills' }"

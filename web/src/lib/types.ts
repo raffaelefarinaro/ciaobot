@@ -3,9 +3,16 @@ export type WorkspaceName = string
 export interface WorkspaceInfo {
   name: WorkspaceName
   vault_root: string
+  default_provider: 'claude' | 'pi'
   default_model: string
+  disallowed_tools?: string[] | null
   gws_profile: string
   model_bucket: string
+}
+
+export interface WorkspacesResponse {
+  workspaces: WorkspaceInfo[]
+  active: WorkspaceName | null
 }
 
 // ── Projects & Chats ────────────────────────────────────────────────────
@@ -247,6 +254,16 @@ export interface RoutineSettings {
     ollama_cloud: string[]
     ollama_local: string[]
   }
+}
+
+export interface ProviderConfigSettings {
+  keys: Record<string, {
+    label: string
+    description: string
+    configured: boolean
+  }>
+  requires_restart: boolean
+  env_path: string
 }
 
 export interface AdminStatus {

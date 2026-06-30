@@ -695,6 +695,16 @@ async def provider_config_settings(request: Request) -> JSONResponse:
         )
     _write_env_values(_env_path(config), updates)
     _apply_provider_key_updates(config, updates)
+    if updates:
+        async def _do_restart():
+            await asyncio.sleep(0.5)
+            fn = getattr(request.app.state, "request_restart", None)
+            if callable(fn):
+                fn(config.restart_exit_code)
+            else:
+                from ciao.signals import RestartRequested
+                raise RestartRequested(config.restart_exit_code)
+        asyncio.create_task(_do_restart())
     return JSONResponse(_provider_config_payload(config))
 
 

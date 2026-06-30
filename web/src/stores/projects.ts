@@ -203,14 +203,15 @@ export const useProjectStore = defineStore('projects', () => {
       return names.map(name => ({
         name,
         vault_root: '',
+        default_provider: 'claude',
         default_model: '',
         gws_profile: '',
         model_bucket: '',
       }))
     }
     return [
-      { name: 'personal', vault_root: 'personal', default_model: '', gws_profile: 'personal', model_bucket: 'personal' },
-      { name: 'work', vault_root: 'work', default_model: '', gws_profile: 'work', model_bucket: 'work' },
+      { name: 'personal', vault_root: 'personal', default_provider: 'claude', default_model: '', gws_profile: 'personal', model_bucket: 'personal' },
+      { name: 'work', vault_root: 'work', default_provider: 'claude', default_model: '', gws_profile: 'work', model_bucket: 'work' },
     ]
   })
 
