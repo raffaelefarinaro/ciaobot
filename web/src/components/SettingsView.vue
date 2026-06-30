@@ -296,6 +296,18 @@
               Manage API keys and developer credentials. Changes are written directly to your local <code>.env</code> file and will automatically reboot the server.
             </p>
 
+            <div v-if="providerKeys.connections" class="routine-row" style="flex-direction: column; align-items: stretch; gap: 8px; margin-bottom: 12px;">
+              <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="routine-info" style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                <span class="routine-name">Codex <span class="hint" style="font-weight: normal;">via Pi</span></span>
+                <span class="badge" :class="conn.ok ? 'badge--success' : 'badge--error'">
+                  {{ conn.ok ? '✓ Connected' : '✗ Not connected' }}
+                </span>
+              </div>
+              <p v-if="providerKeys.connections.codex?.detail" class="hint" style="margin-top: 0; margin-bottom: 0;">
+                {{ providerKeys.connections.codex.detail }}
+              </p>
+            </div>
+
             <div v-for="(meta, key) in providerKeys.keys" :key="key" class="routine-row" style="flex-direction: column; align-items: stretch; gap: 8px;">
               <div class="routine-info" style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
                 <span class="routine-name">{{ meta.label }}</span>
@@ -336,6 +348,107 @@
               </button>
             </div>
             <div v-if="providerKeysResult" class="action-result">{{ providerKeysResult }}</div>
+          </div>
+        </template>
+      </template>
+
+      <!-- WORKSPACES TAB -->
+      <template v-if="currentTab === 'workspaces'">
+        <div v-if="!workspacesLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
+        <template v-else-if="workspacesError">
+          <div class="card"><p class="hint">{{ workspacesError }}</p></div>
+        </template>
+        <template v-else>
+          <div class="card">
+            <p class="section-title">Workspaces</p>
+            <p class="hint">
+              Logical chat spaces that route projects, chats, vault roots, model defaults, and integration profiles. Saved to <code>.runtime/workspaces.json</code> and applied immediately.
+            </p>
+
+            <div
+              v-for="form in workspaceForms"
+              :key="form.name"
+              class="routine-row"
+              style="flex-direction: column; align-items: stretch; gap: 8px; margin-top: 16px;"
+            >
+              <div class="routine-info" style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                <span class="routine-name">{{ form.name }}</span>
+                <button
+                  v-if="workspaceForms.length > 1"
+                  class="btn-small btn-danger"
+                  @click="removeWorkspace(form.name)"
+                  :disabled="workspacesSaving === form.name"
+                >Delete</button>
+              </div>
+
+              <label class="ws-field"><span class="ws-label">Vault root</span>
+                <input class="routine-input" v-model="form.vault_root" :disabled="workspacesSaving === form.name" placeholder="(defaults to workspace name)" />
+              </label>
+              <label class="ws-field"><span class="ws-label">Provider</span>
+                <select class="routine-input" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
+                  <option value="claude">claude</option>
+                  <option value="pi">pi</option>
+                </select>
+              </label>
+              <label class="ws-field"><span class="ws-label">Default model</span>
+                <input class="routine-input" v-model="form.default_model" :disabled="workspacesSaving === form.name" placeholder="(inherit)" />
+              </label>
+              <label class="ws-field"><span class="ws-label">GWS profile</span>
+                <input class="routine-input" v-model="form.gws_profile" :disabled="workspacesSaving === form.name" placeholder="(none)" />
+              </label>
+              <label class="ws-field"><span class="ws-label">Model bucket</span>
+                <input class="routine-input" v-model="form.model_bucket" :disabled="workspacesSaving === form.name" placeholder="(none)" />
+              </label>
+              <label class="ws-field"><span class="ws-label">Disallowed tools</span>
+                <input class="routine-input" v-model="form.disallowed_tools" :disabled="workspacesSaving === form.name" placeholder="comma-separated, blank = defaults" />
+              </label>
+
+              <div class="action-row" style="margin-top: 4px;">
+                <button class="btn-small" @click="saveWorkspace(form.name)" :disabled="workspacesSaving === form.name">
+                  {{ workspacesSaving === form.name ? 'Saving...' : 'Save' }}
+                </button>
+              </div>
+            </div>
+
+            <!-- Add workspace -->
+            <div class="routine-row" style="flex-direction: column; align-items: stretch; gap: 8px; margin-top: 20px; border-top: 1px solid var(--border); padding-top: 16px;">
+              <button class="btn-small" @click="showNewWorkspace = !showNewWorkspace">
+                {{ showNewWorkspace ? 'Cancel' : '+ Add workspace' }}
+              </button>
+              <template v-if="showNewWorkspace">
+                <label class="ws-field"><span class="ws-label">Name</span>
+                  <input class="routine-input" v-model="newWorkspaceForm.name" :disabled="workspacesSaving === 'new'" placeholder="letters, numbers, dashes, underscores" />
+                </label>
+                <label class="ws-field"><span class="ws-label">Vault root</span>
+                  <input class="routine-input" v-model="newWorkspaceForm.vault_root" :disabled="workspacesSaving === 'new'" placeholder="(defaults to name)" />
+                </label>
+                <label class="ws-field"><span class="ws-label">Provider</span>
+                  <select class="routine-input" v-model="newWorkspaceForm.default_provider" :disabled="workspacesSaving === 'new'">
+                    <option value="claude">claude</option>
+                    <option value="pi">pi</option>
+                  </select>
+                </label>
+                <label class="ws-field"><span class="ws-label">Default model</span>
+                  <input class="routine-input" v-model="newWorkspaceForm.default_model" :disabled="workspacesSaving === 'new'" placeholder="(inherit)" />
+                </label>
+                <label class="ws-field"><span class="ws-label">GWS profile</span>
+                  <input class="routine-input" v-model="newWorkspaceForm.gws_profile" :disabled="workspacesSaving === 'new'" placeholder="(none)" />
+                </label>
+                <label class="ws-field"><span class="ws-label">Model bucket</span>
+                  <input class="routine-input" v-model="newWorkspaceForm.model_bucket" :disabled="workspacesSaving === 'new'" placeholder="(none)" />
+                </label>
+                <label class="ws-field"><span class="ws-label">Disallowed tools</span>
+                  <input class="routine-input" v-model="newWorkspaceForm.disallowed_tools" :disabled="workspacesSaving === 'new'" placeholder="comma-separated, blank = defaults" />
+                </label>
+                <div class="action-row" style="margin-top: 4px;">
+                  <button class="btn-primary" @click="createNewWorkspace" :disabled="workspacesSaving === 'new'">
+                    {{ workspacesSaving === 'new' ? 'Creating...' : 'Create workspace' }}
+                  </button>
+                </div>
+              </template>
+            </div>
+
+            <div v-if="workspacesResult" class="action-result">{{ workspacesResult }}</div>
           </div>
         </template>
       </template>
@@ -461,9 +574,10 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '../lib/api'
 import { formatTime, formatDuration } from '../lib/time'
-import type { AutomationProcess, DeployResult, LocalStatus, RoutineSettings, SkillInventory, ProviderConfigSettings } from '../lib/types'
+import type { AutomationProcess, DeployResult, LocalStatus, RoutineSettings, SkillInventory, ProviderConfigSettings, WorkspaceInfo } from '../lib/types'
 import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSupported } from '../lib/push'
 import { useAuthStore } from '../stores/auth'
+import { useProjectStore } from '../stores/projects'
 import PaneHeader from './PaneHeader.vue'
 
 const emit = defineEmits<{ 'open-sidebar': [] }>()
@@ -763,6 +877,139 @@ function isStandalone(): boolean {
   )
 }
 
+// ── Workspaces settings (Workspaces tab) ───────────────────────────────────
+const projectStore = useProjectStore()
+const workspacesLoaded = ref(false)
+const workspacesError = ref('')
+const workspacesSaving = ref<string | null>(null)
+const workspacesResult = ref('')
+const showNewWorkspace = ref(false)
+
+type WorkspaceForm = {
+  name: string
+  vault_root: string
+  default_provider: string
+  default_model: string
+  gws_profile: string
+  model_bucket: string
+  disallowed_tools: string
+}
+
+function blankWorkspaceForm(): WorkspaceForm {
+  return {
+    name: '',
+    vault_root: '',
+    default_provider: 'claude',
+    default_model: '',
+    gws_profile: '',
+    model_bucket: '',
+    disallowed_tools: '',
+  }
+}
+
+function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
+  return {
+    name: ws.name,
+    vault_root: ws.vault_root || '',
+    default_provider: ws.default_provider || 'claude',
+    default_model: ws.default_model || '',
+    gws_profile: ws.gws_profile || '',
+    model_bucket: ws.model_bucket || '',
+    disallowed_tools: Array.isArray(ws.disallowed_tools) ? ws.disallowed_tools.join(', ') : '',
+  }
+}
+
+const workspaceForms = ref<WorkspaceForm[]>([])
+const newWorkspaceForm = ref<WorkspaceForm>(blankWorkspaceForm())
+
+function disallowedToolsPayload(raw: string): string[] | null {
+  const cleaned = raw.trim()
+  if (!cleaned) return null
+  return cleaned.split(',').map((s) => s.trim()).filter(Boolean)
+}
+
+async function fetchWorkspacesList() {
+  workspacesError.value = ''
+  try {
+    await projectStore.fetchWorkspaces()
+    workspaceForms.value = projectStore.workspaces.map(workspaceToForm)
+  } catch (e: any) {
+    workspacesError.value = `Failed to load workspaces: ${e?.message || e}`
+  } finally {
+    workspacesLoaded.value = true
+  }
+}
+
+async function saveWorkspace(name: string) {
+  const form = workspaceForms.value.find((f) => f.name === name)
+  if (!form) return
+  workspacesSaving.value = name
+  workspacesResult.value = ''
+  try {
+    await projectStore.updateWorkspace(name, {
+      vault_root: form.vault_root,
+      default_provider: form.default_provider as 'claude' | 'pi',
+      default_model: form.default_model,
+      gws_profile: form.gws_profile,
+      model_bucket: form.model_bucket,
+      disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
+    })
+    workspacesResult.value = `Workspace "${name}" saved.`
+    await fetchWorkspacesList()
+  } catch (e: any) {
+    workspacesResult.value = `Error: ${e?.message || e}`
+  } finally {
+    workspacesSaving.value = null
+    setTimeout(() => { if (workspacesResult.value.startsWith('Workspace')) workspacesResult.value = '' }, 3000)
+  }
+}
+
+async function createNewWorkspace() {
+  const form = newWorkspaceForm.value
+  if (!form.name.trim()) {
+    workspacesResult.value = 'Enter a workspace name.'
+    return
+  }
+  workspacesSaving.value = 'new'
+  workspacesResult.value = ''
+  try {
+    await projectStore.createWorkspace({
+      name: form.name.trim(),
+      vault_root: form.vault_root,
+      default_provider: form.default_provider as 'claude' | 'pi',
+      default_model: form.default_model,
+      gws_profile: form.gws_profile,
+      model_bucket: form.model_bucket,
+      disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
+    })
+    workspacesResult.value = `Workspace "${form.name.trim()}" created.`
+    showNewWorkspace.value = false
+    newWorkspaceForm.value = blankWorkspaceForm()
+    await fetchWorkspacesList()
+  } catch (e: any) {
+    workspacesResult.value = `Error: ${e?.message || e}`
+  } finally {
+    workspacesSaving.value = null
+    setTimeout(() => { if (workspacesResult.value.startsWith('Workspace')) workspacesResult.value = '' }, 3000)
+  }
+}
+
+async function removeWorkspace(name: string) {
+  if (!window.confirm(`Delete workspace "${name}"? Chats keep their history but lose workspace routing.`)) return
+  workspacesSaving.value = name
+  workspacesResult.value = ''
+  try {
+    await projectStore.deleteWorkspace(name)
+    workspacesResult.value = `Workspace "${name}" deleted.`
+    await fetchWorkspacesList()
+  } catch (e: any) {
+    workspacesResult.value = `Error: ${e?.message || e}`
+  } finally {
+    workspacesSaving.value = null
+    setTimeout(() => { if (workspacesResult.value.startsWith('Workspace')) workspacesResult.value = '' }, 3000)
+  }
+}
+
 onMounted(async () => {
   loadAppearanceSettings()
   fetchSkills()
@@ -771,6 +1018,7 @@ onMounted(async () => {
   fetchAutomation()
   fetchPackageStatus()
   fetchProviderKeys()
+  fetchWorkspacesList()
   pushSupportedFlag.value = pushSupported()
   if (isIos() && !isStandalone()) {
     needsIosInstall.value = true
@@ -1520,5 +1768,15 @@ async function doPackageUpdate() {
   color: var(--fg);
   min-width: 48px;
   text-align: center;
+}
+.ws-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+.ws-label {
+  font-size: var(--text-sm);
+  color: var(--fg2);
 }
 </style>

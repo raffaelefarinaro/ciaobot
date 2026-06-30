@@ -810,6 +810,41 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
+  // ── Workspace actions ────────────────────────────────────────────────
+  async function fetchWorkspaces() {
+    const res = await api.get<{ workspaces: WorkspaceInfo[]; active: WorkspaceName | null }>('/api/workspaces')
+    workspaces.value = res.workspaces || []
+    const names = workspaces.value.map(w => w.name)
+    if (activeWorkspace.value && !names.includes(activeWorkspace.value)) {
+      activeWorkspace.value = res.active || names[0] || 'personal'
+    }
+    return res
+  }
+
+  async function createWorkspace(payload: Partial<WorkspaceInfo> & { name: string }) {
+    const res = await api.post<{ workspaces: WorkspaceInfo[]; active: WorkspaceName | null }>('/api/workspaces', payload)
+    workspaces.value = res.workspaces || []
+    return res
+  }
+
+  async function updateWorkspace(name: WorkspaceName, payload: Partial<WorkspaceInfo>) {
+    const res = await api.patch<{ workspaces: WorkspaceInfo[]; active: WorkspaceName | null }>(`/api/workspaces/${encodeURIComponent(name)}`, payload)
+    workspaces.value = res.workspaces || []
+    if (activeWorkspace.value && !workspaces.value.some(w => w.name === activeWorkspace.value)) {
+      activeWorkspace.value = res.active || workspaces.value[0]?.name || 'personal'
+    }
+    return res
+  }
+
+  async function deleteWorkspace(name: WorkspaceName) {
+    const res = await api.del<{ workspaces: WorkspaceInfo[]; active: WorkspaceName | null }>(`/api/workspaces/${encodeURIComponent(name)}`)
+    workspaces.value = res.workspaces || []
+    if (activeWorkspace.value === name) {
+      activeWorkspace.value = res.active || workspaces.value[0]?.name || 'personal'
+    }
+    return res
+  }
+
   // ── Project actions ─────────────────────────────────────────────────
 
   async function createProject(name: string, context = '') {
@@ -2400,7 +2435,8 @@ export const useProjectStore = defineStore('projects', () => {
     chatUnread, projectUnread, workspaceUnread, clearUnread, markRead, markAllRead,
     recentChats, projectIsStreaming, isChatStreaming, workspaceIsStreaming, projectFor,
     // Actions
-    fetchAll, createProject, updateProject, deleteProject, completeProject,
+    fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
+    createProject, updateProject, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
     createChat, renameChat, updateChat, handoverChat, moveChat, deleteChat, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
