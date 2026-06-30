@@ -107,7 +107,7 @@
             <option value="auto">Auto, archive if boring</option>
           </select>
         </div>
-        <p class="hint">Auto runs a post-run classifier. If it finds proposals, decisions, warnings, or anything useful for Raffa to judge, the chat stays visible.</p>
+        <p class="hint">Auto runs a post-run classifier. If it finds proposals, decisions, warnings, or anything useful for the user to judge, the chat stays visible.</p>
         <div class="form-group">
           <label>Prompt</label>
           <textarea v-model="editData.prompt" rows="10"></textarea>

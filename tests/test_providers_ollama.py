@@ -410,7 +410,7 @@ def test_personal_workspace_denies_claude_ai_mcps_by_default(monkeypatch) -> Non
     assert "mcp__claude_ai_Google_Cloud_BigQuery" in personal
     # Self-hosted n8n MCP (project-scoped in .mcp.json) is work-only too.
     assert "mcp__n8n_mcp" in personal
-    # Work workspace: defaults to empty (Raffa's PM tools available).
+    # Work workspace: defaults to empty (workspace-specific tools available).
     assert config.disallowed_tools_for_workspace("work") == []
 
 

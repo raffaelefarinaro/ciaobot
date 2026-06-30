@@ -22,7 +22,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
-import work_chat_transcripts  # noqa: E402
+work_chat_transcripts = pytest.importorskip("work_chat_transcripts")
 
 
 def _setup_fake_root(
@@ -53,7 +53,7 @@ def _setup_fake_root(
 
 
 def test_filters_personal_chats_out_of_work_run(tmp_path, capsys):
-    """The bug Raffa reported: personal-workspace chats appearing in the
+    """Regression bug: personal-workspace chats appearing in the
     Work daily log. With `--workspace work`, only work transcripts come back."""
     _setup_fake_root(
         tmp_path,

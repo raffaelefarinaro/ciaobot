@@ -269,7 +269,7 @@ def test_claude_convert_stream_event_threads_parent_tool_use_id(
     """When the SDK marks a stream event as coming from a Task subagent,
     the converter must thread parent_tool_use_id through to text deltas,
     tool_use starts, and thinking events. Without this the trace can't tell
-    parent prose from subagent prose, which was the leak Raffa caught in
+    parent prose from subagent prose, which was the leak caught in
     the Explore-agent demo run."""
     from claude_agent_sdk import StreamEvent as SDKStreamEvent
 

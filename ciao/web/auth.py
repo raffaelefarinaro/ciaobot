@@ -152,9 +152,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
         app,
         *,
         serializer: URLSafeTimedSerializer,
+        auth_required: bool = True,
     ) -> None:
         super().__init__(app)
         self._serializer = serializer
+        self._auth_required = auth_required
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
@@ -174,7 +176,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         )
         if not protected:
             return await call_next(request)
-        if not verify_session(request, self._serializer):
+        if self._auth_required and not verify_session(request, self._serializer):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         if path.startswith("/api/") and not _state_change_origin_allowed(request):
             return JSONResponse({"error": "forbidden origin"}, status_code=403)

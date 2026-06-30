@@ -199,6 +199,9 @@ class CiaoConfig:
     workspace_root: Path
     state_path: Path
     media_root: Path
+    pwa_auth_required: bool = True
+    git_direct_main: bool = False
+    dev_mode: bool = False
     bootstrap_mode: bool = False
     vault_root: Path = Path("memory-vault")
     extra_workspace_roots: list[Path] = field(default_factory=list)
@@ -358,8 +361,14 @@ class CiaoConfig:
 
         source = env if env is not None else os.environ
 
+        pwa_auth_required_raw = source.get("PWA_AUTH_REQUIRED", "").strip().lower()
+        pwa_auth_required = pwa_auth_required_raw not in {"false", "0", "no", "n"}
+
         pwa_auth_token = source.get("PWA_AUTH_TOKEN", "").strip()
-        bootstrap_mode = not bool(pwa_auth_token)
+        bootstrap_mode = not (
+            (bool(pwa_auth_token) or not pwa_auth_required)
+            and (bool(source.get("CIAO_WORKSPACE")) or bool(source.get("TELEGRAM_BRIDGE_WORKSPACE")))
+        )
         if bootstrap_mode:
             workspace_root = _bootstrap_workspace(source)
             runtime_default = workspace_root / ".runtime"
@@ -371,6 +380,8 @@ class CiaoConfig:
                 _env(source, "CIAO_WORKSPACE", "TELEGRAM_BRIDGE_WORKSPACE", ".")
             ).expanduser().resolve()
             runtime_default = Path(".runtime")
+            if not pwa_auth_token:
+                pwa_auth_token = "ciao-insecure-fallback-secret-key"
 
         vault_root_raw = source.get("CIAO_VAULT_ROOT", "").strip()
         if vault_root_raw:
@@ -501,11 +512,20 @@ class CiaoConfig:
             gws_default_profile=gws_default_profile,
         )
 
+        git_direct_main_raw = source.get("CIAO_GIT_DIRECT_MAIN", "").strip().lower()
+        git_direct_main = git_direct_main_raw in {"true", "1", "yes", "y"}
+
+        dev_mode_raw = source.get("CIAO_DEV_MODE", "").strip().lower()
+        dev_mode = dev_mode_raw in {"true", "1", "yes", "y"}
+
         return cls(
             pwa_auth_token=pwa_auth_token,
             workspace_root=workspace_root,
             state_path=state_path,
             media_root=media_root,
+            pwa_auth_required=pwa_auth_required,
+            git_direct_main=git_direct_main,
+            dev_mode=dev_mode,
             bootstrap_mode=bootstrap_mode,
             vault_root=vault_root,
             extra_workspace_roots=extra_workspace_roots,

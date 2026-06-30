@@ -331,7 +331,7 @@ def _summarize_task_notification(content: str) -> str | None:
 
     Returns None if `content` isn't a task-notification. The CLI emits this
     XML as a user-role message after a Task subagent finishes. We surface it
-    as a system status bubble so Raffa retains visibility into subagent
+    as a system status bubble so the user retains visibility into subagent
     completions without seeing the raw envelope.
     """
     m = _TASK_NOTIFICATION_RE.match(content)
@@ -2198,6 +2198,43 @@ async def package_update_endpoint(request: Request) -> JSONResponse:
         return JSONResponse(res, status_code=status_code)
 
 
+async def voice_install_local_endpoint(request: Request) -> JSONResponse:
+    """Install local voice transcription dependencies (mlx-whisper)."""
+    import sys
+    import subprocess
+
+    cmd = [sys.executable, "-m", "pip", "install", "mlx-whisper>=0.4.0"]
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        output = (result.stdout.strip() + "\n" + result.stderr.strip()).strip()
+        if result.returncode == 0:
+            config = request.app.state.config
+            async def _do_restart():
+                await asyncio.sleep(2)
+                fn = getattr(request.app.state, "request_restart", None)
+                if callable(fn):
+                    fn(config.restart_exit_code)
+                else:
+                    from ciao.signals import RestartRequested
+                    raise RestartRequested(config.restart_exit_code)
+
+            asyncio.create_task(_do_restart())
+            return JSONResponse({"ok": True, "output": output})
+        else:
+            return JSONResponse(
+                {"ok": False, "error": f"Command exited with code {result.returncode}", "output": output},
+                status_code=500,
+            )
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+
 def _host_name(value: str) -> str:
     host = value.strip()
     if host.startswith("["):
@@ -2270,6 +2307,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     written = setup_workspace(
         workspace,
         auth_token=str(body.get("auth_token", "")).strip() or config.pwa_auth_token,
+        auth_required=bool(body.get("auth_required", True)),
         push_contact=push_contact,
         vault_root=str(body.get("vault_root", "")).strip() or None,
         python_path=str(body.get("python", "")).strip() or None,
@@ -2529,13 +2567,18 @@ def _open_merge_chat(request: Request, branch: str) -> dict:
         return {"error": "no personal project to host the merge chat"}
 
     from datetime import UTC, datetime
-    from ciao.local_session import MERGE_PROMPT
+    from ciao.local_session import MERGE_PROMPT, MERGE_PROMPT_MAIN
 
-    title = f"Merge to main: {branch} {datetime.now(UTC).strftime('%Y-%m-%d %H:%M')}"
+    if branch == "main":
+        title = f"Resolve sync conflicts: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M')}"
+        prompt = MERGE_PROMPT_MAIN
+    else:
+        title = f"Merge to main: {branch} {datetime.now(UTC).strftime('%Y-%m-%d %H:%M')}"
+        prompt = MERGE_PROMPT.replace("{branch}", str(branch))
+
     chat = pcm.create_chat(
         project.project_id, title=title, model=config.claude_default_model
     )
-    prompt = MERGE_PROMPT.replace("{branch}", str(branch))
     pcm.start_stream(chat.chat_id, prompt)
     return {"ok": True, "chat_id": chat.chat_id, "project_id": project.project_id}
 

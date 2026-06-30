@@ -60,6 +60,26 @@ Report what you merged and any decisions you made.
 """
 
 
+MERGE_PROMPT_MAIN = """\
+A git conflict occurred on the `main` branch of this workspace during remote synchronization.
+Please resolve the conflicts for me, here, in this chat.
+
+Steps:
+1. Identify the conflicting files via `git status`.
+2. Inspect the conflict markers and resolve them with judgment:
+   - `memory-vault/**`: keep BOTH sides' content (union the notes; never drop entries).
+   - `.runtime/schedules.json`: union the schedule entries.
+   - If a conflict is ambiguous or risky (you might drop real work), STOP and ask me with
+     AskUserQuestion before deciding.
+3. Stage the resolved files: `git add <file>`.
+4. Commit the resolved changes: `git commit -m "resolve conflicts on main"`.
+5. Push the branch: `git push origin main`.
+6. Do NOT restart or redeploy the service.
+
+Report what you resolved and any decisions you made.
+"""
+
+
 async def _git(workspace: Path, *args: str, timeout: float | None = None) -> tuple[int, str, str]:
     proc = await asyncio.create_subprocess_exec(
         "git", *args, cwd=str(workspace),
@@ -102,17 +122,26 @@ def current_branch(workspace: Path) -> str:
 
 
 async def ensure_device_branch(
-    workspace: Path, *, device_name: str, base: str = DEFAULT_BASE
+    workspace: Path, *, device_name: str, base: str = DEFAULT_BASE, direct_main: bool = False
 ) -> str:
-    """Make sure the checkout is on this device's ``dev/<device>`` branch.
+    """Make sure the checkout is on this device's ``dev/<device>`` branch or ``main``.
 
     Fetches, then:
+    - if direct_main is True, checkout main if not already there;
     - if already on the branch -> keep it (preserve unmerged work across
       restarts; never reset);
     - else -> create it from ``base`` (origin/main) and check it out.
 
     Returns the branch name.
     """
+    if direct_main:
+        await _git(workspace, "fetch", "origin", timeout=10.0)
+        if current_branch(workspace) != "main":
+            rc, _, err = await _git(workspace, "checkout", "main")
+            if rc != 0:
+                raise RuntimeError(f"could not checkout main: {err}")
+        return "main"
+
     name = device_branch_name(device_name)
     await _git(workspace, "fetch", "origin", timeout=10.0)
     if current_branch(workspace) == name:
@@ -156,6 +185,23 @@ async def try_merge_to_main(workspace: Path, *, branch: str) -> dict:
       {"ok": True, "merged": False, "conflict": True, "branch": branch}
       {"ok": False, "step": str, "error": str}
     """
+    if branch == "main":
+        await commit_pending(workspace, branch="main")
+        await _git(workspace, "fetch", "origin", timeout=10.0)
+        rc_pull, pull_out, pull_err = await _git(workspace, "pull", "--no-rebase", timeout=10.0)
+        if rc_pull != 0:
+            return {"ok": True, "merged": False, "conflict": True, "branch": "main"}
+        rc, out, err = await _git(workspace, "push", "origin", "main", timeout=10.0)
+        if rc != 0:
+            return {"ok": False, "step": "push main", "error": err or out}
+        return {
+            "ok": True,
+            "merged": True,
+            "deploy_needed": False,
+            "pushed": True,
+            "detail": out or "pushed",
+        }
+
     await commit_pending(workspace, branch=branch)
     ok, detail = await push_branch(workspace, branch=branch)
     if not ok:
@@ -234,6 +280,17 @@ async def resync_to_main(workspace: Path, *, branch: str) -> tuple[bool, str]:
     post-handback case fast-forwards cleanly, and any genuinely new local work
     is preserved.
     """
+    if branch == "main":
+        rc, _, err = await _git(workspace, "fetch", "origin", timeout=10.0)
+        if rc != 0:
+            return False, f"fetch failed: {err}"
+        await commit_pending(workspace, branch="main")
+        rc, out, err = await _git(workspace, "merge", "--no-edit", "origin/main")
+        if rc != 0:
+            await _git(workspace, "merge", "--abort")
+            return False, f"resync hit conflict on main: {err or out}"
+        return True, "resynced"
+
     rc, _, err = await _git(workspace, "fetch", "origin", timeout=10.0)
     if rc != 0:
         return False, f"fetch failed: {err}"
@@ -268,10 +325,12 @@ class LocalSessionManager:
     One per process; every instance has one (no primary/secondary split).
     """
 
-    def __init__(self, *, workspace: Path, runtime_root: Path, device_name: str) -> None:
+    def __init__(self, *, workspace: Path, runtime_root: Path, device_name: str, direct_main: bool = False, dev_mode: bool = False) -> None:
         self.workspace = Path(workspace)
         self.device_name = device_name
-        self.branch = device_branch_name(device_name)
+        self.direct_main = direct_main
+        self.dev_mode = dev_mode
+        self.branch = "main" if direct_main else device_branch_name(device_name)
 
     def status(self) -> dict:
         br = current_branch(self.workspace)
@@ -282,6 +341,8 @@ class LocalSessionManager:
             "branch": br,
             "on_device_branch": br == self.branch,
             "dirty": bool(dirty.strip()),
+            "direct_main": self.direct_main,
+            "dev_mode": self.dev_mode,
         }
 
     async def commit_to_main(self) -> dict:

@@ -12,7 +12,7 @@ _SAMPLE_INSIGHTS = """
 - Bash failed: command not found -> installed via brew. [idx=4]
 
 ## User corrections
-- Raffa said: "no em dashes" -> assistant rewrote with commas. [idx=12]
+- User said: "no em dashes" -> assistant rewrote with commas. [idx=12]
 
 ## New entities
 - person: Manager Example - the user's direct manager. [idx=2]

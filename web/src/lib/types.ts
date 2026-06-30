@@ -265,6 +265,8 @@ export interface LocalStatus {
   branch: string
   on_device_branch: boolean
   dirty: boolean
+  direct_main?: boolean
+  dev_mode?: boolean
 }
 
 export interface DeployResult {

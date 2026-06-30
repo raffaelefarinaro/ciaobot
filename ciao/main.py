@@ -353,6 +353,8 @@ async def _async_main() -> int:
         workspace=config.workspace_root,
         runtime_root=config.state_path.parent,
         device_name=config.device_name,
+        direct_main=config.git_direct_main,
+        dev_mode=config.dev_mode,
     )
     push_subject = _push_subject_for_config(config)
     app.state.push_manager = PushManager(config.state_path.parent, subject=push_subject)
@@ -485,7 +487,7 @@ async def _async_main() -> int:
     async def _device_branch_loop() -> None:
         try:
             branch = await ensure_device_branch(
-                config.workspace_root, device_name=config.device_name
+                config.workspace_root, device_name=config.device_name, direct_main=config.git_direct_main
             )
             logger.info("Working on device branch '%s'", branch)
         except Exception:

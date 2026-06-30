@@ -23,6 +23,7 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/push/unsubscribe": "browser push registration",
     "/api/admin/snapshot": "admin internal; deploy is the agent-callable wrapper",
     "/api/package/update": "browser package update; upgrades ciao package and restarts",
+    "/api/voice/install-local": "browser voice local engine installation; installs mlx-whisper and restarts",
 }
 
 

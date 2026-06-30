@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 _PROPOSALS_PATH = "personal/Workspace/Memory-Proposals.md"
 
 # Section headers used by ``_INSIGHTS_SYSTEM_PROMPT`` in ``ciao/insights.py``.
-# Two of them are "behavioral" (durable preferences, decisions Raffa made),
+# Two of them are "behavioral" (durable preferences, decisions the user made),
 # one is "identity" (new people/projects), and the rest are session-specific
 # noise we ignore for memory purposes.
 _BEHAVIORAL_SECTIONS = ("User corrections", "Decisions")

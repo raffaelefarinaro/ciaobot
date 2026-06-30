@@ -56,7 +56,7 @@ UUID_RE = re.compile(
 
 _TEXT_MODE_SYSTEM_PROMPT = """\
 You are extracting durable signal from a Claude Code chat transcript.
-The user is Raffa. The transcript is a rendered Markdown summary -
+The user is the workspace owner. The transcript is a rendered Markdown summary -
 tool calls, tool errors, thinking blocks, and intermediate states are
 NOT included, only the user/assistant text turns. Adjust accordingly:
 sections like Errors, Reusable snippets, and Vault changes will often
@@ -68,12 +68,12 @@ transcript itself.
 
 Rules:
 - Skip anything obvious from the transcript prose alone.
-- "User corrections" = Raffa pushed back, redirected, or rejected an approach.
+- "User corrections" = the user pushed back, redirected, or rejected an approach.
 - "New entities" = people/projects/places/products mentioned for the first time.
 - Be terse. One line per item where possible.
 
 ## User corrections
-- Raffa said: "<short quote>" -> assistant changed <what>.
+- User said: "<short quote>" -> assistant changed <what>.
 
 ## New entities
 - <type>: <name> - <one-line context>.

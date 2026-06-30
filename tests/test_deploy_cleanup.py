@@ -6,11 +6,11 @@ from pathlib import Path
 def test_deploy_folder_has_no_private_reverse_proxy_or_absolute_paths() -> None:
     repo = Path(__file__).parents[1]
 
-    assert not (repo / "deploy" / "Caddyfile").exists()
+    assert not (repo / "ciao" / "stock" / "deploy" / "Caddyfile").exists()
 
     deploy_text = "\n".join(
         path.read_text(encoding="utf-8")
-        for path in (repo / "deploy").rglob("*")
+        for path in (repo / "ciao" / "stock" / "deploy").rglob("*")
         if path.is_file()
     )
     forbidden = (
@@ -25,7 +25,7 @@ def test_deploy_folder_has_no_private_reverse_proxy_or_absolute_paths() -> None:
 
 def test_deploy_plist_points_at_packaged_cli_template() -> None:
     text = (
-        Path(__file__).parents[1] / "deploy" / "com.ciao.server.plist"
+        Path(__file__).parents[1] / "ciao" / "stock" / "deploy" / "com.ciao.server.plist.tmpl"
     ).read_text(encoding="utf-8")
 
     assert "{{CIAO_PYTHON}}" in text

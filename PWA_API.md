@@ -64,6 +64,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/setup-status` | Read first-run setup checks and provider readiness |
 | GET | `/api/package/status` | Read installed package version and best-effort latest-version status |
 | POST | `/api/package/update` | Upgrade ciao package and restart |
+| POST | `/api/voice/install-local` | Install local voice transcription dependencies and restart |
 | POST | `/api/setup/finish` | Finish first-run setup from bootstrap mode |
 | GET | `/api/stats` | Read CLI stats |
 | GET | `/api/workspaces` | List configured logical workspaces |
@@ -190,7 +191,7 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chat
 
 ```bash
 # Create a routine with archive behavior. archive_policy ∈ manual|auto.
-# `auto` runs a post-run classifier and archives only when Raffa does not need to see it.
+# `auto` runs a post-run classifier and archives only when the user does not need to see it.
 # GET /api/schedules enriches each entry with `next_run` (next fire, ISO or null),
 # `last_expected_run` (most recent due fire, ISO or null), and `missed` (true when a
 # due fire was never recorded — surfaced in the Schedules overview).
@@ -207,7 +208,7 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/sched
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/schedule-run/$SID"
 
 # Deploy: snapshot, pull, build, restart. Don't call from inside the live PWA session
-# (CLAUDE.md "Never restart the ciao service yourself"); ask Raffa to hit Deploy.
+# (CLAUDE.md "Never restart the ciao service yourself"); ask the operator to hit Deploy.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/admin/deploy"
 ```
 

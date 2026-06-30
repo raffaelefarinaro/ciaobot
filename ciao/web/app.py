@@ -61,6 +61,7 @@ from ciao.web.routes_api import (
     project_detail,
     package_status_endpoint,
     package_update_endpoint,
+    voice_install_local_endpoint,
     project_restore,
     project_files_list,
     project_files_upload,
@@ -166,6 +167,7 @@ def create_app(config, app_settings=None) -> Starlette:
         Route("/api/setup-status", setup_status_endpoint, methods=["GET"]),
         Route("/api/package/status", package_status_endpoint, methods=["GET"]),
         Route("/api/package/update", package_update_endpoint, methods=["POST"]),
+        Route("/api/voice/install-local", voice_install_local_endpoint, methods=["POST"]),
         Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"]),
         Route("/api/stats", cli_stats, methods=["GET"]),
         # Push notifications
@@ -197,7 +199,7 @@ def create_app(config, app_settings=None) -> Starlette:
 
     middleware = [
         Middleware(SecurityHeadersMiddleware),
-        Middleware(AuthMiddleware, serializer=serializer),
+        Middleware(AuthMiddleware, serializer=serializer, auth_required=config.pwa_auth_required),
     ]
 
     app = Starlette(routes=routes, middleware=middleware)

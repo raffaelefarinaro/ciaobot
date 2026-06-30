@@ -22,7 +22,7 @@ def temp_vault(tmp_path: Path) -> Path:
     people = vault / "People"
     people.mkdir()
     (people / "User.md").write_text(
-        "---\ntags: [personal, core]\nname: Raffaele Farinaro\n---\n# User Profile\nUser resides in Zurich.",
+        "---\ntags: [personal, core]\nname: Alex Example\n---\n# User Profile\nUser resides in Zurich.",
         encoding="utf-8",
     )
 
@@ -94,7 +94,7 @@ def test_index_vault_modified_reindex(db_conn: sqlite3.Connection, temp_vault: P
     # Modify one file and change its mtime artificially
     user_md = temp_vault / "People" / "User.md"
     user_md.write_text(
-        "---\nname: Raffaele Farinaro\n---\n# User Profile\nModified resides in Zurich.",
+        "---\nname: Alex Example\n---\n# User Profile\nModified resides in Zurich.",
         encoding="utf-8",
     )
     # Force modification time change
@@ -124,7 +124,7 @@ def test_index_vault_deletion(db_conn: sqlite3.Connection, temp_vault: Path) -> 
     assert removed == 1
 
     # Verify no search results for User
-    results = fts_search.search_vault(db_conn, "Raffaele")
+    results = fts_search.search_vault(db_conn, "Alex")
     assert len(results) == 0
 
 
@@ -155,7 +155,7 @@ def test_index_file(db_conn: sqlite3.Connection, temp_vault: Path) -> None:
     # Verify indexed
     results = fts_search.search_vault(db_conn, "Zurich")
     assert len(results) == 1
-    assert "Raffaele" in results[0]["title"]
+    assert "Alex" in results[0]["title"]
 
 
 def test_search_stemming_and_ranking(db_conn: sqlite3.Connection, temp_vault: Path) -> None:

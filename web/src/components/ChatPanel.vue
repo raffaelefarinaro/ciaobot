@@ -509,7 +509,7 @@
     </div>
 
     <!-- Pending Auto-mode permission prompts. Shown above queued/input so
-         Raffa can't miss them. Each prompt sticks until it's approved or
+         the user can't miss them. Each prompt sticks until it's approved or
          denied; the server resolves still-open prompts on turn teardown. -->
     <div v-if="pendingApprovals.length" class="permission-requests">
       <div
@@ -968,8 +968,8 @@ function isQuestionOptionSelected(i: number, label: string): boolean {
 // Block Send answer until every question has at least one option picked
 // or non-empty "Other" text. Without this, tapping Send with no selection
 // would route an empty answer through submitQuestionAnswers and the
-// handler would label it "(no answer)" (line below), which is the bug
-// Raffa hit on the PWA.
+// handler would label it "(no answer)" (line below), which is the bug this
+// guard fixes.
 const allQuestionsAnswered = computed(() => {
   const qs = activeQuestions.value
   if (!qs.length) return false

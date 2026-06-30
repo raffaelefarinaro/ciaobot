@@ -146,6 +146,7 @@ def setup_workspace(
     workspace: Path | str,
     *,
     auth_token: str | None = None,
+    auth_required: bool = True,
     push_contact: str | None = None,
     vault_root: Path | str | None = None,
     python_path: str | None = None,
@@ -165,17 +166,20 @@ def setup_workspace(
     if not env_path.exists():
         token = auth_token or secrets.token_urlsafe(32)
         contact = push_contact or "mailto:you@example.com"
+        lines = [
+            f"PWA_AUTH_TOKEN={token}",
+        ]
+        if not auth_required:
+            lines.append("PWA_AUTH_REQUIRED=false")
+        lines.extend([
+            f"CIAO_PUSH_CONTACT={contact}",
+            "CIAO_WORKSPACE=.",
+            f"CIAO_VAULT_ROOT={vault_value}",
+            "CIAO_RUNTIME_ROOT=.runtime",
+            "",
+        ])
         env_path.write_text(
-            "\n".join(
-                [
-                    f"PWA_AUTH_TOKEN={token}",
-                    f"CIAO_PUSH_CONTACT={contact}",
-                    "CIAO_WORKSPACE=.",
-                    f"CIAO_VAULT_ROOT={vault_value}",
-                    "CIAO_RUNTIME_ROOT=.runtime",
-                    "",
-                ]
-            ),
+            "\n".join(lines),
             encoding="utf-8",
         )
         written.append(env_path)

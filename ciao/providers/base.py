@@ -83,7 +83,7 @@ def build_runtime_context(request: AgentRequest) -> str:
     """Compact per-request runtime context for system_prompt append.
 
     Keeps the model in sync with today's date, active workspace, and
-    GWS profile without requiring Raffa to restate them in every prompt.
+    GWS profile without requiring the user to restate them in every prompt.
     Returns "" when nothing meaningful can be derived, so the caller can
     skip appending entirely.
     """

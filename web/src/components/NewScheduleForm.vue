@@ -52,7 +52,7 @@
         <option value="auto">Auto, archive if boring</option>
       </select>
     </div>
-    <p class="hint">Auto runs a post-run classifier. If it finds proposals, decisions, warnings, or anything useful for Raffa to judge, the chat stays visible.</p>
+    <p class="hint">Auto runs a post-run classifier. If it finds proposals, decisions, warnings, or anything useful for the user to judge, the chat stays visible.</p>
     <div v-if="frequency === 'once'" class="form-group">
       <label>Date</label>
       <input v-model="runAtDate" type="date" :min="todayDate" required />

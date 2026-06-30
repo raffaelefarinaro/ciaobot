@@ -141,6 +141,7 @@ describe('LoginView setup wizard tests', () => {
       push_contact: 'mailto:owner@example.com',
       port: 8443,
       python: undefined,
+      auth_required: true,
       restart: true,
     })
     expect(wrapper.text()).toContain('restarting')

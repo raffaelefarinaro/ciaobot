@@ -48,7 +48,7 @@ _TRUNCATE_TOOLS = frozenset({"Read", "Glob", "Grep", "WebFetch", "WebSearch"})
 
 _INSIGHTS_SYSTEM_PROMPT = """\
 You are extracting durable signal from a Claude Code session transcript.
-The user is Raffa. Output Markdown with the exact section headers below.
+The user is the workspace owner. Output Markdown with the exact section headers below.
 Omit a section entirely if empty - do NOT write "none" or "n/a".
 Cite the message index `[idx=N]` for every claim. Do not invent facts.
 Do not summarise the conversation - that is already saved.
@@ -56,8 +56,8 @@ Do not summarise the conversation - that is already saved.
 Rules:
 - Skip routine successful tool calls.
 - Skip anything obvious from user/assistant text alone.
-- "Errors" = tool/model/system failure, not just things Raffa disliked.
-- "User corrections" = Raffa pushed back, redirected, or rejected an approach.
+- "Errors" = tool/model/system failure, not just things the user disliked.
+- "User corrections" = the user pushed back, redirected, or rejected an approach.
 - "New entities" = people/projects/places/products mentioned for the first time, not generic nouns.
 - When citing wikilinks, use bare [[Target]] or [[Target|Display]] syntax. Do NOT wrap wikilinks in backticks, quotes, or other formatting.
 - Be terse. One line per item where possible.
@@ -69,7 +69,7 @@ Rules:
 - Tried <approach>; blocked by <reason>; switched to <alternative>. [idx=N]
 
 ## User corrections
-- Raffa said: "<short quote>" -> assistant changed <what>. [idx=N]
+- User said: "<short quote>" -> assistant changed <what>. [idx=N]
 
 ## New entities
 - <type>: <name> - <one-line context>. [idx=N]

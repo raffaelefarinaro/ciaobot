@@ -176,7 +176,7 @@ def test_configured_custom_bucket_is_allowed_and_defaults_to_anthropic(tmp_path)
 
 
 def test_explicit_work_bucket_in_personal_workspace_stays_anthropic(tmp_path):
-    """Raffa's case: a personal-workspace chat explicitly set to Claude
+    """Regression case: a personal-workspace chat explicitly set to Claude
     (Work) must use the Anthropic subscription, not the Ollama tier map."""
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("p", workspace="personal")

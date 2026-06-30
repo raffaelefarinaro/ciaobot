@@ -3734,12 +3734,12 @@ class ProjectChatManager:
             "final_output": outcome.final_text[-6000:],
         }
         system_prompt = (
-            "You decide whether Raffa needs to see a scheduled routine result in the chat interface. "
+            "You decide whether the user needs to see a scheduled routine result in the chat interface. "
             "Return only JSON: {\"needs_user\": boolean, \"reason\": string}. "
             "needs_user=false when the run is routine maintenance, even if it updated files, triaged proposals, "
             "or created file stubs automatically (e.g. routine memory curation, git syncs, daily logs, baseline bumps). "
             "Set needs_user=true ONLY when there is an actual problem, error, warning, unresolved conflict, "
-            "a specific question/decision asked of Raffa, or a new external finding that requires his direct "
+            "a specific question/decision asked of the user, or a new external finding that requires their direct "
             "intervention or judgment to proceed."
         )
         user_prompt = json.dumps(payload, ensure_ascii=False)

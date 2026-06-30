@@ -6,7 +6,7 @@ Two hooks are wired today:
    before it sees a user turn.
    a. Compact runtime context: today's date, active workspace, and GWS
       profile. Keeps schedules and reconnected sessions in sync without
-      Raffa having to restate them.
+      the user having to restate them.
    b. Vault entity tags: whole-word matches against memory-vault/INDEX.md
       get surfaced as ``- [[People/Name]] (person)`` bullets so the model
       can load the right note without guessing who "Emma" or "Ciao-

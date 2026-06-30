@@ -9,14 +9,11 @@
         <div class="card">
           <p class="section-title">Actions</p>
           <div class="action-row">
-            <button class="btn-primary" @click="() => doSnapshot()" :disabled="!!actionPending">
-              {{ actionPending === 'snapshot' ? 'Snapshotting...' : 'Git Snapshot' }}
+            <button class="btn-primary" @click="() => localStatus?.direct_main ? localHandback() : doSnapshot()" :disabled="!!actionPending || !!localPending">
+              {{ actionPending === 'snapshot' || localPending === 'handback' ? (localStatus?.direct_main ? 'Syncing...' : 'Snapshotting...') : (localStatus?.direct_main ? 'Sync with Remote' : 'Git Snapshot') }}
             </button>
-            <button class="btn-primary" @click="() => doDeploy()" :disabled="!!actionPending" title="Reinstall deps, rebuild the frontend, and restart with the latest code">
+            <button v-if="localStatus?.dev_mode" class="btn-primary" @click="() => doDeploy()" :disabled="!!actionPending" title="Reinstall deps, rebuild the frontend, and restart with the latest code">
               {{ actionPending === 'deploy' ? 'Deploying...' : 'Deploy' }}
-            </button>
-            <button class="btn-primary" @click="doLogout" :disabled="!!actionPending">
-              {{ actionPending === 'logout' ? 'Logging out...' : 'Log out' }}
             </button>
           </div>
           <div v-if="actionResult" class="action-result">{{ actionResult }}</div>
@@ -130,7 +127,7 @@
         </div>
 
         <!-- Commit to main (branch-per-device) -->
-        <div class="card">
+        <div v-if="localStatus && !localStatus.direct_main" class="card">
           <p class="section-title">Commit to main</p>
           <div class="dev-meta">
             <div>
@@ -261,12 +258,25 @@
                 :disabled="routinesSaving"
                 @change="saveRoutines({ transcription_engine: ($event.target as HTMLSelectElement).value })"
               >
-                <option value="local" :disabled="!routines.transcription.local_available">Local (free)</option>
+                <option value="local">Local (free)</option>
                 <option value="cloud" :disabled="!routines.transcription.cloud_available">Cloud (OpenAI)</option>
               </select>
             </div>
-            <p v-if="!routines.transcription.local_available" class="hint hint--warn" style="margin-top: 10px;">
-              Local engine unavailable: install with <code>pip install 'ciao[voice-local]'</code> (Apple Silicon only).
+            <p v-if="!routines.transcription.local_available" class="hint hint--warn" style="margin-top: 10px; display: flex; align-items: center; gap: 8px;">
+              <span v-if="routines.transcription.engine === 'local'">
+                <strong>Local Whisper engine is selected but not installed.</strong> Run <code>pip install 'ciao[voice-local]'</code> or install now:
+              </span>
+              <span v-else>
+                Local engine is available for Apple Silicon (requires installing <code>mlx-whisper</code>).
+              </span>
+              <button
+                class="btn-primary btn-small"
+                style="padding: 2px 8px; font-size: 0.8rem;"
+                :disabled="voiceInstalling"
+                @click="installLocalVoice"
+              >
+                {{ voiceInstalling ? 'Installing...' : 'Install engine' }}
+              </button>
             </p>
           </div>
           <div v-if="routinesResult" class="action-result">{{ routinesResult }}</div>
@@ -506,6 +516,29 @@ async function saveRoutines(patch: Record<string, string>) {
   }
 }
 
+const voiceInstalling = ref(false)
+
+async function installLocalVoice() {
+  voiceInstalling.value = true
+  routinesResult.value = 'Installing local whisper engine...'
+  try {
+    const res = await api.post<{ ok: boolean; output?: string }>('/api/voice/install-local', {})
+    if (res.ok) {
+      routinesResult.value = 'Local whisper engine installed successfully! Restarting server...'
+      setTimeout(async () => {
+        routinesResult.value = ''
+        await fetchRoutines()
+      }, 5000)
+    } else {
+      routinesResult.value = 'Installation failed.'
+    }
+  } catch (e: any) {
+    routinesResult.value = `Error installing engine: ${e?.message || e}`
+  } finally {
+    voiceInstalling.value = false
+  }
+}
+
 async function fetchSkills() {
   try {
     skillsInventory.value = await api.get<SkillInventory>('/api/admin/skills')
@@ -736,35 +769,59 @@ async function fetchLocalStatus() {
 }
 
 async function localHandback(confirmWarnings = false) {
-  if (!confirmWarnings && !confirm('Commit this device\'s branch to main?')) return
-  localPending.value = 'handback'
-  localResult.value = ''
+  const isDirect = !!localStatus.value?.direct_main
+  const promptMsg = isDirect ? 'Sync changes with the remote repository?' : 'Commit this device\'s branch to main?'
+  if (!confirmWarnings && !confirm(promptMsg)) return
+
+  if (isDirect) {
+    actionPending.value = 'snapshot'
+    actionResult.value = ''
+  } else {
+    localPending.value = 'handback'
+    localResult.value = ''
+  }
+
   try {
     const r = await api.post<any>('/api/local/handback', { confirm_warnings: confirmWarnings })
     if (r?.ok === false) {
-      localResult.value = `${r.step}: ${r.error}`
+      const errText = `${r.step}: ${r.error}`
+      if (isDirect) actionResult.value = errText
+      else localResult.value = errText
     } else if (r?.merged === true) {
-      localResult.value = 'Merged to main.'
+      const successText = isDirect ? 'Synced with remote repository.' : 'Merged to main.'
+      if (isDirect) actionResult.value = successText
+      else localResult.value = successText
     } else if (r?.conflict === true) {
-      localResult.value = 'Merge conflict — opened a chat to resolve it. Answer it, then Sync to main.'
+      const conflictText = isDirect
+        ? 'Sync conflict — opened a chat to resolve it. Answer it, then Sync again.'
+        : 'Merge conflict — opened a chat to resolve it. Answer it, then Sync to main.'
+      if (isDirect) actionResult.value = conflictText
+      else localResult.value = conflictText
     }
     await fetchLocalStatus()
   } catch (e: any) {
     const payload = e?.payload
     if (payload?.blockers) {
-      alert(`Commit blocked by secrets:\n\n${payload.blockers.join('\n')}`)
-      localResult.value = 'Blocked by secrets.'
+      alert(`${isDirect ? 'Sync' : 'Commit'} blocked by secrets:\n\n${payload.blockers.join('\n')}`)
+      if (isDirect) actionResult.value = 'Blocked by secrets.'
+      else localResult.value = 'Blocked by secrets.'
     } else if (payload?.warnings) {
       if (confirm(`Warnings found:\n\n${payload.warnings.join('\n')}\n\nDo you want to proceed anyway?`)) {
-        localPending.value = null
+        if (isDirect) actionPending.value = null
+        else localPending.value = null
         return localHandback(true)
       }
-      localResult.value = 'Cancelled by user due to warnings.'
+      const cancelText = 'Cancelled by user due to warnings.'
+      if (isDirect) actionResult.value = cancelText
+      else localResult.value = cancelText
     } else {
-      localResult.value = `Error: ${e.message || 'commit failed'}`
+      const errText = `Error: ${e.message || 'sync failed'}`
+      if (isDirect) actionResult.value = errText
+      else localResult.value = errText
     }
   }
-  localPending.value = null
+  if (isDirect) actionPending.value = null
+  else localPending.value = null
 }
 
 async function localResync() {

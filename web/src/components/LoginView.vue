@@ -145,6 +145,13 @@
 
         <div class="checkbox-row">
           <label class="choice-label">
+            <input type="checkbox" v-model="authRequired" :disabled="loading" />
+            Require password for PWA access
+          </label>
+        </div>
+
+        <div class="checkbox-row">
+          <label class="choice-label">
             <input type="checkbox" v-model="apiFallback" :disabled="loading" />
             I will set API keys manually in .env later (API key fallback)
           </label>
@@ -224,6 +231,7 @@ const port = ref(8443)
 const python = ref('')
 const provider = ref('claude')
 const apiFallback = ref(false)
+const authRequired = ref(true)
 const isRestarting = ref(false)
 const userEditedVault = ref(false)
 const copyStatus = ref('')
@@ -295,6 +303,7 @@ async function doFinish() {
       push_contact: pushContact.value,
       port: Number(port.value),
       python: python.value || undefined,
+      auth_required: authRequired.value,
       restart: true,
     })
     isRestarting.value = true

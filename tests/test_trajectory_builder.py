@@ -194,7 +194,7 @@ _INSIGHTS = """\
 - Use sqlite-vec for vectors [idx=7]
 
 ## User corrections
-- Raffa said: "no, use defuddle" -> assistant switched [idx=3]
+- User said: "no, use defuddle" -> assistant switched [idx=3]
 """
 
 

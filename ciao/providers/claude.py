@@ -122,9 +122,9 @@ def _route_cli_stderr(line: str) -> None:
     """Forward a CLI-subprocess stderr line into our logger.
 
     Without a callback the SDK inherits stderr to the parent process, so
-    the CLI's internal warnings end up in uvicorn's stdout (e.g. the
-    `Error in hook callback hook_0: ... Stream closed` Raffa saw on chat
-    `chat-dfcfa6d7`). Routing to our logger lets us demote known-benign
+    the CLI's internal warnings end up in uvicorn's stdout (e.g. a
+    `Error in hook callback hook_0: ... Stream closed` warning). Routing
+    to our logger lets us demote known-benign
     noise without losing genuine errors.
     """
     stripped = line.rstrip()
