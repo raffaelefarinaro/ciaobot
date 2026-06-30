@@ -1,0 +1,346 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from ciao import cli
+
+
+def test_cli_run_dispatches_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = []
+
+    monkeypatch.setattr(cli, "_run_server", lambda: called.append("run") or 0)
+
+    assert cli.main(["run"]) == 0
+    assert called == ["run"]
+
+
+def test_cli_public_preflight_dispatches_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = []
+
+    monkeypatch.setattr(cli.public_release, "main", lambda argv: called.append(argv) or 7)
+
+    assert cli.main(["public-preflight", "scan", "/tmp/export"]) == 7
+    assert called == [["scan", "/tmp/export"]]
+
+
+def test_cli_package_smoke_dispatches_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = []
+
+    monkeypatch.setattr(cli.package_smoke, "main", lambda argv: called.append(argv) or 0)
+
+    assert cli.main(["package-smoke", "--skip-frontend"]) == 0
+    assert called == [["--skip-frontend"]]
+
+
+def test_cli_dev_dispatches_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = []
+
+    monkeypatch.setattr(cli.dev, "main", lambda argv: called.append(argv) or 0)
+
+    assert cli.main(["dev", "--workspace", "/tmp/app", "--no-install"]) == 0
+    assert called == [
+        [
+            "--workspace",
+            "/tmp/app",
+            "--backend-port",
+            "8543",
+            "--frontend-port",
+            "5173",
+            "--no-install",
+        ]
+    ]
+
+
+def test_cli_memory_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = []
+
+    monkeypatch.setattr(cli, "_memory_command", lambda args: called.append(args) or 0)
+
+    assert cli.main(["memory", "read", "--target", "memory"]) == 0
+    assert called[0].action == "read"
+    assert called[0].target == "memory"
+
+
+def test_cli_vault_search_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = []
+
+    monkeypatch.setattr(cli, "_vault_search_command", lambda args: called.append(args) or 0)
+
+    assert cli.main(["vault-search", "query", "--limit", "3"]) == 0
+    assert called[0].query == "query"
+    assert called[0].limit == 3
+
+
+def test_cli_vault_index_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = []
+
+    monkeypatch.setattr(cli, "_vault_index_command", lambda args: called.append(args) or 0)
+
+    assert cli.main(["vault-index", "--workspace", "personal", "--format", "json"]) == 0
+    assert called[0].workspace == "personal"
+    assert called[0].format == "json"
+
+
+def test_cli_vault_lint_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = []
+
+    monkeypatch.setattr(cli, "_vault_lint_command", lambda args: called.append(args) or 0)
+
+    assert cli.main(["vault-lint", "--vault-root", "/tmp/vault"]) == 0
+    assert str(called[0].vault_root) == "/tmp/vault"
+
+
+def test_cli_create_chat_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = []
+
+    monkeypatch.setattr(cli, "_create_chat_command", lambda args: called.append(args) or 0)
+
+    assert cli.main(["create-chat", "--prompt", "hello", "--workspace", "personal"]) == 0
+    assert called[0].prompt == "hello"
+    assert called[0].workspace == "personal"
+
+
+def test_cli_cleanup_sdk_blobs_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = []
+
+    monkeypatch.setattr(cli, "_cleanup_sdk_blobs_command", lambda args: called.append(args) or 0)
+
+    assert cli.main(["cleanup-sdk-blobs", "--workspace", "/tmp/workspace", "--apply"]) == 0
+    assert str(called[0].workspace) == "/tmp/workspace"
+    assert called[0].apply is True
+
+
+def test_cli_skills_sync_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = []
+
+    monkeypatch.setattr(cli, "_skills_sync_command", lambda args: called.append(args) or 0)
+
+    assert cli.main(["skills-sync", "write-cache", "lock.json", "heads.json", "cache.json"]) == 0
+    assert called[0].args == ["write-cache", "lock.json", "heads.json", "cache.json"]
+
+
+def test_cli_sync_skills_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = []
+
+    monkeypatch.setattr(cli, "_sync_skills_command", lambda args: called.append(args) or 0)
+
+    assert (
+        cli.main(
+            [
+                "sync-skills",
+                "--workspace",
+                "/tmp/workspace",
+                "--pi-root",
+                "/tmp/pi",
+                "--skip-upstream",
+            ]
+        )
+        == 0
+    )
+    assert str(called[0].workspace) == "/tmp/workspace"
+    assert str(called[0].pi_root) == "/tmp/pi"
+    assert called[0].skip_upstream is True
+
+
+def test_cli_sync_agents_to_pi_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = []
+
+    monkeypatch.setattr(
+        cli, "_sync_agents_to_pi_command", lambda args: called.append(args) or 0
+    )
+
+    assert (
+        cli.main(
+            [
+                "sync-agents-to-pi",
+                "--claude-dir",
+                "/tmp/agents",
+                "--pi-dir",
+                "/tmp/pi-agents",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+    assert str(called[0].claude_dir) == "/tmp/agents"
+    assert str(called[0].pi_dir) == "/tmp/pi-agents"
+    assert called[0].dry_run is True
+
+
+def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    launch_agents = tmp_path / "LaunchAgents"
+    apps = tmp_path / "Applications"
+
+    rc = cli.main(
+        [
+            "setup",
+            "--workspace",
+            str(workspace),
+            "--auth-token",
+            "test-token",
+            "--push-contact",
+            "mailto:owner@example.com",
+            "--launch-agents-dir",
+            str(launch_agents),
+            "--app-dir",
+            str(apps),
+            "--python",
+            "/opt/ciao/bin/python",
+            "--port",
+            "9443",
+        ]
+    )
+
+    assert rc == 0
+    assert (workspace / ".env").read_text(encoding="utf-8").splitlines()[:2] == [
+        "PWA_AUTH_TOKEN=test-token",
+        "CIAO_PUSH_CONTACT=mailto:owner@example.com",
+    ]
+    assert (workspace / ".claude" / "agents" / "memory.md").is_file()
+    assert (workspace / ".claude" / "commands" / "remember.md").is_file()
+    assert (workspace / ".runtime" / "schedules.json").is_file()
+    assert (workspace / "memory-vault" / "MEMORY.md").is_file()
+    plist = launch_agents / "com.ciao.server.plist"
+    assert plist.is_file()
+    plist_text = plist.read_text(encoding="utf-8")
+    assert "<string>/opt/ciao/bin/python</string>" in plist_text
+    assert "<string>-m</string>" in plist_text
+    assert "<string>ciao.cli</string>" in plist_text
+    assert "<string>run</string>" in plist_text
+    assert f"<string>{workspace.resolve()}</string>" in plist_text
+    assert "<string>9443</string>" in plist_text
+    assert f"<string>{workspace.resolve()}/.runtime/ciao.stdout.log</string>" in plist_text
+    app_exe = apps / "Ciao.app" / "Contents" / "MacOS" / "Ciao"
+    assert app_exe.is_file()
+    assert app_exe.stat().st_mode & 0o111
+    app_text = app_exe.read_text(encoding="utf-8")
+    assert 'open "http://localhost:9443/?setup=' in app_text
+    setup_token = (workspace / ".runtime" / "setup-token").read_text(encoding="utf-8").strip()
+    assert setup_token
+    assert setup_token in app_text
+
+
+def test_setup_is_idempotent_and_does_not_overwrite_env(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".env").write_text("PWA_AUTH_TOKEN=existing\n", encoding="utf-8")
+
+    assert cli.main([
+        "setup",
+        "--workspace",
+        str(workspace),
+        "--launch-agents-dir",
+        str(tmp_path / "LaunchAgents"),
+        "--app-dir",
+        str(tmp_path / "Applications"),
+    ]) == 0
+
+    assert (workspace / ".env").read_text(encoding="utf-8") == "PWA_AUTH_TOKEN=existing\n"
+
+
+def test_auth_print_only_outputs_terminal_command(capsys) -> None:
+    assert cli.main(["auth", "ollama", "--print-only"]) == 0
+
+    assert capsys.readouterr().out.strip() == "ollama signin"
+
+
+def test_auth_claude_uses_bundled_cli(monkeypatch) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        "ciao.providers.claude.get_bundled_claude_path",
+        lambda: "/opt/ciao/claude",
+    )
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda cmd, check=False: calls.append(cmd) or type("P", (), {"returncode": 0})(),
+    )
+
+    assert cli.main(["auth", "claude"]) == 0
+
+    assert calls == [["/opt/ciao/claude", "login"]]
+
+
+def test_vault_index_accepts_arbitrary_workspace_name(monkeypatch) -> None:
+    called = []
+    monkeypatch.setattr(cli, "_vault_index_command", lambda args: called.append(args) or 0)
+
+    assert cli.main(["vault-index", "--workspace", "client"]) == 0
+
+    assert called[0].workspace == "client"
+
+
+def test_create_chat_accepts_configured_workspace_and_bucket(monkeypatch) -> None:
+    called = []
+    monkeypatch.setattr(cli, "_create_chat_command", lambda args: called.append(args) or 0)
+
+    assert (
+        cli.main(
+            [
+                "create-chat",
+                "--prompt",
+                "hello",
+                "--workspace",
+                "client",
+                "--model-bucket",
+                "anthropic",
+            ]
+        )
+        == 0
+    )
+
+    assert called[0].workspace == "client"
+    assert called[0].model_bucket == "anthropic"
+
+
+def test_create_chat_command_uses_active_workspace_without_name_clamp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "client")
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def fake_request(_opener, url: str, *, data=None, method: str = "GET"):
+        calls.append((method, url, data))
+        if url == "http://test/api/auth":
+            return {}
+        if url == "http://test/api/projects?workspace=client":
+            return [{"project_id": "proj-client", "name": "General", "is_auto": True}]
+        if url == "http://test/api/projects/proj-client/chats":
+            return {
+                "chat_id": "chat-client",
+                "title": "New Chat",
+                "project_id": "proj-client",
+                "model": "opus",
+                "provider": "claude",
+            }
+        if url == "http://test/api/chats/chat-client/prompt":
+            return {}
+        raise AssertionError(f"unexpected request: {method} {url}")
+
+    monkeypatch.setattr(cli, "_make_json_request", fake_request)
+
+    assert (
+        cli.main(
+            [
+                "create-chat",
+                "--prompt",
+                "hello",
+                "--workspace-root",
+                str(tmp_path),
+                "--base-url",
+                "http://test",
+            ]
+        )
+        == 0
+    )
+
+    assert ("GET", "http://test/api/projects?workspace=client", None) in calls
+    assert all("workspace=personal" not in url for _, url, _ in calls)
+    assert "Workspace: client" in capsys.readouterr().out
