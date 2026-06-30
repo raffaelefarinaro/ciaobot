@@ -48,6 +48,8 @@ from ciao.web.routes_api import (
     local_status,
     list_all_chats,
     list_models,
+    delete_workspace_setting,
+    provider_config_settings,
     settings_routines,
     setup_finish_endpoint,
     setup_status_endpoint,
@@ -69,6 +71,7 @@ from ciao.web.routes_api import (
     schedule_detail,
     startup_status_endpoint,
     status_endpoint,
+    upsert_workspace_setting,
     workspace_binary,
     workspace_file,
     workspace_file_write,
@@ -110,6 +113,9 @@ def create_app(config, app_settings=None) -> Starlette:
         Route("/api/auth/check", auth_check, methods=["GET"]),
         # Projects
         Route("/api/workspaces", list_workspaces, methods=["GET"]),
+        Route("/api/workspaces", upsert_workspace_setting, methods=["POST"]),
+        Route("/api/workspaces/{name}", upsert_workspace_setting, methods=["PATCH"]),
+        Route("/api/workspaces/{name}", delete_workspace_setting, methods=["DELETE"]),
         Route("/api/projects", list_projects, methods=["GET"]),
         Route("/api/projects", create_project, methods=["POST"]),
         # Literal `completed` paths must precede the {project_id} pattern so
@@ -162,6 +168,7 @@ def create_app(config, app_settings=None) -> Starlette:
         # Models & Status
         Route("/api/models", list_models, methods=["GET"]),
         Route("/api/settings/routines", settings_routines, methods=["GET", "PATCH"]),
+        Route("/api/settings/providers", provider_config_settings, methods=["GET", "PATCH"]),
         Route("/api/status", status_endpoint, methods=["GET", "PATCH"]),
         Route("/api/startup-status", startup_status_endpoint, methods=["GET"]),
         Route("/api/setup-status", setup_status_endpoint, methods=["GET"]),

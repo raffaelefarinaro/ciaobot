@@ -2731,8 +2731,9 @@ async def admin_deploy(request: Request) -> JSONResponse:
         )
 
     # 2. pip install
+    import sys
     result = await asyncio.to_thread(
-        subprocess.run, ["pip", "install", "-e", "."],
+        subprocess.run, [sys.executable, "-m", "pip", "install", "-e", "."],
         cwd=str(ws), capture_output=True, text=True, timeout=120,
     )
     steps.append(_record("pip install", result))
