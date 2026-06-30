@@ -68,6 +68,9 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/setup/finish` | Finish first-run setup from bootstrap mode |
 | GET | `/api/stats` | Read CLI stats |
 | GET | `/api/workspaces` | List configured logical workspaces |
+| POST | `/api/workspaces/{name}` | Add or update a logical workspace config |
+| DELETE | `/api/workspaces/{name}` | Delete a logical workspace config |
+| POST | `/api/settings/providers` | Update configured LLM providers settings |
 | GET | `/api/push/public-key` | Read VAPID public key |
 | POST | `/api/push/subscribe` | Store push subscription |
 | POST | `/api/push/unsubscribe` | Remove push subscription |

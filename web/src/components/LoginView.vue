@@ -61,6 +61,33 @@
         </div>
 
         <div class="form-group">
+          <label>Vault Content Mode</label>
+          <div class="radio-group" style="display: flex; gap: 20px; margin-top: 6px;">
+            <label class="checkbox-label" style="font-weight: normal; cursor: pointer;">
+              <input
+                type="radio"
+                value="scratch"
+                v-model="vaultMode"
+                :disabled="loading"
+                style="margin-right: 6px;"
+              />
+              Create from scratch
+            </label>
+            <label class="checkbox-label" style="font-weight: normal; cursor: pointer;">
+              <input
+                type="radio"
+                value="existing"
+                v-model="vaultMode"
+                :disabled="loading"
+                style="margin-right: 6px;"
+              />
+              Use existing notes folder
+            </label>
+          </div>
+          <span class="hint">Starting fresh builds folder scaffolds; existing runs CiaoBot onboarding adaptation.</span>
+        </div>
+
+        <div class="form-group">
           <label for="setup-push">Push Contact</label>
           <input
             id="setup-push"
@@ -234,6 +261,7 @@ const apiFallback = ref(false)
 const authRequired = ref(true)
 const isRestarting = ref(false)
 const userEditedVault = ref(false)
+const vaultMode = ref('scratch')
 const copyStatus = ref('')
 
 async function doLogin() {
@@ -300,6 +328,7 @@ async function doFinish() {
     await api.post('/api/setup/finish', {
       workspace: workspace.value,
       vault_root: vaultRoot.value,
+      vault_mode: vaultMode.value,
       push_contact: pushContact.value,
       port: Number(port.value),
       python: python.value || undefined,

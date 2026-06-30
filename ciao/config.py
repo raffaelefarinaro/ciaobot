@@ -42,6 +42,7 @@ class WorkspaceConfig:
 
     name: str
     vault_root: str
+    default_provider: str = "claude"
     default_model: str = ""
     disallowed_tools: list[str] | None = None
     gws_profile: str = ""
@@ -66,6 +67,7 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
     return WorkspaceConfig(
         name=name,
         vault_root=vault_root,
+        default_provider=str(data.get("default_provider", "claude")).strip() or "claude",
         default_model=str(data.get("default_model", "")).strip(),
         disallowed_tools=_coerce_workspace_disallowed(data.get("disallowed_tools")),
         gws_profile=str(data.get("gws_profile", "")).strip(),
@@ -113,6 +115,7 @@ def _legacy_workspaces(
         "personal": WorkspaceConfig(
             name="personal",
             vault_root="personal",
+            default_provider="claude",
             default_model=default_model_personal,
             disallowed_tools=disallowed_tools_personal,
             gws_profile=gws_default_profile or "personal",
@@ -121,6 +124,7 @@ def _legacy_workspaces(
         "work": WorkspaceConfig(
             name="work",
             vault_root="work",
+            default_provider="claude",
             default_model=default_model_work,
             disallowed_tools=disallowed_tools_work,
             gws_profile="work",
@@ -202,6 +206,7 @@ class CiaoConfig:
     pwa_auth_required: bool = True
     git_direct_main: bool = False
     dev_mode: bool = False
+    vault_mode: str = "scratch"
     bootstrap_mode: bool = False
     vault_root: Path = Path("memory-vault")
     extra_workspace_roots: list[Path] = field(default_factory=list)
@@ -330,6 +335,12 @@ class CiaoConfig:
         if workspace_config and workspace_config.default_model:
             return workspace_config.default_model
         return self.claude_default_model
+
+    def default_provider_for_workspace(self, workspace: str | None) -> str:
+        workspace_config = self.workspace(workspace)
+        if workspace_config and workspace_config.default_provider in {"claude", "pi"}:
+            return workspace_config.default_provider
+        return "claude"
 
     def disallowed_tools_for_workspace(self, workspace: str | None) -> list[str]:
         """Tools to deny for a chat in this workspace.
@@ -518,6 +529,10 @@ class CiaoConfig:
         dev_mode_raw = source.get("CIAO_DEV_MODE", "").strip().lower()
         dev_mode = dev_mode_raw in {"true", "1", "yes", "y"}
 
+        vault_mode = source.get("CIAO_VAULT_MODE", "scratch").strip().lower()
+        if vault_mode not in {"existing", "scratch"}:
+            vault_mode = "scratch"
+
         return cls(
             pwa_auth_token=pwa_auth_token,
             workspace_root=workspace_root,
@@ -526,6 +541,7 @@ class CiaoConfig:
             pwa_auth_required=pwa_auth_required,
             git_direct_main=git_direct_main,
             dev_mode=dev_mode,
+            vault_mode=vault_mode,
             bootstrap_mode=bootstrap_mode,
             vault_root=vault_root,
             extra_workspace_roots=extra_workspace_roots,

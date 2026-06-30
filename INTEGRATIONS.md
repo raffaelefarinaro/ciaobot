@@ -154,6 +154,7 @@ Runtime config for the Ciao server itself (PWA, schedules, deploy).
 - `PWA_AUTH_REQUIRED`: set to `false` to disable password protection for the PWA dashboard entirely.
 - `CIAO_GIT_DIRECT_MAIN`: set to `true` to work directly on the `main` branch of the vault repository, syncing via direct pull/push rather than per-device branches.
 - `CIAO_DEV_MODE`: set to `true` to enable developer mode controls in the PWA dashboard (like the Deploy button).
+- `CIAO_VAULT_MODE`: onboarding mode for memory-vault folders. Either `scratch` (create folders and documentation from scratch) or `existing` (connect and adapt existing markdown folders).
 - `CIAO_BOOTSTRAP_WORKSPACE`: temp workspace root used when `PWA_AUTH_TOKEN` is absent. Defaults to `~/.ciao/bootstrap`; Ciao persists the generated bootstrap auth token under its `.runtime/` so first-run setup survives a restart.
 - `CIAO_WORKSPACE`: filesystem workspace root for operational state, `.runtime/`, `.env`, `.claude/`, and `CLAUDE.md`. Default `.`.
 - `CIAO_VAULT_ROOT`: durable memory/vault root. Default `<CIAO_WORKSPACE>/memory-vault`. Set this to an external notes folder when operational state should stay out of synced notes.

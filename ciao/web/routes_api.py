@@ -10,7 +10,7 @@ import os
 import re
 import hmac
 import subprocess
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
+from ciao.config import WorkspaceConfig
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.package_version import package_status, update_package
 from ciao.providers.claude import _summarize_tool_input
@@ -60,6 +61,27 @@ _CONTEXT_BLOCK_RE = re.compile(
 _IMAGE_MANIFEST_RE = re.compile(
     r"\n{0,2}\[INCOMING IMAGES\]\n(?:\d+\. [^\n]*(?:\n|$))+\s*$",
 )
+
+_WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_ALLOWED_CHAT_PROVIDERS = {"claude", "pi"}
+_PROVIDER_KEY_META = {
+    "ANTHROPIC_API_KEY": {
+        "label": "Anthropic API key",
+        "description": "Fallback key for Claude provider auth when OAuth is not used.",
+    },
+    "OPENAI_API_KEY": {
+        "label": "OpenAI API key",
+        "description": "Used by cloud voice transcription and other OpenAI-backed features.",
+    },
+    "CIAO_OLLAMA_API_KEY": {
+        "label": "Ollama Cloud API key",
+        "description": "Routes configured Ollama cloud models directly through ollama.com.",
+    },
+    "OPENROUTER_API_KEY": {
+        "label": "OpenRouter API key",
+        "description": "Optional key for critique/review model routing.",
+    },
+}
 
 
 def _known_workspace_names(pcm: object) -> set[str]:
@@ -424,14 +446,256 @@ async def list_workspaces(request: Request) -> JSONResponse:
         {
             "name": getattr(workspace, "name", ""),
             "vault_root": getattr(workspace, "vault_root", ""),
+            "default_provider": getattr(workspace, "default_provider", "claude"),
             "default_model": getattr(workspace, "default_model", ""),
             "gws_profile": getattr(workspace, "gws_profile", ""),
             "model_bucket": getattr(workspace, "model_bucket", ""),
+            "disallowed_tools": getattr(workspace, "disallowed_tools", None),
         }
         for workspace in config.workspaces.values()
     ]
     active = workspaces[0]["name"] if workspaces else None
     return JSONResponse({"workspaces": workspaces, "active": active})
+
+
+def _workspace_to_dict(workspace: WorkspaceConfig) -> dict:
+    return {
+        "name": workspace.name,
+        "vault_root": workspace.vault_root,
+        "default_provider": workspace.default_provider,
+        "default_model": workspace.default_model,
+        "disallowed_tools": (
+            list(workspace.disallowed_tools)
+            if workspace.disallowed_tools is not None
+            else None
+        ),
+        "gws_profile": workspace.gws_profile,
+        "model_bucket": workspace.model_bucket,
+    }
+
+
+def _workspaces_payload(config) -> dict:
+    workspaces = [_workspace_to_dict(workspace) for workspace in config.workspaces.values()]
+    return {
+        "workspaces": workspaces,
+        "active": workspaces[0]["name"] if workspaces else None,
+    }
+
+
+def _parse_disallowed_tools_value(raw: object) -> list[str] | None:
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        if raw.strip().lower() == "default":
+            return None
+        return [item.strip() for item in raw.split(",") if item.strip()]
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    raise ValueError("disallowed_tools must be a list, comma-separated string, or null")
+
+
+def _workspace_from_request(data: dict, *, existing: WorkspaceConfig | None = None) -> WorkspaceConfig:
+    name = str(data.get("name", existing.name if existing else "")).strip()
+    if not _WORKSPACE_NAME_RE.match(name):
+        raise ValueError("workspace name must use letters, numbers, dashes, or underscores")
+    provider = str(
+        data.get(
+            "default_provider",
+            existing.default_provider if existing else "claude",
+        )
+    ).strip() or "claude"
+    if provider not in _ALLOWED_CHAT_PROVIDERS:
+        raise ValueError("default_provider must be either 'claude' or 'pi'")
+    if "disallowed_tools" in data:
+        disallowed_tools = _parse_disallowed_tools_value(data.get("disallowed_tools"))
+    elif existing is not None:
+        disallowed_tools = existing.disallowed_tools
+    else:
+        disallowed_tools = None
+    return WorkspaceConfig(
+        name=name,
+        vault_root=str(data.get("vault_root", existing.vault_root if existing else name)).strip()
+        or name,
+        default_provider=provider,
+        default_model=str(
+            data.get("default_model", existing.default_model if existing else "")
+        ).strip(),
+        disallowed_tools=disallowed_tools,
+        gws_profile=str(data.get("gws_profile", existing.gws_profile if existing else "")).strip(),
+        model_bucket=str(
+            data.get("model_bucket", existing.model_bucket if existing else "")
+        ).strip(),
+    )
+
+
+def _workspaces_path(config) -> Path:
+    return Path(config.state_path).resolve().parent / "workspaces.json"
+
+
+def _persist_workspaces(config) -> None:
+    path = _workspaces_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = [_workspace_to_dict(workspace) for workspace in config.workspaces.values()]
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _refresh_project_manager_workspaces(request: Request) -> None:
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    refresh = getattr(pcm, "refresh_workspaces", None)
+    if callable(refresh):
+        refresh()
+
+
+async def upsert_workspace_setting(request: Request) -> JSONResponse:
+    config = request.app.state.config
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "expected an object"}, status_code=400)
+    route_name = request.path_params.get("name")
+    if route_name:
+        body = {**body, "name": route_name}
+    existing = config.workspace(str(body.get("name", "")).strip())
+    try:
+        workspace = _workspace_from_request(body, existing=existing)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    created = workspace.name not in config.workspaces
+    config.workspaces[workspace.name] = workspace
+    _persist_workspaces(config)
+    _refresh_project_manager_workspaces(request)
+    return JSONResponse(_workspaces_payload(config), status_code=201 if created else 200)
+
+
+async def delete_workspace_setting(request: Request) -> JSONResponse:
+    config = request.app.state.config
+    name = str(request.path_params.get("name", "")).strip()
+    if name not in config.workspaces:
+        return JSONResponse({"error": "workspace not found"}, status_code=404)
+    if len(config.workspaces) <= 1:
+        return JSONResponse({"error": "cannot delete the last workspace"}, status_code=400)
+    config.workspaces.pop(name, None)
+    _persist_workspaces(config)
+    _refresh_project_manager_workspaces(request)
+    return JSONResponse(_workspaces_payload(config))
+
+
+def _env_path(config) -> Path:
+    return Path(config.workspace_root).resolve() / ".env"
+
+
+def _read_env_lines(path: Path) -> list[str]:
+    try:
+        return path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
+
+
+def _write_env_values(path: Path, updates: dict[str, str]) -> None:
+    lines = _read_env_lines(path)
+    remaining = dict(updates)
+    out: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            out.append(line)
+            continue
+        key = line.split("=", 1)[0].strip()
+        if key not in remaining:
+            out.append(line)
+            continue
+        value = remaining.pop(key).strip()
+        if value:
+            out.append(f"{key}={value}")
+    for key, value in remaining.items():
+        value = value.strip()
+        if value:
+            out.append(f"{key}={value}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+
+
+def _read_env_value(path: Path, key: str) -> str:
+    for line in _read_env_lines(path):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            continue
+        env_key, value = line.split("=", 1)
+        if env_key.strip() == key:
+            return value.strip().strip("'\"")
+    return ""
+
+
+def _provider_key_configured(config, key: str) -> bool:
+    env_value = os.environ.get(key, "").strip()
+    if env_value:
+        return True
+    file_value = _read_env_value(_env_path(config), key)
+    if file_value:
+        return True
+    if key == "OPENAI_API_KEY":
+        return bool(getattr(config, "openai_api_key", None))
+    if key == "CIAO_OLLAMA_API_KEY":
+        return getattr(config.ollama, "api_key", "ollama") != "ollama"
+    return False
+
+
+def _provider_config_payload(config) -> dict:
+    return {
+        "keys": {
+            key: {
+                **meta,
+                "configured": _provider_key_configured(config, key),
+            }
+            for key, meta in _PROVIDER_KEY_META.items()
+        },
+        "requires_restart": True,
+        "env_path": str(_env_path(config)),
+    }
+
+
+def _apply_provider_key_updates(config, updates: dict[str, str]) -> None:
+    for key, value in updates.items():
+        value = value.strip()
+        if value:
+            os.environ[key] = value
+        else:
+            os.environ.pop(key, None)
+        if key == "OPENAI_API_KEY":
+            config.openai_api_key = value or None
+        elif key == "CIAO_OLLAMA_API_KEY":
+            if value:
+                base_url = os.environ.get("CIAO_OLLAMA_URL", "").strip() or "https://ollama.com"
+                config.ollama = replace(config.ollama, api_key=value, base_url=base_url)
+            else:
+                base_url = os.environ.get("CIAO_OLLAMA_URL", "").strip() or "http://localhost:11434"
+                config.ollama = replace(config.ollama, api_key="ollama", base_url=base_url)
+
+
+async def provider_config_settings(request: Request) -> JSONResponse:
+    config = request.app.state.config
+    if request.method == "GET":
+        return JSONResponse(_provider_config_payload(config))
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    if not isinstance(body, dict) or not isinstance(body.get("keys"), dict):
+        return JSONResponse({"error": "expected object with keys"}, status_code=400)
+    updates = {str(key): str(value) for key, value in body["keys"].items()}
+    unsupported = sorted(set(updates) - set(_PROVIDER_KEY_META))
+    if unsupported:
+        return JSONResponse(
+            {"error": f"unsupported provider key(s): {', '.join(unsupported)}"},
+            status_code=400,
+        )
+    _write_env_values(_env_path(config), updates)
+    _apply_provider_key_updates(config, updates)
+    return JSONResponse(_provider_config_payload(config))
 
 
 async def list_projects(request: Request) -> JSONResponse:
@@ -2310,6 +2574,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         auth_required=bool(body.get("auth_required", True)),
         push_contact=push_contact,
         vault_root=str(body.get("vault_root", "")).strip() or None,
+        vault_mode=str(body.get("vault_mode", "scratch")).strip().lower(),
         python_path=str(body.get("python", "")).strip() or None,
         port=port,
         launch_agents_dir=str(body.get("launch_agents_dir", "")).strip() or None,

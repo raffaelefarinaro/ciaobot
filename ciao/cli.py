@@ -162,6 +162,7 @@ def setup_workspace(
     auth_required: bool = True,
     push_contact: str | None = None,
     vault_root: Path | str | None = None,
+    vault_mode: str = "scratch",
     python_path: str | None = None,
     port: int = 8443,
     launch_agents_dir: Path | str | None = None,
@@ -188,6 +189,7 @@ def setup_workspace(
             f"CIAO_PUSH_CONTACT={contact}",
             "CIAO_WORKSPACE=.",
             f"CIAO_VAULT_ROOT={vault_value}",
+            f"CIAO_VAULT_MODE={vault_mode}",
             "CIAO_RUNTIME_ROOT=.runtime",
             "",
         ])

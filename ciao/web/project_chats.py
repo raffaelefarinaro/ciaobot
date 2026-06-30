@@ -928,7 +928,73 @@ class ProjectChatManager:
                 )
                 self._events.publish({"type": "project_deleted", "project_id": pid})
 
+        if not self._chats:
+            general = next(
+                (
+                    p
+                    for p in self._projects.values()
+                    if p.workspace == "personal" and p.name == "General"
+                ),
+                None,
+            )
+            if general is not None:
+                self._create_onboarding_chat(general.project_id)
+
         self._save()
+
+    def _create_onboarding_chat(self, project_id: str) -> None:
+        import os
+        vault_mode = os.environ.get("CIAO_VAULT_MODE", "scratch").strip().lower()
+        vault_root = str(self._config.vault_root)
+
+        if vault_mode == "existing":
+            title = "Connect Existing Vault 👋"
+            user_msg = (
+                f"Welcome to Ciao! You are CiaoBot, the user's personal agentic assistant.\n\n"
+                f"The user has completed setup and pointed me to an **existing notes folder** at:\n"
+                f"`{vault_root}`\n\n"
+                f"Your task is to onboard the user and adapt this existing folder into what Ciao requires:\n"
+                f"1. **Analyze Folder**: Scan the existing vault directory to see what directories and files are present.\n"
+                f"2. **Structure Verification**: Check if the standard directories (`personal/`, `work/`, `Templates/`) exist. If not, plan to create them.\n"
+                f"3. **Hygiene & Scaffolding**: Verify if `CLAUDE.md` (defining identity, memory, styles) and `MEMORY.md` exist. If missing, plan to create them using clean Markdown structures (no em-dashes, no horizontal rules `---` as section dividers).\n"
+                f"4. **Onboarding Interview**: Ask the user 2-3 important questions to collect basic info (their name, their role/work context, key people, and active projects) to populate `CLAUDE.md` and `MEMORY.md` correctly.\n\n"
+                f"Introduce yourself to the user, tell them you've scanned their vault at `{vault_root}`, outline your findings, and ask the first onboarding questions to fill out their profile."
+            )
+            assistant_msg = (
+                f"Hello! I am CiaoBot, your agentic second brain. 👋\n\n"
+                f"I've initialized our session and connected to your existing folder at `{vault_root}`. "
+                f"I'm ready to inspect your vault, organize it into Ciao's structure, and bootstrap our core notes. "
+                f"To get started, tell me: **What is your name, and what is your primary focus (work/personal) right now?**"
+            )
+        else:
+            title = "Welcome to Ciao! 👋"
+            user_msg = (
+                f"Welcome to Ciao! You are CiaoBot, the user's personal agentic assistant.\n\n"
+                f"The user has completed setup and initialized a **new vault folder from scratch** at:\n"
+                f"`{vault_root}`\n\n"
+                f"Your task is to bootstrap the vault structure and core documentation:\n"
+                f"1. **Create Directory Structure**: Plan to create: `personal/`, `work/`, and `Templates/` (scaffold markdown templates for logs, projects, and people).\n"
+                f"2. **Generate Core Files**: Plan to generate clean initial templates for `CLAUDE.md` (defining instructions, memory rules, styles) and `MEMORY.md`.\n"
+                f"3. **Onboarding Interview**: Ask the user 2-3 important questions to collect basic info (their name, GWS profiles, key projects) to customize `CLAUDE.md` and `MEMORY.md`.\n\n"
+                f"Introduce yourself to the user, explain that you are starting fresh at `{vault_root}`, and ask the first onboarding questions to bootstrap your profile."
+            )
+            assistant_msg = (
+                f"Hello! I am CiaoBot, your agentic second brain. 👋\n\n"
+                f"Welcome! I've initialized our workspace at `{vault_root}` from scratch. "
+                f"I'm ready to create our core structure (`personal/`, `work/`, `Templates/`) and customize our settings. "
+                f"To begin, tell me: **What is your name, and what is your primary focus (work/personal) right now?**"
+            )
+
+        chat = self.create_chat(
+            project_id,
+            title=title,
+            model=self._config.claude_default_model,
+        )
+        chat.handover_context_pending = True
+        chat.handover_messages = [
+            {"role": "user", "content": user_msg},
+            {"role": "assistant", "content": assistant_msg},
+        ]
 
     def _ensure_general_vault_folder(self, workspace: str) -> None:
         """Create ``projects/active/general/general.md`` if it doesn't exist.
@@ -1761,7 +1827,12 @@ class ProjectChatManager:
         workspace = project.workspace if project else None
         default_model = self._config.default_model_for_workspace(workspace)
         chat_model = model or default_model
-        chat_provider = provider or self._infer_legacy_provider(chat_model)
+        chat_provider = provider
+        if not chat_provider:
+            if self._infer_legacy_provider(chat_model) == "pi":
+                chat_provider = "pi"
+            else:
+                chat_provider = self._config.default_provider_for_workspace(workspace)
         # Claude chats record the bucket explicitly: the workspace only
         # preselects (personal → "personal"), but an explicit picker choice
         # wins and survives project moves. Personal-bucket alias defaults
@@ -2555,6 +2626,15 @@ class ProjectChatManager:
         project = self._projects.get(project_id) if project_id else None
         workspace = project.workspace if project else None
         return self._config.default_model_for_workspace(workspace)
+
+    def schedule_default_provider(self, project_id: str | None) -> str:
+        project = self._projects.get(project_id) if project_id else None
+        workspace = project.workspace if project else None
+        return self._config.default_provider_for_workspace(workspace)
+
+    def refresh_workspaces(self) -> None:
+        self._ensure_defaults()
+        self._discover_vault_projects()
 
     def _workspace_gws_profile(self, workspace: str | None) -> str:
         workspace_config = self._config.workspace(workspace)
