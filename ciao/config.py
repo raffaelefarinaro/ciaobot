@@ -349,6 +349,13 @@ class CiaoConfig:
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "CiaoConfig":
+        if env is None:
+            workspace_env_val = os.environ.get("CIAO_WORKSPACE", "").strip() or os.environ.get("TELEGRAM_BRIDGE_WORKSPACE", "").strip() or "."
+            dotenv_path = Path(workspace_env_val).expanduser().resolve() / ".env"
+            if dotenv_path.exists():
+                from dotenv import load_dotenv
+                load_dotenv(dotenv_path)
+
         source = env if env is not None else os.environ
 
         pwa_auth_token = source.get("PWA_AUTH_TOKEN", "").strip()
