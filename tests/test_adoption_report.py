@@ -20,7 +20,11 @@ from ciao.adoption_report import (
 from ciao.dag import _start_node, _validate
 
 
-def test_dag_structure_is_valid() -> None:
+def test_dag_structure_is_valid(monkeypatch) -> None:
+    monkeypatch.setattr("ciao.adoption_report._load_config", lambda path: {
+        "report_generator_path": "/tmp",
+        "report_output_dir": "reports",
+    })
     nodes, edges, _ = build_report_dag(month="2026-03")
     _validate(nodes, edges)
     assert _start_node(nodes, edges) == "generate"

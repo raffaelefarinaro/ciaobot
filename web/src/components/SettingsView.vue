@@ -314,6 +314,22 @@
               />
             </div>
 
+            <!-- System Settings -->
+            <div class="routine-row" style="flex-direction: column; align-items: stretch; gap: 8px; margin-top: 16px; border-top: 1px solid var(--border); padding-top: 16px;">
+              <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                <span class="routine-name">Auto-Update GitHub Skills</span>
+                <input
+                  type="checkbox"
+                  v-model="autoUpdateGithubSkills"
+                  :disabled="providerKeysSaving"
+                  style="width: 18px; height: 18px; cursor: pointer;"
+                />
+              </div>
+              <p class="hint" style="margin-top: 0; margin-bottom: 0;">
+                If enabled, Ciao automatically checks GitHub for updates to your locked package skills on boot.
+              </p>
+            </div>
+
             <div class="action-row" style="margin-top: 20px;">
               <button class="btn-primary" @click="saveProviderKeys" :disabled="providerKeysSaving">
                 {{ providerKeysSaving ? 'Saving...' : 'Save Keys' }}
@@ -564,6 +580,7 @@ const providerKeysError = ref('')
 const providerKeysSaving = ref(false)
 const providerKeysResult = ref('')
 const providerKeyInputs = ref<Record<string, string>>({})
+const autoUpdateGithubSkills = ref(true)
 
 async function fetchProviderKeys() {
   try {
@@ -571,6 +588,9 @@ async function fetchProviderKeys() {
     providerKeys.value = res
     for (const key in res.keys) {
       providerKeyInputs.value[key] = ''
+    }
+    if (res.auto_update_github_skills !== undefined) {
+      autoUpdateGithubSkills.value = res.auto_update_github_skills
     }
   } catch (e: any) {
     providerKeysError.value = `Failed to load provider keys: ${e?.message || e}`
@@ -592,7 +612,10 @@ async function saveProviderKeys() {
     }
   }
   
-  if (Object.keys(patchKeys).length === 0) {
+  const hasKeyChanges = Object.keys(patchKeys).length > 0
+  const hasSettingChanges = autoUpdateGithubSkills.value !== providerKeys.value.auto_update_github_skills
+  
+  if (!hasKeyChanges && !hasSettingChanges) {
     providerKeysResult.value = 'No changes to save.'
     providerKeysSaving.value = false
     setTimeout(() => { providerKeysResult.value = '' }, 2000)
@@ -600,12 +623,23 @@ async function saveProviderKeys() {
   }
   
   try {
-    const res = await api.patch<ProviderConfigSettings>('/api/settings/providers', { keys: patchKeys })
+    const payload: any = {}
+    if (hasKeyChanges) {
+      payload.keys = patchKeys
+    }
+    if (hasSettingChanges) {
+      payload.auto_update_github_skills = autoUpdateGithubSkills.value
+    }
+    
+    const res = await api.patch<ProviderConfigSettings>('/api/settings/providers', payload)
     providerKeys.value = res
     for (const key in res.keys) {
       providerKeyInputs.value[key] = ''
     }
-    providerKeysResult.value = 'Saved keys. Restarting server to apply...'
+    if (res.auto_update_github_skills !== undefined) {
+      autoUpdateGithubSkills.value = res.auto_update_github_skills
+    }
+    providerKeysResult.value = 'Saved configuration. Restarting server to apply...'
     setTimeout(() => {
       providerKeysResult.value = ''
       window.location.reload()

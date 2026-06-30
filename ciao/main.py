@@ -271,18 +271,9 @@ async def _async_main() -> int:
     except Exception:
         logger.warning("Pi models.json write failed", exc_info=True)
 
-    # Upgrade pip deps + gws CLI in the background.
+    # Automatic background upgrades disabled for public service
     tracker.start("upgrade_all")
-
-    async def _upgrade_task():
-        try:
-            summary = await upgrade_all(str(config.workspace_root))
-            tracker.done("upgrade_all", summary or "up to date")
-        except Exception:
-            tracker.fail("upgrade_all", "upgrade failed")
-            logger.exception("Upgrade task failed")
-
-    asyncio.create_task(_upgrade_task())
+    tracker.done("upgrade_all", "skipped")
 
     # Initialize stores
     state = StateStore(

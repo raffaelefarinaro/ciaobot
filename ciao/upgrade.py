@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -97,7 +98,7 @@ async def upgrade_project_deps(project_root: str) -> dict[str, tuple[str, str]]:
     async def _get_versions() -> dict[str, str]:
         versions: dict[str, str] = {}
         for pkg in tracked:
-            ver = await read_version(["pip", "show", pkg])
+            ver = await read_version([sys.executable, "-m", "pip", "show", pkg])
             if ver:
                 versions[pkg] = ver
         return versions
@@ -111,11 +112,11 @@ async def upgrade_project_deps(project_root: str) -> dict[str, tuple[str, str]]:
     # version still satisfies pyproject.toml lower bounds.
     editable, extras = await asyncio.gather(
         asyncio.create_subprocess_exec(
-            "pip", "install", "--upgrade", "-e", f"{project_root}[test]",
+            sys.executable, "-m", "pip", "install", "--upgrade", "-e", f"{project_root}[test]",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         ),
         asyncio.create_subprocess_exec(
-            "pip", "install", "--upgrade",
+            sys.executable, "-m", "pip", "install", "--upgrade",
             *tracked, "starlette<1",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         ),

@@ -653,6 +653,7 @@ def _provider_config_payload(config) -> dict:
             }
             for key, meta in _PROVIDER_KEY_META.items()
         },
+        "auto_update_github_skills": getattr(config, "auto_update_github_skills", True),
         "requires_restart": True,
         "env_path": str(_env_path(config)),
     }
@@ -684,17 +685,27 @@ async def provider_config_settings(request: Request) -> JSONResponse:
         body = await request.json()
     except ValueError:
         return JSONResponse({"error": "invalid JSON"}, status_code=400)
-    if not isinstance(body, dict) or not isinstance(body.get("keys"), dict):
-        return JSONResponse({"error": "expected object with keys"}, status_code=400)
-    updates = {str(key): str(value) for key, value in body["keys"].items()}
-    unsupported = sorted(set(updates) - set(_PROVIDER_KEY_META))
-    if unsupported:
-        return JSONResponse(
-            {"error": f"unsupported provider key(s): {', '.join(unsupported)}"},
-            status_code=400,
-        )
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "expected object"}, status_code=400)
+    updates = {}
+    if "keys" in body:
+        if not isinstance(body["keys"], dict):
+            return JSONResponse({"error": "keys must be an object"}, status_code=400)
+        key_updates = {str(key): str(value) for key, value in body["keys"].items()}
+        unsupported = sorted(set(key_updates) - set(_PROVIDER_KEY_META))
+        if unsupported:
+            return JSONResponse(
+                {"error": f"unsupported provider key(s): {', '.join(unsupported)}"},
+                status_code=400,
+            )
+        updates.update(key_updates)
+    if "auto_update_github_skills" in body:
+        val = bool(body["auto_update_github_skills"])
+        updates["CIAO_AUTO_UPDATE_GITHUB_SKILLS"] = "true" if val else "false"
+        config.auto_update_github_skills = val
+
     _write_env_values(_env_path(config), updates)
-    _apply_provider_key_updates(config, updates)
+    _apply_provider_key_updates(config, {k: v for k, v in updates.items() if k in _PROVIDER_KEY_META})
     if updates:
         async def _do_restart():
             await asyncio.sleep(0.5)
@@ -2699,6 +2710,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
 
     config = request.app.state.config
     ws = config.workspace_root
+    codebase_root = Path(__file__).resolve().parents[2]
     steps = []
 
     def _record(step: str, result: subprocess.CompletedProcess) -> dict:
@@ -2721,7 +2733,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
     # 1. Git pull (idempotent after snapshot, but catches any race push)
     result = await asyncio.to_thread(
         subprocess.run, ["git", "pull"],
-        cwd=str(ws), capture_output=True, text=True, timeout=60,
+        cwd=str(codebase_root), capture_output=True, text=True, timeout=60,
     )
     steps.append(_record("git pull", result))
     if result.returncode != 0:
@@ -2734,7 +2746,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
     import sys
     result = await asyncio.to_thread(
         subprocess.run, [sys.executable, "-m", "pip", "install", "-e", "."],
-        cwd=str(ws), capture_output=True, text=True, timeout=120,
+        cwd=str(codebase_root), capture_output=True, text=True, timeout=120,
     )
     steps.append(_record("pip install", result))
     if result.returncode != 0:
@@ -2749,12 +2761,12 @@ async def admin_deploy(request: Request) -> JSONResponse:
     # a deploy, since the Python server runs regardless.
     result = await asyncio.to_thread(
         subprocess.run, ["npm", "install", "--no-audit", "--no-fund"],
-        cwd=str(ws), capture_output=True, text=True, timeout=180,
+        cwd=str(codebase_root), capture_output=True, text=True, timeout=180,
     )
     steps.append(_record("npm install (root)", result))
 
     # 3. npm build
-    web_dir = ws / "web"
+    web_dir = codebase_root / "web"
     result = await asyncio.to_thread(
         subprocess.run, ["npm", "run", "build"],
         cwd=str(web_dir), capture_output=True, text=True, timeout=120,

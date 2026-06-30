@@ -262,6 +262,7 @@ export interface ProviderConfigSettings {
     description: string
     configured: boolean
   }>
+  auto_update_github_skills?: boolean
   requires_restart: boolean
   env_path: string
 }

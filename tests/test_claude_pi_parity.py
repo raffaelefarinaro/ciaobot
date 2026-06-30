@@ -33,12 +33,12 @@ MANAGED_MARKER = "# ciao-managed:"
 
 
 def _pi_installed() -> bool:
-    return (Path.home() / ".pi" / "agent").is_dir()
+    return (Path.home() / ".pi" / "agent").is_dir() and CLAUDE_SKILLS.is_dir()
 
 
 pi_required = pytest.mark.skipif(
     not _pi_installed(),
-    reason="Pi not installed on this host (~/.pi/agent missing)",
+    reason="Pi not installed or local .claude skills folder missing in this workspace",
 )
 
 

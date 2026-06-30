@@ -245,6 +245,7 @@ class CiaoConfig:
     restart_exit_code: int = 75
     auto_sync_on_start: bool = True
     auto_vault_index: bool = True
+    auto_update_github_skills: bool = True
     pwa_port: int = 8443
     pwa_host: str = "0.0.0.0"
     gws_default_profile: str = "personal"
@@ -585,6 +586,8 @@ class CiaoConfig:
                 source, "CIAO_AUTO_SYNC_ON_START", "TELEGRAM_BRIDGE_AUTO_SYNC_ON_START", "true"
             ).lower() not in {"0", "false", "no", "off"},
             auto_vault_index=source.get("CIAO_AUTO_VAULT_INDEX", "true").strip().lower()
+            not in {"0", "false", "no", "off"},
+            auto_update_github_skills=source.get("CIAO_AUTO_UPDATE_GITHUB_SKILLS", "true").strip().lower()
             not in {"0", "false", "no", "off"},
             pwa_port=int(source.get("PWA_PORT", "8443")),
             pwa_host=source.get("PWA_HOST", "0.0.0.0").strip(),
