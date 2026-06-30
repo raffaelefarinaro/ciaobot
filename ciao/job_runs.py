@@ -85,8 +85,6 @@ REGISTRY: tuple[JobSpec, ...] = (
             "Weekly: proposes skill edits from underperforming trajectories."),
     JobSpec("dependency_review", "Dependency review", "content",
             "Weekly: reviews tracked dependency releases against the baseline."),
-    JobSpec("adoption_report", "Adoption report", "content",
-            "Monthly: generates, enriches, and autochecks the product adoption reports."),
     JobSpec("schedule_dispatch", "Scheduled dispatch", "content",
             "Fires scheduled chat turns and evaluates auto-archival."),
     JobSpec("startup_sync", "Startup git sync", "system",
