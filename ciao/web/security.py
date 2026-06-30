@@ -29,7 +29,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                     "img-src 'self' data: blob:",
                     "media-src 'self' blob:",
                     "font-src 'self' data: https://fonts.gstatic.com",
-                    "connect-src 'self' ws: wss:",
+                    "connect-src 'self' ws: wss: https://fonts.googleapis.com https://fonts.gstatic.com",
                 ]
             ),
         )
