@@ -71,6 +71,7 @@ ciao/                          Python backend (Starlette).
   public_release.py            Public extraction allowlist, export copier, and private-data preflight scanner. CLI: `ciao public-preflight export <src> <dest>` then `ciao public-preflight scan <export-root> --private-patterns <file>`.
   package_smoke.py             Wheel smoke target: build web, build wheel, install in a clean venv, and probe the installed app. CLI: `ciao package-smoke`.
   stock/                       Generic package-data assets for public installs: stock agents, commands, empty skills, launchd template, and system schedules.
+    workspace/                 Agent-readable docs copied into installed workspaces (`CLAUDE.md`, `CIAO_CUSTOMIZATION.md`).
   web/                         PWA web server (Python routes) + static assets (built by web/).
 
 web/                           Vue 3 PWA frontend.
@@ -147,7 +148,7 @@ ciao setup --workspace /tmp/ciao-workspace
 ciao run
 ```
 
-`ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, renders `~/Library/LaunchAgents/com.ciao.server.plist`, and creates `~/Applications/Ciao.app`, which opens the local PWA. By default it does not load launchd; add `--load-launchd` when you want setup to run `launchctl`.
+`ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies agent-readable workspace docs (`CLAUDE.md`, `CIAO_CUSTOMIZATION.md`), renders `~/Library/LaunchAgents/com.ciao.server.plist`, and creates `~/Applications/Ciao.app`, which opens the local PWA. By default it does not load launchd; add `--load-launchd` when you want setup to run `launchctl`.
 
 The Homebrew formula scaffold lives at `deploy/homebrew/ciao.rb`. It is a `--HEAD` formula until the public repo cuts a tagged release with a stable source URL and SHA. It installs Ciao into a `python@3.12` virtualenv, links the `ciao` CLI, and runs `ciao setup --load-launchd` from `post_install` only when a GUI launchd session is available. Headless installs print the terminal command to finish setup instead of failing silently.
 

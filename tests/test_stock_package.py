@@ -46,6 +46,8 @@ def test_stock_package_contains_generic_agents_commands_and_schedules() -> None:
     assert stock.joinpath("skills").is_dir()
     assert not list(stock.joinpath("skills").glob("*.md"))
     assert stock.joinpath("public", "CLAUDE.md").is_file()
+    assert stock.joinpath("workspace", "CLAUDE.md").is_file()
+    assert stock.joinpath("workspace", "CIAO_CUSTOMIZATION.md").is_file()
     assert stock.joinpath("deploy", "com.ciao.server.plist.tmpl").is_file()
     assert stock.joinpath("schedules", "weekly-review-template.md").is_file()
     plist = stock.joinpath("deploy", "com.ciao.server.plist.tmpl").read_text(encoding="utf-8")
@@ -92,5 +94,6 @@ def test_pyproject_packages_stock_data() -> None:
     assert "commands/*.md" in package_data["ciao.stock"]
     assert "skills/.gitkeep" in package_data["ciao.stock"]
     assert "public/*.md" in package_data["ciao.stock"]
+    assert "workspace/*.md" in package_data["ciao.stock"]
     assert "schedules.json" in package_data["ciao.stock"]
     assert "schedules/*.md" in package_data["ciao.stock"]

@@ -36,6 +36,19 @@ def _copy_tree(src, dest: Path) -> None:
             (dest / item.name).write_bytes(item.read_bytes())
 
 
+def _copy_tree_if_missing(src, dest: Path) -> list[Path]:
+    dest.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for item in src.iterdir():
+        target = dest / item.name
+        if item.is_dir():
+            written.extend(_copy_tree_if_missing(item, target))
+        elif not target.exists():
+            target.write_bytes(item.read_bytes())
+            written.append(target)
+    return written
+
+
 def _write_if_missing(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
@@ -187,9 +200,11 @@ def setup_workspace(
     stock = resources.files("ciao.stock")
     stock_agents = stock.joinpath("agents")
     stock_commands = stock.joinpath("commands")
+    stock_workspace = stock.joinpath("workspace")
     _copy_tree(stock_agents, root / ".claude" / "agents")
     _copy_tree(stock_commands, root / ".claude" / "commands")
     written.extend([root / ".claude" / "agents", root / ".claude" / "commands"])
+    written.extend(_copy_tree_if_missing(stock_workspace, root))
 
     runtime_schedules = root / ".runtime" / "schedules.json"
     _write_if_missing(
