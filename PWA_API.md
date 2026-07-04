@@ -139,7 +139,7 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/proj
 
 ```bash
 # Create — title/model/mode/provider/model_bucket all optional.
-# provider ∈ {claude, pi}. model_bucket is optional and Claude-only:
+# provider is currently `claude`. model_bucket controls the Claude backend:
 # '' = auto from the project's configured workspace bucket. Legacy
 # work/personal buckets still work; anthropic/ollama are the clearer
 # configured names. Unknown buckets are rejected unless a workspace config
@@ -157,13 +157,13 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projec
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/chats/$CID" \
   -H 'content-type: application/json' -d '{"thinking_level":"high"}'
 
-# Handover — switch provider/model inside the same visible chat.
-# Body keys: provider ∈ {claude, pi}, model, model_bucket (optional,
-# Claude only), messages (visible rows).
-# Starts the next provider turn as a fresh session seeded with those messages.
+# Handover — switch model/backend inside the same visible chat.
+# Body keys: provider = claude, model, model_bucket (optional), messages
+# (visible rows). Starts the next provider turn as a fresh session seeded
+# with those messages.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/handover" \
   -H 'content-type: application/json' \
-  -d '{"provider":"pi","model":"openai-codex/gpt-5.5","messages":[{"role":"user","content":"continue this task"},{"role":"assistant","content":"current state"}]}'
+  -d '{"provider":"claude","model":"sonnet","model_bucket":"anthropic","messages":[{"role":"user","content":"continue this task"},{"role":"assistant","content":"current state"}]}'
 
 # Archive — finalises the chat and writes a Markdown transcript. Returns {ok, archived_to}.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/archive"
@@ -291,7 +291,7 @@ When adding a new state-changing route (`POST/PATCH/DELETE /api/...`), add an en
 
 Each user turn carries timing metadata, computed in `ciao/web/project_chats.py` (provider-agnostic) and persisted under `ChatInfo.user_turn_timings` as `{ "<turn_index>": {sent_at, completed_at, duration_ms} }`.
 
-- `GET /api/chats/{chat_id}/messages`: user entries include `sent_at`; the last assistant entry per turn includes `sent_at` (= `completed_at`) and `duration_ms`. Overlay is applied for Claude (SDK) and Pi sessions via `_overlay_assistant_timings` in `ciao/web/routes_api.py`. Pre-feature chats with no recorded timings get no extra fields.
+- `GET /api/chats/{chat_id}/messages`: user entries include `sent_at`; the last assistant entry per turn includes `sent_at` (= `completed_at`) and `duration_ms`. Overlay is applied to Claude SDK sessions via `_overlay_assistant_timings` in `ciao/web/routes_api.py`. Pre-feature chats with no recorded timings get no extra fields.
 - WS `/ws/chat/{chat_id}` `user_echo` event: adds optional `sent_at`.
 - WS `/ws/chat/{chat_id}` `result` event: adds optional `sent_at`, `completed_at`, `duration_ms`.
 
@@ -300,7 +300,7 @@ Each user turn carries timing metadata, computed in `ciao/web/project_chats.py` 
 Write/Edit/MultiEdit/NotebookEdit tool calls flow through both transports tagged with `file_touch` so the PWA can render a clickable inline preview card next to the agent's reasoning trace.
 
 - WS `/ws/chat/{chat_id}` `tool_use` event: adds optional `file_touch: {file_path, action}` when the tool mutates a file on disk. Detection lives in `extract_file_touch` (`ciao/web/chat_broker.py`); `action` is `written | edited`.
-- `GET /api/chats/{chat_id}/messages` and `GET /api/chats/{chat_id}/subagents`: file-mutating tool calls become standalone `{role: "system", tool_name: "_filecard", file_path, action, tool, content: file_path}` entries instead of folding into `_activity`. Claude and Pi readers honour this.
+- `GET /api/chats/{chat_id}/messages` and `GET /api/chats/{chat_id}/subagents`: file-mutating tool calls become standalone `{role: "system", tool_name: "_filecard", file_path, action, tool, content: file_path}` entries instead of folding into `_activity`. Claude readers honour this.
 - Card click opens `/api/workspace-file` (text/code) or `/api/workspace-image` (images by extension). The classification is advisory only; the workspace endpoints stay the security boundary and 403 anything outside `workspace_root` + `extra_workspace_roots`.
 
 **File snapshots, history, diff, edit-in-place**

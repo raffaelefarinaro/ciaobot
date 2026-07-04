@@ -96,8 +96,8 @@ def test_setup_status_detects_claude_oauth_via_config_json(tmp_path) -> None:
     config = _config(tmp_path)
     config_path = tmp_path / ".claude.json"
     config_path.write_text(
-        '{"oauthAccount":{"emailAddress":"raffaele@example.com",'
-        '"accountUuid":"abc","organizationName":"Scandit"}}',
+        '{"oauthAccount":{"emailAddress":"operator@example.com",'
+        '"accountUuid":"abc","organizationName":"Example Org"}}',
         encoding="utf-8",
     )
 
@@ -106,7 +106,7 @@ def test_setup_status_detects_claude_oauth_via_config_json(tmp_path) -> None:
     claude = data["providers"]["claude"]
     assert claude["ok"] is True
     assert claude["auth"] == "oauth"
-    assert "raffaele@example.com" in claude["detail"]
+    assert "operator@example.com" in claude["detail"]
 
 
 def test_setup_status_ignores_empty_oauth_account(tmp_path) -> None:

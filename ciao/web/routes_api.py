@@ -1172,9 +1172,7 @@ def _overlay_assistant_timings(
 async def chat_messages(request: Request) -> JSONResponse:
     """Return conversation history for a chat.
 
-    Claude chats read the SDK session file via
-    ``get_session_messages``.
-    ``~/.pi/agent/sessions/<chat_id>/`` since the SDK can't parse them.
+    Claude chats read the SDK session file via ``get_session_messages``.
 
     When a Claude chat is archived, its SDK session blob is deleted to reclaim
     disk space. In that case we fall back to the durable markdown transcript in

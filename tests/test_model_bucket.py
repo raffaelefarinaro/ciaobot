@@ -178,6 +178,37 @@ def test_configured_workspace_provider_preselects_openrouter_bucket(tmp_path):
     assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-or"
 
 
+def test_anthropic_to_openrouter_switch_rejected_mid_chat(tmp_path):
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        openrouter=OpenRouterSettings(api_key="sk-or"),
+    )
+    state = StateStore(config.state_path, tmp_path, config.media_root)
+    transcripts = TranscriptStore(runtime, tmp_path / "transcripts")
+    pcm = ProjectChatManager(
+        config,
+        state_store=state,
+        transcript_store=transcripts,
+        path=runtime / "web_projects.json",
+    )
+    project = pcm.create_project("client", workspace="client")
+    chat = pcm.create_chat(project.project_id, model="sonnet", model_bucket="anthropic")
+    chat.user_turn_count = 1
+
+    with pytest.raises(ValueError):
+        pcm.update_chat(chat.chat_id, model="sonnet", model_bucket="openrouter")
+
+    fresh = pcm.create_chat(project.project_id, model="sonnet", model_bucket="anthropic")
+    updated = pcm.update_chat(fresh.chat_id, model="sonnet", model_bucket="openrouter")
+    assert updated is not None
+    assert updated.model_bucket == "openrouter"
+
+
 def test_configured_custom_bucket_is_allowed_and_defaults_to_anthropic(tmp_path):
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)

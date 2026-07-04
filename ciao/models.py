@@ -99,9 +99,8 @@ class AgentRequest:
     prompt: str
     model: str
     mode: BridgeMode
-    # Routing key for ProviderService. "claude" → ClaudeProvider (incl. Ollama
-    # env-injection path); "pi" → PiProvider subprocess. Set per chat or per
-    # schedule so the same model name can route either way.
+    # Routing key for ProviderService. Public builds currently accept
+    # "claude"; backend choice is handled by model/model_bucket routing.
     provider: str = "claude"
     resume_session: str | None = None
     images: list[ImageAttachment] = field(default_factory=list)

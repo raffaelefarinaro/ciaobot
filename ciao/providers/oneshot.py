@@ -1,10 +1,9 @@
 """One-shot model calls via the Claude Agent SDK.
 
-Replaces the former ``run_pi_oneshot`` Pi-subprocess path. The upstream
-(Anthropic / Ollama / OpenRouter) is chosen by the caller through the
-``env`` dict -- the same ``ANTHROPIC_BASE_URL`` / ``ANTHROPIC_AUTH_TOKEN``
-env injection used for chats -- so this helper is backend-agnostic and
-needs no provider switch of its own.
+The upstream (Anthropic / Ollama / OpenRouter) is chosen by the caller
+through the ``env`` dict -- the same ``ANTHROPIC_BASE_URL`` /
+``ANTHROPIC_AUTH_TOKEN`` env injection used for chats -- so this helper is
+backend-agnostic and needs no provider switch of its own.
 """
 
 from __future__ import annotations

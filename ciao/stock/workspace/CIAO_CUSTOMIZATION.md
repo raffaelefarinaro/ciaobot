@@ -50,18 +50,15 @@ Example `.runtime/workspaces.json`:
 
 ## Providers and Models
 
-Ciaobot routes each chat through a provider:
+Ciaobot routes each chat through the Claude provider:
 
-- `claude`: Claude Code / Claude Agent SDK. It can use Anthropic models directly or route selected models through Ollama-compatible settings.
-- `pi`: Pi coding agent subprocess. It has its own model/provider routing.
+- `claude`: Claude Code / Claude Agent SDK. It can use Anthropic models directly or route selected models through Ollama-compatible or OpenRouter settings.
 
 Useful `.env` settings:
 
 - `CLAUDE_MODELS`: Anthropic model aliases shown in the picker. Default: `opus,sonnet,haiku`.
 - `CIAO_OLLAMA_MODELS`: Ollama cloud or compatible model IDs shown in the picker.
 - `CIAO_OLLAMA_LOCAL_MODELS`: local Ollama daemon model IDs to pin into the picker.
-- `CIAO_PI_MODELS`: Pi-native add-on model IDs.
-- `CIAO_PI_DEFAULT_MODEL`: default model for new Pi chats.
 - `CLAUDE_DEFAULT_MODEL_PERSONAL` and `CLAUDE_DEFAULT_MODEL_WORK`: legacy defaults for the built-in personal/work workspaces.
 - `CIAO_WORKSPACES`: preferred multi-workspace registry. Use `default_model` and `model_bucket` per workspace.
 
@@ -69,6 +66,7 @@ Useful `.env` settings:
 
 - `anthropic` or `work`: keep aliases such as `opus`, `sonnet`, and `haiku` on Anthropic.
 - `ollama` or `personal`: allow aliases to resolve to configured Ollama tier models.
+- OpenRouter IDs such as `anthropic/claude-sonnet-4.5` route through OpenRouter when `OPENROUTER_API_KEY` is set.
 
 The chat picker can still override the workspace default for a specific chat.
 

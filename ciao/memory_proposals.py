@@ -128,7 +128,7 @@ def propose_from_insights(insights_md: str) -> list[MemoryProposal]:
             # New entities lead with "person:" or "project:". Person entries
             # about the user himself feed user.md; everything else feeds
             # memory.md so the next session knows the new entity exists.
-            if re.match(r"^person\s*:\s*(raffa|user|raffaele)", item, re.I):
+            if re.match(r"^person\s*:\s*(operator|user)", item, re.I):
                 target = "user"
             else:
                 target = "memory"

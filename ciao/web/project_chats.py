@@ -38,7 +38,7 @@ from ciao.providers.ollama import (
     is_local_ollama_model,
     is_ollama_model,
 )
-from ciao.providers.routing import routing_env_for_model
+from ciao.providers.routing import intended_backend, routing_env_for_model
 from ciao.provider_service import ProviderService
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore, _claude_projects_dir
@@ -76,6 +76,7 @@ _HANDOVER_ROLES = {"user", "assistant", "system"}
 _HANDOVER_MAX_MESSAGES = 80
 _HANDOVER_MAX_CHARS = 60_000
 _LEGACY_MODEL_BUCKETS = {"work", "personal"}
+_ANTHROPIC_MODEL_BUCKETS = {"work", "anthropic"}
 _OLLAMA_MODEL_BUCKETS = {"personal", "ollama"}
 
 
@@ -413,8 +414,8 @@ class ChatInfo:
     project_id: str
     title: str = "New Chat"
     model: str = "opus"
-    # Routing key for ProviderService. "claude" uses ClaudeProvider (Anthropic
-    # SDK incl. Ollama env-injection); "pi" spawns the Pi subprocess.
+    # Routing key for ProviderService. Public builds currently accept
+    # "claude"; backend choice is handled by model/model_bucket routing.
     provider: str = "claude"
     # Claude routing bucket chosen in the picker: "work" pins the Anthropic
     # subscription upstream (aliases stay aliases), "personal" pins Ollama
@@ -2477,9 +2478,10 @@ class ProjectChatManager:
     ) -> bool:
         """True when the (provider, model, bucket) tuple changes its spawn kind.
 
-        Spawn kinds: ``pi``, ``claude-ollama`` / ``claude-ollama-local``
-        (ClaudeProvider with Ollama env-injection, cloud vs local daemon), and
-        ``claude-anthropic`` (ClaudeProvider against Anthropic upstream).
+        Spawn kinds: ``claude-ollama`` / ``claude-ollama-local``
+        (ClaudeProvider with Ollama env-injection, cloud vs local daemon),
+        ``claude-openrouter`` (ClaudeProvider with OpenRouter env-injection),
+        and ``claude-anthropic`` (ClaudeProvider against Anthropic upstream).
         Crossing any of those boundaries needs a fresh subprocess because env
         vars only bind at spawn time, and we refuse to do that silently
         mid-conversation. The bucket matters because aliases resolve to
@@ -2495,8 +2497,8 @@ class ProjectChatManager:
         self, provider: str, model: str, *, bucket: str = "", project_id: str = ""
     ) -> str:
         """Return the spawn kind a (provider, model, bucket) tuple produces."""
-        if provider == "pi":
-            return "pi"
+        if provider and provider != "claude":
+            return f"unsupported:{provider}"
         resolved = self._resolve_claude_model(model, bucket, project_id)
         # Local-daemon and cloud Ollama models are distinct spawn kinds:
         # the spawned CLI's ANTHROPIC_BASE_URL is fixed at spawn time, so
@@ -2506,6 +2508,8 @@ class ProjectChatManager:
             return "claude-ollama-local"
         if is_ollama_model(resolved, self._config.ollama):
             return "claude-ollama"
+        if intended_backend(resolved) == "openrouter":
+            return "claude-openrouter"
         return "claude-anthropic"
 
     def disallowed_tools_for_chat(self, chat: ChatInfo) -> list[str]:
@@ -2559,7 +2563,7 @@ class ProjectChatManager:
         return "personal"
 
     def _configured_model_buckets(self) -> set[str]:
-        buckets = set(_LEGACY_MODEL_BUCKETS)
+        buckets = set(_LEGACY_MODEL_BUCKETS | _ANTHROPIC_MODEL_BUCKETS | _OLLAMA_MODEL_BUCKETS)
         if self._config.openrouter.available:
             buckets.add("openrouter")
         for workspace in self._config.workspaces.values():

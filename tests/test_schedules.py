@@ -198,7 +198,7 @@ async def test_catch_up_monthly_skips_other_days(store: ScheduleStore):
 async def test_manual_schedule_skipped_by_tick(store: ScheduleStore):
     entry = store.create(
         daily_time_utc="",  # manual entries don't need a time
-        prompt="monthly adoption report",
+        prompt="monthly usage report",
         model="sonnet",
         mode="bypass",
         chat_id=0,

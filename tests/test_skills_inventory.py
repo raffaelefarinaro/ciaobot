@@ -75,14 +75,14 @@ def test_build_skill_inventory_labels_custom_and_github_sources(tmp_path: Path) 
 def test_build_skill_inventory_reads_yaml_block_descriptions(tmp_path: Path) -> None:
     _write_raw_skill(
         tmp_path / "skills",
-        "adoption-report",
-        "description: |\n  Generate monthly product adoption reports.\n  Pulls data from BigQuery.",
+        "usage-report",
+        "description: |\n  Generate monthly product usage reports.\n  Pulls data from BigQuery.",
     )
 
     inventory = build_skill_inventory(tmp_path)
 
     assert inventory["skills"][0]["description"] == (
-        "Generate monthly product adoption reports. Pulls data from BigQuery."
+        "Generate monthly product usage reports. Pulls data from BigQuery."
     )
 
 

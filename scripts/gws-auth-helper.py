@@ -223,17 +223,6 @@ def main() -> None:
     save_credentials(config_dir, client_id, client_secret, refresh_token)
     fix_encryption_key_permissions(config_dir)
 
-    # Automatically backup the newly saved credentials to .env
-    print("Backing up GWS credentials to .env...")
-    try:
-        import subprocess
-        subprocess.run(
-            [sys.executable, str(REPO_ROOT / "scripts" / "gws-secrets.py"), "backup", args.profile],
-            check=True
-        )
-    except Exception as e:
-        print(f"Warning: automatic backup to .env failed: {e}", file=sys.stderr)
-
     print("\nDone. Verify with:")
     print(f"  GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file scripts/gws-profile.sh {args.profile} gws auth status")
     print(f"  GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file scripts/gws-profile.sh {args.profile} gws calendar events list --params '{{\"calendarId\": \"primary\", \"maxResults\": 1}}'")

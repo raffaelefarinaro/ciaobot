@@ -1551,13 +1551,14 @@ async function confirmDeleteChat(chatId: string) {
   gap: 10px;
   padding: 6px 10px;
   text-decoration: none;
-  color: var(--fg);
-  font-size: var(--text-sm);
+  color: var(--fg2);
+  font-size: var(--text-base);
   cursor: pointer;
 }
-.schedule-item:hover { background: var(--bg3); }
+.schedule-item:hover { background: var(--bg3); color: var(--fg); }
 .schedule-item.active {
   background: var(--bg3);
+  color: var(--fg);
   font-weight: 500;
   border-left: 2px solid var(--accent);
   padding-left: 8px;
@@ -1567,7 +1568,7 @@ async function confirmDeleteChat(chatId: string) {
   font-weight: 600;
   color: var(--fg2);
   flex-shrink: 0;
-  font-size: var(--text-xs);
+  font-size: var(--text-base);
 }
 .schedule-item .schedule-label {
   flex: 1;
