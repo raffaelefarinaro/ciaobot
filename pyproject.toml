@@ -5,33 +5,35 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ciao"
 version = "0.2.0"
-description = "Ciao personal assistant server."
+description = "Ciaobot personal assistant server."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = [
-  "claude-agent-sdk>=0.1.72",
-  "openai>=2.33.0",
-  "starlette>=0.45.0,<1",
-  "uvicorn[standard]>=0.34.0,<1",
-  "itsdangerous>=2.2.0,<3",
-  "pyyaml>=6.0",
-  "pywebpush>=2.0.0,<3",
-  "cryptography>=41.0",
+  "claude-agent-sdk==0.2.110",
+  "openai==2.44.0",
+  "starlette==0.52.1",
+  "uvicorn[standard]==0.49.0",
+  "itsdangerous==2.2.0",
+  "pyyaml==6.0.3",
+  "pywebpush==2.3.0",
+  "cryptography==49.0.0",
   # `websockets` is already pulled in transitively by uvicorn[standard].
-  "httpx>=0.27,<1",
-  "python-pptx",
+  "httpx==0.28.1",
+  "python-pptx==1.0.2",
+  "notebooklm-py==0.7.3",
+  "playwright==1.61.0",
 ]
 
 [project.optional-dependencies]
 test = [
-  "build>=1.2.0,<2",
-  "pytest>=8.3.0,<9",
-  "pytest-asyncio>=0.26.0,<1",
+  "build==1.5.0",
+  "pytest==8.4.2",
+  "pytest-asyncio==0.26.0",
 ]
 # Local on-device voice transcription (Apple Silicon only).
 voice-local = [
-  "mlx-whisper>=0.4.0",
+  "mlx-whisper==0.4.3",
 ]
 
 [project.scripts]

@@ -14,6 +14,7 @@ import pytest
 
 from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.providers.ollama import OllamaSettings
+from ciao.providers.openrouter import OpenRouterSettings
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
@@ -139,6 +140,44 @@ def test_configured_workspace_preselects_ollama_bucket(tmp_path):
     assert env["ANTHROPIC_BASE_URL"] == "https://ollama.com"
 
 
+def test_configured_workspace_provider_preselects_openrouter_bucket(tmp_path):
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        openrouter=OpenRouterSettings(api_key="sk-or"),
+        workspaces={
+            "client": WorkspaceConfig(
+                name="client",
+                vault_root="vaults/client",
+                default_provider="openrouter",
+                gws_profile="work",
+            )
+        },
+    )
+    state = StateStore(config.state_path, tmp_path, config.media_root)
+    transcripts = TranscriptStore(runtime, tmp_path / "transcripts")
+    pcm = ProjectChatManager(
+        config,
+        state_store=state,
+        transcript_store=transcripts,
+        path=runtime / "web_projects.json",
+    )
+    project = pcm.create_project("client", workspace="client")
+
+    chat = pcm.create_chat(project.project_id)
+
+    assert chat.provider == "claude"
+    assert chat.model_bucket == "openrouter"
+    assert chat.model == "anthropic/claude-opus-4.8"
+    env = pcm._build_extra_env(chat)
+    assert env["ANTHROPIC_BASE_URL"] == "https://openrouter.ai/api"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-or"
+
+
 def test_configured_custom_bucket_is_allowed_and_defaults_to_anthropic(tmp_path):
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
@@ -247,15 +286,3 @@ def test_invalid_bucket_rejected(tmp_path):
     chat = pcm.create_chat(project.project_id)
     with pytest.raises(ValueError, match="bucket"):
         pcm.update_chat(chat.chat_id, model_bucket="corporate")
-
-
-def test_non_claude_provider_clears_bucket(tmp_path):
-    pcm = _make_manager(tmp_path)
-    project = pcm.create_project("p", workspace="personal")
-    chat = pcm.create_chat(project.project_id)
-    assert chat.model_bucket == "personal"
-    updated = pcm.update_chat(
-        chat.chat_id, provider="pi", model="kimi-k2.7-code:cloud"
-    )
-    assert updated is not None
-    assert updated.model_bucket == ""

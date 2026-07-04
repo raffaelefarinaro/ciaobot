@@ -27,6 +27,7 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/workspaces": "browser workspaces list config",
     "/api/workspaces/{name}": "browser workspaces management endpoint",
     "/api/settings/providers": "browser LLM providers configuration settings",
+    "/api/admin/skills/add": "browser admin skills addition; runs skills_add.py scripts",
 }
 
 

@@ -25,7 +25,7 @@
           @click="onBrandClick"
           :title="refreshing ? 'Refreshing...' : 'Click to reload the latest app build'"
           role="button"
-        >{{ refreshing ? 'sync...' : 'ciao' }}</span>
+        >{{ refreshing ? 'sync...' : 'ciaobot' }}</span>
         <div class="nav-links">
           <router-link
             to="/"
@@ -96,22 +96,22 @@
                 active-class="active"
               >
                 <span class="schedule-time">{{ s.run_at_date?.slice(5) }} {{ s.daily_time_utc }}</span>
-                <span class="schedule-label">{{ promptTitle(s.prompt) }}</span>
+                <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
                 <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
               </router-link>
             </div>
           </div>
         </template>
 
-        <template v-if="recurringSchedules.length">
+        <template v-if="userRoutines.length">
           <div class="schedule-group">
             <div class="schedule-group-header">
               <span>Routines <span class="schedule-group-hint">recurring</span></span>
-              <span class="schedule-group-count">{{ recurringSchedules.length }}</span>
+              <span class="schedule-group-count">{{ userRoutines.length }}</span>
             </div>
             <div class="schedule-group-items">
               <router-link
-                v-for="s in recurringSchedules"
+                v-for="s in userRoutines"
                 :key="s.schedule_id"
                 :to="`/schedules/${s.schedule_id}`"
                 class="schedule-item"
@@ -119,7 +119,30 @@
                 active-class="active"
               >
                 <span class="schedule-time">{{ s.frequency === 'manual' ? '·' : s.daily_time_utc }}</span>
-                <span class="schedule-label">{{ promptTitle(s.prompt) }}</span>
+                <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
+                <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
+              </router-link>
+            </div>
+          </div>
+        </template>
+
+        <template v-if="systemAutomations.length">
+          <div class="schedule-group schedule-group--system">
+            <div class="schedule-group-header">
+              <span>System <span class="schedule-group-hint">built-in</span></span>
+              <span class="schedule-group-count">{{ systemAutomations.length }}</span>
+            </div>
+            <div class="schedule-group-items">
+              <router-link
+                v-for="s in systemAutomations"
+                :key="s.schedule_id"
+                :to="`/schedules/${s.schedule_id}`"
+                class="schedule-item"
+                :class="{ 'schedule-item--missed': s.missed }"
+                active-class="active"
+              >
+                <span class="schedule-time">{{ s.frequency === 'manual' ? '·' : s.daily_time_utc }}</span>
+                <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
                 <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
               </router-link>
             </div>
@@ -141,18 +164,18 @@
           Home
         </router-link>
         <router-link
-          to="/settings/models"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/models' }"
-        >
-          Models
-        </router-link>
-        <router-link
           to="/settings/providers"
           class="settings-nav-item"
           :class="{ active: route.path === '/settings/providers' }"
         >
           Providers
+        </router-link>
+        <router-link
+          to="/settings/models"
+          class="settings-nav-item"
+          :class="{ active: route.path === '/settings/models' }"
+        >
+          Models
         </router-link>
         <router-link
           to="/settings/workspaces"
@@ -167,13 +190,6 @@
           :class="{ active: route.path === '/settings/skills' }"
         >
           Skills
-        </router-link>
-        <router-link
-          to="/settings/automation"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/automation' }"
-        >
-          Automation
         </router-link>
       </div>
     </template>
@@ -450,8 +466,11 @@ const oneOffSchedules = computed(() => {
       return ka.localeCompare(kb)
     })
 })
-const recurringSchedules = computed(() =>
-  taskStore.schedules.filter(s => s.frequency !== 'once'),
+const userRoutines = computed(() =>
+  taskStore.schedules.filter(s => s.frequency !== 'once' && s.scope !== 'system'),
+)
+const systemAutomations = computed(() =>
+  taskStore.schedules.filter(s => s.frequency !== 'once' && s.scope === 'system'),
 )
 
 import type { ChatInfo, ProjectInfo } from '../lib/types'
@@ -778,6 +797,9 @@ async function confirmDeleteChat(chatId: string) {
   font-size: calc(16px * var(--font-scale));
   cursor: pointer;
   transition: opacity 120ms var(--ease);
+}
+.brand::before {
+  content: none;
 }
 .brand:hover { opacity: 0.85; }
 .brand:active { opacity: 0.7; }
@@ -1477,6 +1499,9 @@ async function confirmDeleteChat(chatId: string) {
 }
 .schedule-group--once {
   border-left: 2px solid var(--accent);
+}
+.schedule-group--system {
+  border-left: 2px solid var(--accent2);
 }
 .schedule-group-header {
   display: flex;

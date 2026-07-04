@@ -65,6 +65,5 @@ def test_ollama_local_env_parsing(tmp_path):
     assert config.ollama.local_models == ("gemma4:12b-it-qat",)
     assert config.ollama.local_url == "http://127.0.0.1:11434"
     assert config.ollama_local_discovery is False
-    # Manually pinned local models join the picker and Pi's local set.
+    # Manually pinned local models join the picker.
     assert "gemma4:12b-it-qat" in config.claude_models
-    assert config.pi.local_models == ("gemma4:12b-it-qat",)

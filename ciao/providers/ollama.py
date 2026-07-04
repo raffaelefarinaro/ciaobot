@@ -90,11 +90,31 @@ def is_local_ollama_model(model: str, settings: OllamaSettings) -> bool:
     return bool(model) and model in settings.local_models
 
 
+def _cloud_available(settings: OllamaSettings) -> bool:
+    """True when Ollama Cloud is configured (a real API key, not the
+    local daemon's literal "ollama" token)."""
+    return bool(settings.api_key) and settings.api_key != "ollama"
+
+
+def _is_ollama_shaped(model: str) -> bool:
+    """Ollama ids carry a ``:tag``/``:cloud`` suffix; Anthropic aliases
+    and OpenRouter ``owner/model`` ids do not."""
+    return ":" in model
+
+
 def is_ollama_model(model: str, settings: OllamaSettings) -> bool:
-    """True when ``model`` should be routed through Ollama (cloud or local)."""
+    """True when ``model`` should be routed through Ollama (cloud or local).
+
+    Dynamic: a local-daemon model routes through Ollama when it is in
+    ``local_models``; any ``:tag``/``:cloud``-shaped id routes through
+    Ollama Cloud when a cloud API key is configured. No static allowlist
+    required — ``settings.models`` is picker display only.
+    """
     if not model:
         return False
-    return model in settings.models or model in settings.local_models
+    if is_local_ollama_model(model, settings):
+        return True
+    return _is_ollama_shaped(model) and _cloud_available(settings)
 
 
 def _env_overrides(base_url: str, api_key: str) -> dict[str, str]:
@@ -117,10 +137,15 @@ def ollama_env_for_model(model: str, settings: OllamaSettings) -> dict[str, str]
         # The daemon expects the literal "ollama" token under device-linked
         # auth; a cloud API key would be rejected.
         return _env_overrides(settings.local_url, "ollama")
-    if model and model in settings.models:
+    if model and _is_ollama_shaped(model) and _cloud_available(settings):
         return _env_overrides(settings.base_url, settings.api_key)
     return {}
 
+
+def _looks_like_ollama_id(model: str) -> bool:
+    """Ollama ids carry a ``:tag``/``:cloud`` suffix; OpenRouter ids are
+    ``owner/model`` (no ``:``); Anthropic ids are bare aliases or ``claude-*``."""
+    return ":" in model
 
 def routine_env_for_model(model: str, settings: OllamaSettings) -> dict[str, str]:
     """Env overrides for server-side routines (titles, insights).
@@ -128,14 +153,18 @@ def routine_env_for_model(model: str, settings: OllamaSettings) -> dict[str, str
     Unlike :func:`ollama_env_for_model` this is not gated on the cloud
     allowlist: routine models are fixed at the server level (config or the
     runtime settings store), so the per-chat typo protection isn't relevant.
-    Anthropic aliases and real ``claude-*`` ids return an empty dict so the
-    routine stays on the subscription path.
+    Only Ollama-shaped ids (``:tag``/``:cloud`` or local-daemon models)
+    route through Ollama; ``owner/model`` ids fall through so the OpenRouter
+    backend can claim them. Anthropic aliases and ``claude-*`` ids return
+    an empty dict so the routine stays on the subscription path.
     """
     if not model or model in _ANTHROPIC_ALIASES or model.startswith("claude-"):
         return {}
     if is_local_ollama_model(model, settings):
         return _env_overrides(settings.local_url, "ollama")
-    return _env_overrides(settings.base_url, settings.api_key)
+    if _looks_like_ollama_id(model):
+        return _env_overrides(settings.base_url, settings.api_key)
+    return {}
 
 
 def discover_local_models(local_url: str, timeout_s: float = 2.0) -> tuple[str, ...]:

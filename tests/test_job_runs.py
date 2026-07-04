@@ -53,6 +53,46 @@ def test_recent_capped_per_job(tmp_path: Path) -> None:
     assert grouped["title"]["recent"][0]["duration_ms"] == 14
 
 
+def test_load_runs_uses_latest_index_when_history_missing(tmp_path: Path) -> None:
+    jr.record_run(jr.JobRun(
+        job="insights",
+        label="Session insights",
+        status="ok",
+        started_at="2026-07-02T06:00:00+00:00",
+        ended_at="2026-07-02T06:00:02+00:00",
+        duration_ms=2000,
+    ))
+    (tmp_path / jr.JOB_RUNS_NAME).write_text("", encoding="utf-8")
+
+    grouped = jr.load_runs()
+
+    assert grouped["insights"]["last_run"]["status"] == "ok"
+    assert grouped["insights"]["last_run"]["ended_at"] == "2026-07-02T06:00:02+00:00"
+
+
+def test_trim_preserves_latest_line_for_each_job(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(jr, "MAX_BYTES", 400)
+    monkeypatch.setattr(jr, "KEEP_LINES", 3)
+    jr.record_run(jr.JobRun(
+        job="insights",
+        label="Session insights",
+        status="ok",
+        started_at="2026-07-02T06:00:00+00:00",
+        ended_at="2026-07-02T06:00:02+00:00",
+    ))
+
+    for i in range(30):
+        jr.record_run(jr.JobRun(
+            job="branch_backup",
+            label="Device-branch backup",
+            category="system",
+            duration_ms=i,
+        ))
+
+    rows = _read_lines(tmp_path)
+    assert any(row["job"] == "insights" for row in rows)
+
+
 # ── track (async) ────────────────────────────────────────────────────────
 
 

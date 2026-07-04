@@ -1,4 +1,4 @@
-"""Configuration loading for the Ciao server."""
+"""Configuration loading for the Ciaobot server."""
 
 from __future__ import annotations
 
@@ -14,16 +14,15 @@ from pathlib import Path
 from ciao.execution_modes import normalize_claude_mode
 from ciao.models import BridgeMode
 from ciao.providers.ollama import OllamaSettings
-from ciao.providers.pi import PiSettings
+from ciao.providers.openrouter import OpenRouterSettings
 
 
-# Default denylist for personal-workspace chats: every claude.ai connector MCP,
-# plus the self-hosted n8n MCP (project-scoped in .mcp.json). Those are work-only
-# tools (Airtable, Atlassian, Slack, Asana, BigQuery, incident.io, Salesforce,
-# Sentry, n8n). Listed at the server level so the CLI denies every tool the server
-# exposes without enumerating them. Override with ``CIAO_DISALLOWED_TOOLS_PERSONAL``
-# (CSV; literal ``none`` clears).
-_DEFAULT_DISALLOWED_TOOLS_PERSONAL: tuple[str, ...] = (
+# claude.ai account-OAuth connector MCPs (Airtable, Atlassian, Slack, Asana,
+# BigQuery, incident.io, Salesforce, Sentry). These are work-only tools, gated
+# per workspace by the ``claude_ai_mcps`` toggle on ``WorkspaceConfig`` (default
+# off for personal, on for work). The toggle expands to this set in
+# ``CiaoConfig.disallowed_tools_for_workspace``.
+CLAUDE_AI_CONNECTORS: tuple[str, ...] = (
     "mcp__claude_ai_Airtable",
     "mcp__claude_ai_Asana",
     "mcp__claude_ai_Atlassian",
@@ -32,8 +31,44 @@ _DEFAULT_DISALLOWED_TOOLS_PERSONAL: tuple[str, ...] = (
     "mcp__claude_ai_Sentry",
     "mcp__claude_ai_Slack",
     "mcp__claude_ai_incident_io",
+)
+
+# Non-connector tools blocked by default in the personal workspace. The
+# self-hosted n8n MCP (project-scoped in .mcp.json) is work-only, so it stays
+# blocked even when the claude.ai MCP toggle is flipped on. Operators add or
+# remove entries via the per-workspace "Extra disallowed tools" field (PWA) or
+# ``CIAO_DISALLOWED_TOOLS_PERSONAL`` (CSV; literal ``none`` clears).
+_DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL: tuple[str, ...] = (
     "mcp__n8n_mcp",
 )
+
+# Back-compat alias: the full personal default denylist (connectors + extras).
+# Kept for any caller that still wants the combined set.
+_DEFAULT_DISALLOWED_TOOLS_PERSONAL: tuple[str, ...] = (
+    *CLAUDE_AI_CONNECTORS,
+    *_DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL,
+)
+
+
+def coerce_claude_ai_mcps(raw: object) -> bool | None:
+    """Parse the claude.ai MCPs toggle. ``None``/``"default"`` → unset (use the
+    per-workspace default); booleans pass through; strings ``true/false/on/off``
+    coerce. Anything else → None."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    if isinstance(raw, str):
+        cleaned = raw.strip().lower()
+        if cleaned in {"", "default", "none"}:
+            return None
+        if cleaned in {"true", "1", "yes", "on"}:
+            return True
+        if cleaned in {"false", "0", "no", "off"}:
+            return False
+    return None
 
 
 @dataclass(slots=True)
@@ -44,7 +79,16 @@ class WorkspaceConfig:
     vault_root: str
     default_provider: str = "claude"
     default_model: str = ""
+    # Extra (non-connector) tools to deny. The claude.ai connector set is
+    # controlled by ``claude_ai_mcps``; this field covers everything else
+    # (e.g. ``mcp__n8n_mcp``, ``Bash``). ``None`` = use the per-workspace
+    # default extras; ``[]`` = explicit opt-out (no extras).
     disallowed_tools: list[str] | None = None
+    # Whether claude.ai account-OAuth connector MCPs are exposed in this
+    # workspace. ``None`` = per-workspace default (personal False, else True).
+    # When False/defaults-off, ``CLAUDE_AI_CONNECTORS`` is added to the
+    # effective denylist in ``disallowed_tools_for_workspace``.
+    claude_ai_mcps: bool | None = None
     gws_profile: str = ""
     model_bucket: str = ""
 
@@ -70,6 +114,7 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         default_provider=str(data.get("default_provider", "claude")).strip() or "claude",
         default_model=str(data.get("default_model", "")).strip(),
         disallowed_tools=_coerce_workspace_disallowed(data.get("disallowed_tools")),
+        claude_ai_mcps=coerce_claude_ai_mcps(data.get("claude_ai_mcps")),
         gws_profile=str(data.get("gws_profile", "")).strip(),
         model_bucket=str(data.get("model_bucket", "")).strip(),
     )
@@ -108,6 +153,8 @@ def _legacy_workspaces(
     default_model_work: str = "",
     disallowed_tools_personal: list[str] | None = None,
     disallowed_tools_work: list[str] | None = None,
+    claude_ai_mcps_personal: bool | None = None,
+    claude_ai_mcps_work: bool | None = None,
     gws_default_profile: str = "personal",
 ) -> dict[str, WorkspaceConfig]:
     """Current private-layout defaults until callers fully support N workspaces."""
@@ -118,6 +165,7 @@ def _legacy_workspaces(
             default_provider="claude",
             default_model=default_model_personal,
             disallowed_tools=disallowed_tools_personal,
+            claude_ai_mcps=claude_ai_mcps_personal,
             gws_profile=gws_default_profile or "personal",
             model_bucket="personal",
         ),
@@ -127,6 +175,7 @@ def _legacy_workspaces(
             default_provider="claude",
             default_model=default_model_work,
             disallowed_tools=disallowed_tools_work,
+            claude_ai_mcps=claude_ai_mcps_work,
             gws_profile="work",
             model_bucket="work",
         ),
@@ -234,12 +283,19 @@ class CiaoConfig:
     # cheap Ollama model while work stays on Anthropic.
     default_model_personal: str = ""
     default_model_work: str = ""
-    # Per-workspace tool denylists. Forwarded to ``ClaudeAgentOptions.disallowed_tools``
-    # for the spawned CLI subprocess, so a personal chat can't accidentally
-    # touch a work-only MCP (and vice versa). ``None`` = "unset, use built-in
+    # Per-workspace tool denylists (the "extra" tools beyond claude.ai
+    # connectors). Forwarded to ``ClaudeAgentOptions.disallowed_tools`` for the
+    # spawned CLI subprocess, so a personal chat can't accidentally touch a
+    # work-only MCP (and vice versa). ``None`` = "unset, use built-in
     # defaults"; explicit ``[]`` = "operator opted out of the defaults".
     disallowed_tools_personal: list[str] | None = None
     disallowed_tools_work: list[str] | None = None
+    # Per-workspace claude.ai connector MCP toggle. ``None`` = per-workspace
+    # default (personal off, work on). When off, ``CLAUDE_AI_CONNECTORS`` is
+    # added to the effective denylist. Set via ``CIAO_CLAUDE_AI_MCPS_PERSONAL``
+    # / ``_WORK`` (true/false; ``default``/unset → per-workspace default).
+    claude_ai_mcps_personal: bool | None = None
+    claude_ai_mcps_work: bool | None = None
     workspaces: dict[str, WorkspaceConfig] = field(default_factory=dict)
     claude_mode: BridgeMode = "auto"
     restart_exit_code: int = 75
@@ -283,16 +339,13 @@ class CiaoConfig:
     # the env (``CIAO_SKILL_EVOLUTION_DISABLED=1``) without editing
     # schedules.json.
     skill_evolution_enabled: bool = True
-    # Reasoning-heavy task: a 3B model can't parse a 15 KB SKILL.md plus a
-    # trajectory dump and produce a coherent edit. Default to the same
-    # sonnet/opus-tier Ollama model the other admin schedules use
-    # (memory curation, weekly review, dependency check).
-    skill_evolution_model: str = "kimi-k2.7-code:cloud"
-    # Pi (coding agent) provider configuration.
-    pi: PiSettings = field(default_factory=PiSettings)
+
     # Comma-separated list of models for the critique / adversarial-review skill.
     # Empty string defaults to the script's built-in panel.
     critique_models: str = ""
+    # OpenRouter (Anthropic-compatible) routing. Available when
+    # OPENROUTER_API_KEY is set; aliases resolve to per-tier models.
+    openrouter: OpenRouterSettings = field(default_factory=OpenRouterSettings)
     # Bounded agent-managed memory files at ``~/.ciao/memory.md`` and
     # ``~/.ciao/user.md``. Injected as a frozen snapshot into the Claude
     # system prompt at session start; edited via the ``memory`` MCP tool.
@@ -315,6 +368,8 @@ class CiaoConfig:
                 default_model_work=self.default_model_work,
                 disallowed_tools_personal=self.disallowed_tools_personal,
                 disallowed_tools_work=self.disallowed_tools_work,
+                claude_ai_mcps_personal=self.claude_ai_mcps_personal,
+                claude_ai_mcps_work=self.claude_ai_mcps_work,
                 gws_default_profile=self.gws_default_profile,
             )
 
@@ -339,28 +394,64 @@ class CiaoConfig:
 
     def default_provider_for_workspace(self, workspace: str | None) -> str:
         workspace_config = self.workspace(workspace)
-        if workspace_config and workspace_config.default_provider in {"claude", "pi"}:
+        if workspace_config and workspace_config.default_provider == "claude":
             return workspace_config.default_provider
         return "claude"
+
+    def claude_ai_mcps_for_workspace(self, workspace: str | None) -> bool:
+        """Whether claude.ai connector MCPs are exposed in this workspace.
+
+        ``None`` on the workspace config resolves to the per-workspace default:
+        personal → False (work-only connectors blocked), everything else → True.
+        """
+        workspace_config = self.workspace(workspace)
+        if workspace_config is None:
+            return True
+        value = workspace_config.claude_ai_mcps
+        if value is None:
+            return workspace_config.name != "personal"
+        return value
 
     def disallowed_tools_for_workspace(self, workspace: str | None) -> list[str]:
         """Tools to deny for a chat in this workspace.
 
-        Personal chats default to denying every claude.ai connector MCP
-        (Airtable, Atlassian, Slack, Asana, BigQuery, incident.io,
-        Salesforce, Sentry) since those are work tools. Work
-        chats default to no denylist. Both are overridable via env.
+        The effective denylist is the union of:
+
+        * the claude.ai connector set (``CLAUDE_AI_CONNECTORS``) when
+          ``claude_ai_mcps`` resolves to False (default for personal), and
+        * the workspace's extra tools (``disallowed_tools``), which defaults to
+          ``_DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL`` (n8n) for personal and
+          ``[]`` for every other workspace.
+
+        So a personal chat defaults to blocking all 8 claude.ai connectors plus
+        n8n; a work chat defaults to no denylist. Both are overridable: the
+        toggle via ``CIAO_CLAUDE_AI_MCPS_PERSONAL`` / ``CIAO_CLAUDE_AI_MCPS_WORK``
+        / the PWA switch, the extras via ``CIAO_DISALLOWED_TOOLS_PERSONAL`` /
+        ``CIAO_DISALLOWED_TOOLS_WORK`` / the "Extra disallowed tools" field.
         """
         workspace_config = self.workspace(workspace)
         if workspace_config is None:
             return []
-        if workspace_config.name == "personal":
-            if workspace_config.disallowed_tools is None:
-                return list(_DEFAULT_DISALLOWED_TOOLS_PERSONAL)
-            return list(workspace_config.disallowed_tools)
-        if workspace_config.disallowed_tools is None:
-            return []
-        return list(workspace_config.disallowed_tools)
+        connectors = (
+            list(CLAUDE_AI_CONNECTORS)
+            if not self.claude_ai_mcps_for_workspace(workspace)
+            else []
+        )
+        extras = workspace_config.disallowed_tools
+        if extras is None:
+            extras = (
+                list(_DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL)
+                if workspace_config.name == "personal"
+                else []
+            )
+        # Union, preserving order, deduped.
+        seen: set[str] = set()
+        effective: list[str] = []
+        for tool in (*connectors, *extras):
+            if tool not in seen:
+                seen.add(tool)
+                effective.append(tool)
+        return effective
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "CiaoConfig":
@@ -481,18 +572,17 @@ class CiaoConfig:
             or "http://localhost:11434",
         )
 
-        pi_models = tuple(_split_csv(source.get("CIAO_PI_MODELS", "")))
-        pi_provider = source.get("CIAO_PI_PROVIDER", "ollama").strip()
-        pi_base_url = source.get("CIAO_PI_OLLAMA_URL", "").strip()
-        if not pi_base_url:
-            pi_base_url = "http://localhost:11434"
-        pi_default_model = source.get("CIAO_PI_DEFAULT_MODEL", "").strip()
-        pi_settings = PiSettings(
-            models=pi_models,
-            provider=pi_provider,
-            base_url=pi_base_url,
-            default_model=pi_default_model,
-            local_models=ollama_local_models,
+        openrouter_settings = OpenRouterSettings(
+            api_key=source.get("OPENROUTER_API_KEY", "").strip(),
+            base_url=source.get("CIAO_OPENROUTER_BASE_URL", "").strip()
+            or "https://openrouter.ai/api",
+            haiku_model=source.get("CIAO_OPENROUTER_HAIKU_MODEL", "").strip()
+            or "anthropic/claude-haiku-4.5",
+            sonnet_model=source.get("CIAO_OPENROUTER_SONNET_MODEL", "").strip()
+            or "anthropic/claude-sonnet-4.5",
+            opus_model=source.get("CIAO_OPENROUTER_OPUS_MODEL", "").strip()
+            or "anthropic/claude-opus-4.8",
+            models=tuple(_split_csv(source.get("CIAO_OPENROUTER_MODELS", ""))),
         )
 
         # Extra read-only roots the workspace-file/image/binary viewers may
@@ -515,12 +605,20 @@ class CiaoConfig:
         disallowed_tools_work = _parse_disallowed_tools(
             source.get("CIAO_DISALLOWED_TOOLS_WORK", "")
         )
+        claude_ai_mcps_personal = coerce_claude_ai_mcps(
+            source.get("CIAO_CLAUDE_AI_MCPS_PERSONAL", "")
+        )
+        claude_ai_mcps_work = coerce_claude_ai_mcps(
+            source.get("CIAO_CLAUDE_AI_MCPS_WORK", "")
+        )
         gws_default_profile = source.get("GWS_PROFILE", "personal").strip() or "personal"
         workspaces = _parse_workspaces_json(workspaces_json) or _legacy_workspaces(
             default_model_personal=default_model_personal,
             default_model_work=default_model_work,
             disallowed_tools_personal=disallowed_tools_personal,
             disallowed_tools_work=disallowed_tools_work,
+            claude_ai_mcps_personal=claude_ai_mcps_personal,
+            claude_ai_mcps_work=claude_ai_mcps_work,
             gws_default_profile=gws_default_profile,
         )
 
@@ -572,8 +670,7 @@ class CiaoConfig:
                 "CIAO_OLLAMA_LOCAL_DISCOVERY", ""
             ).strip().lower()
             not in {"0", "false", "no", "off"},
-            claude_models=list(claude_models or ["opus", "sonnet", "haiku"])
-            + [m for m in pi_models if m not in claude_models],
+            claude_models=list(claude_models or ["opus", "sonnet", "haiku"]),
             claude_default_model=claude_default_model,
             claude_mode=normalize_claude_mode(
                 source.get("CLAUDE_EXECUTION_MODE", "")
@@ -599,11 +696,13 @@ class CiaoConfig:
             dispatch_schedules=source.get("CIAO_DISPATCH_SCHEDULES", "").strip().lower()
             in {"1", "true", "yes", "on"},
             ollama=ollama_settings,
-            pi=pi_settings,
+            openrouter=openrouter_settings,
             default_model_personal=default_model_personal,
             default_model_work=default_model_work,
             disallowed_tools_personal=disallowed_tools_personal,
             disallowed_tools_work=disallowed_tools_work,
+            claude_ai_mcps_personal=claude_ai_mcps_personal,
+            claude_ai_mcps_work=claude_ai_mcps_work,
             workspaces=workspaces,
             insights_enabled=source.get("CIAO_INSIGHTS_DISABLED", "").strip().lower()
             in {"", "0", "false", "no", "off"},
@@ -623,10 +722,7 @@ class CiaoConfig:
                 "CIAO_SKILL_EVOLUTION_DISABLED", ""
             ).strip().lower()
             in {"", "0", "false", "no", "off"},
-            skill_evolution_model=source.get(
-                "CIAO_SKILL_EVOLUTION_MODEL", ""
-            ).strip()
-            or "kimi-k2.7-code:cloud",
+
             critique_models=source.get("CIAO_REVIEW_MODELS", "").strip()
             or source.get("CIAO_ADVERSARIAL_MODELS", "").strip(),
             memory_enabled=source.get("CIAO_MEMORY_ENABLED", "true").strip().lower()
@@ -650,8 +746,7 @@ def refresh_local_ollama_models(config: CiaoConfig) -> bool:
     so a freshly ``ollama pull``-ed model shows up without a restart.
     Additive while running: models removed from the daemon drop out on the
     next restart. Models already in the cloud allowlist keep their cloud
-    routing. Returns True when the local set changed (and Pi's models.json
-    was rewritten to match).
+    routing. Returns True when the local set changed.
     """
     if not config.ollama_local_discovery:
         return False
@@ -669,27 +764,31 @@ def refresh_local_ollama_models(config: CiaoConfig) -> bool:
     if merged == config.ollama.local_models:
         return False
     config.ollama = replace(config.ollama, local_models=merged)
-    # Keep Pi's view of the local daemon in sync so its model resolver
-    # dispatches these under --provider ollama-local.
-    config.pi = replace(config.pi, local_models=merged)
     for m in merged:
         if m not in config.claude_models:
             config.claude_models.append(m)
     logger.info("Local Ollama models available: %s", ", ".join(merged))
-    try:
-        from ciao.providers.pi import ensure_models_json
-
-        ensure_models_json(
-            config.pi,
-            ollama_base_url=config.ollama.base_url,
-            ollama_api_key=config.ollama.api_key,
-            extra_models=config.ollama.models,
-            local_models=config.ollama.local_models,
-            local_url=config.ollama.local_url,
-        )
-    except Exception:
-        logger.warning("Pi models.json refresh failed", exc_info=True)
     return True
+
+
+
+def refresh_openrouter_models(config: "CiaoConfig") -> bool:
+    """Discover anthropic-family models from OpenRouter and merge into the picker.
+
+    Called at startup and when the Settings tab loads, so the OpenRouter
+    model list is populated dynamically from the live catalogue rather than
+    requiring a static allowlist. Returns True when the set changed.
+    """
+    from ciao.providers.openrouter import discover_models, merge_discovered
+
+    if not config.openrouter.available:
+        return False
+    discovered = discover_models(config.openrouter, anthropic_only=True)
+    if not discovered:
+        return False
+    before = config.openrouter.models
+    config.openrouter = merge_discovered(config.openrouter, discovered)
+    return config.openrouter.models != before
 
 
 # Backward-compatible alias used by project_chats.py and other modules

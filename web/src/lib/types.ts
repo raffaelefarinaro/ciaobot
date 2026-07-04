@@ -1,11 +1,21 @@
 export type WorkspaceName = string
+export type WorkspaceProvider = 'claude' | 'ollama' | 'openrouter'
+
+export interface WorkspaceProviderOption {
+  value: WorkspaceProvider
+  label: string
+}
 
 export interface WorkspaceInfo {
   name: WorkspaceName
   vault_root: string
-  default_provider: 'claude' | 'pi'
+  default_provider: WorkspaceProvider
   default_model: string
   disallowed_tools?: string[] | null
+  // claude.ai connector MCP toggle. null = per-workspace default
+  // (personal off, else on). When off, the connector set is added to the
+  // effective denylist; disallowed_tools covers the extra tools.
+  claude_ai_mcps?: boolean | null
   gws_profile: string
   model_bucket: string
 }
@@ -13,6 +23,9 @@ export interface WorkspaceInfo {
 export interface WorkspacesResponse {
   workspaces: WorkspaceInfo[]
   active: WorkspaceName | null
+  provider_options?: WorkspaceProviderOption[]
+  // claude.ai connector MCP names the per-workspace toggle controls.
+  claude_ai_connectors?: string[]
 }
 
 // ── Projects & Chats ────────────────────────────────────────────────────
@@ -35,9 +48,9 @@ export interface ChatInfo {
   project_id: string
   title: string
   model: string
-  // Routing key for the server: 'claude' uses the Claude SDK (incl. Ollama
-  // env-injection); 'pi' spawns the Pi subprocess.
-  provider: 'claude' | 'pi'
+  // Routing key for the server: 'claude' uses the Claude SDK (incl.
+  // Ollama/OpenRouter env-injection).
+  provider: 'claude'
   // Claude routing bucket. Legacy values: 'work'/'anthropic' pin Anthropic,
   // 'personal'/'ollama' pin Ollama routing. '' = auto from project workspace.
   // Only meaningful when provider is 'claude'.
@@ -204,6 +217,10 @@ export interface Schedule {
   missed: boolean
   enabled: boolean
   archive_policy: ScheduleArchivePolicy
+  title?: string
+  scope?: string
+  editable?: boolean
+  removable?: boolean
 }
 
 // ── Status & Models ─────────────────────────────────────────────────────
@@ -217,7 +234,7 @@ export interface StatusResponse {
 export interface ModelsResponse {
   models: string[]
   default: string
-  // Keyed by picker bucket (claude_work, claude_personal, pi_personal).
+  // Keyed by picker bucket (claude_work, claude_personal, openrouter).
   provider_models: Record<string, string[]>
   provider_defaults: Record<string, string>
   // Names listed in CIAO_OLLAMA_MODELS, repeated here so the UI can
@@ -227,7 +244,13 @@ export interface ModelsResponse {
   // Subset of ollama_models served by the local Ollama daemon (free,
   // on-device); the picker can badge these as "local".
   ollama_local_models?: string[]
-  // Keyed by provider ('claude' | 'pi'), not bucket: both Claude
+  // OpenRouter owner/model ids available as a backend.
+  openrouter_models?: string[]
+  // Per-backend alias tier models (haiku/sonnet/opus) and which
+  // backends are configured/available.
+  alias_tiers?: Record<string, Record<string, string>>
+  backends?: Record<string, boolean>
+  // Keyed by provider ('claude'); both Claude
   // buckets share the SDK's effort levels.
   thinking_levels?: Record<string, string[]>
 }
@@ -238,11 +261,20 @@ export interface RoutineSettings {
   // Overrides as stored; empty string = automatic default.
   title_model: string
   insights_model: string
+
   critique_models: string
+  ollama_haiku_model: string
+  ollama_sonnet_model: string
+  ollama_opus_model: string
+  openrouter_haiku_model: string
+  openrouter_sonnet_model: string
+  openrouter_opus_model: string
   // What actually runs right now, after defaults.
   title_model_effective: string
   insights_model_effective: string
+
   critique_models_effective: string
+  alias_tiers?: Record<string, Record<string, string>>
   transcription: {
     engine: 'cloud' | 'local'
     local_model: string
@@ -253,7 +285,21 @@ export interface RoutineSettings {
     anthropic: string[]
     ollama_cloud: string[]
     ollama_local: string[]
+    openrouter?: string[]
   }
+  backends?: Record<string, boolean>
+  workspace_context?: {
+    workspace_root: string
+    vault_root: string
+  }
+}
+
+export interface ProviderConnection {
+  name: string
+  ok: boolean
+  auth: string
+  command: string
+  detail?: string
 }
 
 export interface ProviderConfigSettings {
@@ -261,7 +307,9 @@ export interface ProviderConfigSettings {
     label: string
     description: string
     configured: boolean
+    auth_method?: string
   }>
+  connections?: Record<string, ProviderConnection>
   auto_update_github_skills?: boolean
   requires_restart: boolean
   env_path: string

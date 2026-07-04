@@ -50,8 +50,18 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     # Ollama configured → free-tier title model is the effective default.
     assert data["title_model_effective"] == config.ollama.title_model
     assert data["insights_model_effective"] == "deepseek-v4-flash:cloud"
-    assert data["model_options"]["ollama_cloud"] == ["kimi-k2.7-code:cloud"]
+    assert data["alias_tiers"]["ollama"]["sonnet"] == config.ollama.sonnet_model
+    assert data["model_options"]["ollama_cloud"] == [
+        "kimi-k2.7-code:cloud",
+        "deepseek-v4-flash:cloud",
+        "minimax-m3:cloud",
+        "ministral-3:3b",
+    ]
     assert data["model_options"]["ollama_local"] == ["gemma4:12b-it-qat"]
+    assert data["workspace_context"] == {
+        "workspace_root": str(config.workspace_root),
+        "vault_root": str(config.vault_root),
+    }
     assert data["transcription"]["engine"] == "cloud"
     assert data["transcription"]["cloud_available"] is True
 
@@ -80,6 +90,26 @@ def test_patch_applies_to_live_config_and_persists(tmp_path):
     # Persisted: a fresh store sees the values.
     fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
     assert fresh.settings.title_model == "gemma4:12b-it-qat"
+
+
+def test_patch_applies_tier_model_overrides(tmp_path):
+    client, config = _make_client(tmp_path, {"OPENROUTER_API_KEY": "sk-or"})
+    resp = client.patch(
+        "/api/settings/routines",
+        json={
+            "ollama_haiku_model": "llama3.1:latest",
+            "openrouter_sonnet_model": "anthropic/claude-sonnet-4.6",
+        },
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ollama_haiku_model"] == "llama3.1:latest"
+    assert data["openrouter_sonnet_model"] == "anthropic/claude-sonnet-4.6"
+    assert data["alias_tiers"]["ollama"]["haiku"] == "llama3.1:latest"
+    assert data["alias_tiers"]["openrouter"]["sonnet"] == "anthropic/claude-sonnet-4.6"
+    assert config.ollama.haiku_model == "llama3.1:latest"
+    assert config.openrouter.sonnet_model == "anthropic/claude-sonnet-4.6"
 
 
 def test_patch_clearing_restores_defaults(tmp_path):

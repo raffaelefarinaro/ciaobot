@@ -516,7 +516,7 @@ def _format_summary(rec: dict[str, Any]) -> str:
 
 def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Inspect Ciao session trajectories",
+        description="Inspect Ciaobot session trajectories",
     )
     parser.add_argument("--list", action="store_true", help="list trajectories")
     parser.add_argument("--month", help="filter by YYYY-MM month")

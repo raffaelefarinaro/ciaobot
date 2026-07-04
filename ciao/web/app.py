@@ -13,6 +13,7 @@ from starlette.responses import FileResponse
 from ciao.web.auth import AuthMiddleware, make_serializer
 from ciao.web.commands import list_commands_endpoint, rate_limits_endpoint
 from ciao.web.routes_api import (
+    admin_add_skill,
     admin_deploy,
     admin_snapshot,
     admin_skills,
@@ -194,6 +195,7 @@ def create_app(config, app_settings=None) -> Starlette:
         Route("/api/admin/deploy", admin_deploy, methods=["POST"]),
         Route("/api/admin/status", admin_status, methods=["GET"]),
         Route("/api/admin/skills", admin_skills, methods=["GET"]),
+        Route("/api/admin/skills/add", admin_add_skill, methods=["POST"]),
         # WebSocket
         WebSocketRoute("/ws/chat/{chat_id}", ws_chat),
         WebSocketRoute("/ws/events", ws_events),

@@ -4,7 +4,7 @@ Operator scripts. Run from the repo root; most expect the project venv at `.venv
 
 | File | Purpose |
 |---|---|
-| `run-ciao.sh` | Production launcher: activates the venv, sources `.env`, execs the Ciao server. |
+| `run-ciao.sh` | Production launcher: activates the venv, sources `.env`, execs the Ciaobot server. |
 | `dev.sh` | Compatibility wrapper for `ciao dev` after running `ensure-deps.sh`. |
 | `gws-profile.sh` | Dual-account wrapper for the `gws` CLI: routes `personal` to `secrets/gws-personal/`, `work` to `secrets/gws/`. Restores credentials from `.env` if missing. |
 | `gws-personal.sh` | Wrapper to run `gws` commands for the `personal` GWS profile. |

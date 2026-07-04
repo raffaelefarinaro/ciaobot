@@ -29,7 +29,7 @@ _MIN_ALIAS_LEN = 3
 
 # Bullet lines look like:
 #   - `People/Alba` (tags: person, friend; aliases: Alba)
-#   - `Projects/Ciao-Improvements` (tags: ...)
+#   - `Projects/Ciaobot-Improvements` (tags: ...)
 _BULLET_RE = re.compile(r"^- `(?P<path>[^`]+)`(?P<rest>.*)$")
 _ALIASES_RE = re.compile(r"aliases:\s*([^)]+)")
 _CATEGORY_PARTS = {

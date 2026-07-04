@@ -12,7 +12,6 @@ import pytest
 
 from ciao import skill_evolution as se
 from ciao import trajectory_builder as tb
-from ciao.providers.pi import PiSettings
 
 
 # ── trajectory mining ───────────────────────────────────────────────────
@@ -96,17 +95,20 @@ def test_run_skill_tests_no_files_returns_true() -> None:
 # ── propose_skill_edit ──────────────────────────────────────────────────
 
 
-def test_propose_skill_edit_returns_none_when_pi_missing(
+def test_propose_skill_edit_returns_none_when_model_call_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     skill_path = tmp_path / "SKILL.md"
     skill_path.write_text("# Skill\n")
-    monkeypatch.setattr("ciao.skill_evolution.shutil.which", lambda name: None)
+    monkeypatch.setattr(
+        "ciao.skill_evolution.run_oneshot",
+        AsyncMock(side_effect=OSError("no upstream")),
+    )
 
     result = asyncio.run(
         se.propose_skill_edit(
             skill_path, [_t("web-research", corrections=1)],
-            pi_settings=PiSettings(), model="ministral-3:3b",
+            model="ministral-3:3b",
         )
     )
     assert result is None
@@ -117,15 +119,14 @@ def test_propose_skill_edit_returns_none_on_no_improvement_marker(
 ) -> None:
     skill_path = tmp_path / "SKILL.md"
     skill_path.write_text("# Skill\n")
-    monkeypatch.setattr("ciao.skill_evolution.shutil.which", lambda name: "/usr/bin/pi")
     monkeypatch.setattr(
-        "ciao.skill_evolution.run_pi_oneshot",
+        "ciao.skill_evolution.run_oneshot",
         AsyncMock(return_value="No clear improvement found."),
     )
     result = asyncio.run(
         se.propose_skill_edit(
             skill_path, [_t("x", corrections=1)],
-            pi_settings=PiSettings(), model="ministral-3:3b",
+            model="ministral-3:3b",
         )
     )
     assert result is None
@@ -136,15 +137,14 @@ def test_propose_skill_edit_returns_text_when_model_proposes(
 ) -> None:
     skill_path = tmp_path / "SKILL.md"
     skill_path.write_text("# Skill\nold guidance\n")
-    monkeypatch.setattr("ciao.skill_evolution.shutil.which", lambda name: "/usr/bin/pi")
     monkeypatch.setattr(
-        "ciao.skill_evolution.run_pi_oneshot",
+        "ciao.skill_evolution.run_oneshot",
         AsyncMock(return_value="Replace 'old guidance' with 'new guidance'.\nconfidence: 0.7"),
     )
     result = asyncio.run(
         se.propose_skill_edit(
             skill_path, [_t("x", corrections=1)],
-            pi_settings=PiSettings(), model="ministral-3:3b",
+            model="ministral-3:3b",
         )
     )
     assert result is not None
@@ -206,20 +206,18 @@ def test_run_evolution_pass_writes_proposals(
 
     output_dir = tmp_path / "Skill-Proposals"
 
-    monkeypatch.setattr("ciao.skill_evolution.shutil.which", lambda name: "/usr/bin/pi")
     # First call = proposal, second call = semantic check verdict
     pi_mock = _mock_pi_returning(
         "Suggested edit: explain defuddle.\nconfidence: 0.6",
         "VERDICT: PRESERVED\nREASON: only adds clarification on defuddle",
     )
-    monkeypatch.setattr("ciao.skill_evolution.run_pi_oneshot", pi_mock)
+    monkeypatch.setattr("ciao.skill_evolution.run_oneshot", pi_mock)
 
     paths = asyncio.run(
         se.run_evolution_pass(
             since_days=7,
             skills_root=skills_root,
             output_dir=output_dir,
-            pi_settings=PiSettings(),
             model="kimi-k2.7-code:cloud",
             min_sessions=1,
             enable_test_gate=False,
@@ -266,8 +264,7 @@ def test_run_evolution_pass_writes_trim_proposal_for_oversized_skill(
     (skills_root / "big-skill" / "SKILL.md").write_text("x" * big_size)
 
     pi_mock = AsyncMock(return_value="No clear improvement found.")
-    monkeypatch.setattr("ciao.skill_evolution.shutil.which", lambda name: "/usr/bin/pi")
-    monkeypatch.setattr("ciao.skill_evolution.run_pi_oneshot", pi_mock)
+    monkeypatch.setattr("ciao.skill_evolution.run_oneshot", pi_mock)
 
     paths = asyncio.run(
         se.run_evolution_pass(
@@ -293,20 +290,23 @@ def test_run_evolution_pass_writes_trim_proposal_for_oversized_skill(
 # ── semantic-drift gate ─────────────────────────────────────────────────
 
 
-def test_passes_semantic_check_fail_open_when_pi_missing(
+def test_passes_semantic_check_fail_open_when_model_call_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     skill_path = tmp_path / "SKILL.md"
     skill_path.write_text("# Skill\n")
-    monkeypatch.setattr("ciao.skill_evolution.shutil.which", lambda name: None)
+    monkeypatch.setattr(
+        "ciao.skill_evolution.run_oneshot",
+        AsyncMock(side_effect=OSError("no upstream")),
+    )
     passed, reason = asyncio.run(
         se.passes_semantic_check(
             skill_path, "some edit",
-            pi_settings=PiSettings(), model="kimi-k2.7-code:cloud",
+            model="kimi-k2.7-code:cloud",
         )
     )
     assert passed is True
-    assert "pi" in reason.lower()
+    assert "semantic check unavailable" in reason.lower()
 
 
 def test_passes_semantic_check_returns_true_on_preserved(
@@ -314,15 +314,14 @@ def test_passes_semantic_check_returns_true_on_preserved(
 ) -> None:
     skill_path = tmp_path / "SKILL.md"
     skill_path.write_text("# Skill\n")
-    monkeypatch.setattr("ciao.skill_evolution.shutil.which", lambda name: "/usr/bin/pi")
     monkeypatch.setattr(
-        "ciao.skill_evolution.run_pi_oneshot",
+        "ciao.skill_evolution.run_oneshot",
         AsyncMock(return_value="VERDICT: PRESERVED\nREASON: clarification only"),
     )
     passed, reason = asyncio.run(
         se.passes_semantic_check(
             skill_path, "some edit",
-            pi_settings=PiSettings(), model="kimi-k2.7-code:cloud",
+            model="kimi-k2.7-code:cloud",
         )
     )
     assert passed is True
@@ -334,15 +333,14 @@ def test_passes_semantic_check_returns_false_on_drifted(
 ) -> None:
     skill_path = tmp_path / "SKILL.md"
     skill_path.write_text("# Skill\n")
-    monkeypatch.setattr("ciao.skill_evolution.shutil.which", lambda name: "/usr/bin/pi")
     monkeypatch.setattr(
-        "ciao.skill_evolution.run_pi_oneshot",
+        "ciao.skill_evolution.run_oneshot",
         AsyncMock(return_value="VERDICT: DRIFTED\nREASON: changed the trigger keywords"),
     )
     passed, reason = asyncio.run(
         se.passes_semantic_check(
             skill_path, "some edit",
-            pi_settings=PiSettings(), model="kimi-k2.7-code:cloud",
+            model="kimi-k2.7-code:cloud",
         )
     )
     assert passed is False
@@ -356,15 +354,14 @@ def test_passes_semantic_check_fail_open_on_unparseable(
     drop the proposal — human review is the actual gate."""
     skill_path = tmp_path / "SKILL.md"
     skill_path.write_text("# Skill\n")
-    monkeypatch.setattr("ciao.skill_evolution.shutil.which", lambda name: "/usr/bin/pi")
     monkeypatch.setattr(
-        "ciao.skill_evolution.run_pi_oneshot",
+        "ciao.skill_evolution.run_oneshot",
         AsyncMock(return_value="I think it's fine?"),
     )
     passed, reason = asyncio.run(
         se.passes_semantic_check(
             skill_path, "some edit",
-            pi_settings=PiSettings(), model="kimi-k2.7-code:cloud",
+            model="kimi-k2.7-code:cloud",
         )
     )
     assert passed is True
@@ -387,8 +384,7 @@ def test_run_evolution_pass_drops_drifted_proposal(
         "Replace 'web research' with 'cooking recipes'.\nconfidence: 0.9",
         "VERDICT: DRIFTED\nREASON: changes the skill's domain entirely",
     )
-    monkeypatch.setattr("ciao.skill_evolution.shutil.which", lambda name: "/usr/bin/pi")
-    monkeypatch.setattr("ciao.skill_evolution.run_pi_oneshot", pi_mock)
+    monkeypatch.setattr("ciao.skill_evolution.run_oneshot", pi_mock)
 
     paths = asyncio.run(
         se.run_evolution_pass(

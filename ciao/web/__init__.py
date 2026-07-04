@@ -1,1 +1,1 @@
-"""PWA web frontend for the Ciao server."""
+"""PWA web frontend for the Ciaobotboto server."""

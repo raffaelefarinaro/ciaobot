@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Central dependency verification and environment setup helper for Ciao.
+# Central dependency verification and environment setup helper for Ciaobot.
 # This script handles Python venv creation, package updates, Node.js installation (local/system),
 # npm package installations, and frontend PWA builds.
 #
@@ -25,13 +25,13 @@ ciao_ensure_deps() {
 
   # Design Aesthetics Logging
   log_info() {
-    echo -e "\033[0;32m[Ciao Setup] $1\033[0m"
+    echo -e "\033[0;32m[Ciaobot Setup] $1\033[0m"
   }
   log_warn() {
-    echo -e "\033[0;33m[Ciao Setup] WARNING: $1\033[0m" >&2
+    echo -e "\033[0;33m[Ciaobot Setup] WARNING: $1\033[0m" >&2
   }
   log_err() {
-    echo -e "\033[0;31m[Ciao Setup] ERROR: $1\033[0m" >&2
+    echo -e "\033[0;31m[Ciaobot Setup] ERROR: $1\033[0m" >&2
   }
 
   log_info "Verifying OS and system architecture..."
@@ -110,7 +110,7 @@ ciao_ensure_deps() {
     if ! grep -q "DYLD_LIBRARY_PATH=.*expat" .venv/bin/activate 2>/dev/null; then
       cat >> .venv/bin/activate <<'EOF'
 
-# Ciao: macOS 26+ libexpat workaround (added by scripts/ensure-deps.sh)
+# Ciaobot: macOS 26+ libexpat workaround (added by scripts/ensure-deps.sh)
 if [ -d /opt/homebrew/opt/expat/lib ]; then
     export DYLD_LIBRARY_PATH="/opt/homebrew/opt/expat/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 fi
@@ -125,7 +125,7 @@ EOF
   if ! grep -q "SSL_CERT_FILE=.*certifi" .venv/bin/activate 2>/dev/null; then
     cat >> .venv/bin/activate <<'EOF'
 
-# Ciao: use certifi CA bundle for stdlib ssl/urllib (added by scripts/ensure-deps.sh)
+# Ciaobot: use certifi CA bundle for stdlib ssl/urllib (added by scripts/ensure-deps.sh)
 _ciao_ca="$(python -c 'import certifi; print(certifi.where())' 2>/dev/null)"
 if [ -n "$_ciao_ca" ]; then
     export SSL_CERT_FILE="$_ciao_ca"
@@ -150,8 +150,6 @@ EOF
   # default install. Drop it from the extras if this ever runs on non-arm64.
   pip install -q ${PIP_UPGRADE_ARG} -e '.[test,voice-local]' || { log_err "Failed to install python dependencies."; return 1; }
 
-  log_info "Ensuring key Python packages are installed..."
-  pip install -q ${PIP_UPGRADE_ARG} notebooklm-py playwright "starlette<1" || log_warn "Extra pip dependencies setup failed, continuing..."
 
   log_info "Verifying Playwright browser binaries..."
   # Only run playwright install if chromium is not installed or if upgrading

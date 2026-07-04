@@ -181,18 +181,23 @@ def _ollama() -> OllamaSettings:
     )
 
 
+def _config():
+    from ciao.config import CiaoConfig
+    return CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t", "CIAO_OLLAMA_API_KEY": "sk-cloud"})
+
+
 def test_extract_appends_section_when_archive_exists(tmp_path: Path) -> None:
     archive = tmp_path / "archive.md"
     archive.write_text("# Existing\n\nbody\n", encoding="utf-8")
 
-    async def fake_call(filtered_jsonl: str, model: str, env: dict, pi_settings=None) -> str:
+    async def fake_call(filtered_jsonl: str, model: str, env: dict) -> str:
         return "## Errors\n- something failed [idx=3]\n"
 
     with patch.object(insights, "_call_model", side_effect=fake_call):
         asyncio.run(insights.extract_and_append(
             archive_path=archive,
             filtered_jsonl="dummy",
-            ollama_settings=_ollama(),
+            config=_config(),
             model="deepseek-v4-flash:cloud",
         ))
 
@@ -210,12 +215,12 @@ def test_extract_is_idempotent_when_section_already_present(
         "# Existing\n\n## Session insights\n\nold body\n", encoding="utf-8"
     )
 
-    async def fake_call(filtered_jsonl: str, model: str, env: dict, pi_settings=None) -> str:
+    async def fake_call(filtered_jsonl: str, model: str, env: dict) -> str:
         return "fresh content"
 
     called = {"count": 0}
 
-    async def counting_call(filtered_jsonl: str, model: str, env: dict, pi_settings=None) -> str:
+    async def counting_call(filtered_jsonl: str, model: str, env: dict) -> str:
         called["count"] += 1
         return await fake_call(filtered_jsonl, model, env)
 
@@ -223,7 +228,7 @@ def test_extract_is_idempotent_when_section_already_present(
         asyncio.run(insights.extract_and_append(
             archive_path=archive,
             filtered_jsonl="dummy",
-            ollama_settings=_ollama(),
+            config=_config(),
             model="deepseek-v4-flash:cloud",
         ))
 
@@ -242,7 +247,7 @@ def test_extract_skips_silently_when_archive_missing(
     asyncio.run(insights.extract_and_append(
         archive_path=missing,
         filtered_jsonl="dummy",
-        ollama_settings=_ollama(),
+        config=_config(),
         model="deepseek-v4-flash:cloud",
     ))
     assert not missing.exists()
@@ -256,7 +261,7 @@ def test_extract_retries_once_then_skips(
 
     calls = {"count": 0}
 
-    async def flaky_call(filtered_jsonl: str, model: str, env: dict, pi_settings=None) -> str:
+    async def flaky_call(filtered_jsonl: str, model: str, env: dict) -> str:
         calls["count"] += 1
         raise RuntimeError("boom")
 
@@ -268,7 +273,7 @@ def test_extract_retries_once_then_skips(
         asyncio.run(insights.extract_and_append(
             archive_path=archive,
             filtered_jsonl="dummy",
-            ollama_settings=_ollama(),
+            config=_config(),
             model="deepseek-v4-flash:cloud",
         ))
 
@@ -285,7 +290,7 @@ def test_extract_succeeds_on_retry(
 
     calls = {"count": 0}
 
-    async def flaky_call(filtered_jsonl: str, model: str, env: dict, pi_settings=None) -> str:
+    async def flaky_call(filtered_jsonl: str, model: str, env: dict) -> str:
         calls["count"] += 1
         if calls["count"] == 1:
             raise RuntimeError("transient")
@@ -299,7 +304,7 @@ def test_extract_succeeds_on_retry(
         asyncio.run(insights.extract_and_append(
             archive_path=archive,
             filtered_jsonl="dummy",
-            ollama_settings=_ollama(),
+            config=_config(),
             model="deepseek-v4-flash:cloud",
         ))
 
@@ -315,106 +320,45 @@ def test_extract_skips_silently_on_empty_model_output(
     archive = tmp_path / "archive.md"
     archive.write_text("# Existing\n", encoding="utf-8")
 
-    async def empty_call(filtered_jsonl: str, model: str, env: dict, pi_settings=None) -> str:
+    async def empty_call(filtered_jsonl: str, model: str, env: dict) -> str:
         return ""
 
     with patch.object(insights, "_call_model", side_effect=empty_call):
         asyncio.run(insights.extract_and_append(
             archive_path=archive,
             filtered_jsonl="dummy",
-            ollama_settings=_ollama(),
+            config=_config(),
             model="deepseek-v4-flash:cloud",
         ))
 
     assert "## Session insights" not in archive.read_text(encoding="utf-8")
 
 
-def test_call_model_uses_pi_when_available(
+def test_call_model_uses_oneshot_runner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When pi is on PATH and pi_settings is configured, _call_model
-    routes through run_pi_oneshot, not the Claude SDK."""
-    from ciao.providers.pi import PiSettings
-
+    """_call_model routes through the unified run_oneshot helper."""
     archive = tmp_path / "archive.md"
     archive.write_text("# Existing\n", encoding="utf-8")
-
-    monkeypatch.setattr(
-        "ciao.insights.shutil.which",
-        lambda name: "/usr/bin/pi" if name == "pi" else None,
-        raising=False,
-    )
 
     captured: dict = {}
 
-    async def fake_oneshot(prompt, *, system_prompt, model, settings, cwd=None, env=None, timeout_s=60.0):
-        captured["prompt"] = prompt
+    async def fake_oneshot(prompt, *, system_prompt, model, env, timeout_s=120.0):
         captured["model"] = model
         captured["timeout_s"] = timeout_s
-        return "## Decisions\n- via Pi [idx=1]\n"
+        return "## Decisions\n- via oneshot [idx=1]\n"
 
-    monkeypatch.setattr("ciao.providers.pi.run_pi_oneshot", fake_oneshot)
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
 
     asyncio.run(insights.extract_and_append(
         archive_path=archive,
         filtered_jsonl="dummy-jsonl",
-        ollama_settings=_ollama(),
+        config=_config(),
         model="deepseek-v4-flash:cloud",
-        pi_settings=PiSettings(provider="ollama"),
     ))
 
     text = archive.read_text(encoding="utf-8")
     assert "## Session insights" in text
-    assert "via Pi" in text
+    assert "via oneshot" in text
     assert captured["model"] == "deepseek-v4-flash:cloud"
     assert captured["timeout_s"] == 120.0
-
-
-def test_call_model_falls_back_to_claude_sdk_without_pi(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When pi isn't on PATH, _call_model uses the Claude SDK path."""
-    archive = tmp_path / "archive.md"
-    archive.write_text("# Existing\n", encoding="utf-8")
-
-    monkeypatch.setattr(
-        "ciao.insights.shutil.which", lambda name: None, raising=False
-    )
-
-    pi_calls: list = []
-
-    async def fake_oneshot(*args, **kwargs):
-        pi_calls.append(kwargs)
-        return "SHOULD NOT BE USED"
-
-    monkeypatch.setattr("ciao.providers.pi.run_pi_oneshot", fake_oneshot)
-
-    from dataclasses import dataclass as _dc
-
-    @_dc
-    class _Block:
-        text: str
-
-    @_dc
-    class _AsstMsg:
-        content: list
-
-    async def fake_query(prompt, options):
-        yield _AsstMsg(content=[_Block(text="## Decisions\n- via SDK [idx=2]\n")])
-
-    import claude_agent_sdk as _sdk
-    monkeypatch.setattr(_sdk, "query", fake_query, raising=True)
-    monkeypatch.setattr(_sdk, "AssistantMessage", _AsstMsg, raising=True)
-    monkeypatch.setattr(_sdk, "TextBlock", _Block, raising=True)
-
-    asyncio.run(insights.extract_and_append(
-        archive_path=archive,
-        filtered_jsonl="dummy-jsonl",
-        ollama_settings=_ollama(),
-        model="deepseek-v4-flash:cloud",
-    ))
-
-    text = archive.read_text(encoding="utf-8")
-    assert "## Session insights" in text
-    assert "via SDK" in text
-    assert pi_calls == []

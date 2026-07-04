@@ -24,12 +24,12 @@ def test_matches_names_and_aliases(tmp_path: Path) -> None:
 
 ### project (1)
 
-- `Projects/Ciao-Improvements` (tags: project)
+- `Projects/Ciaobot-Improvements` (tags: project)
 """)
-    hits = find_entities("Meeting with Alba about Ciao-Improvements next week", tmp_path)
+    hits = find_entities("Meeting with Alba about Ciaobot-Improvements next week", tmp_path)
     paths = {e.path for e in hits}
     assert "People/Alba" in paths
-    assert "Projects/Ciao-Improvements" in paths
+    assert "Projects/Ciaobot-Improvements" in paths
 
 
 def test_filters_matches_to_active_workspace_and_shared_roots(tmp_path: Path) -> None:

@@ -1,4 +1,4 @@
-"""Command-line entrypoint for the packaged Ciao app."""
+"""Command-line entrypoint for the packaged Ciaobot app."""
 
 from __future__ import annotations
 
@@ -60,14 +60,19 @@ def _render_launchd_plist(
     workspace: Path,
     python_path: str,
     port: int,
+    path: str = "",
 ) -> str:
     template = resources.files("ciao.stock").joinpath(
         "deploy", "com.ciao.server.plist.tmpl"
     ).read_text(encoding="utf-8")
+    # Under launchd the default PATH omits Homebrew, so subprocess calls to
+    # npm/node/git fail. Bake the user's PATH from setup time into the plist.
+    resolved_path = path or os.environ.get("PATH", "")
     replacements = {
         "{{CIAO_WORKSPACE}}": html.escape(str(workspace), quote=False),
         "{{CIAO_PYTHON}}": html.escape(python_path, quote=False),
         "{{CIAO_PORT}}": html.escape(str(port), quote=False),
+        "{{CIAO_PATH}}": html.escape(resolved_path, quote=False),
     }
     for key, value in replacements.items():
         template = template.replace(key, value)
@@ -80,6 +85,7 @@ def _write_launchd_plist(
     launch_agents_dir: Path,
     python_path: str,
     port: int,
+    path: str = "",
 ) -> Path:
     plist = launch_agents_dir.expanduser() / "com.ciao.server.plist"
     plist.parent.mkdir(parents=True, exist_ok=True)
@@ -88,6 +94,7 @@ def _write_launchd_plist(
             workspace=workspace,
             python_path=python_path,
             port=port,
+            path=path,
         ),
         encoding="utf-8",
     )
@@ -117,7 +124,7 @@ def _write_app_shortcut(
     port: int,
 ) -> Path:
     token = _ensure_setup_token(workspace)
-    app_root = app_dir.expanduser() / "Ciao.app"
+    app_root = app_dir.expanduser() / "Ciaobot.app"
     contents = app_root / "Contents"
     macos = contents / "MacOS"
     macos.mkdir(parents=True, exist_ok=True)
@@ -130,11 +137,11 @@ def _write_app_shortcut(
                 '<plist version="1.0">',
                 '<dict>',
                 '  <key>CFBundleName</key>',
-                '  <string>Ciao</string>',
+                '  <string>Ciaobot</string>',
                 '  <key>CFBundleExecutable</key>',
-                '  <string>Ciao</string>',
+                '  <string>Ciaobot</string>',
                 '  <key>CFBundleIdentifier</key>',
-                '  <string>local.ciao.app</string>',
+                '  <string>local.ciaobot.app</string>',
                 '  <key>CFBundlePackageType</key>',
                 '  <string>APPL</string>',
                 '</dict>',
@@ -145,7 +152,7 @@ def _write_app_shortcut(
         encoding="utf-8",
     )
     url = f"http://localhost:{port}/?setup={token}"
-    executable = macos / "Ciao"
+    executable = macos / "Ciaobot"
     executable.write_text(
         "#!/bin/sh\n"
         f'open "{url}"\n',
@@ -237,6 +244,7 @@ def setup_workspace(
         launch_agents_dir=launch_dir,
         python_path=python_path or sys.executable,
         port=port,
+        path=os.environ.get("PATH", ""),
     ))
     written.append(_write_app_shortcut(
         workspace=root,
@@ -275,8 +283,6 @@ def _auth_command_for_provider(provider: str) -> list[str]:
         if not binary:
             raise FileNotFoundError("Claude CLI not found")
         return [binary, "login"]
-    if provider == "pi":
-        return ["pi", "auth"]
     if provider == "ollama":
         return ["ollama", "signin"]
     raise ValueError(f"Unknown provider '{provider}'")
@@ -514,23 +520,8 @@ def _sync_skills_command(args: argparse.Namespace) -> int:
         [
             "--workspace",
             str(args.workspace),
-            *(["--pi-root", str(args.pi_root)] if args.pi_root is not None else []),
             *(["--skip-upstream"] if args.skip_upstream else []),
             *(["--verbose"] if args.verbose else []),
-        ]
-    )
-
-
-def _sync_agents_to_pi_command(args: argparse.Namespace) -> int:
-    from ciao import sync_agents_to_pi
-
-    return sync_agents_to_pi.main(
-        [
-            "--claude-dir",
-            str(args.claude_dir),
-            "--pi-dir",
-            str(args.pi_dir),
-            *(["--dry-run"] if args.dry_run else []),
         ]
     )
 
@@ -696,15 +687,15 @@ def _create_chat_command(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="ciao", description="Ciao local assistant CLI.")
+    parser = argparse.ArgumentParser(prog="ciao", description="Ciaobot local assistant CLI.")
     subparsers = parser.add_subparsers(dest="command")
 
-    run_parser = subparsers.add_parser("run", help="Run the Ciao server.")
+    run_parser = subparsers.add_parser("run", help="Run the Ciaobot server.")
     run_parser.set_defaults(func=lambda _args: _run_server())
 
     setup_parser = subparsers.add_parser(
         "setup",
-        help="Scaffold a local Ciao workspace from packaged stock assets.",
+        help="Scaffold a local Ciaobot workspace from packaged stock assets.",
     )
     setup_parser.add_argument(
         "--workspace",
@@ -735,7 +726,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--app-dir",
         type=Path,
         default=Path.home() / "Applications",
-        help="Directory where Ciao.app is written.",
+        help="Directory where Ciaobot.app is written.",
     )
     setup_parser.add_argument(
         "--load-launchd",
@@ -748,7 +739,7 @@ def build_parser() -> argparse.ArgumentParser:
         "auth",
         help="Run a provider OAuth/login command for first-run setup.",
     )
-    auth_parser.add_argument("provider", choices=["claude", "pi", "ollama"])
+    auth_parser.add_argument("provider", choices=["claude", "ollama"])
     auth_parser.add_argument(
         "--print-only",
         action="store_true",
@@ -789,14 +780,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     public_parser = subparsers.add_parser(
         "public-preflight",
-        help="Export or scan a public Ciao tree.",
+        help="Export or scan a public Ciaobot tree.",
     )
     public_parser.add_argument("args", nargs=argparse.REMAINDER)
     public_parser.set_defaults(func=lambda args: public_release.main(args.args))
 
     smoke_parser = subparsers.add_parser(
         "package-smoke",
-        help="Build, install, and smoke-test the Ciao wheel.",
+        help="Build, install, and smoke-test the Ciaobot wheel.",
     )
     smoke_parser.add_argument("args", nargs=argparse.REMAINDER)
     smoke_parser.set_defaults(func=lambda args: package_smoke.main(args.args))
@@ -895,7 +886,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     chat_parser = subparsers.add_parser(
         "create-chat",
-        help="Create a chat through the running Ciao server and send an initial prompt.",
+        help="Create a chat through the running Ciaobot server and send an initial prompt.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     chat_parser.add_argument("--prompt", required=True, help="Initial prompt.")
@@ -914,7 +905,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat_parser.add_argument("--model", help="Model override. Inherits CIAO_MODEL.")
     chat_parser.add_argument(
         "--provider",
-        choices=["claude", "pi"],
+        choices=["claude"],
         help="Provider override. Inherits CIAO_PROVIDER.",
     )
     chat_parser.add_argument(
@@ -923,7 +914,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     chat_parser.add_argument(
         "--base-url",
-        help="Ciao server URL. Defaults to PWA_HOST/PWA_PORT.",
+        help="Ciaobot server URL. Defaults to PWA_HOST/PWA_PORT.",
     )
     chat_parser.set_defaults(func=_create_chat_command)
 
@@ -962,37 +953,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Workspace root. Defaults to current directory.",
     )
     sync_skills_parser.add_argument(
-        "--pi-root",
-        type=Path,
-        default=None,
-        help="Pi agent root. Defaults to ~/.pi/agent.",
-    )
-    sync_skills_parser.add_argument(
         "--skip-upstream",
         action="store_true",
         help="Skip skills-lock.json remote refresh and only mirror local catalogs.",
     )
     sync_skills_parser.add_argument("--verbose", action="store_true")
     sync_skills_parser.set_defaults(func=_sync_skills_command)
-
-    sync_agents_parser = subparsers.add_parser(
-        "sync-agents-to-pi",
-        help="Convert Ciao subagents into Pi-compatible agent files.",
-    )
-    sync_agents_parser.add_argument(
-        "--claude-dir",
-        type=Path,
-        default=Path("subagents"),
-        help="Source dir of agent *.md files.",
-    )
-    sync_agents_parser.add_argument(
-        "--pi-dir",
-        type=Path,
-        default=Path.home() / ".pi" / "agent" / "agents",
-        help="Destination dir for Pi agents.",
-    )
-    sync_agents_parser.add_argument("--dry-run", action="store_true")
-    sync_agents_parser.set_defaults(func=_sync_agents_to_pi_command)
 
     return parser
 

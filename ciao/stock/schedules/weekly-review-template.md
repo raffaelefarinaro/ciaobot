@@ -1,6 +1,6 @@
 # Weekly Self-Improvement Review
 
-Use this checklist for a generic Ciao workspace.
+Use this checklist for a generic Ciaobot workspace.
 
 1. Review recent archived chat insights for repeated tool failures.
 2. Promote durable learnings to the configured vault.

@@ -44,7 +44,7 @@ def test_public_export_scan_flags_private_paths(tmp_path: Path) -> None:
 
 
 def test_public_export_scan_flags_private_strings(tmp_path: Path) -> None:
-    _write(tmp_path / "README.md", "Ciao public docs\n")
+    _write(tmp_path / "README.md", "Ciaobot public docs\n")
     _write(tmp_path / "ciao" / "config.py", "contact='private-person@example.com'\n")
     _write(tmp_path / "web" / "src" / "x.ts", "const host = 'private-host.example.com'\n")
     _write(tmp_path / "tests" / "fixture.py", "company = 'PrivateCo'\n")
@@ -103,7 +103,7 @@ def test_export_public_tree_copies_only_allowlisted_paths(tmp_path: Path) -> Non
     _write(source / "ciao" / "main.py", "print('public')\n")
     _write(source / "web" / "src" / "main.ts", "console.log('public')\n")
     _write(source / "scripts" / "vault_index.py", "print('public')\n")
-    _write(source / ".github" / "workflows" / "ci.yml", "name: Ciao CI\n")
+    _write(source / ".github" / "workflows" / "ci.yml", "name: Ciaobot CI\n")
     _write(source / "scripts" / "morning-briefing.py", "private workspace helper\n")
     _write(source / "pyproject.toml", "[project]\nname='ciao'\n")
     _write(source / "memory-vault" / "personal" / "MEMORY.md", "private\n")

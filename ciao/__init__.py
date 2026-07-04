@@ -1,4 +1,4 @@
-"""Ciao personal assistant server."""
+"""Ciaobot personal assistant server."""
 
 __all__ = ["__version__"]
 

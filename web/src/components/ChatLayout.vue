@@ -39,13 +39,13 @@
           />
           <ChatPanel v-else-if="store.activeChat" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
           <div v-else class="empty-shell">
-            <PaneHeader title="Ciao" @open-sidebar="sidebarCollapsed = false" />
+            <PaneHeader title="Ciaobot" @open-sidebar="sidebarCollapsed = false" />
             <div class="empty-state">
               <div class="empty-mark">
                 <img
                   class="empty-face"
                   :src="faceSrc"
-                  alt="ciao"
+                  alt="ciaobot"
                   draggable="false"
                   @click="faceToggled = !faceToggled"
                   @mouseenter="faceHover = true"
@@ -101,13 +101,13 @@
         />
         <ChatPanel v-else-if="store.activeChat" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
         <div v-else class="empty-shell">
-          <PaneHeader title="Ciao" @open-sidebar="sidebarCollapsed = false" />
+          <PaneHeader title="Ciaobot" @open-sidebar="sidebarCollapsed = false" />
           <div class="empty-state">
             <div class="empty-mark">
               <img
                 class="empty-face"
                 :src="faceSrc"
-                alt="ciao"
+                alt="ciaobot"
                 draggable="false"
                 @click="faceToggled = !faceToggled"
                 @mouseenter="faceHover = true"

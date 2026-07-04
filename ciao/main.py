@@ -1,10 +1,11 @@
-"""Entrypoint for the Ciao server."""
+"""Entrypoint for the Ciaobot server."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -21,13 +22,30 @@ from ciao.schedules import ScheduleManager, ScheduleStore
 from ciao.sessions import StateStore
 from ciao.signals import RestartRequested
 from ciao.transcripts import TranscriptStore
-from ciao.upgrade import update_skills, upgrade_all
+from ciao.upgrade import update_skills
 from ciao.web.app import create_app
 from ciao.error_log import setup_error_logging
 from ciao.web.project_chats import ProjectChatManager
 from ciao.web.push import PushManager
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_homebrew_on_path() -> None:
+    """Prepend Homebrew bin dirs to PATH when missing.
+
+    launchd launches the server with a minimal PATH (roughly
+    ``/usr/bin:/bin:/usr/sbin:/sbin``) that omits Homebrew, so subprocess
+    calls to ``npm``, ``node``, Homebrew's ``git``/``pip``, etc. fail with
+    FileNotFoundError. Prepending the standard Homebrew directories lets the
+    deploy/upgrade subprocess steps find those tools regardless of how the
+    service was started. Adding a non-existent directory is harmless.
+    """
+    extra = ["/opt/homebrew/bin", "/usr/local/bin"]
+    parts = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+    prepend = [d for d in extra if d not in parts]
+    if prepend:
+        os.environ["PATH"] = os.pathsep.join([*prepend, *parts])
 
 
 _PhaseStatus = Literal["pending", "in_progress", "done", "failed"]
@@ -147,6 +165,7 @@ def _push_subject_for_config(config: CiaoConfig) -> str:
 
 
 async def _async_main() -> int:
+    _ensure_homebrew_on_path()
     os.environ.setdefault("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "file")
     config = CiaoConfig.from_env()
     setup_error_logging(config.workspace_root)
@@ -157,9 +176,10 @@ async def _async_main() -> int:
     # routing so discovery never silently changes existing behaviour. Also
     # re-run whenever the Settings → Models tab loads (routes_api), so a
     # freshly pulled model shows up without a restart.
-    from ciao.config import refresh_local_ollama_models
+    from ciao.config import refresh_local_ollama_models, refresh_openrouter_models
 
     refresh_local_ollama_models(config)
+    refresh_openrouter_models(config)
 
     # Runtime-mutable settings overlay (PWA Settings → Models tab). Applied
     # on top of the env-backed config so PATCHes take effect without a
@@ -179,12 +199,23 @@ async def _async_main() -> int:
 
     # Start provider checks in the background
     tracker.start("connect_claude_code")
-    tracker.start("connect_pi")
 
     async def check_claude_code():
         try:
+            # Use the bundled Claude Code CLI (the same binary the provider
+            # spawns) rather than a bare ``claude`` on PATH: under launchd
+            # PATH omits ~/.local/bin, and the canonical CLI is the SDK's
+            # bundled one anyway.
+            from ciao.providers.claude import get_bundled_claude_path
+            cli = get_bundled_claude_path() or shutil.which("claude")
+            if not cli:
+                tracker.fail(
+                    "connect_claude_code",
+                    "claude CLI not found (no bundled binary and not on PATH)",
+                )
+                return
             proc = await asyncio.create_subprocess_exec(
-                "claude", "--version",
+                cli, "--version",
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=3.0)
@@ -196,23 +227,7 @@ async def _async_main() -> int:
         except Exception as e:
             tracker.fail("connect_claude_code", f"not found: {e}")
 
-    async def check_pi():
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "pi", "--version",
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=3.0)
-            if proc.returncode == 0:
-                version = stdout.decode().strip()
-                tracker.done("connect_pi", f"connected: {version}")
-            else:
-                tracker.fail("connect_pi", f"failed: exit {proc.returncode}")
-        except Exception as e:
-            tracker.fail("connect_pi", f"not found: {e}")
-
     asyncio.create_task(check_claude_code())
-    asyncio.create_task(check_pi())
 
     # Sync workspace before anything else
     if config.auto_sync_on_start:
@@ -255,25 +270,6 @@ async def _async_main() -> int:
             logger.exception("Skill update failed")
 
     asyncio.create_task(asyncio.to_thread(_skills_task))
-
-    # Materialize ~/.pi/agent/models.json so the Pi 0.74+ fork can resolve
-    # the "ollama" provider name (it dropped the built-in). Cheap, sync.
-    try:
-        from ciao.providers.pi import ensure_models_json
-        ensure_models_json(
-            config.pi,
-            ollama_base_url=config.ollama.base_url,
-            ollama_api_key=config.ollama.api_key,
-            extra_models=config.ollama.models,
-            local_models=config.ollama.local_models,
-            local_url=config.ollama.local_url,
-        )
-    except Exception:
-        logger.warning("Pi models.json write failed", exc_info=True)
-
-    # Automatic background upgrades disabled for public service
-    tracker.start("upgrade_all")
-    tracker.done("upgrade_all", "skipped")
 
     # Initialize stores
     state = StateStore(
@@ -362,7 +358,7 @@ async def _async_main() -> int:
         if pm is None:
             return
         payload = {
-            "title": title or "Ciao",
+            "title": title or "Ciaobot",
             "body": snippet or "New message",
             "chat_id": chat_id,
         }
@@ -389,7 +385,7 @@ async def _async_main() -> int:
             return
         body = f"{tool_name}: {message}" if tool_name else message
         payload = {
-            "title": "Ciao needs approval",
+            "title": "Ciaobot needs approval",
             "body": body or "Tool approval required",
             "chat_id": chat_id,
         }
@@ -435,7 +431,7 @@ async def _async_main() -> int:
         if pm is None:
             return
         payload = {
-            "title": "Ciao has a question",
+            "title": "Ciaobot has a question",
             "body": question_text or "The model needs your input",
             "chat_id": chat_id,
         }
@@ -514,7 +510,7 @@ async def _async_main() -> int:
     )
     server = uvicorn.Server(uvi_config)
     tracker.start("server_starting")
-    logger.info("Starting Ciao server on %s:%d", config.pwa_host, config.pwa_port)
+    logger.info("Starting Ciaobot server on %s:%d", config.pwa_host, config.pwa_port)
     tracker.done("server_starting")
 
     restart_flag: list[int | None] = [None]

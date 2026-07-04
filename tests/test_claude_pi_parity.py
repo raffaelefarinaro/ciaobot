@@ -12,7 +12,7 @@ These tests are the tripwire: if a skill / command / agent lands in
 `.claude/` but the install script is not re-run, Pi sessions silently drop
 that capability. Skipped when `~/.pi/agent/` is not present.
 
-Ciao uses @tintinweb/pi-subagents as a Claude Code-like Agent primitive and
+Ciaobot uses @tintinweb/pi-subagents as a Claude Code-like Agent primitive and
 keeps the actual agent catalog in `subagents/` (symlinked into `.claude/agents/`).
 """
 
@@ -165,7 +165,7 @@ def test_pi_mirrored_agents_carry_managed_marker_and_pi_tools() -> None:
 
 @pi_required
 def test_pi_mirrored_agents_use_tintinweb_frontmatter() -> None:
-    """Ciao-generated Pi agents use @tintinweb/pi-subagents frontmatter."""
+    """Ciaobot-generated Pi agents use @tintinweb/pi-subagents frontmatter."""
     for src in CLAUDE_AGENTS.glob("*.md"):
         out = PI_AGENTS / src.name
         text = out.read_text(encoding="utf-8")

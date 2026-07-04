@@ -40,7 +40,6 @@ import asyncio
 import json
 import logging
 import os
-import shutil
 import subprocess
 import sys
 from collections import defaultdict
@@ -48,7 +47,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
-from ciao.providers.pi import PiSettings, run_pi_oneshot
+from ciao.providers.oneshot import run_oneshot
+from ciao.providers.ollama import OllamaSettings, routine_env_for_model
+from ciao.providers.routing import routing_routine_env_for_model
 from ciao.trajectory_builder import (
     DEFAULT_RETENTION_MONTHS,
     list_trajectories,
@@ -365,7 +366,7 @@ async def propose_skill_edit(
     skill_path: Path,
     trajectories: list[dict[str, Any]],
     *,
-    pi_settings: PiSettings,
+    env: dict[str, str] | None = None,
     model: str,
     timeout_s: float = 180.0,
     force_trim: bool = False,
@@ -380,9 +381,6 @@ async def propose_skill_edit(
     the skill under the cap, instead of an unsatisfiable "keep under
     15KB by adding helpful guidance" instruction.
     """
-    if shutil.which("pi") is None:
-        logger.info("pi binary not on PATH; skipping proposal for %s", skill_path)
-        return None
     skill_text = skill_path.read_text(encoding="utf-8")
     trimmed = [_trim_trajectory(t) for t in trajectories[:MAX_TRAJECTORIES_PER_PROMPT]]
     trajectories_text = json.dumps(trimmed, indent=2, ensure_ascii=False)
@@ -404,15 +402,15 @@ async def propose_skill_edit(
         "Propose improvements:"
     )
     try:
-        result = await run_pi_oneshot(
+        result = await run_oneshot(
             prompt,
             system_prompt=system_prompt,
             model=model,
-            settings=pi_settings,
+            env=env,
             timeout_s=timeout_s,
         )
-    except (TimeoutError, OSError) as exc:
-        logger.warning("Pi proposal call failed for %s: %s", skill_path, exc)
+    except (TimeoutError, OSError, RuntimeError) as exc:
+        logger.warning("Proposal call failed for %s: %s", skill_path, exc)
         return None
     cleaned = (result or "").strip()
     if not cleaned:
@@ -429,20 +427,17 @@ async def passes_semantic_check(
     skill_path: Path,
     proposal_text: str,
     *,
-    pi_settings: PiSettings,
+    env: dict[str, str] | None = None,
     model: str,
     timeout_s: float = 60.0,
 ) -> tuple[bool, str]:
     """Second-pass judge: does the proposal preserve the skill's core purpose?
 
-    Cheaper than the proposal call (smaller prompt, short answer) but
-    runs against the same Pi/Ollama path. Returns ``(passed, reason)``;
-    when ``pi`` isn't available we fail-open with passed=True since we
-    can't actually judge and the proposal still has to clear human
-    review.
+    Cheaper than the proposal call (smaller prompt, short answer) and
+    runs against the same upstream as the proposal. Returns
+    ``(passed, reason)``; on a model failure we fail-open with
+    passed=True since the proposal still has to clear human review.
     """
-    if shutil.which("pi") is None:
-        return True, "pi unavailable; skipping semantic check"
     skill_excerpt = skill_path.read_text(encoding="utf-8")[:1200]
     prompt = (
         f"Original skill ({skill_path.name}, first 1200 chars):\n"
@@ -456,14 +451,14 @@ async def passes_semantic_check(
         "Judge:"
     )
     try:
-        result = await run_pi_oneshot(
+        result = await run_oneshot(
             prompt,
             system_prompt=SEMANTIC_CHECK_SYSTEM_PROMPT,
             model=model,
-            settings=pi_settings,
+            env=env,
             timeout_s=timeout_s,
         )
-    except (TimeoutError, OSError) as exc:
+    except (TimeoutError, OSError, RuntimeError) as exc:
         logger.warning("Semantic check call failed for %s: %s", skill_path, exc)
         # Fail-open: don't lose a proposal because the judge timed out.
         return True, f"semantic check unavailable: {exc}"
@@ -559,7 +554,7 @@ async def _process_skill_dag(
     skill_trajectories: list[dict[str, Any]],
     *,
     output_dir: Path,
-    pi_settings: PiSettings,
+    env: dict[str, str] | None,
     model: str,
     now: datetime,
     enable_test_gate: bool,
@@ -588,7 +583,7 @@ async def _process_skill_dag(
     proposal = await propose_skill_edit(
         skill_path,
         skill_trajectories,
-        pi_settings=pi_settings,
+        env=env,
         model=model,
         force_trim=over_cap,
     )
@@ -600,7 +595,7 @@ async def _process_skill_dag(
         semantic_ok, semantic_reason = await passes_semantic_check(
             skill_path,
             proposal,
-            pi_settings=pi_settings,
+            env=env,
             model=model,
         )
         semantic_verdict = "PRESERVED" if semantic_ok else "DRIFTED"
@@ -697,7 +692,8 @@ async def run_evolution_pass(
     since_days: int = 7,
     skills_root: Path | None = None,
     output_dir: Path | None = None,
-    pi_settings: PiSettings | None = None,
+    env: dict[str, str] | None = None,
+    ollama_settings: OllamaSettings | None = None,
     model: str = "kimi-k2.7-code:cloud",
     min_sessions: int = 1,
     enable_test_gate: bool = False,
@@ -727,7 +723,8 @@ async def run_evolution_pass(
     ``skillevo:<skill>:<node>``.
     """
     output_dir = output_dir or _DEFAULT_PROPOSALS_DIR
-    pi_settings = pi_settings or PiSettings()
+    if env is None:
+        env = routine_env_for_model(model, ollama_settings) if ollama_settings is not None else {}
     now = now or datetime.now(UTC)
     since = now - timedelta(days=since_days)
 
@@ -758,7 +755,7 @@ async def run_evolution_pass(
                     skill_path,
                     skill_trajectories,
                     output_dir=output_dir,
-                    pi_settings=pi_settings,
+                    env=env,
                     model=model,
                     now=now,
                     enable_test_gate=enable_test_gate,
@@ -823,8 +820,8 @@ def _main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument(
         "--model",
-        default="kimi-k2.7-code:cloud",
-        help="model to call via Pi/Ollama for proposals",
+        default=None,
+        help="model to call for proposals (Ollama / OpenRouter / Anthropic). Defaults to the runtime skill_evolution_model setting.",
     )
     parser.add_argument(
         "--min-sessions",
@@ -913,11 +910,23 @@ def _main(argv: list[str] | None = None) -> int:
     with job_runs.track_sync(
         "skill_evolution", "Skill evolution", model=args.model
     ) as run:
+        from ciao.config import CiaoConfig
+        from ciao.providers.routing import resolve_with_fallback
+        cfg = CiaoConfig.from_env()
+        if args.model is None:
+            args.model = os.environ.get("CIAO_MODEL") or cfg.claude_default_model or "sonnet"
+        args.model, env, note = resolve_with_fallback(
+            args.model, cfg, default_model=cfg.claude_default_model
+        )
+        if note:
+            run.extra["fallback"] = note
+            logger.info("Skill evolution %s", note)
         paths = asyncio.run(
             run_evolution_pass(
                 since_days=args.since_days,
                 skills_root=args.skills_root,
                 output_dir=args.output_dir,
+                env=env,
                 model=args.model,
                 min_sessions=args.min_sessions,
                 enable_test_gate=args.test_gate,

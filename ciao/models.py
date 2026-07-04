@@ -85,12 +85,10 @@ class ImageAttachment:
 
 
 # Native thinking/reasoning levels per provider, surfaced as-is in the PWA
-# model picker (no cross-provider mapping). Empty string = provider default:
-# no flag/option is sent. Claude maps to ``ClaudeAgentOptions.effort``, Pi to
-# ``--thinking``.
+# model picker. Empty string = provider default: no flag/option is sent.
+# Maps to ``ClaudeAgentOptions.effort``.
 THINKING_LEVELS: dict[str, tuple[str, ...]] = {
     "claude": ("low", "medium", "high", "xhigh", "max"),
-    "pi": ("off", "minimal", "low", "medium", "high", "xhigh"),
 }
 
 

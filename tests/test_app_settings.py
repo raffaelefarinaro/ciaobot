@@ -7,6 +7,8 @@ import json
 import pytest
 
 from ciao.app_settings import AppSettings, AppSettingsStore
+from ciao.providers.ollama import OllamaSettings
+from ciao.providers.openrouter import OpenRouterSettings
 
 
 class FakeConfig:
@@ -15,9 +17,21 @@ class FakeConfig:
     def __init__(self) -> None:
         self.title_model_override = ""
         self.insights_model = "deepseek-v4-flash:cloud"
+
         self.transcription_engine = "cloud"
         self.transcription_local_model = "mlx-community/whisper-large-v3-turbo"
         self.critique_models = ""
+        self.ollama = OllamaSettings(
+            haiku_model="deepseek-v4-flash:cloud",
+            sonnet_model="kimi-k2.7-code:cloud",
+            opus_model="minimax-m3:cloud",
+        )
+        self.openrouter = OpenRouterSettings(
+            api_key="sk-or",
+            haiku_model="anthropic/claude-haiku-4.5",
+            sonnet_model="anthropic/claude-sonnet-4.5",
+            opus_model="anthropic/claude-opus-4.8",
+        )
 
 
 def test_load_missing_file_gives_defaults(tmp_path):
@@ -100,3 +114,23 @@ def test_critique_models_override_applies(tmp_path):
     store.update({"critique_models": ""})
     store.apply_to_config(config)
     assert config.critique_models == ""
+
+
+def test_tier_model_overrides_apply_and_clear(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    config = FakeConfig()
+
+    store.update(
+        {
+            "ollama_sonnet_model": "qwen3:8b",
+            "openrouter_opus_model": "anthropic/claude-opus-4.9",
+        }
+    )
+    store.apply_to_config(config)
+    assert config.ollama.sonnet_model == "qwen3:8b"
+    assert config.openrouter.opus_model == "anthropic/claude-opus-4.9"
+
+    store.update({"ollama_sonnet_model": "", "openrouter_opus_model": ""})
+    store.apply_to_config(config)
+    assert config.ollama.sonnet_model == "kimi-k2.7-code:cloud"
+    assert config.openrouter.opus_model == "anthropic/claude-opus-4.8"

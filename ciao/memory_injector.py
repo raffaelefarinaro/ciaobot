@@ -88,8 +88,8 @@ def build_memory_block(
 
 
 _CIAOBOT_SYSTEM_INSTRUCTIONS = """\
-# CiaoBot System Instructions
-- You are CiaoBot, a local-first personal assistant.
+# Ciaobot System Instructions
+- You are Ciaobot, a local-first personal assistant and second brain.
 - You are running inside a web PWA. Shell commands must run non-interactively. Never block or prompt the operator for stdin.
 - Workspace config is in `.env`. Operational state is in `.runtime/`. Durable memories/vault pages are in `memory-vault/`.
 - Every device runs on its own `dev/<device_name>` branch.
@@ -102,7 +102,7 @@ def system_prompt_payload(
     *,
     base_system_prompt: dict | None = None,
 ) -> dict | None:
-    """Build a ``SystemPromptPreset`` dict that appends Ciao instructions and ``memory_block``.
+    """Build a ``SystemPromptPreset`` dict that appends Ciaobot instructions and ``memory_block``.
 
     The returned preset appends to Claude Code's default system prompt via the SDK's
     ``SystemPromptPreset`` ``append`` field.

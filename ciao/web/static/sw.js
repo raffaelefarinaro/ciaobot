@@ -1,8 +1,8 @@
-const CACHE_NAME = 'ciao-v6'
+const CACHE_NAME = 'ciaobot-v1'
 const STATIC_ASSETS = ['/', '/index.html', '/manifest.json']
 const ICON = '/icons/icon-192.png'
 const BADGE = '/icons/icon-192.png'
-const UNREAD_CACHE = 'ciao-unread-v1'
+const UNREAD_CACHE = 'ciaobot-unread-v1'
 const UNREAD_KEY = '/__unread__'
 
 self.addEventListener('install', (event) => {
@@ -142,15 +142,15 @@ self.addEventListener('push', (event) => {
   try {
     data = event.data ? event.data.json() : {}
   } catch {
-    data = { title: 'Ciao', body: event.data ? event.data.text() : '' }
+    data = { title: 'Ciaobot', body: event.data ? event.data.text() : '' }
   }
-  const title = data.title || 'Ciao'
+  const title = data.title || 'Ciaobot'
   const chatId = data.chat_id || ''
   const options = {
     body: data.body || '',
     icon: ICON,
     badge: BADGE,
-    tag: chatId || 'ciao',
+    tag: chatId || 'ciaobot',
     renotify: true,
     vibrate: [120, 60, 120],
     data: { chat_id: chatId },

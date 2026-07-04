@@ -38,7 +38,7 @@ _DEFAULT_BASELINE = Path(".runtime/dependency_baseline.json")
 # Tools we track. ``repo`` is the GitHub releases page the research node reads;
 # ``installed`` is the shell snippet that prints the locally-installed version
 # (reference only: the baseline, not the install, is the comparison point
-# because ``upgrade_all()`` bumps installs on every startup).
+# because dependency installs are no longer changed automatically on startup).
 TRACKED_TOOLS: tuple[dict[str, str], ...] = (
     {"key": "openai", "repo": "https://github.com/openai/openai-python/releases"},
     {"key": "claude-agent-sdk", "repo": "https://github.com/anthropics/claude-agent-sdk-python/releases"},

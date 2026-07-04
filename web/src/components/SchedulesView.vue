@@ -25,7 +25,7 @@
         <div class="schedule-summary" @click="toggle(schedule.schedule_id)">
           <div class="summary-row-1">
             <span class="schedule-time">{{ schedule.run_at_date }} {{ schedule.daily_time_utc }}</span>
-            <span class="schedule-title">{{ promptTitle(schedule.prompt) }}</span>
+            <span class="schedule-title">{{ schedule.title || promptTitle(schedule.prompt) }}</span>
             <span class="expand-icon">{{ expanded[schedule.schedule_id] ? '\u25BC' : '\u25B6' }}</span>
           </div>
           <div class="summary-row-2">
@@ -100,83 +100,83 @@
       </div>
     </section>
 
-    <!-- Recurring routines -->
-    <section v-if="recurringSchedules.length" class="schedule-section">
+    <!-- User routines -->
+    <section v-if="userRoutines.length" class="schedule-section">
       <h3 class="section-heading">Routines <span class="section-hint">recurring</span></h3>
-    <div v-for="schedule in recurringSchedules" :key="schedule.schedule_id" class="schedule-card">
-      <!-- Summary (two rows) -->
-      <div class="schedule-summary" @click="toggle(schedule.schedule_id)">
-        <div class="summary-row-1">
-          <span class="schedule-time">{{ schedule.frequency === 'manual' ? 'Manual' : schedule.daily_time_utc }}</span>
-          <span v-if="schedule.enabled === false" class="badge badge--warning" style="font-size:var(--text-xs);padding:1px 6px;font-weight:500;">paused</span>
-          <span class="schedule-title">{{ promptTitle(schedule.prompt) }}</span>
-          <span class="expand-icon">{{ expanded[schedule.schedule_id] ? '\u25BC' : '\u25B6' }}</span>
+      <div v-for="schedule in userRoutines" :key="schedule.schedule_id" class="schedule-card">
+        <!-- Summary (two rows) -->
+        <div class="schedule-summary" @click="toggle(schedule.schedule_id)">
+          <div class="summary-row-1">
+            <span class="schedule-time">{{ schedule.frequency === 'manual' ? 'Manual' : schedule.daily_time_utc }}</span>
+            <span v-if="schedule.enabled === false" class="badge badge--warning" style="font-size:var(--text-xs);padding:1px 6px;font-weight:500;">paused</span>
+            <span class="schedule-title">{{ schedule.title || promptTitle(schedule.prompt) }}</span>
+            <span class="expand-icon">{{ expanded[schedule.schedule_id] ? '\u25BC' : '\u25B6' }}</span>
+          </div>
+          <div class="summary-row-2">
+            <span v-if="schedule.frequency === 'manual'" class="schedule-days-label">run on click only</span>
+            <span v-else-if="schedule.frequency === 'monthly'" class="schedule-days-label">day {{ schedule.day_of_month }} of month</span>
+            <span v-else-if="schedule.frequency === 'weekly' && schedule.days_of_week?.length" class="schedule-days">
+              <span v-for="d in allDays" :key="d" class="badge badge--dot" :class="{ active: schedule.days_of_week.includes(d) }">{{ d }}</span>
+            </span>
+            <span v-else class="schedule-days-label">every day</span>
+            <span class="badge badge--muted">{{ archiveLabel(schedule.archive_policy) }}</span>
+            <span class="badge context-badge" :class="badgeVariant(schedule)">{{ contextLabel(schedule) }}</span>
+          </div>
         </div>
-        <div class="summary-row-2">
-          <span v-if="schedule.frequency === 'manual'" class="schedule-days-label">run on click only</span>
-          <span v-else-if="schedule.frequency === 'monthly'" class="schedule-days-label">day {{ schedule.day_of_month }} of month</span>
-          <span v-else-if="schedule.frequency === 'weekly' && schedule.days_of_week?.length" class="schedule-days">
-            <span v-for="d in allDays" :key="d" class="badge badge--dot" :class="{ active: schedule.days_of_week.includes(d) }">{{ d }}</span>
-          </span>
-          <span v-else class="schedule-days-label">every day</span>
-          <span class="badge badge--muted">{{ archiveLabel(schedule.archive_policy) }}</span>
-          <span class="badge context-badge" :class="badgeVariant(schedule)">{{ contextLabel(schedule) }}</span>
-        </div>
-      </div>
 
-      <!-- Detail panel -->
-      <div v-if="expanded[schedule.schedule_id]" class="schedule-detail">
-        <!-- Edit form -->
-        <div v-if="editing[schedule.schedule_id]" class="edit-form">
-          <div class="form-grid">
-            <div v-if="editData[schedule.schedule_id].frequency !== 'manual'" class="form-group">
-              <label>Time</label>
-              <input v-model="editData[schedule.schedule_id].time" type="time" />
-            </div>
-            <div v-if="editData[schedule.schedule_id].frequency !== 'manual'" class="form-group">
-              <label>Timezone</label>
-              <select v-model="editData[schedule.schedule_id].timezone">
-                <option value="Europe/Zurich">Europe/Zurich</option>
-                <option value="Europe/Rome">Europe/Rome</option>
-                <option value="UTC">UTC</option>
-                <option value="America/New_York">US East</option>
-                <option value="America/Los_Angeles">US West</option>
-                <option value="Asia/Tokyo">Tokyo</option>
-              </select>
+        <!-- Detail panel -->
+        <div v-if="expanded[schedule.schedule_id]" class="schedule-detail">
+          <!-- Edit form -->
+          <div v-if="editing[schedule.schedule_id]" class="edit-form">
+            <div class="form-grid">
+              <div v-if="editData[schedule.schedule_id].frequency !== 'manual'" class="form-group">
+                <label>Time</label>
+                <input v-model="editData[schedule.schedule_id].time" type="time" />
+              </div>
+              <div v-if="editData[schedule.schedule_id].frequency !== 'manual'" class="form-group">
+                <label>Timezone</label>
+                <select v-model="editData[schedule.schedule_id].timezone">
+                  <option value="Europe/Zurich">Europe/Zurich</option>
+                  <option value="Europe/Rome">Europe/Rome</option>
+                  <option value="UTC">UTC</option>
+                  <option value="America/New_York">US East</option>
+                  <option value="America/Los_Angeles">US West</option>
+                  <option value="Asia/Tokyo">Tokyo</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Deliver to</label>
+                <select v-model="editData[schedule.schedule_id].contextKey">
+                  <optgroup v-for="group in contextGroups" :key="group.label" :label="group.label">
+                    <option v-for="ctx in group.items" :key="ctx.key" :value="ctx.key">
+                      {{ ctx.label || ctx.key }}
+                    </option>
+                  </optgroup>
+                </select>
+              </div>
             </div>
             <div class="form-group">
-              <label>Deliver to</label>
-              <select v-model="editData[schedule.schedule_id].contextKey">
-                <optgroup v-for="group in contextGroups" :key="group.label" :label="group.label">
-                  <option v-for="ctx in group.items" :key="ctx.key" :value="ctx.key">
-                    {{ ctx.label || ctx.key }}
-                  </option>
-                </optgroup>
+              <label>Frequency</label>
+              <select v-model="editData[schedule.schedule_id].frequency">
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+                <option value="manual">Manual (run on click only)</option>
               </select>
             </div>
-          </div>
-          <div class="form-group">
-            <label>Frequency</label>
-            <select v-model="editData[schedule.schedule_id].frequency">
-              <option value="daily">Daily</option>
-              <option value="weekly">Weekly</option>
-              <option value="monthly">Monthly</option>
-              <option value="manual">Manual (run on click only)</option>
-            </select>
-          </div>
-          <div v-if="editData[schedule.schedule_id].frequency === 'weekly'" class="form-group">
-            <label>Days</label>
-            <div class="days-row">
-              <label v-for="d in allDays" :key="d" class="checkbox-pill" :class="{ active: editData[schedule.schedule_id].days_of_week.includes(d) }">
-                <input type="checkbox" :value="d" v-model="editData[schedule.schedule_id].days_of_week" hidden />
-                {{ d }}
-              </label>
+            <div v-if="editData[schedule.schedule_id].frequency === 'weekly'" class="form-group">
+              <label>Days</label>
+              <div class="days-row">
+                <label v-for="d in allDays" :key="d" class="checkbox-pill" :class="{ active: editData[schedule.schedule_id].days_of_week.includes(d) }">
+                  <input type="checkbox" :value="d" v-model="editData[schedule.schedule_id].days_of_week" hidden />
+                  {{ d }}
+                </label>
+              </div>
             </div>
-          </div>
-          <div v-if="editData[schedule.schedule_id].frequency === 'monthly'" class="form-group">
-            <label>Day of month</label>
-            <input v-model.number="editData[schedule.schedule_id].day_of_month" type="number" min="1" max="31" placeholder="1-31" />
-          </div>
+            <div v-if="editData[schedule.schedule_id].frequency === 'monthly'" class="form-group">
+              <label>Day of month</label>
+              <input v-model.number="editData[schedule.schedule_id].day_of_month" type="number" min="1" max="31" placeholder="1-31" />
+            </div>
             <div class="form-group">
               <label>Archive behavior</label>
               <select v-model="editData[schedule.schedule_id].archive_policy">
@@ -185,35 +185,78 @@
               </select>
             </div>
             <p class="hint">Auto runs a post-run classifier. If it finds proposals, decisions, warnings, or anything useful for the user to judge, the chat stays visible.</p>
-          <div class="form-group">
-            <label>Prompt</label>
-            <textarea v-model="editData[schedule.schedule_id].prompt" rows="4"></textarea>
+            <div class="form-group">
+              <label>Prompt</label>
+              <textarea v-model="editData[schedule.schedule_id].prompt" rows="4"></textarea>
+            </div>
+            <div class="form-actions">
+              <button class="btn-primary" @click="saveEdit(schedule.schedule_id)">Save</button>
+              <button class="btn-chip" @click="editing[schedule.schedule_id] = false">Cancel</button>
+            </div>
           </div>
-          <div class="form-actions">
-            <button class="btn-primary" @click="saveEdit(schedule.schedule_id)">Save</button>
-            <button class="btn-chip" @click="editing[schedule.schedule_id] = false">Cancel</button>
+
+          <!-- Read-only detail -->
+          <div v-else class="detail-body">
+            <p class="full-prompt">{{ schedule.prompt }}</p>
+            <div class="detail-meta">
+              <span>Last triggered: {{ schedule.last_triggered_on || 'never' }}</span>
+              <span>ID: {{ schedule.schedule_id }}</span>
+            </div>
+            <div class="detail-actions">
+              <button class="btn-primary" @click="runNow(schedule.schedule_id)">Run now</button>
+              <button class="btn-chip" @click="togglePause(schedule)">
+                {{ schedule.enabled === false ? 'Resume' : 'Pause' }}
+              </button>
+              <button class="btn-chip" @click="startEdit(schedule)">Edit</button>
+              <button class="btn-chip btn-danger" @click="confirmDelete(schedule.schedule_id)">Delete</button>
+            </div>
           </div>
         </div>
-
-        <!-- Read-only detail -->
-        <div v-else class="detail-body">
-          <p class="full-prompt">{{ schedule.prompt }}</p>
-          <div class="detail-meta">
-            <span>Last triggered: {{ schedule.last_triggered_on || 'never' }}</span>
-            <span>ID: {{ schedule.schedule_id }}</span>
-          </div>
-          <div class="detail-actions">
-            <button class="btn-primary" @click="runNow(schedule.schedule_id)">Run now</button>
-            <button class="btn-chip" @click="togglePause(schedule)">
-              {{ schedule.enabled === false ? 'Resume' : 'Pause' }}
-            </button>
-            <button class="btn-chip" @click="startEdit(schedule)">Edit</button>
-            <button class="btn-chip btn-danger" @click="confirmDelete(schedule.schedule_id)">Delete</button>
-          </div>
-        </div>
-
       </div>
-    </div>
+    </section>
+
+    <!-- System automations -->
+    <section v-if="systemAutomations.length" class="schedule-section">
+      <h3 class="section-heading">System Automations <span class="section-hint">built-in</span></h3>
+      <div v-for="schedule in systemAutomations" :key="schedule.schedule_id" class="schedule-card">
+        <!-- Summary (two rows) -->
+        <div class="schedule-summary" @click="toggle(schedule.schedule_id)">
+          <div class="summary-row-1">
+            <span class="schedule-time">{{ schedule.frequency === 'manual' ? 'Manual' : schedule.daily_time_utc }}</span>
+            <span v-if="schedule.enabled === false" class="badge badge--warning" style="font-size:var(--text-xs);padding:1px 6px;font-weight:500;">paused</span>
+            <span class="schedule-title">{{ schedule.title || promptTitle(schedule.prompt) }}</span>
+            <span class="expand-icon">{{ expanded[schedule.schedule_id] ? '\u25BC' : '\u25B6' }}</span>
+          </div>
+          <div class="summary-row-2">
+            <span v-if="schedule.frequency === 'manual'" class="schedule-days-label">run on click only</span>
+            <span v-else-if="schedule.frequency === 'monthly'" class="schedule-days-label">day {{ schedule.day_of_month }} of month</span>
+            <span v-else-if="schedule.frequency === 'weekly' && schedule.days_of_week?.length" class="schedule-days">
+              <span v-for="d in allDays" :key="d" class="badge badge--dot" :class="{ active: schedule.days_of_week.includes(d) }">{{ d }}</span>
+            </span>
+            <span v-else class="schedule-days-label">every day</span>
+            <span class="badge badge--muted">{{ archiveLabel(schedule.archive_policy) }}</span>
+            <span class="badge context-badge" :class="badgeVariant(schedule)">{{ contextLabel(schedule) }}</span>
+          </div>
+        </div>
+
+        <!-- Detail panel -->
+        <div v-if="expanded[schedule.schedule_id]" class="schedule-detail">
+          <!-- Read-only detail only (no edit form) -->
+          <div class="detail-body">
+            <p class="full-prompt">{{ schedule.prompt }}</p>
+            <div class="detail-meta">
+              <span>Last triggered: {{ schedule.last_triggered_on || 'never' }}</span>
+              <span>ID: {{ schedule.schedule_id }}</span>
+            </div>
+            <div class="detail-actions">
+              <button class="btn-primary" @click="runNow(schedule.schedule_id)">Run now</button>
+              <button class="btn-chip" @click="togglePause(schedule)">
+                {{ schedule.enabled === false ? 'Resume' : 'Pause' }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
     </section>
   </div>
 </template>
@@ -264,8 +307,11 @@ const oneOffSchedules = computed(() => {
       return ka.localeCompare(kb)
     })
 })
-const recurringSchedules = computed(() =>
-  store.schedules.filter(s => s.frequency !== 'once'),
+const userRoutines = computed(() =>
+  store.schedules.filter(s => s.frequency !== 'once' && s.scope !== 'system'),
+)
+const systemAutomations = computed(() =>
+  store.schedules.filter(s => s.frequency !== 'once' && s.scope === 'system'),
 )
 
 const contextGroups = computed(() => {

@@ -105,23 +105,14 @@ async def upgrade_project_deps(project_root: str) -> dict[str, tuple[str, str]]:
 
     before = await _get_versions()
 
-    # Upgrade project deps + explicit packages in parallel.
-    # starlette<1 is pinned alongside mcp to prevent mcp's transitive dep
-    # from pulling in the starlette 1.x breaking release.
-    # Include all tracked packages so they upgrade even when the installed
-    # version still satisfies pyproject.toml lower bounds.
-    editable, extras = await asyncio.gather(
-        asyncio.create_subprocess_exec(
-            sys.executable, "-m", "pip", "install", "--upgrade", "-e", f"{project_root}[test]",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        ),
-        asyncio.create_subprocess_exec(
-            sys.executable, "-m", "pip", "install", "--upgrade",
-            *tracked, "starlette<1",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        ),
+    # Install project dependencies in accordance with pyproject.toml pins.
+    # We do not use --upgrade or install untracked explicit packages,
+    # because they are strictly pinned in pyproject.toml now.
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "pip", "install", "-e", f"{project_root}[test,voice-local]",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
-    await asyncio.gather(editable.communicate(), extras.communicate())
+    await proc.communicate()
 
     after = await _get_versions()
 
@@ -196,16 +187,6 @@ async def upgrade_claude_code() -> UpgradeResult:
 
 
 
-# Pi extensions managed by Ciao. Each entry is a ``pi install`` spec
-# (``npm:<pkg>`` or ``git:<repo>``). Keep the list small so startup stays
-# fast; add packages here as they prove useful.
-PI_EXTENSIONS: tuple[str, ...] = (
-    "npm:pi-subagents",
-    "npm:@ollama/pi-web-search",
-    "npm:pi-codex-search",
-)
-
-
 async def upgrade_root_npm(project_root: str) -> UpgradeResult:
     """Update root npm packages via npm update."""
     if shutil.which("npm") is None:
@@ -234,26 +215,6 @@ async def upgrade_web_npm(project_root: str) -> UpgradeResult:
     return await run_upgrade(
         install_command=["npm", "update", "--prefix", web_dir, "--no-audit", "--no-fund"],
         version_command=["npm", "--version"],
-    )
-
-
-async def upgrade_pi() -> UpgradeResult:
-    """Install or upgrade the Pi coding-agent CLI via npm.
-
-    ``npm install -g`` is idempotent: it installs if missing, upgrades if
-    outdated, no-ops when current. Canonical install command from
-    https://docs.ollama.com/integrations/pi.
-    """
-    if shutil.which("npm") is None:
-        return UpgradeResult(
-            command=["npm", "install", "-g", "@earendil-works/pi-coding-agent"],
-            changed=False, success=False,
-            stdout="", stderr="npm not found",
-            before_version="", after_version="",
-        )
-    return await run_upgrade(
-        install_command=["npm", "install", "-g", "@earendil-works/pi-coding-agent"],
-        version_command=["pi", "--version"],
     )
 
 
@@ -308,54 +269,28 @@ async def upgrade_libreoffice() -> UpgradeResult:
     )
 
 
-async def upgrade_pi_extensions() -> list[UpgradeResult]:
-    """Install/upgrade each managed Pi extension in parallel.
-
-    Returns an empty list when ``pi`` isn't on PATH (the Pi binary install
-    is logged separately by ``upgrade_pi``).
-    """
-    if shutil.which("pi") is None:
-        return []
-    return list(await asyncio.gather(*[
-        run_upgrade(
-            install_command=["pi", "install", ext],
-            # Pi doesn't expose per-extension versions, so reuse the binary
-            # version command. ``changed`` will usually read False here even
-            # when an extension actually got updated; the success/stderr
-            # fields still surface install failures.
-            version_command=["pi", "--version"],
-        )
-        for ext in PI_EXTENSIONS
-    ]))
-
-
 async def upgrade_all(project_root: str) -> str | None:
     """Run all upgrades (pip deps + root npm + web npm + gws + defuddle
-    + claude + pi + pi extensions). Returns a summary or *None*."""
+    + claude). Returns a summary or *None*."""
     parts: list[str] = []
 
-    # All non-Pi upgrades in parallel.
+    # All upgrades in parallel.
     pip_task = asyncio.create_task(upgrade_project_deps(project_root))
     gws_task = asyncio.create_task(upgrade_gws())
     defuddle_task = asyncio.create_task(upgrade_defuddle())
     claude_task = asyncio.create_task(upgrade_claude_code())
-    pi_task = asyncio.create_task(upgrade_pi())
     root_npm_task = asyncio.create_task(upgrade_root_npm(project_root))
     web_npm_task = asyncio.create_task(upgrade_web_npm(project_root))
     apfel_task = asyncio.create_task(upgrade_apfel())
     libreoffice_task = asyncio.create_task(upgrade_libreoffice())
     (
         pip_changed, gws_result, defuddle_result,
-        claude_result, pi_result, root_npm_result, web_npm_result,
+        claude_result, root_npm_result, web_npm_result,
         apfel_result, libreoffice_result,
     ) = await asyncio.gather(
-        pip_task, gws_task, defuddle_task, claude_task, pi_task,
+        pip_task, gws_task, defuddle_task, claude_task,
         root_npm_task, web_npm_task, apfel_task, libreoffice_task,
     )
-
-    # Pi extensions wait for the binary install to land — they shell out
-    # through ``pi`` and would no-op if it isn't on PATH yet.
-    pi_ext_results = await upgrade_pi_extensions()
 
     # Failures get logged + surfaced in the summary even when nothing changed,
     # so silent EACCES (e.g. npm-global writes without a prior sudo seed) don't
@@ -364,7 +299,6 @@ async def upgrade_all(project_root: str) -> str | None:
         ("gws", gws_result),
         ("defuddle", defuddle_result),
         ("claude", claude_result),
-        ("pi", pi_result),
         ("root-npm", root_npm_result),
         ("web-npm", web_npm_result),
         ("apfel", apfel_result),
@@ -382,12 +316,6 @@ async def upgrade_all(project_root: str) -> str | None:
             logger.warning("%s upgrade failed: %s", name, tail)
             parts.append(f"{name}: install failed ({tail})")
 
-    for ext, result in zip(PI_EXTENSIONS, pi_ext_results, strict=False):
-        if not result.success:
-            tail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "error"
-            logger.warning("pi/%s upgrade failed: %s", ext, tail)
-            parts.append(f"pi/{ext}: install failed ({tail})")
-
     if not parts:
         logger.info("Upgrades: everything already up to date.")
         return None
@@ -398,7 +326,7 @@ async def upgrade_all(project_root: str) -> str | None:
 
 
 def install_custom_skills(cwd: str) -> int:
-    """Install and mirror Ciao skills through the packaged sync command.
+    """Install and mirror Ciaobot skills through the packaged sync command.
 
     Returns the number of skills installed.
     """
@@ -416,7 +344,7 @@ def update_skills(cwd: str) -> str | None:
     """Install the curated skill set from ``skills-lock.json`` + ``skills/``.
 
     The package command performs upstream refresh when possible, then mirrors
-    skills, commands, and agents into the Claude and Pi catalogs.
+    skills, commands, and agents into the Claude catalog.
     """
     n_custom = install_custom_skills(cwd)
     if n_custom:

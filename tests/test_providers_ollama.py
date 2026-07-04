@@ -21,28 +21,34 @@ from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
 
 
-def test_is_ollama_model_matches_allowlist() -> None:
-    settings = OllamaSettings(
+def test_is_ollama_model_matches_dynamic_shape() -> None:
+    # Cloud configured: any :tag/:cloud-shaped id routes dynamically.
+    cloud = OllamaSettings(
         models=("kimi-k2.7-code:cloud", "deepseek-v4-pro:cloud"),
-        base_url="http://localhost:11434",
+        base_url="https://ollama.com", api_key="sk-cloud",
     )
-    assert is_ollama_model("kimi-k2.7-code:cloud", settings)
-    assert is_ollama_model("deepseek-v4-pro:cloud", settings)
-    assert not is_ollama_model("opus", settings)
-    assert not is_ollama_model("sonnet", settings)
-    assert not is_ollama_model("", settings)
+    assert is_ollama_model("kimi-k2.7-code:cloud", cloud)
+    assert is_ollama_model("deepseek-v4-pro:cloud", cloud)
+    assert is_ollama_model("some-other:cloud", cloud)  # not in allowlist but shaped
+    assert not is_ollama_model("opus", cloud)
+    assert not is_ollama_model("anthropic/claude-haiku-4.5", cloud)  # OpenRouter shape
+    assert not is_ollama_model("", cloud)
+    # Local daemon only (no cloud key): only local_models route.
+    local = OllamaSettings(local_models=("gemma4:12b-it-qat",), base_url="http://localhost:11434")
+    assert is_ollama_model("gemma4:12b-it-qat", local)
+    assert not is_ollama_model("kimi-k2.7-code:cloud", local)
 
 
-def test_ollama_env_returns_three_overrides_for_allowlisted_model() -> None:
+def test_ollama_env_returns_three_overrides_for_cloud_model() -> None:
     settings = OllamaSettings(
         models=("kimi-k2.7-code:cloud",),
-        base_url="http://localhost:11434",
+        base_url="https://ollama.com", api_key="sk-cloud",
     )
     env = ollama_env_for_model("kimi-k2.7-code:cloud", settings)
     assert env == {
-        "ANTHROPIC_AUTH_TOKEN": "ollama",
+        "ANTHROPIC_AUTH_TOKEN": "sk-cloud",
         "ANTHROPIC_API_KEY": "",
-        "ANTHROPIC_BASE_URL": "http://localhost:11434",
+        "ANTHROPIC_BASE_URL": "https://ollama.com",
     }
 
 
@@ -76,14 +82,14 @@ def test_ollama_env_returns_empty_for_anthropic_model() -> None:
 def test_ollama_env_honours_custom_base_url() -> None:
     settings = OllamaSettings(
         models=("kimi-k2.7-code:cloud",),
-        base_url="http://ollama.internal:11434",
+        base_url="http://ollama.internal:11434", api_key="sk-cloud",
     )
     env = ollama_env_for_model("kimi-k2.7-code:cloud", settings)
     assert env["ANTHROPIC_BASE_URL"] == "http://ollama.internal:11434"
 
 
-def test_ollama_settings_disabled_when_no_models() -> None:
-    """An empty allowlist must short-circuit even if a base URL is set."""
+def test_ollama_settings_disabled_when_no_cloud_key() -> None:
+    """No cloud key and not a local model -> no routing, even with a base URL."""
     settings = OllamaSettings(models=(), base_url="http://localhost:11434")
     assert not is_ollama_model("kimi-k2.7-code:cloud", settings)
     assert ollama_env_for_model("kimi-k2.7-code:cloud", settings) == {}
@@ -151,7 +157,13 @@ def test_ciao_config_ollama_disabled_by_default(monkeypatch) -> None:
     assert config.ollama.models == ()
 
 
-def _make_manager(tmp_path: Path, ollama_models: tuple[str, ...] = ()) -> ProjectChatManager:
+def _make_manager(
+    tmp_path: Path,
+    ollama_models: tuple[str, ...] = (),
+    *,
+    ollama_api_key: str = "sk-cloud",
+    ollama_base_url: str = "https://ollama.com",
+) -> ProjectChatManager:
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     config = CiaoConfig(
@@ -159,7 +171,12 @@ def _make_manager(tmp_path: Path, ollama_models: tuple[str, ...] = ()) -> Projec
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
-        ollama=OllamaSettings(models=ollama_models, base_url="http://localhost:11434"),
+        ollama=OllamaSettings(
+            models=ollama_models, base_url=ollama_base_url, api_key=ollama_api_key,
+            haiku_model="deepseek-v4-flash:cloud",
+            sonnet_model="kimi-k2.7-code:cloud",
+            opus_model="minimax-m3:cloud",
+        ),
     )
     state = StateStore(config.state_path, tmp_path, config.media_root)
     transcripts = TranscriptStore(runtime, tmp_path / "transcripts")
@@ -178,9 +195,9 @@ def test_ollama_alias_uses_configured_tier_model(tmp_path: Path) -> None:
 
     assert pcm._runtime_model_for_chat(chat) == "minimax-m3:cloud"
     env = pcm._build_extra_env(chat)
-    assert env["ANTHROPIC_AUTH_TOKEN"] == "ollama"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-cloud"
     assert env["ANTHROPIC_API_KEY"] == ""
-    assert env["ANTHROPIC_BASE_URL"] == "http://localhost:11434"
+    assert env["ANTHROPIC_BASE_URL"] == "https://ollama.com"
 
 
 def test_build_extra_env_injects_ollama_overrides_for_allowlisted_chat(tmp_path: Path) -> None:
@@ -190,9 +207,9 @@ def test_build_extra_env_injects_ollama_overrides_for_allowlisted_chat(tmp_path:
     chat.model = "kimi-k2.7-code:cloud"
 
     env = pcm._build_extra_env(chat)
-    assert env["ANTHROPIC_AUTH_TOKEN"] == "ollama"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-cloud"
     assert env["ANTHROPIC_API_KEY"] == ""
-    assert env["ANTHROPIC_BASE_URL"] == "http://localhost:11434"
+    assert env["ANTHROPIC_BASE_URL"] == "https://ollama.com"
     # Existing GWS_PROFILE wiring must be preserved.
     assert env["GWS_PROFILE"] == "personal"
 
@@ -202,6 +219,7 @@ def test_build_extra_env_leaves_anthropic_chat_alone(tmp_path: Path) -> None:
     project = pcm.create_project("anthropic-test", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="anthropic-chat")
     chat.model = "opus"
+    chat.model_bucket = "work"  # pin Anthropic; personal would resolve to Ollama
 
     env = pcm._build_extra_env(chat)
     assert "ANTHROPIC_AUTH_TOKEN" not in env
@@ -243,8 +261,8 @@ async def test_auto_title_uses_dedicated_ollama_title_model(
     # Dedicated cheap title model, not the chat's own (potentially gated) one.
     assert captured["model"] == "ministral-3:3b"
     assert captured["env"] is not None
-    assert captured["env"]["ANTHROPIC_BASE_URL"] == "http://localhost:11434"
-    assert captured["env"]["ANTHROPIC_AUTH_TOKEN"] == "ollama"
+    assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://ollama.com"
+    assert captured["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-cloud"
 
 
 def test_create_chat_uses_personal_workspace_default(
@@ -414,26 +432,59 @@ def test_personal_workspace_denies_claude_ai_mcps_by_default(monkeypatch) -> Non
     assert config.disallowed_tools_for_workspace("work") == []
 
 
-def test_disallowed_tools_env_override(monkeypatch) -> None:
-    """Operator can shrink or expand the denylist via env vars."""
+def test_disallowed_tools_env_override_unions_with_toggle(monkeypatch) -> None:
+    """CIAO_DISALLOWED_TOOLS_* sets the extra denylist. It unions with the
+    claude.ai connector set when the toggle is off (the personal default), and
+    stands alone when the toggle is on (the work default)."""
     monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
     monkeypatch.setenv("CIAO_DISALLOWED_TOOLS_PERSONAL", "Bash,mcp__custom_tool")
     monkeypatch.setenv("CIAO_DISALLOWED_TOOLS_WORK", "mcp__claude_ai_Sentry")
     config = CiaoConfig.from_env()
-    assert config.disallowed_tools_for_workspace("personal") == ["Bash", "mcp__custom_tool"]
+    personal = config.disallowed_tools_for_workspace("personal")
+    # Toggle defaults off for personal → connectors blocked, plus the extras.
+    assert "mcp__claude_ai_Airtable" in personal
+    assert "Bash" in personal
+    assert "mcp__custom_tool" in personal
+    # Work toggle defaults on → only the extra is blocked.
     assert config.disallowed_tools_for_workspace("work") == ["mcp__claude_ai_Sentry"]
 
 
+def test_claude_ai_mcps_toggle_env_override(monkeypatch) -> None:
+    """CIAO_CLAUDE_AI_MCPS_* controls the connector set independently of extras."""
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    # Flip personal on → connectors allowed, only the n8n extra stays.
+    monkeypatch.setenv("CIAO_CLAUDE_AI_MCPS_PERSONAL", "true")
+    config = CiaoConfig.from_env()
+    assert config.disallowed_tools_for_workspace("personal") == ["mcp__n8n_mcp"]
+    assert config.claude_ai_mcps_for_workspace("personal") is True
+    # Flip work off → connectors blocked on top of any extras.
+    monkeypatch.setenv("CIAO_CLAUDE_AI_MCPS_WORK", "false")
+    monkeypatch.setenv("CIAO_DISALLOWED_TOOLS_WORK", "")
+    config = CiaoConfig.from_env()
+    work = config.disallowed_tools_for_workspace("work")
+    assert "mcp__claude_ai_Airtable" in work
+    assert config.claude_ai_mcps_for_workspace("work") is False
+
+
 def test_disallowed_tools_personal_can_be_disabled(monkeypatch) -> None:
-    """Empty CIAO_DISALLOWED_TOOLS_PERSONAL clears the default denylist."""
+    """Fully clearing the personal denylist needs the toggle on AND extras
+    cleared. An empty CIAO_DISALLOWED_TOOLS_PERSONAL still applies defaults
+    (unset == empty); the literal ``none`` clears the extras only."""
     monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
     monkeypatch.setenv("CIAO_DISALLOWED_TOOLS_PERSONAL", "")
     config = CiaoConfig.from_env()
     # Empty string still applies the defaults (since unset == empty).
-    # To explicitly disable defaults, the operator sets the literal "none".
     assert "mcp__claude_ai_Airtable" in config.disallowed_tools_for_workspace("personal")
 
+    # "none" clears the extras, but the toggle default (off) still blocks
+    # the connectors.
     monkeypatch.setenv("CIAO_DISALLOWED_TOOLS_PERSONAL", "none")
+    config = CiaoConfig.from_env()
+    assert "mcp__claude_ai_Airtable" in config.disallowed_tools_for_workspace("personal")
+    assert "mcp__n8n_mcp" not in config.disallowed_tools_for_workspace("personal")
+
+    # Flip the toggle on too → fully empty denylist.
+    monkeypatch.setenv("CIAO_CLAUDE_AI_MCPS_PERSONAL", "true")
     config = CiaoConfig.from_env()
     assert config.disallowed_tools_for_workspace("personal") == []
 
@@ -468,6 +519,7 @@ def test_effective_mode_leaves_anthropic_auto_untouched(tmp_path: Path) -> None:
     project = pcm.create_project("anthropic-auto", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="t")
     chat.model = "opus"
+    chat.model_bucket = "work"  # pin Anthropic
     chat.mode = "auto"
 
     assert pcm._effective_mode_for_chat(chat) == "auto"
@@ -581,6 +633,7 @@ def test_update_chat_rejects_cross_provider_switch_with_history(
     pcm = _make_manager(tmp_path, ollama_models=("kimi-k2.7-code:cloud",))
     project = pcm.create_project("cross-provider", workspace="personal")
     chat = pcm.create_chat(project.project_id, model="opus")
+    chat.model_bucket = "work"  # opus = Anthropic; kimi = Ollama -> cross-provider
     # Simulate a chat that has had a turn (history exists on disk).
     chat.user_turn_count = 1
     chat.session_id = "sess-existing"
@@ -601,6 +654,7 @@ def test_update_chat_rejects_ollama_to_anthropic_with_history(
     pcm = _make_manager(tmp_path, ollama_models=("kimi-k2.7-code:cloud",))
     project = pcm.create_project("reverse", workspace="personal")
     chat = pcm.create_chat(project.project_id, model="kimi-k2.7-code:cloud")
+    chat.model_bucket = "work"  # target opus = Anthropic; kimi = Ollama
     chat.user_turn_count = 3
 
     try:
@@ -739,8 +793,8 @@ async def test_auto_title_routes_anthropic_chats_through_ollama_when_enabled(
     await pcm.auto_title_if_default(chat.chat_id, "hello", "hi")
     assert captured["model"] == "ministral-3:3b"  # Ollama default title model
     assert captured["env"] is not None
-    assert captured["env"]["ANTHROPIC_BASE_URL"] == "http://localhost:11434"
-    assert captured["env"]["ANTHROPIC_AUTH_TOKEN"] == "ollama"
+    assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://ollama.com"
+    assert captured["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-cloud"
 
 
 async def test_auto_title_falls_back_to_haiku_when_ollama_disabled(
@@ -750,7 +804,7 @@ async def test_auto_title_falls_back_to_haiku_when_ollama_disabled(
     Haiku-via-subscription path so the feature still works out of the
     box on a fresh install with only Anthropic configured.
     """
-    pcm = _make_manager(tmp_path, ollama_models=())  # Ollama disabled
+    pcm = _make_manager(tmp_path, ollama_models=(), ollama_api_key="", ollama_base_url="http://localhost:11434")  # Ollama disabled
     project = pcm.create_project("anthropic-only", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="New Chat")
     chat.model = "opus"
@@ -800,70 +854,16 @@ async def test_auto_title_works_with_user_text_only(
     assert captured["assistant"] == ""
 
 
-async def test_auto_title_uses_pi_when_pi_on_path(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """When `pi` is on PATH and Pi is configured, the title call goes via
-    run_pi_oneshot (no claude_agent_sdk import)."""
+async def test_auto_title_uses_claude_sdk(tmp_path: Path, monkeypatch) -> None:
+    """The title call uses the Claude SDK path (the only path now)."""
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda cmd: None)
+
     pcm = _make_manager(tmp_path, ollama_models=("kimi-k2.7-code:cloud",))
-    project = pcm.create_project("pi-title", workspace="personal")
+    project = pcm.create_project("title", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="New Chat")
     chat.model = "kimi-k2.7-code:cloud"
 
-    monkeypatch.setattr(
-        "ciao.web.project_chats.shutil.which",
-        lambda name: "/usr/bin/pi" if name == "pi" else None,
-        raising=False,
-    )
-
-    captured: dict = {}
-
-    async def fake_oneshot(prompt, *, system_prompt, model, settings, cwd=None, env=None, timeout_s=60.0):
-        captured["prompt"] = prompt
-        captured["model"] = model
-        captured["settings"] = settings
-        captured["timeout_s"] = timeout_s
-        return "Pi titled chat"
-
-    monkeypatch.setattr(
-        "ciao.providers.pi.run_pi_oneshot", fake_oneshot
-    )
-
-    # Force Claude SDK path to error if it gets called — proves we never
-    # fell through.
-    def _explode(*args, **kwargs):
-        raise AssertionError("claude_agent_sdk.query should not be reached")
-    monkeypatch.setattr("claude_agent_sdk.query", _explode, raising=False)
-
-    new_title = await pcm.auto_title_if_default(chat.chat_id, "user prompt about weather")
-    assert new_title == "Pi titled chat"
-    assert captured["model"] == "ministral-3:3b"
-    assert captured["timeout_s"] == 15.0
-    assert "user prompt about weather" in captured["prompt"]
-
-
-async def test_auto_title_falls_back_to_claude_sdk_when_pi_missing(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """When `pi` isn't on PATH, the title call uses the Claude SDK path."""
-    pcm = _make_manager(tmp_path, ollama_models=("kimi-k2.7-code:cloud",))
-    project = pcm.create_project("no-pi", workspace="personal")
-    chat = pcm.create_chat(project.project_id, title="New Chat")
-    chat.model = "kimi-k2.7-code:cloud"
-
-    monkeypatch.setattr(
-        "ciao.web.project_chats.shutil.which", lambda name: None, raising=False
-    )
-
-    pi_calls: list = []
-
-    async def fake_oneshot(*args, **kwargs):
-        pi_calls.append(kwargs)
-        return "SHOULD NOT BE USED"
-
-    monkeypatch.setattr("ciao.providers.pi.run_pi_oneshot", fake_oneshot)
-
-    # Stub claude_agent_sdk.query to emit one assistant text block.
     from dataclasses import dataclass as _dc
 
     @_dc
@@ -877,11 +877,14 @@ async def test_auto_title_falls_back_to_claude_sdk_when_pi_missing(
     async def fake_query(prompt, options):
         yield _AsstMsg(content=[_Block(text="SDK titled chat")])
 
+    import ciao.providers.oneshot as _oneshot
     import claude_agent_sdk as _sdk
-    monkeypatch.setattr(_sdk, "query", fake_query, raising=True)
-    monkeypatch.setattr(_sdk, "AssistantMessage", _AsstMsg, raising=True)
-    monkeypatch.setattr(_sdk, "TextBlock", _Block, raising=True)
+    monkeypatch.setattr(_oneshot, "query", fake_query, raising=True)
+    monkeypatch.setattr(_oneshot, "AssistantMessage", _AsstMsg, raising=True)
+    monkeypatch.setattr(_oneshot, "TextBlock", _Block, raising=True)
+    monkeypatch.setattr(_sdk, "query", fake_query, raising=False)
+    monkeypatch.setattr(_sdk, "AssistantMessage", _AsstMsg, raising=False)
+    monkeypatch.setattr(_sdk, "TextBlock", _Block, raising=False)
 
     new_title = await pcm.auto_title_if_default(chat.chat_id, "user prompt")
     assert new_title == "SDK titled chat"
-    assert pi_calls == []

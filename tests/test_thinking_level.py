@@ -9,7 +9,6 @@ import pytest
 
 from ciao.config import CiaoConfig
 from ciao.models import THINKING_LEVELS
-from ciao.providers.pi import PiProvider, PiSettings
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
@@ -23,7 +22,6 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
-        pi=PiSettings(models=("qwen3-coder",)),
     )
     state = StateStore(config.state_path, tmp_path, config.media_root)
     transcripts = TranscriptStore(runtime, tmp_path / "transcripts")
@@ -57,9 +55,8 @@ def test_update_chat_rejects_unknown_thinking_level(tmp_path: Path) -> None:
     project = pcm.create_project("thinking", workspace="personal")
     chat = pcm.create_chat(project.project_id, model="opus", provider="claude")
 
-    # "off" is a Pi level, not a Claude one.
     with pytest.raises(ValueError, match="Unknown thinking level"):
-        pcm.update_chat(chat.chat_id, thinking_level="off")
+        pcm.update_chat(chat.chat_id, thinking_level="bogus")
 
 
 def test_update_chat_empty_thinking_level_resets_to_default(tmp_path: Path) -> None:
@@ -98,7 +95,7 @@ def test_handover_resets_thinking_level(tmp_path: Path) -> None:
     pcm._save()
 
     updated = pcm.handover_chat(
-        chat.chat_id, provider="pi", model="qwen3-coder", messages=[]
+        chat.chat_id, provider="claude", model="sonnet", messages=[]
     )
     assert updated is not None
     assert updated.thinking_level == ""
@@ -108,7 +105,7 @@ def test_stale_thinking_level_falls_back_to_default(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("thinking", workspace="personal")
     chat = pcm.create_chat(project.project_id, model="opus", provider="claude")
-    # Simulate stale persisted data: a Pi-only level on a Claude chat.
+    # Simulate stale persisted data: an unknown level on a Claude chat.
     chat.thinking_level = "off"
     assert pcm._thinking_level_for_chat(chat) == ""
     chat.thinking_level = "high"
@@ -116,21 +113,6 @@ def test_stale_thinking_level_falls_back_to_default(tmp_path: Path) -> None:
 
 
 # ── provider command construction ────────────────────────────────────────
-
-def test_pi_args_include_thinking_when_set(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("CIAO_PI_SESSION_DIR", str(tmp_path / "pi-sessions"))
-    provider = PiProvider(tmp_path, config=PiSettings(models=("qwen3-coder",)))
-    args = provider._build_pi_args("qwen3-coder", "chat-1", "xhigh")
-    idx = args.index("--thinking")
-    assert args[idx + 1] == "xhigh"
-
-
-def test_pi_args_omit_thinking_by_default(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("CIAO_PI_SESSION_DIR", str(tmp_path / "pi-sessions"))
-    provider = PiProvider(tmp_path, config=PiSettings(models=("qwen3-coder",)))
-    args = provider._build_pi_args("qwen3-coder", "chat-1")
-    assert "--thinking" not in args
-
 
 def test_claude_levels_match_sdk_effort_literal() -> None:
     # Guard against SDK upgrades renaming/narrowing the effort values we
@@ -168,4 +150,3 @@ def test_list_models_exposes_thinking_levels(monkeypatch) -> None:
 
     data = json.loads(asyncio.run(list_models(request)).body)
     assert data["thinking_levels"]["claude"] == list(THINKING_LEVELS["claude"])
-    assert data["thinking_levels"]["pi"] == list(THINKING_LEVELS["pi"])

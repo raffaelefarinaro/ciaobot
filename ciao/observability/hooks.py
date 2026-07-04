@@ -9,7 +9,7 @@ Two hooks are wired today:
       the user having to restate them.
    b. Vault entity tags: whole-word matches against memory-vault/INDEX.md
       get surfaced as ``- [[People/Name]] (person)`` bullets so the model
-      can load the right note without guessing who "Emma" or "Ciao-
+      can load the right note without guessing who "Emma" or "Ciaobot-
       Improvements" refers to.
 2. ``PostToolUse`` on the ``WebSearch`` tool backfills results on
    Ollama-cloud-routed chats, where the Anthropic-compat layer doesn't
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 def _legacy_workspace_context(raw: str | None) -> str:
     """Return old-style logical workspace values carried in CIAO_WORKSPACE.
 
-    Historically Ciao used ``CIAO_WORKSPACE=personal|work`` in provider env.
+    Historically Ciaobot used ``CIAO_WORKSPACE=personal|work`` in provider env.
     Public setup needs ``CIAO_WORKSPACE`` to be a filesystem path, so only
     preserve the two legacy context values here.
     """

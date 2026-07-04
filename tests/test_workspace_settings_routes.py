@@ -68,8 +68,8 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         json={
             "name": "client-a",
             "vault_root": "vaults/client-a",
-            "default_provider": "pi",
-            "default_model": "openai-codex/gpt-5.5",
+            "default_provider": "claude",
+            "default_model": "kimi-k2.7-code:cloud",
             "gws_profile": "work",
             "model_bucket": "anthropic",
             "disallowed_tools": ["mcp__claude_ai_Slack", "Bash"],
@@ -80,22 +80,24 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
     data = resp.json()
     names = [workspace["name"] for workspace in data["workspaces"]]
     assert "client-a" in names
-    assert config.workspace("client-a").default_provider == "pi"
-    assert config.default_model_for_workspace("client-a") == "openai-codex/gpt-5.5"
+    assert config.workspace("client-a").default_provider == "claude"
+    assert config.default_model_for_workspace("client-a") == "kimi-k2.7-code:cloud"
     assert config.disallowed_tools_for_workspace("client-a") == [
         "mcp__claude_ai_Slack",
         "Bash",
     ]
     assert pcm.refresh_count == 1
+    assert data["provider_options"] == [{"value": "claude", "label": "Claude"}]
 
     stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
     client_workspace = next(item for item in stored if item["name"] == "client-a")
     assert client_workspace == {
         "name": "client-a",
         "vault_root": "vaults/client-a",
-        "default_provider": "pi",
-        "default_model": "openai-codex/gpt-5.5",
+        "default_provider": "claude",
+        "default_model": "kimi-k2.7-code:cloud",
         "disallowed_tools": ["mcp__claude_ai_Slack", "Bash"],
+        "claude_ai_mcps": None,
         "gws_profile": "work",
         "model_bucket": "anthropic",
     }
@@ -126,6 +128,7 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "default_provider": "claude",
             "default_model": "",
             "disallowed_tools": None,
+            "claude_ai_mcps": None,
             "gws_profile": "personal",
             "model_bucket": "personal",
         },
@@ -135,6 +138,7 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "default_provider": "claude",
             "default_model": "",
             "disallowed_tools": None,
+            "claude_ai_mcps": None,
             "gws_profile": "work",
             "model_bucket": "work",
         },
@@ -155,6 +159,72 @@ def test_workspace_validation_rejects_bad_name_and_provider(tmp_path):
     )
     assert bad_provider.status_code == 400
     assert "provider" in bad_provider.json()["error"]
+
+
+def test_workspace_provider_options_follow_available_backends(tmp_path):
+    client, _config, _pcm = _client(
+        tmp_path,
+        {
+            "CIAO_OLLAMA_API_KEY": "sk-ollama",
+            "OPENROUTER_API_KEY": "sk-or",
+        },
+    )
+
+    data = client.get("/api/workspaces").json()
+    assert data["provider_options"] == [
+        {"value": "claude", "label": "Claude"},
+        {"value": "ollama", "label": "Ollama"},
+        {"value": "openrouter", "label": "OpenRouter"},
+    ]
+
+    resp = client.post(
+        "/api/workspaces",
+        json={"name": "client-a", "default_provider": "openrouter"},
+    )
+    assert resp.status_code == 201
+    assert resp.json()["workspaces"][-1]["default_provider"] == "openrouter"
+
+
+def test_claude_ai_mcps_toggle_persists_and_resolves(tmp_path):
+    """The claude.ai MCPs toggle is persisted on the workspace and drives the
+    connector portion of the effective denylist (union with extras)."""
+    client, config, _pcm = _client(tmp_path)
+
+    # Personal default: toggle off → connectors blocked, n8n extra blocked.
+    personal = config.disallowed_tools_for_workspace("personal")
+    assert "mcp__claude_ai_Airtable" in personal
+    assert "mcp__n8n_mcp" in personal
+
+    # Flip the personal toggle on via PATCH; keep n8n as an explicit extra.
+    resp = client.patch(
+        "/api/workspaces/personal",
+        json={"claude_ai_mcps": True, "disallowed_tools": "mcp__n8n_mcp"},
+    )
+    assert resp.status_code == 200
+    ws = next(w for w in resp.json()["workspaces"] if w["name"] == "personal")
+    assert ws["claude_ai_mcps"] is True
+    # Connectors now allowed; only the n8n extra remains.
+    assert config.disallowed_tools_for_workspace("personal") == ["mcp__n8n_mcp"]
+    assert config.claude_ai_mcps_for_workspace("personal") is True
+
+    # Persisted to disk.
+    stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
+    personal_stored = next(w for w in stored if w["name"] == "personal")
+    assert personal_stored["claude_ai_mcps"] is True
+    assert personal_stored["disallowed_tools"] == ["mcp__n8n_mcp"]
+
+    # "default" string clears the toggle back to the per-workspace default.
+    resp = client.patch(
+        "/api/workspaces/personal",
+        json={"claude_ai_mcps": "default"},
+    )
+    assert resp.status_code == 200
+    assert config.claude_ai_mcps_for_workspace("personal") is False
+    assert "mcp__claude_ai_Airtable" in config.disallowed_tools_for_workspace("personal")
+
+    # The payload advertises the connector set for the PWA label.
+    payload = client.get("/api/workspaces").json()
+    assert "mcp__claude_ai_Airtable" in payload["claude_ai_connectors"]
 
 
 def test_provider_config_status_and_write_only_patch(tmp_path):
@@ -207,4 +277,3 @@ def test_provider_config_status_and_write_only_patch(tmp_path):
     assert "CIAO_AUTO_UPDATE_GITHUB_SKILLS=false" in env_text
     assert "sk-ollama" not in json.dumps(resp.json())
     assert resp.json()["auto_update_github_skills"] is False
-

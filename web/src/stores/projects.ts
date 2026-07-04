@@ -14,6 +14,8 @@ import type {
   PendingPermission,
   WorkspaceInfo,
   WorkspaceName,
+  WorkspaceProviderOption,
+  WorkspacesResponse,
 } from '../lib/types'
 
 export function shouldReconnectActiveChatOnStreamingStarted(
@@ -29,6 +31,12 @@ export const useProjectStore = defineStore('projects', () => {
   const projects = ref<ProjectInfo[]>([])
   const chats = ref<ChatInfo[]>([])
   const workspaces = ref<WorkspaceInfo[]>([])
+  const workspaceProviderOptions = ref<WorkspaceProviderOption[]>([
+    { value: 'claude', label: 'Claude' },
+  ])
+  // claude.ai connector MCP names the per-workspace toggle controls, for the
+  // PWA Settings label. Populated from /api/workspaces; stable across writes.
+  const workspaceClaudeAiConnectors = ref<string[]>([])
   const activeWorkspace = ref<WorkspaceName>('personal')
   const activeChatId = ref<string | null>(null)
   const messages = ref<Record<string, ChatMessage[]>>({})
@@ -645,11 +653,15 @@ export const useProjectStore = defineStore('projects', () => {
     restoreState()
     restoreUnread()
     const [workspaceResponse, p, c] = await Promise.all([
-      api.get<{ workspaces: WorkspaceInfo[]; active: WorkspaceName | null }>('/api/workspaces'),
+      api.get<WorkspacesResponse>('/api/workspaces'),
       api.get<ProjectInfo[]>('/api/projects'),
       api.get<ChatInfo[]>('/api/chats'),
     ])
     workspaces.value = workspaceResponse.workspaces || []
+    workspaceProviderOptions.value = workspaceResponse.provider_options?.length
+      ? workspaceResponse.provider_options
+      : [{ value: 'claude', label: 'Claude' }]
+    workspaceClaudeAiConnectors.value = workspaceResponse.claude_ai_connectors || []
     projects.value = p
     chats.value = c
     const knownWorkspaceNames = workspaceOptions.value.map(w => w.name)
@@ -724,7 +736,7 @@ export const useProjectStore = defineStore('projects', () => {
         0,
       ),
       (total) => {
-        document.title = total > 0 ? `(${total}) Ciao` : 'Ciao'
+        document.title = total > 0 ? `(${total}) Ciaobot` : 'Ciaobot'
       },
       { immediate: true }
     )
@@ -812,8 +824,11 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Workspace actions ────────────────────────────────────────────────
   async function fetchWorkspaces() {
-    const res = await api.get<{ workspaces: WorkspaceInfo[]; active: WorkspaceName | null }>('/api/workspaces')
+    const res = await api.get<WorkspacesResponse>('/api/workspaces')
     workspaces.value = res.workspaces || []
+    workspaceProviderOptions.value = res.provider_options?.length
+      ? res.provider_options
+      : [{ value: 'claude', label: 'Claude' }]
     const names = workspaces.value.map(w => w.name)
     if (activeWorkspace.value && !names.includes(activeWorkspace.value)) {
       activeWorkspace.value = res.active || names[0] || 'personal'
@@ -822,14 +837,20 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   async function createWorkspace(payload: Partial<WorkspaceInfo> & { name: string }) {
-    const res = await api.post<{ workspaces: WorkspaceInfo[]; active: WorkspaceName | null }>('/api/workspaces', payload)
+    const res = await api.post<WorkspacesResponse>('/api/workspaces', payload)
     workspaces.value = res.workspaces || []
+    workspaceProviderOptions.value = res.provider_options?.length
+      ? res.provider_options
+      : [{ value: 'claude', label: 'Claude' }]
     return res
   }
 
   async function updateWorkspace(name: WorkspaceName, payload: Partial<WorkspaceInfo>) {
-    const res = await api.patch<{ workspaces: WorkspaceInfo[]; active: WorkspaceName | null }>(`/api/workspaces/${encodeURIComponent(name)}`, payload)
+    const res = await api.patch<WorkspacesResponse>(`/api/workspaces/${encodeURIComponent(name)}`, payload)
     workspaces.value = res.workspaces || []
+    workspaceProviderOptions.value = res.provider_options?.length
+      ? res.provider_options
+      : [{ value: 'claude', label: 'Claude' }]
     if (activeWorkspace.value && !workspaces.value.some(w => w.name === activeWorkspace.value)) {
       activeWorkspace.value = res.active || workspaces.value[0]?.name || 'personal'
     }
@@ -837,8 +858,11 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   async function deleteWorkspace(name: WorkspaceName) {
-    const res = await api.del<{ workspaces: WorkspaceInfo[]; active: WorkspaceName | null }>(`/api/workspaces/${encodeURIComponent(name)}`)
+    const res = await api.del<WorkspacesResponse>(`/api/workspaces/${encodeURIComponent(name)}`)
     workspaces.value = res.workspaces || []
+    workspaceProviderOptions.value = res.provider_options?.length
+      ? res.provider_options
+      : [{ value: 'claude', label: 'Claude' }]
     if (activeWorkspace.value === name) {
       activeWorkspace.value = res.active || workspaces.value[0]?.name || 'personal'
     }
@@ -940,7 +964,7 @@ export const useProjectStore = defineStore('projects', () => {
     updates: {
       model?: string
       mode?: string
-      provider?: 'claude' | 'pi'
+      provider?: 'claude'
       thinking_level?: string
       model_bucket?: string
     },
@@ -952,7 +976,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   async function handoverChat(
     chatId: string,
-    updates: { model: string; provider: 'claude' | 'pi'; model_bucket?: string },
+    updates: { model: string; provider: 'claude'; model_bucket?: string },
   ) {
     const visibleMessages = normalizeMessages(messages.value[chatId] || [])
     const c = await api.post<ChatInfo>(`/api/chats/${chatId}/handover`, {
@@ -1403,7 +1427,7 @@ export const useProjectStore = defineStore('projects', () => {
           if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
             pushToast({
               chat_id: msg.chat_id,
-              title: msg.title || 'Ciao',
+              title: msg.title || 'Ciaobot',
               body: msg.snippet || 'New message',
             })
           }
@@ -2154,7 +2178,7 @@ export const useProjectStore = defineStore('projects', () => {
               const first = qs[0]
               pushToast({
                 chat_id: chatId,
-                title: 'Ciao has a question',
+                title: 'Ciaobot has a question',
                 body: first?.question || first?.header || 'The model needs your input',
               })
             }
@@ -2391,7 +2415,7 @@ export const useProjectStore = defineStore('projects', () => {
         if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
           pushToast({
             chat_id: chatId,
-            title: 'Ciao needs approval',
+            title: 'Ciaobot needs approval',
             body: `${event.tool_name}: ${event.message}`,
           })
         }
@@ -2426,7 +2450,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   return {
     // State
-    projects, chats, workspaces, activeWorkspace, activeChatId, messages, subagents, unread,
+    projects, chats, workspaces, workspaceProviderOptions, workspaceClaudeAiConnectors, activeWorkspace, activeChatId, messages, subagents, unread,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
     projectStreaming, toasts, pendingPermissions, activeQuestions, creatingChatProjectIds,
     // Computed

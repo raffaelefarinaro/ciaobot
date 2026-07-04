@@ -2,7 +2,7 @@
   <div class="startup-overlay">
     <div class="startup-content">
       <div class="startup-head">
-        <span class="wordmark wordmark--lg">ciao</span>
+        <span class="wordmark wordmark--lg">ciaobot</span>
         <span class="startup-version">boot · v0.1</span>
       </div>
 
@@ -31,7 +31,7 @@
       <!-- Footer: blinking cursor while booting, ready line when done -->
       <div class="startup-foot">
         <template v-if="overallReady">
-          <span class="startup-ready">[ok] ciao is online.</span>
+          <span class="startup-ready">[ok] ciaobot is online.</span>
         </template>
         <template v-else>
           <span class="startup-prompt">$</span>
@@ -84,7 +84,6 @@ function phaseLabel(name: string): string {
     refresh_vault_index: 'refresh_vault_index',
     rebuild_pwa: 'rebuild_pwa',
     update_skills: 'update_skills',
-    upgrade_all: 'upgrade_all',
     server_starting: 'server_starting',
   }
   return labels[name] || name

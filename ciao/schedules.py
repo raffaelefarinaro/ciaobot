@@ -234,6 +234,10 @@ class ScheduleEntry:
     workspace: str = ""
     enabled: bool = True                 # False = paused, won't auto-fire but manual dispatch still works
     archive_policy: str = "manual"      # manual | auto
+    title: str = ""
+    scope: str = "user"
+    editable: bool = True
+    removable: bool = True
 
 
 class ScheduleStore:

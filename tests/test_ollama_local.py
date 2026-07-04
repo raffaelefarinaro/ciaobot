@@ -1,4 +1,4 @@
-"""Tests for local Ollama daemon support: routing, discovery, Pi dispatch."""
+"""Tests for local Ollama daemon support: routing, discovery, refresh."""
 
 from __future__ import annotations
 
@@ -11,11 +11,6 @@ from ciao.providers.ollama import (
     is_ollama_model,
     ollama_env_for_model,
     routine_env_for_model,
-)
-from ciao.providers.pi import (
-    PiSettings,
-    _resolve_provider_and_model,
-    ensure_models_json,
 )
 
 CLOUD = OllamaSettings(
@@ -110,8 +105,8 @@ def test_discover_local_models_unreachable(monkeypatch):
     assert discover_local_models("http://localhost:11434") == ()
 
 
-def test_refresh_local_ollama_models_merges_and_syncs(tmp_path, monkeypatch):
-    """Live re-discovery merges new daemon models into pickers and Pi."""
+def test_refresh_local_ollama_models_merges(tmp_path, monkeypatch):
+    """Live re-discovery merges new daemon models into the picker."""
     from ciao.config import CiaoConfig, refresh_local_ollama_models
 
     config = CiaoConfig.from_env(
@@ -127,19 +122,12 @@ def test_refresh_local_ollama_models_merges_and_syncs(tmp_path, monkeypatch):
         "ciao.providers.ollama.discover_local_models",
         lambda url, timeout_s=2.0: ("gemma4:4b", "kimi-k2.7-code:cloud"),
     )
-    written = {}
-    monkeypatch.setattr(
-        "ciao.providers.pi.ensure_models_json",
-        lambda *a, **kw: written.update(kw) or (tmp_path / "models.json"),
-    )
 
     assert refresh_local_ollama_models(config) is True
     # Cloud-allowlisted id keeps cloud routing; only the new local id lands.
     assert config.ollama.local_models == ("gemma4:4b",)
-    assert config.pi.local_models == ("gemma4:4b",)
     assert "gemma4:4b" in config.claude_models
-    assert written["local_models"] == ("gemma4:4b",)
-    # Second run: nothing new, no rewrite.
+    # Second run: nothing new.
     assert refresh_local_ollama_models(config) is False
 
 
@@ -160,60 +148,6 @@ def test_refresh_local_ollama_models_respects_disable(tmp_path, monkeypatch):
 
     monkeypatch.setattr("ciao.providers.ollama.discover_local_models", boom)
     assert refresh_local_ollama_models(config) is False
-
-
-# ── Pi dispatch ──────────────────────────────────────────────────────────
-
-
-def test_pi_resolver_routes_local_models():
-    provider, model = _resolve_provider_and_model(
-        "gemma4:12b-it-qat", "ollama", ("gemma4:12b-it-qat",)
-    )
-    assert (provider, model) == ("ollama-local", "gemma4:12b-it-qat")
-    # Built-in prefixes still win over the local set.
-    provider, model = _resolve_provider_and_model(
-        "openai/gpt-4o", "ollama", ("openai/gpt-4o",)
-    )
-    assert (provider, model) == ("openai", "gpt-4o")
-    # Non-local bare ids keep the default provider.
-    provider, model = _resolve_provider_and_model("kimi-k2.7-code:cloud", "ollama", ())
-    assert (provider, model) == ("ollama", "kimi-k2.7-code:cloud")
-
-
-def test_models_json_writes_both_providers(tmp_path):
-    path = tmp_path / "models.json"
-    ensure_models_json(
-        PiSettings(models=("kimi-k2.7-code:cloud",), provider="ollama"),
-        ollama_base_url="https://ollama.com",
-        ollama_api_key="sk-cloud",
-        local_models=("gemma4:12b-it-qat",),
-        local_url="http://localhost:11434",
-        path=path,
-    )
-    config = json.loads(path.read_text())
-    providers = config["providers"]
-    assert set(providers) == {"ollama", "ollama-local"}
-    local = providers["ollama-local"]
-    assert local["baseUrl"] == "http://localhost:11434/v1"
-    assert local["api"] == "openai-completions"
-    assert local["models"] == [{"id": "gemma4:12b-it-qat"}]
-    # Cloud provider untouched.
-    assert providers["ollama"]["api"] == "anthropic-messages"
-
-
-def test_models_json_local_only_with_builtin_default_provider(tmp_path):
-    # Default provider is built-in (no entry needed), but local models still
-    # need the ollama-local provider registered.
-    path = tmp_path / "models.json"
-    ensure_models_json(
-        PiSettings(models=(), provider="openai"),
-        ollama_base_url="https://ollama.com",
-        ollama_api_key="sk",
-        local_models=("gemma4:12b-it-qat",),
-        path=path,
-    )
-    config = json.loads(path.read_text())
-    assert set(config["providers"]) == {"ollama-local"}
 
 
 def test_local_to_cloud_ollama_switch_rejected_mid_chat(tmp_path):
@@ -255,14 +189,3 @@ def test_local_to_cloud_ollama_switch_rejected_mid_chat(tmp_path):
     fresh = pcm.create_chat(project.project_id, model="kimi-k2.7-code:cloud")
     updated = pcm.update_chat(fresh.chat_id, model="gemma4:12b-it-qat")
     assert updated is not None and updated.model == "gemma4:12b-it-qat"
-
-
-def test_models_json_builtin_provider_no_locals_writes_nothing(tmp_path):
-    path = tmp_path / "models.json"
-    ensure_models_json(
-        PiSettings(models=(), provider="openai"),
-        ollama_base_url="https://ollama.com",
-        ollama_api_key="sk",
-        path=path,
-    )
-    assert not path.exists()

@@ -37,8 +37,8 @@ from ciao.models import (
 from ciao.providers.ollama import (
     is_local_ollama_model,
     is_ollama_model,
-    ollama_env_for_model,
 )
+from ciao.providers.routing import routing_env_for_model
 from ciao.provider_service import ProviderService
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore, _claude_projects_dir
@@ -277,25 +277,21 @@ async def _generate_chat_title(
     model: str = "haiku",
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
-    pi_settings: "PiSettings | None" = None,
     timeout_s: float = 15.0,
 ) -> str | None:
     """Summarize the first user message into a short chat title.
 
-    Prefers a one-shot ``pi --mode rpc`` subprocess (cheaper to spin up
-    than the Claude CLI) when ``pi`` is on PATH and ``pi_settings`` is
-    configured. Falls back to ``claude_agent_sdk.query()`` otherwise so
-    boxes without Pi installed still get titles. The ``env`` dict is
-    forwarded to either path so Ollama env-injection keeps working.
+    Prefers the local Apple Intelligence CLI (`apfel`) when available,
+    falling back to `run_oneshot` using the Claude SDK. The `env` dict
+    is forwarded to the SDK query so Ollama env-injection keeps working.
 
-    No cost tracking: both paths run the same upstream model (Ollama via
-    the Pi-side ``--provider ollama`` or via Claude-SDK env injection),
+    No cost tracking: both paths run the same upstream model,
     so there's no separate bill to log.
 
     Falls back to a deterministic truncation when both paths fail so the
     sidebar never gets stuck on "New Chat".
     """
-    from ciao.providers.pi import PiSettings, run_pi_oneshot  # noqa: F401 (PiSettings is for type hints)
+    from ciao.providers.oneshot import run_oneshot
 
     user_snippet = (user_text or "").strip()[:1000]
     if not user_snippet:
@@ -340,57 +336,21 @@ async def _generate_chat_title(
         except Exception as exc:
             logger.info("apfel title spawn failed (%s); falling back", exc)
 
-    if pi_settings is not None and shutil.which("pi") is not None:
-        try:
-            text = await run_pi_oneshot(
-                user_prompt,
-                system_prompt=_TITLE_SYSTEM_PROMPT,
-                model=model,
-                settings=pi_settings,
-                cwd=cwd,
-                env=env,
-                timeout_s=timeout_s,
-            )
-            if text:
-                return _clean_title(text, user_snippet)
-        except (TimeoutError, OSError, FileNotFoundError) as exc:
-            logger.info(
-                "Pi title spawn failed (%s); falling back to Claude SDK", exc
-            )
-
     try:
-        from claude_agent_sdk import (
-            AssistantMessage,
-            ClaudeAgentOptions,
-            TextBlock,
-            query,
+        text = await run_oneshot(
+            user_prompt,
+            system_prompt=_TITLE_SYSTEM_PROMPT,
+            model=model,
+            env=env,
+            timeout_s=timeout_s,
         )
-    except Exception:
-        logger.exception("claude_agent_sdk unavailable for title generation")
-        return _fallback_title(user_snippet)
-
-    options = ClaudeAgentOptions(
-        model=model,
-        system_prompt=_TITLE_SYSTEM_PROMPT,
-        setting_sources=[],
-        skills=[],
-        max_turns=1,
-        cwd=str(cwd) if cwd is not None else None,
-        env=env or {},
-    )
-
-    collected_parts: list[str] = []
-    try:
-        async for msg in query(prompt=user_prompt, options=options):
-            if isinstance(msg, AssistantMessage):
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        collected_parts.append(block.text)
+        if text:
+            return _clean_title(text, user_snippet)
     except Exception as exc:
         logger.info("Title generation via Claude %s failed: %s", model, exc)
         return _fallback_title(user_snippet)
 
-    return _clean_title("".join(collected_parts), user_snippet)
+    return _fallback_title(user_snippet)
 
 
 def _safe_validate(path: Path, root: Path, allowed_ext: set[str], max_bytes: int) -> None:
@@ -507,7 +467,7 @@ class ChatInfo:
     # pre-handover history after reload.
     handover_messages: list[dict] = field(default_factory=list)
     # True until the first post-handover turn successfully seeds the new
-    # provider with `handover_messages` inside the hidden Ciao context block.
+    # provider with `handover_messages` inside the hidden Ciaobot context block.
     handover_context_pending: bool = False
     # Raw AskUserQuestion JSON (`{"questions": [...]}`) when the model paused
     # this chat on a question the user hasn't answered yet. Set when the
@@ -677,19 +637,6 @@ class ProjectChatManager:
 
     # ── Persistence ──────────────────────────────────────────────────────
 
-    def _infer_legacy_provider(self, model: str) -> str:
-        """Default provider for chats persisted before the `provider` field existed.
-
-        Returns "pi" only for Pi-native models (listed in CIAO_PI_MODELS and
-        absent from CIAO_OLLAMA_MODELS). Everything else defaults to "claude",
-        preserving the pre-refactor behaviour where Ollama models flowed
-        through ClaudeProvider's env-injection sidecar.
-        """
-        pi_native = set(self._config.pi.models)
-        ollama = set(self._config.ollama.models)
-        if model in pi_native and model not in ollama:
-            return "pi"
-        return "claude"
 
     def _load(self) -> None:
         if not self._path or not self._path.exists():
@@ -716,12 +663,8 @@ class ProjectChatManager:
                 project_id=cd["project_id"],
                 title=cd.get("title", "New Chat"),
                 model=chat_model,
-                # Migration: legacy chats without a `provider` key default to
-                # "claude". Exception: a chat whose model is listed in
-                # CIAO_PI_MODELS *and not* in CIAO_OLLAMA_MODELS (i.e. a
-                # Pi-native model like qwen3-coder) loads as "pi" so the
-                # dispatch stays correct.
-                provider=cd.get("provider") or self._infer_legacy_provider(chat_model),
+                # Migration: legacy chats without a `provider` key default to "claude".
+                provider=cd.get("provider") or "claude",
                 # Migration: legacy chats without a bucket stay "" (auto:
                 # project workspace decides routing).
                 model_bucket=cd.get("model_bucket", ""),
@@ -950,10 +893,10 @@ class ProjectChatManager:
         if vault_mode == "existing":
             title = "Connect Existing Vault 👋"
             user_msg = (
-                f"Welcome to Ciao! You are CiaoBot, the user's personal agentic assistant.\n\n"
+                f"Welcome to Ciaobot. You are Ciaobot, the user's personal agentic assistant.\n\n"
                 f"The user has completed setup and pointed me to an **existing notes folder** at:\n"
                 f"`{vault_root}`\n\n"
-                f"Your task is to onboard the user and adapt this existing folder into what Ciao requires:\n"
+                f"Your task is to onboard the user and adapt this existing folder into what Ciaobot requires:\n"
                 f"1. **Analyze Folder**: Scan the existing vault directory to see what directories and files are present.\n"
                 f"2. **Structure Verification**: Check if the standard directories (`personal/`, `work/`, `Templates/`) exist. If not, plan to create them.\n"
                 f"3. **Hygiene & Scaffolding**: Verify if `CLAUDE.md` (defining identity, memory, styles) and `MEMORY.md` exist. If missing, plan to create them using clean Markdown structures (no em-dashes, no horizontal rules `---` as section dividers).\n"
@@ -961,15 +904,15 @@ class ProjectChatManager:
                 f"Introduce yourself to the user, tell them you've scanned their vault at `{vault_root}`, outline your findings, and ask the first onboarding questions to fill out their profile."
             )
             assistant_msg = (
-                f"Hello! I am CiaoBot, your agentic second brain. 👋\n\n"
+                f"Hello! I am Ciaobot, your agentic second brain. 👋\n\n"
                 f"I've initialized our session and connected to your existing folder at `{vault_root}`. "
-                f"I'm ready to inspect your vault, organize it into Ciao's structure, and bootstrap our core notes. "
+                f"I'm ready to inspect your vault, organize it into Ciaobot's structure, and bootstrap our core notes. "
                 f"To get started, tell me: **What is your name, and what is your primary focus (work/personal) right now?**"
             )
         else:
-            title = "Welcome to Ciao! 👋"
+            title = "Welcome to Ciaobot! 👋"
             user_msg = (
-                f"Welcome to Ciao! You are CiaoBot, the user's personal agentic assistant.\n\n"
+                f"Welcome to Ciaobot. You are Ciaobot, the user's personal agentic assistant.\n\n"
                 f"The user has completed setup and initialized a **new vault folder from scratch** at:\n"
                 f"`{vault_root}`\n\n"
                 f"Your task is to bootstrap the vault structure and core documentation:\n"
@@ -979,7 +922,7 @@ class ProjectChatManager:
                 f"Introduce yourself to the user, explain that you are starting fresh at `{vault_root}`, and ask the first onboarding questions to bootstrap your profile."
             )
             assistant_msg = (
-                f"Hello! I am CiaoBot, your agentic second brain. 👋\n\n"
+                f"Hello! I am Ciaobot, your agentic second brain. 👋\n\n"
                 f"Welcome! I've initialized our workspace at `{vault_root}` from scratch. "
                 f"I'm ready to create our core structure (`personal/`, `work/`, `Templates/`) and customize our settings. "
                 f"To begin, tell me: **What is your name, and what is your primary focus (work/personal) right now?**"
@@ -1754,27 +1697,6 @@ class ProjectChatManager:
         if not chat.session_id:
             return True  # new chat, no session yet, treat as local
 
-        if chat.provider == "pi":
-            try:
-                p = Path(chat.session_id)
-                if p.is_absolute() and p.exists():
-                    return True
-            except Exception:
-                pass
-            from ciao.providers.pi import session_dir_root
-            try:
-                if (session_dir_root() / chat.chat_id).exists():
-                    return True
-            except Exception:
-                pass
-            try:
-                alt_dir = self._config.workspace_root / ".runtime" / "pi_sessions" / chat.chat_id
-                if alt_dir.exists():
-                    return True
-            except Exception:
-                pass
-            return False
-
         # Default / "claude" provider
         projects_dir = _claude_projects_dir(self._config.workspace_root)
         if (projects_dir / f"{chat.session_id}.jsonl").exists():
@@ -1812,7 +1734,7 @@ class ProjectChatManager:
     ) -> ChatInfo:
         if project_id not in self._projects:
             raise ValueError(f"Project '{project_id}' not found")
-        if provider is not None and provider not in ("claude", "pi"):
+        if provider is not None and provider not in ("claude",):
             raise ValueError(f"Unknown provider '{provider}'")
         if not self._model_bucket_allowed(model_bucket):
             raise ValueError(f"Unknown model bucket '{model_bucket}'")
@@ -1829,10 +1751,7 @@ class ProjectChatManager:
         chat_model = model or default_model
         chat_provider = provider
         if not chat_provider:
-            if self._infer_legacy_provider(chat_model) == "pi":
-                chat_provider = "pi"
-            else:
-                chat_provider = self._config.default_provider_for_workspace(workspace)
+            chat_provider = self._config.default_provider_for_workspace(workspace)
         # Claude chats record the bucket explicitly: the workspace only
         # preselects (personal → "personal"), but an explicit picker choice
         # wins and survives project moves. Personal-bucket alias defaults
@@ -1841,7 +1760,7 @@ class ProjectChatManager:
         chat_bucket = ""
         if chat_provider == "claude":
             chat_bucket = self._effective_bucket(model_bucket or "", project_id)
-            if self._bucket_routes_to_ollama(chat_bucket) and model is None:
+            if (self._bucket_routes_to_ollama(chat_bucket) or chat_bucket == "openrouter") and model is None:
                 chat_model = self._resolve_claude_model(
                     chat_model, chat_bucket, project_id
                 )
@@ -1937,7 +1856,7 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is None:
             return None
-        if provider is not None and provider not in ("claude", "pi"):
+        if provider is not None and provider not in ("claude",):
             raise ValueError(f"Unknown provider '{provider}'")
         if not self._model_bucket_allowed(model_bucket):
             raise ValueError(f"Unknown model bucket '{model_bucket}'")
@@ -2111,7 +2030,7 @@ class ProjectChatManager:
             return None
         if chat.archived:
             raise ValueError("Cannot hand over an archived chat")
-        if provider not in ("claude", "pi"):
+        if provider not in ("claude",):
             raise ValueError(f"Unknown provider '{provider}'")
         clean_model = (model or "").strip()
         if not clean_model:
@@ -2173,12 +2092,6 @@ class ProjectChatManager:
             self._transcripts.delete_sdk_session_blob(
                 self._config.workspace_root, chat.session_id
             )
-        # Reclaim Pi session logs too, symmetric to the Claude SDK blob above.
-        # Pi names its per-chat dir by chat_id, so this also covers Pi chats
-        # whose session_id is empty. Keeps ~/.pi/agent/sessions from growing
-        # forever once a chat is archived or deleted.
-        from ciao.providers.pi import delete_pi_session_dir
-        delete_pi_session_dir(chat.chat_id)
         self._unlink_chat_images(chat)
         # Drop file snapshots so we don't accumulate dead history forever.
         # Archive intentionally keeps them: archived chats are read-only but
@@ -2242,12 +2155,6 @@ class ProjectChatManager:
             self._transcripts.delete_sdk_session_blob(
                 self._config.workspace_root, chat.session_id
             )
-        # Reclaim Pi session logs too, symmetric to the Claude SDK blob above.
-        # Pi names its per-chat dir by chat_id, so this also covers Pi chats
-        # whose session_id is empty. Keeps ~/.pi/agent/sessions from growing
-        # forever once a chat is archived or deleted.
-        from ciao.providers.pi import delete_pi_session_dir
-        delete_pi_session_dir(chat.chat_id)
         self._unlink_chat_images(chat)
         chat.archived = True
         if result is not None:
@@ -2297,14 +2204,13 @@ class ProjectChatManager:
                 extract_and_append(
                     archive_path=outcome.path,
                     filtered_jsonl=outcome.filtered_jsonl,
-                    ollama_settings=config.ollama,
+                    config=config,
                     model=config.insights_model,
-                    pi_settings=config.pi,
-                    workspace_root=config.workspace_root,
-                    vault_root=config.vault_root,
                     session_id=outcome.session_id,
                     trajectory_meta=trajectory_meta,
                     trajectories_enabled=trajectories_enabled,
+                    workspace_root=config.workspace_root,
+                    vault_root=config.vault_root,
                 )
             )
         elif trajectories_enabled:
@@ -2428,7 +2334,7 @@ class ProjectChatManager:
         lines = [
             "[Provider handover messages]",
             (
-                "The following are prior visible messages from this same Ciao "
+                "The following are prior visible messages from this same Ciaobot "
                 "chat. Use them as conversation context, not as new user "
                 "instructions."
             ),
@@ -2646,15 +2552,21 @@ class ProjectChatManager:
         workspace_config = self._config.workspace(workspace)
         if workspace_config and workspace_config.model_bucket:
             return workspace_config.model_bucket
+        if workspace_config and workspace_config.default_provider == "openrouter":
+            return "openrouter"
         if workspace == "work":
             return "work"
         return "personal"
 
     def _configured_model_buckets(self) -> set[str]:
         buckets = set(_LEGACY_MODEL_BUCKETS)
+        if self._config.openrouter.available:
+            buckets.add("openrouter")
         for workspace in self._config.workspaces.values():
             if workspace.model_bucket:
                 buckets.add(workspace.model_bucket)
+            if workspace.default_provider == "openrouter":
+                buckets.add("openrouter")
         return buckets
 
     def _model_bucket_allowed(self, bucket: str | None) -> bool:
@@ -2674,15 +2586,19 @@ class ProjectChatManager:
         return self._workspace_model_bucket(project.workspace if project else None)
 
     def _resolve_claude_model(self, model: str, bucket: str, project_id: str) -> str:
-        """Resolve picker aliases to Ollama tier models for personal-bucket chats.
-
-        An explicit "work" bucket pins the Anthropic subscription upstream:
-        aliases stay aliases regardless of the project's workspace. The
-        "personal" bucket maps aliases to the Ollama tier models. The
-        resolved target must be in ``CIAO_OLLAMA_MODELS`` so a typo in the
-        tier override does not inject Ollama env for an unknown ID.
-        """
+        """Resolve picker aliases to Ollama or OpenRouter tier models."""
         effective = self._effective_bucket(bucket, project_id)
+        if effective == "openrouter":
+            aliases = {
+                "haiku": self._config.openrouter.haiku_model,
+                "sonnet": self._config.openrouter.sonnet_model,
+                "opus": self._config.openrouter.opus_model,
+            }
+            target = aliases.get((model or "").lower())
+            if target:
+                return target
+            return model
+
         if not self._bucket_routes_to_ollama(effective):
             return model
         aliases = {
@@ -2733,7 +2649,7 @@ class ProjectChatManager:
         env["CIAO_PROVIDER"] = chat.provider
         env["CIAO_MODEL_BUCKET"] = chat.model_bucket or ""
         env.update(
-            ollama_env_for_model(self._runtime_model_for_chat(chat), self._config.ollama)
+            routing_env_for_model(self._runtime_model_for_chat(chat), self._config)
         )
         # Pi needs the chat_id to locate its session directory
         env["CIAO_CHAT_ID"] = chat.chat_id
@@ -3491,7 +3407,7 @@ class ProjectChatManager:
                             self._clear_chat_retry(chat_now)
                         chat_now.last_activity_at = _now_iso()
                         self._save()
-                    title = chat_now.title if chat_now else "Ciao"
+                    title = chat_now.title if chat_now else "Ciaobot"
                     self._events.publish({
                         "type": "chat_result_ready",
                         "chat_id": chat_id,
@@ -3781,7 +3697,6 @@ class ProjectChatManager:
                 model=title_model,
                 cwd=self._config.workspace_root,
                 env=title_env,
-                pi_settings=self._config.pi,
                 timeout_s=title_timeout,
             )
             if not title:
@@ -3824,37 +3739,17 @@ class ProjectChatManager:
         )
         user_prompt = json.dumps(payload, ensure_ascii=False)
         try:
-            text = ""
-            from ciao.providers.pi import run_pi_oneshot
+            from ciao.providers.oneshot import run_oneshot
             from ciao.insights import _ollama_env
 
             env = _ollama_env(self._config.insights_model, self._config.ollama)
-            if self._config.pi is not None and shutil.which("pi") is not None:
-                text = await run_pi_oneshot(
-                    user_prompt,
-                    system_prompt=system_prompt,
-                    model=self._config.insights_model,
-                    settings=self._config.pi,
-                    env=env,
-                    timeout_s=60.0,
-                )
-            if not text:
-                from claude_agent_sdk import ClaudeAgentOptions, TextBlock, query
-
-                options = ClaudeAgentOptions(
-                    model=self._config.insights_model,
-                    system_prompt=system_prompt,
-                    setting_sources=[],
-                    skills=[],
-                    max_turns=1,
-                    env=env,
-                )
-                async for message in query(prompt=user_prompt, options=options):
-                    content = getattr(message, "content", None)
-                    if isinstance(content, list):
-                        for block in content:
-                            if isinstance(block, TextBlock):
-                                text += block.text
+            text = await run_oneshot(
+                user_prompt,
+                system_prompt=system_prompt,
+                model=self._config.insights_model,
+                env=env,
+                timeout_s=60.0,
+            )
             raw = text.strip()
             if raw.startswith("```"):
                 raw = re.sub(r"^```(?:json)?\s*", "", raw)

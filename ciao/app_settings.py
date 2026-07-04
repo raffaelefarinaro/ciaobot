@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -30,12 +30,21 @@ class AppSettings:
     title_model: str = ""
     # Model used by post-archive session-insights extraction.
     insights_model: str = ""
+
     # Voice transcription engine: "cloud" (OpenAI) or "local" (mlx-whisper).
     transcription_engine: str = ""
     # Whisper checkpoint for the local engine (HF repo id).
     transcription_local_model: str = ""
     # Comma-separated list of models for the critique / adversarial-review skill.
     critique_models: str = ""
+    # Per-backend tier aliases used when a chat asks for haiku/sonnet/opus
+    # while the workspace routes through Ollama or OpenRouter.
+    ollama_haiku_model: str = ""
+    ollama_sonnet_model: str = ""
+    ollama_opus_model: str = ""
+    openrouter_haiku_model: str = ""
+    openrouter_sonnet_model: str = ""
+    openrouter_opus_model: str = ""
 
 
 class AppSettingsStore:
@@ -101,14 +110,22 @@ class AppSettingsStore:
             self._defaults = {
                 "title_model_override": config.title_model_override,
                 "insights_model": config.insights_model,
+
                 "transcription_engine": config.transcription_engine,
                 "transcription_local_model": config.transcription_local_model,
                 "critique_models": config.critique_models,
+                "ollama_haiku_model": config.ollama.haiku_model,
+                "ollama_sonnet_model": config.ollama.sonnet_model,
+                "ollama_opus_model": config.ollama.opus_model,
+                "openrouter_haiku_model": config.openrouter.haiku_model,
+                "openrouter_sonnet_model": config.openrouter.sonnet_model,
+                "openrouter_opus_model": config.openrouter.opus_model,
             }
         d = self._defaults
         s = self.settings
         config.title_model_override = s.title_model or d["title_model_override"]
         config.insights_model = s.insights_model or d["insights_model"]
+
         config.transcription_engine = (
             s.transcription_engine or d["transcription_engine"]
         )
@@ -116,4 +133,15 @@ class AppSettingsStore:
             s.transcription_local_model or d["transcription_local_model"]
         )
         config.critique_models = s.critique_models or d["critique_models"]
-
+        config.ollama = replace(
+            config.ollama,
+            haiku_model=s.ollama_haiku_model or d["ollama_haiku_model"],
+            sonnet_model=s.ollama_sonnet_model or d["ollama_sonnet_model"],
+            opus_model=s.ollama_opus_model or d["ollama_opus_model"],
+        )
+        config.openrouter = replace(
+            config.openrouter,
+            haiku_model=s.openrouter_haiku_model or d["openrouter_haiku_model"],
+            sonnet_model=s.openrouter_sonnet_model or d["openrouter_sonnet_model"],
+            opus_model=s.openrouter_opus_model or d["openrouter_opus_model"],
+        )

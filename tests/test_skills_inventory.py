@@ -49,7 +49,7 @@ def test_build_skill_inventory_labels_custom_and_github_sources(tmp_path: Path) 
         encoding="utf-8",
     )
 
-    inventory = build_skill_inventory(tmp_path, pi_skills_dir=tmp_path / "pi-skills")
+    inventory = build_skill_inventory(tmp_path)
 
     assert inventory["counts"] == {"custom": 1, "github": 1}
     assert inventory["skills"] == [
@@ -79,7 +79,7 @@ def test_build_skill_inventory_reads_yaml_block_descriptions(tmp_path: Path) -> 
         "description: |\n  Generate monthly product adoption reports.\n  Pulls data from BigQuery.",
     )
 
-    inventory = build_skill_inventory(tmp_path, pi_skills_dir=tmp_path / "pi-skills")
+    inventory = build_skill_inventory(tmp_path)
 
     assert inventory["skills"][0]["description"] == (
         "Generate monthly product adoption reports. Pulls data from BigQuery."
@@ -100,7 +100,7 @@ def test_build_skill_inventory_dedupes_custom_over_lock_entry(tmp_path: Path) ->
         encoding="utf-8",
     )
 
-    inventory = build_skill_inventory(tmp_path, pi_skills_dir=tmp_path / "pi-skills")
+    inventory = build_skill_inventory(tmp_path)
 
     assert inventory["counts"] == {"custom": 1, "github": 0}
     assert inventory["skills"][0]["label"] == "custom"

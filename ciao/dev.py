@@ -1,4 +1,4 @@
-"""Local development runner for the Ciao backend and Vite frontend."""
+"""Local development runner for the Ciaobot backend and Vite frontend."""
 
 from __future__ import annotations
 

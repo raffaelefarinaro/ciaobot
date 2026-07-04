@@ -88,34 +88,3 @@ def test_is_session_local_claude_workspace_fallback(tmp_path: Path, monkeypatch:
     )
     # The default projects_dir won't have it, but the fallback projects search will find it
     assert pcm.is_session_local(chat) is True
-
-
-def test_is_session_local_pi_absolute_path(tmp_path: Path) -> None:
-    pcm = _make_manager(tmp_path)
-    
-    session_file = tmp_path / "pi_session.jsonl"
-    session_file.write_text("{}", encoding="utf-8")
-    
-    chat = ChatInfo(
-        chat_id="chat-123",
-        project_id="proj-123",
-        session_id=str(session_file),
-        provider="pi",
-    )
-    assert pcm.is_session_local(chat) is True
-
-
-def test_is_session_local_pi_home_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    pcm = _make_manager(tmp_path)
-    
-    pi_chat_dir = tmp_path / ".pi" / "agent" / "sessions" / "chat-123"
-    pi_chat_dir.mkdir(parents=True, exist_ok=True)
-    
-    chat = ChatInfo(
-        chat_id="chat-123",
-        project_id="proj-123",
-        session_id="some-id",
-        provider="pi",
-    )
-    assert pcm.is_session_local(chat) is True

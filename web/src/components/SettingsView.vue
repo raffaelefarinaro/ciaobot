@@ -12,8 +12,8 @@
             <button class="btn-primary" @click="() => localStatus?.direct_main ? localHandback() : doSnapshot()" :disabled="!!actionPending || !!localPending">
               {{ actionPending === 'snapshot' || localPending === 'handback' ? (localStatus?.direct_main ? 'Syncing...' : 'Snapshotting...') : (localStatus?.direct_main ? 'Sync with Remote' : 'Git Snapshot') }}
             </button>
-            <button v-if="localStatus?.dev_mode" class="btn-primary" @click="() => doDeploy()" :disabled="!!actionPending" title="Reinstall deps, rebuild the frontend, and restart with the latest code">
-              {{ actionPending === 'deploy' ? 'Deploying...' : 'Deploy' }}
+            <button class="btn-primary" @click="() => doDeploy()" :disabled="!!actionPending" title="Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code">
+              {{ actionPending === 'deploy' ? 'Restarting...' : 'Restart' }}
             </button>
           </div>
           <div v-if="actionResult" class="action-result">{{ actionResult }}</div>
@@ -40,18 +40,18 @@
               <div v-if="packageStatus.latest_version">
                 <span class="dev-label">Latest Version</span> <code>{{ packageStatus.latest_version }}</code>
               </div>
-              <div v-if="packageStatus.error" class="hint hint--warn" style="margin-top: 6px;">
+              <div v-if="packageStatus.error" class="hint hint--warn hint--spaced">
                 Update check failed: {{ packageStatus.error }}
               </div>
             </div>
 
-            <div v-if="packageStatus.update_available" class="action-row" style="margin-top: 10px;">
+            <div v-if="packageStatus.update_available" class="action-row action-row--spaced">
               <button class="btn-primary" @click="doPackageUpdate" :disabled="packageUpdating">
                 {{ packageUpdating ? 'Upgrading...' : 'Update Package' }}
               </button>
             </div>
-            <p v-else class="hint" style="margin-top: 6px;">
-              Ciao is up to date.
+            <p v-else class="hint hint--spaced">
+              Ciaobot is up to date.
             </p>
           </div>
           <div v-if="packageResult" class="action-result">{{ packageResult }}</div>
@@ -64,7 +64,7 @@
             On iOS, push notifications only work after you "Add to Home Screen" and open the app from there.
           </div>
           <div v-else-if="permissionDenied" class="hint hint--warn">
-            Notifications are blocked at the OS level. Re-enable them in your phone's Settings &rarr; Notifications &rarr; Ciao.
+            Notifications are blocked at the OS level. Re-enable them in your phone's Settings &rarr; Notifications &rarr; Ciaobot.
           </div>
           <div v-else-if="!pushSupportedFlag" class="loading">
             Push notifications are not supported in this browser.
@@ -119,7 +119,7 @@
             <button class="btn-small" @click="adjustFontScale(-0.05)" :disabled="fontScale <= 0.8">- Decrease</button>
             <span class="font-scale-display">{{ Math.round(fontScale * 100) }}%</span>
             <button class="btn-small" @click="adjustFontScale(0.05)" :disabled="fontScale >= 1.5">+ Increase</button>
-            <button class="btn-small" style="margin-left: auto;" @click="resetFontScale" :disabled="fontScale === 1.0">Reset</button>
+            <button class="btn-small font-reset" @click="resetFontScale" :disabled="fontScale === 1.0">Reset</button>
           </div>
           <p class="hint">
             Increase or decrease the font size across messages, code blocks, sidebars, and menus.
@@ -135,7 +135,7 @@
             </div>
             <div>
               <span class="dev-label">Branch</span> <code>{{ localStatus?.branch || '...' }}</code>
-              <span v-if="localStatus?.dirty" class="hint" style="margin-left:6px;">(uncommitted changes)</span>
+              <span v-if="localStatus?.dirty" class="hint inline-hint">(uncommitted changes)</span>
             </div>
           </div>
           <div class="action-row">
@@ -150,7 +150,7 @@
             "Commit to main" lands this device's branch on <code>main</code>. If it can't merge cleanly,
             it opens a chat to resolve the conflict; then use "Sync to main".
           </p>
-          <div v-if="localResult" class="action-result" style="white-space: pre-wrap;">{{ localResult }}</div>
+          <div v-if="localResult" class="action-result action-result--prewrap">{{ localResult }}</div>
         </div>
       </template>
 
@@ -170,76 +170,197 @@
               "Automatic" keeps the built-in default. Local models run free on this machine's
               Ollama daemon.
             </p>
+            <div v-if="routines.workspace_context" class="routine-context">
+              <div>
+                <span class="dev-label">Main workspace</span>
+                <code>{{ routines.workspace_context.workspace_root }}</code>
+              </div>
+              <div>
+                <span class="dev-label">Vault root</span>
+                <code>{{ routines.workspace_context.vault_root }}</code>
+              </div>
+              <p class="hint hint--compact">
+                Change the main workspace by starting Ciaobot with a different <code>CIAO_WORKSPACE</code> and restarting.
+                Settings &rarr; Workspaces are logical chat spaces; they do not move the server workspace root.
+              </p>
+            </div>
 
             <div class="routine-row">
               <div class="routine-info">
                 <span class="routine-name">Chat titles</span>
-                <span class="routine-detail">Names a new chat after the first message. Currently: <code>{{ routines.title_model_effective }}</code></span>
+                <span class="routine-detail">Names a new chat after the first message; runs from the main workspace.</span>
+                <div v-if="getJobTelemetry('title')" class="routine-telemetry">
+                  <span class="badge" :class="getJobBadgeClass('title')">
+                    {{ getJobStatus('title') }}
+                  </span>
+                  <span v-if="hasJobLastRun('title')" class="telemetry-meta">
+                    Last run: {{ getJobLastRunLabel('title') }} ({{ getJobDuration('title') }})
+                  </span>
+                  <span v-if="getJobStatus('title') === 'error' && getJobLastError('title')" class="telemetry-error" :title="getJobLastError('title')">
+                    &middot; {{ getJobLastError('title') }}
+                  </span>
+                </div>
               </div>
-              <select
-                class="routine-select"
-                :value="routines.title_model"
-                :disabled="routinesSaving"
-                @change="saveRoutines({ title_model: ($event.target as HTMLSelectElement).value })"
-              >
-                <option value="">Automatic</option>
-                <option value="apfel">apfel (local, Apple Intelligence)</option>
-                <optgroup v-if="routines.model_options.ollama_local.length" label="Ollama (local, free)">
-                  <option v-for="m in routines.model_options.ollama_local" :key="m" :value="m">{{ m }}</option>
-                </optgroup>
-                <optgroup v-if="routines.model_options.ollama_cloud.length" label="Ollama cloud">
-                  <option v-for="m in routines.model_options.ollama_cloud" :key="m" :value="m">{{ m }}</option>
-                </optgroup>
-                <optgroup label="Anthropic">
-                  <option v-for="m in routines.model_options.anthropic" :key="m" :value="m">{{ m }}</option>
-                </optgroup>
-              </select>
+              <div class="routine-model-controls">
+                <select
+                  class="routine-select routine-select--provider"
+                  :value="routineProviderValue('title_model')"
+                  :disabled="routinesSaving"
+                  @change="saveRoutineProvider('title_model', ($event.target as HTMLSelectElement).value)"
+                >
+                  <option value="automatic">Automatic</option>
+                  <option value="apple">Apple Intelligence</option>
+                  <option v-for="provider in aliasProviderSections" :key="provider.key" :value="provider.key">
+                    {{ provider.label }}
+                  </option>
+                  <option v-if="routineProviderValue('title_model') === 'custom'" value="custom">Custom model</option>
+                </select>
+                <select
+                  class="routine-select routine-select--tier"
+                  :value="routineTierValue('title_model')"
+                  :disabled="routinesSaving || !routineTierSelectable('title_model')"
+                  @change="saveRoutineTier('title_model', ($event.target as HTMLSelectElement).value)"
+                >
+                  <option v-for="tier in modelTiers" :key="`title-${tier.key}`" :value="tier.key">
+                    {{ tier.label }}
+                  </option>
+                </select>
+                <span class="routine-model-hint">{{ routineModelSummary('title_model') }}</span>
+              </div>
             </div>
 
             <div class="routine-row">
               <div class="routine-info">
                 <span class="routine-name">Session insights</span>
-                <span class="routine-detail">Extracts learnings when a chat is archived. Currently: <code>{{ routines.insights_model_effective }}</code></span>
+                <span class="routine-detail">Extracts learnings when a chat is archived; follows that chat's logical workspace.</span>
+                <div v-if="getJobTelemetry('insights')" class="routine-telemetry">
+                  <span class="badge" :class="getJobBadgeClass('insights')">
+                    {{ getJobStatus('insights') }}
+                  </span>
+                  <span v-if="hasJobLastRun('insights')" class="telemetry-meta">
+                    Last run: {{ getJobLastRunLabel('insights') }} ({{ getJobDuration('insights') }})
+                  </span>
+                  <span v-if="getJobStatus('insights') === 'error' && getJobLastError('insights')" class="telemetry-error" :title="getJobLastError('insights')">
+                    &middot; {{ getJobLastError('insights') }}
+                  </span>
+                </div>
               </div>
-              <select
-                class="routine-select"
-                :value="routines.insights_model"
-                :disabled="routinesSaving"
-                @change="saveRoutines({ insights_model: ($event.target as HTMLSelectElement).value })"
-              >
-                <option value="">Automatic</option>
-                <optgroup v-if="routines.model_options.ollama_local.length" label="Ollama (local, free)">
-                  <option v-for="m in routines.model_options.ollama_local" :key="m" :value="m">{{ m }}</option>
-                </optgroup>
-                <optgroup v-if="routines.model_options.ollama_cloud.length" label="Ollama cloud">
-                  <option v-for="m in routines.model_options.ollama_cloud" :key="m" :value="m">{{ m }}</option>
-                </optgroup>
-                <optgroup label="Anthropic">
-                  <option v-for="m in routines.model_options.anthropic" :key="m" :value="m">{{ m }}</option>
-                </optgroup>
-              </select>
+              <div class="routine-model-controls">
+                <select
+                  class="routine-select routine-select--provider"
+                  :value="routineProviderValue('insights_model')"
+                  :disabled="routinesSaving"
+                  @change="saveRoutineProvider('insights_model', ($event.target as HTMLSelectElement).value)"
+                >
+                  <option value="automatic">Automatic</option>
+                  <option v-for="provider in aliasProviderSections" :key="provider.key" :value="provider.key">
+                    {{ provider.label }}
+                  </option>
+                  <option v-if="routineProviderValue('insights_model') === 'custom'" value="custom">Custom model</option>
+                </select>
+                <select
+                  class="routine-select routine-select--tier"
+                  :value="routineTierValue('insights_model')"
+                  :disabled="routinesSaving || !routineTierSelectable('insights_model')"
+                  @change="saveRoutineTier('insights_model', ($event.target as HTMLSelectElement).value)"
+                >
+                  <option v-for="tier in modelTiers" :key="`insights-${tier.key}`" :value="tier.key">
+                    {{ tier.label }}
+                  </option>
+                </select>
+                <span class="routine-model-hint">{{ routineModelSummary('insights_model') }}</span>
+              </div>
             </div>
 
             <div class="routine-row">
               <div class="routine-info">
-                <span class="routine-name">Critique models</span>
-                <span class="routine-detail">Models used for adversarial review (comma-separated). Currently: <code>{{ routines.critique_models_effective }}</code></span>
+                <span class="routine-name">Skill evolution</span>
+                <span class="routine-detail">Weekly main-workspace pass; proposals go under personal/Workspace/Skill-Proposals. Run model is set at the schedule level.</span>
+                <div v-if="getJobTelemetry('skill_evolution')" class="routine-telemetry">
+                  <span class="badge" :class="getJobBadgeClass('skill_evolution')">
+                    {{ getJobStatus('skill_evolution') }}
+                  </span>
+                  <span v-if="hasJobLastRun('skill_evolution')" class="telemetry-meta">
+                    Last run: {{ getJobLastRunLabel('skill_evolution') }} ({{ getJobDuration('skill_evolution') }})
+                  </span>
+                  <span v-if="getJobStatus('skill_evolution') === 'error' && getJobLastError('skill_evolution')" class="telemetry-error" :title="getJobLastError('skill_evolution')">
+                    &middot; {{ getJobLastError('skill_evolution') }}
+                  </span>
+                </div>
               </div>
-              <input
-                type="text"
-                class="routine-input"
-                :value="routines.critique_models"
-                :disabled="routinesSaving"
-                @change="saveRoutines({ critique_models: ($event.target as HTMLInputElement).value })"
-                placeholder="Automatic default"
-              />
+            </div>
+
+            <div class="routine-row routine-row--top">
+              <div class="routine-info">
+                <span class="routine-name">Critique models</span>
+                <span class="routine-detail">Select one or more models for adversarial review.</span>
+              </div>
+              <div class="critique-model-picker">
+                <div class="critique-picker-header">
+                  <span class="critique-picker-summary">
+                    {{ selectedCritiqueModels.length ? `${selectedCritiqueModels.length} selected` : 'Automatic default' }}
+                  </span>
+                  <button
+                    type="button"
+                    class="btn-small"
+                    :disabled="routinesSaving || selectedCritiqueModels.length === 0"
+                    @click="setCritiqueModels([])"
+                  >
+                    Reset
+                  </button>
+                </div>
+                <div
+                  v-if="selectedCritiqueModels.length"
+                  class="critique-chip-list"
+                  aria-label="Selected critique models"
+                >
+                  <button
+                    v-for="model in selectedCritiqueModels"
+                    :key="model"
+                    type="button"
+                    class="critique-chip"
+                    :disabled="routinesSaving"
+                    :title="`Remove ${model}`"
+                    @click="toggleCritiqueModel(model, false)"
+                  >
+                    <span>{{ model }}</span>
+                    <span aria-hidden="true">&times;</span>
+                  </button>
+                </div>
+                <div class="critique-option-groups" role="group" aria-label="Critique model choices">
+                  <div v-for="group in critiqueModelGroups" :key="group.key" class="critique-option-group">
+                    <div class="critique-group-label">{{ group.label }}</div>
+                    <label v-for="model in group.models" :key="model" class="critique-option">
+                      <input
+                        type="checkbox"
+                        :checked="isCritiqueModelSelected(model)"
+                        :disabled="routinesSaving"
+                        @change="toggleCritiqueModel(model, ($event.target as HTMLInputElement).checked)"
+                      />
+                      <span>{{ model }}</span>
+                    </label>
+                  </div>
+                  <div v-if="customCritiqueModels.length" class="critique-option-group">
+                    <div class="critique-group-label">Saved custom</div>
+                    <label v-for="model in customCritiqueModels" :key="model" class="critique-option">
+                      <input
+                        type="checkbox"
+                        checked
+                        :disabled="routinesSaving"
+                        @change="toggleCritiqueModel(model, ($event.target as HTMLInputElement).checked)"
+                      />
+                      <span>{{ model }}</span>
+                    </label>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
           <!-- Voice transcription -->
           <div class="card">
             <p class="section-title">Voice transcription</p>
-            <div class="routine-row" style="border-top: none; margin-top: 0; padding-top: 0;">
+            <div class="routine-row routine-row--flush">
               <div class="routine-info">
                 <span class="routine-name">Engine</span>
                 <span class="routine-detail">
@@ -262,7 +383,7 @@
                 <option value="cloud" :disabled="!routines.transcription.cloud_available">Cloud (OpenAI)</option>
               </select>
             </div>
-            <p v-if="!routines.transcription.local_available" class="hint hint--warn" style="margin-top: 10px; display: flex; align-items: center; gap: 8px;">
+            <p v-if="!routines.transcription.local_available" class="hint hint--warn voice-warning">
               <span v-if="routines.transcription.engine === 'local'">
                 <strong>Local Whisper engine is selected but not installed.</strong> Run <code>pip install 'ciao[voice-local]'</code> or install now:
               </span>
@@ -270,8 +391,7 @@
                 Local engine is available for Apple Silicon (requires installing <code>mlx-whisper</code>).
               </span>
               <button
-                class="btn-primary btn-small"
-                style="padding: 2px 8px; font-size: 0.8rem;"
+                class="btn-primary btn-small voice-install-btn"
                 :disabled="voiceInstalling"
                 @click="installLocalVoice"
               >
@@ -291,63 +411,105 @@
         </template>
         <template v-else-if="providerKeys">
           <div class="card">
-            <p class="section-title">LLM Providers Configuration</p>
-            <p class="hint">
-              Manage API keys and developer credentials. Changes are written directly to your local <code>.env</code> file and will automatically reboot the server.
-            </p>
+            <div class="settings-card-header">
+              <div>
+                <p class="section-title">Providers</p>
+                <p class="hint">
+                  Manage API keys and developer credentials. Changes are written to your local <code>.env</code> file and restart the server.
+                </p>
+              </div>
+            </div>
 
-            <div v-if="providerKeys.connections" class="routine-row" style="flex-direction: column; align-items: stretch; gap: 8px; margin-bottom: 12px;">
-              <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="routine-info" style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
-                <span class="routine-name">Codex <span class="hint" style="font-weight: normal;">via Pi</span></span>
+            <div v-if="providerKeys.connections" class="setting-row setting-row--stack">
+              <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="setting-row-main setting-row-main--inline">
+                <span class="routine-name">Codex <span class="muted-text">via Pi</span></span>
                 <span class="badge" :class="conn.ok ? 'badge--success' : 'badge--error'">
-                  {{ conn.ok ? '✓ Connected' : '✗ Not connected' }}
+                  {{ conn.ok ? 'Connected' : 'Not connected' }}
                 </span>
               </div>
-              <p v-if="providerKeys.connections.codex?.detail" class="hint" style="margin-top: 0; margin-bottom: 0;">
+              <p v-if="providerKeys.connections.codex?.detail" class="hint hint--compact">
                 {{ providerKeys.connections.codex.detail }}
               </p>
             </div>
 
-            <div v-for="(meta, key) in providerKeys.keys" :key="key" class="routine-row" style="flex-direction: column; align-items: stretch; gap: 8px;">
-              <div class="routine-info" style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
-                <span class="routine-name">{{ meta.label }}</span>
+            <div v-for="(meta, key) in providerKeys.keys" :key="key" class="credential-row">
+              <div class="setting-row-main setting-row-main--inline">
+                <div class="routine-info">
+                  <span class="routine-name">{{ meta.label }}</span>
+                  <p class="hint hint--compact">{{ meta.description }}</p>
+                </div>
                 <span class="badge" :class="meta.configured ? 'badge--success' : 'badge--error'">
-                  {{ meta.configured ? '✓ Configured' : '✗ Unconfigured' }}
+                  {{ meta.configured ? (meta.auth_method === 'oauth' ? 'OAuth' : 'Configured') : 'Unconfigured' }}
                 </span>
               </div>
-              <p class="hint" style="margin-top: 0; margin-bottom: 4px;">{{ meta.description }}</p>
               <input
                 type="password"
                 class="routine-input"
                 v-model="providerKeyInputs[key]"
                 :placeholder="meta.configured ? '•••••••••••• (Leave blank to keep existing, or type empty space to clear)' : 'Enter API Key'"
                 :disabled="providerKeysSaving"
-                style="max-width: 100%; width: 100%; font-family: monospace; box-sizing: border-box;"
               />
             </div>
 
-            <!-- System Settings -->
-            <div class="routine-row" style="flex-direction: column; align-items: stretch; gap: 8px; margin-top: 16px; border-top: 1px solid var(--border); padding-top: 16px;">
-              <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
-                <span class="routine-name">Auto-Update GitHub Skills</span>
-                <input
-                  type="checkbox"
-                  v-model="autoUpdateGithubSkills"
-                  :disabled="providerKeysSaving"
-                  style="width: 18px; height: 18px; cursor: pointer;"
-                />
-              </div>
-              <p class="hint" style="margin-top: 0; margin-bottom: 0;">
-                If enabled, Ciao automatically checks GitHub for updates to your locked package skills on boot.
-              </p>
-            </div>
 
-            <div class="action-row" style="margin-top: 20px;">
+            <div class="action-row settings-actions">
               <button class="btn-primary" @click="saveProviderKeys" :disabled="providerKeysSaving">
                 {{ providerKeysSaving ? 'Saving...' : 'Save Keys' }}
               </button>
             </div>
             <div v-if="providerKeysResult" class="action-result">{{ providerKeysResult }}</div>
+          </div>
+
+          <!-- Provider alias tiers -->
+          <div v-if="tierProviderSections.length" class="card">
+            <p class="section-title">Provider alias models</p>
+            <p class="hint">
+              Pick a provider, then set the model behind <code>opus</code>, <code>sonnet</code>, and <code>haiku</code>.
+            </p>
+            <div class="alias-provider-bar">
+              <label class="settings-field alias-provider-field">
+                <span class="ws-label">Provider</span>
+                <select
+                  class="routine-input alias-provider-select"
+                  :value="selectedTierProviderSection?.key || ''"
+                  :disabled="routinesSaving"
+                  @change="selectedTierProvider = ($event.target as HTMLSelectElement).value as AliasProviderKey"
+                >
+                  <option v-for="section in tierProviderSections" :key="section.key" :value="section.key">
+                    {{ section.label }}<template v-if="!section.available"> (not configured)</template>
+                  </option>
+                </select>
+              </label>
+            </div>
+            <div v-if="selectedTierProviderSection" class="tier-provider-section">
+              <div class="settings-field-grid">
+                <label v-for="tier in modelTiers" :key="`${selectedTierProviderSection.key}-${tier.key}`" class="settings-field">
+                  <span class="ws-label">{{ tier.label }}</span>
+                  <select
+                    v-if="selectedTierProviderSection.configurable"
+                    class="routine-input"
+                    :value="tierOverrideValue(selectedTierProviderSection.key as TierProviderKey, tier.key)"
+                    :disabled="routinesSaving || !selectedTierProviderSection.available"
+                    @change="saveTierModel(selectedTierProviderSection.key as TierProviderKey, tier.key, ($event.target as HTMLSelectElement).value)"
+                  >
+                    <option value="">Default ({{ tierEffectiveValue(selectedTierProviderSection.key as TierProviderKey, tier.key) || 'automatic' }})</option>
+                    <option v-for="model in selectedTierProviderSection.options" :key="model" :value="model">{{ model }}</option>
+                  </select>
+                  <input
+                    v-else
+                    class="routine-input"
+                    :value="tier.key"
+                    disabled
+                  />
+                </label>
+              </div>
+              <p v-if="!selectedTierProviderSection.configurable" class="hint hint--compact tier-provider-note">
+                Claude uses the native tier aliases directly.
+              </p>
+              <p v-else-if="!selectedTierProviderSection.available" class="hint hint--compact tier-provider-note">
+                {{ tierProviderUnavailableHint }}
+              </p>
+            </div>
           </div>
         </template>
       </template>
@@ -360,92 +522,152 @@
         </template>
         <template v-else>
           <div class="card">
-            <p class="section-title">Workspaces</p>
-            <p class="hint">
-              Logical chat spaces that route projects, chats, vault roots, model defaults, and integration profiles. Saved to <code>.runtime/workspaces.json</code> and applied immediately.
-            </p>
-
-            <div
-              v-for="form in workspaceForms"
-              :key="form.name"
-              class="routine-row"
-              style="flex-direction: column; align-items: stretch; gap: 8px; margin-top: 16px;"
-            >
-              <div class="routine-info" style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
-                <span class="routine-name">{{ form.name }}</span>
-                <button
-                  v-if="workspaceForms.length > 1"
-                  class="btn-small btn-danger"
-                  @click="removeWorkspace(form.name)"
-                  :disabled="workspacesSaving === form.name"
-                >Delete</button>
+            <div class="settings-card-header settings-card-header--split">
+              <div>
+                <p class="section-title">Workspaces</p>
+                <p class="hint">
+                  Logical chat spaces that route projects, chats, vault roots, model defaults, and integration profiles.
+                </p>
               </div>
+              <button class="btn-small" @click="showNewWorkspace = !showNewWorkspace">
+                {{ showNewWorkspace ? 'Cancel' : '+ Add workspace' }}
+              </button>
+            </div>
 
-              <label class="ws-field"><span class="ws-label">Vault root</span>
-                <input class="routine-input" v-model="form.vault_root" :disabled="workspacesSaving === form.name" placeholder="(defaults to workspace name)" />
-              </label>
-              <label class="ws-field"><span class="ws-label">Provider</span>
-                <select class="routine-input" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
-                  <option value="claude">claude</option>
-                  <option value="pi">pi</option>
-                </select>
-              </label>
-              <label class="ws-field"><span class="ws-label">Default model</span>
-                <input class="routine-input" v-model="form.default_model" :disabled="workspacesSaving === form.name" placeholder="(inherit)" />
-              </label>
-              <label class="ws-field"><span class="ws-label">GWS profile</span>
-                <input class="routine-input" v-model="form.gws_profile" :disabled="workspacesSaving === form.name" placeholder="(none)" />
-              </label>
-              <label class="ws-field"><span class="ws-label">Model bucket</span>
-                <input class="routine-input" v-model="form.model_bucket" :disabled="workspacesSaving === form.name" placeholder="(none)" />
-              </label>
-              <label class="ws-field"><span class="ws-label">Disallowed tools</span>
-                <input class="routine-input" v-model="form.disallowed_tools" :disabled="workspacesSaving === form.name" placeholder="comma-separated, blank = defaults" />
-              </label>
-
-              <div class="action-row" style="margin-top: 4px;">
-                <button class="btn-small" @click="saveWorkspace(form.name)" :disabled="workspacesSaving === form.name">
-                  {{ workspacesSaving === form.name ? 'Saving...' : 'Save' }}
+            <div v-if="showNewWorkspace" class="workspace-card workspace-card--new">
+              <div class="workspace-card-header">
+                <div>
+                  <p class="workspace-title">New workspace</p>
+                  <p class="hint hint--compact">Saved to <code>.runtime/workspaces.json</code> and applied immediately.</p>
+                </div>
+              </div>
+              <div class="settings-field-grid">
+                <label class="settings-field"><span class="ws-label">Name</span>
+                  <input class="routine-input" v-model="newWorkspaceForm.name" :disabled="workspacesSaving === 'new'" placeholder="letters, numbers, dashes, underscores" />
+                </label>
+                <label class="settings-field"><span class="ws-label">Vault root</span>
+                  <input class="routine-input" v-model="newWorkspaceForm.vault_root" :disabled="workspacesSaving === 'new'" placeholder="(defaults to name)" />
+                </label>
+                <label class="settings-field"><span class="ws-label">Provider</span>
+                  <select class="routine-input" v-model="newWorkspaceForm.default_provider" :disabled="workspacesSaving === 'new'">
+                    <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
+                      {{ provider.label }}
+                    </option>
+                  </select>
+                </label>
+                <label class="settings-field"><span class="ws-label">Default tier</span>
+                  <select class="routine-input" v-model="newWorkspaceForm.default_model" :disabled="workspacesSaving === 'new'">
+                    <option value="">Inherit default tier</option>
+                    <option v-for="tier in modelTiers" :key="`new-${tier.key}`" :value="tier.key">
+                      {{ tier.label }}
+                    </option>
+                    <option v-if="workspaceCustomDefaultModel(newWorkspaceForm.default_model)" :value="newWorkspaceForm.default_model">
+                      Custom: {{ newWorkspaceForm.default_model }}
+                    </option>
+                  </select>
+                </label>
+                <label class="settings-field"><span class="ws-label">GWS profile</span>
+                  <input class="routine-input" v-model="newWorkspaceForm.gws_profile" :disabled="workspacesSaving === 'new'" placeholder="(none)" />
+                </label>
+                <label class="settings-field settings-field--wide"><span class="ws-label">Claude.ai MCPs</span>
+                  <select class="routine-input" v-model="newWorkspaceForm.claude_ai_mcps" :disabled="workspacesSaving === 'new'">
+                    <option value="default">Default (off for personal, on for work)</option>
+                    <option value="on">On (connectors allowed)</option>
+                    <option value="off">Off (connectors blocked)</option>
+                  </select>
+                  <p class="hint hint--compact">Toggle the claude.ai connector MCPs: {{ claudeAiMcpsLabel }}.</p>
+                </label>
+                <details class="settings-advanced settings-field settings-field--wide">
+                  <summary>Advanced routing</summary>
+                  <label class="settings-field">
+                    <span class="ws-label">Model bucket</span>
+                    <input class="routine-input" v-model="newWorkspaceForm.model_bucket" :disabled="workspacesSaving === 'new'" placeholder="(automatic from provider)" />
+                  </label>
+                  <label class="settings-field settings-field--wide"><span class="ws-label">Extra disallowed tools (advanced)</span>
+                    <input class="routine-input" v-model="newWorkspaceForm.disallowed_tools" :disabled="workspacesSaving === 'new'" placeholder="comma-separated, e.g. mcp__n8n_mcp" />
+                  </label>
+                </details>
+              </div>
+              <div class="action-row settings-actions">
+                <button class="btn-primary" @click="createNewWorkspace" :disabled="workspacesSaving === 'new'">
+                  {{ workspacesSaving === 'new' ? 'Creating...' : 'Create workspace' }}
                 </button>
               </div>
             </div>
 
-            <!-- Add workspace -->
-            <div class="routine-row" style="flex-direction: column; align-items: stretch; gap: 8px; margin-top: 20px; border-top: 1px solid var(--border); padding-top: 16px;">
-              <button class="btn-small" @click="showNewWorkspace = !showNewWorkspace">
-                {{ showNewWorkspace ? 'Cancel' : '+ Add workspace' }}
-              </button>
-              <template v-if="showNewWorkspace">
-                <label class="ws-field"><span class="ws-label">Name</span>
-                  <input class="routine-input" v-model="newWorkspaceForm.name" :disabled="workspacesSaving === 'new'" placeholder="letters, numbers, dashes, underscores" />
-                </label>
-                <label class="ws-field"><span class="ws-label">Vault root</span>
-                  <input class="routine-input" v-model="newWorkspaceForm.vault_root" :disabled="workspacesSaving === 'new'" placeholder="(defaults to name)" />
-                </label>
-                <label class="ws-field"><span class="ws-label">Provider</span>
-                  <select class="routine-input" v-model="newWorkspaceForm.default_provider" :disabled="workspacesSaving === 'new'">
-                    <option value="claude">claude</option>
-                    <option value="pi">pi</option>
-                  </select>
-                </label>
-                <label class="ws-field"><span class="ws-label">Default model</span>
-                  <input class="routine-input" v-model="newWorkspaceForm.default_model" :disabled="workspacesSaving === 'new'" placeholder="(inherit)" />
-                </label>
-                <label class="ws-field"><span class="ws-label">GWS profile</span>
-                  <input class="routine-input" v-model="newWorkspaceForm.gws_profile" :disabled="workspacesSaving === 'new'" placeholder="(none)" />
-                </label>
-                <label class="ws-field"><span class="ws-label">Model bucket</span>
-                  <input class="routine-input" v-model="newWorkspaceForm.model_bucket" :disabled="workspacesSaving === 'new'" placeholder="(none)" />
-                </label>
-                <label class="ws-field"><span class="ws-label">Disallowed tools</span>
-                  <input class="routine-input" v-model="newWorkspaceForm.disallowed_tools" :disabled="workspacesSaving === 'new'" placeholder="comma-separated, blank = defaults" />
-                </label>
-                <div class="action-row" style="margin-top: 4px;">
-                  <button class="btn-primary" @click="createNewWorkspace" :disabled="workspacesSaving === 'new'">
-                    {{ workspacesSaving === 'new' ? 'Creating...' : 'Create workspace' }}
-                  </button>
+            <div class="workspace-list">
+              <div
+                v-for="form in workspaceForms"
+                :key="form.name"
+                class="workspace-card"
+              >
+                <div class="workspace-card-header">
+                  <div>
+                    <p class="workspace-title">{{ form.name }}</p>
+                    <p class="hint hint--compact">{{ form.vault_root || form.name }} vault root</p>
+                  </div>
+                  <div class="workspace-actions">
+                    <button
+                      class="btn-small"
+                      @click="saveWorkspace(form.name)"
+                      :disabled="workspacesSaving === form.name"
+                    >
+                      {{ workspacesSaving === form.name ? 'Saving...' : 'Save' }}
+                    </button>
+                    <button
+                      v-if="workspaceForms.length > 1"
+                      class="btn-small btn-danger"
+                      @click="removeWorkspace(form.name)"
+                      :disabled="workspacesSaving === form.name"
+                    >Delete</button>
+                  </div>
                 </div>
-              </template>
+
+                <div class="settings-field-grid">
+                  <label class="settings-field"><span class="ws-label">Vault root</span>
+                    <input class="routine-input" v-model="form.vault_root" :disabled="workspacesSaving === form.name" placeholder="(defaults to workspace name)" />
+                  </label>
+                  <label class="settings-field"><span class="ws-label">Provider</span>
+                    <select class="routine-input" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
+                      <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
+                        {{ provider.label }}
+                      </option>
+                    </select>
+                  </label>
+                  <label class="settings-field"><span class="ws-label">Default tier</span>
+                    <select class="routine-input" v-model="form.default_model" :disabled="workspacesSaving === form.name">
+                      <option value="">Inherit default tier</option>
+                      <option v-for="tier in modelTiers" :key="`${form.name}-${tier.key}`" :value="tier.key">
+                        {{ tier.label }}
+                      </option>
+                      <option v-if="workspaceCustomDefaultModel(form.default_model)" :value="form.default_model">
+                        Custom: {{ form.default_model }}
+                      </option>
+                    </select>
+                  </label>
+                  <label class="settings-field"><span class="ws-label">GWS profile</span>
+                    <input class="routine-input" v-model="form.gws_profile" :disabled="workspacesSaving === form.name" placeholder="(none)" />
+                  </label>
+                  <label class="settings-field settings-field--wide"><span class="ws-label">Claude.ai MCPs</span>
+                    <select class="routine-input" v-model="form.claude_ai_mcps" :disabled="workspacesSaving === form.name">
+                      <option value="default">Default (off for personal, on for work)</option>
+                      <option value="on">On (connectors allowed)</option>
+                      <option value="off">Off (connectors blocked)</option>
+                    </select>
+                    <p class="hint hint--compact">Toggle the claude.ai connector MCPs: {{ claudeAiMcpsLabel }}.</p>
+                  </label>
+                  <details class="settings-advanced settings-field settings-field--wide">
+                    <summary>Advanced routing</summary>
+                    <label class="settings-field">
+                      <span class="ws-label">Model bucket</span>
+                      <input class="routine-input" v-model="form.model_bucket" :disabled="workspacesSaving === form.name" placeholder="(automatic from provider)" />
+                    </label>
+                    <label class="settings-field settings-field--wide"><span class="ws-label">Extra disallowed tools (advanced)</span>
+                      <input class="routine-input" v-model="form.disallowed_tools" :disabled="workspacesSaving === form.name" placeholder="comma-separated, e.g. mcp__n8n_mcp" />
+                    </label>
+                  </details>
+                </div>
+              </div>
             </div>
 
             <div v-if="workspacesResult" class="action-result">{{ workspacesResult }}</div>
@@ -456,45 +678,119 @@
       <!-- SKILLS TAB -->
       <template v-if="currentTab === 'skills'">
         <div class="card">
-          <p class="section-title">Skills</p>
+          <div class="settings-toolbar">
+            <p class="section-title">Skills</p>
+            <div class="settings-toolbar-actions">
+              <button class="btn-small" @click="createSkillViaChat">Add via Chat</button>
+              <button class="btn-small" @click="toggleAddGithubSkill">
+                {{ showAddGithubSkill ? 'Cancel' : '+ Add from GitHub' }}
+              </button>
+            </div>
+          </div>
+
+          <p class="hint hint--compact skill-scope-note">
+            Ciaobot runs on Claude Code, so any plugins and skills you install globally in Claude Code are also loaded and available to Ciaobot. This page only lists the skills managed here, the Ciaobot-specific ones (custom and GitHub/package skills).
+          </p>
+
+          <!-- Auto-Update GitHub Skills -->
+          <div class="setting-row setting-row--inline">
+            <div class="routine-info">
+              <span class="routine-name">Auto-Update GitHub Skills</span>
+              <p class="hint hint--compact">
+                If enabled, Ciaobot checks GitHub for updates to locked package skills on boot.
+              </p>
+            </div>
+            <input
+              type="checkbox"
+              class="settings-checkbox"
+              v-model="autoUpdateGithubSkills"
+              :disabled="autoUpdateSaving"
+              @change="saveAutoUpdateGithubSkills"
+            />
+          </div>
+          <div v-if="autoUpdateResult" class="action-result">{{ autoUpdateResult }}</div>
+
+          <!-- Add Github Skill Form -->
+          <div
+            v-if="showAddGithubSkill"
+            class="settings-form-panel"
+          >
+            <label class="ws-field"><span class="ws-label">GitHub URL / owner/repo</span>
+              <input class="routine-input" v-model="githubSource" :disabled="addingGithubSkill" placeholder="e.g. owner/repo or github URL" />
+            </label>
+            <label class="ws-field"><span class="ws-label">Skill Name (optional)</span>
+              <input class="routine-input" v-model="githubSkillName" :disabled="addingGithubSkill" placeholder="(inferred from URL if omitted)" />
+            </label>
+            <div class="action-row settings-actions">
+              <button class="btn-primary" @click="addGithubSkill" :disabled="addingGithubSkill || !githubSource.trim()">
+                {{ addingGithubSkill ? 'Adding...' : 'Add Skill' }}
+              </button>
+            </div>
+            <div v-if="addGithubSkillResult" class="action-result" :class="{ '--error': addGithubSkillError }">{{ addGithubSkillResult }}</div>
+          </div>
+
           <div v-if="!skillsLoaded" class="action-row"><span class="loading">Loading&hellip;</span></div>
           <template v-else-if="skillsError">
             <p class="hint">{{ skillsError }}</p>
           </template>
           <template v-else-if="skillsInventory">
-            <p class="hint">
-              {{ skillsInventory.counts.custom }} custom &middot; {{ skillsInventory.counts.github }} GitHub/package
-            </p>
-            <div class="skill-list">
-              <div
-                v-for="skill in skillsInventory.skills"
-                :key="skill.name"
-                class="skill-row"
-                :class="{ expanded: isSkillExpanded(skill.name) }"
-                @click="toggleSkill(skill.name)"
-              >
-                <div class="skill-main">
-                  <div class="skill-title-row">
-                    <span class="skill-chevron">{{ isSkillExpanded(skill.name) ? '&#9662;' : '&#9656;' }}</span>
-                    <span class="skill-name">{{ skill.name }}</span>
-                    <span class="badge" :class="skill.label === 'custom' ? '--accent' : '--accent2'">
-                      {{ skill.label === 'custom' ? 'custom' : 'github/package' }}
-                    </span>
-                  </div>
-                  <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
-                  <p class="skill-source">{{ skill.source }}</p>
-                  <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
-                    <p v-if="skill.source_type" class="skill-meta"><span class="skill-meta-label">Type</span> {{ skill.source_type }}</p>
-                    <div v-if="skill.installed_targets.length" class="skill-meta">
-                      <span class="skill-meta-label">Installed on</span>
-                      <div class="skill-targets-inline">
-                        <span v-for="target in skill.installed_targets" :key="target" class="skill-target">{{ target }}</span>
-                      </div>
+            <!-- Custom Skills Section -->
+            <div class="skill-section">
+              <p class="subsection-title subsection-title--spaced">Custom Skills</p>
+              <p v-if="!customSkills.length" class="hint hint--section-empty">No custom skills created yet.</p>
+              <div v-else class="skill-list skill-list--section">
+                <div
+                  v-for="skill in customSkills"
+                  :key="skill.name"
+                  class="skill-row"
+                  :class="{ expanded: isSkillExpanded(skill.name) }"
+                  @click="toggleSkill(skill.name)"
+                >
+                  <div class="skill-main">
+                    <div class="skill-title-row">
+                      <span class="skill-chevron">{{ isSkillExpanded(skill.name) ? '&#9662;' : '&#9656;' }}</span>
+                      <span class="skill-name">{{ skill.name }}</span>
+                    </div>
+                    <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
+                    <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
+                      <p v-if="skill.source_type" class="skill-meta"><span class="skill-meta-label">Type</span> {{ skill.source_type }}</p>
                     </div>
                   </div>
                 </div>
-                <div v-if="!isSkillExpanded(skill.name) && skill.installed_targets.length" class="skill-targets">
-                  <span v-for="target in skill.installed_targets" :key="target" class="skill-target">{{ target }}</span>
+              </div>
+            </div>
+
+            <!-- GitHub Skills Section -->
+            <div class="skill-section skill-section--spaced">
+              <p class="subsection-title subsection-title--spaced">GitHub / Package Skills</p>
+              <p v-if="!githubSkills.length" class="hint hint--section-empty">No GitHub/package skills installed yet.</p>
+              <div v-else class="skill-list">
+                <div
+                  v-for="skill in githubSkills"
+                  :key="skill.name"
+                  class="skill-row"
+                  :class="{ expanded: isSkillExpanded(skill.name) }"
+                  @click="toggleSkill(skill.name)"
+                >
+                  <div class="skill-main">
+                    <div class="skill-title-row">
+                      <span class="skill-chevron">{{ isSkillExpanded(skill.name) ? '&#9662;' : '&#9656;' }}</span>
+                      <a
+                        v-if="skill.source && skill.source !== 'skills-lock.json'"
+                        :href="'https://github.com/' + skill.source"
+                        target="_blank"
+                        class="skill-name skill-link"
+                        @click.stop
+                      >
+                        {{ skill.name }}
+                      </a>
+                      <span v-else class="skill-name">{{ skill.name }}</span>
+                    </div>
+                    <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
+                    <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
+                      <p v-if="skill.source_type" class="skill-meta"><span class="skill-meta-label">Type</span> {{ skill.source_type }}</p>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -502,67 +798,7 @@
         </div>
       </template>
 
-      <!-- AUTOMATION TAB -->
-      <template v-if="currentTab === 'automation'">
-        <div class="card">
-          <div class="auto-intro">
-            <div>
-              <p class="section-title">Automation</p>
-              <p class="hint">
-                Background processes Ciao runs on its own. Check that each is working,
-                when it last ran, how long it took, and what failed.
-              </p>
-            </div>
-            <button class="btn-small" @click="fetchAutomation" :disabled="!automationLoaded">Refresh</button>
-          </div>
-          <div v-if="!automationLoaded" class="action-row"><span class="loading">Loading&hellip;</span></div>
-          <p v-else-if="automationError" class="hint">{{ automationError }}</p>
-        </div>
 
-        <template v-if="automationLoaded && !automationError">
-          <div v-for="group in automationGroups" :key="group.key" class="card">
-            <p class="section-title">{{ group.title }}</p>
-            <div class="auto-list">
-              <div
-                v-for="item in group.items"
-                :key="item.job"
-                class="auto-row"
-                :class="{ expanded: isJobExpanded(item.job) }"
-                @click="toggleJob(item.job)"
-              >
-                <div class="auto-head">
-                  <span class="auto-chevron">{{ isJobExpanded(item.job) ? '&#9662;' : '&#9656;' }}</span>
-                  <span class="auto-name">{{ item.label }}</span>
-                  <span class="badge" :class="statusBadgeClass(item)">{{ statusLabel(item) }}</span>
-                  <span class="auto-when">{{ lastRunLabel(item) }}</span>
-                </div>
-                <div class="auto-sub">
-                  <span v-if="item.last_run" class="auto-meta">{{ formatDuration(item.last_run.duration_ms) || '0ms' }}</span>
-                  <span v-if="item.last_run && item.last_run.model" class="badge --muted">
-                    {{ item.last_run.model }}<template v-if="item.last_run.provider"> &middot; {{ item.last_run.provider }}</template>
-                  </span>
-                  <span v-if="item.stats.total_runs" class="auto-meta">
-                    {{ item.stats.total_runs }} run{{ item.stats.total_runs === 1 ? '' : 's' }}<template v-if="item.stats.success_rate != null"> &middot; {{ Math.round(item.stats.success_rate * 100) }}% ok</template>
-                  </span>
-                </div>
-                <div v-if="item.last_run?.status === 'error' && lastError(item) && !isJobExpanded(item.job)" class="auto-error">{{ lastError(item) }}</div>
-
-                <div v-if="isJobExpanded(item.job)" class="auto-detail" @click.stop>
-                  <p v-if="item.description" class="auto-desc">{{ item.description }}</p>
-                  <p v-if="!item.recent.length" class="hint">No runs recorded yet.</p>
-                  <div v-for="(run, i) in item.recent" :key="i" class="auto-run">
-                    <span class="badge" :class="runBadgeClass(run.status)">{{ run.status }}</span>
-                    <span class="auto-run-when">{{ formatTime(run.ended_at || run.started_at) }}</span>
-                    <span class="auto-meta">{{ formatDuration(run.duration_ms) || '0ms' }}</span>
-                    <span v-if="run.model" class="auto-run-model">{{ run.model }}</span>
-                    <span v-if="run.error" class="auto-run-error">{{ run.error }}</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </template>
-      </template>
 
 
     </div>
@@ -574,7 +810,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '../lib/api'
 import { formatTime, formatDuration } from '../lib/time'
-import type { AutomationProcess, DeployResult, LocalStatus, RoutineSettings, SkillInventory, ProviderConfigSettings, WorkspaceInfo } from '../lib/types'
+import type { AutomationProcess, DeployResult, LocalStatus, RoutineSettings, SkillInventory, ProviderConfigSettings, WorkspaceInfo, WorkspaceProvider } from '../lib/types'
 import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSupported } from '../lib/push'
 import { useAuthStore } from '../stores/auth'
 import { useProjectStore } from '../stores/projects'
@@ -663,6 +899,64 @@ const routinesError = ref('')
 const routinesSaving = ref(false)
 const routinesResult = ref('')
 
+type CritiqueModelGroup = {
+  key: string
+  label: string
+  models: string[]
+}
+
+type AliasProviderKey = 'claude' | 'ollama' | 'openrouter'
+type TierProviderKey = Exclude<AliasProviderKey, 'claude'>
+type TierKey = 'haiku' | 'sonnet' | 'opus'
+type RoutineModelKey = 'title_model' | 'insights_model'
+type RoutineProviderValue = 'automatic' | 'apple' | 'custom' | AliasProviderKey
+type AliasProviderSection = {
+  key: AliasProviderKey
+  label: string
+  options: string[]
+  configurable: boolean
+  // Whether the backend is configured (API key set, or for Ollama: local
+  // models OR cloud key). Routine selectors filter to available sections;
+  // the Providers tab tier card shows unavailable sections disabled.
+  available: boolean
+}
+type TierSettingKey =
+  | 'ollama_haiku_model'
+  | 'ollama_sonnet_model'
+  | 'ollama_opus_model'
+  | 'openrouter_haiku_model'
+  | 'openrouter_sonnet_model'
+  | 'openrouter_opus_model'
+
+const modelTiers: { key: TierKey; label: string }[] = [
+  { key: 'haiku', label: 'Haiku' },
+  { key: 'sonnet', label: 'Sonnet' },
+  { key: 'opus', label: 'Opus' },
+]
+
+const tierSettingKeys: Record<TierProviderKey, Record<TierKey, TierSettingKey>> = {
+  ollama: {
+    haiku: 'ollama_haiku_model',
+    sonnet: 'ollama_sonnet_model',
+    opus: 'ollama_opus_model',
+  },
+  openrouter: {
+    haiku: 'openrouter_haiku_model',
+    sonnet: 'openrouter_sonnet_model',
+    opus: 'openrouter_opus_model',
+  },
+}
+
+const routineEffectiveKeys: Record<RoutineModelKey, keyof RoutineSettings> = {
+  title_model: 'title_model_effective',
+  insights_model: 'insights_model_effective',
+}
+
+const routineDefaultTiers: Record<RoutineModelKey, TierKey> = {
+  title_model: 'haiku',
+  insights_model: 'haiku',
+}
+
 async function fetchRoutines() {
   try {
     routines.value = await api.get<RoutineSettings>('/api/settings/routines')
@@ -687,6 +981,268 @@ async function saveRoutines(patch: Record<string, string>) {
   }
 }
 
+function parseModelList(raw: string): string[] {
+  const seen = new Set<string>()
+  const models: string[] = []
+  for (const item of raw.split(',')) {
+    const model = item.trim()
+    if (!model || seen.has(model)) continue
+    seen.add(model)
+    models.push(model)
+  }
+  return models
+}
+
+function serializeModelList(models: string[]): string {
+  return parseModelList(models.join(',')).join(',')
+}
+
+const critiqueModelGroups = computed<CritiqueModelGroup[]>(() => {
+  const options = routines.value?.model_options
+  if (!options) return []
+  return [
+    { key: 'ollama_local', label: 'Ollama (local, free)', models: options.ollama_local || [] },
+    { key: 'ollama_cloud', label: 'Ollama cloud', models: options.ollama_cloud || [] },
+    { key: 'openrouter', label: 'OpenRouter', models: options.openrouter || [] },
+    { key: 'anthropic', label: 'Anthropic', models: options.anthropic || [] },
+  ].filter((group) => group.models.length > 0)
+})
+
+const knownCritiqueModels = computed(() => new Set(critiqueModelGroups.value.flatMap((group) => group.models)))
+
+const selectedCritiqueModels = computed(() => parseModelList(routines.value?.critique_models || ''))
+
+const customCritiqueModels = computed(() =>
+  selectedCritiqueModels.value.filter((model) => !knownCritiqueModels.value.has(model))
+)
+
+function isCritiqueModelSelected(model: string): boolean {
+  return selectedCritiqueModels.value.includes(model)
+}
+
+async function setCritiqueModels(models: string[]) {
+  await saveRoutines({ critique_models: serializeModelList(models) })
+}
+
+async function toggleCritiqueModel(model: string, checked: boolean) {
+  const current = selectedCritiqueModels.value
+  const next = checked
+    ? [...current, model]
+    : current.filter((selected) => selected !== model)
+  await setCritiqueModels(next)
+}
+
+const aliasProviderSections = computed<AliasProviderSection[]>(() => {
+  const settings = routines.value
+  if (!settings) return []
+  // Filtered to available backends — used by the routine model selectors,
+  // which must not offer a backend that isn't configured.
+  const sections: AliasProviderSection[] = [
+    {
+      key: 'claude',
+      label: 'Claude',
+      options: settings.model_options.anthropic || [],
+      configurable: false,
+      available: true,
+    },
+  ]
+  if (settings.backends?.ollama) {
+    sections.push({
+      key: 'ollama',
+      label: 'Ollama',
+      options: parseModelList([
+        ...(settings.model_options.ollama_local || []),
+        ...(settings.model_options.ollama_cloud || []),
+      ].join(',')),
+      configurable: true,
+      available: true,
+    })
+  }
+  if (settings.backends?.openrouter) {
+    sections.push({
+      key: 'openrouter',
+      label: 'OpenRouter',
+      options: parseModelList((settings.model_options.openrouter || []).join(',')),
+      configurable: true,
+      available: true,
+    })
+  }
+  return sections
+})
+
+// Tier-mapping sections for the Providers tab "Provider alias models" card.
+// Always includes Ollama and OpenRouter (even when unconfigured) so the
+// operator can see the option exists; unconfigured backends render disabled
+// with a "set the API key" hint instead of vanishing.
+const tierProviderSections = computed<AliasProviderSection[]>(() => {
+  const settings = routines.value
+  if (!settings) return []
+  const ollamaAvailable = !!settings.backends?.ollama
+  const openrouterAvailable = !!settings.backends?.openrouter
+  return [
+    {
+      key: 'claude',
+      label: 'Claude',
+      options: settings.model_options.anthropic || [],
+      configurable: false,
+      available: true,
+    },
+    {
+      key: 'ollama',
+      label: 'Ollama',
+      options: ollamaAvailable
+        ? parseModelList([
+            ...(settings.model_options.ollama_local || []),
+            ...(settings.model_options.ollama_cloud || []),
+          ].join(','))
+        : [],
+      configurable: true,
+      available: ollamaAvailable,
+    },
+    {
+      key: 'openrouter',
+      label: 'OpenRouter',
+      options: openrouterAvailable
+        ? parseModelList((settings.model_options.openrouter || []).join(','))
+        : [],
+      configurable: true,
+      available: openrouterAvailable,
+    },
+  ]
+})
+
+const selectedTierProvider = ref<AliasProviderKey>('claude')
+const selectedTierProviderSection = computed(() =>
+  tierProviderSections.value.find((section) => section.key === selectedTierProvider.value)
+  || tierProviderSections.value[0]
+  || null
+)
+
+// Hint shown when the selected tier provider isn't configured yet.
+const tierProviderUnavailableHint = computed(() => {
+  const section = selectedTierProviderSection.value
+  if (!section || section.available) return ''
+  if (section.key === 'ollama') {
+    return 'Install local Ollama models or set the Ollama Cloud API key above to enable tier mapping.'
+  }
+  if (section.key === 'openrouter') {
+    return 'Set the OpenRouter API key above to enable tier mapping.'
+  }
+  return 'Configure this provider to enable tier mapping.'
+})
+
+function tierOverrideValue(provider: TierProviderKey, tier: TierKey): string {
+  const key = tierSettingKeys[provider][tier]
+  return routines.value?.[key] || ''
+}
+
+function tierEffectiveValue(provider: TierProviderKey, tier: TierKey): string {
+  return routines.value?.alias_tiers?.[provider]?.[tier] || ''
+}
+
+async function saveTierModel(provider: TierProviderKey, tier: TierKey, model: string) {
+  const key = tierSettingKeys[provider][tier]
+  await saveRoutines({ [key]: model.trim() })
+}
+
+function tierModelForProvider(provider: AliasProviderKey, tier: TierKey): string {
+  if (provider === 'claude') return tier
+  return tierEffectiveValue(provider, tier) || ''
+}
+
+function aliasProviderLabel(provider: AliasProviderKey): string {
+  return aliasProviderSections.value.find((section) => section.key === provider)?.label || provider
+}
+
+function routineEffectiveModel(key: RoutineModelKey): string {
+  const settings = routines.value
+  if (!settings) return ''
+  const effectiveKey = routineEffectiveKeys[key]
+  const value = settings[effectiveKey]
+  return typeof value === 'string' ? value : ''
+}
+
+function inferRoutineModel(model: string): { provider: RoutineProviderValue; tier: TierKey } {
+  const raw = model.trim()
+  if (!raw) return { provider: 'automatic', tier: 'sonnet' }
+  if (raw === 'apfel') return { provider: 'apple', tier: 'haiku' }
+  if (raw === 'haiku' || raw === 'sonnet' || raw === 'opus') {
+    return { provider: 'claude', tier: raw }
+  }
+
+  const providers: TierProviderKey[] = ['ollama', 'openrouter']
+  for (const provider of providers) {
+    for (const tier of modelTiers) {
+      if (tierEffectiveValue(provider, tier.key) === raw) {
+        return { provider, tier: tier.key }
+      }
+    }
+  }
+
+  return { provider: 'custom', tier: 'sonnet' }
+}
+
+function routineProviderValue(key: RoutineModelKey): RoutineProviderValue {
+  return inferRoutineModel(routines.value?.[key] || '').provider
+}
+
+function routineTierValue(key: RoutineModelKey): TierKey {
+  const raw = routines.value?.[key] || ''
+  if (raw.trim()) return inferRoutineModel(raw).tier
+  const effective = inferRoutineModel(routineEffectiveModel(key))
+  if (effective.provider !== 'automatic' && effective.provider !== 'custom') {
+    return effective.tier
+  }
+  return routineDefaultTiers[key]
+}
+
+function routineTierSelectable(key: RoutineModelKey): boolean {
+  const provider = routineProviderValue(key)
+  return provider === 'claude' || provider === 'ollama' || provider === 'openrouter'
+}
+
+function routineCustomModel(key: RoutineModelKey): string {
+  return routineProviderValue(key) === 'custom' ? (routines.value?.[key] || '') : ''
+}
+
+async function saveRoutineProvider(key: RoutineModelKey, providerValue: string) {
+  const provider = providerValue as RoutineProviderValue
+  if (provider === 'automatic') {
+    await saveRoutines({ [key]: '' })
+    return
+  }
+  if (provider === 'apple') {
+    await saveRoutines({ [key]: 'apfel' })
+    return
+  }
+  if (provider === 'custom') return
+  const tier = routineTierValue(key)
+  const model = tierModelForProvider(provider, tier)
+  await saveRoutines({ [key]: model })
+}
+
+async function saveRoutineTier(key: RoutineModelKey, tierValue: string) {
+  const tier = tierValue as TierKey
+  let provider = routineProviderValue(key)
+  if (provider === 'automatic' || provider === 'apple' || provider === 'custom') {
+    provider = 'claude'
+  }
+  const model = tierModelForProvider(provider, tier)
+  await saveRoutines({ [key]: model })
+}
+
+function routineModelSummary(key: RoutineModelKey): string {
+  const provider = routineProviderValue(key)
+  if (provider === 'automatic') {
+    return `Automatic: ${routineEffectiveModel(key) || 'default'}`
+  }
+  if (provider === 'apple') return 'Apple Intelligence'
+  if (provider === 'custom') return `Custom: ${routineCustomModel(key)}`
+  const tier = routineTierValue(key)
+  const model = tierModelForProvider(provider, tier)
+  return `${aliasProviderLabel(provider)} ${tier}: ${model || 'default'}`
+}
+
 // ── Provider API Key settings (Providers tab) ─────────────────────────────────
 const providerKeys = ref<ProviderConfigSettings | null>(null)
 const providerKeysLoaded = ref(false)
@@ -695,6 +1251,31 @@ const providerKeysSaving = ref(false)
 const providerKeysResult = ref('')
 const providerKeyInputs = ref<Record<string, string>>({})
 const autoUpdateGithubSkills = ref(true)
+const autoUpdateSaving = ref(false)
+const autoUpdateResult = ref('')
+
+async function saveAutoUpdateGithubSkills() {
+  autoUpdateSaving.value = true
+  autoUpdateResult.value = ''
+  try {
+    const res = await api.patch<ProviderConfigSettings>('/api/settings/providers', {
+      auto_update_github_skills: autoUpdateGithubSkills.value,
+    })
+    if (res.auto_update_github_skills !== undefined) {
+      autoUpdateGithubSkills.value = res.auto_update_github_skills
+    }
+    if (providerKeys.value) {
+      providerKeys.value = res
+    }
+    autoUpdateResult.value = 'Saved.'
+    setTimeout(() => { autoUpdateResult.value = '' }, 2000)
+  } catch (e: any) {
+    autoUpdateResult.value = `Error: ${e?.message || e}`
+    autoUpdateGithubSkills.value = !autoUpdateGithubSkills.value
+  } finally {
+    autoUpdateSaving.value = false
+  }
+}
 
 async function fetchProviderKeys() {
   try {
@@ -727,9 +1308,8 @@ async function saveProviderKeys() {
   }
   
   const hasKeyChanges = Object.keys(patchKeys).length > 0
-  const hasSettingChanges = autoUpdateGithubSkills.value !== providerKeys.value.auto_update_github_skills
   
-  if (!hasKeyChanges && !hasSettingChanges) {
+  if (!hasKeyChanges) {
     providerKeysResult.value = 'No changes to save.'
     providerKeysSaving.value = false
     setTimeout(() => { providerKeysResult.value = '' }, 2000)
@@ -737,13 +1317,7 @@ async function saveProviderKeys() {
   }
   
   try {
-    const payload: any = {}
-    if (hasKeyChanges) {
-      payload.keys = patchKeys
-    }
-    if (hasSettingChanges) {
-      payload.auto_update_github_skills = autoUpdateGithubSkills.value
-    }
+    const payload: any = { keys: patchKeys }
     
     const res = await api.patch<ProviderConfigSettings>('/api/settings/providers', payload)
     providerKeys.value = res
@@ -799,47 +1373,124 @@ async function fetchSkills() {
   }
 }
 
-// ── Automation tab ─────────────────────────────────────────────────────────
+const customSkills = computed(() => {
+  return skillsInventory.value?.skills.filter(s => s.label === 'custom') || []
+})
+
+const githubSkills = computed(() => {
+  return skillsInventory.value?.skills.filter(s => s.label === 'github') || []
+})
+
+const showAddGithubSkill = ref(false)
+const githubSource = ref('')
+const githubSkillName = ref('')
+const addingGithubSkill = ref(false)
+const addGithubSkillResult = ref('')
+const addGithubSkillError = ref(false)
+
+function toggleAddGithubSkill() {
+  showAddGithubSkill.value = !showAddGithubSkill.value
+  githubSource.value = ''
+  githubSkillName.value = ''
+  addGithubSkillResult.value = ''
+  addGithubSkillError.value = false
+}
+
+async function addGithubSkill() {
+  if (!githubSource.value.trim()) return
+  addingGithubSkill.value = true
+  addGithubSkillResult.value = 'Adding skill...'
+  addGithubSkillError.value = false
+  try {
+    const res = await api.post<{ ok: boolean; message?: string; error?: string }>('/api/admin/skills/add', {
+      source: githubSource.value.trim(),
+      skill: githubSkillName.value.trim() || undefined,
+    })
+    if (res.ok) {
+      addGithubSkillResult.value = res.message || 'Skill added successfully.'
+      githubSource.value = ''
+      githubSkillName.value = ''
+      await fetchSkills()
+      setTimeout(() => {
+        showAddGithubSkill.value = false
+        addGithubSkillResult.value = ''
+      }, 2000)
+    } else {
+      addGithubSkillError.value = true
+      addGithubSkillResult.value = res.error || 'Failed to add skill.'
+    }
+  } catch (e: any) {
+    addGithubSkillError.value = true
+    addGithubSkillResult.value = `Error: ${e?.message || e}`
+  } finally {
+    addingGithubSkill.value = false
+  }
+}
+
+async function createSkillViaChat() {
+  const activeProj = projectStore.activeProject
+  let projectId = activeProj?.project_id
+  if (!projectId) {
+    projectId = projectStore.workspaceProjects[0]?.project_id
+  }
+  if (!projectId) {
+    projectId = projectStore.projects[0]?.project_id
+  }
+  if (!projectId) {
+    alert('Please create a project first before starting a chat.')
+    return
+  }
+
+  try {
+    const chat = await projectStore.createChat(projectId, 'New Custom Skill')
+    if (chat) {
+      const prompt = 'I want to create a new custom skill. Please guide me through writing a new skill (creating the SKILL.md under the skills/ directory).'
+      projectStore.sendMessage(chat.chat_id, prompt)
+    }
+  } catch (e: any) {
+    alert(`Failed to start chat: ${e?.message || e}`)
+  }
+}
+
+
 const automationItems = ref<AutomationProcess[]>([])
 const automationLoaded = ref(false)
 const automationError = ref('')
-const expandedJobs = ref<Record<string, boolean>>({})
 
-function isJobExpanded(job: string) {
-  return expandedJobs.value[job] || false
+function getJobTelemetry(job: string): AutomationProcess | undefined {
+  return automationItems.value.find((i) => i.job === job)
 }
-function toggleJob(job: string) {
-  expandedJobs.value[job] = !isJobExpanded(job)
+function getTelemetryBadgeClass(status: string | undefined): string {
+  if (status === 'ok') return 'badge--success'
+  if (status === 'error') return 'badge--error'
+  if (status === 'skipped') return 'badge--warn'
+  return 'badge--muted'
 }
 
-const automationGroups = computed(() => [
-  {
-    key: 'content',
-    title: 'Content automations',
-    items: automationItems.value.filter((i) => i.category === 'content'),
-  },
-  {
-    key: 'system',
-    title: 'System',
-    items: automationItems.value.filter((i) => i.category === 'system'),
-  },
-])
+function getJobStatus(job: string): string {
+  const item = getJobTelemetry(job)
+  return item?.last_run ? item.last_run.status : 'never run'
+}
+function getJobBadgeClass(job: string): string {
+  const status = getJobTelemetry(job)?.last_run?.status
+  return getTelemetryBadgeClass(status)
+}
+function getJobDuration(job: string): string {
+  const dur = getJobTelemetry(job)?.last_run?.duration_ms
+  return formatDuration(dur) || '0ms'
+}
+function getJobLastRunLabel(job: string): string {
+  const item = getJobTelemetry(job)
+  return item ? lastRunLabel(item) : ''
+}
+function getJobLastError(job: string): string {
+  const item = getJobTelemetry(job)
+  return item ? lastError(item) : ''
+}
+function hasJobLastRun(job: string): boolean {
+  return !!getJobTelemetry(job)?.last_run
+}
 
-function statusLabel(item: AutomationProcess): string {
-  return item.last_run ? item.last_run.status : 'never run'
-}
-function badgeClass(status: string | undefined): string {
-  if (status === 'ok') return '--success'
-  if (status === 'error') return '--error'
-  if (status === 'skipped') return '--warn'
-  return '--muted'
-}
-function statusBadgeClass(item: AutomationProcess): string {
-  return badgeClass(item.last_run?.status)
-}
-function runBadgeClass(status: string): string {
-  return badgeClass(status)
-}
 function lastRunLabel(item: AutomationProcess): string {
   if (!item.last_run) return ''
   return formatTime(item.last_run.ended_at || item.last_run.started_at)
@@ -888,26 +1539,34 @@ const showNewWorkspace = ref(false)
 type WorkspaceForm = {
   name: string
   vault_root: string
-  default_provider: string
+  default_provider: WorkspaceProvider
   default_model: string
   gws_profile: string
   model_bucket: string
   disallowed_tools: string
+  // 'default' = per-workspace default (personal off, else on); on/off are explicit.
+  claude_ai_mcps: 'default' | 'on' | 'off'
+}
+
+function defaultWorkspaceProvider(): WorkspaceProvider {
+  return projectStore.workspaceProviderOptions[0]?.value || 'claude'
 }
 
 function blankWorkspaceForm(): WorkspaceForm {
   return {
     name: '',
     vault_root: '',
-    default_provider: 'claude',
+    default_provider: defaultWorkspaceProvider(),
     default_model: '',
     gws_profile: '',
     model_bucket: '',
     disallowed_tools: '',
+    claude_ai_mcps: 'default',
   }
 }
 
 function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
+  const mcps = ws.claude_ai_mcps
   return {
     name: ws.name,
     vault_root: ws.vault_root || '',
@@ -916,11 +1575,39 @@ function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
     gws_profile: ws.gws_profile || '',
     model_bucket: ws.model_bucket || '',
     disallowed_tools: Array.isArray(ws.disallowed_tools) ? ws.disallowed_tools.join(', ') : '',
+    claude_ai_mcps: mcps === true ? 'on' : mcps === false ? 'off' : 'default',
   }
+}
+
+const claudeAiConnectors = computed(() => projectStore.workspaceClaudeAiConnectors)
+
+// Human-readable label for the claude.ai MCPs switch: lists the connectors the
+// toggle controls (or a generic fallback if the payload hasn't loaded).
+const claudeAiMcpsLabel = computed(() => {
+  const names = claudeAiConnectors.value
+  if (!names.length) return 'claude.ai connector MCPs'
+  return names.map((n) => n.replace('mcp__claude_ai_', '').replace(/_/g, ' ')).join(', ')
+})
+
+function claudeAiMcpsPayload(value: 'default' | 'on' | 'off'): boolean | null {
+  if (value === 'on') return true
+  if (value === 'off') return false
+  return null
+}
+
+function workspaceCustomDefaultModel(model: string): boolean {
+  const value = model.trim()
+  return Boolean(value) && !modelTiers.some((tier) => tier.key === value)
 }
 
 const workspaceForms = ref<WorkspaceForm[]>([])
 const newWorkspaceForm = ref<WorkspaceForm>(blankWorkspaceForm())
+
+const workspaceProviderOptions = computed(() =>
+  projectStore.workspaceProviderOptions.length
+    ? projectStore.workspaceProviderOptions
+    : [{ value: 'claude' as WorkspaceProvider, label: 'Claude' }]
+)
 
 function disallowedToolsPayload(raw: string): string[] | null {
   const cleaned = raw.trim()
@@ -933,6 +1620,9 @@ async function fetchWorkspacesList() {
   try {
     await projectStore.fetchWorkspaces()
     workspaceForms.value = projectStore.workspaces.map(workspaceToForm)
+    if (!workspaceProviderOptions.value.some((provider) => provider.value === newWorkspaceForm.value.default_provider)) {
+      newWorkspaceForm.value.default_provider = defaultWorkspaceProvider()
+    }
   } catch (e: any) {
     workspacesError.value = `Failed to load workspaces: ${e?.message || e}`
   } finally {
@@ -948,11 +1638,12 @@ async function saveWorkspace(name: string) {
   try {
     await projectStore.updateWorkspace(name, {
       vault_root: form.vault_root,
-      default_provider: form.default_provider as 'claude' | 'pi',
+      default_provider: form.default_provider,
       default_model: form.default_model,
       gws_profile: form.gws_profile,
       model_bucket: form.model_bucket,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
+      claude_ai_mcps: claudeAiMcpsPayload(form.claude_ai_mcps),
     })
     workspacesResult.value = `Workspace "${name}" saved.`
     await fetchWorkspacesList()
@@ -976,11 +1667,12 @@ async function createNewWorkspace() {
     await projectStore.createWorkspace({
       name: form.name.trim(),
       vault_root: form.vault_root,
-      default_provider: form.default_provider as 'claude' | 'pi',
+      default_provider: form.default_provider,
       default_model: form.default_model,
       gws_profile: form.gws_profile,
       model_bucket: form.model_bucket,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
+      claude_ai_mcps: claudeAiMcpsPayload(form.claude_ai_mcps),
     })
     workspacesResult.value = `Workspace "${form.name.trim()}" created.`
     showNewWorkspace.value = false
@@ -1091,8 +1783,39 @@ async function doSnapshot(confirmWarnings = false) {
   actionPending.value = null
 }
 
+async function reloadWhenServerReady(timeoutMs = 120000) {
+  // The deploy endpoint returns ok immediately while the restart is only
+  // scheduled (~2s later). Reloading on a fixed timer races the server
+  // coming back up and lands on a dead/half-booted process -> grey screen.
+  // Instead, poll /api/startup-status (the same signal App.vue's boot overlay
+  // uses): wait for the server to go down, then reload once it reports
+  // overall_ready again. Fallback to a forced reload on timeout.
+  const start = Date.now()
+  let sawDown = false
+  while (true) {
+    try {
+      const res = await fetch('/api/startup-status')
+      if (res.ok) {
+        const data = await res.json()
+        if (data.overall_ready && sawDown) {
+          location.reload()
+          return
+        }
+      }
+    } catch {
+      // server is down mid-restart
+      sawDown = true
+    }
+    if (Date.now() - start > timeoutMs) {
+      location.reload()
+      return
+    }
+    await new Promise(r => setTimeout(r, 1000))
+  }
+}
+
 async function doDeploy(confirmWarnings = false) {
-  if (!confirmWarnings && !confirm('Redeploy? This will pull latest, rebuild, and restart.')) return
+  if (!confirmWarnings && !confirm('Restart? This will pull latest, rebuild, and restart.')) return
   actionPending.value = 'deploy'
   actionResult.value = ''
   deploySteps.value = []
@@ -1100,16 +1823,16 @@ async function doDeploy(confirmWarnings = false) {
     const r = await api.post<DeployResult>('/api/admin/deploy', { confirm_warnings: confirmWarnings })
     deploySteps.value = r.steps
     if (r.ok) {
-      actionResult.value = 'Deploy complete. Page will reload shortly...'
-      setTimeout(() => location.reload(), 10000)
+      actionResult.value = 'Restart complete. Waiting for server to come back, then reloading...'
+      reloadWhenServerReady()
     } else {
-      actionResult.value = 'Deploy failed. See steps above.'
+      actionResult.value = 'Restart failed. See steps above.'
     }
   } catch (e: any) {
     const payload = e?.payload
     if (Array.isArray(payload?.steps)) deploySteps.value = payload.steps
     if (payload?.blockers) {
-      alert(`Deploy blocked by secrets:\n\n${payload.blockers.join('\n')}`)
+      alert(`Restart blocked by secrets:\n\n${payload.blockers.join('\n')}`)
       actionResult.value = 'Blocked by secrets.'
     } else if (payload?.warnings) {
       if (confirm(`Warnings found:\n\n${payload.warnings.join('\n')}\n\nDo you want to proceed anyway?`)) {
@@ -1129,7 +1852,7 @@ async function doLogout() {
   // delete from document.cookie). After success the auth store routes back
   // to /login and the next login re-issues the cookie with the wider
   // Host-only cookie: no Domain attribute, scoped to the exact host.
-  if (!confirm('Log out of CiaoBot?')) return
+  if (!confirm('Log out of Ciaobot?')) return
   actionPending.value = 'logout'
   actionResult.value = ''
   try {
@@ -1240,9 +1963,9 @@ async function fetchPackageStatus() {
 }
 
 async function doPackageUpdate() {
-  if (!confirm('Upgrade Ciao package and restart?')) return
+  if (!confirm('Upgrade Ciaobot package and restart?')) return
   packageUpdating.value = true
-  packageResult.value = 'Upgrading ciao package...'
+  packageResult.value = 'Upgrading Ciaobot package...'
   try {
     const res = await api.post<any>('/api/package/update')
     if (res.ok) {
@@ -1271,10 +1994,62 @@ async function doPackageUpdate() {
 .pane-body {
   flex: 1;
   overflow-y: auto;
-  padding: var(--space-4);
+  padding: var(--space-5);
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+  align-items: center;
+}
+.card {
+  width: min(100%, 1040px);
+  margin: 0 auto;
+  gap: var(--space-4);
+  border-color: var(--border);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--fg) 4%, transparent);
+}
+.section-title {
+  letter-spacing: 0.08em;
+}
+.settings-card-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+.settings-card-header--split {
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+.settings-card-header--split > div {
+  min-width: 0;
+}
+.settings-card-header .hint {
+  margin: var(--space-2) 0 0;
+  max-width: 76ch;
+}
+.hint--compact {
+  margin: 0;
+}
+.skill-scope-note {
+  margin-top: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+.hint--spaced {
+  margin-top: var(--space-2);
+}
+.hint--section-empty {
+  margin: var(--space-1) 0 var(--space-3);
+}
+.inline-hint {
+  margin-left: var(--space-2);
+}
+.muted-text {
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  font-weight: 400;
 }
 .loading {
   color: var(--fg2);
@@ -1301,14 +2076,28 @@ async function doPackageUpdate() {
   gap: 8px;
   flex-wrap: wrap;
 }
+.action-row--spaced {
+  margin-top: var(--space-3);
+}
 .action-row > button {
   flex: 1 1 0;
+}
+.settings-actions {
+  justify-content: flex-end;
+  margin-top: var(--space-2);
+}
+.settings-actions > button {
+  flex: 0 0 auto;
+  min-width: 150px;
 }
 
 .action-result {
   font-size: var(--text-sm);
   color: var(--fg2);
   padding: 4px 0;
+}
+.action-result--prewrap {
+  white-space: pre-wrap;
 }
 
 .deploy-steps {
@@ -1403,9 +2192,16 @@ async function doPackageUpdate() {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 10px 0;
+  padding: 14px 0;
   border-top: 1px solid var(--border);
-  margin-top: 10px;
+  margin-top: 0;
+}
+.routine-row--top {
+  align-items: flex-start;
+}
+.routine-row--flush {
+  border-top: 0;
+  padding-top: 0;
 }
 .routine-info {
   display: flex;
@@ -1430,10 +2226,42 @@ async function doPackageUpdate() {
   background: var(--bg);
   color: var(--fg);
 }
+.routine-telemetry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: var(--text-xs);
+  color: var(--fg2);
+  flex-wrap: wrap;
+}
+.telemetry-meta {
+  color: var(--fg3, var(--fg2));
+}
+.telemetry-error {
+  color: var(--error);
+  font-weight: 500;
+  max-width: 250px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.routine-value-stub {
+  flex-shrink: 0;
+  max-width: 46%;
+  padding: 6px 8px;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  font-style: italic;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+}
 .routine-select,
 .routine-input {
   flex-shrink: 0;
   max-width: 46%;
+  min-width: min(360px, 46%);
   padding: 6px 8px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm, 4px);
@@ -1441,16 +2269,249 @@ async function doPackageUpdate() {
   color: var(--fg);
   font-size: var(--text-sm);
   /* 44px min tap target height on mobile is handled by padding + font */
+  min-height: 38px;
+}
+.routine-input::placeholder {
+  color: var(--fg3);
+}
+.routine-context {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: var(--space-3) 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 4px);
+  background: color-mix(in srgb, var(--bg) 76%, transparent);
+  font-size: var(--text-sm);
+}
+.routine-context code {
+  overflow-wrap: anywhere;
+}
+.routine-model-controls {
+  flex: 0 1 46%;
+  max-width: 46%;
+  min-width: 300px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(96px, 0.7fr);
+  gap: 8px;
+  align-items: start;
+}
+.routine-model-controls .routine-select {
+  max-width: none;
+  min-width: 0;
+  width: 100%;
+}
+.routine-model-hint {
+  grid-column: 1 / -1;
+  min-width: 0;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.setting-row,
+.credential-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--border);
+}
+.setting-row--inline {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+.setting-row--stack {
+  margin-top: 0;
+}
+.setting-row-main {
+  min-width: 0;
+}
+.setting-row-main--inline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  width: 100%;
+}
+.credential-row .routine-input {
+  max-width: none;
+  min-width: 0;
+  width: 100%;
+}
+.settings-checkbox {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+.voice-warning {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+.voice-install-btn {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  font-size: var(--text-xs);
+}
+.critique-model-picker {
+  flex: 0 1 46%;
+  max-width: 46%;
+  min-width: 280px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.critique-picker-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.critique-picker-summary {
+  flex: 1;
+  min-width: 0;
   min-height: 32px;
+  display: flex;
+  align-items: center;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg);
+  color: var(--fg2);
+  font-size: var(--text-sm);
+}
+.critique-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.critique-chip {
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg3);
+  color: var(--fg);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.critique-chip span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.critique-chip:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+.critique-option-groups {
+  max-height: 230px;
+  overflow-y: auto;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg);
+}
+.critique-option-group + .critique-option-group {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.critique-group-label {
+  margin-bottom: 4px;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+.critique-option {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  color: var(--fg);
+  font-size: var(--text-xs);
+  line-height: 1.3;
+}
+.critique-option input {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+}
+.critique-option span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.tier-provider-section {
+  padding-top: var(--space-3);
+  margin-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.tier-provider-header {
+  margin-bottom: var(--space-2);
+}
+.alias-provider-bar {
+  display: flex;
+  align-items: flex-end;
+  margin-top: var(--space-3);
+}
+.alias-provider-field {
+  width: min(360px, 100%);
+}
+.tier-provider-note {
+  margin-top: var(--space-2);
 }
 @media (max-width: 520px) {
+  .pane-body {
+    padding: var(--space-3);
+  }
+  .settings-card-header--split,
+  .setting-row--inline,
+  .setting-row-main--inline {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .settings-actions > button {
+    flex: 1 1 auto;
+  }
   .routine-row {
     flex-direction: column;
     align-items: stretch;
   }
   .routine-select,
-  .routine-input {
+  .routine-input,
+  .routine-value-stub {
     max-width: none;
+    min-height: 44px;
+  }
+  .routine-model-controls {
+    max-width: none;
+    min-width: 0;
+    width: 100%;
+    grid-template-columns: 1fr;
+  }
+  .routine-model-hint {
+    grid-column: 1;
+  }
+  .critique-model-picker {
+    max-width: none;
+    min-width: 0;
+    width: 100%;
+  }
+  .critique-picker-summary {
+    min-height: 44px;
+  }
+  .critique-option {
     min-height: 44px;
   }
 }
@@ -1473,6 +2534,140 @@ async function doPackageUpdate() {
   flex-direction: column;
   gap: 8px;
   margin-top: var(--space-3);
+}
+.skill-list--section {
+  margin-bottom: var(--space-4);
+}
+.settings-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+.settings-toolbar-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.settings-form-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+.subsection-title--spaced {
+  margin-bottom: var(--space-2);
+}
+.skill-section--spaced {
+  margin-top: var(--space-5);
+}
+
+.workspace-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.workspace-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+}
+.workspace-card--new {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg));
+}
+.workspace-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.workspace-title {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--text-base);
+  font-weight: 700;
+}
+.workspace-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+}
+.workspace-actions .btn-small {
+  flex: 0 0 auto;
+}
+.settings-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.settings-field--wide {
+  grid-column: 1 / -1;
+}
+.settings-field .routine-input {
+  max-width: none;
+  min-width: 0;
+  width: 100%;
+}
+.settings-advanced {
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+}
+.settings-advanced summary {
+  cursor: pointer;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.settings-advanced[open] summary {
+  margin-bottom: var(--space-2);
+}
+@media (max-width: 720px) {
+  .settings-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .settings-toolbar-actions {
+    justify-content: stretch;
+  }
+  .settings-toolbar-actions .btn-small {
+    flex: 1 1 auto;
+  }
+  .voice-warning {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .settings-field-grid {
+    grid-template-columns: 1fr;
+  }
+  .workspace-card-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .workspace-actions {
+    width: 100%;
+  }
+  .workspace-actions .btn-small {
+    flex: 1 1 auto;
+  }
 }
 .skill-row {
   display: flex;
@@ -1566,6 +2761,15 @@ async function doPackageUpdate() {
   color: var(--fg2);
   font-size: var(--text-xs);
 }
+.skill-link {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.skill-link:hover {
+  opacity: 0.85;
+}
+
 
 .cost-grid {
   display: flex;

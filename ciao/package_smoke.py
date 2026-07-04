@@ -123,7 +123,7 @@ def run_package_smoke(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Build, install, and smoke-test the Ciao wheel in isolation."
+        description="Build, install, and smoke-test the Ciaobot wheel in isolation."
     )
     parser.add_argument("repo_root", nargs="?", default=".")
     parser.add_argument(

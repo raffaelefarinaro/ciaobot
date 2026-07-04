@@ -1,6 +1,6 @@
-# Ciao Customization Guide
+# Ciaobot Customization Guide
 
-This document is for agents and operators working inside an installed Ciao workspace. It explains where customization lives and what can be changed safely.
+This document is for agents and operators working inside an installed Ciaobot workspace. It explains where customization lives and what can be changed safely.
 
 ## Where to Look First
 
@@ -16,9 +16,9 @@ Do not edit package files under the Python installation for normal customization
 
 ## Workspaces
 
-Ciao has two workspace concepts:
+Ciaobot has two workspace concepts:
 
-- `CIAO_WORKSPACE`: the filesystem root for this local Ciao instance. It contains `.env`, `.runtime/`, `.claude/`, and usually `memory-vault/`.
+- `CIAO_WORKSPACE`: the filesystem root for this local Ciaobot instance. It contains `.env`, `.runtime/`, `.claude/`, and usually `memory-vault/`.
 - Logical workspaces: named chat spaces such as `default`, `personal`, `work`, or `client-a`. These appear in the PWA sidebar and route projects, chats, vault roots, model defaults, and integration profiles.
 
 Logical workspaces are configured with `CIAO_WORKSPACES` in `.env` or `.runtime/workspaces.json`.
@@ -50,7 +50,7 @@ Example `.runtime/workspaces.json`:
 
 ## Providers and Models
 
-Ciao routes each chat through a provider:
+Ciaobot routes each chat through a provider:
 
 - `claude`: Claude Code / Claude Agent SDK. It can use Anthropic models directly or route selected models through Ollama-compatible settings.
 - `pi`: Pi coding agent subprocess. It has its own model/provider routing.
@@ -110,7 +110,7 @@ Tool names follow Claude SDK naming:
 - `mcp__server_name__tool_name`: block one MCP tool.
 - `Bash`: block the Bash tool.
 
-Skills and agents are installed into `.claude/skills/` and `.claude/agents/`. Ciao also mirrors supported assets to Pi with `ciao sync-skills`.
+Skills and agents are installed into `.claude/skills/` and `.claude/agents/`. Ciaobot also mirrors supported assets with `ciao sync-skills`.
 
 Use workspace-level tool deny lists for access control. Use skills and agents for behavior and workflow guidance.
 

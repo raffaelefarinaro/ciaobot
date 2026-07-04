@@ -1,6 +1,6 @@
 """Tiny DAG runner for deterministic schedule pipelines.
 
-A few Ciao schedules are shaped like a small workflow: load some state, flag
+A few Ciaobot schedules are shaped like a small workflow: load some state, flag
 items, call a model, run a gate, write output. Today those are hand-rolled
 ``async def`` functions (see ``ciao/skill_evolution.py`` for the canonical
 example). This module lifts the workflow into data so future schedules
@@ -25,7 +25,7 @@ Design constraints (intentionally small):
   to swallow.
 
 This is the Python port of the Archon YAML-DAG pattern, scoped to the 2-3
-Ciao schedules that actually benefit. See ``Resources/Archon.md`` for the
+Ciaobot schedules that actually benefit. See ``Resources/Archon.md`` for the
 rationale (decision: do-not-adopt; pattern: steal).
 """
 
@@ -167,34 +167,42 @@ def _exec_bash(node: Node, ctx: dict[str, Any]) -> NodeResult:
 
 
 def _exec_prompt(node: Node, ctx: dict[str, Any]) -> NodeResult:
-    """Call a model via Pi. ``payload['system']`` and ``payload['prompt']``
+    """Call a model via a ``claude -p`` one-shot subprocess. ``payload['system']`` and ``payload['prompt']``
     are required; both may reference prior node outputs via Python
     ``str.format`` against ``ctx`` (callers that need richer templating
     should pre-render and pass a fully-formed string)."""
-    from ciao.providers.pi import PiSettings, run_pi_oneshot  # local import to avoid cycle
-
     if not node.model:
         raise ValueError(f"prompt node '{node.id}' has empty model")
     system = node.payload.get("system", "")
     prompt = node.payload.get("prompt", "")
     if not prompt:
         raise ValueError(f"prompt node '{node.id}' missing payload['prompt']")
-    settings = PiSettings(
-        model=node.model,
-        timeout_s=node.timeout_s,
-    )
+    cli = node.payload.get("cli", "claude")
     rendered_prompt = prompt.format_map(_SafeFormatDict(ctx))
     rendered_system = system.format_map(_SafeFormatDict(ctx)) if system else ""
-    out = run_pi_oneshot(
-        prompt=rendered_prompt,
-        system=rendered_system,
-        model=node.model,
-        settings=settings,
-        timeout_s=node.timeout_s,
+    composed = f"Instructions:\n{rendered_system}\n\n{rendered_prompt}"
+    argv = [cli, "-p", "--model", node.model, "--max-turns", "1"]
+    try:
+        proc = subprocess.run(
+            argv,
+            input=composed,
+            capture_output=True,
+            text=True,
+            timeout=node.timeout_s,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return NodeResult(ok=False, error=f"timeout after {node.timeout_s}s: {exc}")
+    if proc.returncode == 0:
+        out = proc.stdout.strip()
+        if not out:
+            return NodeResult(ok=False, error="model returned empty output")
+        return NodeResult(ok=True, output=out)
+    return NodeResult(
+        ok=False,
+        output=proc.stdout,
+        error=f"exit {proc.returncode}: {proc.stderr.strip()[:500] if proc.stderr else '<no stderr>'}",
     )
-    if not out:
-        return NodeResult(ok=False, error="model returned empty output")
-    return NodeResult(ok=True, output=out)
 
 
 def _exec_gate(node: Node, ctx: dict[str, Any]) -> NodeResult:

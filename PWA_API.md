@@ -1,6 +1,6 @@
 # PWA API
 
-Local HTTP API for the Ciao PWA. Default base URL is `http://localhost:$PWA_PORT` with `PWA_PORT=8443`.
+Local HTTP API for the Ciaobot PWA. Default base URL is `http://localhost:$PWA_PORT` with `PWA_PORT=8443`.
 
 The route source of truth is `ciao/web/app.py`. This file is kept in sync by `tests/test_pwa_api_docs.py`.
 
@@ -85,6 +85,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/admin/deploy` | Reinstall deps, rebuild frontend, and restart with latest code |
 | GET | `/api/admin/status` | Read admin/deploy status |
 | GET | `/api/admin/skills` | List skills labelled as custom or GitHub/package |
+| POST | `/api/admin/skills/add` | Add an upstream skill from GitHub and synchronize it |
 | WS | `/ws/chat/{chat_id}` | Per-chat streaming socket |
 | WS | `/ws/events` | Global event socket |
 
@@ -190,6 +191,33 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chats/$CID"
 ```
 
+**Workspaces**
+
+```bash
+# List — returns {workspaces, active, provider_options, claude_ai_connectors}.
+# claude_ai_connectors is the claude.ai connector MCP set the per-workspace
+# toggle controls (for UI labels).
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
+
+# Upsert — body keys: name, vault_root, default_provider, default_model,
+# gws_profile, model_bucket, disallowed_tools (extra non-connector tools,
+# CSV or list, null = defaults), claude_ai_mcps (true|false|null where null
+# = per-workspace default: personal off, else on). The effective denylist is
+# the union of the claude.ai connector set (when the toggle is off) and the
+# extras. POST creates, PATCH /api/workspaces/{name} updates in place.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces" \
+  -H 'content-type: application/json' \
+  -d '{"name":"client-a","vault_root":"vaults/client-a","claude_ai_mcps":true,"disallowed_tools":"mcp__n8n_mcp"}'
+
+# Flip just the toggle on an existing workspace.
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/workspaces/personal" \
+  -H 'content-type: application/json' \
+  -d '{"claude_ai_mcps":true}'
+
+# Delete.
+curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/workspaces/client-a"
+```
+
 **Schedules and ops**
 
 ```bash
@@ -229,7 +257,7 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routi
 # mlx-whisper on-device (free) and falls back to cloud when unavailable.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/routines" \
   -H 'content-type: application/json' \
-  -d '{"title_model":"gemma4:12b-it-qat","critique_models":"openrouter/anthropic/claude-3.7-sonnet","transcription_engine":"local"}'
+  -d '{"title_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","transcription_engine":"local"}'
 ```
 
 **Commit-to-main / handover flow** (`CIAO_DEVICE_NAME`)

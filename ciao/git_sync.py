@@ -1,4 +1,4 @@
-"""Git sync helpers for the Ciao server.
+"""Git sync helpers for the Ciaobot server.
 
 Handles pulling latest changes on startup and merging before push.
 """

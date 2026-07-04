@@ -6,9 +6,11 @@ schedule dispatch, startup tasks, ...) wraps its work in :func:`track`
 job: last run, duration, model/provider, and the error text on failure.
 
 Records append to ``.runtime/job_runs.jsonl`` (one JSON object per line)
-with a coarse size guard. Everything here is **fail-open**: a recorder
-error must never break the job it is wrapping. The schema deliberately
-omits token/cost fields to keep instrumentation cheap.
+with a coarse size guard. A compact latest-run index is also maintained so
+rare jobs do not disappear from Settings when high-frequency jobs rotate the
+history log. Everything here is **fail-open**: a recorder error must never
+break the job it is wrapping. The schema deliberately omits token/cost fields
+to keep instrumentation cheap.
 
 Mirrors the spirit of the old ``api_costs.py`` recorder and the rotating
 log pattern in ``ciao/error_log.py``.
@@ -30,6 +32,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 JOB_RUNS_NAME = "job_runs.jsonl"
+JOB_RUNS_LATEST_NAME = "job_runs_latest.json"
 MAX_BYTES = 2 * 1024 * 1024  # trim the log once it passes ~2 MB
 KEEP_LINES = 2000            # lines retained after a trim
 
@@ -57,6 +60,10 @@ def _runtime_dir() -> Path:
 
 def _log_path() -> Path:
     return _runtime_dir() / JOB_RUNS_NAME
+
+
+def _latest_path() -> Path:
+    return _runtime_dir() / JOB_RUNS_LATEST_NAME
 
 
 # ── Job registry ───────────────────────────────────────────────────────────
@@ -95,8 +102,6 @@ REGISTRY: tuple[JobSpec, ...] = (
             "Rebuilds the web frontend so served assets match source."),
     JobSpec("skills_update", "Skills update", "system",
             "Updates installed agent skills."),
-    JobSpec("system_upgrade", "System upgrade", "system",
-            "Upgrades pip dependencies and the gws CLI."),
     JobSpec("branch_backup", "Device-branch backup", "system",
             "Pushes the per-device working branch for backup."),
 )
@@ -108,7 +113,6 @@ STARTUP_PHASE_JOBS: dict[str, str] = {
     "refresh_vault_index": "vault_index",
     "rebuild_pwa": "pwa_rebuild",
     "update_skills": "skills_update",
-    "upgrade_all": "system_upgrade",
 }
 
 
@@ -133,8 +137,10 @@ def record_run(run: JobRun) -> None:
         path = _log_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         _trim_if_large(path)
+        payload = asdict(run)
         with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(asdict(run), ensure_ascii=False) + "\n")
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        _write_latest_run(payload)
     except Exception:  # noqa: BLE001 — recording must never break a job
         logger.debug("Failed to record job run %s", run.job, exc_info=True)
 
@@ -145,10 +151,61 @@ def _trim_if_large(path: Path) -> None:
             return
         with path.open("r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
+        kept = lines[-KEEP_LINES:]
+        kept_jobs = {_line_job(line) for line in kept}
+        kept_jobs.discard(None)
+        preserved_by_job: dict[str, str] = {}
+        for line in lines[:-KEEP_LINES]:
+            job = _line_job(line)
+            if job and job not in kept_jobs:
+                preserved_by_job[job] = line
         with path.open("w", encoding="utf-8") as f:
-            f.writelines(lines[-KEEP_LINES:])
+            f.writelines([*preserved_by_job.values(), *kept])
     except Exception:  # noqa: BLE001
         logger.debug("Failed to trim job-run log", exc_info=True)
+
+
+def _line_job(line: str) -> str | None:
+    try:
+        rec = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    job = rec.get("job") if isinstance(rec, dict) else None
+    return job if isinstance(job, str) and job else None
+
+
+def _write_latest_run(run: dict[str, Any]) -> None:
+    path = _latest_path()
+    data = _load_latest_runs()
+    job = run.get("job")
+    if not isinstance(job, str) or not job:
+        return
+    data[job] = run
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    tmp_path.replace(path)
+
+
+def _load_latest_runs() -> dict[str, dict]:
+    path = _latest_path()
+    try:
+        if not path.exists():
+            return {}
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        logger.debug("Failed to load latest job-run index", exc_info=True)
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict] = {}
+    for job, rec in raw.items():
+        if isinstance(job, str) and job and isinstance(rec, dict):
+            out[job] = rec
+    return out
 
 
 # ── Tracking ─────────────────────────────────────────────────────────────
@@ -309,6 +366,8 @@ def load_runs(limit_per_job: int = 10) -> dict[str, dict]:
     except Exception:  # noqa: BLE001
         logger.debug("Failed to load job runs", exc_info=True)
 
+    _merge_latest_runs(runs_by_job, _load_latest_runs())
+
     grouped: dict[str, dict] = {}
     for job, runs in runs_by_job.items():
         recent = runs[-limit_per_job:][::-1]  # newest first
@@ -338,6 +397,42 @@ def load_runs(limit_per_job: int = 10) -> dict[str, dict]:
             },
         }
     return grouped
+
+
+def _merge_latest_runs(
+    runs_by_job: dict[str, list[dict]],
+    latest_by_job: dict[str, dict],
+) -> None:
+    """Make latest-run rows visible even when the rotating JSONL lost them."""
+    for job, latest in latest_by_job.items():
+        runs = runs_by_job.setdefault(job, [])
+        if not runs:
+            runs.append(latest)
+            continue
+        if any(_same_run(run, latest) for run in runs):
+            continue
+        last_ts = _run_ts(runs[-1])
+        latest_ts = _run_ts(latest)
+        if latest_ts is None or last_ts is None or latest_ts > last_ts:
+            runs.append(latest)
+
+
+def _same_run(a: dict, b: dict) -> bool:
+    return (
+        a.get("job") == b.get("job")
+        and a.get("started_at") == b.get("started_at")
+        and a.get("ended_at") == b.get("ended_at")
+    )
+
+
+def _run_ts(run: dict) -> datetime | None:
+    raw = run.get("ended_at") or run.get("started_at")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
 
 
 def automation_summary(limit_per_job: int = 10) -> list[dict]:

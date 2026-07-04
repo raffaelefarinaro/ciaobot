@@ -9,7 +9,7 @@
       <template #title>
         <div class="header-left">
           <button class="close-btn desktop-only" @click="closeSchedule" title="Close">&times;</button>
-          <h2 v-if="schedule">{{ promptTitle(schedule.prompt) }}</h2>
+          <h2 v-if="schedule">{{ schedule.title || promptTitle(schedule.prompt) }}</h2>
           <h2 v-else-if="showNew">New schedule</h2>
         </div>
       </template>
@@ -17,8 +17,8 @@
         <button v-if="schedule && !editing" class="btn-small" @click="runNow" :disabled="runningNow">
           {{ runningNow ? 'Running...' : 'Run now' }}
         </button>
-        <button v-if="schedule && !editing" class="btn-small" @click="startEdit">Edit</button>
-        <button v-if="schedule && !editing" class="btn-small btn-danger" @click="onDelete">Delete</button>
+        <button v-if="schedule && !editing && schedule.scope !== 'system'" class="btn-small" @click="startEdit">Edit</button>
+        <button v-if="schedule && !editing && schedule.scope !== 'system'" class="btn-small btn-danger" @click="onDelete">Delete</button>
       </template>
     </PaneHeader>
 
@@ -139,7 +139,7 @@
           class="ov-item"
         >
           <span class="ov-when ov-when--alert">{{ formatWhen(s.last_expected_run) }}</span>
-          <span class="ov-title">{{ promptTitle(s.prompt) }}</span>
+          <span class="ov-title">{{ s.title || promptTitle(s.prompt) }}</span>
         </router-link>
       </div>
       <div class="ov-card">
@@ -155,7 +155,7 @@
           class="ov-item"
         >
           <span class="ov-when">{{ formatWhen(s.next_run) }}</span>
-          <span class="ov-title">{{ promptTitle(s.prompt) }}</span>
+          <span class="ov-title">{{ s.title || promptTitle(s.prompt) }}</span>
         </router-link>
         <p v-if="!upcomingSchedules.length" class="ov-empty">
           No upcoming runs. Only manual or paused schedules.
@@ -386,7 +386,7 @@ async function runNow() {
       projectStore.pushToast({
         chat_id: result.chat_id,
         title: 'Schedule started',
-        body: promptTitle(schedule.value.prompt),
+        body: schedule.value.title || promptTitle(schedule.value.prompt),
       })
     }
   } finally {

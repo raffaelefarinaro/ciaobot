@@ -88,6 +88,38 @@ def test_setup_status_detects_claude_api_key_and_credentials_file(tmp_path) -> N
     assert data["providers"]["claude"]["auth"] == "oauth"
 
 
+def test_setup_status_detects_claude_oauth_via_config_json(tmp_path) -> None:
+    """macOS Claude Code stores the OAuth token in the Keychain and writes the
+    account metadata to ~/.claude.json. The probe must treat a populated
+    ``oauthAccount`` block as a logged-in session even when no credentials
+    file exists and no API key is set."""
+    config = _config(tmp_path)
+    config_path = tmp_path / ".claude.json"
+    config_path.write_text(
+        '{"oauthAccount":{"emailAddress":"raffaele@example.com",'
+        '"accountUuid":"abc","organizationName":"Scandit"}}',
+        encoding="utf-8",
+    )
+
+    data = setup_status(config, env={}, claude_config_path=config_path)
+
+    claude = data["providers"]["claude"]
+    assert claude["ok"] is True
+    assert claude["auth"] == "oauth"
+    assert "raffaele@example.com" in claude["detail"]
+
+
+def test_setup_status_ignores_empty_oauth_account(tmp_path) -> None:
+    config = _config(tmp_path)
+    config_path = tmp_path / ".claude.json"
+    config_path.write_text('{"oauthAccount":null}', encoding="utf-8")
+
+    data = setup_status(config, env={}, claude_config_path=config_path)
+
+    assert data["providers"]["claude"]["ok"] is False
+    assert data["providers"]["claude"]["auth"] == "missing"
+
+
 def test_setup_status_detects_ollama_cloud_key_or_local_daemon(tmp_path, monkeypatch) -> None:
     config = _config(tmp_path, {"CIAO_OLLAMA_API_KEY": "sk-ollama"})
     data = setup_status(config, env={"CIAO_OLLAMA_API_KEY": "sk-ollama"})
@@ -99,6 +131,15 @@ def test_setup_status_detects_ollama_cloud_key_or_local_daemon(tmp_path, monkeyp
     data = setup_status(config, env={})
     assert data["providers"]["ollama"]["ok"] is True
     assert data["providers"]["ollama"]["auth"] == "local_daemon"
+
+
+def test_setup_status_detects_openrouter_key(tmp_path) -> None:
+    config = _config(tmp_path, {"OPENROUTER_API_KEY": "sk-or-test"})
+
+    data = setup_status(config, env={"OPENROUTER_API_KEY": "sk-or-test"})
+
+    assert data["providers"]["openrouter"]["ok"] is True
+    assert data["providers"]["openrouter"]["auth"] == "api_key"
 
 
 def test_setup_status_route_is_public_before_login(tmp_path) -> None:
@@ -159,7 +200,7 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path) -> No
     assert (notes / "MEMORY.md").is_file()
     assert not (workspace / "memory-vault" / "MEMORY.md").exists()
     assert (launch_agents / "com.ciao.server.plist").is_file()
-    assert (apps / "Ciao.app" / "Contents" / "MacOS" / "Ciao").is_file()
+    assert (apps / "Ciaobot.app" / "Contents" / "MacOS" / "Ciaobot").is_file()
 
 
 def test_setup_finish_requires_bootstrap_mode_and_push_contact(tmp_path) -> None:

@@ -118,6 +118,7 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "gws_profile": "personal",
                 "model_bucket": "personal",
                 "disallowed_tools": None,
+                "claude_ai_mcps": None,
             },
             {
                 "name": "work",
@@ -127,9 +128,21 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "gws_profile": "work",
                 "model_bucket": "work",
                 "disallowed_tools": [],
+                "claude_ai_mcps": None,
             },
         ],
         "active": "personal",
+        "provider_options": [{"value": "claude", "label": "Claude"}],
+        "claude_ai_connectors": [
+            "mcp__claude_ai_Airtable",
+            "mcp__claude_ai_Asana",
+            "mcp__claude_ai_Atlassian",
+            "mcp__claude_ai_Google_Cloud_BigQuery",
+            "mcp__claude_ai_Salesforce",
+            "mcp__claude_ai_Sentry",
+            "mcp__claude_ai_Slack",
+            "mcp__claude_ai_incident_io",
+        ],
     }
 
 

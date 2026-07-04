@@ -742,6 +742,7 @@ const models = ref<string[]>(['sonnet', 'opus', 'haiku'])
 const providerModels = ref<Record<string, string[]>>({})
 const providerDefaults = ref<Record<string, string>>({})
 const ollamaModels = ref<string[]>([])
+const openrouterModels = ref<string[]>([])
 const thinkingLevels = ref<Record<string, string[]>>({})
 const openTraces = ref<Record<number, boolean>>({})
 const transcribing = ref(false)
@@ -884,13 +885,13 @@ const touchedFiles = computed<TouchedFile[]>(() => {
   return Array.from(byPath.values()).sort((a, b) => b.index - a.index)
 })
 
-type ProviderKey = 'claude' | 'pi'
-type BucketKey = 'claude_work' | 'claude_personal' | 'pi_personal'
+type ProviderKey = 'claude'
+type BucketKey = 'claude_work' | 'claude_personal' | 'openrouter'
 
 const BUCKET_DEFS: { key: BucketKey; label: string; provider: ProviderKey }[] = [
   { key: 'claude_work', label: 'Claude (Work)', provider: 'claude' },
   { key: 'claude_personal', label: 'Claude (Personal)', provider: 'claude' },
-  { key: 'pi_personal', label: 'Pi (Personal)', provider: 'pi' },
+  { key: 'openrouter', label: 'OpenRouter', provider: 'claude' },
 ]
 
 const bucketOptions = computed(() => BUCKET_DEFS.filter(b => (providerModels.value[b.key] || []).length > 0))
@@ -1018,7 +1019,8 @@ const activeProvider = computed<ProviderKey>(() => {
 const activeBucket = computed<BucketKey>(() => {
   const c = chat.value
   if (!c) return 'claude_work'
-  if (c.provider === 'pi') return 'pi_personal'
+  // OpenRouter ids are owner/model (no ':' tag); Ollama ids carry ':'.
+  if (c.model.includes('/') && !c.model.includes(':')) return 'openrouter'
   // The server records the explicit bucket choice. Legacy values are kept
   // for existing chats; new workspace config may use clearer bucket names.
   if (c.model_bucket === 'work' || c.model_bucket === 'anthropic') return 'claude_work'
@@ -1493,6 +1495,7 @@ onMounted(async () => {
     providerModels.value = r.provider_models || {}
     providerDefaults.value = r.provider_defaults || {}
     ollamaModels.value = r.ollama_models || []
+    openrouterModels.value = r.openrouter_models || []
     thinkingLevels.value = r.thinking_levels || {}
   } catch { /* use defaults */ }
   try {
@@ -1911,6 +1914,8 @@ async function selectBucket(bucket: BucketKey) {
   // providers clear it (bucket is implied by the provider).
   const modelBucket: '' | 'work' | 'personal' =
     bucket === 'claude_work' ? 'work' : bucket === 'claude_personal' ? 'personal' : ''
+  // OpenRouter bucket selects an owner/model id; routing is automatic
+  // from the model shape, so the bucket is empty.
   if (bucketLocked.value) {
     const ok = window.confirm(
       `Hand over this chat to ${def.label} / ${defaultModel}? The same visible chat will continue with a fresh provider session.`,

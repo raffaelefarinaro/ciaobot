@@ -6,7 +6,7 @@
         <span class="dot dot--y"></span>
         <span class="dot dot--g"></span>
         <span class="login-shell-title">
-          {{ isRestarting ? 'ciao@bot · restarting' : (isBootstrap ? 'ciao@bot · first-run setup' : 'ciao@bot · session') }}
+          {{ isRestarting ? 'ciaobot@local · restarting' : (isBootstrap ? 'ciaobot@local · first-run setup' : 'ciaobot@local · session') }}
         </span>
       </div>
 
@@ -14,10 +14,10 @@
       <div v-if="isRestarting" class="login-body restarting-body">
         <p class="line line--banner">
           <span class="wordmark wordmark--md">restarting</span>
-          <span class="banner-meta">// ciao is loading config ...</span>
+          <span class="banner-meta">// ciaobot is loading config ...</span>
         </p>
         <p class="line line--sys">
-          Ciao is restarting. Reopen Ciao.app if this page does not reconnect.
+          Ciaobot is restarting. Reopen Ciaobot.app if this page does not reconnect.
         </p>
         <div class="spinner-container">
           <span class="caret"></span>
@@ -27,9 +27,35 @@
       <!-- SETUP WIZARD SCREEN -->
       <form v-else-if="isBootstrap" class="login-body setup-wizard" @submit.prevent="doFinish">
         <p class="line line--banner">
-          <span class="wordmark wordmark--md">ciao setup</span>
-          <span class="banner-meta">// welcome · let's configure your assistant</span>
+          <span class="wordmark wordmark--md">ciaobot setup</span>
+          <span class="banner-meta">// tour + local setup</span>
         </p>
+
+        <section class="setup-tour" aria-label="Ciaobot setup tour">
+          <p class="tour-title">Claude Code, with a real interface and memory.</p>
+          <ul class="tour-list">
+            <li>
+              <strong>Bring your own backend.</strong>
+              <span>Use Claude Code, Ollama Cloud or local Ollama, or an OpenRouter API key.</span>
+            </li>
+            <li>
+              <strong>Split your life into workspaces.</strong>
+              <span>Keep personal, work, clients, and long-running areas separate.</span>
+            </li>
+            <li>
+              <strong>Work by project.</strong>
+              <span>Project files become durable context, so the assistant does not rediscover the same facts every turn.</span>
+            </li>
+            <li>
+              <strong>Schedule routines.</strong>
+              <span>Run workspace-specific chats when you want: reviews, briefs, checks, and maintenance.</span>
+            </li>
+            <li>
+              <strong>Archive into a second brain.</strong>
+              <span>Archived chats produce session insights, trajectories, and memory proposals for review.</span>
+            </li>
+          </ul>
+        </section>
 
         <div class="form-group">
           <label for="setup-workspace">Workspace Folder</label>
@@ -38,26 +64,26 @@
             v-model="workspace"
             type="text"
             class="form-input"
-            placeholder="~/ciao"
+            placeholder="~/ciaobot"
             required
             :disabled="loading"
           />
-          <span class="hint">The directory where your configuration and chats will reside.</span>
+          <span class="hint">The local app workspace. It stores config, runtime state, generated assets, and chat metadata.</span>
         </div>
 
         <div class="form-group">
-          <label for="setup-vault">Vault Folder</label>
+          <label for="setup-vault">Second-brain Vault Folder</label>
           <input
             id="setup-vault"
             v-model="vaultRoot"
             type="text"
             class="form-input"
-            placeholder="~/ciao/memory-vault"
+            placeholder="~/ciaobot/memory-vault"
             required
             :disabled="loading"
             @input="userEditedVault = true"
           />
-          <span class="hint">Durable markdown files / personal knowledge base folder.</span>
+          <span class="hint">Durable markdown memory: projects, people, references, archived chats, and reviewed insights.</span>
         </div>
 
         <div class="form-group">
@@ -84,7 +110,7 @@
               Use existing notes folder
             </label>
           </div>
-          <span class="hint">Starting fresh builds folder scaffolds; existing runs CiaoBot onboarding adaptation.</span>
+          <span class="hint">Starting fresh builds the scaffold; existing asks Ciaobot to adapt your notes into the project structure.</span>
         </div>
 
         <div class="form-group">
@@ -131,13 +157,13 @@
           <label>AI Provider Choice</label>
           <div class="provider-choices">
             <label class="choice-label">
-              <input type="radio" v-model="provider" value="claude" :disabled="loading" /> Claude
-            </label>
-            <label class="choice-label">
-              <input type="radio" v-model="provider" value="pi" :disabled="loading" /> Pi
+              <input type="radio" v-model="provider" value="claude" :disabled="loading" /> Claude Code
             </label>
             <label class="choice-label">
               <input type="radio" v-model="provider" value="ollama" :disabled="loading" /> Ollama
+            </label>
+            <label class="choice-label">
+              <input type="radio" v-model="provider" value="openrouter" :disabled="loading" /> OpenRouter
             </label>
           </div>
         </div>
@@ -149,13 +175,13 @@
               class="badge"
               :class="setupStatus.providers[provider].ok ? 'badge--success' : 'badge--error'"
             >
-              {{ setupStatus.providers[provider].ok ? '✓ Ready' : '✗ Not Configured' }}
+              {{ setupStatus.providers[provider].ok ? '[ok] Ready' : '[!] Not Configured' }}
             </span>
             <span class="provider-detail">{{ setupStatus.providers[provider].detail }}</span>
           </div>
 
           <div v-if="!setupStatus.providers[provider].ok" class="command-box">
-            <p class="hint">To authorize, run this command in your Terminal:</p>
+            <p class="hint">{{ providerInstruction }}</p>
             <div class="command-row">
               <code>{{ setupStatus.providers[provider].command }}</code>
               <button
@@ -180,7 +206,7 @@
         <div class="checkbox-row">
           <label class="choice-label">
             <input type="checkbox" v-model="apiFallback" :disabled="loading" />
-            I will set API keys manually in .env later (API key fallback)
+            I will set provider keys manually in .env later
           </label>
         </div>
 
@@ -201,10 +227,10 @@
       <!-- STANDARD LOGIN FORM -->
       <form v-else class="login-body" @submit.prevent="doLogin">
         <p class="line line--banner">
-          <span class="wordmark wordmark--md">ciao</span>
+          <span class="wordmark wordmark--md">ciaobot</span>
           <span class="banner-meta">// personal assistant · auth required</span>
         </p>
-        <p class="line line--sys">connecting to Ciao<span v-if="loading"> ...</span></p>
+        <p class="line line--sys">connecting to Ciaobot<span v-if="loading"> ...</span></p>
         <p class="line">
           <span class="prompt">$</span>
           <label class="prompt-label" for="login-token">auth_token:</label>
@@ -251,8 +277,8 @@ const loading = ref(false)
 const isBootstrap = ref(false)
 const bootstrapLoading = ref(true)
 const setupStatus = ref<any>(null)
-const workspace = ref('~/ciao')
-const vaultRoot = ref('~/ciao/memory-vault')
+const workspace = ref('~/ciaobot')
+const vaultRoot = ref('~/ciaobot/memory-vault')
 const pushContact = ref('')
 const port = ref(8443)
 const python = ref('')
@@ -263,6 +289,13 @@ const isRestarting = ref(false)
 const userEditedVault = ref(false)
 const vaultMode = ref('scratch')
 const copyStatus = ref('')
+
+const providerInstruction = computed(() => {
+  if (provider.value === 'openrouter') {
+    return 'Add this environment variable in your workspace .env:'
+  }
+  return 'To authorize, run this command in your Terminal:'
+})
 
 async function doLogin() {
   loading.value = true
@@ -390,15 +423,17 @@ onUnmounted(() => {
 <style scoped>
 .login-page {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
-  min-height: 100dvh;
+  height: 100dvh;
+  overflow-y: auto;
   padding: 20px;
 }
 
 .login-shell {
   width: 100%;
-  max-width: 520px;
+  max-width: 680px;
+  margin: auto 0;
   background: var(--bg2);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
@@ -443,6 +478,46 @@ onUnmounted(() => {
 
 .setup-wizard {
   gap: 12px;
+}
+
+.setup-tour {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 0;
+  border-top: 1px dashed var(--border);
+  border-bottom: 1px dashed var(--border);
+}
+.tour-title {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--text-base);
+  font-weight: 700;
+}
+.tour-list {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 14px;
+  margin: 0;
+  padding: 0;
+}
+.tour-list li {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border-strong);
+}
+.tour-list strong {
+  color: var(--fg2);
+  font-size: var(--text-sm);
+}
+.tour-list span {
+  color: var(--fg3);
+  font-size: var(--text-xs);
+  line-height: 1.4;
 }
 
 .line {
@@ -581,6 +656,7 @@ onUnmounted(() => {
 
 .provider-choices {
   display: flex;
+  flex-wrap: wrap;
   gap: 16px;
   margin-top: 4px;
 }
@@ -712,6 +788,9 @@ onUnmounted(() => {
 @media (max-width: 600px) {
   .login-shell-title { font-size: 10px; }
   .login-body { padding: 16px; }
+  .tour-list {
+    grid-template-columns: 1fr;
+  }
   .form-grid {
     grid-template-columns: 1fr;
     gap: 8px;

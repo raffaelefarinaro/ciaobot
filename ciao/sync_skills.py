@@ -1,4 +1,4 @@
-"""Install and mirror Ciao skills, commands, and agents."""
+"""Install and mirror Ciaobot skills, commands, and agents."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-from ciao import skills_sync, sync_agents_to_pi
+from ciao import skills_sync
 
 
 @dataclass(frozen=True)
@@ -21,13 +21,6 @@ class SyncSkillsResult:
     custom_pruned: int = 0
     upstream_updated: int = 0
     upstream_pruned: int = 0
-    pi_skills_linked: int = 0
-    pi_skills_pruned: int = 0
-    pi_prompts_linked: int = 0
-    pi_prompts_pruned: int = 0
-    pi_agents_written: int = 0
-    pi_agents_pruned: int = 0
-    pi_agents_sources: int = 0
 
 
 def _load_json(path: Path) -> dict:
@@ -211,12 +204,10 @@ def _agent_source_dir(workspace: Path) -> Path:
 def sync_workspace_skills(
     workspace: Path | str,
     *,
-    pi_root: Path | str | None = None,
     refresh_upstream: bool = True,
     runner=subprocess.run,
 ) -> SyncSkillsResult:
     root = Path(workspace).expanduser().resolve()
-    pi_base = Path(pi_root).expanduser().resolve() if pi_root is not None else Path.home() / ".pi" / "agent"
 
     upstream_updated = 0
     upstream_pruned = 0
@@ -229,34 +220,11 @@ def sync_workspace_skills(
         f"{custom_pruned} orphaned pruned."
     )
 
-    pi_skills_linked, pi_skills_pruned = _mirror_dir_symlinks(
-        root / ".claude" / "skills",
-        pi_base / "skills",
-        prune_regular=True,
-    )
-    print(f"Pi skills mirror: {pi_skills_linked} linked, {pi_skills_pruned} pruned.")
-
-    pi_prompts_linked, pi_prompts_pruned = _mirror_dir_symlinks(
-        root / ".claude" / "commands",
-        pi_base / "prompts",
-        glob_pattern="*.md",
-        prune_regular=False,
-    )
-    print(f"Pi prompts mirror: {pi_prompts_linked} linked, {pi_prompts_pruned} pruned.")
-
-    agent_result = sync_agents_to_pi.sync(_agent_source_dir(root), pi_base / "agents")
     return SyncSkillsResult(
         custom_installed=custom_installed,
         custom_pruned=custom_pruned,
         upstream_updated=upstream_updated,
         upstream_pruned=upstream_pruned,
-        pi_skills_linked=pi_skills_linked,
-        pi_skills_pruned=pi_skills_pruned,
-        pi_prompts_linked=pi_prompts_linked,
-        pi_prompts_pruned=pi_prompts_pruned,
-        pi_agents_written=agent_result.written,
-        pi_agents_pruned=agent_result.pruned,
-        pi_agents_sources=agent_result.sources,
     )
 
 
@@ -269,12 +237,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Workspace root. Defaults to current directory.",
     )
     parser.add_argument(
-        "--pi-root",
-        type=Path,
-        default=None,
-        help="Pi agent root. Defaults to ~/.pi/agent.",
-    )
-    parser.add_argument(
         "--skip-upstream",
         action="store_true",
         help="Skip skills-lock.json remote refresh and only mirror local catalogs.",
@@ -283,7 +245,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
     sync_workspace_skills(
         args.workspace,
-        pi_root=args.pi_root,
         refresh_upstream=not args.skip_upstream,
     )
     return 0

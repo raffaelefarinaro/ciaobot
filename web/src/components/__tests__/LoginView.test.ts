@@ -136,8 +136,9 @@ describe('LoginView setup wizard tests', () => {
     await flushPromises()
 
     expect(mockApiPost).toHaveBeenCalledWith('/api/setup/finish', {
-      workspace: '~/ciao',
-      vault_root: '~/ciao/memory-vault',
+      workspace: '~/ciaobot',
+      vault_root: '~/ciaobot/memory-vault',
+      vault_mode: 'scratch',
       push_contact: 'mailto:owner@example.com',
       port: 8443,
       python: undefined,

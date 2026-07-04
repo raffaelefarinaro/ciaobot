@@ -1,14 +1,14 @@
 """Per-device working-branch flow with direct or agent-merged handover.
 
-Every Ciao instance works on its own ``dev/<device_name>`` branch, cut from
+Every Ciaobot instance works on its own ``dev/<device_name>`` branch, cut from
 ``origin/main`` and reused across restarts (unmerged work is preserved). When
-the user clicks "commit to main" in Settings, Ciao commits + pushes the branch,
+the user clicks "commit to main" in Settings, Ciaobot commits + pushes the branch,
 then tries to merge it into ``main``:
 
 - clean merge -> pushed to ``main`` directly (plain git), and the device branch
   is re-pointed at the merged ``main`` so work continues there;
 - conflicting merge -> the merge is aborted and an interactive Claude Code chat
-  is opened in CiaoBot to resolve it (see ``MERGE_PROMPT``), so questions
+  is opened in Ciaobot to resolve it (see ``MERGE_PROMPT``), so questions
   surface with push notifications and the user answers in that chat.
 
 The git helpers here are unit-tested; the conflict merge runs as a normal PWA

@@ -29,7 +29,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import shutil
 from pathlib import Path
 
 from ciao import job_runs
@@ -253,9 +252,8 @@ async def extract_and_append(
     *,
     archive_path: Path,
     filtered_jsonl: str,
-    ollama_settings: OllamaSettings,
+    config,
     model: str,
-    pi_settings: "PiSettings | None" = None,
     session_id: str = "",
     trajectory_meta: dict[str, str] | None = None,
     workspace_root: Path | None = None,
@@ -270,11 +268,11 @@ async def extract_and_append(
     Always swallows exceptions — this runs as a fire-and-forget task and
     must never crash the route or leave the archive corrupted.
 
-    When ``pi`` is on PATH and ``pi_settings`` is configured, the model
-    call goes through a one-shot Pi subprocess (lighter than the Claude
-    SDK CLI). Falls back to ``claude_agent_sdk.query()`` otherwise.
+    The model call goes through a one-shot ``claude_agent_sdk.query()``
+    call, routed to the configured upstream (Ollama / OpenRouter /
+    Anthropic) via the ``env`` dict.
 
-    When ``trajectories_enabled`` and ``session_id`` are set, a JSON
+    When ``trajectories_enabled" and ``session_id`` are set, a JSON
     trajectory is written to ``~/.ciao/trajectories/YYYY-MM/`` after the
     insights section is appended. The trajectory uses the model output
     to populate decisions/errors/user_corrections and the filtered JSONL
@@ -291,16 +289,22 @@ async def extract_and_append(
             logger.info("Archive %s already has insights, skipping", archive_path)
             return
 
-        env = _ollama_env(model, ollama_settings)
+        from ciao.providers.routing import resolve_with_fallback
+
+        effective_model, env, note = resolve_with_fallback(
+            model, config, default_model=config.insights_model
+        )
         async with job_runs.track(
-            "insights", "Session insights", model=model,
+            "insights", "Session insights", model=effective_model,
             extra={"archive": archive_path.name, "session_id": session_id},
         ) as run:
+            if note:
+                run.extra["fallback"] = note
+                logger.info("Insights %s", note)
             output = await _run_model_with_retry(
                 filtered_jsonl=filtered_jsonl,
-                model=model,
+                model=effective_model,
                 env=env,
-                pi_settings=pi_settings,
             )
             if output:
                 _append_section(archive_path, output)
@@ -396,17 +400,16 @@ async def _run_model_with_retry(
     filtered_jsonl: str,
     model: str,
     env: dict[str, str],
-    pi_settings: "PiSettings | None" = None,
 ) -> str:
     """Call the model; on failure, wait 30s and retry once."""
     try:
-        return await _call_model(filtered_jsonl, model, env, pi_settings)
+        return await _call_model(filtered_jsonl, model, env)
     except Exception as exc:  # noqa: BLE001
         logger.info("Insights model call failed (%s); retrying in %ds", exc, _RETRY_DELAY_S)
 
     await asyncio.sleep(_RETRY_DELAY_S)
     try:
-        return await _call_model(filtered_jsonl, model, env, pi_settings)
+        return await _call_model(filtered_jsonl, model, env)
     except Exception:
         logger.exception("Insights model call failed twice; skipping")
         return ""
@@ -416,9 +419,8 @@ async def _call_model(
     filtered_jsonl: str,
     model: str,
     env: dict[str, str],
-    pi_settings: "PiSettings | None" = None,
 ) -> str:
-    from ciao.providers.pi import PiSettings, run_pi_oneshot  # noqa: F401
+    from ciao.providers.oneshot import run_oneshot
 
     user_prompt = (
         "Below is a Claude Code session transcript as line-oriented JSON.\n"
@@ -427,43 +429,10 @@ async def _call_model(
         f"{filtered_jsonl}"
     )
 
-    if pi_settings is not None and shutil.which("pi") is not None:
-        try:
-            text = await run_pi_oneshot(
-                user_prompt,
-                system_prompt=_INSIGHTS_SYSTEM_PROMPT,
-                model=model,
-                settings=pi_settings,
-                env=env,
-                timeout_s=120.0,
-            )
-            if text:
-                return text
-        except (TimeoutError, OSError, FileNotFoundError) as exc:
-            logger.info(
-                "Pi insights spawn failed (%s); falling back to Claude SDK", exc
-            )
-
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        TextBlock,
-        query,
-    )
-
-    options = ClaudeAgentOptions(
-        model=model,
+    return await run_oneshot(
+        user_prompt,
         system_prompt=_INSIGHTS_SYSTEM_PROMPT,
-        setting_sources=[],
-        skills=[],
-        max_turns=1,
+        model=model,
         env=env,
+        timeout_s=120.0,
     )
-
-    parts: list[str] = []
-    async for msg in query(prompt=user_prompt, options=options):
-        if isinstance(msg, AssistantMessage):
-            for block in msg.content:
-                if isinstance(block, TextBlock):
-                    parts.append(block.text)
-    return "".join(parts).strip()

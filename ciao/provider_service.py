@@ -5,14 +5,14 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from ciao.config import BridgeConfig
 from ciao.models import AgentRequest, StreamEvent
-from ciao.providers import ClaudeProvider, PiProvider
+from ciao.providers import ClaudeProvider
 from ciao.providers.base import ActiveHandle
 
-ProviderImpl = ClaudeProvider | PiProvider
+ProviderImpl = ClaudeProvider
 
 
 class ProviderService:
-    """Routes requests to the right provider and tracks the live handle."""
+    """Routes requests to the Claude provider and tracks the live handle."""
 
     def __init__(self, config: BridgeConfig, provider: str = "") -> None:
         self._config = config
@@ -24,9 +24,7 @@ class ProviderService:
     def _ensure_provider(self, provider: str) -> ProviderImpl:
         """Create the provider instance on first use based on provider name."""
         if self._provider is None:
-            if provider == "pi":
-                self._provider = PiProvider(self._config.workspace_root, config=self._config.pi)
-            elif provider == "claude":
+            if provider == "claude":
                 self._provider = ClaudeProvider(self._config.workspace_root, config=self._config)
             else:
                 raise ValueError(f"Unknown provider '{provider}'")

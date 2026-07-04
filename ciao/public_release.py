@@ -218,12 +218,12 @@ def main(argv: list[str] | None = None) -> int:
     argv_list = list(sys.argv[1:] if argv is None else argv)
     if argv_list and argv_list[0] not in {"scan", "export", "-h", "--help"}:
         argv_list.insert(0, "scan")
-    parser = argparse.ArgumentParser(description="Prepare and scan public Ciao exports.")
+    parser = argparse.ArgumentParser(description="Prepare and scan public Ciaobot exports.")
     subparsers = parser.add_subparsers(dest="command")
 
     scan_parser = subparsers.add_parser(
         "scan",
-        help="Scan an extracted public Ciao tree for private paths/strings.",
+        help="Scan an extracted public Ciaobot tree for private paths/strings.",
     )
     scan_parser.add_argument("root", nargs="?", default=".")
     scan_parser.add_argument(

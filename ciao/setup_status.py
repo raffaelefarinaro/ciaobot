@@ -11,6 +11,8 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import json
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -67,28 +69,10 @@ def _ollama_daemon_ready(local_url: str) -> bool:
         return False
 
 
-def _pi_auth_ready() -> bool:
-    if (Path.home() / ".pi").exists():
-        return True
-    if shutil.which("pi") is None:
-        return False
-    try:
-        proc = subprocess.run(
-            ["pi", "auth", "status"],
-            capture_output=True,
-            text=True,
-            timeout=0.8,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError, TimeoutError):
-        return False
-    combined = f"{proc.stdout}\n{proc.stderr}".lower()
-    return proc.returncode == 0 and "login" not in combined and "not" not in combined
-
-
 def _claude_status(
     env: Mapping[str, str],
     credentials_path: Path,
+    config_path: Path,
 ) -> dict[str, Any]:
     if env.get("ANTHROPIC_API_KEY", "").strip():
         return _provider(
@@ -106,6 +90,20 @@ def _claude_status(
             command="ciao auth claude",
             detail=str(credentials_path),
         )
+    # Claude Code on macOS stores the OAuth token in the Keychain and writes
+    # account metadata to ~/.claude.json. The token itself is not on disk, so
+    # treat a populated ``oauthAccount`` block as evidence of a logged-in
+    # session without attempting to read the Keychain (which may be locked or
+    # unavailable to the server process).
+    account = _claude_oauth_account(config_path)
+    if account:
+        return _provider(
+            name="claude",
+            ok=True,
+            auth="oauth",
+            command="ciao auth claude",
+            detail=account,
+        )
     return _provider(
         name="claude",
         ok=False,
@@ -113,6 +111,32 @@ def _claude_status(
         command="ciao auth claude",
         detail="Run Claude OAuth or set ANTHROPIC_API_KEY.",
     )
+
+
+def _claude_oauth_account(config_path: Path) -> str:
+    """Return a short identifier from ``~/.claude.json``'s ``oauthAccount``.
+
+    Returns an empty string when the file is missing, unparseable, or has no
+    usable account metadata. We deliberately avoid touching the Keychain: the
+    server process often cannot unlock it, and the account block is enough to
+    confirm a completed OAuth login.
+    """
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    account = data.get("oauthAccount")
+    if not isinstance(account, dict) or not account:
+        return ""
+    email = str(account.get("emailAddress", "")).strip()
+    if email:
+        return f"oauthAccount: {email}"
+    uuid_ = str(account.get("accountUuid", "")).strip()
+    if uuid_:
+        return f"oauthAccount: {uuid_}"
+    return "oauthAccount present"
 
 
 def _ollama_status(config: Any, env: Mapping[str, str]) -> dict[str, Any]:
@@ -142,21 +166,21 @@ def _ollama_status(config: Any, env: Mapping[str, str]) -> dict[str, Any]:
     )
 
 
-def _pi_status() -> dict[str, Any]:
-    if _pi_auth_ready():
+def _openrouter_status(env: Mapping[str, str]) -> dict[str, Any]:
+    if env.get("OPENROUTER_API_KEY", "").strip():
         return _provider(
-            name="pi",
+            name="openrouter",
             ok=True,
-            auth="oauth",
-            command="ciao auth pi",
-            detail="pi auth status succeeded.",
+            auth="api_key",
+            command="OPENROUTER_API_KEY=sk-or-...",
+            detail="OPENROUTER_API_KEY is set.",
         )
     return _provider(
-        name="pi",
+        name="openrouter",
         ok=False,
         auth="missing",
-        command="ciao auth pi",
-        detail="Install Pi and run pi auth.",
+        command="OPENROUTER_API_KEY=sk-or-...",
+        detail="Create an OpenRouter key and add OPENROUTER_API_KEY to .env.",
     )
 
 
@@ -165,6 +189,7 @@ def setup_status(
     *,
     env: Mapping[str, str] | None = None,
     claude_credentials_path: Path | None = None,
+    claude_config_path: Path | None = None,
 ) -> dict[str, Any]:
     """Return setup readiness for the wizard and expert CLI.
 
@@ -179,6 +204,12 @@ def setup_status(
         claude_credentials_path
         or (Path(raw_credentials_path).expanduser() if raw_credentials_path else None)
         or Path.home() / ".claude" / ".credentials.json"
+    )
+    raw_config_path = source.get("CLAUDE_CONFIG_PATH", "").strip()
+    config_path = (
+        claude_config_path
+        or (Path(raw_config_path).expanduser() if raw_config_path else None)
+        or Path.home() / ".claude.json"
     )
 
     checks = [
@@ -211,9 +242,9 @@ def setup_status(
         ),
     ]
     providers = {
-        "claude": _claude_status(source, credentials_path),
-        "pi": _pi_status(),
+        "claude": _claude_status(source, credentials_path, config_path),
         "ollama": _ollama_status(config, source),
+        "openrouter": _openrouter_status(source),
     }
     configured = all(row["ok"] for row in checks)
     provider_ready = any(row["ok"] for row in providers.values())

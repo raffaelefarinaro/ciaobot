@@ -132,41 +132,13 @@ def test_cli_sync_skills_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> 
                 "sync-skills",
                 "--workspace",
                 "/tmp/workspace",
-                "--pi-root",
-                "/tmp/pi",
                 "--skip-upstream",
             ]
         )
         == 0
     )
     assert str(called[0].workspace) == "/tmp/workspace"
-    assert str(called[0].pi_root) == "/tmp/pi"
     assert called[0].skip_upstream is True
-
-
-def test_cli_sync_agents_to_pi_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    called = []
-
-    monkeypatch.setattr(
-        cli, "_sync_agents_to_pi_command", lambda args: called.append(args) or 0
-    )
-
-    assert (
-        cli.main(
-            [
-                "sync-agents-to-pi",
-                "--claude-dir",
-                "/tmp/agents",
-                "--pi-dir",
-                "/tmp/pi-agents",
-                "--dry-run",
-            ]
-        )
-        == 0
-    )
-    assert str(called[0].claude_dir) == "/tmp/agents"
-    assert str(called[0].pi_dir) == "/tmp/pi-agents"
-    assert called[0].dry_run is True
 
 
 def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
@@ -217,7 +189,7 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     assert f"<string>{workspace.resolve()}</string>" in plist_text
     assert "<string>9443</string>" in plist_text
     assert f"<string>{workspace.resolve()}/.runtime/ciao.stdout.log</string>" in plist_text
-    app_exe = apps / "Ciao.app" / "Contents" / "MacOS" / "Ciao"
+    app_exe = apps / "Ciaobot.app" / "Contents" / "MacOS" / "Ciaobot"
     assert app_exe.is_file()
     assert app_exe.stat().st_mode & 0o111
     app_text = app_exe.read_text(encoding="utf-8")

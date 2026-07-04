@@ -16,5 +16,13 @@ web/node_modules/
 # vite outDir is ciao/web/static, hashed bundles land in assets/)
 ciao/web/static/assets/
 
+# Python build artifacts
+build/
+dist/
+
+# Local runtime / package-smoke artifacts (the live runtime lives in the
+# operator repo, not here)
+.runtime/
+
 # OS noise
 .DS_Store

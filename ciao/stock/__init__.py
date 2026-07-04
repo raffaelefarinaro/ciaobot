@@ -1,1 +1,1 @@
-"""Stock content shipped with the Ciao package."""
+"""Stock content shipped with the Ciaobot package."""

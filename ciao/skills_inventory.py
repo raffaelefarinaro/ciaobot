@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 
-def build_skill_inventory(workspace_root: Path | str, *, pi_skills_dir: Path | str | None = None) -> dict[str, Any]:
+def build_skill_inventory(workspace_root: Path | str) -> dict[str, Any]:
     """Return installed/known skills labelled by source.
 
     Source labels intentionally stay coarse for the Settings UI:
@@ -36,7 +36,7 @@ def build_skill_inventory(workspace_root: Path | str, *, pi_skills_dir: Path | s
                 "source": source,
                 "source_type": source_type,
                 "description": _description_for(root, name, prefer_custom=is_custom),
-                "installed_targets": _installed_targets(root, name, pi_skills_dir=pi_skills_dir),
+                "installed_targets": _installed_targets(root, name),
             }
         )
 
@@ -111,14 +111,9 @@ def _read_frontmatter_description(path: Path) -> str:
     return " ".join(values).strip()
 
 
-def _installed_targets(root: Path, name: str, *, pi_skills_dir: Path | str | None) -> list[str]:
+def _installed_targets(root: Path, name: str) -> list[str]:
     targets: list[str] = []
-    checks: list[tuple[str, Path]] = [
-        ("claude", root / ".claude" / "skills" / name / "SKILL.md"),
-    ]
-    pi_root = Path(pi_skills_dir) if pi_skills_dir is not None else Path.home() / ".pi" / "agent" / "skills"
-    checks.append(("pi", pi_root / name / "SKILL.md"))
-    for target, path in checks:
-        if path.exists():
-            targets.append(target)
+    path = root / ".claude" / "skills" / name / "SKILL.md"
+    if path.exists():
+        targets.append("claude")
     return targets

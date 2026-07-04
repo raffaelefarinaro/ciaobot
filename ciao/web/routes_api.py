@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
-from ciao.config import WorkspaceConfig
+from ciao.config import WorkspaceConfig, CLAUDE_AI_CONNECTORS, coerce_claude_ai_mcps
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.package_version import package_status, update_package
 from ciao.providers.claude import _summarize_tool_input
@@ -63,7 +63,11 @@ _IMAGE_MANIFEST_RE = re.compile(
 )
 
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-_ALLOWED_CHAT_PROVIDERS = {"claude", "pi"}
+_WORKSPACE_PROVIDER_LABELS = {
+    "claude": "Claude",
+    "ollama": "Ollama",
+    "openrouter": "OpenRouter",
+}
 _PROVIDER_KEY_META = {
     "ANTHROPIC_API_KEY": {
         "label": "Anthropic API key",
@@ -92,6 +96,63 @@ def _known_workspace_names(pcm: object) -> set[str]:
         if names:
             return names
     return {"personal", "work"}
+
+
+def _ollama_cloud_available(config) -> bool:
+    ollama = getattr(config, "ollama", None)
+    if ollama is None:
+        return False
+    return bool(getattr(ollama, "api_key", "")) and ollama.api_key != "ollama"
+
+
+def _ollama_backend_available(config) -> bool:
+    ollama = getattr(config, "ollama", None)
+    if ollama is None:
+        return False
+    return bool(ollama.local_models) or _ollama_cloud_available(config)
+
+
+def _openrouter_model_options(config) -> list[str]:
+    openrouter = config.openrouter
+    if not openrouter.available:
+        return []
+    return list(
+        dict.fromkeys(
+            [
+                openrouter.haiku_model,
+                openrouter.sonnet_model,
+                openrouter.opus_model,
+                *openrouter.models,
+            ]
+        )
+    )
+
+
+def _ollama_cloud_model_options(config) -> list[str]:
+    ollama = config.ollama
+    tier_models = (
+        [ollama.haiku_model, ollama.sonnet_model, ollama.opus_model, ollama.title_model]
+        if _ollama_cloud_available(config)
+        else []
+    )
+    return list(dict.fromkeys([*ollama.models, *tier_models]))
+
+
+def _workspace_provider_options(config) -> list[dict[str, str]]:
+    values = ["claude"]
+    if _ollama_backend_available(config):
+        values.append("ollama")
+    openrouter = getattr(config, "openrouter", None)
+    if openrouter is not None and openrouter.available:
+        values.append("openrouter")
+    return [
+        {"value": value, "label": _WORKSPACE_PROVIDER_LABELS[value]}
+        for value in values
+    ]
+
+
+def _workspace_provider_values(config) -> set[str]:
+    return {option["value"] for option in _workspace_provider_options(config)}
 
 
 def _extract_text_content(raw: object) -> str:
@@ -442,35 +503,26 @@ async def auth_check(request: Request) -> JSONResponse:
 async def list_workspaces(request: Request) -> JSONResponse:
     """Return configured logical workspaces for the PWA sidebar."""
     config = request.app.state.config
-    workspaces = [
-        {
-            "name": getattr(workspace, "name", ""),
-            "vault_root": getattr(workspace, "vault_root", ""),
-            "default_provider": getattr(workspace, "default_provider", "claude"),
-            "default_model": getattr(workspace, "default_model", ""),
-            "gws_profile": getattr(workspace, "gws_profile", ""),
-            "model_bucket": getattr(workspace, "model_bucket", ""),
-            "disallowed_tools": getattr(workspace, "disallowed_tools", None),
-        }
-        for workspace in config.workspaces.values()
-    ]
-    active = workspaces[0]["name"] if workspaces else None
-    return JSONResponse({"workspaces": workspaces, "active": active})
+    return JSONResponse(_workspaces_payload(config))
 
 
 def _workspace_to_dict(workspace: WorkspaceConfig) -> dict:
     return {
-        "name": workspace.name,
-        "vault_root": workspace.vault_root,
-        "default_provider": workspace.default_provider,
-        "default_model": workspace.default_model,
+        "name": getattr(workspace, "name", ""),
+        "vault_root": getattr(workspace, "vault_root", ""),
+        "default_provider": getattr(workspace, "default_provider", "claude"),
+        "default_model": getattr(workspace, "default_model", ""),
         "disallowed_tools": (
-            list(workspace.disallowed_tools)
-            if workspace.disallowed_tools is not None
+            list(getattr(workspace, "disallowed_tools", None))
+            if getattr(workspace, "disallowed_tools", None) is not None
             else None
         ),
-        "gws_profile": workspace.gws_profile,
-        "model_bucket": workspace.model_bucket,
+        # claude.ai connector MCP toggle. null = per-workspace default
+        # (personal off, else on). The effective denylist is computed by
+        # ``CiaoConfig.disallowed_tools_for_workspace``.
+        "claude_ai_mcps": getattr(workspace, "claude_ai_mcps", None),
+        "gws_profile": getattr(workspace, "gws_profile", ""),
+        "model_bucket": getattr(workspace, "model_bucket", ""),
     }
 
 
@@ -479,6 +531,10 @@ def _workspaces_payload(config) -> dict:
     return {
         "workspaces": workspaces,
         "active": workspaces[0]["name"] if workspaces else None,
+        "provider_options": _workspace_provider_options(config),
+        # The claude.ai connector set the toggle controls, so the PWA can label
+        # the switch without hardcoding tool names.
+        "claude_ai_connectors": list(CLAUDE_AI_CONNECTORS),
     }
 
 
@@ -494,7 +550,12 @@ def _parse_disallowed_tools_value(raw: object) -> list[str] | None:
     raise ValueError("disallowed_tools must be a list, comma-separated string, or null")
 
 
-def _workspace_from_request(data: dict, *, existing: WorkspaceConfig | None = None) -> WorkspaceConfig:
+def _workspace_from_request(
+    data: dict,
+    *,
+    config,
+    existing: WorkspaceConfig | None = None,
+) -> WorkspaceConfig:
     name = str(data.get("name", existing.name if existing else "")).strip()
     if not _WORKSPACE_NAME_RE.match(name):
         raise ValueError("workspace name must use letters, numbers, dashes, or underscores")
@@ -504,14 +565,22 @@ def _workspace_from_request(data: dict, *, existing: WorkspaceConfig | None = No
             existing.default_provider if existing else "claude",
         )
     ).strip() or "claude"
-    if provider not in _ALLOWED_CHAT_PROVIDERS:
-        raise ValueError("default_provider must be either 'claude' or 'pi'")
+    available_providers = _workspace_provider_values(config)
+    if provider not in available_providers:
+        allowed = ", ".join(sorted(available_providers))
+        raise ValueError(f"default_provider must be one of: {allowed}")
     if "disallowed_tools" in data:
         disallowed_tools = _parse_disallowed_tools_value(data.get("disallowed_tools"))
     elif existing is not None:
         disallowed_tools = existing.disallowed_tools
     else:
         disallowed_tools = None
+    if "claude_ai_mcps" in data:
+        claude_ai_mcps = coerce_claude_ai_mcps(data.get("claude_ai_mcps"))
+    elif existing is not None:
+        claude_ai_mcps = existing.claude_ai_mcps
+    else:
+        claude_ai_mcps = None
     return WorkspaceConfig(
         name=name,
         vault_root=str(data.get("vault_root", existing.vault_root if existing else name)).strip()
@@ -521,6 +590,7 @@ def _workspace_from_request(data: dict, *, existing: WorkspaceConfig | None = No
             data.get("default_model", existing.default_model if existing else "")
         ).strip(),
         disallowed_tools=disallowed_tools,
+        claude_ai_mcps=claude_ai_mcps,
         gws_profile=str(data.get("gws_profile", existing.gws_profile if existing else "")).strip(),
         model_bucket=str(
             data.get("model_bucket", existing.model_bucket if existing else "")
@@ -561,7 +631,7 @@ async def upsert_workspace_setting(request: Request) -> JSONResponse:
         body = {**body, "name": route_name}
     existing = config.workspace(str(body.get("name", "")).strip())
     try:
-        workspace = _workspace_from_request(body, existing=existing)
+        workspace = _workspace_from_request(body, config=config, existing=existing)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     created = workspace.name not in config.workspaces
@@ -630,32 +700,57 @@ def _read_env_value(path: Path, key: str) -> str:
     return ""
 
 
-def _provider_key_configured(config, key: str) -> bool:
+def _claude_oauth_ready() -> bool:
+    """True when Claude Code OAuth credentials are present on disk."""
+    from ciao.setup_status import _claude_oauth_account
+
+    raw = os.environ.get("CLAUDE_CREDENTIALS_PATH", "").strip()
+    credentials_path = (
+        Path(raw).expanduser() if raw else Path.home() / ".claude" / ".credentials.json"
+    )
+    if credentials_path.is_file():
+        return True
+    raw_cfg = os.environ.get("CLAUDE_CONFIG_PATH", "").strip()
+    config_path = Path(raw_cfg).expanduser() if raw_cfg else Path.home() / ".claude.json"
+    return bool(_claude_oauth_account(config_path))
+
+
+def _provider_key_auth_method(config, key: str) -> str:
+    """Return how a provider key is authenticated: 'api_key', 'oauth', or 'missing'."""
     env_value = os.environ.get(key, "").strip()
     if env_value:
-        return True
+        return "api_key"
     file_value = _read_env_value(_env_path(config), key)
     if file_value:
-        return True
-    if key == "OPENAI_API_KEY":
-        return bool(getattr(config, "openai_api_key", None))
-    if key == "CIAO_OLLAMA_API_KEY":
-        return getattr(config.ollama, "api_key", "ollama") != "ollama"
-    return False
+        return "api_key"
+    if key == "OPENAI_API_KEY" and bool(getattr(config, "openai_api_key", None)):
+        return "api_key"
+    if key == "CIAO_OLLAMA_API_KEY" and getattr(config.ollama, "api_key", "ollama") != "ollama":
+        return "api_key"
+    if key == "ANTHROPIC_API_KEY" and _claude_oauth_ready():
+        return "oauth"
+    return "missing"
+
+
+def _provider_key_configured(config, key: str) -> bool:
+    return _provider_key_auth_method(config, key) != "missing"
 
 
 def _provider_config_payload(config) -> dict:
+    keys = {}
+    for key, meta in _PROVIDER_KEY_META.items():
+        auth_method = _provider_key_auth_method(config, key)
+        keys[key] = {
+            **meta,
+            "configured": auth_method != "missing",
+            "auth_method": auth_method,
+        }
     return {
-        "keys": {
-            key: {
-                **meta,
-                "configured": _provider_key_configured(config, key),
-            }
-            for key, meta in _PROVIDER_KEY_META.items()
-        },
+        "keys": keys,
         "auto_update_github_skills": getattr(config, "auto_update_github_skills", True),
         "requires_restart": True,
         "env_path": str(_env_path(config)),
+        "connections": {},
     }
 
 
@@ -705,8 +800,9 @@ async def provider_config_settings(request: Request) -> JSONResponse:
         config.auto_update_github_skills = val
 
     _write_env_values(_env_path(config), updates)
-    _apply_provider_key_updates(config, {k: v for k, v in updates.items() if k in _PROVIDER_KEY_META})
-    if updates:
+    provider_key_changes = {k: v for k, v in updates.items() if k in _PROVIDER_KEY_META}
+    _apply_provider_key_updates(config, provider_key_changes)
+    if provider_key_changes:
         async def _do_restart():
             await asyncio.sleep(0.5)
             fn = getattr(request.app.state, "request_restart", None)
@@ -1038,28 +1134,6 @@ async def chat_archive(request: Request) -> JSONResponse:
     })
 
 
-def _pi_session_dir() -> Path:
-    override = os.environ.get("CIAO_PI_SESSION_DIR", "").strip()
-    if override:
-        return Path(override).expanduser()
-    return Path.home() / ".pi" / "agent" / "sessions"
-
-
-def _pi_user_text(content: object) -> str:
-    """Flatten a Pi user/toolResult content field (string or block array) to text."""
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return ""
-    parts: list[str] = []
-    for block in content:
-        if isinstance(block, str):
-            parts.append(block)
-        elif isinstance(block, dict) and block.get("type") == "text":
-            parts.append(block.get("text", ""))
-    return "\n".join(parts)
-
-
 def _overlay_assistant_timings(
     entries: list[dict], timings: dict
 ) -> None:
@@ -1095,136 +1169,11 @@ def _overlay_assistant_timings(
             entries[idx]["duration_ms"] = int(duration)
 
 
-def _clean_user_content(content: str) -> str:
-    if "<USER_REQUEST>" in content:
-        parts = content.split("<USER_REQUEST>", 1)
-        if "</USER_REQUEST>" in parts[1]:
-            content = parts[1].split("</USER_REQUEST>", 1)[0]
-    return _strip_injected_context(content)
-
-
-
-def _read_pi_session_messages(
-    chat_id: str,
-    timings: dict | None = None,
-    user_turn_images: dict | None = None,
-) -> list[dict]:
-    """Read the Pi RPC transcript for ``chat_id`` and map to the FE shape.
-
-    Pi writes one JSONL per session under ``~/.pi/agent/sessions/<chat_id>/``;
-    when a chat has multiple files (resumes/branches), the most-recently
-    modified one is the live transcript. Returns an empty list when there is
-    no session yet (chat created but Pi never spawned successfully, or the
-    binary is missing).
-
-    Output shape mirrors what ``chat_messages`` returns from Claude sessions:
-    user/assistant bubbles plus collapsed ``_activity`` tool groups. Pi-only
-    entries the FE has no place for (``branchSummary``, ``compactionSummary``,
-    ``custom``, ``bashExecution``, ``thinking``) are dropped, matching how the
-    Claude reader drops thinking/control-ack noise.
-    """
-    chat_dir = _pi_session_dir() / chat_id
-    if not chat_dir.exists():
-        return []
-    files = sorted(chat_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not files:
-        return []
-
-    timings = timings or {}
-    user_turn_images = user_turn_images or {}
-    result: list[dict] = []
-    user_idx = 0
-    pending_tools: list[str] = []
-
-    def flush_tools() -> None:
-        if pending_tools:
-            result.append({
-                "role": "system",
-                "content": "\n".join(pending_tools),
-                "tool_name": "_activity",
-            })
-            pending_tools.clear()
-
-    try:
-        with files[0].open("r", encoding="utf-8") as fh:
-            for raw_line in fh:
-                raw_line = raw_line.strip()
-                if not raw_line:
-                    continue
-                try:
-                    entry = json.loads(raw_line)
-                except json.JSONDecodeError:
-                    continue
-                if entry.get("type") != "message":
-                    continue
-                msg = entry.get("message") or {}
-                role = msg.get("role")
-                if role == "user":
-                    flush_tools()
-                    text = _pi_user_text(msg.get("content")).strip()
-                    if not text:
-                        continue
-                    user_entry: dict = {
-                        "role": "user",
-                        "content": text,
-                        "turn_index": user_idx,
-                    }
-                    refs = user_turn_images.get(str(user_idx))
-                    if refs is None:
-                        refs = user_turn_images.get(user_idx)
-                    if refs:
-                        user_entry["images"] = list(refs)
-                    rec = timings.get(str(user_idx)) or timings.get(user_idx)
-                    if isinstance(rec, dict) and rec.get("sent_at"):
-                        user_entry["sent_at"] = rec["sent_at"]
-                    result.append(user_entry)
-                    user_idx += 1
-                elif role == "assistant":
-                    for block in (msg.get("content") or []):
-                        if not isinstance(block, dict):
-                            continue
-                        btype = block.get("type")
-                        if btype == "text":
-                            text = (block.get("text") or "").strip()
-                            if text:
-                                flush_tools()
-                                result.append({"role": "assistant", "content": text})
-                        elif btype == "toolCall":
-                            name = block.get("name") or "tool"
-                            args = block.get("arguments") or {}
-                            touch = extract_file_touch(name, args) if isinstance(args, dict) else None
-                            if touch:
-                                flush_tools()
-                                result.append({
-                                    "role": "system",
-                                    "tool_name": "_filecard",
-                                    "content": touch["file_path"],
-                                    "file_path": touch["file_path"],
-                                    "action": touch["action"],
-                                    "tool": name,
-                                })
-                                continue
-                            summary = _summarize_tool_input(name, args) if isinstance(args, dict) else ""
-                            line_text = f"{_tool_icon(name)} {name}"
-                            if summary:
-                                line_text += f" {summary}"
-                            pending_tools.append(line_text)
-                        # "thinking" blocks: hidden, like the Claude reader.
-                # Other roles (toolResult, branchSummary, compactionSummary,
-                # custom, bashExecution) don't get their own bubble — the
-                # toolCall line already represents what the user needs to see.
-    except OSError:
-        return []
-    flush_tools()
-    _overlay_assistant_timings(result, timings)
-    return result
-
-
 async def chat_messages(request: Request) -> JSONResponse:
     """Return conversation history for a chat.
 
-    Routes by provider: Claude chats read the SDK session file via
-    ``get_session_messages``; Pi chats read Pi's own JSONL transcript under
+    Claude chats read the SDK session file via
+    ``get_session_messages``.
     ``~/.pi/agent/sessions/<chat_id>/`` since the SDK can't parse them.
 
     When a Claude chat is archived, its SDK session blob is deleted to reclaim
@@ -1237,14 +1186,6 @@ async def chat_messages(request: Request) -> JSONResponse:
     if chat is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     handover_messages = list(getattr(chat, "handover_messages", []) or [])
-    if chat.provider == "pi":
-        return JSONResponse(
-            handover_messages + _read_pi_session_messages(
-                chat_id,
-                chat.user_turn_timings,
-                chat.user_turn_images,
-            )
-        )
     if not chat.session_id:
         return JSONResponse(handover_messages)
 
@@ -2176,7 +2117,7 @@ async def create_schedule(request: Request) -> JSONResponse:
     # else we still require it (create will happily take "" but then the entry
     # would never tick).
     provider = (body.get("provider") or "").strip()
-    if provider and provider not in ("claude", "pi"):
+    if provider and provider != "claude":
         return JSONResponse({"error": f"unknown provider '{provider}'"}, status_code=400)
     try:
         archive_policy = normalize_archive_policy(body.get("archive_policy"))
@@ -2278,7 +2219,7 @@ async def schedule_detail(request: Request) -> JSONResponse:
         entry.model = new_model
     if "provider" in body:
         new_provider = (body["provider"] or "").strip()
-        if new_provider and new_provider not in ("claude", "pi"):
+        if new_provider and new_provider != "claude":
             return JSONResponse(
                 {"error": f"unknown provider '{new_provider}'"}, status_code=400
             )
@@ -2300,20 +2241,27 @@ async def schedule_detail(request: Request) -> JSONResponse:
 async def list_models(request: Request) -> JSONResponse:
     config = request.app.state.config
     # Cloud allowlist + locally-discovered daemon models both count as
-    # "Ollama" for bucketing: they show in the personal Claude bucket and
-    # in the Pi bucket, never in the work (Anthropic subscription) bucket.
-    ollama = list(
-        dict.fromkeys([*config.ollama.models, *config.ollama.local_models])
-    )
-    pi_native = list(config.pi.models)
-    pi_only = [m for m in pi_native if m not in ollama]
-    claude_work = [m for m in config.claude_models if m not in ollama and m not in pi_only]
+    # "Ollama" for bucketing: they show in the personal Claude bucket,
+    # never in the work (Anthropic subscription) bucket.
+    ollama_cloud = _ollama_cloud_model_options(config)
+    ollama = list(dict.fromkeys([*ollama_cloud, *config.ollama.local_models]))
+    claude_work = [m for m in config.claude_models if m not in ollama]
     claude_personal = [m for m in config.claude_models if m in ollama]
-    pi_personal = list(dict.fromkeys([*pi_native, *ollama]))
 
     work_default = config.claude_default_model if config.claude_default_model in claude_work else (claude_work[0] if claude_work else "")
     personal_default = claude_personal[0] if claude_personal else ""
-    pi_default = config.pi.default_model or (pi_personal[0] if pi_personal else "")
+
+    # OpenRouter backend: available when an API key is set. The picker
+    # offers the per-tier alias defaults plus any discovered/disabled
+    # anthropic-family models.
+    or_settings = config.openrouter
+    openrouter_models = _openrouter_model_options(config)
+    openrouter_tiers = {
+        "haiku": or_settings.haiku_model,
+        "sonnet": or_settings.sonnet_model,
+        "opus": or_settings.opus_model,
+    } if or_settings.available else {}
+    openrouter_default = or_settings.sonnet_model if or_settings.available else ""
 
     return JSONResponse({
         "models": config.claude_models,
@@ -2321,19 +2269,31 @@ async def list_models(request: Request) -> JSONResponse:
         "provider_models": {
             "claude_work": claude_work,
             "claude_personal": claude_personal,
-            "pi_personal": pi_personal,
+            "openrouter": openrouter_models,
         },
         "provider_defaults": {
             "claude_work": work_default,
             "claude_personal": personal_default,
-            "pi_personal": pi_default,
+            "openrouter": openrouter_default,
+        },
+        # Per-backend alias tier models, so the picker can show
+        # "sonnet -> kimi (ollama) / anthropic-sonnet (openrouter)".
+        "alias_tiers": {
+            "ollama": {
+                "haiku": config.ollama.haiku_model,
+                "sonnet": config.ollama.sonnet_model,
+                "opus": config.ollama.opus_model,
+            },
+            "openrouter": openrouter_tiers,
+        },
+        "backends": {
+            "ollama": _ollama_backend_available(config),
+            "openrouter": or_settings.available,
+            "anthropic": True,
         },
         "ollama_models": ollama,
-        # Subset of ollama_models served by the local daemon (free,
-        # on-device). The picker can badge these as "local".
         "ollama_local_models": list(config.ollama.local_models),
-        # Keyed by provider (not bucket): both Claude buckets share the SDK's
-        # effort levels. Empty selection = provider default, no flag sent.
+        "openrouter_models": openrouter_models,
         "thinking_levels": {k: list(v) for k, v in THINKING_LEVELS.items()},
     })
 
@@ -2358,19 +2318,39 @@ def _routines_payload(config, app_settings) -> dict:
     if config.critique_models:
         critique_effective = config.critique_models
     elif os.environ.get("OPENROUTER_API_KEY"):
-        critique_effective = "openrouter/anthropic/claude-3.7-sonnet,openrouter/google/gemini-2.5-pro,openrouter/minimax/minimax-m3,openrouter/zai/glm-5.2"
+        critique_effective = "anthropic/claude-sonnet-4.5,anthropic/claude-haiku-4.5,anthropic/claude-opus-4.8"
     else:
-        critique_effective = "openai-codex/gpt-5.5,kimi-k2.7-code:cloud,deepseek-v4-pro:cloud"
+        critique_effective = "kimi-k2.7-code:cloud,deepseek-v4-flash:cloud,minimax-m3:cloud"
 
     return {
         # Overrides as stored ("" = automatic default).
         "title_model": s.title_model,
         "insights_model": s.insights_model,
+
         "critique_models": s.critique_models,
+        "ollama_haiku_model": s.ollama_haiku_model,
+        "ollama_sonnet_model": s.ollama_sonnet_model,
+        "ollama_opus_model": s.ollama_opus_model,
+        "openrouter_haiku_model": s.openrouter_haiku_model,
+        "openrouter_sonnet_model": s.openrouter_sonnet_model,
+        "openrouter_opus_model": s.openrouter_opus_model,
         # What actually runs right now, after defaults.
         "title_model_effective": title_effective,
         "insights_model_effective": config.insights_model,
+
         "critique_models_effective": critique_effective,
+        "alias_tiers": {
+            "ollama": {
+                "haiku": config.ollama.haiku_model,
+                "sonnet": config.ollama.sonnet_model,
+                "opus": config.ollama.opus_model,
+            },
+            "openrouter": {
+                "haiku": config.openrouter.haiku_model,
+                "sonnet": config.openrouter.sonnet_model,
+                "opus": config.openrouter.opus_model,
+            } if config.openrouter.available else {},
+        },
         "transcription": {
             "engine": config.transcription_engine,
             "local_model": config.transcription_local_model,
@@ -2380,8 +2360,18 @@ def _routines_payload(config, app_settings) -> dict:
         # Grouped options for the routine model selectors.
         "model_options": {
             "anthropic": ["haiku", "sonnet", "opus"],
-            "ollama_cloud": list(ollama.models),
+            "ollama_cloud": _ollama_cloud_model_options(config),
             "ollama_local": list(ollama.local_models),
+            "openrouter": _openrouter_model_options(config),
+        },
+        "backends": {
+            "ollama": _ollama_backend_available(config),
+            "openrouter": config.openrouter.available,
+            "anthropic": True,
+        },
+        "workspace_context": {
+            "workspace_root": str(config.workspace_root),
+            "vault_root": str(config.vault_root),
         },
     }
 
@@ -2401,9 +2391,10 @@ async def settings_routines(request: Request) -> JSONResponse:
         # Re-discover local daemon models so a freshly `ollama pull`-ed
         # model appears in the selectors without a restart. Bounded by the
         # discovery timeout (2s) and run off the event loop.
-        from ciao.config import refresh_local_ollama_models
+        from ciao.config import refresh_local_ollama_models, refresh_openrouter_models
 
         await asyncio.to_thread(refresh_local_ollama_models, config)
+        await asyncio.to_thread(refresh_openrouter_models, config)
     if request.method == "PATCH":
         try:
             body = await request.json()
@@ -2685,6 +2676,39 @@ async def admin_snapshot(request: Request) -> JSONResponse:
 
 
 
+def _run_step(args: list[str], *, cwd: str, timeout: int) -> subprocess.CompletedProcess:
+    """Run a deploy step, turning missing-binary and timeout errors into a
+    failed CompletedProcess so the handler reports a structured error instead
+    of crashing with a 500. Under launchd the server PATH may omit Homebrew,
+    so a bare ``npm`` can raise FileNotFoundError before ``run`` returns."""
+    try:
+        return subprocess.run(
+            args, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+        )
+    except FileNotFoundError as exc:
+        return subprocess.CompletedProcess(
+            args=args, returncode=127, stdout="",
+            stderr=f"{args[0]} not found on PATH: {exc}",
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args=args, returncode=124, stdout="",
+            stderr=f"{args[0]} timed out after {timeout}s",
+        )
+
+
+def _run_root_npm_install(codebase_root: Path) -> subprocess.CompletedProcess:
+    args = ["npm", "install", "--no-audit", "--no-fund"]
+    if not (codebase_root / "package.json").exists():
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout="skipped: no root package.json",
+            stderr="",
+        )
+    return _run_step(args, cwd=str(codebase_root), timeout=180)
+
+
 async def admin_deploy(request: Request) -> JSONResponse:
     """Snapshot local work, pull latest, rebuild frontend, restart service."""
     mgr = getattr(request.app.state, "local_session_manager", None)
@@ -2732,8 +2756,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
 
     # 1. Git pull (idempotent after snapshot, but catches any race push)
     result = await asyncio.to_thread(
-        subprocess.run, ["git", "pull"],
-        cwd=str(codebase_root), capture_output=True, text=True, timeout=60,
+        _run_step, ["git", "pull"], cwd=str(codebase_root), timeout=60,
     )
     steps.append(_record("git pull", result))
     if result.returncode != 0:
@@ -2745,8 +2768,8 @@ async def admin_deploy(request: Request) -> JSONResponse:
     # 2. pip install
     import sys
     result = await asyncio.to_thread(
-        subprocess.run, [sys.executable, "-m", "pip", "install", "-e", "."],
-        cwd=str(codebase_root), capture_output=True, text=True, timeout=120,
+        _run_step, [sys.executable, "-m", "pip", "install", "-e", "."],
+        cwd=str(codebase_root), timeout=120,
     )
     steps.append(_record("pip install", result))
     if result.returncode != 0:
@@ -2755,21 +2778,19 @@ async def admin_deploy(request: Request) -> JSONResponse:
             status_code=500,
         )
 
-    # 2b. npm install at repo root. Picks up server-side node tools
-    # (codeburn, slidev theme, anything we add later to the root
-    # package.json). Non-fatal: a transient npm hiccup shouldn't block
-    # a deploy, since the Python server runs regardless.
+    # 2b. npm install at repo root, only when a root package exists. The PWA's
+    # package.json lives under web/, so running npm at the repo root on this
+    # project would otherwise emit ENOENT on every deploy.
     result = await asyncio.to_thread(
-        subprocess.run, ["npm", "install", "--no-audit", "--no-fund"],
-        cwd=str(codebase_root), capture_output=True, text=True, timeout=180,
+        _run_root_npm_install, codebase_root,
     )
     steps.append(_record("npm install (root)", result))
 
     # 3. npm build
     web_dir = codebase_root / "web"
     result = await asyncio.to_thread(
-        subprocess.run, ["npm", "run", "build"],
-        cwd=str(web_dir), capture_output=True, text=True, timeout=120,
+        _run_step, ["npm", "run", "build"],
+        cwd=str(web_dir), timeout=120,
     )
     steps.append(_record("npm build", result))
     if result.returncode != 0:
@@ -2802,9 +2823,62 @@ async def admin_deploy(request: Request) -> JSONResponse:
 
 
 async def admin_skills(request: Request) -> JSONResponse:
-    """List skills known to Ciao, labelled as custom or GitHub/package."""
+    """List skills known to Ciaobot, labelled as custom or GitHub/package."""
     config = request.app.state.config
     return JSONResponse(build_skill_inventory(config.workspace_root))
+
+
+async def admin_add_skill(request: Request) -> JSONResponse:
+    """Add an upstream skill from GitHub."""
+    config = request.app.state.config
+    try:
+        body = await request.json()
+        source = body.get("source", "").strip()
+        skill = body.get("skill", "").strip() or None
+        agent = body.get("agent", "claude-code").strip() or "claude-code"
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"Invalid request body: {e}"}, status_code=400)
+
+    if not source:
+        return JSONResponse({"ok": False, "error": "GitHub URL or owner/repo is required"}, status_code=400)
+
+    try:
+        import sys
+        
+        script_path = Path(config.workspace_root) / "scripts" / "skills_add.py"
+        if not script_path.exists():
+            return JSONResponse({"ok": False, "error": f"Script {script_path} does not exist"}, status_code=500)
+
+        cmd = [sys.executable, str(script_path), source]
+        if skill:
+            cmd.extend(["--skill", skill])
+        cmd.extend(["--agent", agent])
+
+        # Run script to add the skill to skills-lock.json
+        result = await asyncio.to_thread(
+            subprocess.run,
+            cmd,
+            cwd=str(config.workspace_root), capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            err = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
+            return JSONResponse({"ok": False, "error": err}, status_code=500)
+        
+        # Run sync-skills immediately so it mirrors custom/locked skills to the local Claude catalog
+        sync_result = await asyncio.to_thread(
+            subprocess.run,
+            [sys.executable, "-m", "ciao.cli", "sync-skills", "--workspace", str(config.workspace_root)],
+            cwd=str(config.workspace_root), capture_output=True, text=True, timeout=60,
+        )
+        if sync_result.returncode != 0:
+            err = sync_result.stderr.strip() or sync_result.stdout.strip() or f"sync exit code {sync_result.returncode}"
+            return JSONResponse({"ok": False, "error": f"Skill added but sync failed: {err}"}, status_code=500)
+
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    return JSONResponse({"ok": True, "message": "Skill added and synchronized successfully."})
+
 
 
 async def admin_status(request: Request) -> JSONResponse:
@@ -2895,7 +2969,7 @@ async def local_handback(request: Request) -> JSONResponse:
     """Commit the device session and land it on ``main``.
 
     Clean merge -> pushed to main directly. Conflict -> an interactive merge
-    chat is opened in CiaoBot to resolve it.
+    chat is opened in Ciaobot to resolve it.
     """
     mgr = _local_manager(request)
     if mgr is None:

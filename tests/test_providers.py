@@ -188,7 +188,7 @@ def test_strip_injected_context_removes_image_manifest(tmp_path: Path) -> None:
     # With injected CIAO context block
     with_prefix = (
         "[CIAO_CONTEXT_BEGIN]\n"
-        '[Project: "Ciao Improvements"]\n'
+        '[Project: "Ciaobot Improvements"]\n'
         "[CIAO_CONTEXT_END]\n\n"
         + prompt
     )

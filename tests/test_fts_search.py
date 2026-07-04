@@ -28,7 +28,7 @@ def temp_vault(tmp_path: Path) -> Path:
 
     projects = vault / "Projects"
     projects.mkdir()
-    (projects / "Ciao-Search.md").write_text(
+    (projects / "Ciaobot-Search.md").write_text(
         "---\ntype: project\nworkspace: personal\n---\n# Search Improvements\nWe should discuss the wedding venue next week.",
         encoding="utf-8",
     )
@@ -79,7 +79,7 @@ def test_init_db(db_conn: sqlite3.Connection) -> None:
 def test_index_vault_incremental(db_conn: sqlite3.Connection, temp_vault: Path) -> None:
     # First indexing pass
     indexed, removed = fts_search.index_vault(db_conn, temp_vault)
-    assert indexed == 2  # User.md and Ciao-Search.md
+    assert indexed == 2  # User.md and Ciaobot-Search.md
     assert removed == 0
 
     # Second pass with no changes should skip
@@ -161,10 +161,10 @@ def test_index_file(db_conn: sqlite3.Connection, temp_vault: Path) -> None:
 def test_search_stemming_and_ranking(db_conn: sqlite3.Connection, temp_vault: Path) -> None:
     fts_search.index_vault(db_conn, temp_vault)
 
-    # Check stemming: "weddings" should match "wedding" in Ciao-Search.md
+    # Check stemming: "weddings" should match "wedding" in Ciaobot-Search.md
     results = fts_search.search_vault(db_conn, "weddings")
     assert len(results) == 1
-    assert "Ciao-Search.md" in results[0]["path"]
+    assert "Ciaobot-Search.md" in results[0]["path"]
     assert "wedding" in results[0]["snippet"]
 
     # Check proximity/ranking

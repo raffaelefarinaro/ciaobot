@@ -100,11 +100,9 @@ async def test_upgrade_all_returns_none_when_nothing_changed(monkeypatch, tmp_pa
     monkeypatch.setattr("ciao.upgrade.upgrade_gws", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_defuddle", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_claude_code", AsyncMock(return_value=_UNCHANGED))
-    monkeypatch.setattr("ciao.upgrade.upgrade_pi", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_root_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_web_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_apfel", AsyncMock(return_value=_UNCHANGED))
-    monkeypatch.setattr("ciao.upgrade.upgrade_pi_extensions", AsyncMock(return_value=[]))
 
     with caplog.at_level(logging.INFO):
         result = await upgrade_all(str(tmp_path))
@@ -127,11 +125,9 @@ async def test_upgrade_all_reports_changes(monkeypatch, tmp_path, caplog) -> Non
     monkeypatch.setattr("ciao.upgrade.upgrade_gws", AsyncMock(return_value=gws_bumped))
     monkeypatch.setattr("ciao.upgrade.upgrade_defuddle", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_claude_code", AsyncMock(return_value=_UNCHANGED))
-    monkeypatch.setattr("ciao.upgrade.upgrade_pi", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_root_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_web_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_apfel", AsyncMock(return_value=_UNCHANGED))
-    monkeypatch.setattr("ciao.upgrade.upgrade_pi_extensions", AsyncMock(return_value=[]))
 
     with caplog.at_level(logging.INFO):
         result = await upgrade_all(str(tmp_path))
@@ -146,30 +142,28 @@ async def test_upgrade_all_surfaces_silent_failures(monkeypatch, tmp_path, caplo
     async def _no_pip_changes(root):
         return {}
 
-    pi_failed = UpgradeResult(
-        command=["npm", "install", "-g", "@earendil-works/pi-coding-agent"],
+    claude_failed = UpgradeResult(
+        command=["npm", "install", "-g", "@anthropic-ai/claude-code"],
         changed=False, success=False,
         stdout="",
-        stderr="npm error code EACCES\nnpm error syscall mkdir\nnpm error path /usr/lib/node_modules/@mariozechner",
+        stderr="npm error code EACCES\nnpm error syscall mkdir",
         before_version="", after_version="",
     )
 
     monkeypatch.setattr("ciao.upgrade.upgrade_project_deps", _no_pip_changes)
     monkeypatch.setattr("ciao.upgrade.upgrade_gws", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_defuddle", AsyncMock(return_value=_UNCHANGED))
-    monkeypatch.setattr("ciao.upgrade.upgrade_claude_code", AsyncMock(return_value=_UNCHANGED))
-    monkeypatch.setattr("ciao.upgrade.upgrade_pi", AsyncMock(return_value=pi_failed))
+    monkeypatch.setattr("ciao.upgrade.upgrade_claude_code", AsyncMock(return_value=claude_failed))
     monkeypatch.setattr("ciao.upgrade.upgrade_root_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_web_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_apfel", AsyncMock(return_value=_UNCHANGED))
-    monkeypatch.setattr("ciao.upgrade.upgrade_pi_extensions", AsyncMock(return_value=[]))
 
     with caplog.at_level(logging.WARNING):
         result = await upgrade_all(str(tmp_path))
 
     assert result is not None
-    assert "pi: install failed" in result
-    assert "pi upgrade failed" in caplog.text
+    assert "claude: install failed" in result
+    assert "claude upgrade failed" in caplog.text
 
 
 def test_upgrade_apfel_skips_when_brew_missing(monkeypatch) -> None:

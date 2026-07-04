@@ -49,7 +49,7 @@ def test_system_prompt_payload_returns_instructions_for_empty() -> None:
     assert payload is not None
     assert payload["type"] == "preset"
     assert payload["preset"] == "claude_code"
-    assert "CiaoBot System Instructions" in payload["append"]
+    assert "Ciaobot System Instructions" in payload["append"]
 
 
 def test_system_prompt_payload_appends_to_claude_code_preset() -> None:
@@ -57,7 +57,7 @@ def test_system_prompt_payload_appends_to_claude_code_preset() -> None:
     assert payload is not None
     assert payload["type"] == "preset"
     assert payload["preset"] == "claude_code"
-    assert "CiaoBot System Instructions" in payload["append"]
+    assert "Ciaobot System Instructions" in payload["append"]
     assert "hello memory" in payload["append"]
 
 
@@ -70,7 +70,7 @@ def test_system_prompt_payload_preserves_existing_append() -> None:
     payload = mi.system_prompt_payload("memory block", base_system_prompt=base)
     assert payload is not None
     assert payload["append"].startswith("operator hint")
-    assert "CiaoBot System Instructions" in payload["append"]
+    assert "Ciaobot System Instructions" in payload["append"]
     assert "memory block" in payload["append"]
 
 
