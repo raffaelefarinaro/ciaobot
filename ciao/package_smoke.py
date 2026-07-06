@@ -94,7 +94,6 @@ def run_package_smoke(
             "pip",
             "wheel",
             "--no-deps",
-            "--no-build-isolation",
             "--wheel-dir",
             str(dist_dir),
             ".",

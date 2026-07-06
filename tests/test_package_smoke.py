@@ -31,7 +31,6 @@ def test_package_smoke_runs_build_install_and_installed_probe(tmp_path: Path) ->
             "pip",
             "wheel",
             "--no-deps",
-            "--no-build-isolation",
             "--wheel-dir",
             str(repo / ".runtime" / "package-smoke" / "dist"),
             ".",
