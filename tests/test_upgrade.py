@@ -103,6 +103,7 @@ async def test_upgrade_all_returns_none_when_nothing_changed(monkeypatch, tmp_pa
     monkeypatch.setattr("ciao.upgrade.upgrade_root_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_web_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_apfel", AsyncMock(return_value=_UNCHANGED))
+    monkeypatch.setattr("ciao.upgrade.upgrade_libreoffice", AsyncMock(return_value=_UNCHANGED))
 
     with caplog.at_level(logging.INFO):
         result = await upgrade_all(str(tmp_path))
@@ -128,6 +129,7 @@ async def test_upgrade_all_reports_changes(monkeypatch, tmp_path, caplog) -> Non
     monkeypatch.setattr("ciao.upgrade.upgrade_root_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_web_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_apfel", AsyncMock(return_value=_UNCHANGED))
+    monkeypatch.setattr("ciao.upgrade.upgrade_libreoffice", AsyncMock(return_value=_UNCHANGED))
 
     with caplog.at_level(logging.INFO):
         result = await upgrade_all(str(tmp_path))
@@ -157,6 +159,7 @@ async def test_upgrade_all_surfaces_silent_failures(monkeypatch, tmp_path, caplo
     monkeypatch.setattr("ciao.upgrade.upgrade_root_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_web_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_apfel", AsyncMock(return_value=_UNCHANGED))
+    monkeypatch.setattr("ciao.upgrade.upgrade_libreoffice", AsyncMock(return_value=_UNCHANGED))
 
     with caplog.at_level(logging.WARNING):
         result = await upgrade_all(str(tmp_path))
