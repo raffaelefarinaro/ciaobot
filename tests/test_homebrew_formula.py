@@ -37,14 +37,27 @@ def test_homebrew_formula_postinstall_runs_setup_or_prints_headless_fallback() -
     assert 'launchctl", "print", "gui/#{Process.uid}"' in text
 
 
+CANONICAL_REPO = "https://github.com/raffaelefarinaro/ciaobot"
+
+
+def test_homebrew_formula_points_at_canonical_public_repo() -> None:
+    text = _formula_text()
+
+    assert f'homepage "{CANONICAL_REPO}"' in text
+    assert f'url "{CANONICAL_REPO}/archive/refs/tags/v' in text
+    assert f'head "{CANONICAL_REPO}.git", branch: "main"' in text
+    # Every GitHub reference must be the canonical public repo.
+    for line in text.splitlines():
+        if "github.com" in line:
+            assert CANONICAL_REPO in line, line
+
+
 def test_homebrew_formula_has_no_private_distribution_markers() -> None:
     text = _formula_text()
 
     forbidden = (
-        "raff" + "aele",
         "scan" + "dit",
         "sdc" + "-labs",
-        "bot.",
         "/Users/",
     )
     lowered = text.lower()
