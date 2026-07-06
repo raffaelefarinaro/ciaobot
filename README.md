@@ -31,12 +31,33 @@ Use the access you already have:
 
 The model is project-first: a workspace represents a life area (personal, work, a client), each workspace contains projects, and each project carries files, notes, decisions, and context that Ciaobot injects when you work inside it, so the agent does not rediscover what you are talking about every time.
 
-## Quickstart
+## Install
+
+Install from the [latest release](https://github.com/raffaelefarinaro/ciaobot/releases/latest) — the wheel ships with the pre-built PWA:
+
+```bash
+python3.12 -m venv ~/.ciaobot-venv
+~/.ciaobot-venv/bin/pip install https://github.com/raffaelefarinaro/ciaobot/releases/download/v0.2.0/ciao-0.2.0-py3-none-any.whl
+~/.ciaobot-venv/bin/ciao setup --workspace ~/ciao-workspace
+~/.ciaobot-venv/bin/ciao run
+```
+
+On macOS you can use the Homebrew formula instead:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/raffaelefarinaro/ciaobot/main/deploy/homebrew/ciao.rb
+brew install --formula ./ciao.rb
+```
+
+## Quickstart (from source)
+
+A git checkout does not include the built PWA bundle, so build it once before running:
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[test]'
+(cd web && npm ci && npm run build)
 ciao setup --workspace ~/ciao-workspace
 ciao run
 ```
