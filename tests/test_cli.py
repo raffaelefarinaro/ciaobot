@@ -248,6 +248,40 @@ def test_setup_removes_our_legacy_ciao_app_only(tmp_path: Path) -> None:
     assert not foreign.exists()  # untouched (never created); guard for typos
 
 
+def test_default_app_dir_prefers_system_applications(monkeypatch) -> None:
+    monkeypatch.setattr(cli.os, "access", lambda path, mode: True)
+    assert cli._default_app_dir() == Path("/Applications")
+
+    monkeypatch.setattr(cli.os, "access", lambda path, mode: False)
+    assert cli._default_app_dir() == Path.home() / "Applications"
+
+
+def test_setup_cleans_our_bundles_from_home_applications(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    home_apps = tmp_path / "home" / "Applications"
+    for name, bundle_id in (("Ciao.app", "local.ciao.app"), ("Ciaobot.app", "local.ciaobot.app")):
+        contents = home_apps / name / "Contents"
+        contents.mkdir(parents=True)
+        (contents / "Info.plist").write_text(
+            f"<plist><string>{bundle_id}</string></plist>", encoding="utf-8"
+        )
+    system_apps = tmp_path / "SystemApplications"
+
+    assert cli.main([
+        "setup",
+        "--workspace",
+        str(tmp_path / "workspace"),
+        "--launch-agents-dir",
+        str(tmp_path / "LaunchAgents"),
+        "--app-dir",
+        str(system_apps),
+    ]) == 0
+
+    assert not (home_apps / "Ciao.app").exists()
+    assert not (home_apps / "Ciaobot.app").exists()
+    assert (system_apps / "Ciaobot.app").is_dir()
+
+
 def test_setup_keeps_unrelated_ciao_app(tmp_path: Path) -> None:
     apps = tmp_path / "Applications"
     unrelated = apps / "Ciao.app" / "Contents"

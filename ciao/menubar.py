@@ -267,17 +267,9 @@ def run_menubar(workspace: Path, port: int) -> int:
     face_scared = icon_path("face_scared.png")
 
     app = rumps.App("Ciaobot", icon=face, quit_button=None)
-    status_item = rumps.MenuItem(status_label(ServerStatus(False, False)))
-    status_item.set_callback(None)
-    notifications_menu = rumps.MenuItem("Notifications")
-    notifications_menu.add(_disabled_item(rumps, "No notifications yet"))
-    chats_menu = rumps.MenuItem("Open Chats")
-    chats_menu.add(_disabled_item(rumps, "No open chats"))
-    addresses_menu = rumps.MenuItem("Addresses (click to copy)")
-    addresses_menu.add(_disabled_item(rumps, "Detecting…"))
 
     # Only notify for entries newer than launch, not the whole backlog.
-    state = {"last_seen_ts": time.time()}
+    state = {"last_seen_ts": time.time(), "fingerprint": None}
 
     def _open_chat_callback(chat_id: str):
         def _callback(_sender) -> None:
@@ -291,45 +283,6 @@ def run_menubar(workspace: Path, port: int) -> int:
 
         return _callback
 
-    def refresh(_timer=None) -> None:
-        status = fetch_server_status(port)
-        status_item.title = status_label(status)
-        app.icon = face if status.reachable else face_scared
-
-        entries = read_notifications(workspace)
-        notifications_menu.clear()
-        if not entries:
-            notifications_menu.add(_disabled_item(rumps, "No notifications yet"))
-        for entry in entries:
-            notifications_menu.add(
-                rumps.MenuItem(
-                    notification_menu_title(entry),
-                    callback=_open_chat_callback(entry.chat_id),
-                )
-            )
-
-        chats = read_open_chats(workspace)
-        chats_menu.clear()
-        if not chats:
-            chats_menu.add(_disabled_item(rumps, "No open chats"))
-        for chat in chats:
-            chats_menu.add(
-                rumps.MenuItem(
-                    chat.title if len(chat.title) <= 60 else chat.title[:59] + "…",
-                    callback=_open_chat_callback(chat.chat_id),
-                )
-            )
-
-        addresses_menu.clear()
-        for url in server_addresses(port):
-            addresses_menu.add(rumps.MenuItem(url, callback=_copy_address_callback(url)))
-
-        fresh = [e for e in entries if e.ts > state["last_seen_ts"]]
-        if fresh:
-            state["last_seen_ts"] = max(e.ts for e in fresh)
-            for entry in fresh[:3]:
-                subprocess.run(notify_command(entry.title, entry.body), check=False)
-
     def on_open(_sender) -> None:
         subprocess.run(open_app_command(workspace, port), check=False)
 
@@ -340,22 +293,77 @@ def run_menubar(workspace: Path, port: int) -> int:
     def on_logs(_sender) -> None:
         subprocess.run(view_logs_command(workspace), check=False)
 
-    app.menu = [
-        rumps.MenuItem("Open Ciaobot", callback=on_open),
-        status_item,
-        None,
-        notifications_menu,
-        chats_menu,
-        addresses_menu,
-        None,
-        rumps.MenuItem("Restart Server", callback=on_restart),
-        rumps.MenuItem("View Logs", callback=on_logs),
-        None,
-        rumps.MenuItem(
-            "Quit Menu Bar Icon",
-            callback=lambda _sender: rumps.quit_application(),
-        ),
-    ]
+    def _rebuild_menu(
+        status: ServerStatus,
+        chats: list[OpenChat],
+        entries: list[Notification],
+        addresses: list[str],
+    ) -> None:
+        notifications_menu = rumps.MenuItem("Notifications")
+        if not entries:
+            notifications_menu.add(_disabled_item(rumps, "No notifications yet"))
+        for entry in entries:
+            notifications_menu.add(
+                rumps.MenuItem(
+                    notification_menu_title(entry),
+                    callback=_open_chat_callback(entry.chat_id),
+                )
+            )
+
+        addresses_menu = rumps.MenuItem("Addresses (click to copy)")
+        for url in addresses:
+            addresses_menu.add(rumps.MenuItem(url, callback=_copy_address_callback(url)))
+
+        # Open chats live directly in the menu under a section header.
+        chat_items = [
+            rumps.MenuItem(
+                chat.title if len(chat.title) <= 60 else chat.title[:59] + "…",
+                callback=_open_chat_callback(chat.chat_id),
+            )
+            for chat in chats
+        ] or [_disabled_item(rumps, "No open chats")]
+
+        app.menu.clear()
+        app.menu = [
+            rumps.MenuItem("Open Ciaobot", callback=on_open),
+            _disabled_item(rumps, status_label(status)),
+            None,
+            _disabled_item(rumps, "Open Chats"),
+            *chat_items,
+            None,
+            notifications_menu,
+            addresses_menu,
+            None,
+            rumps.MenuItem("Restart Server", callback=on_restart),
+            rumps.MenuItem("View Logs", callback=on_logs),
+            None,
+            rumps.MenuItem("Quit", callback=lambda _sender: rumps.quit_application()),
+        ]
+
+    def refresh(_timer=None) -> None:
+        status = fetch_server_status(port)
+        app.icon = face if status.reachable else face_scared
+
+        entries = read_notifications(workspace)
+        chats = read_open_chats(workspace)
+        addresses = server_addresses(port)
+
+        # Rebuild only when content changed so an open menu doesn't flicker.
+        fingerprint = (
+            status,
+            tuple((c.chat_id, c.title) for c in chats),
+            tuple((e.ts, e.title, e.body) for e in entries),
+            tuple(addresses),
+        )
+        if fingerprint != state["fingerprint"]:
+            state["fingerprint"] = fingerprint
+            _rebuild_menu(status, chats, entries, addresses)
+
+        fresh = [e for e in entries if e.ts > state["last_seen_ts"]]
+        if fresh:
+            state["last_seen_ts"] = max(e.ts for e in fresh)
+            for entry in fresh[:3]:
+                subprocess.run(notify_command(entry.title, entry.body), check=False)
 
     rumps.Timer(refresh, POLL_SECONDS).start()
     refresh()
