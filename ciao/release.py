@@ -111,7 +111,7 @@ def read_versions(root: Path | str) -> RepoVersions:
     web_package = _read_json(files.web_package)
     web_lock = _read_json(files.web_lock)
 
-    formula_match = re.search(r"/refs/tags/v([^/]+)\.tar\.gz", formula_text)
+    formula_match = re.search(r"/releases/download/v([^/]+)/", formula_text)
     return RepoVersions(
         pyproject=_extract_one(
             r'^version\s*=\s*"([^"]+)"',
@@ -246,9 +246,9 @@ def apply_release_files(
 
     formula_text = files.homebrew_formula.read_text(encoding="utf-8")
     formula_text = _replace_once(
-        r'url "https://github\.com/raffaelefarinaro/ciaobot/archive/refs/tags/v[^"]+\.tar\.gz"',
+        r'url "https://github\.com/raffaelefarinaro/ciaobot/releases/download/v[^"]+/ciao-[^"]+\.tar\.gz"',
         formula_text,
-        f'url "https://github.com/raffaelefarinaro/ciaobot/archive/refs/tags/v{version}.tar.gz"',
+        f'url "https://github.com/raffaelefarinaro/ciaobot/releases/download/v{version}/ciao-{version}.tar.gz"',
         path=files.homebrew_formula,
     )
     formula_text = _replace_once(

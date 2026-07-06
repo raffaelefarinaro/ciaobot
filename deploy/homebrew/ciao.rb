@@ -6,8 +6,8 @@ class Ciao < Formula
   desc "Local-first personal assistant server"
   homepage "https://github.com/raffaelefarinaro/ciaobot"
   license "Apache-2.0"
-  url "https://github.com/raffaelefarinaro/ciaobot/archive/refs/tags/v0.2.0.tar.gz"
-  sha256 "9d210014a49f25451518cf2c1f35aee28a6e8fa76fa8b045d560c4428f228391"
+  url "https://github.com/raffaelefarinaro/ciaobot/releases/download/v0.2.0/ciao-0.2.0.tar.gz"
+  sha256 "5686c005477ff6c547b4966bec8a0f9a79b2f64960ed807756fe5a17b5d4728d"
   head "https://github.com/raffaelefarinaro/ciaobot.git", branch: "main"
 
   depends_on "python@3.12"

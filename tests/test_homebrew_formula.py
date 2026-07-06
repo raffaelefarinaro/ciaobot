@@ -44,7 +44,7 @@ def test_homebrew_formula_points_at_canonical_public_repo() -> None:
     text = _formula_text()
 
     assert f'homepage "{CANONICAL_REPO}"' in text
-    assert f'url "{CANONICAL_REPO}/archive/refs/tags/v' in text
+    assert f'url "{CANONICAL_REPO}/releases/download/v' in text
     assert f'head "{CANONICAL_REPO}.git", branch: "main"' in text
     # Every GitHub reference must be the canonical public repo.
     for line in text.splitlines():
