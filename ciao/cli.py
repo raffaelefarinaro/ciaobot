@@ -120,6 +120,20 @@ def _ensure_setup_token(workspace: Path) -> str:
     return token
 
 
+def _remove_legacy_app_shortcut(app_dir: Path) -> None:
+    """Remove the pre-rename Ciao.app launcher, but only if it is ours."""
+
+    legacy = app_dir / "Ciao.app"
+    plist = legacy / "Contents" / "Info.plist"
+    try:
+        if not plist.is_file() or "local.ciao.app" not in plist.read_text(encoding="utf-8"):
+            return
+        shutil.rmtree(legacy)
+    except OSError:
+        logger_msg = f"Could not remove legacy app shortcut at {legacy}"
+        print(logger_msg, file=sys.stderr)
+
+
 def _write_app_shortcut(
     *,
     workspace: Path,
@@ -127,10 +141,15 @@ def _write_app_shortcut(
     port: int,
 ) -> Path:
     token = _ensure_setup_token(workspace)
+    _remove_legacy_app_shortcut(app_dir.expanduser())
     app_root = app_dir.expanduser() / "Ciaobot.app"
     contents = app_root / "Contents"
     macos = contents / "MacOS"
+    resources_dir = contents / "Resources"
     macos.mkdir(parents=True, exist_ok=True)
+    resources_dir.mkdir(parents=True, exist_ok=True)
+    icns = resources.files("ciao.stock").joinpath("deploy", "Ciaobot.icns")
+    (resources_dir / "Ciaobot.icns").write_bytes(icns.read_bytes())
     (contents / "Info.plist").write_text(
         "\n".join(
             [
@@ -147,6 +166,8 @@ def _write_app_shortcut(
                 '  <string>local.ciaobot.app</string>',
                 '  <key>CFBundlePackageType</key>',
                 '  <string>APPL</string>',
+                '  <key>CFBundleIconFile</key>',
+                '  <string>Ciaobot</string>',
                 '</dict>',
                 '</plist>',
                 '',

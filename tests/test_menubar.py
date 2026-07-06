@@ -109,6 +109,120 @@ def test_icon_paths_resolve_to_packaged_faces() -> None:
     assert Path(menubar.icon_path("face_scared.png")).is_file()
 
 
+def _write_log(workspace: Path, entries: list[dict]) -> None:
+    log = workspace / ".runtime" / "notifications.jsonl"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(
+        "\n".join(json.dumps(entry) for entry in entries) + "\n", encoding="utf-8"
+    )
+
+
+def test_read_notifications_missing_file_returns_empty(tmp_path: Path) -> None:
+    assert menubar.read_notifications(tmp_path) == []
+
+
+def test_read_notifications_newest_first_with_limit(tmp_path: Path) -> None:
+    _write_log(
+        tmp_path,
+        [
+            {"ts": float(index), "title": "t", "body": f"msg {index}", "chat_id": ""}
+            for index in range(15)
+        ],
+    )
+
+    entries = menubar.read_notifications(tmp_path, limit=10)
+
+    assert len(entries) == 10
+    assert entries[0].body == "msg 14"
+    assert entries[-1].body == "msg 5"
+
+
+def test_read_notifications_skips_corrupt_lines(tmp_path: Path) -> None:
+    log = tmp_path / ".runtime" / "notifications.jsonl"
+    log.parent.mkdir(parents=True)
+    log.write_text(
+        'not json\n{"ts": 1.0, "title": "ok", "body": "b", "chat_id": "c"}\n',
+        encoding="utf-8",
+    )
+
+    entries = menubar.read_notifications(tmp_path)
+
+    assert [entry.title for entry in entries] == ["ok"]
+
+
+def test_notification_menu_title_truncates() -> None:
+    entry = menubar.Notification(ts=1.0, title="Ciaobot", body="x" * 100, chat_id="")
+
+    title = menubar.notification_menu_title(entry, max_length=30)
+
+    assert len(title) == 30
+    assert title.endswith("…")
+
+
+def test_chat_url_deep_links_to_chat(tmp_path: Path) -> None:
+    assert menubar.chat_url(tmp_path, 8443, "abc") == "http://localhost:8443/chat/abc"
+    assert menubar.chat_url(tmp_path, 8443, "") == "http://localhost:8443/"
+
+
+def test_notify_command_builds_osascript_invocation() -> None:
+    cmd = menubar.notify_command('He said "hi"', "body text")
+
+    assert cmd[:2] == ["osascript", "-e"]
+    assert 'display notification "body text"' in cmd[2]
+    assert '\\"hi\\"' in cmd[2]
+
+
+def test_read_open_chats_filters_archived_and_sorts_by_activity(tmp_path: Path) -> None:
+    state = tmp_path / ".runtime" / "web_projects.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(
+        json.dumps(
+            {
+                "chats": {
+                    "old": {"title": "Old", "archived": False, "last_activity_at": 1.0},
+                    "new": {"title": "New", "archived": False, "last_activity_at": 9.0},
+                    "gone": {"title": "Gone", "archived": True, "last_activity_at": 99.0},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    chats = menubar.read_open_chats(tmp_path)
+
+    assert [chat.chat_id for chat in chats] == ["new", "old"]
+    assert chats[0].title == "New"
+
+
+def test_read_open_chats_missing_state_returns_empty(tmp_path: Path) -> None:
+    assert menubar.read_open_chats(tmp_path) == []
+
+
+def test_parse_inet_addresses_excludes_loopback_and_dupes() -> None:
+    text = (
+        "lo0: flags\n\tinet 127.0.0.1 netmask 0xff000000\n"
+        "en0: flags\n\tinet 192.168.1.20 netmask 0xffffff00\n"
+        "en5: flags\n\tinet 192.168.1.20 netmask 0xffffff00\n"
+        "utun3: flags\n\tinet 100.94.1.5 --> 100.94.1.5 netmask 0xffffffff\n"
+    )
+
+    assert menubar.parse_inet_addresses(text) == ["192.168.1.20", "100.94.1.5"]
+
+
+def test_server_addresses_lists_localhost_bonjour_and_lan() -> None:
+    urls = menubar.server_addresses(
+        9443,
+        ifconfig_text="\tinet 127.0.0.1\n\tinet 10.0.0.7\n",
+        local_hostname="raffas-mini",
+    )
+
+    assert urls == [
+        "http://localhost:9443/",
+        "http://raffas-mini.local:9443/",
+        "http://10.0.0.7:9443/",
+    ]
+
+
 def test_run_menubar_without_rumps_explains_the_extra(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
