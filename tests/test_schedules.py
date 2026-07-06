@@ -8,6 +8,7 @@ should fire the schedule once.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -72,6 +73,70 @@ def test_schedule_policy_fields_round_trip(store: ScheduleStore) -> None:
     reloaded = store.get(entry.schedule_id)
     assert reloaded is not None
     assert reloaded.archive_policy == "auto"
+
+
+def test_system_schedules_load_from_stock_not_runtime(tmp_path: Path) -> None:
+    (tmp_path / "schedules.json").write_text(
+        json.dumps(
+            {
+                "schedules": [
+                    {
+                        "schedule_id": "sched-user",
+                        "daily_time_utc": "08:00",
+                        "prompt": "user routine",
+                        "chat_id": 0,
+                        "created_at": "2026-06-06T00:00:00Z",
+                    },
+                    {
+                        "schedule_id": "system-old-copy",
+                        "scope": "system",
+                        "daily_time_utc": "09:00",
+                        "prompt": "stale copied system routine",
+                        "chat_id": 0,
+                        "created_at": "2026-06-06T00:00:00Z",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = ScheduleStore(tmp_path, include_system=True)
+
+    schedules = store.list()
+
+    assert store.get("sched-user") is not None
+    assert store.get("system-old-copy") is None
+    assert any(item.schedule_id == "system-memory-curation" for item in schedules)
+
+
+def test_stock_error_triage_schedule_uses_issue_report(tmp_path: Path) -> None:
+    store = ScheduleStore(tmp_path, include_system=True)
+    entry = store.get("system-error-triage")
+    assert entry is not None
+    assert entry.scope == "system"
+    assert entry.frequency == "weekly"
+    assert "{{ISSUE_REPORT}}" in entry.prompt
+
+
+def test_system_schedule_state_persists_separately(tmp_path: Path) -> None:
+    store = ScheduleStore(tmp_path, include_system=True)
+    entry = store.get("system-memory-curation")
+    assert entry is not None
+
+    entry.last_triggered_on = "2026-07-05"
+    entry.last_dispatched_at = "2026-07-05T01:00:00"
+    entry.enabled = False
+    store.replace(entry)
+
+    runtime = json.loads((tmp_path / "schedules.json").read_text(encoding="utf-8")) if (tmp_path / "schedules.json").exists() else {"schedules": []}
+    state = json.loads((tmp_path / "system_schedules_state.json").read_text(encoding="utf-8"))
+    reloaded = ScheduleStore(tmp_path, include_system=True).get("system-memory-curation")
+
+    assert runtime == {"schedules": []}
+    assert state["schedules"]["system-memory-curation"]["last_triggered_on"] == "2026-07-05"
+    assert reloaded is not None
+    assert reloaded.enabled is False
+    assert reloaded.last_triggered_on == "2026-07-05"
 
 
 async def test_catch_up_fires_past_due_schedule(store: ScheduleStore):

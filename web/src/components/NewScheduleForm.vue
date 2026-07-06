@@ -29,10 +29,12 @@
       </div>
       <div class="form-group">
         <label>Model</label>
-        <select v-model="model">
-          <option value="">Default ({{ store.models?.default || '—' }})</option>
-          <option v-for="m in store.models?.models || []" :key="m" :value="m">{{ m }}</option>
-        </select>
+        <ModelSelector
+          v-model="model"
+          :sections="scheduleModelSections"
+          placeholder="Default ({{ store.models?.default || '—' }})"
+          empty-placeholder="Default ({{ store.models?.default || '—' }})"
+        />
       </div>
     </div>
     <div class="form-group">
@@ -83,6 +85,8 @@ import { ref, computed, onMounted } from 'vue'
 import { useTaskStore } from '../stores/tasks'
 import { useProjectStore } from '../stores/projects'
 import type { ScheduleArchivePolicy } from '../lib/types'
+import ModelSelector from '../components/ModelSelector.vue'
+import { sectionsFromModelsResponse } from '../lib/modelSections'
 const props = defineProps<{}>()
 const emit = defineEmits<{ created: [] }>()
 const store = useTaskStore()
@@ -105,6 +109,8 @@ const todayDate = computed(() => new Date().toISOString().split('T')[0])
 onMounted(() => {
   if (!store.models) store.fetchModels()
 })
+
+const scheduleModelSections = computed(() => sectionsFromModelsResponse(store.models))
 
 const contextGroups = computed(() => {
   const groups: { label: string; items: { key: string; label: string }[] }[] = []

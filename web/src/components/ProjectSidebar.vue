@@ -178,6 +178,13 @@
           Models
         </router-link>
         <router-link
+          to="/settings/instructions"
+          class="settings-nav-item"
+          :class="{ active: route.path === '/settings/instructions' }"
+        >
+          Instructions
+        </router-link>
+        <router-link
           to="/settings/workspaces"
           class="settings-nav-item"
           :class="{ active: route.path === '/settings/workspaces' }"
@@ -189,7 +196,7 @@
           class="settings-nav-item"
           :class="{ active: route.path === '/settings/skills' }"
         >
-          Skills
+          Agent assets
         </router-link>
       </div>
     </template>
@@ -568,7 +575,7 @@ async function doMoveChat(targetProjectId: string) {
     await store.moveChat(cid, targetProjectId)
     expandedProjects.add(targetProjectId)
   } catch (e: any) {
-    alert(`Could not move chat: ${e?.message || e}`)
+    store.pushErrorToast('Could not move chat', `${e?.message || e}`)
   }
 }
 
@@ -644,7 +651,7 @@ async function openArchive() {
   try {
     completedProjects.value = await store.fetchCompletedProjects()
   } catch (e: any) {
-    alert(`Could not load completed projects: ${e?.message || e}`)
+    store.pushErrorToast('Could not load completed projects', `${e?.message || e}`)
     archiveOpen.value = false
   } finally {
     loadingCompleted.value = false
@@ -660,7 +667,7 @@ async function doRestore(cp: CompletedProject) {
     if (restored) expandedProjects.add(restored.project_id)
     if (!completedProjects.value.length) archiveOpen.value = false
   } catch (e: any) {
-    alert(`Could not restore project: ${e?.message || e}`)
+    store.pushErrorToast('Could not restore project', `${e?.message || e}`)
   } finally {
     restoringStem.value = null
   }
@@ -739,8 +746,8 @@ async function confirmDeleteChat(chatId: string) {
 
 <style scoped>
 .sidebar {
-  width: 260px;
-  min-width: 260px;
+  width: 280px;
+  min-width: 280px;
   background: var(--bg2);
   border-right: 1px solid var(--border);
   display: flex;

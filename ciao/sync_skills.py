@@ -21,6 +21,17 @@ class SyncSkillsResult:
     custom_pruned: int = 0
     upstream_updated: int = 0
     upstream_pruned: int = 0
+    agents_installed: int = 0
+    agents_pruned: int = 0
+    commands_installed: int = 0
+    commands_pruned: int = 0
+    stock_installed: int = 0
+    stock_pruned: int = 0
+
+
+# Marker dropped into skills copied from ciao.stock so stale copies can be
+# pruned when the packaged set changes or a workspace skill overrides them.
+STOCK_SKILL_MARKER = ".ciao-stock-skill"
 
 
 def _load_json(path: Path) -> dict:
@@ -129,6 +140,53 @@ def _refresh_upstream_skills(
     return len(plan["to_update"]), len(plan["to_prune"])
 
 
+def _install_stock_skills(workspace: Path) -> tuple[int, int]:
+    """Copy packaged ``ciao.stock/skills`` into ``.claude/skills``.
+
+    A workspace ``skills/<name>`` always wins over the packaged skill of the
+    same name.  Copies carry ``STOCK_SKILL_MARKER`` so they are refreshed on
+    every sync and pruned once they disappear from the package (or become
+    shadowed by a workspace skill).
+    """
+    from importlib import resources
+
+    claude_skills = workspace / ".claude" / "skills"
+    claude_skills.mkdir(parents=True, exist_ok=True)
+    custom_dir = workspace / "skills"
+
+    try:
+        stock_skills = resources.files("ciao.stock").joinpath("skills")
+        entries = [entry for entry in stock_skills.iterdir() if entry.is_dir()]
+    except (ModuleNotFoundError, FileNotFoundError, OSError):
+        entries = []
+
+    installed = 0
+    live: set[str] = set()
+    for entry in sorted(entries, key=lambda item: item.name):
+        if not entry.joinpath("SKILL.md").is_file():
+            continue
+        if (custom_dir / entry.name / "SKILL.md").is_file():
+            continue  # workspace skill shadows the packaged one
+        target = claude_skills / entry.name
+        if target.is_symlink():
+            continue  # user-managed link, leave it alone
+        with resources.as_file(entry) as source:
+            shutil.copytree(source, target, dirs_exist_ok=True)
+        (target / STOCK_SKILL_MARKER).touch()
+        live.add(entry.name)
+        installed += 1
+
+    pruned = 0
+    for existing in _iter_entries(claude_skills):
+        if existing.name in live or existing.is_symlink() or not existing.is_dir():
+            continue
+        if not (existing / STOCK_SKILL_MARKER).exists():
+            continue
+        shutil.rmtree(existing)
+        pruned += 1
+    return installed, pruned
+
+
 def _rebuild_custom_skill_links(workspace: Path) -> tuple[int, int]:
     custom_dir = workspace / "skills"
     claude_skills = workspace / ".claude" / "skills"
@@ -194,13 +252,6 @@ def _mirror_dir_symlinks(
     return linked, pruned
 
 
-def _agent_source_dir(workspace: Path) -> Path:
-    subagents = workspace / "subagents"
-    if subagents.is_dir():
-        return subagents
-    return workspace / ".claude" / "agents"
-
-
 def sync_workspace_skills(
     workspace: Path | str,
     *,
@@ -214,10 +265,28 @@ def sync_workspace_skills(
     if refresh_upstream:
         upstream_updated, upstream_pruned = _refresh_upstream_skills(root, runner=runner)
 
+    stock_installed, stock_pruned = _install_stock_skills(root)
     custom_installed, custom_pruned = _rebuild_custom_skill_links(root)
     print(
-        f"Skills: {custom_installed} custom-skill symlinks rebuilt, "
+        f"Skills: {stock_installed} stock skills installed ({stock_pruned} stale pruned), "
+        f"{custom_installed} custom-skill symlinks rebuilt, "
         f"{custom_pruned} orphaned pruned."
+    )
+    agents_installed, agents_pruned = _mirror_dir_symlinks(
+        root / "subagents",
+        root / ".claude" / "agents",
+        glob_pattern="*.md",
+        prune_regular=False,
+    )
+    commands_installed, commands_pruned = _mirror_dir_symlinks(
+        root / "commands",
+        root / ".claude" / "commands",
+        glob_pattern="*.md",
+        prune_regular=False,
+    )
+    print(
+        f"Skills: {agents_installed} agent links, {commands_installed} command links rebuilt; "
+        f"{agents_pruned + commands_pruned} orphaned pruned."
     )
 
     return SyncSkillsResult(
@@ -225,6 +294,12 @@ def sync_workspace_skills(
         custom_pruned=custom_pruned,
         upstream_updated=upstream_updated,
         upstream_pruned=upstream_pruned,
+        agents_installed=agents_installed,
+        agents_pruned=agents_pruned,
+        commands_installed=commands_installed,
+        commands_pruned=commands_pruned,
+        stock_installed=stock_installed,
+        stock_pruned=stock_pruned,
     )
 
 

@@ -26,6 +26,7 @@ EXPECTED_SYSTEM_SCHEDULES = {
     "system-memory-curation",
     "system-skill-evolution",
     "system-dependency-review",
+    "system-error-triage",
     "system-weekly-review",
 }
 

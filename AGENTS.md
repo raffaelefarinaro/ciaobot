@@ -1,9 +1,9 @@
-# Ciaobot Contributor Guide
+# Ciao Contributor Guide
 
 You are working on the Ciaobot app repository.
 
 Before changing code:
-- Read `README.md` for architecture and development workflow.
+- Read `docs/ARCHITECTURE.md` for the system design and `docs/DEVELOPMENT.md` for the dev workflow.
 - Read `web/README.md` before changing the PWA.
 - Keep changes scoped and covered by tests.
 - Do not commit secrets, private workspace data, or operator credentials.
@@ -20,3 +20,12 @@ Verification:
 - Run `cd web && npm run build` after frontend changes.
 
 Use plain, factual engineering notes in commits and pull requests.
+
+## Reporting Issues & Continuous Improvement
+- As an open-source project, if you (the agent) discover bugs, unexpected behavior, test failures, or potential enhancements in `ciaobot` (either during development or when trying to run/use the project), you can and should create a GitHub issue in the repository: `https://github.com/raffaelefarinaro/ciaobot`.
+- To do this, use the local GitHub CLI (`gh`) if available and authenticated.
+- Always explain the issue clearly to the user and suggest creating a GitHub issue. You can run the following command to file the issue:
+  ```bash
+  gh issue create --repo raffaelefarinaro/ciaobot --title "[Agent] Brief summary of the issue" --body "Detailed description of the problem, reproducing steps, relevant code locations, and logs."
+  ```
+- This helps maintain a continuous loop of improvements for the open-source repository.

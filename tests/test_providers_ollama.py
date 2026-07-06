@@ -8,6 +8,7 @@ when to inject those overrides and what to fill them with.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from ciao.config import CiaoConfig, WorkspaceConfig
@@ -18,7 +19,7 @@ from ciao.providers.ollama import (
 )
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
-from ciao.web.project_chats import ProjectChatManager
+from ciao.web.project_chats import ChatInfo, ProjectChatManager
 
 
 def test_is_ollama_model_matches_dynamic_shape() -> None:
@@ -39,17 +40,57 @@ def test_is_ollama_model_matches_dynamic_shape() -> None:
     assert not is_ollama_model("kimi-k2.7-code:cloud", local)
 
 
-def test_ollama_env_returns_three_overrides_for_cloud_model() -> None:
+def test_ollama_env_returns_base_overrides_for_cloud_model() -> None:
     settings = OllamaSettings(
         models=("kimi-k2.7-code:cloud",),
         base_url="https://ollama.com", api_key="sk-cloud",
     )
     env = ollama_env_for_model("kimi-k2.7-code:cloud", settings)
-    assert env == {
-        "ANTHROPIC_AUTH_TOKEN": "sk-cloud",
-        "ANTHROPIC_API_KEY": "",
-        "ANTHROPIC_BASE_URL": "https://ollama.com",
-    }
+    # Base routing overrides (the original three). Tier remaps are
+    # asserted separately below.
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-cloud"
+    assert env["ANTHROPIC_API_KEY"] == ""
+    assert env["ANTHROPIC_BASE_URL"] == "https://ollama.com"
+
+
+def test_ollama_env_includes_tier_remaps_for_cloud() -> None:
+    """Cloud-routed CLIs get tier-alias + control-plane remaps so subagents
+    and the auto-mode classifier resolve to Ollama-served models instead of
+    claude-* ids that ollama.com rejects."""
+    settings = OllamaSettings(
+        models=("glm-5.2:cloud",),
+        base_url="https://ollama.com", api_key="sk-cloud",
+        haiku_model="deepseek-v4-flash:cloud",
+        sonnet_model="kimi-k2.7-code:cloud",
+        opus_model="glm-5.2:cloud",
+    )
+    env = ollama_env_for_model("glm-5.2:cloud", settings)
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "deepseek-v4-flash:cloud"
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "kimi-k2.7-code:cloud"
+    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.2:cloud"
+    assert env["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "glm-5.2:cloud"
+    assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "deepseek-v4-flash:cloud"
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "kimi-k2.7-code:cloud"
+    assert env["CLAUDE_CODE_AUTO_MODE_MODEL"] == "deepseek-v4-flash:cloud"
+    assert env["CLAUDE_CODE_BG_CLASSIFIER_MODEL"] == "deepseek-v4-flash:cloud"
+
+
+def test_ollama_env_remaps_control_plane_for_local_daemon() -> None:
+    """Local-daemon chats use the selected local model for internal Claude
+    Code tier aliases so Task subagents do not resolve to unsupported
+    claude-* ids."""
+    settings = OllamaSettings(
+        local_models=("llama3.1:latest",),
+        local_url="http://localhost:11434",
+        haiku_model="deepseek-v4-flash:cloud",
+    )
+    env = ollama_env_for_model("llama3.1:latest", settings)
+    assert env["ANTHROPIC_BASE_URL"] == "http://localhost:11434"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "ollama"
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "llama3.1:latest"
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "llama3.1:latest"
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "llama3.1:latest"
+    assert env["CLAUDE_CODE_AUTO_MODE_MODEL"] == "llama3.1:latest"
 
 
 def test_ollama_env_uses_explicit_api_key_when_set() -> None:
@@ -110,8 +151,8 @@ def test_ciao_config_parses_ollama_env(monkeypatch) -> None:
     assert config.ollama.base_url == "http://ollama.box:11434"
     assert config.ollama.api_key == "ollama"  # default daemon-relay token
     # Default cheap free-tier title model when nothing is set.
-    assert config.ollama.title_model == "ministral-3:3b"
-    assert config.ollama.opus_model == "minimax-m3:cloud"
+    assert config.ollama.title_model == "gemma4:e2b-it-qat"
+    assert config.ollama.opus_model == "glm-5.2:cloud"
     assert config.ollama.sonnet_model == "kimi-k2.7-code:cloud"
     assert config.ollama.haiku_model == "deepseek-v4-flash:cloud"
 
@@ -155,6 +196,17 @@ def test_ciao_config_ollama_disabled_by_default(monkeypatch) -> None:
     monkeypatch.delenv("CIAO_OLLAMA_URL", raising=False)
     config = CiaoConfig.from_env()
     assert config.ollama.models == ()
+
+
+def test_effective_mode_keeps_auto_for_ollama(tmp_path: Path) -> None:
+    """Auto mode is now always live for Ollama-routed chats: the tier-remap
+    env points the classifier at an Ollama-served haiku-tier model."""
+    manager = _make_manager(tmp_path, ollama_models=("glm-5.2:cloud",))
+    chat = ChatInfo(
+        chat_id="c", project_id="p", model="glm-5.2:cloud",
+        provider="pi", mode="auto",
+    )
+    assert manager._effective_mode_for_chat(chat) == "auto"
 
 
 def _make_manager(
@@ -232,7 +284,7 @@ async def test_auto_title_uses_dedicated_ollama_title_model(
 ) -> None:
     """When the chat is on an Ollama model, the title call uses the
     cheap dedicated ``OllamaSettings.title_model`` (free-tier-friendly,
-    e.g. ``ministral-3:3b``) instead of the chat's own model — which
+    e.g. ``gemma4:e2b-it-qat``) instead of the chat's own model — which
     may be subscription-gated and is overkill for 50-token titles.
 
     The env injection still happens so the call hits Ollama, not
@@ -259,7 +311,7 @@ async def test_auto_title_uses_dedicated_ollama_title_model(
     )
     assert new_title == "ollama-titled"
     # Dedicated cheap title model, not the chat's own (potentially gated) one.
-    assert captured["model"] == "ministral-3:3b"
+    assert captured["model"] == "gemma4:e2b-it-qat"
     assert captured["env"] is not None
     assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://ollama.com"
     assert captured["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-cloud"
@@ -407,26 +459,15 @@ def test_create_chat_explicit_model_wins_over_workspace_default(
     assert chat.model == "haiku"
 
 
-def test_personal_workspace_denies_claude_ai_mcps_by_default(monkeypatch) -> None:
-    """Personal chats should not see work-only claude.ai connector MCPs.
-
-    Defaults block all 8 currently-known claude.ai connectors. Override
-    with ``CIAO_DISALLOWED_TOOLS_PERSONAL=`` to restore them.
-    """
+def test_personal_workspace_allows_claude_ai_mcps_by_default(monkeypatch) -> None:
+    """Personal chats should see work-only claude.ai connector MCPs by default."""
     monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
     monkeypatch.delenv("CIAO_DISALLOWED_TOOLS_PERSONAL", raising=False)
     monkeypatch.delenv("CIAO_DISALLOWED_TOOLS_WORK", raising=False)
     config = CiaoConfig.from_env()
     personal = config.disallowed_tools_for_workspace("personal")
-    assert "mcp__claude_ai_Airtable" in personal
-    assert "mcp__claude_ai_Atlassian" in personal
-    assert "mcp__claude_ai_Slack" in personal
-    assert "mcp__claude_ai_Salesforce" in personal
-    assert "mcp__claude_ai_Sentry" in personal
-    assert "mcp__claude_ai_incident_io" in personal
-    assert "mcp__claude_ai_Asana" in personal
-    assert "mcp__claude_ai_Google_Cloud_BigQuery" in personal
-    # Self-hosted n8n MCP (project-scoped in .mcp.json) is work-only too.
+    assert "mcp__claude_ai_Airtable" not in personal
+    # Self-hosted n8n MCP (project-scoped in .mcp.json) is work-only, so it is blocked.
     assert "mcp__n8n_mcp" in personal
     # Work workspace: defaults to empty (workspace-specific tools available).
     assert config.disallowed_tools_for_workspace("work") == []
@@ -434,15 +475,15 @@ def test_personal_workspace_denies_claude_ai_mcps_by_default(monkeypatch) -> Non
 
 def test_disallowed_tools_env_override_unions_with_toggle(monkeypatch) -> None:
     """CIAO_DISALLOWED_TOOLS_* sets the extra denylist. It unions with the
-    claude.ai connector set when the toggle is off (the personal default), and
-    stands alone when the toggle is on (the work default)."""
+    claude.ai connector set when the toggle is off, and stands alone when the
+    toggle is on (the default)."""
     monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
     monkeypatch.setenv("CIAO_DISALLOWED_TOOLS_PERSONAL", "Bash,mcp__custom_tool")
     monkeypatch.setenv("CIAO_DISALLOWED_TOOLS_WORK", "mcp__claude_ai_Sentry")
     config = CiaoConfig.from_env()
     personal = config.disallowed_tools_for_workspace("personal")
-    # Toggle defaults off for personal → connectors blocked, plus the extras.
-    assert "mcp__claude_ai_Airtable" in personal
+    # Toggle defaults on → only the extras are blocked.
+    assert "mcp__claude_ai_Airtable" not in personal
     assert "Bash" in personal
     assert "mcp__custom_tool" in personal
     # Work toggle defaults on → only the extra is blocked.
@@ -474,13 +515,14 @@ def test_disallowed_tools_personal_can_be_disabled(monkeypatch) -> None:
     monkeypatch.setenv("CIAO_DISALLOWED_TOOLS_PERSONAL", "")
     config = CiaoConfig.from_env()
     # Empty string still applies the defaults (since unset == empty).
-    assert "mcp__claude_ai_Airtable" in config.disallowed_tools_for_workspace("personal")
+    # But since the toggle is on by default, connectors are not blocked.
+    assert "mcp__claude_ai_Airtable" not in config.disallowed_tools_for_workspace("personal")
+    assert "mcp__n8n_mcp" in config.disallowed_tools_for_workspace("personal")
 
-    # "none" clears the extras, but the toggle default (off) still blocks
-    # the connectors.
+    # "none" clears the extras.
     monkeypatch.setenv("CIAO_DISALLOWED_TOOLS_PERSONAL", "none")
     config = CiaoConfig.from_env()
-    assert "mcp__claude_ai_Airtable" in config.disallowed_tools_for_workspace("personal")
+    assert "mcp__claude_ai_Airtable" not in config.disallowed_tools_for_workspace("personal")
     assert "mcp__n8n_mcp" not in config.disallowed_tools_for_workspace("personal")
 
     # Flip the toggle on too → fully empty denylist.
@@ -498,19 +540,16 @@ def test_build_extra_env_does_not_carry_disallowed_tools(tmp_path: Path) -> None
     assert "DISALLOWED_TOOLS" not in env
 
 
-def test_effective_mode_downgrades_auto_to_bypass_for_ollama(tmp_path: Path) -> None:
-    """Auto mode requires Anthropic's classifier API. Ollama doesn't expose
-    one, so the SDK would prompt via ``can_use_tool`` for *every* tool
-    call and the PWA would render an Approve/Deny card per call. Mapping
-    auto → bypass for Ollama keeps tool execution flowing without prompts.
-    """
+def test_effective_mode_keeps_auto_for_ollama_routed_chat(tmp_path: Path) -> None:
+    """Auto mode is now always live for Ollama-routed chats. The tier-remap
+    env points the classifier at an Ollama-served haiku-tier model."""
     pcm = _make_manager(tmp_path, ollama_models=("kimi-k2.7-code:cloud",))
     project = pcm.create_project("ollama-auto", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="t")
     chat.model = "kimi-k2.7-code:cloud"
     chat.mode = "auto"
 
-    assert pcm._effective_mode_for_chat(chat) == "bypass"
+    assert pcm._effective_mode_for_chat(chat) == "auto"
 
 
 def test_effective_mode_leaves_anthropic_auto_untouched(tmp_path: Path) -> None:
@@ -554,7 +593,8 @@ def test_pcm_disallowed_tools_for_chat_routes_by_workspace(
 
     p_disallowed = pcm.disallowed_tools_for_chat(p_chat)
     w_disallowed = pcm.disallowed_tools_for_chat(w_chat)
-    assert "mcp__claude_ai_Airtable" in p_disallowed
+    assert "mcp__claude_ai_Airtable" not in p_disallowed
+    assert "mcp__n8n_mcp" in p_disallowed
     assert w_disallowed == []
 
 
@@ -791,7 +831,7 @@ async def test_auto_title_routes_anthropic_chats_through_ollama_when_enabled(
     )
 
     await pcm.auto_title_if_default(chat.chat_id, "hello", "hi")
-    assert captured["model"] == "ministral-3:3b"  # Ollama default title model
+    assert captured["model"] == "gemma4:e2b-it-qat"  # Ollama default title model
     assert captured["env"] is not None
     assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://ollama.com"
     assert captured["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-cloud"

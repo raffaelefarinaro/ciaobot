@@ -14,6 +14,7 @@ import logging
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
+    ResultMessage,
     TextBlock,
     query,
 )
@@ -48,9 +49,17 @@ async def run_oneshot(
         parts: list[str] = []
         async for msg in query(prompt=prompt, options=options):
             if isinstance(msg, AssistantMessage):
+                if getattr(msg, "error", None):
+                    error_text = "".join(
+                        block.text for block in msg.content if isinstance(block, TextBlock)
+                    ).strip()
+                    raise RuntimeError(error_text or f"Assistant error: {msg.error}")
                 for block in msg.content:
                     if isinstance(block, TextBlock):
                         parts.append(block.text)
+            elif isinstance(msg, ResultMessage):
+                if msg.is_error:
+                    raise RuntimeError(msg.result or "One-shot query failed")
         return "".join(parts).strip()
 
     return await asyncio.wait_for(_collect(), timeout=timeout_s)

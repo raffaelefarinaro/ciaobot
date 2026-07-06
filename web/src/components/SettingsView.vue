@@ -7,8 +7,11 @@
       <template v-if="currentTab === 'home'">
         <!-- Actions -->
         <div class="card">
-          <p class="section-title">Actions</p>
-          <div class="action-row">
+          <div class="settings-card-header">
+            <p class="section-title">App actions</p>
+            <p class="hint">Snapshot, sync, or restart this local Ciaobot instance.</p>
+          </div>
+          <div class="action-row action-row--spaced">
             <button class="btn-primary" @click="() => localStatus?.direct_main ? localHandback() : doSnapshot()" :disabled="!!actionPending || !!localPending">
               {{ actionPending === 'snapshot' || localPending === 'handback' ? (localStatus?.direct_main ? 'Syncing...' : 'Snapshotting...') : (localStatus?.direct_main ? 'Sync with Remote' : 'Git Snapshot') }}
             </button>
@@ -16,50 +19,122 @@
               {{ actionPending === 'deploy' ? 'Restarting...' : 'Restart' }}
             </button>
           </div>
-          <div v-if="actionResult" class="action-result">{{ actionResult }}</div>
-          <div v-if="deploySteps.length" class="deploy-steps">
-            <div v-for="step in deploySteps" :key="step.step" class="deploy-step" :class="{ ok: step.ok, fail: !step.ok }">
-              <span class="step-icon">{{ step.ok ? '&#10003;' : '&#10007;' }}</span>
-              {{ step.step }}
-              <span v-if="step.output" class="step-output">{{ step.output }}</span>
+          <div v-if="actionResult" class="action-result" :class="{ 'action-result--error': hasDeployError }">{{ actionResult }}</div>
+          <div v-if="hasDeployError" class="deploy-steps">
+            <div v-for="step in deploySteps.filter(s => !s.ok)" :key="step.step" class="deploy-step fail">
+              <span class="step-icon">&#10007;</span>
+              <div style="flex: 1; min-width: 0;">
+                <strong>{{ step.step }} failed</strong>
+                <pre v-if="step.output" class="deploy-step-error-output">{{ step.output }}</pre>
+              </div>
+            </div>
+            <div class="action-row action-row--spaced">
+              <button class="btn-primary" @click="fixDeployErrorInChat">
+                Fix in Chat
+              </button>
             </div>
           </div>
         </div>
 
-        <!-- Package Update -->
+        <!-- Workspace health -->
         <div class="card">
-          <p class="section-title">Package Update</p>
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">Workspace health</p>
+              <p class="hint">Checks Claude Code discovery files, vault writability, and generated asset links.</p>
+            </div>
+            <span class="badge" :class="healthBadgeClass(workspaceHealth?.status || '')">
+              {{ workspaceHealth?.status || (agentAssetsLoaded ? 'unknown' : 'loading') }}
+            </span>
+          </div>
+          <div v-if="!agentAssetsLoaded" class="action-row"><span class="loading">Scanning&hellip;</span></div>
+          <p v-else-if="agentAssetsError" class="hint hint--warn">{{ agentAssetsError }}</p>
+          <div v-else-if="workspaceHealth && prioritizedHealthChecks.length" class="health-list">
+            <div
+              v-for="check in prioritizedHealthChecks"
+              :key="check.id"
+              class="health-row"
+              :class="`health-row--${check.status}`"
+            >
+              <span class="health-dot" aria-hidden="true"></span>
+              <div class="health-main">
+                <div class="health-title-row">
+                  <span class="health-title">{{ check.title }}</span>
+                  <span v-if="check.path" class="health-path">{{ check.path }}</span>
+                </div>
+                <p class="hint hint--compact">{{ check.detail }}</p>
+                <p v-if="check.action" class="hint hint--compact hint--warn">{{ check.action }}</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Package update -->
+        <div class="card">
+          <div class="settings-card-header">
+            <p class="section-title">Package update</p>
+            <p class="hint">Check the installed package version and upgrade this local app.</p>
+          </div>
           <div v-if="packageLoading && !packageStatus" class="loading">
             Checking package status...
           </div>
           <div v-else-if="packageStatus">
-            <div class="dev-meta">
-              <div>
-                <span class="dev-label">Current Version</span> <code>{{ packageStatus.current_version }}</code>
-              </div>
-              <div v-if="packageStatus.latest_version">
-                <span class="dev-label">Latest Version</span> <code>{{ packageStatus.latest_version }}</code>
-              </div>
-              <div v-if="packageStatus.error" class="hint hint--warn hint--spaced">
-                Update check failed: {{ packageStatus.error }}
-              </div>
+            <div v-if="packageStatus.error" class="hint hint--warn hint--spaced">
+              Update check failed: {{ packageStatus.error }}
             </div>
 
-            <div v-if="packageStatus.update_available" class="action-row action-row--spaced">
-              <button class="btn-primary" @click="doPackageUpdate" :disabled="packageUpdating">
-                {{ packageUpdating ? 'Upgrading...' : 'Update Package' }}
+            <div class="action-row action-row--spaced">
+              <button
+                class="btn-primary"
+                @click="openUpdatePanel"
+                :disabled="!packageStatus.update_available || packageUpdating || showUpdatePanel"
+              >
+                {{ packageStatus.update_available
+                    ? `Update to ${packageStatus.latest_version}`
+                    : 'Up to date' }}
               </button>
             </div>
-            <p v-else class="hint hint--spaced">
-              Ciaobot is up to date.
-            </p>
+
+            <div v-if="showUpdatePanel" class="settings-form-panel">
+              <p class="section-title">What&rsquo;s new in {{ packageStatus.latest_version }}</p>
+              <div v-if="changelogLoading" class="loading">Loading changelog&hellip;</div>
+              <template v-else>
+                <ul v-if="changelog.commits && changelog.commits.length" class="changelog-list">
+                  <li v-for="c in changelog.commits" :key="c.sha || c.subject">
+                    <code v-if="c.sha" class="changelog-sha">{{ c.sha }}</code>
+                    <span class="changelog-subject">{{ c.subject }}</span>
+                  </li>
+                </ul>
+                <p v-else class="hint">
+                  {{ changelog.error
+                      ? `Could not load changelog: ${changelog.error}`
+                      : 'No changelog details available.' }}
+                </p>
+                <p v-if="changelog.compare_url" class="hint hint--spaced">
+                  <a :href="changelog.compare_url" target="_blank" rel="noopener">View full diff on GitHub</a>
+                </p>
+              </template>
+              <div class="action-row settings-actions">
+                <button class="btn-primary" @click="doPackageUpdate" :disabled="packageUpdating">
+                  {{ packageUpdating ? 'Updating&hellip;' : 'Update &amp; Restart' }}
+                </button>
+                <button class="btn-small" @click="showUpdatePanel = false" :disabled="packageUpdating">
+                  Cancel
+                </button>
+              </div>
+            </div>
           </div>
           <div v-if="packageResult" class="action-result">{{ packageResult }}</div>
         </div>
 
         <!-- Notifications -->
         <div class="card">
-          <p class="section-title">Notifications</p>
+          <div class="settings-card-header">
+            <p class="section-title">Notifications</p>
+            <p class="hint">
+              Get a phone notification when a chat replies and the app is not focused.
+            </p>
+          </div>
           <div v-if="needsIosInstall" class="hint hint--warn">
             On iOS, push notifications only work after you "Add to Home Screen" and open the app from there.
           </div>
@@ -75,60 +150,69 @@
             </button>
           </div>
           <div v-if="pushError" class="action-result">{{ pushError }}</div>
-          <p class="hint">
-            Enable to get a phone notification when a chat replies and the app isn't focused.
-            Notifications include Open / Dismiss actions and update the app badge.
-          </p>
         </div>
 
-        <!-- Theme -->
+        <!-- Appearance -->
         <div class="card">
-          <p class="section-title">Theme</p>
-          <div class="instance-toggle">
-            <button
-              class="toggle-btn"
-              :class="{ active: activeTheme === 'dark' }"
-              @click="setTheme('dark')"
-            >
-              Dark Mode
-            </button>
-            <button
-              class="toggle-btn"
-              :class="{ active: activeTheme === 'light' }"
-              @click="setTheme('light')"
-            >
-              Light Mode
-            </button>
-            <button
-              class="toggle-btn"
-              :class="{ active: activeTheme === 'system' }"
-              @click="setTheme('system')"
-            >
-              System
-            </button>
+          <div class="settings-card-header">
+            <p class="section-title">Appearance</p>
+            <p class="hint">Control the visual theme and type scale used across Ciaobot.</p>
           </div>
-          <p class="hint">
-            Choose light, dark, or match your device's system appearance.
-          </p>
-        </div>
-
-        <!-- Font Size -->
-        <div class="card">
-          <p class="section-title">Font Size</p>
-          <div class="font-scale-row">
-            <button class="btn-small" @click="adjustFontScale(-0.05)" :disabled="fontScale <= 0.8">- Decrease</button>
-            <span class="font-scale-display">{{ Math.round(fontScale * 100) }}%</span>
-            <button class="btn-small" @click="adjustFontScale(0.05)" :disabled="fontScale >= 1.5">+ Increase</button>
-            <button class="btn-small font-reset" @click="resetFontScale" :disabled="fontScale === 1.0">Reset</button>
+          <div class="setting-row setting-row--inline setting-row--flush">
+            <div class="routine-info">
+              <span class="routine-name">Theme</span>
+              <span class="routine-detail">Choose light, dark, or match the device appearance.</span>
+            </div>
+            <div class="settings-control">
+              <div class="instance-toggle">
+                <button
+                  class="toggle-btn"
+                  :class="{ active: activeTheme === 'dark' }"
+                  @click="setTheme('dark')"
+                >
+                  Dark
+                </button>
+                <button
+                  class="toggle-btn"
+                  :class="{ active: activeTheme === 'light' }"
+                  @click="setTheme('light')"
+                >
+                  Light
+                </button>
+                <button
+                  class="toggle-btn"
+                  :class="{ active: activeTheme === 'system' }"
+                  @click="setTheme('system')"
+                >
+                  System
+                </button>
+              </div>
+            </div>
           </div>
-          <p class="hint">
-            Increase or decrease the font size across messages, code blocks, sidebars, and menus.
-          </p>
+          <div class="setting-row setting-row--inline">
+            <div class="routine-info">
+              <span class="routine-name">Font size</span>
+              <span class="routine-detail">Adjust messages, code blocks, sidebars, and menus together.</span>
+            </div>
+            <div class="settings-control">
+              <div class="font-scale-row">
+                <button class="btn-small" @click="adjustFontScale(-0.05)" :disabled="fontScale <= 0.8">Decrease</button>
+                <span class="font-scale-display">{{ Math.round(fontScale * 100) }}%</span>
+                <button class="btn-small" @click="adjustFontScale(0.05)" :disabled="fontScale >= 1.5">Increase</button>
+                <button class="btn-small font-reset" @click="resetFontScale" :disabled="fontScale === 1.0">Reset</button>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- Commit to main (branch-per-device) -->
         <div v-if="localStatus && !localStatus.direct_main" class="card">
-          <p class="section-title">Commit to main</p>
+          <div class="settings-card-header">
+            <p class="section-title">Commit to main</p>
+            <p class="hint">
+              Land this device branch on <code>main</code>; conflicts open a chat for resolution.
+            </p>
+          </div>
           <div class="dev-meta">
             <div>
               <span class="dev-label">Device</span> <code>{{ localStatus?.device_name || '...' }}</code>
@@ -146,11 +230,22 @@
               {{ localPending === 'resync' ? 'Syncing...' : 'Sync to main' }}
             </button>
           </div>
-          <p class="hint">
-            "Commit to main" lands this device's branch on <code>main</code>. If it can't merge cleanly,
-            it opens a chat to resolve the conflict; then use "Sync to main".
-          </p>
           <div v-if="localResult" class="action-result action-result--prewrap">{{ localResult }}</div>
+        </div>
+
+        <!-- Debug (dev mode only) -->
+        <div v-if="localStatus?.dev_mode" class="card">
+          <div class="settings-card-header">
+            <p class="section-title">Debug</p>
+            <p class="hint">Runtime issue log: server errors and failed background jobs. Send it to a chat so the agent can self-fix.</p>
+          </div>
+          <div class="action-row action-row--spaced">
+            <button class="btn-primary" @click="fixIssuesInChat" :disabled="debugPending">
+              {{ debugPending ? 'Collecting issues...' : 'Fix issues in chat' }}
+            </button>
+            <button class="btn-small" @click="refreshDebugIssues" :disabled="debugPending">Refresh</button>
+          </div>
+          <div v-if="debugSummary" class="action-result">{{ debugSummary }}</div>
         </div>
       </template>
 
@@ -159,36 +254,33 @@
       <template v-if="currentTab === 'models'">
         <div v-if="!routinesLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
         <template v-else-if="routinesError">
-          <div class="card"><p class="hint">{{ routinesError }}</p></div>
+          <div class="card"><p class="hint hint--warn">{{ routinesError }}</p></div>
         </template>
         <template v-else-if="routines">
           <!-- Internal routines -->
           <div class="card">
-            <p class="section-title">Routine models</p>
-            <p class="hint">
-              Internal tasks that run on their own model, independent of the chat's model.
-              "Automatic" keeps the built-in default. Local models run free on this machine's
-              Ollama daemon.
-            </p>
+            <div class="settings-card-header">
+              <p class="section-title">Internal models</p>
+              <p class="hint">
+                These tasks use their own model setting, separate from the active chat model.
+                "Automatic" keeps the built-in default. Local Ollama models run on this machine.
+                System automations without a model picker are tracked in Settings &rarr; Automation.
+              </p>
+            </div>
             <div v-if="routines.workspace_context" class="routine-context">
               <div>
                 <span class="dev-label">Main workspace</span>
                 <code>{{ routines.workspace_context.workspace_root }}</code>
               </div>
-              <div>
-                <span class="dev-label">Vault root</span>
-                <code>{{ routines.workspace_context.vault_root }}</code>
-              </div>
-              <p class="hint hint--compact">
-                Change the main workspace by starting Ciaobot with a different <code>CIAO_WORKSPACE</code> and restarting.
-                Settings &rarr; Workspaces are logical chat spaces; they do not move the server workspace root.
+              <p class="hint hint--info">
+                Server routines start here. Chat-scoped work still writes to that chat's workspace and vault.
               </p>
             </div>
 
             <div class="routine-row">
               <div class="routine-info">
                 <span class="routine-name">Chat titles</span>
-                <span class="routine-detail">Names a new chat after the first message; runs from the main workspace.</span>
+                <span class="routine-detail">Names a new chat after the first message.</span>
                 <div v-if="getJobTelemetry('title')" class="routine-telemetry">
                   <span class="badge" :class="getJobBadgeClass('title')">
                     {{ getJobStatus('title') }}
@@ -232,7 +324,7 @@
             <div class="routine-row">
               <div class="routine-info">
                 <span class="routine-name">Session insights</span>
-                <span class="routine-detail">Extracts learnings when a chat is archived; follows that chat's logical workspace.</span>
+                <span class="routine-detail">Extracts learnings when a chat is archived and appends them to that archive.</span>
                 <div v-if="getJobTelemetry('insights')" class="routine-telemetry">
                   <span class="badge" :class="getJobBadgeClass('insights')">
                     {{ getJobStatus('insights') }}
@@ -274,32 +366,28 @@
 
             <div class="routine-row">
               <div class="routine-info">
-                <span class="routine-name">Skill evolution</span>
-                <span class="routine-detail">Weekly main-workspace pass; proposals go under personal/Workspace/Skill-Proposals. Run model is set at the schedule level.</span>
-                <div v-if="getJobTelemetry('skill_evolution')" class="routine-telemetry">
-                  <span class="badge" :class="getJobBadgeClass('skill_evolution')">
-                    {{ getJobStatus('skill_evolution') }}
-                  </span>
-                  <span v-if="hasJobLastRun('skill_evolution')" class="telemetry-meta">
-                    Last run: {{ getJobLastRunLabel('skill_evolution') }} ({{ getJobDuration('skill_evolution') }})
-                  </span>
-                  <span v-if="getJobStatus('skill_evolution') === 'error' && getJobLastError('skill_evolution')" class="telemetry-error" :title="getJobLastError('skill_evolution')">
-                    &middot; {{ getJobLastError('skill_evolution') }}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            <div class="routine-row routine-row--top">
-              <div class="routine-info">
                 <span class="routine-name">Critique models</span>
                 <span class="routine-detail">Select one or more models for adversarial review.</span>
               </div>
               <div class="critique-model-picker">
                 <div class="critique-picker-header">
-                  <span class="critique-picker-summary">
-                    {{ selectedCritiqueModels.length ? `${selectedCritiqueModels.length} selected` : 'Automatic default' }}
-                  </span>
+                  <div class="critique-picker-summary">
+                    <div v-if="selectedCritiqueModels.length" class="critique-chip-list">
+                      <button
+                        v-for="model in selectedCritiqueModels"
+                        :key="model"
+                        type="button"
+                        class="critique-chip"
+                        :disabled="routinesSaving"
+                        title="Remove model"
+                        @click="removeCritiqueModel(model)"
+                      >
+                        <span>{{ model }}</span>
+                        <span>&times;</span>
+                      </button>
+                    </div>
+                    <span v-else>Automatic default</span>
+                  </div>
                   <button
                     type="button"
                     class="btn-small"
@@ -309,64 +397,32 @@
                     Reset
                   </button>
                 </div>
-                <div
-                  v-if="selectedCritiqueModels.length"
-                  class="critique-chip-list"
-                  aria-label="Selected critique models"
-                >
-                  <button
-                    v-for="model in selectedCritiqueModels"
-                    :key="model"
-                    type="button"
-                    class="critique-chip"
-                    :disabled="routinesSaving"
-                    :title="`Remove ${model}`"
-                    @click="toggleCritiqueModel(model, false)"
-                  >
-                    <span>{{ model }}</span>
-                    <span aria-hidden="true">&times;</span>
-                  </button>
-                </div>
-                <div class="critique-option-groups" role="group" aria-label="Critique model choices">
-                  <div v-for="group in critiqueModelGroups" :key="group.key" class="critique-option-group">
-                    <div class="critique-group-label">{{ group.label }}</div>
-                    <label v-for="model in group.models" :key="model" class="critique-option">
-                      <input
-                        type="checkbox"
-                        :checked="isCritiqueModelSelected(model)"
-                        :disabled="routinesSaving"
-                        @change="toggleCritiqueModel(model, ($event.target as HTMLInputElement).checked)"
-                      />
-                      <span>{{ model }}</span>
-                    </label>
-                  </div>
-                  <div v-if="customCritiqueModels.length" class="critique-option-group">
-                    <div class="critique-group-label">Saved custom</div>
-                    <label v-for="model in customCritiqueModels" :key="model" class="critique-option">
-                      <input
-                        type="checkbox"
-                        checked
-                        :disabled="routinesSaving"
-                        @change="toggleCritiqueModel(model, ($event.target as HTMLInputElement).checked)"
-                      />
-                      <span>{{ model }}</span>
-                    </label>
-                  </div>
-                </div>
+                <ModelSelector
+                  multiple
+                  :model-value="selectedCritiqueModels"
+                  :sections="critiqueModelSections"
+                  placeholder="Select critique models"
+                  empty-placeholder="Automatic default"
+                  :disabled="routinesSaving"
+                  @update:model-value="setCritiqueModels"
+                />
               </div>
             </div>
           </div>
 
           <!-- Voice transcription -->
           <div class="card">
-            <p class="section-title">Voice transcription</p>
+            <div class="settings-card-header">
+              <p class="section-title">Voice transcription</p>
+              <p class="hint">Choose whether dictation uses the local engine or OpenAI transcription.</p>
+            </div>
             <div class="routine-row routine-row--flush">
               <div class="routine-info">
                 <span class="routine-name">Engine</span>
                 <span class="routine-detail">
                   <template v-if="routines.transcription.engine === 'local'">
                     Dictation runs on-device via mlx-whisper (<code>{{ routines.transcription.local_model }}</code>).
-                    The first transcription downloads the model. Falls back to cloud if the local engine fails.
+                    The first transcription downloads the model.
                   </template>
                   <template v-else>
                     Dictation uses the OpenAI transcription API (needs <code>OPENAI_API_KEY</code>, ~$0.003/min).
@@ -407,7 +463,7 @@
       <template v-if="currentTab === 'providers'">
         <div v-if="!providerKeysLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
         <template v-else-if="providerKeysError">
-          <div class="card"><p class="hint">{{ providerKeysError }}</p></div>
+          <div class="card"><p class="hint hint--warn">{{ providerKeysError }}</p></div>
         </template>
         <template v-else-if="providerKeys">
           <div class="card">
@@ -460,12 +516,196 @@
             <div v-if="providerKeysResult" class="action-result">{{ providerKeysResult }}</div>
           </div>
 
+          <!-- Google Workspace integration -->
+          <div class="card">
+            <div class="settings-card-header settings-card-header--split">
+              <div>
+                <p class="section-title">Google Workspace</p>
+                <p class="hint">
+                  Connect Gmail, Calendar, Drive, Docs, Sheets, Slides, and Tasks through separate local <code>gws</code> profiles.
+                  Workspaces choose which profile to use in Settings &rarr; Workspaces.
+                </p>
+              </div>
+              <span
+                v-if="gwsIntegration"
+                class="badge"
+                :class="gwsIntegration.installed ? 'badge--success' : 'badge--error'"
+              >
+                {{ gwsIntegration.installed ? 'gws installed' : 'gws missing' }}
+              </span>
+            </div>
+
+            <div v-if="!gwsIntegrationLoaded" class="loading">
+              Loading Google Workspace status&hellip;
+            </div>
+            <p v-else-if="gwsIntegrationError" class="hint hint--warn">
+              {{ gwsIntegrationError }}
+            </p>
+            <template v-else-if="gwsIntegration">
+              <p v-if="!gwsIntegration.installed" class="hint hint--warn integration-warning">
+                Install <code>@googleworkspace/cli</code> before enabling Google Workspace tools for chats and schedules.
+              </p>
+              <div class="gws-profile-list">
+                <div
+                  v-for="profile in gwsIntegration.profiles"
+                  :key="profile.name"
+                  class="gws-profile-card"
+                >
+                  <div class="gws-profile-header">
+                    <div class="gws-profile-heading">
+                      <p class="gws-profile-title">{{ profile.label }}</p>
+                      <p v-if="profile.email" class="gws-profile-email">{{ profile.email }}</p>
+                      <p class="hint hint--compact"><code>{{ profile.name }}</code> profile</p>
+                    </div>
+                    <span class="badge" :class="gwsProfileBadgeClass(profile)">
+                      {{ gwsProfileStatus(profile) }}
+                    </span>
+                  </div>
+                  <p class="gws-profile-purpose">{{ profile.purpose }}</p>
+                  <div v-if="profile.examples.length" class="gws-example-row">
+                    <span v-for="example in profile.examples" :key="example" class="gws-chip">
+                      {{ example }}
+                    </span>
+                  </div>
+                  <div class="gws-profile-meta">
+                    <div>
+                      <span class="dev-label">Used by</span>
+                      <span v-if="!profile.workspaces.length" class="muted-text">No workspace</span>
+                      <span v-else class="gws-workspace-chips">
+                        <span v-for="workspace in profile.workspaces" :key="workspace" class="gws-chip gws-chip--workspace">
+                          {{ workspace }}
+                        </span>
+                      </span>
+                    </div>
+                    <div v-if="profile.config_dir">
+                      <span class="dev-label">Config</span>
+                      <code>{{ profile.config_dir }}</code>
+                    </div>
+                    <div>
+                      <span class="dev-label">OAuth client</span>
+                      <span :class="profile.client_secret_present ? 'status-text--ok' : 'status-text--warn'">
+                        {{ profile.client_secret_present ? 'present' : 'missing' }}
+                      </span>
+                    </div>
+                    <div v-if="profile.setup_command">
+                      <span class="dev-label">Login</span>
+                      <code class="gws-command">{{ profile.setup_command }}</code>
+                    </div>
+                    <div v-if="profile.headless_auth_command">
+                      <span class="dev-label">Headless</span>
+                      <code class="gws-command">{{ profile.headless_auth_command }}</code>
+                    </div>
+                  </div>
+
+                  <!-- Interactive account connection controls -->
+                  <div class="gws-profile-actions">
+                    <!-- State 1: Needs client_secret.json -->
+                    <template v-if="!profile.client_secret_present">
+                      <p class="gws-action-hint">
+                        Upload <code>client_secret.json</code> to start:
+                      </p>
+                      <label class="btn-small file-upload-btn">
+                        Choose JSON file
+                        <input
+                          type="file"
+                          accept=".json"
+                          style="display: none;"
+                          @change="handleClientSecretUpload($event, profile.name)"
+                          :disabled="gwsSavingProfile === profile.name"
+                        />
+                      </label>
+                    </template>
+
+                    <!-- State 2: Ready to authenticate -->
+                    <template v-else-if="!profile.configured">
+                      <div v-if="!gwsAuthUrls[profile.name]" class="gws-btn-group">
+                        <button
+                          class="btn-primary btn-small"
+                          @click="startGwsAuth(profile.name)"
+                          :disabled="gwsSavingProfile === profile.name"
+                        >
+                          Connect Google Account
+                        </button>
+                        <button
+                          class="btn-small btn-danger"
+                          @click="disconnectGwsProfile(profile.name, true)"
+                          :disabled="gwsSavingProfile === profile.name"
+                        >
+                          Remove OAuth Client
+                        </button>
+                      </div>
+                      <div v-else class="gws-auth-flow-box">
+                        <p class="gws-flow-step">
+                          1. Follow the Google auth flow. If the browser did not open, click here:
+                          <a :href="gwsAuthUrls[profile.name]" target="_blank" class="gws-auth-link">Open authorization page</a>
+                        </p>
+                        <p class="gws-flow-step">
+                          2. After signing in, copy the full redirect URL (even if it fails to load) or authorization code, and paste it below:
+                        </p>
+                        <input
+                          type="text"
+                          class="routine-input gws-auth-input"
+                          v-model="gwsRedirectUrls[profile.name]"
+                          placeholder="Paste redirect URL (http://localhost/?code=...) or code"
+                          :disabled="gwsSavingProfile === profile.name"
+                          @keyup.enter="exchangeGwsCode(profile.name)"
+                        />
+                        <div class="gws-flow-buttons">
+                          <button
+                            class="btn-primary btn-small"
+                            @click="exchangeGwsCode(profile.name)"
+                            :disabled="!gwsRedirectUrls[profile.name]?.trim() || gwsSavingProfile === profile.name"
+                          >
+                            {{ gwsSavingProfile === profile.name ? 'Connecting...' : 'Complete Sign-In' }}
+                          </button>
+                          <button
+                            class="btn-small"
+                            @click="cancelGwsAuth(profile.name)"
+                            :disabled="gwsSavingProfile === profile.name"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    </template>
+
+                    <!-- State 3: Authenticated -->
+                    <template v-else>
+                      <div class="gws-btn-group">
+                        <button
+                          class="btn-small btn-danger"
+                          @click="disconnectGwsProfile(profile.name, false)"
+                          :disabled="gwsSavingProfile === profile.name"
+                        >
+                          Disconnect Account
+                        </button>
+                        <button
+                          class="btn-small btn-outline-danger"
+                          style="border-color: var(--error); color: var(--error);"
+                          @click="disconnectGwsProfile(profile.name, true)"
+                          :disabled="gwsSavingProfile === profile.name"
+                        >
+                          Remove Client & Credentials
+                        </button>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </div>
+              <p class="hint hint--info gws-boundary-note">
+                Keep personal and work Google accounts in different profiles. A personal chat should not inherit work Drive, calendar, or connector access by accident.
+              </p>
+            </template>
+          </div>
+
           <!-- Provider alias tiers -->
           <div v-if="tierProviderSections.length" class="card">
-            <p class="section-title">Provider alias models</p>
-            <p class="hint">
-              Pick a provider, then set the model behind <code>opus</code>, <code>sonnet</code>, and <code>haiku</code>.
-            </p>
+            <div class="settings-card-header">
+              <p class="section-title">Provider alias models</p>
+              <p class="hint">
+                Pick a provider, then set the model behind <code>opus</code>, <code>sonnet</code>, and <code>haiku</code>.
+              </p>
+            </div>
             <div class="alias-provider-bar">
               <label class="settings-field alias-provider-field">
                 <span class="ws-label">Provider</span>
@@ -485,16 +725,15 @@
               <div class="settings-field-grid">
                 <label v-for="tier in modelTiers" :key="`${selectedTierProviderSection.key}-${tier.key}`" class="settings-field">
                   <span class="ws-label">{{ tier.label }}</span>
-                  <select
+                  <ModelSelector
                     v-if="selectedTierProviderSection.configurable"
-                    class="routine-input"
-                    :value="tierOverrideValue(selectedTierProviderSection.key as TierProviderKey, tier.key)"
+                    :model-value="tierOverrideValue(selectedTierProviderSection.key as TierProviderKey, tier.key)"
+                    :sections="tierModelSections"
                     :disabled="routinesSaving || !selectedTierProviderSection.available"
-                    @change="saveTierModel(selectedTierProviderSection.key as TierProviderKey, tier.key, ($event.target as HTMLSelectElement).value)"
-                  >
-                    <option value="">Default ({{ tierEffectiveValue(selectedTierProviderSection.key as TierProviderKey, tier.key) || 'automatic' }})</option>
-                    <option v-for="model in selectedTierProviderSection.options" :key="model" :value="model">{{ model }}</option>
-                  </select>
+                    placeholder="Default ({{ tierEffectiveValue(selectedTierProviderSection.key as TierProviderKey, tier.key) || 'automatic' }})"
+                    empty-placeholder="Default ({{ tierEffectiveValue(selectedTierProviderSection.key as TierProviderKey, tier.key) || 'automatic' }})"
+                    @update:model-value="saveTierModel(selectedTierProviderSection.key as TierProviderKey, tier.key, $event)"
+                  />
                   <input
                     v-else
                     class="routine-input"
@@ -503,10 +742,10 @@
                   />
                 </label>
               </div>
-              <p v-if="!selectedTierProviderSection.configurable" class="hint hint--compact tier-provider-note">
+              <p v-if="!selectedTierProviderSection.configurable" class="hint hint--info tier-provider-note">
                 Claude uses the native tier aliases directly.
               </p>
-              <p v-else-if="!selectedTierProviderSection.available" class="hint hint--compact tier-provider-note">
+              <p v-else-if="!selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
                 {{ tierProviderUnavailableHint }}
               </p>
             </div>
@@ -518,7 +757,7 @@
       <template v-if="currentTab === 'workspaces'">
         <div v-if="!workspacesLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
         <template v-else-if="workspacesError">
-          <div class="card"><p class="hint">{{ workspacesError }}</p></div>
+          <div class="card"><p class="hint hint--warn">{{ workspacesError }}</p></div>
         </template>
         <template v-else>
           <div class="card">
@@ -526,7 +765,7 @@
               <div>
                 <p class="section-title">Workspaces</p>
                 <p class="hint">
-                  Logical chat spaces that route projects, chats, vault roots, model defaults, and integration profiles.
+                  Logical chat spaces that route projects, chats, vault names, model defaults, and integration profiles.
                 </p>
               </div>
               <button class="btn-small" @click="showNewWorkspace = !showNewWorkspace">
@@ -545,7 +784,7 @@
                 <label class="settings-field"><span class="ws-label">Name</span>
                   <input class="routine-input" v-model="newWorkspaceForm.name" :disabled="workspacesSaving === 'new'" placeholder="letters, numbers, dashes, underscores" />
                 </label>
-                <label class="settings-field"><span class="ws-label">Vault root</span>
+                <label class="settings-field"><span class="ws-label">Vault name</span>
                   <input class="routine-input" v-model="newWorkspaceForm.vault_root" :disabled="workspacesSaving === 'new'" placeholder="(defaults to name)" />
                 </label>
                 <label class="settings-field"><span class="ws-label">Provider</span>
@@ -555,38 +794,60 @@
                     </option>
                   </select>
                 </label>
-                <label class="settings-field"><span class="ws-label">Default tier</span>
-                  <select class="routine-input" v-model="newWorkspaceForm.default_model" :disabled="workspacesSaving === 'new'">
-                    <option value="">Inherit default tier</option>
-                    <option v-for="tier in modelTiers" :key="`new-${tier.key}`" :value="tier.key">
-                      {{ tier.label }}
+                <label class="settings-field"><span class="ws-label">Default model</span>
+                  <ModelSelector
+                    v-model="newWorkspaceForm.default_model"
+                    :sections="newWorkspaceModelSections"
+                    :placeholder="workspaceInheritPlaceholder"
+                    :empty-placeholder="workspaceInheritPlaceholder"
+                    :disabled="workspacesSaving === 'new'"
+                  />
+                </label>
+                <label class="settings-field">
+                  <div class="settings-label-row">
+                    <span class="ws-label">Google profile</span>
+                    <details class="field-info">
+                      <summary aria-label="About GWS profiles" title="About GWS profiles">i</summary>
+                      <div class="field-info-panel">
+                        <p>
+                          Selects the Google Workspace profile used by this workspace. Manage profiles and credentials in the Providers tab.
+                        </p>
+                      </div>
+                    </details>
+                  </div>
+                  <select class="routine-input" v-model="newWorkspaceForm.gws_profile" :disabled="workspacesSaving === 'new'">
+                    <option value="">Default ({{ defaultGwsProfileName }})</option>
+                    <option v-for="profile in gwsProfileOptions" :key="`new-gws-${profile.name}`" :value="profile.name">
+                      {{ profile.label }} ({{ profile.email || profile.name }})
                     </option>
-                    <option v-if="workspaceCustomDefaultModel(newWorkspaceForm.default_model)" :value="newWorkspaceForm.default_model">
-                      Custom: {{ newWorkspaceForm.default_model }}
+                    <option v-if="workspaceCustomGwsProfile(newWorkspaceForm.gws_profile)" :value="newWorkspaceForm.gws_profile">
+                      Custom: {{ newWorkspaceForm.gws_profile }}
                     </option>
                   </select>
                 </label>
-                <label class="settings-field"><span class="ws-label">GWS profile</span>
-                  <input class="routine-input" v-model="newWorkspaceForm.gws_profile" :disabled="workspacesSaving === 'new'" placeholder="(none)" />
-                </label>
-                <label class="settings-field settings-field--wide"><span class="ws-label">Claude.ai MCPs</span>
-                  <select class="routine-input" v-model="newWorkspaceForm.claude_ai_mcps" :disabled="workspacesSaving === 'new'">
-                    <option value="default">Default (off for personal, on for work)</option>
+                <div class="settings-field settings-field--wide">
+                  <div class="settings-label-row">
+                    <span class="ws-label">Claude.ai MCPs</span>
+                    <details class="field-info">
+                      <summary aria-label="About Claude.ai MCP connectors" title="About Claude.ai MCP connectors">i</summary>
+                      <div class="field-info-panel">
+                        <p>
+                          Allows this workspace to use claude.ai account connectors, for example Airtable,
+                          Slack, Atlassian, BigQuery, Sentry, or similar tools.
+                        </p>
+                        <p>
+                          Turn this off for personal workspaces when your connected accounts point to work systems,
+                          so personal chats do not inherit work-only connectors.
+                        </p>
+                      </div>
+                    </details>
+                  </div>
+                  <select class="routine-input" v-model="newWorkspaceForm.claude_ai_mcps" :disabled="workspacesSaving === 'new'" aria-label="Claude.ai MCPs">
                     <option value="on">On (connectors allowed)</option>
                     <option value="off">Off (connectors blocked)</option>
                   </select>
-                  <p class="hint hint--compact">Toggle the claude.ai connector MCPs: {{ claudeAiMcpsLabel }}.</p>
-                </label>
-                <details class="settings-advanced settings-field settings-field--wide">
-                  <summary>Advanced routing</summary>
-                  <label class="settings-field">
-                    <span class="ws-label">Model bucket</span>
-                    <input class="routine-input" v-model="newWorkspaceForm.model_bucket" :disabled="workspacesSaving === 'new'" placeholder="(automatic from provider)" />
-                  </label>
-                  <label class="settings-field settings-field--wide"><span class="ws-label">Extra disallowed tools (advanced)</span>
-                    <input class="routine-input" v-model="newWorkspaceForm.disallowed_tools" :disabled="workspacesSaving === 'new'" placeholder="comma-separated, e.g. mcp__n8n_mcp" />
-                  </label>
-                </details>
+                </div>
+
               </div>
               <div class="action-row settings-actions">
                 <button class="btn-primary" @click="createNewWorkspace" :disabled="workspacesSaving === 'new'">
@@ -604,7 +865,7 @@
                 <div class="workspace-card-header">
                   <div>
                     <p class="workspace-title">{{ form.name }}</p>
-                    <p class="hint hint--compact">{{ form.vault_root || form.name }} vault root</p>
+                    <p class="hint hint--compact">{{ form.vault_root || form.name }} vault name</p>
                   </div>
                   <div class="workspace-actions">
                     <button
@@ -624,7 +885,7 @@
                 </div>
 
                 <div class="settings-field-grid">
-                  <label class="settings-field"><span class="ws-label">Vault root</span>
+                  <label class="settings-field"><span class="ws-label">Vault name</span>
                     <input class="routine-input" v-model="form.vault_root" :disabled="workspacesSaving === form.name" placeholder="(defaults to workspace name)" />
                   </label>
                   <label class="settings-field"><span class="ws-label">Provider</span>
@@ -634,38 +895,60 @@
                       </option>
                     </select>
                   </label>
-                  <label class="settings-field"><span class="ws-label">Default tier</span>
-                    <select class="routine-input" v-model="form.default_model" :disabled="workspacesSaving === form.name">
-                      <option value="">Inherit default tier</option>
-                      <option v-for="tier in modelTiers" :key="`${form.name}-${tier.key}`" :value="tier.key">
-                        {{ tier.label }}
+                  <label class="settings-field"><span class="ws-label">Default model</span>
+                    <ModelSelector
+                      v-model="form.default_model"
+                      :sections="workspaceModelSectionsForForm(form)"
+                      :placeholder="workspaceInheritPlaceholder"
+                      :empty-placeholder="workspaceInheritPlaceholder"
+                      :disabled="workspacesSaving === form.name"
+                    />
+                  </label>
+                  <label class="settings-field">
+                    <div class="settings-label-row">
+                      <span class="ws-label">Google profile</span>
+                      <details class="field-info">
+                        <summary aria-label="About GWS profiles" title="About GWS profiles">i</summary>
+                        <div class="field-info-panel">
+                          <p>
+                            Selects the Google Workspace profile used by this workspace. Manage profiles and credentials in the Providers tab.
+                          </p>
+                        </div>
+                      </details>
+                    </div>
+                    <select class="routine-input" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
+                      <option value="">Default ({{ defaultGwsProfileName }})</option>
+                      <option v-for="profile in gwsProfileOptions" :key="`${form.name}-gws-${profile.name}`" :value="profile.name">
+                        {{ profile.label }} ({{ profile.email || profile.name }})
                       </option>
-                      <option v-if="workspaceCustomDefaultModel(form.default_model)" :value="form.default_model">
-                        Custom: {{ form.default_model }}
+                      <option v-if="workspaceCustomGwsProfile(form.gws_profile)" :value="form.gws_profile">
+                        Custom: {{ form.gws_profile }}
                       </option>
                     </select>
                   </label>
-                  <label class="settings-field"><span class="ws-label">GWS profile</span>
-                    <input class="routine-input" v-model="form.gws_profile" :disabled="workspacesSaving === form.name" placeholder="(none)" />
-                  </label>
-                  <label class="settings-field settings-field--wide"><span class="ws-label">Claude.ai MCPs</span>
-                    <select class="routine-input" v-model="form.claude_ai_mcps" :disabled="workspacesSaving === form.name">
-                      <option value="default">Default (off for personal, on for work)</option>
+                  <div class="settings-field settings-field--wide">
+                    <div class="settings-label-row">
+                      <span class="ws-label">Claude.ai MCPs</span>
+                      <details class="field-info">
+                        <summary aria-label="About Claude.ai MCP connectors" title="About Claude.ai MCP connectors">i</summary>
+                        <div class="field-info-panel">
+                          <p>
+                            Allows this workspace to use claude.ai account connectors, for example Airtable,
+                            Slack, Atlassian, BigQuery, Sentry, or similar tools.
+                          </p>
+                          <p>
+                            Turn this off for personal workspaces when your connected accounts point to work systems,
+                            so personal chats do not inherit work-only connectors.
+                          </p>
+                        </div>
+                      </details>
+                    </div>
+                    <select class="routine-input" v-model="form.claude_ai_mcps" :disabled="workspacesSaving === form.name" aria-label="Claude.ai MCPs">
                       <option value="on">On (connectors allowed)</option>
                       <option value="off">Off (connectors blocked)</option>
                     </select>
-                    <p class="hint hint--compact">Toggle the claude.ai connector MCPs: {{ claudeAiMcpsLabel }}.</p>
-                  </label>
-                  <details class="settings-advanced settings-field settings-field--wide">
-                    <summary>Advanced routing</summary>
-                    <label class="settings-field">
-                      <span class="ws-label">Model bucket</span>
-                      <input class="routine-input" v-model="form.model_bucket" :disabled="workspacesSaving === form.name" placeholder="(automatic from provider)" />
-                    </label>
-                    <label class="settings-field settings-field--wide"><span class="ws-label">Extra disallowed tools (advanced)</span>
-                      <input class="routine-input" v-model="form.disallowed_tools" :disabled="workspacesSaving === form.name" placeholder="comma-separated, e.g. mcp__n8n_mcp" />
-                    </label>
-                  </details>
+                  </div>
+
                 </div>
               </div>
             </div>
@@ -675,27 +958,92 @@
         </template>
       </template>
 
+      <!-- INSTRUCTIONS TAB -->
+      <template v-if="currentTab === 'instructions'">
+        <div class="card">
+          <div class="settings-card-header">
+            <p class="section-title">Instructions</p>
+            <p class="hint">
+              Claude Code files and Ciaobot-generated prompt blocks that shape what the agent sees.
+            </p>
+          </div>
+
+          <div v-if="!agentAssetsLoaded" class="action-row"><span class="loading">Loading&hellip;</span></div>
+          <template v-else-if="agentAssetsError">
+            <p class="hint hint--warn">{{ agentAssetsError }}</p>
+          </template>
+          <template v-else>
+            <p v-if="!instructionAssets.length" class="hint hint--section-empty">No instruction sources found.</p>
+            <div v-else class="skill-list">
+              <div
+                v-for="item in instructionAssets"
+                :key="item.id"
+                class="skill-row instruction-row"
+                :class="{ expanded: isInstructionExpanded(item) }"
+                :style="{ paddingLeft: `${Math.min(item.level || 0, 4) * 18}px` }"
+                @click="toggleInstruction(item)"
+              >
+                <div class="skill-main">
+                  <div class="skill-title-row command-title-row">
+                    <span class="skill-chevron">{{ isInstructionExpanded(item) ? '&#9662;' : '&#9656;' }}</span>
+                    <span class="skill-name">{{ item.title }}</span>
+                    <span class="skill-badges">
+                      <span v-if="item.scope" class="badge badge--muted command-source">{{ item.scope }}</span>
+                      <span class="badge badge--muted command-source">{{ item.source }}</span>
+                      <span v-if="item.status && item.status !== 'ok'" class="badge command-source" :class="item.status === 'missing' ? 'badge--warn' : 'badge--error'">{{ item.status }}</span>
+                      <span v-if="item.editable" class="badge badge--success command-source">editable</span>
+                      <span v-else class="badge badge--muted command-source">read-only</span>
+                    </span>
+                  </div>
+                  <p class="skill-description">{{ item.description }}</p>
+                  <div v-if="isInstructionExpanded(item)" class="skill-detail">
+                    <p v-if="item.path" class="skill-meta">
+                      <span class="skill-meta-label">Path</span>
+                      <button class="inline-path-button" @click.stop="openAssetPath(item.path)">{{ item.path }}</button>
+                    </p>
+                    <p v-if="item.parent_id" class="skill-meta">
+                      <span class="skill-meta-label">Imported by</span>
+                      <code class="command-path">{{ item.parent_id }}</code>
+                    </p>
+                    <p v-if="item.imports?.length" class="skill-meta">
+                      <span class="skill-meta-label">Imports</span>
+                      <code class="command-path">{{ item.imports.join(', ') }}</code>
+                    </p>
+                    <pre v-if="item.content" class="asset-code-preview"><code>{{ item.content }}</code></pre>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+      </template>
+
       <!-- SKILLS TAB -->
       <template v-if="currentTab === 'skills'">
         <div class="card">
-          <div class="settings-toolbar">
-            <p class="section-title">Skills</p>
-            <div class="settings-toolbar-actions">
-              <button class="btn-small" @click="createSkillViaChat">Add via Chat</button>
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">Skills</p>
+              <p class="hint">
+                Manage Ciaobot-specific custom skills and locked GitHub/package skills.
+              </p>
+            </div>
+            <div class="settings-card-header-actions">
+              <button class="btn-small" @click="createSkillViaChat">Add via chat</button>
               <button class="btn-small" @click="toggleAddGithubSkill">
                 {{ showAddGithubSkill ? 'Cancel' : '+ Add from GitHub' }}
               </button>
             </div>
           </div>
 
-          <p class="hint hint--compact skill-scope-note">
+          <p class="hint hint--info skill-scope-note">
             Ciaobot runs on Claude Code, so any plugins and skills you install globally in Claude Code are also loaded and available to Ciaobot. This page only lists the skills managed here, the Ciaobot-specific ones (custom and GitHub/package skills).
           </p>
 
-          <!-- Auto-Update GitHub Skills -->
+          <!-- Auto-update GitHub skills -->
           <div class="setting-row setting-row--inline">
             <div class="routine-info">
-              <span class="routine-name">Auto-Update GitHub Skills</span>
+              <span class="routine-name">Auto-update GitHub skills</span>
               <p class="hint hint--compact">
                 If enabled, Ciaobot checks GitHub for updates to locked package skills on boot.
               </p>
@@ -715,15 +1063,15 @@
             v-if="showAddGithubSkill"
             class="settings-form-panel"
           >
-            <label class="ws-field"><span class="ws-label">GitHub URL / owner/repo</span>
+            <label class="settings-field"><span class="ws-label">GitHub URL / owner/repo</span>
               <input class="routine-input" v-model="githubSource" :disabled="addingGithubSkill" placeholder="e.g. owner/repo or github URL" />
             </label>
-            <label class="ws-field"><span class="ws-label">Skill Name (optional)</span>
+            <label class="settings-field"><span class="ws-label">Skill name (optional)</span>
               <input class="routine-input" v-model="githubSkillName" :disabled="addingGithubSkill" placeholder="(inferred from URL if omitted)" />
             </label>
             <div class="action-row settings-actions">
               <button class="btn-primary" @click="addGithubSkill" :disabled="addingGithubSkill || !githubSource.trim()">
-                {{ addingGithubSkill ? 'Adding...' : 'Add Skill' }}
+                {{ addingGithubSkill ? 'Adding...' : 'Add skill' }}
               </button>
             </div>
             <div v-if="addGithubSkillResult" class="action-result" :class="{ '--error': addGithubSkillError }">{{ addGithubSkillResult }}</div>
@@ -731,7 +1079,7 @@
 
           <div v-if="!skillsLoaded" class="action-row"><span class="loading">Loading&hellip;</span></div>
           <template v-else-if="skillsError">
-            <p class="hint">{{ skillsError }}</p>
+            <p class="hint hint--warn">{{ skillsError }}</p>
           </template>
           <template v-else-if="skillsInventory">
             <!-- Custom Skills Section -->
@@ -753,7 +1101,7 @@
                     </div>
                     <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
                     <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
-                      <p v-if="skill.source_type" class="skill-meta"><span class="skill-meta-label">Type</span> {{ skill.source_type }}</p>
+                      <pre v-if="skill.content" class="asset-code-preview"><code>{{ skill.content }}</code></pre>
                     </div>
                   </div>
                 </div>
@@ -788,7 +1136,221 @@
                     </div>
                     <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
                     <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
-                      <p v-if="skill.source_type" class="skill-meta"><span class="skill-meta-label">Type</span> {{ skill.source_type }}</p>
+                      <pre v-if="skill.content" class="asset-code-preview"><code>{{ skill.content }}</code></pre>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+
+        <div class="card">
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">Subagents</p>
+              <p class="hint">
+                Claude Code subagents available to Ciaobot. Custom subagents are saved in <code>subagents/</code> and mirrored into the vault.
+              </p>
+            </div>
+            <button class="btn-small" @click="toggleAddSubagent">
+              {{ showAddSubagent ? 'Cancel' : '+ New subagent' }}
+            </button>
+          </div>
+
+          <div v-if="showAddSubagent" class="settings-form-panel">
+            <div class="settings-field-grid">
+              <label class="settings-field"><span class="ws-label">Name</span>
+                <input class="routine-input" v-model="newSubagentName" :disabled="addingSubagent" placeholder="e.g. pr-reviewer" />
+              </label>
+              <label class="settings-field"><span class="ws-label">Description</span>
+                <input class="routine-input" v-model="newSubagentDescription" :disabled="addingSubagent" placeholder="When this subagent should be used" />
+              </label>
+              <label class="settings-field settings-field--wide"><span class="ws-label">Instructions</span>
+                <textarea class="routine-textarea" v-model="newSubagentPrompt" :disabled="addingSubagent" rows="8" placeholder="Write the subagent behavior, constraints, and output format."></textarea>
+              </label>
+            </div>
+            <div class="action-row settings-actions">
+              <button class="btn-primary" @click="addSubagent" :disabled="addingSubagent || !newSubagentName.trim() || !newSubagentDescription.trim() || !newSubagentPrompt.trim()">
+                {{ addingSubagent ? 'Creating...' : 'Create subagent' }}
+              </button>
+            </div>
+            <div v-if="addSubagentResult" class="action-result" :class="{ '--error': addSubagentError }">{{ addSubagentResult }}</div>
+          </div>
+          <div v-if="assetLifecycleResult" class="action-result" :class="{ '--error': assetLifecycleError }">{{ assetLifecycleResult }}</div>
+
+          <div v-if="!agentAssetsLoaded" class="action-row"><span class="loading">Loading&hellip;</span></div>
+          <template v-else-if="agentAssetsError">
+            <p class="hint hint--warn">{{ agentAssetsError }}</p>
+          </template>
+          <template v-else>
+            <p v-if="!subagentAssets.length" class="hint hint--section-empty">No subagents found.</p>
+            <div v-else class="skill-list">
+              <div
+                v-for="agent in subagentAssets"
+                :key="`${agent.source}:${agent.name}:${agent.path}`"
+                class="skill-row"
+                :class="{ expanded: isSubagentExpanded(agent) }"
+                @click="toggleSubagent(agent)"
+              >
+                <div class="skill-main">
+                  <div class="skill-title-row command-title-row">
+                    <span class="skill-chevron">{{ isSubagentExpanded(agent) ? '&#9662;' : '&#9656;' }}</span>
+                    <span class="skill-name">{{ agent.name }}</span>
+                    <span class="skill-badges">
+                      <span class="badge badge--muted command-source">{{ agent.scope }}</span>
+                      <span v-if="agent.editable" class="badge badge--success command-source">custom</span>
+                    </span>
+                  </div>
+                  <p v-if="agent.description" class="skill-description">{{ agent.description }}</p>
+                  <p v-else class="skill-description muted-text">No description.</p>
+                  <div v-if="isSubagentExpanded(agent)" class="skill-detail">
+                    <p class="skill-meta">
+                      <span class="skill-meta-label">Path</span>
+                      <button class="inline-path-button" @click.stop="openAssetPath(agent.path)">{{ agent.path }}</button>
+                    </p>
+                    <p v-if="agent.vault_path" class="skill-meta">
+                      <span class="skill-meta-label">Vault</span>
+                      <button class="inline-path-button" @click.stop="openAssetPath(agent.vault_path)">{{ agent.vault_path }}</button>
+                    </p>
+                    <div v-if="agent.editable" class="asset-actions">
+                      <button class="btn-small" @click.stop="startEditSubagent(agent)" :disabled="savingSubagent === agent.name">
+                        Edit
+                      </button>
+                      <button class="btn-small btn-danger" @click.stop="deleteSubagent(agent)" :disabled="savingSubagent === agent.name">
+                        {{ savingSubagent === agent.name ? 'Working...' : 'Delete' }}
+                      </button>
+                    </div>
+                    <div v-if="editingSubagent === agent.name" class="settings-form-panel asset-edit-panel" @click.stop>
+                      <label class="settings-field"><span class="ws-label">Description</span>
+                        <input class="routine-input" v-model="editSubagentDescription" :disabled="savingSubagent === agent.name" />
+                      </label>
+                      <label class="settings-field"><span class="ws-label">Instructions</span>
+                        <textarea class="routine-textarea" v-model="editSubagentContent" :disabled="savingSubagent === agent.name" rows="10"></textarea>
+                      </label>
+                      <div class="action-row settings-actions">
+                        <button class="btn-primary" @click.stop="saveSubagent(agent)" :disabled="savingSubagent === agent.name || !editSubagentDescription.trim() || !editSubagentContent.trim()">
+                          {{ savingSubagent === agent.name ? 'Saving...' : 'Save subagent' }}
+                        </button>
+                        <button class="btn-small" @click.stop="cancelEditSubagent" :disabled="savingSubagent === agent.name">Cancel</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+
+        <div class="card">
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">Commands</p>
+              <p class="hint">
+                Slash commands available to Claude Code. Custom commands are saved in <code>commands/</code> and mirrored into the vault.
+              </p>
+            </div>
+            <div class="settings-card-header-actions">
+              <span class="badge badge--muted">{{ commandAssets.length || commands.length }} loaded</span>
+              <button class="btn-small" @click="toggleAddCommand">
+                {{ showAddCommand ? 'Cancel' : '+ New command' }}
+              </button>
+            </div>
+          </div>
+
+          <div v-if="showAddCommand" class="settings-form-panel">
+            <div class="settings-field-grid">
+              <label class="settings-field"><span class="ws-label">Name</span>
+                <input class="routine-input" v-model="newCommandName" :disabled="addingCommand" placeholder="e.g. summarize-decision" />
+              </label>
+              <label class="settings-field"><span class="ws-label">Argument hint</span>
+                <input class="routine-input" v-model="newCommandArgumentHint" :disabled="addingCommand" placeholder="e.g. &lt;notes&gt;" />
+              </label>
+              <label class="settings-field settings-field--wide"><span class="ws-label">Description</span>
+                <input class="routine-input" v-model="newCommandDescription" :disabled="addingCommand" placeholder="What this slash command does" />
+              </label>
+              <label class="settings-field settings-field--wide"><span class="ws-label">Prompt</span>
+                <textarea class="routine-textarea" v-model="newCommandPrompt" :disabled="addingCommand" rows="8" placeholder="Write the command prompt. Use $ARGUMENTS where the user's command text should be inserted."></textarea>
+              </label>
+            </div>
+            <div class="action-row settings-actions">
+              <button class="btn-primary" @click="addCommand" :disabled="addingCommand || !newCommandName.trim() || !newCommandDescription.trim() || !newCommandPrompt.trim()">
+                {{ addingCommand ? 'Creating...' : 'Create command' }}
+              </button>
+            </div>
+            <div v-if="addCommandResult" class="action-result" :class="{ '--error': addCommandError }">{{ addCommandResult }}</div>
+          </div>
+          <div v-if="assetLifecycleResult" class="action-result" :class="{ '--error': assetLifecycleError }">{{ assetLifecycleResult }}</div>
+
+          <div v-if="!agentAssetsLoaded" class="action-row"><span class="loading">Loading&hellip;</span></div>
+          <template v-else-if="agentAssetsError">
+            <p class="hint hint--warn">{{ agentAssetsError }}</p>
+          </template>
+          <template v-else>
+            <p v-if="!commandAssets.length" class="hint hint--section-empty">No slash commands found.</p>
+            <div v-else class="skill-list">
+              <div
+                v-for="command in commandAssets"
+                :key="commandKey(command)"
+                class="skill-row command-row"
+                :class="{ expanded: isCommandExpanded(command) }"
+                @click="toggleCommand(command)"
+              >
+                <div class="skill-main">
+                  <div class="skill-title-row command-title-row">
+                    <span class="skill-chevron">{{ isCommandExpanded(command) ? '&#9662;' : '&#9656;' }}</span>
+                    <span class="command-name">/{{ command.name }}</span>
+                    <span v-if="command.argument_hint" class="command-args">{{ command.argument_hint }}</span>
+                    <span class="skill-badges">
+                      <span class="badge badge--muted command-source">{{ command.scope }}</span>
+                      <span v-if="command.editable" class="badge badge--success command-source">custom</span>
+                    </span>
+                  </div>
+                  <p v-if="command.description" class="skill-description">{{ command.description }}</p>
+                  <p v-else class="skill-description muted-text">No description.</p>
+                  <div v-if="isCommandExpanded(command)" class="skill-detail">
+                    <p v-if="command.argument_hint" class="skill-meta">
+                      <span class="skill-meta-label">Arguments</span>
+                      <code class="command-path">{{ command.argument_hint }}</code>
+                    </p>
+                    <p class="skill-meta">
+                      <span class="skill-meta-label">Source</span>
+                      {{ command.source }}
+                    </p>
+                    <p v-if="command.path" class="skill-meta">
+                      <span class="skill-meta-label">Path</span>
+                      <button class="inline-path-button" @click.stop="openAssetPath(command.path)">{{ command.path }}</button>
+                    </p>
+                    <p v-if="command.vault_path" class="skill-meta">
+                      <span class="skill-meta-label">Vault</span>
+                      <button class="inline-path-button" @click.stop="openAssetPath(command.vault_path)">{{ command.vault_path }}</button>
+                    </p>
+                    <div v-if="command.editable" class="asset-actions">
+                      <button class="btn-small" @click.stop="startEditCommand(command)" :disabled="savingCommand === command.name">
+                        Edit
+                      </button>
+                      <button class="btn-small btn-danger" @click.stop="deleteCommand(command)" :disabled="savingCommand === command.name">
+                        {{ savingCommand === command.name ? 'Working...' : 'Delete' }}
+                      </button>
+                    </div>
+                    <div v-if="editingCommand === command.name" class="settings-form-panel asset-edit-panel" @click.stop>
+                      <div class="settings-field-grid">
+                        <label class="settings-field"><span class="ws-label">Description</span>
+                          <input class="routine-input" v-model="editCommandDescription" :disabled="savingCommand === command.name" />
+                        </label>
+                        <label class="settings-field"><span class="ws-label">Argument hint</span>
+                          <input class="routine-input" v-model="editCommandArgumentHint" :disabled="savingCommand === command.name" />
+                        </label>
+                        <label class="settings-field settings-field--wide"><span class="ws-label">Prompt</span>
+                          <textarea class="routine-textarea" v-model="editCommandContent" :disabled="savingCommand === command.name" rows="10"></textarea>
+                        </label>
+                      </div>
+                      <div class="action-row settings-actions">
+                        <button class="btn-primary" @click.stop="saveCommand(command)" :disabled="savingCommand === command.name || !editCommandDescription.trim() || !editCommandContent.trim()">
+                          {{ savingCommand === command.name ? 'Saving...' : 'Save command' }}
+                        </button>
+                        <button class="btn-small" @click.stop="cancelEditCommand" :disabled="savingCommand === command.name">Cancel</button>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -810,20 +1372,46 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '../lib/api'
 import { formatTime, formatDuration } from '../lib/time'
-import type { AutomationProcess, DeployResult, LocalStatus, RoutineSettings, SkillInventory, ProviderConfigSettings, WorkspaceInfo, WorkspaceProvider } from '../lib/types'
+import type {
+  AgentAssetsResponse,
+  AutomationProcess,
+  CommandAsset,
+  CommandsResponse,
+  CreatedAgentAssetResponse,
+  DebugIssueReport,
+  DeployResult,
+  GwsIntegrationSettings,
+  LocalStatus,
+  PromptAsset,
+  ProviderConfigSettings,
+  RoutineSettings,
+  SkillInventory,
+  SlashCommand,
+  SubagentAsset,
+  WorkspaceInfo,
+  WorkspaceHealthResponse,
+  WorkspaceProvider,
+} from '../lib/types'
 import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSupported } from '../lib/push'
 import { useAuthStore } from '../stores/auth'
+import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
 import PaneHeader from './PaneHeader.vue'
+import ModelSelector from './ModelSelector.vue'
+import { providerModelBadges, sectionsFromModelOptions, type ModelSection } from '../lib/modelSections'
 
 const emit = defineEmits<{ 'open-sidebar': [] }>()
 
 const route = useRoute()
+const fileViewer = useFileViewerStore()
 const currentTab = computed(() => (route.params.tab as string) || 'home')
 
 const expandedSkills = ref<Record<string, boolean>>({})
+const expandedCommands = ref<Record<string, boolean>>({})
+const expandedSubagents = ref<Record<string, boolean>>({})
+const expandedInstructions = ref<Record<string, boolean>>({})
 
-// ── Appearance settings (Theme & Font Size) ─────────────────────────────────
+// ── Appearance settings ────────────────────────────────────────────────────
 const activeTheme = ref('dark')
 const fontScale = ref(1.0)
 
@@ -883,14 +1471,60 @@ function isSkillExpanded(name: string) {
 function toggleSkill(name: string) {
   expandedSkills.value[name] = !isSkillExpanded(name)
 }
+function commandKey(command: SlashCommand | CommandAsset) {
+  return `${command.source}:${command.name}:${command.path}`
+}
+function isCommandExpanded(command: SlashCommand | CommandAsset) {
+  return expandedCommands.value[commandKey(command)] || false
+}
+function toggleCommand(command: SlashCommand | CommandAsset) {
+  const key = commandKey(command)
+  expandedCommands.value[key] = !isCommandExpanded(command)
+}
+function isSubagentExpanded(agent: SubagentAsset) {
+  return expandedSubagents.value[`${agent.source}:${agent.name}:${agent.path}`] || false
+}
+function toggleSubagent(agent: SubagentAsset) {
+  const key = `${agent.source}:${agent.name}:${agent.path}`
+  expandedSubagents.value[key] = !isSubagentExpanded(agent)
+}
+function isInstructionExpanded(item: PromptAsset) {
+  return expandedInstructions.value[item.id] || false
+}
+function toggleInstruction(item: PromptAsset) {
+  expandedInstructions.value[item.id] = !isInstructionExpanded(item)
+}
+function openAssetPath(path: string) {
+  if (!path) return
+  void fileViewer.open(path)
+}
 
 const actionPending = ref<string | null>(null)
 const actionResult = ref('')
 const deploySteps = ref<{ step: string; ok: boolean; output?: string }[]>([])
 
+const hasDeployError = computed(() => {
+  if (deploySteps.value.some(s => !s.ok)) return true
+  if (!actionResult.value) return false
+  const successOrPending = [
+    'complete',
+    'waiting',
+    'reloading',
+    'cancelled by user'
+  ]
+  const val = actionResult.value.toLowerCase()
+  return !successOrPending.some(str => val.includes(str))
+})
+
 const skillsInventory = ref<SkillInventory | null>(null)
 const skillsLoaded = ref(false)
 const skillsError = ref('')
+const commands = ref<SlashCommand[]>([])
+const commandsLoaded = ref(false)
+const commandsError = ref('')
+const agentAssets = ref<AgentAssetsResponse | null>(null)
+const agentAssetsLoaded = ref(false)
+const agentAssetsError = ref('')
 
 // ── Routine settings (Models tab) ─────────────────────────────────────────
 const routines = ref<RoutineSettings | null>(null)
@@ -898,12 +1532,6 @@ const routinesLoaded = ref(false)
 const routinesError = ref('')
 const routinesSaving = ref(false)
 const routinesResult = ref('')
-
-type CritiqueModelGroup = {
-  key: string
-  label: string
-  models: string[]
-}
 
 type AliasProviderKey = 'claude' | 'ollama' | 'openrouter'
 type TierProviderKey = Exclude<AliasProviderKey, 'claude'>
@@ -997,39 +1625,27 @@ function serializeModelList(models: string[]): string {
   return parseModelList(models.join(',')).join(',')
 }
 
-const critiqueModelGroups = computed<CritiqueModelGroup[]>(() => {
+const critiqueModelSections = computed<ModelSection[]>(() => {
   const options = routines.value?.model_options
   if (!options) return []
   return [
-    { key: 'ollama_local', label: 'Ollama (local, free)', models: options.ollama_local || [] },
+    { key: 'ollama_local', label: 'Ollama (local, free)', models: options.ollama_local || [], badge: 'local' },
     { key: 'ollama_cloud', label: 'Ollama cloud', models: options.ollama_cloud || [] },
     { key: 'openrouter', label: 'OpenRouter', models: options.openrouter || [] },
     { key: 'anthropic', label: 'Anthropic', models: options.anthropic || [] },
-  ].filter((group) => group.models.length > 0)
+  ].filter((section) => section.models.length > 0)
 })
-
-const knownCritiqueModels = computed(() => new Set(critiqueModelGroups.value.flatMap((group) => group.models)))
 
 const selectedCritiqueModels = computed(() => parseModelList(routines.value?.critique_models || ''))
 
-const customCritiqueModels = computed(() =>
-  selectedCritiqueModels.value.filter((model) => !knownCritiqueModels.value.has(model))
-)
-
-function isCritiqueModelSelected(model: string): boolean {
-  return selectedCritiqueModels.value.includes(model)
-}
-
-async function setCritiqueModels(models: string[]) {
+async function setCritiqueModels(value: string | string[]) {
+  const models = Array.isArray(value) ? value : [value]
   await saveRoutines({ critique_models: serializeModelList(models) })
 }
 
-async function toggleCritiqueModel(model: string, checked: boolean) {
-  const current = selectedCritiqueModels.value
-  const next = checked
-    ? [...current, model]
-    : current.filter((selected) => selected !== model)
-  await setCritiqueModels(next)
+function removeCritiqueModel(model: string) {
+  const current = selectedCritiqueModels.value.filter((m) => m !== model)
+  setCritiqueModels(current)
 }
 
 const aliasProviderSections = computed<AliasProviderSection[]>(() => {
@@ -1119,6 +1735,24 @@ const selectedTierProviderSection = computed(() =>
 )
 
 // Hint shown when the selected tier provider isn't configured yet.
+const tierModelSections = computed<ModelSection[]>(() => {
+  const section = selectedTierProviderSection.value
+  if (!section || !section.options.length) return []
+  const localModels = section.key === 'ollama'
+    ? routines.value?.model_options.ollama_local || []
+    : []
+  return [
+    {
+      key: section.key,
+      label: section.label,
+      models: section.options,
+      modelBadges: providerModelBadges(section.key, section.options, routines.value?.alias_tiers, localModels),
+      disabled: !section.available,
+      hint: section.available ? undefined : tierProviderUnavailableHint.value,
+    },
+  ]
+})
+
 const tierProviderUnavailableHint = computed(() => {
   const section = selectedTierProviderSection.value
   if (!section || section.available) return ''
@@ -1140,7 +1774,8 @@ function tierEffectiveValue(provider: TierProviderKey, tier: TierKey): string {
   return routines.value?.alias_tiers?.[provider]?.[tier] || ''
 }
 
-async function saveTierModel(provider: TierProviderKey, tier: TierKey, model: string) {
+async function saveTierModel(provider: TierProviderKey, tier: TierKey, value: string | string[]) {
+  const model = Array.isArray(value) ? value[0] || '' : value
   const key = tierSettingKeys[provider][tier]
   await saveRoutines({ [key]: model.trim() })
 }
@@ -1253,6 +1888,140 @@ const providerKeyInputs = ref<Record<string, string>>({})
 const autoUpdateGithubSkills = ref(true)
 const autoUpdateSaving = ref(false)
 const autoUpdateResult = ref('')
+const gwsIntegration = ref<GwsIntegrationSettings | null>(null)
+const gwsIntegrationLoaded = ref(false)
+const gwsIntegrationError = ref('')
+
+type GwsProfile = GwsIntegrationSettings['profiles'][number]
+
+function gwsProfileStatus(profile: GwsProfile): string {
+  if (profile.configured) return 'Authenticated'
+  if (profile.client_secret_present) return 'Ready to auth'
+  return 'Needs OAuth client'
+}
+
+function gwsProfileBadgeClass(profile: GwsProfile): string {
+  if (profile.configured) return 'badge--success'
+  if (profile.client_secret_present) return 'badge--warn'
+  return 'badge--error'
+}
+
+const defaultGwsProfileName = computed(() => gwsIntegration.value?.default_profile || 'personal')
+
+const gwsProfileOptions = computed(() => {
+  const profiles = gwsIntegration.value?.profiles || []
+  if (profiles.length) {
+    return profiles.map((profile) => ({ name: profile.name, label: profile.label, email: profile.email }))
+  }
+  return [
+    { name: 'personal', label: 'Personal Google account', email: '' },
+    { name: 'work', label: 'Work Google account', email: '' },
+  ]
+})
+
+function workspaceCustomGwsProfile(profile: string): boolean {
+  const name = profile.trim()
+  return Boolean(name) && !gwsProfileOptions.value.some((option) => option.name === name)
+}
+
+async function fetchGwsIntegration() {
+  gwsIntegrationError.value = ''
+  try {
+    gwsIntegration.value = await api.get<GwsIntegrationSettings>('/api/integrations/gws')
+  } catch (e: any) {
+    gwsIntegrationError.value = `Failed to load Google Workspace integration: ${e?.message || e}`
+  } finally {
+    gwsIntegrationLoaded.value = true
+  }
+}
+
+const gwsSavingProfile = ref<string | null>(null)
+const gwsAuthUrls = ref<Record<string, string>>({})
+const gwsRedirectUrls = ref<Record<string, string>>({})
+
+async function handleClientSecretUpload(event: Event, profileName: string) {
+  const target = event.target as HTMLInputElement
+  const file = target.files?.[0]
+  if (!file) return
+
+  gwsSavingProfile.value = profileName
+  try {
+    const content = await file.text()
+    const updated = await api.post<GwsIntegrationSettings>('/api/integrations/gws/client-secret', {
+      profile: profileName,
+      client_secret: content,
+    })
+    gwsIntegration.value = updated
+  } catch (e: any) {
+    alert(e?.message || 'Failed to upload client secret')
+  } finally {
+    gwsSavingProfile.value = null
+    target.value = ''
+  }
+}
+
+async function startGwsAuth(profileName: string) {
+  gwsSavingProfile.value = profileName
+  try {
+    const res = await api.post<{ auth_url: string }>('/api/integrations/gws/auth-url', {
+      profile: profileName,
+    })
+    gwsAuthUrls.value[profileName] = res.auth_url
+    gwsRedirectUrls.value[profileName] = ''
+    window.open(res.auth_url, '_blank')
+  } catch (e: any) {
+    alert(e?.message || 'Failed to generate authorization URL')
+  } finally {
+    gwsSavingProfile.value = null
+  }
+}
+
+async function exchangeGwsCode(profileName: string) {
+  const code = gwsRedirectUrls.value[profileName]?.trim()
+  if (!code) return
+
+  gwsSavingProfile.value = profileName
+  try {
+    const updated = await api.post<GwsIntegrationSettings>('/api/integrations/gws/exchange', {
+      profile: profileName,
+      code: code,
+    })
+    gwsIntegration.value = updated
+    delete gwsAuthUrls.value[profileName]
+    delete gwsRedirectUrls.value[profileName]
+  } catch (e: any) {
+    alert(e?.message || 'Failed to complete connection')
+  } finally {
+    gwsSavingProfile.value = null
+  }
+}
+
+function cancelGwsAuth(profileName: string) {
+  delete gwsAuthUrls.value[profileName]
+  delete gwsRedirectUrls.value[profileName]
+}
+
+async function disconnectGwsProfile(profileName: string, deleteClientSecret: boolean) {
+  const message = deleteClientSecret
+    ? `Are you sure you want to delete the OAuth Client Secret for the ${profileName} profile?`
+    : `Are you sure you want to disconnect/sign out the ${profileName} Google account?`
+
+  if (!confirm(message)) return
+
+  gwsSavingProfile.value = profileName
+  try {
+    const updated = await api.post<GwsIntegrationSettings>('/api/integrations/gws/disconnect', {
+      profile: profileName,
+      delete_client_secret: deleteClientSecret,
+    })
+    gwsIntegration.value = updated
+    cancelGwsAuth(profileName)
+  } catch (e: any) {
+    alert(e?.message || 'Failed to update profile connection')
+  } finally {
+    gwsSavingProfile.value = null
+  }
+}
 
 async function saveAutoUpdateGithubSkills() {
   autoUpdateSaving.value = true
@@ -1373,6 +2142,29 @@ async function fetchSkills() {
   }
 }
 
+async function fetchCommands() {
+  commandsError.value = ''
+  try {
+    const res = await api.get<CommandsResponse>('/api/commands')
+    commands.value = Array.isArray(res.commands) ? res.commands : []
+  } catch (e: any) {
+    commandsError.value = `Failed to load commands: ${e?.message || e}`
+  } finally {
+    commandsLoaded.value = true
+  }
+}
+
+async function fetchAgentAssets() {
+  agentAssetsError.value = ''
+  try {
+    agentAssets.value = await api.get<AgentAssetsResponse>('/api/agent-assets')
+  } catch (e: any) {
+    agentAssetsError.value = `Failed to load agent assets: ${e?.message || e}`
+  } finally {
+    agentAssetsLoaded.value = true
+  }
+}
+
 const customSkills = computed(() => {
   return skillsInventory.value?.skills.filter(s => s.label === 'custom') || []
 })
@@ -1380,6 +2172,260 @@ const customSkills = computed(() => {
 const githubSkills = computed(() => {
   return skillsInventory.value?.skills.filter(s => s.label === 'github') || []
 })
+
+const instructionAssets = computed(() => agentAssets.value?.instructions || [])
+const subagentAssets = computed(() => agentAssets.value?.subagents || [])
+const commandAssets = computed(() => agentAssets.value?.commands || [])
+const workspaceHealth = computed<WorkspaceHealthResponse | null>(() => agentAssets.value?.health || null)
+const prioritizedHealthChecks = computed(() => {
+  const checks = workspaceHealth.value?.checks || []
+  const rank: Record<string, number> = { error: 0, warn: 1 }
+  return [...checks]
+    .filter(check => check.status === 'error' || check.status === 'warn')
+    .sort((a, b) => (rank[a.status] ?? 3) - (rank[b.status] ?? 3))
+})
+
+function healthBadgeClass(status: string): string {
+  if (status === 'ok') return 'badge--success'
+  if (status === 'warn') return 'badge--warn'
+  if (status === 'error') return 'badge--error'
+  return 'badge--muted'
+}
+
+const showAddSubagent = ref(false)
+const newSubagentName = ref('')
+const newSubagentDescription = ref('')
+const newSubagentPrompt = ref('')
+const addingSubagent = ref(false)
+const addSubagentResult = ref('')
+const addSubagentError = ref(false)
+const editingSubagent = ref<string | null>(null)
+const editSubagentDescription = ref('')
+const editSubagentContent = ref('')
+const savingSubagent = ref<string | null>(null)
+
+const showAddCommand = ref(false)
+const newCommandName = ref('')
+const newCommandDescription = ref('')
+const newCommandArgumentHint = ref('')
+const newCommandPrompt = ref('')
+const addingCommand = ref(false)
+const addCommandResult = ref('')
+const addCommandError = ref(false)
+const editingCommand = ref<string | null>(null)
+const editCommandDescription = ref('')
+const editCommandArgumentHint = ref('')
+const editCommandContent = ref('')
+const savingCommand = ref<string | null>(null)
+const assetLifecycleResult = ref('')
+const assetLifecycleError = ref(false)
+
+function resetSubagentForm(clearResult = true) {
+  newSubagentName.value = ''
+  newSubagentDescription.value = ''
+  newSubagentPrompt.value = ''
+  if (clearResult) {
+    addSubagentResult.value = ''
+    addSubagentError.value = false
+  }
+}
+
+function resetCommandForm(clearResult = true) {
+  newCommandName.value = ''
+  newCommandDescription.value = ''
+  newCommandArgumentHint.value = ''
+  newCommandPrompt.value = ''
+  if (clearResult) {
+    addCommandResult.value = ''
+    addCommandError.value = false
+  }
+}
+
+function bodyWithoutFrontmatter(content: string): string {
+  if (content.startsWith('---')) {
+    const parts = content.split('---')
+    if (parts.length >= 3) {
+      return parts.slice(2).join('---').trim()
+    }
+  }
+  return content.trim()
+}
+
+function toggleAddSubagent() {
+  showAddSubagent.value = !showAddSubagent.value
+  resetSubagentForm()
+}
+
+function toggleAddCommand() {
+  showAddCommand.value = !showAddCommand.value
+  resetCommandForm()
+}
+
+async function addSubagent() {
+  if (!newSubagentName.value.trim() || !newSubagentDescription.value.trim() || !newSubagentPrompt.value.trim()) return
+  addingSubagent.value = true
+  addSubagentResult.value = 'Creating subagent...'
+  addSubagentError.value = false
+  try {
+    const res = await api.post<CreatedAgentAssetResponse<SubagentAsset>>('/api/agent-assets/subagents', {
+      name: newSubagentName.value.trim(),
+      description: newSubagentDescription.value.trim(),
+      prompt: newSubagentPrompt.value.trim(),
+    })
+    addSubagentResult.value = `Created ${res.path}`
+    resetSubagentForm(false)
+    await fetchAgentAssets()
+    setTimeout(() => {
+      showAddSubagent.value = false
+      addSubagentResult.value = ''
+    }, 2000)
+  } catch (e: any) {
+    addSubagentError.value = true
+    addSubagentResult.value = `Error: ${e?.message || e}`
+  } finally {
+    addingSubagent.value = false
+  }
+}
+
+async function addCommand() {
+  if (!newCommandName.value.trim() || !newCommandDescription.value.trim() || !newCommandPrompt.value.trim()) return
+  addingCommand.value = true
+  addCommandResult.value = 'Creating command...'
+  addCommandError.value = false
+  try {
+    const res = await api.post<CreatedAgentAssetResponse<CommandAsset>>('/api/agent-assets/commands', {
+      name: newCommandName.value.trim(),
+      description: newCommandDescription.value.trim(),
+      argument_hint: newCommandArgumentHint.value.trim(),
+      prompt: newCommandPrompt.value.trim(),
+    })
+    addCommandResult.value = `Created ${res.path}`
+    resetCommandForm(false)
+    await Promise.all([fetchAgentAssets(), fetchCommands()])
+    setTimeout(() => {
+      showAddCommand.value = false
+      addCommandResult.value = ''
+    }, 2000)
+  } catch (e: any) {
+    addCommandError.value = true
+    addCommandResult.value = `Error: ${e?.message || e}`
+  } finally {
+    addingCommand.value = false
+  }
+}
+
+function startEditSubagent(agent: SubagentAsset) {
+  if (!agent.editable) return
+  editingSubagent.value = agent.name
+  editSubagentDescription.value = agent.description || ''
+  editSubagentContent.value = bodyWithoutFrontmatter(agent.content || '')
+  assetLifecycleResult.value = ''
+  assetLifecycleError.value = false
+}
+
+function cancelEditSubagent() {
+  editingSubagent.value = null
+  editSubagentDescription.value = ''
+  editSubagentContent.value = ''
+}
+
+async function saveSubagent(agent: SubagentAsset) {
+  if (!agent.editable || !editingSubagent.value) return
+  savingSubagent.value = agent.name
+  assetLifecycleResult.value = 'Saving subagent...'
+  assetLifecycleError.value = false
+  try {
+    await api.patch<CreatedAgentAssetResponse<SubagentAsset>>(`/api/agent-assets/subagents/${encodeURIComponent(agent.name)}`, {
+      description: editSubagentDescription.value.trim(),
+      content: editSubagentContent.value.trim(),
+    })
+    assetLifecycleResult.value = `Saved ${agent.name}. Restart or sync Claude Code sessions to pick it up.`
+    cancelEditSubagent()
+    await fetchAgentAssets()
+  } catch (e: any) {
+    assetLifecycleError.value = true
+    assetLifecycleResult.value = `Error: ${e?.message || e}`
+  } finally {
+    savingSubagent.value = null
+  }
+}
+
+async function deleteSubagent(agent: SubagentAsset) {
+  if (!agent.editable) return
+  if (!window.confirm(`Delete custom subagent "${agent.name}"?`)) return
+  savingSubagent.value = agent.name
+  assetLifecycleResult.value = 'Deleting subagent...'
+  assetLifecycleError.value = false
+  try {
+    await api.del(`/api/agent-assets/subagents/${encodeURIComponent(agent.name)}`)
+    assetLifecycleResult.value = `Deleted ${agent.name}. Restart or sync Claude Code sessions to pick it up.`
+    if (editingSubagent.value === agent.name) cancelEditSubagent()
+    await fetchAgentAssets()
+  } catch (e: any) {
+    assetLifecycleError.value = true
+    assetLifecycleResult.value = `Error: ${e?.message || e}`
+  } finally {
+    savingSubagent.value = null
+  }
+}
+
+function startEditCommand(command: CommandAsset) {
+  if (!command.editable) return
+  editingCommand.value = command.name
+  editCommandDescription.value = command.description || ''
+  editCommandArgumentHint.value = command.argument_hint || ''
+  editCommandContent.value = bodyWithoutFrontmatter(command.content || '')
+  assetLifecycleResult.value = ''
+  assetLifecycleError.value = false
+}
+
+function cancelEditCommand() {
+  editingCommand.value = null
+  editCommandDescription.value = ''
+  editCommandArgumentHint.value = ''
+  editCommandContent.value = ''
+}
+
+async function saveCommand(command: CommandAsset) {
+  if (!command.editable || !editingCommand.value) return
+  savingCommand.value = command.name
+  assetLifecycleResult.value = 'Saving command...'
+  assetLifecycleError.value = false
+  try {
+    await api.patch<CreatedAgentAssetResponse<CommandAsset>>(`/api/agent-assets/commands/${encodeURIComponent(command.name)}`, {
+      description: editCommandDescription.value.trim(),
+      argument_hint: editCommandArgumentHint.value.trim(),
+      content: editCommandContent.value.trim(),
+    })
+    assetLifecycleResult.value = `Saved /${command.name}. Restart or sync Claude Code sessions to pick it up.`
+    cancelEditCommand()
+    await Promise.all([fetchAgentAssets(), fetchCommands()])
+  } catch (e: any) {
+    assetLifecycleError.value = true
+    assetLifecycleResult.value = `Error: ${e?.message || e}`
+  } finally {
+    savingCommand.value = null
+  }
+}
+
+async function deleteCommand(command: CommandAsset) {
+  if (!command.editable) return
+  if (!window.confirm(`Delete custom command "/${command.name}"?`)) return
+  savingCommand.value = command.name
+  assetLifecycleResult.value = 'Deleting command...'
+  assetLifecycleError.value = false
+  try {
+    await api.del(`/api/agent-assets/commands/${encodeURIComponent(command.name)}`)
+    assetLifecycleResult.value = `Deleted /${command.name}. Restart or sync Claude Code sessions to pick it up.`
+    if (editingCommand.value === command.name) cancelEditCommand()
+    await Promise.all([fetchAgentAssets(), fetchCommands()])
+  } catch (e: any) {
+    assetLifecycleError.value = true
+    assetLifecycleResult.value = `Error: ${e?.message || e}`
+  } finally {
+    savingCommand.value = null
+  }
+}
 
 const showAddGithubSkill = ref(false)
 const githubSource = ref('')
@@ -1544,8 +2590,7 @@ type WorkspaceForm = {
   gws_profile: string
   model_bucket: string
   disallowed_tools: string
-  // 'default' = per-workspace default (personal off, else on); on/off are explicit.
-  claude_ai_mcps: 'default' | 'on' | 'off'
+  claude_ai_mcps: 'on' | 'off'
 }
 
 function defaultWorkspaceProvider(): WorkspaceProvider {
@@ -1561,7 +2606,7 @@ function blankWorkspaceForm(): WorkspaceForm {
     gws_profile: '',
     model_bucket: '',
     disallowed_tools: '',
-    claude_ai_mcps: 'default',
+    claude_ai_mcps: 'on',
   }
 }
 
@@ -1575,19 +2620,9 @@ function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
     gws_profile: ws.gws_profile || '',
     model_bucket: ws.model_bucket || '',
     disallowed_tools: Array.isArray(ws.disallowed_tools) ? ws.disallowed_tools.join(', ') : '',
-    claude_ai_mcps: mcps === true ? 'on' : mcps === false ? 'off' : 'default',
+    claude_ai_mcps: mcps === false ? 'off' : 'on',
   }
 }
-
-const claudeAiConnectors = computed(() => projectStore.workspaceClaudeAiConnectors)
-
-// Human-readable label for the claude.ai MCPs switch: lists the connectors the
-// toggle controls (or a generic fallback if the payload hasn't loaded).
-const claudeAiMcpsLabel = computed(() => {
-  const names = claudeAiConnectors.value
-  if (!names.length) return 'claude.ai connector MCPs'
-  return names.map((n) => n.replace('mcp__claude_ai_', '').replace(/_/g, ' ')).join(', ')
-})
 
 function claudeAiMcpsPayload(value: 'default' | 'on' | 'off'): boolean | null {
   if (value === 'on') return true
@@ -1600,6 +2635,60 @@ function workspaceCustomDefaultModel(model: string): boolean {
   return Boolean(value) && !modelTiers.some((tier) => tier.key === value)
 }
 
+function isCustomWorkspaceModel(model: string): boolean {
+  const value = model.trim()
+  if (!value) return false
+  if (modelTiers.some((tier) => tier.key === value)) return false
+  const options = routines.value?.model_options
+  if (!options) return true
+  const allKnown = [
+    ...(options.ollama_local || []),
+    ...(options.ollama_cloud || []),
+    ...(options.openrouter || []),
+  ]
+  return !allKnown.includes(value)
+}
+
+function workspaceModelSectionsForProvider(provider: WorkspaceProvider, currentModelValue: string): ModelSection[] {
+  const tiers: TierKey[] = ['haiku', 'sonnet', 'opus']
+  const modelBadges: Record<string, string[]> = {}
+  
+  for (const tier of tiers) {
+    const actualModel = tierModelForProvider(provider as AliasProviderKey, tier)
+    if (actualModel && actualModel !== tier) {
+      modelBadges[tier] = [actualModel]
+    }
+  }
+
+  const sections: ModelSection[] = [
+    {
+      key: provider,
+      label: `${aliasProviderLabel(provider as AliasProviderKey)} Tiers`,
+      models: tiers,
+      modelBadges,
+    }
+  ]
+
+  const v = (currentModelValue || '').trim()
+  if (v && !tiers.includes(v as TierKey)) {
+    sections.push({
+      key: 'custom',
+      label: 'Custom override',
+      models: [v],
+    })
+  }
+
+  return sections
+}
+
+const newWorkspaceModelSections = computed<ModelSection[]>(() => {
+  return workspaceModelSectionsForProvider(newWorkspaceForm.value.default_provider, newWorkspaceForm.value.default_model)
+})
+
+function workspaceModelSectionsForForm(form: WorkspaceForm): ModelSection[] {
+  return workspaceModelSectionsForProvider(form.default_provider, form.default_model)
+}
+
 const workspaceForms = ref<WorkspaceForm[]>([])
 const newWorkspaceForm = ref<WorkspaceForm>(blankWorkspaceForm())
 
@@ -1607,6 +2696,14 @@ const workspaceProviderOptions = computed(() =>
   projectStore.workspaceProviderOptions.length
     ? projectStore.workspaceProviderOptions
     : [{ value: 'claude' as WorkspaceProvider, label: 'Claude' }]
+)
+
+// Empty default_model inherits the app-wide default; name it in the picker
+// so "inherit" is not a mystery value.
+const workspaceInheritPlaceholder = computed(() =>
+  projectStore.workspaceAppDefaultModel
+    ? `Inherit default (${projectStore.workspaceAppDefaultModel})`
+    : 'Inherit default model'
 )
 
 function disallowedToolsPayload(raw: string): string[] | null {
@@ -1705,11 +2802,16 @@ async function removeWorkspace(name: string) {
 onMounted(async () => {
   loadAppearanceSettings()
   fetchSkills()
-  fetchLocalStatus()
+  fetchCommands()
+  fetchAgentAssets()
+  fetchLocalStatus().then(() => {
+    if (localStatus.value?.dev_mode) refreshDebugIssues()
+  })
   fetchRoutines()
   fetchAutomation()
   fetchPackageStatus()
   fetchProviderKeys()
+  fetchGwsIntegration()
   fetchWorkspacesList()
   pushSupportedFlag.value = pushSupported()
   if (isIos() && !isStandalone()) {
@@ -1797,13 +2899,18 @@ async function reloadWhenServerReady(timeoutMs = 120000) {
       const res = await fetch('/api/startup-status')
       if (res.ok) {
         const data = await res.json()
-        if (data.overall_ready && sawDown) {
+        if (!data.overall_ready) {
+          sawDown = true
+        } else if (sawDown) {
           location.reload()
           return
         }
+      } else {
+        // server returned non-ok status (e.g. 502 Bad Gateway during restart)
+        sawDown = true
       }
     } catch {
-      // server is down mid-restart
+      // server is down mid-restart (network error / connection refused)
       sawDown = true
     }
     if (Date.now() - start > timeoutMs) {
@@ -1845,6 +2952,93 @@ async function doDeploy(confirmWarnings = false) {
     }
   }
   actionPending.value = null
+}
+
+async function fixDeployErrorInChat() {
+  let errorMsg = ''
+  if (deploySteps.value.some(s => !s.ok)) {
+    errorMsg = deploySteps.value
+      .filter(s => !s.ok)
+      .map(s => `Step: ${s.step}\nOutput:\n${s.output || 'No output'}`)
+      .join('\n\n')
+  } else {
+    errorMsg = actionResult.value
+  }
+
+  const defaultWorkspace = projectStore.workspaceOptions[0]?.name || 'personal'
+
+  if (projectStore.activeWorkspace !== defaultWorkspace) {
+    await projectStore.switchWorkspace(defaultWorkspace)
+  }
+
+  let project = projectStore.projects.find(p => p.workspace === defaultWorkspace)
+  if (!project) {
+    try {
+      project = await projectStore.createProject('General')
+    } catch (e: any) {
+      alert(`Failed to create project: ${e?.message || e}`)
+      return
+    }
+  }
+
+  try {
+    const chat = await projectStore.createChat(project.project_id, 'Deploy Fix')
+    if (chat) {
+      const prompt = `I encountered an error during deployment:\n\n${errorMsg}\n\nPlease help me fix this.`
+      projectStore.sendMessage(chat.chat_id, prompt)
+      const { router } = await import('../router')
+      router.push(`/chat/${chat.chat_id}`)
+    }
+  } catch (e: any) {
+    alert(`Failed to start chat: ${e?.message || e}`)
+  }
+}
+
+// ── Debug: runtime issue log → self-fix chat (dev mode only) ─────────────
+const debugPending = ref(false)
+const debugIssues = ref<DebugIssueReport | null>(null)
+const debugSummary = computed(() => {
+  const r = debugIssues.value
+  if (!r) return ''
+  if (!r.has_issues) return 'No runtime issues logged.'
+  return `${r.failed_jobs.length} failed job run(s), ${r.error_log_lines} error-log line(s).`
+})
+
+async function refreshDebugIssues() {
+  try {
+    debugIssues.value = await api.get<DebugIssueReport>('/api/debug/issues')
+  } catch {
+    /* endpoint is 404 unless dev mode; leave null */
+  }
+}
+
+async function fixIssuesInChat() {
+  debugPending.value = true
+  try {
+    await refreshDebugIssues()
+    const report = debugIssues.value
+    if (!report?.has_issues) return
+
+    const defaultWorkspace = projectStore.workspaceOptions[0]?.name || 'personal'
+    if (projectStore.activeWorkspace !== defaultWorkspace) {
+      await projectStore.switchWorkspace(defaultWorkspace)
+    }
+    let project = projectStore.projects.find(p => p.workspace === defaultWorkspace)
+    if (!project) {
+      project = await projectStore.createProject('General')
+    }
+    const chat = await projectStore.createChat(project.project_id, 'Issue Triage')
+    if (chat) {
+      const prompt = `Here is the current runtime issue report from this Ciaobot instance (server error log tail plus failed background jobs):\n\n${report.report_text}\n\nPlease triage these issues: group them by root cause, note frequency and impact, investigate the top causes in the app and workspace, and apply low-risk fixes directly. Report anything riskier that needs my approval.`
+      projectStore.sendMessage(chat.chat_id, prompt)
+      const { router } = await import('../router')
+      router.push(`/chat/${chat.chat_id}`)
+    }
+  } catch (e: any) {
+    alert(`Failed to start issue-triage chat: ${e?.message || e}`)
+  } finally {
+    debugPending.value = false
+  }
 }
 
 async function doLogout() {
@@ -1945,11 +3139,14 @@ async function localResync() {
   localPending.value = null
 }
 
-// ── Package Update ────────────────────────────────────────────────────────
+// ── Package update ────────────────────────────────────────────────────────
 const packageStatus = ref<any>(null)
 const packageLoading = ref(false)
 const packageUpdating = ref(false)
 const packageResult = ref('')
+const showUpdatePanel = ref(false)
+const changelogLoading = ref(false)
+const changelog = ref<any>({ commits: [], compare_url: '', error: '' })
 
 async function fetchPackageStatus() {
   packageLoading.value = true
@@ -1962,20 +3159,33 @@ async function fetchPackageStatus() {
   }
 }
 
+async function openUpdatePanel() {
+  showUpdatePanel.value = true
+  changelogLoading.value = true
+  changelog.value = { commits: [], compare_url: '', error: '' }
+  try {
+    changelog.value = await api.get<any>('/api/package/changelog')
+  } catch (e: any) {
+    changelog.value = { commits: [], compare_url: '', error: e?.message || 'unknown error' }
+  } finally {
+    changelogLoading.value = false
+  }
+}
+
 async function doPackageUpdate() {
-  if (!confirm('Upgrade Ciaobot package and restart?')) return
   packageUpdating.value = true
-  packageResult.value = 'Upgrading Ciaobot package...'
+  packageResult.value = 'Updating Ciaobot and restarting...'
   try {
     const res = await api.post<any>('/api/package/update')
     if (res.ok) {
-      packageResult.value = 'Upgrade complete. Page will reload shortly...'
+      showUpdatePanel.value = false
+      packageResult.value = 'Update complete. Page will reload shortly...'
       setTimeout(() => location.reload(), 10000)
     } else {
-      packageResult.value = `Upgrade failed: ${res.error || 'unknown error'}`
+      packageResult.value = `Update failed: ${res.error || 'unknown error'}`
     }
   } catch (e: any) {
-    packageResult.value = `Upgrade failed: ${e.message || 'unknown error'}`
+    packageResult.value = `Update failed: ${e.message || 'unknown error'}`
   } finally {
     packageUpdating.value = false
     await fetchPackageStatus()
@@ -1990,6 +3200,7 @@ async function doPackageUpdate() {
   flex-direction: column;
   height: 100%;
   min-width: 0;
+  container-type: inline-size;
 }
 .pane-body {
   flex: 1;
@@ -2029,6 +3240,13 @@ async function doPackageUpdate() {
 .settings-card-header .hint {
   margin: var(--space-2) 0 0;
   max-width: 76ch;
+}
+.settings-card-header-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  flex: 0 0 auto;
 }
 .hint--compact {
   margin: 0;
@@ -2096,8 +3314,82 @@ async function doPackageUpdate() {
   color: var(--fg2);
   padding: 4px 0;
 }
+.action-result--error {
+  color: var(--error);
+}
+.action-result.--error {
+  color: var(--error);
+}
 .action-result--prewrap {
   white-space: pre-wrap;
+}
+
+.health-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.health-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.health-row--warn {
+  border-color: color-mix(in srgb, var(--warning) 42%, var(--border));
+}
+
+.health-row--error {
+  border-color: color-mix(in srgb, var(--error) 48%, var(--border));
+}
+
+.health-dot {
+  width: 9px;
+  height: 9px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--success);
+  flex: 0 0 auto;
+}
+
+.health-row--warn .health-dot {
+  background: var(--warning);
+}
+
+.health-row--error .health-dot {
+  background: var(--error);
+}
+
+.health-main {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.health-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.health-title {
+  font-weight: 700;
+  color: var(--fg);
+}
+
+.health-path {
+  min-width: 0;
+  color: var(--fg2);
+  font-family: var(--font-mono, var(--font));
+  font-size: var(--text-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .deploy-steps {
@@ -2109,7 +3401,7 @@ async function doPackageUpdate() {
 
 .deploy-step {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
   font-size: var(--text-sm);
   padding: 4px 8px;
@@ -2132,6 +3424,21 @@ async function doPackageUpdate() {
   white-space: nowrap;
 }
 
+.deploy-step-error-output {
+  margin: 6px 0 0 0;
+  padding: 8px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: var(--text-xs);
+  color: var(--fg);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
 .pause-badge {
   display: inline-block;
   padding: 2px 8px;
@@ -2148,7 +3455,8 @@ async function doPackageUpdate() {
   border-radius: 8px;
   overflow: hidden;
   border: 1px solid var(--border);
-  margin-top: 4px;
+  margin-top: 0;
+  width: 100%;
 }
 .toggle-btn {
   flex: 1;
@@ -2188,16 +3496,13 @@ async function doPackageUpdate() {
 }
 
 .routine-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(380px, 490px);
+  align-items: start;
+  gap: var(--space-4);
   padding: 14px 0;
   border-top: 1px solid var(--border);
   margin-top: 0;
-}
-.routine-row--top {
-  align-items: flex-start;
 }
 .routine-row--flush {
   border-top: 0;
@@ -2208,6 +3513,7 @@ async function doPackageUpdate() {
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+  max-width: 62ch;
 }
 .routine-name {
   font-size: var(--text-sm);
@@ -2246,22 +3552,11 @@ async function doPackageUpdate() {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.routine-value-stub {
-  flex-shrink: 0;
-  max-width: 46%;
-  padding: 6px 8px;
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  font-style: italic;
-  min-height: 32px;
-  display: flex;
-  align-items: center;
-}
 .routine-select,
 .routine-input {
-  flex-shrink: 0;
-  max-width: 46%;
-  min-width: min(360px, 46%);
+  max-width: none;
+  min-width: 0;
+  width: 100%;
   padding: 6px 8px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm, 4px);
@@ -2289,11 +3584,10 @@ async function doPackageUpdate() {
   overflow-wrap: anywhere;
 }
 .routine-model-controls {
-  flex: 0 1 46%;
-  max-width: 46%;
-  min-width: 300px;
+  width: 100%;
+  min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(96px, 0.7fr);
+  grid-template-columns: minmax(0, 1fr) 136px;
   gap: 8px;
   align-items: start;
 }
@@ -2324,6 +3618,10 @@ async function doPackageUpdate() {
   justify-content: space-between;
   gap: var(--space-4);
 }
+.setting-row--flush {
+  border-top: 0;
+  padding-top: 0;
+}
 .setting-row--stack {
   margin-top: 0;
 }
@@ -2341,6 +3639,11 @@ async function doPackageUpdate() {
   max-width: none;
   min-width: 0;
   width: 100%;
+}
+.settings-control {
+  width: min(100%, 430px);
+  min-width: 320px;
+  flex: 0 0 auto;
 }
 .settings-checkbox {
   width: 20px;
@@ -2361,20 +3664,19 @@ async function doPackageUpdate() {
   font-size: var(--text-xs);
 }
 .critique-model-picker {
-  flex: 0 1 46%;
-  max-width: 46%;
-  min-width: 280px;
+  width: 100%;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 .critique-picker-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 112px;
   align-items: center;
   gap: 8px;
 }
 .critique-picker-summary {
-  flex: 1;
   min-width: 0;
   min-height: 32px;
   display: flex;
@@ -2385,6 +3687,10 @@ async function doPackageUpdate() {
   background: var(--bg);
   color: var(--fg2);
   font-size: var(--text-sm);
+}
+.critique-picker-header .btn-small {
+  width: 100%;
+  min-height: 32px;
 }
 .critique-chip-list {
   display: flex;
@@ -2471,7 +3777,184 @@ async function doPackageUpdate() {
 .tier-provider-note {
   margin-top: var(--space-2);
 }
-@media (max-width: 520px) {
+.integration-warning {
+  margin-top: var(--space-3);
+}
+.gws-profile-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+.gws-profile-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+}
+.gws-profile-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.gws-profile-heading {
+  min-width: 0;
+}
+.gws-profile-title {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+.gws-profile-purpose {
+  margin: 0;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  line-height: 1.35;
+}
+.gws-example-row,
+.gws-workspace-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+.gws-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  line-height: 1.35;
+}
+.gws-chip--workspace {
+  color: var(--fg);
+}
+.gws-profile-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+  color: var(--fg2);
+  font-size: var(--text-xs);
+}
+.gws-profile-meta > div {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.gws-profile-meta .dev-label {
+  min-width: 0;
+}
+.gws-profile-meta code,
+.gws-command {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.gws-command {
+  display: inline-block;
+}
+.gws-boundary-note {
+  margin-top: var(--space-3);
+}
+.status-text--ok {
+  color: var(--success);
+}
+.status-text--warn {
+  color: var(--warning, #b7791f);
+}
+.gws-profile-email {
+  margin: 0;
+  color: var(--accent);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+.gws-profile-actions {
+  margin-top: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.gws-action-hint {
+  margin: 0;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+}
+.file-upload-btn {
+  display: inline-block;
+  text-align: center;
+  cursor: pointer;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  font-size: var(--text-xs);
+  color: var(--fg);
+  font-weight: 500;
+  width: fit-content;
+}
+.file-upload-btn:hover {
+  background: var(--bg2);
+  border-color: var(--fg3);
+}
+.gws-btn-group {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+.gws-auth-flow-box {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.gws-flow-step {
+  margin: 0;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+}
+.gws-auth-link {
+  color: var(--accent);
+  text-decoration: underline;
+  font-weight: 500;
+}
+.gws-auth-link:hover {
+  color: var(--accent2);
+}
+.gws-auth-input {
+  font-size: var(--text-xs) !important;
+  padding: 4px 8px !important;
+}
+.gws-flow-buttons {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+.btn-outline-danger {
+  background: transparent;
+  border: 1px solid var(--error);
+  color: var(--error);
+}
+.btn-outline-danger:hover {
+  background: color-mix(in srgb, var(--error) 10%, transparent);
+}
+@container (max-width: 720px) {
   .pane-body {
     padding: var(--space-3);
   }
@@ -2481,16 +3964,25 @@ async function doPackageUpdate() {
     flex-direction: column;
     align-items: stretch;
   }
+  .settings-card-header-actions {
+    justify-content: stretch;
+  }
+  .settings-card-header-actions .btn-small {
+    flex: 1 1 auto;
+  }
   .settings-actions > button {
     flex: 1 1 auto;
   }
+  .settings-control {
+    min-width: 0;
+    width: 100%;
+  }
   .routine-row {
-    flex-direction: column;
-    align-items: stretch;
+    grid-template-columns: 1fr;
+    gap: var(--space-3);
   }
   .routine-select,
-  .routine-input,
-  .routine-value-stub {
+  .routine-input {
     max-width: none;
     min-height: 44px;
   }
@@ -2507,6 +3999,13 @@ async function doPackageUpdate() {
     max-width: none;
     min-width: 0;
     width: 100%;
+  }
+  .gws-profile-list {
+    grid-template-columns: 1fr;
+  }
+  .gws-profile-header {
+    flex-direction: column;
+    align-items: stretch;
   }
   .critique-picker-summary {
     min-height: 44px;
@@ -2538,27 +4037,102 @@ async function doPackageUpdate() {
 .skill-list--section {
   margin-bottom: var(--space-4);
 }
-.settings-toolbar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: var(--space-3);
-  margin-bottom: var(--space-3);
-}
-.settings-toolbar-actions {
-  display: flex;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
 .settings-form-panel {
   display: flex;
   flex-direction: column;
   align-items: stretch;
   gap: var(--space-2);
-  margin-bottom: var(--space-4);
-  padding-bottom: var(--space-4);
-  border-bottom: 1px solid var(--border);
+  margin: var(--space-3) 0 var(--space-4);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+}
+.changelog-list {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  max-height: 260px;
+  overflow-y: auto;
+}
+.changelog-list li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  line-height: 1.4;
+}
+.changelog-sha {
+  flex: 0 0 auto;
+  font-size: 0.85em;
+  opacity: 0.7;
+}
+.changelog-subject {
+  min-width: 0;
+  word-break: break-word;
+}
+.asset-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: var(--space-2);
+  flex-wrap: wrap;
+}
+.asset-actions .btn-small {
+  flex: 0 0 auto;
+}
+.asset-edit-panel {
+  margin-bottom: 0;
+}
+.routine-textarea {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  padding: 9px 10px;
+}
+.routine-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.inline-path-button {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.inline-path-button:hover {
+  opacity: 0.85;
+}
+.asset-code-preview {
+  max-height: 360px;
+  margin: var(--space-2) 0 0;
+  padding: var(--space-3);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--fg);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+  white-space: pre-wrap;
 }
 .subsection-title--spaced {
   margin-bottom: var(--space-2);
@@ -2617,6 +4191,62 @@ async function doPackageUpdate() {
   gap: 4px;
   min-width: 0;
 }
+.settings-label-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.field-info {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+.field-info summary {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg);
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  cursor: pointer;
+  line-height: 1;
+  user-select: none;
+}
+.field-info summary::-webkit-details-marker {
+  display: none;
+}
+.field-info[open] summary,
+.field-info summary:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+}
+.field-info-panel {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 6px);
+  left: 0;
+  width: min(380px, calc(100vw - 48px));
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  box-shadow: 0 12px 30px color-mix(in srgb, #000 24%, transparent);
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+}
+.field-info-panel p {
+  margin: 0;
+}
+.field-info-panel p + p {
+  margin-top: var(--space-2);
+}
 .settings-field--wide {
   grid-column: 1 / -1;
 }
@@ -2640,17 +4270,7 @@ async function doPackageUpdate() {
 .settings-advanced[open] summary {
   margin-bottom: var(--space-2);
 }
-@media (max-width: 720px) {
-  .settings-toolbar {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .settings-toolbar-actions {
-    justify-content: stretch;
-  }
-  .settings-toolbar-actions .btn-small {
-    flex: 1 1 auto;
-  }
+@container (max-width: 720px) {
   .voice-warning {
     align-items: stretch;
     flex-direction: column;
@@ -2680,6 +4300,7 @@ async function doPackageUpdate() {
   cursor: pointer;
 }
 .skill-main {
+  flex: 1 1 auto;
   min-width: 0;
 }
 .skill-title-row {
@@ -2708,6 +4329,11 @@ async function doPackageUpdate() {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+.skill-row.expanded .skill-description {
+  display: block;
+  -webkit-line-clamp: unset;
+  overflow: visible;
 }
 .skill-source {
   color: var(--fg2);
@@ -2770,6 +4396,40 @@ async function doPackageUpdate() {
   opacity: 0.85;
 }
 
+.command-title-row {
+  flex-wrap: wrap;
+}
+.command-name {
+  color: var(--fg);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  white-space: nowrap;
+}
+.command-args {
+  min-width: 0;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+.skill-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+}
+.command-source {
+  flex: 0 0 auto;
+  text-transform: capitalize;
+}
+.command-path {
+  min-width: 0;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 
 .cost-grid {
   display: flex;
@@ -2807,58 +4467,6 @@ async function doPackageUpdate() {
   color: var(--fg2);
   text-transform: uppercase;
   letter-spacing: 0.04em;
-}
-
-/* Subscription rate-limit buckets */
-.limits-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.limit-row {
-  display: grid;
-  grid-template-columns: 120px 1fr auto;
-  gap: 10px;
-  align-items: center;
-  font-size: var(--text-sm);
-}
-.limit-label {
-  color: var(--fg);
-  font-weight: 500;
-}
-.limit-bar-wrap {
-  height: 8px;
-  background: var(--border);
-  border-radius: 4px;
-  overflow: hidden;
-}
-.limit-bar {
-  height: 100%;
-  background: #4caf50;
-  transition: width 0.3s ease;
-}
-.limit-row.status-allowed_warning .limit-bar {
-  background: #f39c12;
-}
-.limit-row.status-rejected .limit-bar {
-  background: #e74c3c;
-}
-.limit-row.unreported,
-.limit-row.nopct {
-  opacity: 0.55;
-}
-.limit-row.unreported .limit-bar-wrap,
-.limit-row.nopct .limit-bar-wrap {
-  background: var(--border);
-  opacity: 0.5;
-}
-.limit-meta {
-  color: var(--fg2);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-@media (max-width: 520px) {
-  .limit-row { grid-template-columns: 80px 1fr auto; }
 }
 
 /* Automation tab */
@@ -2964,20 +4572,19 @@ async function doPackageUpdate() {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  margin-top: 4px;
+  margin-top: 0;
+  width: 100%;
+}
+.font-scale-row .btn-small {
+  flex: 1 1 0;
+  min-width: 0;
 }
 .font-scale-display {
   font-size: var(--text-base);
   font-weight: 600;
   color: var(--fg);
-  min-width: 48px;
+  flex: 0 0 56px;
   text-align: center;
-}
-.ws-field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  width: 100%;
 }
 .ws-label {
   font-size: var(--text-sm);

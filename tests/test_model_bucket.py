@@ -23,6 +23,7 @@ OLLAMA = OllamaSettings(
     models=("minimax-m3:cloud", "kimi-k2.7-code:cloud"),
     base_url="https://ollama.com",
     api_key="sk-cloud",
+    opus_model="minimax-m3:cloud",
 )
 
 
@@ -317,3 +318,41 @@ def test_invalid_bucket_rejected(tmp_path):
     chat = pcm.create_chat(project.project_id)
     with pytest.raises(ValueError, match="bucket"):
         pcm.update_chat(chat.chat_id, model_bucket="corporate")
+
+
+def test_configured_workspace_provider_preselects_ollama_bucket_and_tier(tmp_path):
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        ollama=OLLAMA,
+        workspaces={
+            "local": WorkspaceConfig(
+                name="local",
+                vault_root="vaults/local",
+                default_provider="ollama",
+                default_model="opus",
+                gws_profile="personal",
+            )
+        },
+    )
+    state = StateStore(config.state_path, tmp_path, config.media_root)
+    transcripts = TranscriptStore(runtime, tmp_path / "transcripts")
+    pcm = ProjectChatManager(
+        config,
+        state_store=state,
+        transcript_store=transcripts,
+        path=runtime / "web_projects.json",
+    )
+    project = pcm.create_project("local", workspace="local")
+
+    chat = pcm.create_chat(project.project_id)
+
+    assert chat.provider == "claude"
+    assert chat.model_bucket == "ollama"
+    assert chat.model == "minimax-m3:cloud"
+    assert pcm._runtime_model_for_chat(chat) == "minimax-m3:cloud"
+

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+"${CIAO_PYTHON:-python3}" -m ciao.release "$@"

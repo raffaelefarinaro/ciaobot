@@ -3,7 +3,7 @@
 You are working on the Ciaobot app repository.
 
 Before changing code:
-- Read `README.md` for architecture and development workflow.
+- Read `docs/ARCHITECTURE.md` for the system design and `docs/DEVELOPMENT.md` for the dev workflow.
 - Read `web/README.md` before changing the PWA.
 - Keep changes scoped and covered by tests.
 - Do not commit secrets, private workspace data, or operator credentials.

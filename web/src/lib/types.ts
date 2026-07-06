@@ -23,6 +23,8 @@ export interface WorkspaceInfo {
 export interface WorkspacesResponse {
   workspaces: WorkspaceInfo[]
   active: WorkspaceName | null
+  // App-wide fallback model used when a workspace's default_model is empty.
+  app_default_model?: string
   provider_options?: WorkspaceProviderOption[]
   // claude.ai connector MCP names the per-workspace toggle controls.
   claude_ai_connectors?: string[]
@@ -155,6 +157,7 @@ export type EventsWsMessage =
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean }
   | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string }
+  | { type: 'chat_subagents_ready'; chat_id: string; project_id: string; remaining: number }
   | { type: 'chat_read'; chat_id: string; last_read_at: string }
   | { type: 'chat_title'; chat_id: string; title: string; status?: 'pending' | 'ready' }
   | { type: 'chat_moved'; chat_id: string; project_id: string; old_project_id: string }
@@ -166,9 +169,14 @@ export type EventsWsMessage =
 
 export interface InAppToast {
   id: number
+  // Chat this toast points at; '' for global error toasts not tied to a chat.
   chat_id: string
   title: string
   body: string
+  // 'error' toasts persist until dismissed and show a "Fix" action.
+  variant?: 'info' | 'error'
+  // Raw error log used to seed a fix chat when variant === 'error'.
+  errorText?: string
 }
 
 // A pending approval surfaced to the user by Auto mode's classifier. One
@@ -315,6 +323,32 @@ export interface ProviderConfigSettings {
   env_path: string
 }
 
+export interface GwsIntegrationProfile {
+  name: string
+  label: string
+  purpose: string
+  examples: string[]
+  configured: boolean
+  credentials_present: boolean
+  client_secret_present: boolean
+  config_dir: string
+  workspaces: string[]
+  setup_command: string
+  headless_auth_command: string
+  wrapper_available: boolean
+  helper_available: boolean
+  email: string
+}
+
+export interface GwsIntegrationSettings {
+  installed: boolean
+  binary_path: string
+  default_profile: string
+  wrapper_path: string
+  headless_helper_path: string
+  profiles: GwsIntegrationProfile[]
+}
+
 export interface AdminStatus {
   cost: number
   branch: string
@@ -338,6 +372,15 @@ export interface LocalStatus {
 export interface DeployResult {
   ok: boolean
   steps: { step: string; ok: boolean; output?: string }[]
+}
+
+export interface DebugIssueReport {
+  error_log: string
+  error_log_lines: number
+  error_log_path: string
+  failed_jobs: { job: string; label: string; ended_at: string; error: string }[]
+  has_issues: boolean
+  report_text: string
 }
 
 // ── CLI Stats ───────────────────────────────────────────────────────────
@@ -378,6 +421,7 @@ export interface SkillInventoryItem {
   source: string
   source_type: string
   description: string
+  content?: string
   installed_targets: string[]
 }
 
@@ -387,6 +431,88 @@ export interface SkillInventory {
     github: number
   }
   skills: SkillInventoryItem[]
+}
+
+// ── Settings command inventory ───────────────────────────────────────────
+
+export interface SlashCommand {
+  name: string
+  description: string
+  argument_hint: string
+  source: 'project' | 'user'
+  path: string
+}
+
+export interface CommandsResponse {
+  commands: SlashCommand[]
+}
+
+// ── Settings agent assets ────────────────────────────────────────────────
+
+export interface PromptAsset {
+  id: string
+  title: string
+  description: string
+  source: string
+  path: string
+  editable: boolean
+  content: string
+  scope?: string
+  parent_id?: string
+  level?: number
+  status?: 'ok' | 'missing' | 'blocked' | string
+  imports?: string[]
+}
+
+export interface SubagentAsset {
+  name: string
+  description: string
+  source: string
+  scope: string
+  path: string
+  editable: boolean
+  vault_path: string
+  content: string
+}
+
+export interface CommandAsset {
+  name: string
+  description: string
+  argument_hint: string
+  source: string
+  scope: string
+  path: string
+  editable: boolean
+  vault_path: string
+  content: string
+}
+
+export interface AgentAssetsResponse {
+  instructions: PromptAsset[]
+  subagents: SubagentAsset[]
+  commands: CommandAsset[]
+  health?: WorkspaceHealthResponse
+}
+
+export interface CreatedAgentAssetResponse<T> {
+  ok: boolean
+  asset: T
+  path: string
+  vault_path: string
+}
+
+export interface WorkspaceHealthCheck {
+  id: string
+  title: string
+  status: 'ok' | 'warn' | 'error' | string
+  detail: string
+  path: string
+  action: string
+}
+
+export interface WorkspaceHealthResponse {
+  status: 'ok' | 'warn' | 'error' | string
+  checks: WorkspaceHealthCheck[]
 }
 
 // ── Automation status (Settings → Automation) ──────────────────────────────

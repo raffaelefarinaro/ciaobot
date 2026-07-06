@@ -121,6 +121,46 @@ describe('queued message replay handling', () => {
   })
 })
 
+describe('latest status sync', () => {
+  test('hydrates settled active chat history and clears stale streaming state', async () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    const store = useProjectStore()
+    const chatId = 'c-sync'
+    store.chats = [
+      { chat_id: chatId, project_id: 'p1', title: 'Old title', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeChatId = chatId
+    store.messages[chatId] = [
+      { role: 'user', content: 'status?', timestamp: '', turn_index: 0 },
+    ]
+    store.streaming[chatId] = true
+    store.streamingText[chatId] = 'partial'
+
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/chats') {
+        return Promise.resolve([
+          { chat_id: chatId, project_id: 'p1', title: 'Fresh title', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false, last_activity_at: '2026-07-06T10:00:00Z' },
+        ])
+      }
+      if (path === `/api/chats/${chatId}/messages`) {
+        return Promise.resolve([
+          { role: 'user', content: 'status?', sent_at: '2026-07-06T09:59:00Z', turn_index: 0 },
+          { role: 'assistant', content: 'done', sent_at: '2026-07-06T10:00:00Z' },
+        ])
+      }
+      if (path === `/api/chats/${chatId}/subagents`) return Promise.resolve([])
+      return Promise.resolve([])
+    })
+
+    await store.syncLatest()
+
+    expect(store.chats.find(c => c.chat_id === chatId)?.title).toBe('Fresh title')
+    expect(store.messages[chatId].at(-1)?.content).toBe('done')
+    expect(store.streaming[chatId]).toBe(false)
+    expect(store.streamingText[chatId]).toBe('')
+  })
+})
+
 describe('workspace and chat transitions', () => {
   beforeEach(() => {
     routerPush.mockReset()
@@ -234,5 +274,53 @@ describe('workspace and chat transitions', () => {
     expect(store.activeChatId).toBe('c2')
     expect(routerPush).toHaveBeenCalledWith('/chat/c2')
     expect(apiPost).toHaveBeenCalledWith('/api/chats/c2/read', {})
+  })
+
+  test('fixError opens a chat in the active workspace General project seeded with the error log', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'pg', name: 'General', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: 'general', is_auto: true },
+      { project_id: 'pother', name: 'General', workspace: 'work', context: '', created_at: '', order: 0, vault_folder: 'general', is_auto: true },
+    ]
+    store.activeWorkspace = 'personal'
+    apiGet.mockResolvedValue([]) // loadMessages / loadSubagents
+    apiPost.mockResolvedValue({
+      chat_id: 'c-fix', project_id: 'pg', title: 'Fix error', model: '',
+      provider: 'claude', mode: '', session_id: '', created_at: '', archived: false,
+    })
+
+    vi.useFakeTimers()
+    try {
+      const chat = await store.fixError({ errorText: 'Error: boom', context: 'I clicked send' })
+      expect(chat?.chat_id).toBe('c-fix')
+      // The socket opens async (switchChat awaits a dynamic import), so sendMessage
+      // defers the first send by 500ms — advance timers to flush it.
+      await vi.advanceTimersByTimeAsync(600)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(apiPost).toHaveBeenCalledWith('/api/projects/pg/chats', { title: 'Fix error' })
+
+    // The fix prompt (with the error log + gh-issue fallback) was sent over the WS.
+    const sent = fakeSockets.flatMap(s => (s.send as any).mock.calls.map((c: any[]) => String(c[0])))
+    const fixMsg = sent.find(m => m.includes('Error: boom'))
+    expect(fixMsg).toBeTruthy()
+    expect(fixMsg).toContain('gh issue create --repo raffaelefarinaro/ciaobot')
+    expect(fixMsg).toContain('I clicked send')
+  })
+
+  test('fixError surfaces an error toast when the workspace has no General project', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj 1', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.activeWorkspace = 'personal'
+
+    const chat = await store.fixError({ errorText: 'Error: boom' })
+
+    expect(chat).toBeUndefined()
+    expect(apiPost).not.toHaveBeenCalled()
+    expect(store.toasts.some(t => t.variant === 'error')).toBe(true)
   })
 })

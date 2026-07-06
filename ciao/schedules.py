@@ -9,6 +9,7 @@ import logging
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
+from importlib import resources
 from pathlib import Path
 from typing import Awaitable, Callable
 from zoneinfo import ZoneInfo
@@ -26,6 +27,11 @@ def _now_utc() -> datetime:
 WEEKDAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 ARCHIVE_POLICIES = {"manual", "auto"}
+SYSTEM_STATE_FIELDS = {
+    "enabled",
+    "last_triggered_on",
+    "last_dispatched_at",
+}
 
 
 def normalize_archive_policy(value: str | None) -> str:
@@ -241,32 +247,23 @@ class ScheduleEntry:
 
 
 class ScheduleStore:
-    """JSON-backed storage for schedules."""
+    """JSON-backed storage for user schedules plus packaged system schedules."""
 
-    def __init__(self, runtime_root: Path) -> None:
+    def __init__(self, runtime_root: Path, *, include_system: bool = False) -> None:
         self._path = runtime_root / "schedules.json"
+        self._system_state_path = runtime_root / "system_schedules_state.json"
+        self._include_system = include_system
 
     def list(self, *, chat_id: int | None = None) -> list[ScheduleEntry]:
-        raw_items = self._load().get("schedules", [])
+        raw_items = self._runtime_items()
         items: list[ScheduleEntry] = []
         for item in raw_items:
+            if item.get("scope") == "system":
+                continue
             # Strip unknown keys that ScheduleEntry doesn't accept
-            known = {f.name for f in ScheduleEntry.__dataclass_fields__.values()}
-            filtered = {k: v for k, v in item.items() if k in known}
-            entry = ScheduleEntry(**filtered)
-            # Backward compat: infer frequency for entries created before this field existed
-            if "frequency" not in item:
-                entry.frequency = "daily" if not entry.days_of_week else "weekly"
-            try:
-                entry.archive_policy = normalize_archive_policy(entry.archive_policy)
-            except ValueError:
-                logger.warning(
-                    "Schedule %s has unknown archive_policy '%s'; defaulting to manual",
-                    entry.schedule_id,
-                    entry.archive_policy,
-                )
-                entry.archive_policy = "manual"
-            items.append(entry)
+            items.append(self._entry_from_item(item))
+        if self._include_system:
+            items.extend(self._system_entries())
         items.sort(key=lambda item: (item.daily_time_utc, item.created_at))
         if chat_id is not None:
             items = [item for item in items if item.chat_id == chat_id]
@@ -324,6 +321,9 @@ class ScheduleStore:
         return entry
 
     def replace(self, entry: ScheduleEntry) -> None:
+        if entry.scope == "system":
+            self._replace_system_state(entry)
+            return
         data = self._load()
         items = data.setdefault("schedules", [])
         for index, item in enumerate(items):
@@ -335,6 +335,9 @@ class ScheduleStore:
         self._save(data)
 
     def delete(self, schedule_id: str) -> bool:
+        entry = self.get(schedule_id)
+        if entry is not None and entry.scope == "system":
+            return False
         data = self._load()
         before = len(data.setdefault("schedules", []))
         data["schedules"] = [item for item in data["schedules"] if item.get("schedule_id") != schedule_id]
@@ -354,6 +357,81 @@ class ScheduleStore:
     def _save(self, payload: dict) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    def _runtime_items(self) -> list[dict]:
+        return [item for item in self._load().get("schedules", []) if isinstance(item, dict)]
+
+    def _entry_from_item(self, item: dict) -> ScheduleEntry:
+        # Strip unknown keys that ScheduleEntry doesn't accept.
+        known = {f.name for f in ScheduleEntry.__dataclass_fields__.values()}
+        filtered = {k: v for k, v in item.items() if k in known}
+        entry = ScheduleEntry(**filtered)
+        # Backward compat: infer frequency for entries created before this field existed.
+        if "frequency" not in item:
+            entry.frequency = "daily" if not entry.days_of_week else "weekly"
+        try:
+            entry.archive_policy = normalize_archive_policy(entry.archive_policy)
+        except ValueError:
+            logger.warning(
+                "Schedule %s has unknown archive_policy '%s'; defaulting to manual",
+                entry.schedule_id,
+                entry.archive_policy,
+            )
+            entry.archive_policy = "manual"
+        return entry
+
+    def _system_entries(self) -> list[ScheduleEntry]:
+        state = self._load_system_state()
+        entries: list[ScheduleEntry] = []
+        for item in self._load_system_definitions():
+            item = {"chat_id": 0, "created_at": "1970-01-01T00:00:00Z", **item}
+            entry = self._entry_from_item(item)
+            overlay = state.get(entry.schedule_id, {})
+            for key, value in overlay.items():
+                if key in SYSTEM_STATE_FIELDS and hasattr(entry, key):
+                    setattr(entry, key, value)
+            entry.scope = "system"
+            entry.editable = False
+            entry.removable = False
+            entries.append(entry)
+        return entries
+
+    def _load_system_definitions(self) -> list[dict]:
+        try:
+            raw = resources.files("ciao.stock").joinpath("schedules.json").read_text(encoding="utf-8")
+            data = json.loads(raw)
+        except (FileNotFoundError, json.JSONDecodeError, ModuleNotFoundError):
+            logger.exception("Failed to load stock system schedules")
+            return []
+        return [
+            item for item in data.get("schedules", [])
+            if isinstance(item, dict) and item.get("scope") == "system"
+        ]
+
+    def _load_system_state(self) -> dict[str, dict]:
+        if not self._system_state_path.exists():
+            return {}
+        try:
+            data = json.loads(self._system_state_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+        raw = data.get("schedules", {})
+        return raw if isinstance(raw, dict) else {}
+
+    def _save_system_state(self, payload: dict[str, dict]) -> None:
+        self._system_state_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {"schedules": payload}
+        self._system_state_path.write_text(
+            json.dumps(data, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+
+    def _replace_system_state(self, entry: ScheduleEntry) -> None:
+        state = self._load_system_state()
+        current = state.setdefault(entry.schedule_id, {})
+        for field in SYSTEM_STATE_FIELDS:
+            current[field] = getattr(entry, field)
+        self._save_system_state(state)
 
     def _serialize_entry(self, entry: ScheduleEntry) -> dict:
         payload = asdict(entry)

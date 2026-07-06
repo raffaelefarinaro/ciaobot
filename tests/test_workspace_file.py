@@ -26,6 +26,9 @@ class _FakeConfig:
     # project-linked repos). Defaults to empty so existing tests keep the
     # original "single workspace root" semantics.
     extra_workspace_roots: list[Path] = None  # type: ignore[assignment]
+    # When True, the viewer drops the root sandbox and serves any
+    # allowlisted-extension file on the system (opt-in via env).
+    unrestricted_file_viewer: bool = False
 
     def __post_init__(self) -> None:
         if self.extra_workspace_roots is None:
@@ -33,12 +36,15 @@ class _FakeConfig:
 
 
 def _make_client(
-    workspace_root: Path, extra_workspace_roots: list[Path] | None = None
+    workspace_root: Path,
+    extra_workspace_roots: list[Path] | None = None,
+    unrestricted_file_viewer: bool = False,
 ) -> TestClient:
     app = Starlette(routes=[Route("/api/workspace-file", workspace_file, methods=["GET"])])
     app.state.config = _FakeConfig(
         workspace_root=workspace_root,
         extra_workspace_roots=list(extra_workspace_roots or []),
+        unrestricted_file_viewer=unrestricted_file_viewer,
     )
     return TestClient(app)
 
@@ -307,3 +313,57 @@ def test_fuzzy_match_multiple_options_sorts_by_closeness(workspace: Path) -> Non
     assert resp.status_code == 200
     # "dir1/testfile.md" is sorted first alphabetically/by path
     assert resp.text == "first option"
+
+
+def test_unrestricted_serves_file_outside_workspace(workspace: Path, tmp_path: Path) -> None:
+    """In unrestricted mode, an absolute path outside the workspace (and any
+    extra root) still serves, as long as the extension is allowlisted."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    outside = elsewhere / "notes.md"
+    outside.write_text("from outside", encoding="utf-8")
+
+    client = _make_client(workspace, unrestricted_file_viewer=True)
+    resp = client.get("/api/workspace-file", params={"path": str(outside)})
+    assert resp.status_code == 200
+    assert resp.text == "from outside"
+
+
+def test_unrestricted_relative_path_still_anchors_to_workspace(workspace: Path, tmp_path: Path) -> None:
+    """Relative paths still anchor to the workspace root in unrestricted mode;
+    the catch-all ``/`` only admits absolute paths. A relative name that
+    doesn't exist anywhere in the workspace (so fuzzy can't rescue it) must
+    NOT resolve to a same-named file living outside the workspace."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "unique_outside.md").write_text("not anchored here", encoding="utf-8")
+
+    client = _make_client(workspace, unrestricted_file_viewer=True)
+    resp = client.get("/api/workspace-file", params={"path": "unique_outside.md"})
+    assert resp.status_code == 404
+
+
+def test_unrestricted_still_enforces_extension_allowlist(workspace: Path, tmp_path: Path) -> None:
+    """Unrestricted mode loosens the root check only. The extension allowlist
+    still blocks .env / secret files regardless of where they live."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    secret = elsewhere / ".env"
+    secret.write_text("API_KEY=super-secret", encoding="utf-8")
+
+    client = _make_client(workspace, unrestricted_file_viewer=True)
+    resp = client.get("/api/workspace-file", params={"path": str(secret)})
+    assert resp.status_code in (404, 415)
+    assert "super-secret" not in resp.text
+
+
+def test_unrestricted_disabled_by_default(workspace: Path, tmp_path: Path) -> None:
+    """Without the opt-in, a path outside the workspace still 403s."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    outside = elsewhere / "notes.md"
+    outside.write_text("from outside", encoding="utf-8")
+
+    client = _make_client(workspace)
+    resp = client.get("/api/workspace-file", params={"path": str(outside)})
+    assert resp.status_code == 403

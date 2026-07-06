@@ -61,9 +61,11 @@ def test_propose_handles_empty_input() -> None:
 def test_append_proposals_writes_bullet_list(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
-    out = mp.append_proposals(proposals, vault, source_path=Path("/tmp/chat.md"))
+    # Without a source_path with known frontmatter, defaults to "personal" workspace.
+    out = mp.append_proposals(proposals, vault, source_path=None)
     assert out is not None
     assert out.exists()
+    assert out == vault / "personal" / "Workspace" / "Memory-Proposals.md"
     text = out.read_text(encoding="utf-8")
     assert "Memory Proposals" in text
     # Each proposal lands as one bullet line.
@@ -74,7 +76,22 @@ def test_append_proposals_writes_bullet_list(tmp_path: Path) -> None:
 def test_append_proposals_skips_empty(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     assert mp.append_proposals([], vault) is None
-    assert not (vault / "Workspace" / "Memory-Proposals.md").exists()
+    assert not (vault / "personal" / "Workspace" / "Memory-Proposals.md").exists()
+
+
+def test_append_proposals_routes_by_workspace(tmp_path: Path) -> None:
+    """Proposals from a 'work' chat archive go to vault/work/Workspace/Memory-Proposals.md."""
+    vault = tmp_path / "vault"
+    (vault / "work").mkdir(parents=True)
+    archive = tmp_path / "chat.md"
+    archive.write_text(
+        "---\ntype: transcript\ncontext: work\n---\n# chat\n\n## Session insights\n" + _SAMPLE_INSIGHTS,
+        encoding="utf-8",
+    )
+    proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
+    out = mp.append_proposals(proposals, vault, source_path=archive)
+    assert out is not None
+    assert out == vault / "work" / "Workspace" / "Memory-Proposals.md"
 
 
 def test_proposals_from_archive_extracts_insights_section(tmp_path: Path) -> None:

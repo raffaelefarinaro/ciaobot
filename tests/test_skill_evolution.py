@@ -425,3 +425,81 @@ def test_run_evolution_pass_prunes_old_trajectories(
     # The ancient trajectory should be gone
     remaining = list(tb.list_trajectories())
     assert remaining == []
+
+
+# ── skills-root resolution (post-2026-06-30 split) ─────────────────────
+
+
+def test_resolve_skills_roots_uses_ciao_workspace_when_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CIAO_WORKSPACE should put the ciao workspace's skill directories
+    first, ahead of the ciaobot in-tree fallbacks."""
+    ciao_root = tmp_path / "ciao"
+    (ciao_root / "skills").mkdir(parents=True)
+    (ciao_root / ".claude" / "skills").mkdir(parents=True)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(ciao_root))
+    roots = se._resolve_skills_roots()
+    assert roots[0] == ciao_root / "skills"
+    assert roots[1] == ciao_root / ".claude" / "skills"
+    # ciaobot fallbacks still included at the tail
+    assert roots[-2:] == se._CIAOBOT_SKILLS_ROOTS
+
+
+def test_resolve_skills_roots_falls_back_to_ciaobot_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CIAO_WORKSPACE", raising=False)
+    roots = se._resolve_skills_roots()
+    assert roots == se._CIAOBOT_SKILLS_ROOTS
+
+
+def test_resolve_skills_roots_ignores_blank_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CIAO_WORKSPACE", "   ")
+    roots = se._resolve_skills_roots()
+    assert roots == se._CIAOBOT_SKILLS_ROOTS
+
+
+# ── non-skill classifier (commands / subagents / external) ─────────────
+
+
+def test_classify_non_skill_finds_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
+    (tmp_path / "commands").mkdir(parents=True)
+    (tmp_path / "commands" / "critique.md").write_text("# critique")
+    label, path = se._classify_non_skill("critique")
+    assert label == "command"
+    assert path == tmp_path / "commands" / "critique.md"
+
+
+def test_classify_non_skill_finds_subagent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
+    (tmp_path / "subagents").mkdir(parents=True)
+    (tmp_path / "subagents" / "memory.md").write_text("# memory agent")
+    label, path = se._classify_non_skill("memory")
+    assert label == "subagent"
+    assert path == tmp_path / "subagents" / "memory.md"
+
+
+def test_classify_non_skill_falls_back_to_external(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
+    label, path = se._classify_non_skill("impeccable-skill-from-plugin")
+    assert label == "external"
+    assert path is None
+
+
+def test_classify_non_skill_external_when_workspace_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CIAO_WORKSPACE", raising=False)
+    label, path = se._classify_non_skill("critique")
+    assert label == "external"
+    assert path is None

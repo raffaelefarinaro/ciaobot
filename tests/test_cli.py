@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,15 @@ def test_cli_package_smoke_dispatches_module(monkeypatch: pytest.MonkeyPatch) ->
 
     assert cli.main(["package-smoke", "--skip-frontend"]) == 0
     assert called == [["--skip-frontend"]]
+
+
+def test_cli_prepare_release_dispatches_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = []
+
+    monkeypatch.setattr(cli.release, "main", lambda argv: called.append(argv) or 0)
+
+    assert cli.main(["prepare-release", "--version", "0.3.0"]) == 0
+    assert called == [["--version", "0.3.0"]]
 
 
 def test_cli_dev_dispatches_module(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -178,6 +188,7 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     assert customization.is_file()
     assert "disallowed_tools" in customization.read_text(encoding="utf-8")
     assert (workspace / ".runtime" / "schedules.json").is_file()
+    assert json.loads((workspace / ".runtime" / "schedules.json").read_text(encoding="utf-8")) == {"schedules": []}
     assert (workspace / "memory-vault" / "MEMORY.md").is_file()
     plist = launch_agents / "com.ciao.server.plist"
     assert plist.is_file()

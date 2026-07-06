@@ -119,13 +119,32 @@ def exchange_code(
         sys.exit(1)
 
 
-def save_credentials(config_dir: Path, client_id: str, client_secret: str, refresh_token: str) -> None:
+def extract_email_from_id_token(id_token: str | None) -> str:
+    if not id_token:
+        return ""
+    try:
+        import base64
+        parts = id_token.split(".")
+        if len(parts) >= 2:
+            payload_b64 = parts[1]
+            payload_b64 += "=" * ((4 - len(payload_b64) % 4) % 4)
+            payload_json = base64.urlsafe_b64decode(payload_b64.encode("utf-8")).decode("utf-8")
+            payload = json.loads(payload_json)
+            return payload.get("email") or ""
+    except Exception:
+        pass
+    return ""
+
+
+def save_credentials(config_dir: Path, client_id: str, client_secret: str, refresh_token: str, email: str = "") -> None:
     creds = {
         "client_id": client_id,
         "client_secret": client_secret,
         "refresh_token": refresh_token,
         "type": "authorized_user",
     }
+    if email:
+        creds["email"] = email
     path = config_dir / "credentials.json"
     with open(path, "w") as f:
         json.dump(creds, f, indent=2)
@@ -220,7 +239,8 @@ def main() -> None:
 
     print("Got refresh token. Saving credentials...")
     clean_stale_files(config_dir)
-    save_credentials(config_dir, client_id, client_secret, refresh_token)
+    email = extract_email_from_id_token(tokens.get("id_token"))
+    save_credentials(config_dir, client_id, client_secret, refresh_token, email=email)
     fix_encryption_key_permissions(config_dir)
 
     print("\nDone. Verify with:")

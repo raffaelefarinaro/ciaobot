@@ -8,7 +8,9 @@ Runs weekly (Sunday night) via ``.runtime/schedules.json``. The pass:
    outcome wasn't clean (errors > 0 or user_corrections > 0 or
    outcome != ``success``).
 3. For each flagged skill, runs a small DAG: propose via
-   ``kimi-k2.7-code:cloud`` through Pi → semantic check (LLM-as-judge,
+   ``kimi-k2.7-code:cloud`` (resolved through
+   :func:`ciao.providers.routing.routing_routine_env_for_model` —
+   not Pi, despite older references) → semantic check (LLM-as-judge,
    same model) → test gate (pytest on ``tests/test_<skill>.py``) →
    write a draft proposal Markdown. The DAG helper is in
    :mod:`ciao.dag`; per-node timing lands in ``.runtime/job_runs.jsonl``
@@ -62,22 +64,82 @@ logger = logging.getLogger(__name__)
 
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_DEFAULT_SKILLS_ROOT = _REPO_ROOT / "skills"
-# The project also ships skills under ``.claude/skills/`` (synced from
-# ``skills/`` by ``ciao/upgrade.py``). Some skills live only in one of the
-# two roots, so the resolver searches both. Order matters: ``skills/`` is
-# the canonical edit target for the upgrade flow, so we prefer it.
-_DEFAULT_SKILLS_ROOTS: tuple[Path, ...] = (
+# ciaobot's own skill roots (used as a fallback when the ciao workspace is
+# missing or unset, and for in-tree tests). ``skills/`` is the canonical
+# edit target for the upgrade flow, so we prefer it.
+_CIAOBOT_SKILLS_ROOTS: tuple[Path, ...] = (
     _REPO_ROOT / "skills",
     _REPO_ROOT / ".claude" / "skills",
 )
-_DEFAULT_PROPOSALS_DIR = (
-    _REPO_ROOT / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
-)
+
+
+def _resolve_skills_roots() -> tuple[Path, ...]:
+    """Resolve skill search roots for the current invocation.
+
+    Since the 2026-06-30 repo split, the canonical skill catalog lives in
+    the *ciao* workspace (``CIAO_WORKSPACE``, e.g. ``~/repos/ciao``) under
+    ``<workspace>/skills`` and ``<workspace>/.claude/skills``. The engine
+    here is the ciaobot repo, so its own ``skills/`` and ``.claude/skills``
+    are normally empty; they are kept as a fallback for in-tree tests and
+    for installs that ship skills alongside the engine.
+
+    The ciao workspace roots come first when set, so user edits in
+    ``CIAO_WORKSPACE/skills/`` win over any stale in-tree copy.
+    """
+    workspace = os.environ.get("CIAO_WORKSPACE", "").strip()
+    if workspace:
+        ws = Path(workspace).expanduser()
+        ciao_roots = (ws / "skills", ws / ".claude" / "skills")
+        return (*ciao_roots, *_CIAOBOT_SKILLS_ROOTS)
+    return _CIAOBOT_SKILLS_ROOTS
+
+
+_DEFAULT_SKILLS_ROOTS: tuple[Path, ...] = _resolve_skills_roots()
+
+
+def _resolve_proposals_dir() -> Path:
+    """Resolve the proposals output dir.
+
+    Same convention as the skills roots: prefer the ciao workspace when
+    ``CIAO_WORKSPACE`` is set (so proposals accumulate in the user's vault,
+    not the ciaobot engine repo); fall back to ciaobot's in-tree memory-vault
+    for tests and installs without a workspace.
+    """
+    workspace = os.environ.get("CIAO_WORKSPACE", "").strip()
+    if workspace:
+        return Path(workspace).expanduser() / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
+    return _REPO_ROOT / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
+
+
+_DEFAULT_PROPOSALS_DIR: Path = _resolve_proposals_dir()
 _DEFAULT_TESTS_ROOT = _REPO_ROOT / "tests"
 
 MAX_SKILL_BYTES = 15 * 1024
 MAX_TRAJECTORIES_PER_PROMPT = 10
+
+
+def _classify_non_skill(name: str) -> tuple[str, Path | None]:
+    """Classify a flagged-but-not-a-skill name so the dry-run can label it.
+
+    Returns ``(label, path)`` where ``label`` is one of:
+
+    - ``"command"`` — lives in ``<workspace>/commands/<name>.md``
+    - ``"subagent"`` — lives in ``<workspace>/subagents/<name>.md``
+    - ``"external"`` — neither found (impeccable plugin, codex, etc.)
+
+    Uses ``CIAO_WORKSPACE`` so the labels match the user's actual repo
+    layout. Returns ``("external", None)`` when the workspace is unset,
+    since we have no other artifact roots to check.
+    """
+    workspace = os.environ.get("CIAO_WORKSPACE", "").strip()
+    if not workspace:
+        return "external", None
+    ws = Path(workspace).expanduser()
+    for label, sub in (("command", "commands"), ("subagent", "subagents")):
+        candidate = ws / sub / f"{name}.md"
+        if candidate.is_file():
+            return label, candidate
+    return "external", None
 
 
 PROPOSAL_SYSTEM_PROMPT = """\
@@ -743,11 +805,18 @@ async def run_evolution_pass(
         for skill_name, skill_trajectories in sorted(flagged.items()):
             skill_path = find_skill_file_in_roots(skill_name, search_roots)
             if skill_path is None:
-                logger.info(
-                    "Skill %s not found under any of %s; skipping",
-                    skill_name,
-                    [str(r) for r in search_roots],
-                )
+                label, found_path = _classify_non_skill(skill_name)
+                if found_path is not None:
+                    logger.info(
+                        "Skill %s is a %s (%s); skipping",
+                        skill_name, label, found_path,
+                    )
+                else:
+                    logger.info(
+                        "Skill %s not found in any skill root, "
+                        "commands/, or subagents/; skipping",
+                        skill_name,
+                    )
                 continue
             try:
                 path = await _process_skill_dag(
@@ -876,12 +945,19 @@ def _main(argv: list[str] | None = None) -> int:
             print(f"{name}: {len(recs)} session(s) -> {sids}")
             skill_path = find_skill_file_in_roots(name, search_roots)
             if skill_path is None:
-                print(
-                    f"  ! {name}: no SKILL.md found under any of "
-                    f"{[str(r) for r in search_roots]} (slash command, "
-                    f"agent, or external)",
-                    file=sys.stderr,
-                )
+                label, found_path = _classify_non_skill(name)
+                if found_path is not None:
+                    print(
+                        f"  ! {name}: {label} ({found_path}), skipping",
+                        file=sys.stderr,
+                    )
+                else:
+                    print(
+                        f"  ! {name}: not a ciao skill "
+                        f"(checked commands/, subagents/, and skill roots); "
+                        f"skipping",
+                        file=sys.stderr,
+                    )
             else:
                 size = skill_path.stat().st_size
                 if size > MAX_SKILL_BYTES:

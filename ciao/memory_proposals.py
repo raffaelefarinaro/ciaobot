@@ -144,6 +144,25 @@ def propose_from_insights(insights_md: str) -> list[MemoryProposal]:
 # ── Persistence ───────────────────────────────────────────────────────────
 
 
+def _extract_workspace_context(archive_path: Path, vault_root: Path) -> str:
+    """Read the archive file and extract the context (workspace) from YAML frontmatter."""
+    try:
+        text = archive_path.read_text(encoding="utf-8")
+        if text.startswith("---"):
+            end_fm = text.find("---", 3)
+            if end_fm > 0:
+                fm_text = text[3:end_fm]
+                for line in fm_text.splitlines():
+                    parts = line.split(":", 1)
+                    if len(parts) == 2 and parts[0].strip() == "context":
+                        context_val = parts[1].strip().strip("'\"")
+                        if context_val and (context_val in {"personal", "work"} or (vault_root / context_val).is_dir()):
+                            return context_val
+    except Exception:  # noqa: BLE001
+        pass
+    return "personal"
+
+
 def append_proposals(
     proposals: list[MemoryProposal],
     vault_root: Path,
@@ -157,7 +176,12 @@ def append_proposals(
     """
     if not proposals:
         return None
-    out_path = vault_root / _PROPOSALS_PATH
+
+    workspace = "personal"
+    if source_path is not None:
+        workspace = _extract_workspace_context(source_path, vault_root)
+
+    out_path = vault_root / workspace / "Workspace/Memory-Proposals.md"
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     header = _proposals_header_block(source_path)

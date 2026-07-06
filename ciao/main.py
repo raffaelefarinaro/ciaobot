@@ -176,9 +176,14 @@ async def _async_main() -> int:
     # routing so discovery never silently changes existing behaviour. Also
     # re-run whenever the Settings → Models tab loads (routes_api), so a
     # freshly pulled model shows up without a restart.
-    from ciao.config import refresh_local_ollama_models, refresh_openrouter_models
+    from ciao.config import (
+        refresh_local_ollama_models,
+        refresh_cloud_ollama_models,
+        refresh_openrouter_models,
+    )
 
     refresh_local_ollama_models(config)
+    refresh_cloud_ollama_models(config)
     refresh_openrouter_models(config)
 
     # Runtime-mutable settings overlay (PWA Settings → Models tab). Applied
@@ -282,7 +287,7 @@ async def _async_main() -> int:
     transcript_root = config.vault_root / "Logs" / "Chats"
     transcripts = TranscriptStore(config.state_path.parent, transcript_root)
 
-    schedule_store = ScheduleStore(config.state_path.parent)
+    schedule_store = ScheduleStore(config.state_path.parent, include_system=True)
 
     # Create ProjectChatManager
     pcm = ProjectChatManager(

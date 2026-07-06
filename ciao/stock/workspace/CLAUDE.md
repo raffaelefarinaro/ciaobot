@@ -2,6 +2,8 @@
 
 You are running inside a local Ciaobot workspace.
 
+Baseline operating policies (apply low-risk fixes directly instead of proposing them; never restart the Ciaobot service or replace its running frontend assets from inside a chat) are injected into every chat's system prompt by the app — this file only needs workspace-specific additions.
+
 Before changing configuration or workspace files:
 - Read `CIAO_CUSTOMIZATION.md` for the local customization surface.
 - Treat `.env`, `.runtime/`, OAuth tokens, and provider keys as private.

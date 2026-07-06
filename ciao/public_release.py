@@ -15,6 +15,7 @@ PUBLIC_EXPORT_ALLOWLIST: tuple[str, ...] = (
     "web/",
     "scripts/",
     "tests/",
+    "docs/",
     ".github/workflows/",
     "deploy/homebrew/",
     "pyproject.toml",
@@ -52,9 +53,7 @@ _FORBIDDEN_PATH_GLOBS: tuple[str, ...] = (
     "scripts/gws-work.sh",
     "scripts/work_chat_transcripts.py",
     "scripts/gws-auth-bridge.sh",
-    "scripts/gws-token-keepalive.sh",
     "scripts/gws-secrets.py",
-    "ciao/adoption_report.py",
 )
 
 _SKIP_DIRS = {

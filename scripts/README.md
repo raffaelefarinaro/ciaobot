@@ -6,6 +6,7 @@ Operator scripts. Run from the repo root; most expect the project venv at `.venv
 |---|---|
 | `run-ciao.sh` | Production launcher: activates the venv, sources `.env`, execs the Ciaobot server. |
 | `dev.sh` | Compatibility wrapper for `ciao dev` after running `ensure-deps.sh`. |
+| `prepare-release` | Prepare a release branch: bump package/PWA versions, update `CHANGELOG.md`, run release checks, commit, push, and optionally open a draft GitHub PR. Dry-run by default. |
 | `gws-profile.sh` | Dual-account wrapper for the `gws` CLI: routes `personal` to `secrets/gws-personal/`, `work` to `secrets/gws/`. |
 | `install-custom-skills.sh` | Compatibility wrapper for `ciao sync-skills`, which syncs canonical `skills/`, `subagents/`, and `commands/` into Claude catalogs and refreshes upstream skills from `skills-lock.json` when possible. |
 | `skills_add.py` | Add an upstream skill from GitHub by pasting a URL (`scripts/skills_add.py <github-url>`). Wraps `npx skills add`, inferring `--skill` from a `/skills/<name>` URL segment. The added skill auto-updates on startup via `ciao sync-skills` + `ciao skills-sync`. |

@@ -93,55 +93,17 @@
           >
             <span aria-hidden="true">🧠</span>
           </button>
-          <div
+          <ModelSelector
             v-if="showModelPicker"
-            class="model-picker-dropdown"
-            @click.stop
-          >
-            <div class="picker-section">
-              <div class="picker-label">Provider</div>
-              <div class="picker-pills">
-                <button
-                  v-for="b in bucketOptions"
-                  :key="b.key"
-                  class="picker-pill"
-                  :class="{ active: activeBucket === b.key, handover: bucketLocked && activeBucket !== b.key }"
-                  :title="bucketLocked && activeBucket !== b.key ? 'Start a provider handover in this chat.' : ''"
-                  @click="selectBucket(b.key)"
-                >{{ b.label }}</button>
-              </div>
-              <p v-if="bucketLocked" class="picker-hint">Choosing another provider starts a handover in this chat.</p>
-            </div>
-            <div class="picker-section">
-              <div class="picker-label">Model</div>
-              <div class="picker-list">
-                <button
-                  v-for="m in filteredModels"
-                  :key="m"
-                  class="picker-item"
-                  :class="{ active: chat.model === m }"
-                  @click="selectModel(m)"
-                >{{ m }}</button>
-              </div>
-            </div>
-            <div v-if="filteredThinkingLevels.length" class="picker-section">
-              <div class="picker-label">Thinking</div>
-              <div class="picker-pills">
-                <button
-                  class="picker-pill"
-                  :class="{ active: !(chat.thinking_level || '') }"
-                  @click="selectThinking('')"
-                >default</button>
-                <button
-                  v-for="lvl in filteredThinkingLevels"
-                  :key="lvl"
-                  class="picker-pill"
-                  :class="{ active: chat.thinking_level === lvl }"
-                  @click="selectThinking(lvl)"
-                >{{ lvl }}</button>
-              </div>
-            </div>
-          </div>
+            triggerless
+            :model-value="chat.model"
+            :active-models="activeModelHighlights"
+            :sections="chatModelSections"
+            placeholder="Model"
+            placement="bottom-end"
+            @update:model-value="selectModel"
+            @close="showModelPicker = false"
+          />
         </div>
         <button class="btn-icon" @click="doArchive" title="Archive chat" aria-label="Archive chat">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
@@ -164,13 +126,22 @@
           <div v-if="openTraces[i]" class="trace-body">
             <template v-for="(step, j) in item.steps" :key="j">
               <div v-if="step.tool_name === '_activity'" class="trace-tools">
-                <div
-                  v-for="(line, k) in step.content.split('\n')"
+                <details
+                  v-for="(line, k) in activityLines(step.content)"
                   :key="k"
-                  class="activity-line"
+                  class="tool-card"
                   :class="{ subagent: isSubagentLine(line) }"
-                  v-html="renderActivityLine(line)"
-                ></div>
+                  :open="activityDetail(line).length < 100"
+                >
+                  <summary class="tool-card-summary">
+                    <span class="tool-card-icon" aria-hidden="true">{{ activityIcon(line) }}</span>
+                    <span v-if="activitySubagentLabel(line)" class="tool-card-agent">{{ activitySubagentLabel(line) }}</span>
+                    <span class="tool-card-name">{{ activityName(line) }}</span>
+                    <span v-if="activitySummary(line)" class="tool-card-preview">{{ activitySummary(line) }}</span>
+                    <button class="tool-card-copy" type="button" title="Copy activity" @click.stop.prevent="copyActivityLine(line)">Copy</button>
+                  </summary>
+                  <div v-if="activityDetail(line)" class="tool-card-body" v-html="renderActivityLine(activityDetail(line))"></div>
+                </details>
               </div>
               <button
                 v-else-if="step.tool_name === '_filecard'"
@@ -228,15 +199,26 @@
             <span v-if="item.msg.effective_model"> &middot; {{ item.msg.effective_model }}</span>
             <span v-if="item.msg.usage?.input_tokens"> | in:{{ item.msg.usage.input_tokens }} out:{{ item.msg.usage.output_tokens }}</span>
           </div>
+          <button
+            v-if="item.msg.is_error"
+            class="retry-btn fix-btn"
+            @click="openFixChat(i)"
+          >Fix this error</button>
         </div>
         <!-- System message (errors, etc) -->
         <div v-else-if="item.kind === 'system'" class="message system">
           <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
-          <button
-            v-if="isErrorMsg(item.msg.content) && lastUserBefore(i)"
-            class="retry-btn"
-            @click="retryFromError(i)"
-          >Retry</button>
+          <div v-if="isErrorMsg(item.msg.content)" class="error-actions">
+            <button
+              v-if="lastUserBefore(i)"
+              class="retry-btn"
+              @click="retryFromError(i)"
+            >Retry</button>
+            <button
+              class="retry-btn fix-btn"
+              @click="openFixChat(i)"
+            >Fix this error</button>
+          </div>
         </div>
       </template>
 
@@ -274,13 +256,22 @@
         >
           <template v-for="(entry, j) in store.currentTimeline" :key="j">
             <div v-if="entry.kind === 'tool'" class="trace-tools">
-              <div
-                v-for="(line, k) in entry.content.split('\n')"
+              <details
+                v-for="(line, k) in activityLines(entry.content)"
                 :key="k"
-                class="activity-line"
+                class="tool-card"
                 :class="{ subagent: isSubagentLine(line) }"
-                v-html="renderActivityLine(line)"
-              ></div>
+                :open="activityDetail(line).length < 100"
+              >
+                <summary class="tool-card-summary">
+                  <span class="tool-card-icon" aria-hidden="true">{{ activityIcon(line) }}</span>
+                  <span v-if="activitySubagentLabel(line)" class="tool-card-agent">{{ activitySubagentLabel(line) }}</span>
+                  <span class="tool-card-name">{{ activityName(line) }}</span>
+                  <span v-if="activitySummary(line)" class="tool-card-preview">{{ activitySummary(line) }}</span>
+                  <button class="tool-card-copy" type="button" title="Copy activity" @click.stop.prevent="copyActivityLine(line)">Copy</button>
+                </summary>
+                <div v-if="activityDetail(line)" class="tool-card-body" v-html="renderActivityLine(activityDetail(line))"></div>
+              </details>
             </div>
             <button
               v-else-if="entry.kind === 'filecard'"
@@ -650,7 +641,9 @@ import VoiceRecorder from './VoiceRecorder.vue'
 import { api } from '../lib/api'
 import type { ModelsResponse, ChatMessage } from '../lib/types'
 import PaneHeader from './PaneHeader.vue'
+import ModelSelector from './ModelSelector.vue'
 import { linkifyText } from '../lib/filePaths'
+import { sectionsFromModelsResponse } from '../lib/modelSections'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
 import { formatTime, formatDuration } from '../lib/time'
 
@@ -741,9 +734,9 @@ const project = computed(() => store.activeProject)
 const models = ref<string[]>(['sonnet', 'opus', 'haiku'])
 const providerModels = ref<Record<string, string[]>>({})
 const providerDefaults = ref<Record<string, string>>({})
-const ollamaModels = ref<string[]>([])
-const openrouterModels = ref<string[]>([])
+const modelsResponse = ref<ModelsResponse | null>(null)
 const thinkingLevels = ref<Record<string, string[]>>({})
+
 const openTraces = ref<Record<number, boolean>>({})
 const transcribing = ref(false)
 const isNearBottom = ref(true)
@@ -887,10 +880,13 @@ const touchedFiles = computed<TouchedFile[]>(() => {
 
 type ProviderKey = 'claude'
 type BucketKey = 'claude_work' | 'claude_personal' | 'openrouter'
+type ModelBucketValue = 'work' | 'personal' | 'openrouter'
+type RouteKind = 'anthropic' | 'ollama' | 'ollama-local' | 'openrouter'
+type TierAlias = 'haiku' | 'sonnet' | 'opus'
 
 const BUCKET_DEFS: { key: BucketKey; label: string; provider: ProviderKey }[] = [
-  { key: 'claude_work', label: 'Claude (Work)', provider: 'claude' },
-  { key: 'claude_personal', label: 'Claude (Personal)', provider: 'claude' },
+  { key: 'claude_work', label: 'Claude', provider: 'claude' },
+  { key: 'claude_personal', label: 'Ollama', provider: 'claude' },
   { key: 'openrouter', label: 'OpenRouter', provider: 'claude' },
 ]
 
@@ -1023,9 +1019,20 @@ const activeBucket = computed<BucketKey>(() => {
   if (c.model.includes('/') && !c.model.includes(':')) return 'openrouter'
   // The server records the explicit bucket choice. Legacy values are kept
   // for existing chats; new workspace config may use clearer bucket names.
+  if (c.model_bucket === 'openrouter') return 'openrouter'
   if (c.model_bucket === 'work' || c.model_bucket === 'anthropic') return 'claude_work'
   if (c.model_bucket === 'personal' || c.model_bucket === 'ollama') return 'claude_personal'
-  return ollamaModels.value.includes(c.model) ? 'claude_personal' : 'claude_work'
+  const ollamaModels = modelsResponse.value?.ollama_models || []
+  return ollamaModels.includes(c.model) ? 'claude_personal' : 'claude_work'
+})
+
+const chatModelSections = computed(() => sectionsFromModelsResponse(modelsResponse.value))
+
+const activeModelHighlights = computed(() => {
+  const c = chat.value
+  if (!c) return []
+  const effective = effectiveModelForBucket(c.model, activeBucket.value)
+  return [effective || c.model]
 })
 
 const bucketLocked = computed(() => {
@@ -1036,10 +1043,6 @@ const bucketLocked = computed(() => {
   // server enforces the same rule on PATCH; this just hides the choice
   // so the user doesn't try and get a 400 back.
   return Boolean(c.session_id) || store.activeMessages.length > 0
-})
-
-const filteredModels = computed(() => {
-  return providerModels.value[activeBucket.value] || models.value
 })
 
 // Thinking levels are provider-native (claude → SDK effort, pi → --thinking),
@@ -1491,11 +1494,10 @@ if (typeof document !== 'undefined') {
 onMounted(async () => {
   try {
     const r = await api.get<ModelsResponse>('/api/models')
+    modelsResponse.value = r
     models.value = r.models
     providerModels.value = r.provider_models || {}
     providerDefaults.value = r.provider_defaults || {}
-    ollamaModels.value = r.ollama_models || []
-    openrouterModels.value = r.openrouter_models || []
     thinkingLevels.value = r.thinking_levels || {}
   } catch { /* use defaults */ }
   try {
@@ -1536,6 +1538,64 @@ function renderMarkdown(text: string): string {
 
 function renderActivityLine(line: string): string {
   return linkifyText(line)
+}
+
+function activityLines(content: string): string[] {
+  return content.split('\n').map(line => line.trim()).filter(Boolean)
+}
+
+function activityParts(line: string): { icon: string; name: string; detail: string; agent: string } {
+  let text = line.trim()
+  let agent = ''
+  if (text.startsWith('↳')) {
+    text = text.slice(1).trim()
+    const match = text.match(/^\[([^\]]+)\]\s*(.*)$/)
+    if (match) {
+      agent = match[1]
+      text = match[2].trim()
+    } else {
+      agent = 'subagent'
+    }
+  }
+  const match = text.match(/^(\S+)\s+(\S+)(?:\s+([\s\S]*))?$/)
+  if (!match) {
+    return { icon: '•', name: text || 'Activity', detail: '', agent }
+  }
+  return {
+    icon: match[1],
+    name: match[2],
+    detail: (match[3] || '').trim(),
+    agent,
+  }
+}
+
+function activityIcon(line: string): string {
+  return activityParts(line).icon
+}
+
+function activityName(line: string): string {
+  return activityParts(line).name
+}
+
+function activityDetail(line: string): string {
+  return activityParts(line).detail
+}
+
+function activitySummary(line: string): string {
+  const detail = activityDetail(line)
+  return detail.length > 120 ? `${detail.slice(0, 117)}...` : detail
+}
+
+function activitySubagentLabel(line: string): string {
+  return activityParts(line).agent
+}
+
+async function copyActivityLine(line: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(line.trim())
+  } catch {
+    // Clipboard can be unavailable in older standalone PWA contexts.
+  }
 }
 
 // Subagent activity lines are tagged with the leading turnstile arrow by the
@@ -1871,6 +1931,16 @@ function retryFromError(errorIdx: number) {
   store.sendMessage(chat.value.chat_id, text, 'queue')
 }
 
+// Open a fresh chat in the General project seeded with this error + the last
+// user turn, asking the agent to diagnose and fix it (or file a GitHub issue
+// if the bug is in Ciaobot itself).
+function openFixChat(errorIdx: number) {
+  const it = renderItems.value[errorIdx]
+  const errorText = it && 'msg' in it ? it.msg.content : ''
+  const context = lastUserBefore(errorIdx) || undefined
+  store.fixError({ errorText, context })
+}
+
 function formatRetryTime(value: string): string {
   const d = new Date(value)
   if (Number.isNaN(d.getTime())) return ''
@@ -1903,19 +1973,70 @@ function toggleModelPicker() {
   showModelPicker.value = !showModelPicker.value
 }
 
+function tierAlias(model: string): TierAlias | null {
+  const normalized = model.trim().toLowerCase()
+  return normalized === 'haiku' || normalized === 'sonnet' || normalized === 'opus'
+    ? normalized
+    : null
+}
+
+function modelBucketForBucket(bucket: BucketKey): ModelBucketValue {
+  if (bucket === 'openrouter') return 'openrouter'
+  return bucket === 'claude_personal' ? 'personal' : 'work'
+}
+
+function bucketLabel(bucket: BucketKey): string {
+  return BUCKET_DEFS.find((def) => def.key === bucket)?.label || 'Claude'
+}
+
+function bucketForSelectedModel(model: string): BucketKey {
+  const response = modelsResponse.value
+  const openrouterModels = response?.openrouter_models || []
+  if (openrouterModels.includes(model) || (model.includes('/') && !model.includes(':'))) {
+    return 'openrouter'
+  }
+  const ollamaModels = response?.ollama_models || []
+  if (ollamaModels.includes(model) || model.includes(':')) {
+    return 'claude_personal'
+  }
+  return 'claude_work'
+}
+
+function effectiveModelForBucket(model: string, bucket: BucketKey): string {
+  const tier = tierAlias(model)
+  if (!tier) return model
+  if (bucket === 'openrouter') {
+    return modelsResponse.value?.alias_tiers?.openrouter?.[tier] || model
+  }
+  if (bucket === 'claude_personal') {
+    return modelsResponse.value?.alias_tiers?.ollama?.[tier] || model
+  }
+  return model
+}
+
+function routeKindFor(model: string, bucket: BucketKey): RouteKind {
+  const effective = effectiveModelForBucket(model, bucket)
+  if (bucket === 'openrouter' || (effective.includes('/') && !effective.includes(':'))) {
+    return 'openrouter'
+  }
+  const local = modelsResponse.value?.ollama_local_models || []
+  if (local.includes(effective)) return 'ollama-local'
+  const ollama = modelsResponse.value?.ollama_models || []
+  if (ollama.includes(effective) || effective.includes(':')) return 'ollama'
+  return 'anthropic'
+}
+
 async function selectBucket(bucket: BucketKey) {
   if (!chat.value || bucket === activeBucket.value) return
   const models = providerModels.value[bucket] || []
   const defaultModel = providerDefaults.value[bucket] || models[0] || chat.value.model
   const def = BUCKET_DEFS.find(b => b.key === bucket)
   if (!def) return
-  // Persist the explicit Claude bucket so the server pins routing:
-  // 'work' → Anthropic subscription, 'personal' → Ollama. Non-Claude
-  // providers clear it (bucket is implied by the provider).
-  const modelBucket: '' | 'work' | 'personal' =
-    bucket === 'claude_work' ? 'work' : bucket === 'claude_personal' ? 'personal' : ''
-  // OpenRouter bucket selects an owner/model id; routing is automatic
-  // from the model shape, so the bucket is empty.
+  // Persist the explicit Claude bucket so alias models keep routing to
+  // the intended backend on future turns.
+  const modelBucket = modelBucketForBucket(bucket)
+  // OpenRouter also keeps its bucket so tier aliases resolve through
+  // the OpenRouter alias map instead of the Claude subscription.
   if (bucketLocked.value) {
     const ok = window.confirm(
       `Hand over this chat to ${def.label} / ${defaultModel}? The same visible chat will continue with a fresh provider session.`,
@@ -1936,8 +2057,36 @@ async function selectBucket(bucket: BucketKey) {
   })
 }
 
-async function selectModel(model: string) {
-  await store.updateChat(chat.value.chat_id, { model })
+async function selectModel(value: string | string[]) {
+  const model = Array.isArray(value) ? value[0] : value
+  if (!model || !chat.value) {
+    showModelPicker.value = false
+    return
+  }
+  const targetBucket = bucketForSelectedModel(model)
+  const modelBucket = modelBucketForBucket(targetBucket)
+  const sameModelAndRoute = model === chat.value.model && targetBucket === activeBucket.value
+  if (sameModelAndRoute) {
+    showModelPicker.value = false
+    return
+  }
+  const targetRoute = routeKindFor(model, targetBucket)
+  const currentRoute = routeKindFor(chat.value.model, activeBucket.value)
+  const updates = {
+    provider: 'claude' as const,
+    model,
+    model_bucket: modelBucket,
+  }
+  if (bucketLocked.value && targetRoute !== currentRoute) {
+    const ok = window.confirm(
+      `Hand over this chat to ${bucketLabel(targetBucket)} / ${model}? The same visible chat will continue with a fresh provider session.`,
+    )
+    if (!ok) return
+    await store.handoverChat(chat.value.chat_id, updates)
+    showModelPicker.value = false
+    return
+  }
+  await store.updateChat(chat.value.chat_id, updates)
   showModelPicker.value = false
 }
 
@@ -1982,7 +2131,7 @@ async function continueChat() {
     await store.continueArchivedChat(chat.value.chat_id)
   } catch (e: any) {
     console.error('Failed to continue archived chat:', e)
-    alert(`Could not continue chat: ${e?.message || e}`)
+    store.pushErrorToast('Could not continue chat', `${e?.message || e}`)
   } finally {
     isContinuing.value = false
   }
@@ -1996,8 +2145,9 @@ async function handleVoice(blob: Blob) {
       nextTick(autoResize)
       inputEl.value?.focus()
     }
-  } catch (e) {
+  } catch (e: any) {
     console.error('Voice error:', e)
+    store.pushErrorToast('Voice transcription failed', `${e?.message || e}`)
   } finally {
     transcribing.value = false
   }
@@ -2348,6 +2498,13 @@ function insertImageRef(n: number) {
 }
 .retry-btn:hover { background: var(--border-strong); border-color: var(--fg2); }
 .retry-btn:active { transform: scale(0.97); }
+.error-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.fix-btn { color: var(--accent); border-color: var(--accent); }
+.fix-btn:hover { background: var(--accent); color: var(--bg); border-color: var(--accent); }
 
 .retry-card {
   align-self: center;
@@ -2477,6 +2634,108 @@ function insertImageRef(n: number) {
   background: var(--bg);
   border-radius: 4px;
   padding: 4px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tool-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.tool-card.subagent {
+  border-left: 3px solid var(--accent2);
+  opacity: 0.9;
+}
+
+.tool-card-summary {
+  min-height: 34px;
+  padding: 6px 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg2);
+  cursor: pointer;
+  list-style: none;
+  min-width: 0;
+}
+
+.tool-card-summary::-webkit-details-marker { display: none; }
+
+.tool-card-summary::before {
+  content: '\25B8';
+  flex: 0 0 auto;
+  font-size: calc(9px * var(--font-scale));
+  opacity: 0.7;
+  transition: transform 0.15s;
+}
+
+.tool-card[open] > .tool-card-summary::before {
+  transform: rotate(90deg);
+}
+
+.tool-card-icon {
+  flex: 0 0 auto;
+  width: 18px;
+  text-align: center;
+  color: var(--accent);
+}
+
+.tool-card-agent {
+  flex: 0 0 auto;
+  max-width: 120px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent2) 18%, transparent);
+  color: var(--fg);
+  font-size: var(--text-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-card-name {
+  flex: 0 0 auto;
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.tool-card-preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-card-copy {
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg2);
+  font: inherit;
+  font-size: var(--text-xs);
+  padding: 3px 6px;
+  cursor: pointer;
+}
+
+.tool-card-copy:hover {
+  color: var(--fg);
+  border-color: var(--accent2);
+}
+
+.tool-card-body {
+  padding: 8px 10px 10px 42px;
+  border-top: 1px solid var(--border);
+  color: var(--fg2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+  font-size: var(--text-sm);
 }
 
 /* Inline file card. Rendered inside the reasoning trace whenever the agent
@@ -3456,32 +3715,6 @@ details[open] > .activity-summary::before {
   font-size: 11px;
   color: var(--fg-muted, var(--fg));
   opacity: 0.7;
-}
-
-.picker-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-height: 220px;
-  overflow-y: auto;
-}
-
-.picker-item {
-  text-align: left;
-  font-size: 13px;
-  padding: 7px 10px;
-  border-radius: var(--radius);
-  border: none;
-  background: transparent;
-  color: var(--fg);
-  cursor: pointer;
-  font-family: var(--font-mono);
-  transition: background 120ms var(--ease);
-}
-.picker-item:hover { background: var(--bg3); }
-.picker-item.active {
-  background: var(--accent);
-  color: white;
 }
 
 @media (max-width: 768px) {

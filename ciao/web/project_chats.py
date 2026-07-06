@@ -608,6 +608,10 @@ class ProjectChatManager:
         # replies to the same chat cancel the previous timer and start a
         # new one (coalesce rapid replies into a single push).
         self._pending_push: dict[str, asyncio.Task] = {}
+        # Per-chat background subagent completion watchers. Each active turn
+        # may spawn subagents; we keep at most one watcher per chat so rapid
+        # successive turns do not accumulate overlapping pollers.
+        self._pending_subagent_watchers: dict[str, asyncio.Task] = {}
         # Per-chat deferred quota retry loops. Each loop sleeps until the
         # chat's retry_next_at, tries the saved prompt if idle, then repeats
         # hourly until success/stop/archive/delete.
@@ -2556,8 +2560,13 @@ class ProjectChatManager:
         workspace_config = self._config.workspace(workspace)
         if workspace_config and workspace_config.model_bucket:
             return workspace_config.model_bucket
-        if workspace_config and workspace_config.default_provider == "openrouter":
-            return "openrouter"
+        if workspace_config:
+            if workspace_config.default_provider == "openrouter":
+                return "openrouter"
+            if workspace_config.default_provider == "ollama":
+                return "ollama"
+            if workspace_config.default_provider == "claude":
+                return "work"
         if workspace == "work":
             return "work"
         return "personal"
@@ -2571,6 +2580,10 @@ class ProjectChatManager:
                 buckets.add(workspace.model_bucket)
             if workspace.default_provider == "openrouter":
                 buckets.add("openrouter")
+            if workspace.default_provider == "ollama":
+                buckets.add("ollama")
+            if workspace.default_provider == "claude":
+                buckets.add("work")
         return buckets
 
     def _model_bucket_allowed(self, bucket: str | None) -> bool:
@@ -2670,16 +2683,17 @@ class ProjectChatManager:
         wall of "Approve use of Bash?" cards which is the opposite of
         what auto mode is for.
 
-        Mapping ``auto`` to ``bypass`` for Ollama keeps tool execution
-        flowing without prompts. Other modes (``plan``, ``bypass``,
-        ``normal``) pass through unchanged: ``plan`` still works (no
-        classifier needed), ``bypass`` is already what we want, and
-        ``normal`` is an explicit user opt-in to be asked every time.
+        With the tier-remap env now pointing the classifier
+        (``CLAUDE_CODE_AUTO_MODE_MODEL`` / ``_BG_CLASSIFIER_MODEL``) at an
+        Ollama-served haiku-tier model, auto mode works on Ollama-routed
+        chats. Other modes (``plan``, ``bypass``, ``normal``) pass through
+        unchanged: ``plan`` still works (no classifier needed), ``bypass``
+        is already what we want, and ``normal`` is an explicit user opt-in
+        to be asked every time.
+
+        Legacy: ``CIAO_OLLAMA_AUTO_CLASSIFIER`` is no longer read; auto mode
+        is always live for Ollama-routed chats. Remove it from your ``.env``.
         """
-        if chat.mode == "auto" and is_ollama_model(
-            self._runtime_model_for_chat(chat), self._config.ollama
-        ):
-            return "bypass"
         return chat.mode
 
     # ── Streaming chat ───────────────────────────────────────────────────
@@ -3400,6 +3414,13 @@ class ProjectChatManager:
                     "project_id": project_id,
                     "is_error": had_error,
                 })
+                # Background subagents can outlive the parent turn. Start a
+                # lightweight watcher so the UI gets notified when they finish,
+                # instead of leaving the chat stuck on "I'll compile once the
+                # agents report back".
+                chat_for_watcher = self._chats.get(chat_id)
+                if chat_for_watcher is not None and chat_for_watcher.session_id:
+                    self._start_subagent_watcher(chat_id, project_id)
                 # Successful turn(s): announce result ready (drives unread
                 # badges + in-app toast on clients that aren't focused on
                 # this chat) and dispatch web push (decoupled from any WS).
@@ -3544,6 +3565,73 @@ class ProjectChatManager:
             current = self._pending_push.get(chat_id)
             if current is not None and current.done():
                 self._pending_push.pop(chat_id, None)
+
+    def _start_subagent_watcher(self, chat_id: str, project_id: str) -> None:
+        """Replace any existing subagent watcher for this chat with a new one."""
+        old = self._pending_subagent_watchers.get(chat_id)
+        if old is not None and not old.done():
+            old.cancel()
+        task = asyncio.create_task(self._watch_subagent_completion(chat_id, project_id))
+        self._pending_subagent_watchers[chat_id] = task
+
+    async def _watch_subagent_completion(self, chat_id: str, project_id: str) -> None:
+        """Poll the SDK until background subagents for this chat finish.
+
+        Emits a ``chat_subagents_ready`` event each time the running count
+        drops, and schedules a delayed push when the last one completes. The
+        watcher stops once no subagents remain, the session disappears, or
+        after a generous timeout.
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None or not chat.session_id:
+            return
+        session_id = chat.session_id
+        workspace = str(self._config.workspace_root)
+        try:
+            from claude_agent_sdk import list_subagents
+        except Exception:
+            return
+
+        try:
+            current_ids = set(list_subagents(session_id, directory=workspace))
+        except Exception:
+            logger.debug("list_subagents failed for watcher %s", session_id)
+            return
+        if not current_ids:
+            return
+
+        last_count = len(current_ids)
+        deadline = time.perf_counter() + 600  # 10 minutes is plenty
+        while time.perf_counter() < deadline:
+            await asyncio.sleep(3)
+            try:
+                current_ids = set(list_subagents(session_id, directory=workspace))
+            except Exception:
+                # Session deleted or SDK unavailable: stop watching.
+                break
+            new_count = len(current_ids)
+            if new_count < last_count:
+                self._events.publish({
+                    "type": "chat_subagents_ready",
+                    "chat_id": chat_id,
+                    "project_id": project_id,
+                    "remaining": new_count,
+                })
+                if new_count == 0:
+                    chat_now = self._chats.get(chat_id)
+                    if chat_now is not None:
+                        chat_now.last_activity_at = _now_iso()
+                        self._save()
+                    title = chat_now.title if chat_now else "Ciaobot"
+                    self._schedule_push(chat_id, title, "Background agents finished")
+                last_count = new_count
+            elif new_count > last_count:
+                # A subagent spawned additional subagents; extend the watch.
+                last_count = new_count
+        # Clean up our slot when the watcher exits.
+        current = self._pending_subagent_watchers.get(chat_id)
+        if current is not None and current.done():
+            self._pending_subagent_watchers.pop(chat_id, None)
 
     def _notify_permission(
         self, chat_id: str, event: PermissionRequestEvent
@@ -3815,6 +3903,24 @@ class ProjectChatManager:
             chat.model = model
             chat.mode = mode
             return web_chat_id
+        elif getattr(entry, "scope", "") == "system":
+            project = self._resolve_schedule_project("", entry)
+            if project is None:
+                logger.warning("System schedule %s has no default project, skipping", getattr(entry, "schedule_id", ""))
+                return None
+            title_base = prompt.split("\n")[0].strip().rstrip(".")
+            if len(title_base) > 40:
+                title_base = title_base[:37] + "..."
+            date_str = datetime.now(UTC).strftime("%b %d")
+            title = f"{title_base} - {date_str}"
+            chat = self.create_chat(
+                project.project_id,
+                title=title,
+                model=model,
+                mode=mode,
+                provider=provider or None,
+            )
+            return chat.chat_id
         else:
             logger.warning("Schedule has no web target, skipping")
             return None
@@ -3866,6 +3972,17 @@ class ProjectChatManager:
                 "{{ERROR_LOG}}",
                 errors or "(no errors logged this week)",
             )
+        # Richer variant: error log + failed background-job runs
+        had_issue_placeholder = "{{ISSUE_REPORT}}" in prompt
+        if had_issue_placeholder:
+            from ciao.debug_report import build_issue_report
+
+            issue_report = await asyncio.to_thread(
+                build_issue_report, self._config.workspace_root
+            )
+            prompt = prompt.replace(
+                "{{ISSUE_REPORT}}", issue_report["report_text"]
+            )
 
         try:
             stream = self.start_stream(target_id, prompt)
@@ -3884,7 +4001,12 @@ class ProjectChatManager:
                     outcome.completed = True
                     outcome.is_error = bool(payload.get("is_error"))
                     outcome.final_text = str(payload.get("text") or "")
-            if had_error_placeholder:
+            # Clear only after a clean run: a failed triage must not wipe
+            # the backlog it never processed.
+            if (
+                (had_error_placeholder or had_issue_placeholder)
+                and _schedule_run_clean(outcome)
+            ):
                 await asyncio.to_thread(
                     clear_error_log, self._config.workspace_root
                 )
@@ -4001,9 +4123,8 @@ class ProjectChatManager:
 
         Engine selection follows ``config.transcription_engine``: ``local``
         runs mlx-whisper on-device (free); anything else uses the OpenAI
-        cloud API. A failing or unavailable local engine falls back to
-        cloud when an OpenAI key is configured, so dictation never breaks
-        because a checkpoint is missing.
+        cloud API. If the local engine fails or is not installed, it raises
+        a ValueError.
         """
         from ciao.voice import (
             MlxWhisperTranscriber,
@@ -4019,21 +4140,15 @@ class ProjectChatManager:
                     )
                     text = await transcriber.transcribe(audio_path)
                     return text, 0.0
-                except Exception:
-                    if not self._config.openai_api_key:
-                        raise
-                    logger.exception(
-                        "Local transcription failed; falling back to cloud"
-                    )
-            elif not self._config.openai_api_key:
-                raise ValueError(
-                    "Local transcription needs mlx-whisper "
-                    "(pip install 'ciao[voice-local]') and no OPENAI_API_KEY "
-                    "is set for cloud fallback"
-                )
+                except Exception as exc:
+                    raise ValueError(
+                        f"Local voice transcription failed: {exc}. "
+                        "Ensure mlx-whisper is properly configured or change the engine in Settings → Models."
+                    ) from exc
             else:
-                logger.warning(
-                    "mlx-whisper not installed; falling back to cloud transcription"
+                raise ValueError(
+                    "Local voice transcription is selected but mlx-whisper is not installed. "
+                    "Install the dependency or change the engine to Cloud in Settings → Models."
                 )
 
         if not self._config.openai_api_key:

@@ -17,7 +17,7 @@ from pathlib import Path
 import urllib.error
 import urllib.request
 
-from ciao import dev, package_smoke, public_release
+from ciao import dev, package_smoke, public_release, release
 
 
 def _run_server() -> int:
@@ -218,7 +218,7 @@ def setup_workspace(
     runtime_schedules = root / ".runtime" / "schedules.json"
     _write_if_missing(
         runtime_schedules,
-        stock.joinpath("schedules.json").read_text(encoding="utf-8"),
+        json.dumps({"schedules": []}, indent=2) + "\n",
     )
     written.append(runtime_schedules)
 
@@ -792,6 +792,13 @@ def build_parser() -> argparse.ArgumentParser:
     smoke_parser.add_argument("args", nargs=argparse.REMAINDER)
     smoke_parser.set_defaults(func=lambda args: package_smoke.main(args.args))
 
+    release_parser = subparsers.add_parser(
+        "prepare-release",
+        help="Prepare a release branch, changelog, and draft PR.",
+    )
+    release_parser.add_argument("args", nargs=argparse.REMAINDER)
+    release_parser.set_defaults(func=lambda args: release.main(args.args))
+
     memory_parser = subparsers.add_parser(
         "memory",
         help="Read or edit bounded memory files.",
@@ -969,6 +976,8 @@ def main(argv: list[str] | None = None) -> int:
         return public_release.main(argv_list[1:])
     if argv_list[:1] == ["package-smoke"]:
         return package_smoke.main(argv_list[1:])
+    if argv_list[:1] == ["prepare-release"]:
+        return release.main(argv_list[1:])
     parser = build_parser()
     args = parser.parse_args(argv_list)
     if not hasattr(args, "func"):

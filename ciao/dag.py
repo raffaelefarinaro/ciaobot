@@ -32,6 +32,7 @@ rationale (decision: do-not-adopt; pattern: steal).
 from __future__ import annotations
 
 import logging
+import os
 import shlex
 import subprocess
 from collections.abc import Callable, Mapping
@@ -85,6 +86,14 @@ class NodeResult:
     ok: bool
     output: Any = None
     error: str | None = None
+
+
+def _subprocess_env(payload: dict[str, Any]) -> dict[str, str] | None:
+    """Merge payload env overrides onto the current process environment."""
+    overrides = payload.get("env")
+    if not overrides:
+        return None
+    return {**os.environ, **{str(k): str(v) for k, v in dict(overrides).items()}}
 
 
 def _validate(dag: list[Node], edges: list[Edge]) -> dict[str, Node]:
@@ -142,7 +151,7 @@ def _exec_bash(node: Node, ctx: dict[str, Any]) -> NodeResult:
         raise ValueError(f"bash node '{node.id}' missing payload['cmd']")
     argv = shlex.split(cmd) if isinstance(cmd, str) else list(cmd)
     cwd = node.payload.get("cwd")
-    env = node.payload.get("env")
+    env = _subprocess_env(node.payload)
     try:
         proc = subprocess.run(
             argv,
@@ -178,6 +187,7 @@ def _exec_prompt(node: Node, ctx: dict[str, Any]) -> NodeResult:
     if not prompt:
         raise ValueError(f"prompt node '{node.id}' missing payload['prompt']")
     cli = node.payload.get("cli", "claude")
+    env = _subprocess_env(node.payload)
     rendered_prompt = prompt.format_map(_SafeFormatDict(ctx))
     rendered_system = system.format_map(_SafeFormatDict(ctx)) if system else ""
     composed = f"Instructions:\n{rendered_system}\n\n{rendered_prompt}"
@@ -186,6 +196,7 @@ def _exec_prompt(node: Node, ctx: dict[str, Any]) -> NodeResult:
         proc = subprocess.run(
             argv,
             input=composed,
+            env=env,
             capture_output=True,
             text=True,
             timeout=node.timeout_s,
@@ -230,6 +241,7 @@ def _exec_subagent(node: Node, ctx: dict[str, Any]) -> NodeResult:
     cmd = node.payload.get("cli", "claude")
     prompt = node.payload.get("prompt", "")
     extra_args = node.payload.get("args", [])
+    env = _subprocess_env(node.payload)
     if not prompt:
         raise ValueError(f"subagent node '{node.id}' missing payload['prompt']")
     argv = [cmd, "-p", "--model", node.model or "sonnet", *extra_args]
@@ -238,6 +250,7 @@ def _exec_subagent(node: Node, ctx: dict[str, Any]) -> NodeResult:
         proc = subprocess.run(
             argv,
             input=rendered,
+            env=env,
             capture_output=True,
             text=True,
             timeout=node.timeout_s,
@@ -358,6 +371,9 @@ def run(
         ) as handle:
             try:
                 result = executor(node, ctx)
+                if not result.ok:
+                    handle.status = "error"
+                    handle.error = result.error
             except Exception as exc:  # noqa: BLE001
                 handle.error = f"{type(exc).__name__}: {exc}"[:1000]
                 result = NodeResult(ok=False, error=str(exc))

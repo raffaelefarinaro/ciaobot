@@ -1,0 +1,161 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from starlette.applications import Starlette
+from starlette.routing import Route
+from starlette.testclient import TestClient
+
+from ciao.config import CiaoConfig
+from ciao.sessions import StateStore
+from ciao.transcripts import TranscriptStore
+from ciao.web.project_chats import ProjectChatManager
+from ciao.web.routes_api import chat_subagents
+
+
+def _client(tmp_path: Path, session_id: str) -> TestClient:
+    chat = SimpleNamespace(session_id=session_id)
+    pcm = SimpleNamespace(get_chat=lambda chat_id: chat if chat_id == "chat-1" else None)
+    app = Starlette(routes=[Route("/api/chats/{chat_id}/subagents", chat_subagents, methods=["GET"])])
+    app.state.project_chat_manager = pcm
+    app.state.config = SimpleNamespace(workspace_root=tmp_path / "workspace")
+    return TestClient(app)
+
+
+def _write_jsonl(path: Path, entries: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(json.dumps(entry) for entry in entries) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _make_manager(tmp_path: Path) -> ProjectChatManager:
+    """Build a ProjectChatManager backed by tmp_path-only stores."""
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+    )
+    state = StateStore(config.state_path, tmp_path, config.media_root)
+    transcripts = TranscriptStore(runtime, tmp_path / "transcripts")
+    return ProjectChatManager(
+        config,
+        state_store=state,
+        transcript_store=transcripts,
+        path=runtime / "web_projects.json",
+    )
+
+
+async def test_watch_subagent_completion_emits_ready_events(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When background subagents finish, the manager emits chat_subagents_ready."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("subagent-watch", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="subagent-watch-test")
+    chat.session_id = "sess-watch-1"
+    pcm._save()
+
+    # Speed the polling loop so the test finishes instantly.
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    # Sequence: two agents running, then one left, then none.
+    responses = iter(
+        [
+            ["agent-1", "agent-2"],
+            ["agent-2"],
+            [],
+        ]
+    )
+    mock_sdk = SimpleNamespace(
+        list_subagents=lambda session_id, directory=None: next(responses),
+    )
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", mock_sdk)
+
+    published: list[dict] = []
+    original_publish = pcm._events.publish
+
+    def capture_publish(payload: dict) -> None:
+        published.append(payload)
+        original_publish(payload)
+
+    monkeypatch.setattr(pcm._events, "publish", capture_publish)
+
+    await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+
+    ready_events = [ev for ev in published if ev.get("type") == "chat_subagents_ready"]
+    assert len(ready_events) == 2
+    assert ready_events[0]["remaining"] == 1
+    assert ready_events[1]["remaining"] == 0
+    assert ready_events[0]["chat_id"] == chat.chat_id
+    assert ready_events[0]["project_id"] == project.project_id
+
+
+def test_chat_subagents_falls_back_to_nested_jsonl_and_progress_entries(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", None)
+
+    nested = tmp_path / ".claude" / "projects" / "-tmp-workspace" / "sess-1" / "subagents" / "researcher.jsonl"
+    _write_jsonl(
+        nested,
+        [
+            {"type": "user", "message": {"role": "user", "content": "Research the release."}},
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "name": "Read", "input": {"file_path": "README.md"}},
+                        {"type": "text", "text": "Found the relevant release notes."},
+                    ],
+                },
+            },
+        ],
+    )
+    parent = tmp_path / ".claude" / "projects" / "-tmp-workspace" / "sess-1.jsonl"
+    _write_jsonl(
+        parent,
+        [
+            {
+                "type": "progress",
+                "data": {
+                    "agent_id": "progress-agent",
+                    "message": {
+                        "type": "assistant",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "Progress entry survived replay."}],
+                        },
+                    },
+                },
+            },
+        ],
+    )
+
+    resp = _client(tmp_path, "sess-1").get("/api/chats/chat-1/subagents")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    by_id = {entry["agent_id"]: entry["messages"] for entry in data}
+    assert "researcher" in by_id
+    assert "progress-agent" in by_id
+    assert any(msg["role"] == "user" and "Research" in msg["content"] for msg in by_id["researcher"])
+    assert any(msg.get("tool_name") == "_activity" and "Read" in msg["content"] for msg in by_id["researcher"])
+    assert any("Progress entry survived" in msg["content"] for msg in by_id["progress-agent"])
