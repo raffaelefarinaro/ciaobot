@@ -16,6 +16,8 @@ class Ciao < Formula
     python = Formula["python@3.12"].opt_bin/"python3.12"
     venv = virtualenv_create(libexec, python)
     venv.pip_install_and_link buildpath
+    # Menu bar companion (rumps/pyobjc); optional extra kept out of the base wheel.
+    venv.pip_install "#{buildpath}[menubar]"
   end
 
   def post_install

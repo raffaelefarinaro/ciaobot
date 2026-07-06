@@ -200,6 +200,14 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     assert f"<string>{workspace.resolve()}</string>" in plist_text
     assert "<string>9443</string>" in plist_text
     assert f"<string>{workspace.resolve()}/.runtime/ciao.stdout.log</string>" in plist_text
+    menubar_plist = launch_agents / "com.ciao.menubar.plist"
+    assert menubar_plist.is_file()
+    menubar_text = menubar_plist.read_text(encoding="utf-8")
+    assert "<string>com.ciao.menubar</string>" in menubar_text
+    assert "<string>/opt/ciao/bin/python</string>" in menubar_text
+    assert "<string>menubar</string>" in menubar_text
+    assert "<string>9443</string>" in menubar_text
+    assert f"<string>{workspace.resolve()}/.runtime/ciao.menubar.stdout.log</string>" in menubar_text
     app_exe = apps / "Ciaobot.app" / "Contents" / "MacOS" / "Ciaobot"
     assert app_exe.is_file()
     assert app_exe.stat().st_mode & 0o111

@@ -16,6 +16,7 @@ I'm sharing it because the patterns may be useful to you, and because I'm happy 
 - Archives chats into a markdown vault, then extracts session insights and drafts memory proposals for review.
 - Keeps durable project context separate from short-lived chat state.
 - Supports voice transcription, push notifications, model/provider settings, and local package updates from the UI.
+- Shows a macOS menu bar icon (`ciao menubar`) with server status and open/restart/logs actions — the Ciaobot face turns scared when the server is down.
 
 What it does **not** do automatically: it never promotes memory proposals into your long-term memory files without review, never discards or rewrites an existing notes folder during onboarding, and never locks you into one provider; chats and routines can route through any configured backend.
 
@@ -62,7 +63,7 @@ ciao setup --workspace ~/ciao-workspace
 ciao run
 ```
 
-`ciao setup` is idempotent: it writes the initial `.env`, seeds the workspace docs and vault, and (on macOS) renders a LaunchAgent plus a `Ciaobot.app` shortcut that opens the local PWA. Full setup details, optional Node tooling, and the Homebrew formula: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+`ciao setup` is idempotent: it writes the initial `.env`, seeds the workspace docs and vault, and (on macOS) renders LaunchAgents for the server and the menu bar companion plus a `Ciaobot.app` shortcut that opens the local PWA. The menu bar icon needs the optional extra (`pip install 'ciao[menubar]'` — the Homebrew install includes it). Full setup details, optional Node tooling, and the Homebrew formula: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 Optional capabilities (Google Workspace, Apple Intelligence titles, MCP connectors) each have their own setup in [INTEGRATIONS.md](INTEGRATIONS.md).
 

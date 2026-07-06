@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ciao.menubar</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{CIAO_PYTHON}}</string>
+        <string>-m</string>
+        <string>ciao.cli</string>
+        <string>menubar</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>{{CIAO_WORKSPACE}}</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CIAO_WORKSPACE</key>
+        <string>{{CIAO_WORKSPACE}}</string>
+        <key>CIAO_PORT</key>
+        <string>{{CIAO_PORT}}</string>
+        <key>PATH</key>
+        <string>{{CIAO_PATH}}</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>{{CIAO_WORKSPACE}}/.runtime/ciao.menubar.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{CIAO_WORKSPACE}}/.runtime/ciao.menubar.stderr.log</string>
+</dict>
+</plist>
