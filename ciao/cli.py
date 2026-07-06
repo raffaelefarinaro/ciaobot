@@ -61,9 +61,10 @@ def _render_launchd_plist(
     python_path: str,
     port: int,
     path: str = "",
+    template_name: str = "com.ciao.server.plist.tmpl",
 ) -> str:
     template = resources.files("ciao.stock").joinpath(
-        "deploy", "com.ciao.server.plist.tmpl"
+        "deploy", template_name
     ).read_text(encoding="utf-8")
     # Under launchd the default PATH omits Homebrew, so subprocess calls to
     # npm/node/git fail. Bake the user's PATH from setup time into the plist.
@@ -86,8 +87,9 @@ def _write_launchd_plist(
     python_path: str,
     port: int,
     path: str = "",
+    plist_name: str = "com.ciao.server.plist",
 ) -> Path:
-    plist = launch_agents_dir.expanduser() / "com.ciao.server.plist"
+    plist = launch_agents_dir.expanduser() / plist_name
     plist.parent.mkdir(parents=True, exist_ok=True)
     plist.write_text(
         _render_launchd_plist(
@@ -95,6 +97,7 @@ def _write_launchd_plist(
             python_path=python_path,
             port=port,
             path=path,
+            template_name=f"{plist_name}.tmpl",
         ),
         encoding="utf-8",
     )
@@ -239,13 +242,15 @@ def setup_workspace(
 
     launch_dir = Path(launch_agents_dir) if launch_agents_dir is not None else Path.home() / "Library" / "LaunchAgents"
     app_root_dir = Path(app_dir) if app_dir is not None else Path.home() / "Applications"
-    written.append(_write_launchd_plist(
-        workspace=root,
-        launch_agents_dir=launch_dir,
-        python_path=python_path or sys.executable,
-        port=port,
-        path=os.environ.get("PATH", ""),
-    ))
+    for plist_name in ("com.ciao.server.plist", "com.ciao.menubar.plist"):
+        written.append(_write_launchd_plist(
+            workspace=root,
+            launch_agents_dir=launch_dir,
+            python_path=python_path or sys.executable,
+            port=port,
+            path=os.environ.get("PATH", ""),
+            plist_name=plist_name,
+        ))
     written.append(_write_app_shortcut(
         workspace=root,
         app_dir=app_root_dir,
@@ -267,12 +272,27 @@ def _setup_command(args: argparse.Namespace) -> int:
     )
     for path in written:
         print(path)
-    plist = Path(args.launch_agents_dir).expanduser() / "com.ciao.server.plist"
+    plists = [
+        Path(args.launch_agents_dir).expanduser() / name
+        for name in ("com.ciao.server.plist", "com.ciao.menubar.plist")
+    ]
     if args.load_launchd:
-        subprocess.run(["launchctl", "unload", str(plist)], check=False)
-        return subprocess.run(["launchctl", "load", "-w", str(plist)], check=False).returncode
-    print(f"LaunchAgent not loaded. To load it: launchctl load -w {plist}")
+        rc = 0
+        for plist in plists:
+            subprocess.run(["launchctl", "unload", str(plist)], check=False)
+            rc = subprocess.run(
+                ["launchctl", "load", "-w", str(plist)], check=False
+            ).returncode or rc
+        return rc
+    for plist in plists:
+        print(f"LaunchAgent not loaded. To load it: launchctl load -w {plist}")
     return 0
+
+
+def _menubar_command(args: argparse.Namespace) -> int:
+    from ciao.menubar import run_menubar
+
+    return run_menubar(Path(args.workspace).expanduser().resolve(), args.port)
 
 
 def _auth_command_for_provider(provider: str) -> list[str]:
@@ -692,6 +712,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_parser = subparsers.add_parser("run", help="Run the Ciaobot server.")
     run_parser.set_defaults(func=lambda _args: _run_server())
+
+    menubar_parser = subparsers.add_parser(
+        "menubar",
+        help="Run the macOS menu bar companion (requires `pip install 'ciao[menubar]'`).",
+    )
+    menubar_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=Path(os.environ.get("CIAO_WORKSPACE", ".")),
+        help="Workspace directory (defaults to $CIAO_WORKSPACE or cwd).",
+    )
+    menubar_parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("CIAO_PORT", "8443")),
+        help="Localhost port the server listens on (defaults to $CIAO_PORT or 8443).",
+    )
+    menubar_parser.set_defaults(func=_menubar_command)
 
     setup_parser = subparsers.add_parser(
         "setup",

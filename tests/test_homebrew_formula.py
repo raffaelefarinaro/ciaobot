@@ -18,6 +18,7 @@ def test_homebrew_formula_installs_python312_virtualenv_package() -> None:
     assert 'Formula["python@3.12"].opt_bin/"python3.12"' in text
     assert "virtualenv_create(libexec, python)" in text
     assert "venv.pip_install_and_link buildpath" in text
+    assert 'venv.pip_install "#{buildpath}[menubar]"' in text
     assert 'bin/"ciao"' in text
 
 

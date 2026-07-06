@@ -35,6 +35,10 @@ test = [
 voice-local = [
   "mlx-whisper==0.4.3",
 ]
+# macOS menu bar companion (`ciao menubar`).
+menubar = [
+  "rumps==0.4.0",
+]
 
 [project.scripts]
 ciao = "ciao.cli:main"
