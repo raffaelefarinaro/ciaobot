@@ -235,6 +235,24 @@ def copy_to_clipboard(text: str) -> None:
     subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=False)
 
 
+def _settings_path(workspace: Path) -> Path:
+    return workspace / ".runtime" / "menubar_settings.json"
+
+
+def read_banners_muted(workspace: Path) -> bool:
+    try:
+        data = json.loads(_settings_path(workspace).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return bool(data.get("banners_muted")) if isinstance(data, dict) else False
+
+
+def write_banners_muted(workspace: Path, muted: bool) -> None:
+    path = _settings_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"banners_muted": muted}) + "\n", encoding="utf-8")
+
+
 def _disabled_item(rumps, title: str):
     item = rumps.MenuItem(title)
     item.set_callback(None)
@@ -269,7 +287,17 @@ def run_menubar(workspace: Path, port: int) -> int:
     app = rumps.App("Ciaobot", icon=face, quit_button=None)
 
     # Only notify for entries newer than launch, not the whole backlog.
-    state = {"last_seen_ts": time.time(), "fingerprint": None}
+    state = {
+        "last_seen_ts": time.time(),
+        "fingerprint": None,
+        "banners_muted": read_banners_muted(workspace),
+    }
+
+    def on_toggle_mute(sender) -> None:
+        muted = not state["banners_muted"]
+        state["banners_muted"] = muted
+        write_banners_muted(workspace, muted)
+        sender.state = 1 if muted else 0
 
     def _open_chat_callback(chat_id: str):
         def _callback(_sender) -> None:
@@ -314,31 +342,37 @@ def run_menubar(workspace: Path, port: int) -> int:
         for url in addresses:
             addresses_menu.add(rumps.MenuItem(url, callback=_copy_address_callback(url)))
 
-        # Open chats live directly in the menu under a section header.
+        # Open chats live directly in the menu, no header — just the list.
         chat_items = [
             rumps.MenuItem(
                 chat.title if len(chat.title) <= 60 else chat.title[:59] + "…",
                 callback=_open_chat_callback(chat.chat_id),
             )
             for chat in chats
-        ] or [_disabled_item(rumps, "No open chats")]
+        ]
+        chat_section = [*chat_items, None] if chat_items else []
 
         app.menu.clear()
         app.menu = [
             rumps.MenuItem("Open Ciaobot", callback=on_open),
             _disabled_item(rumps, status_label(status)),
             None,
-            _disabled_item(rumps, "Open Chats"),
-            *chat_items,
-            None,
+            *chat_section,
             notifications_menu,
             addresses_menu,
+            None,
+            _mute_item(),
             None,
             rumps.MenuItem("Restart Server", callback=on_restart),
             rumps.MenuItem("View Logs", callback=on_logs),
             None,
             rumps.MenuItem("Quit", callback=lambda _sender: rumps.quit_application()),
         ]
+
+    def _mute_item():
+        item = rumps.MenuItem("Mute Banners", callback=on_toggle_mute)
+        item.state = 1 if state["banners_muted"] else 0
+        return item
 
     def refresh(_timer=None) -> None:
         status = fetch_server_status(port)
@@ -361,9 +395,12 @@ def run_menubar(workspace: Path, port: int) -> int:
 
         fresh = [e for e in entries if e.ts > state["last_seen_ts"]]
         if fresh:
+            # Advance the cursor even when muted so unmuting doesn't replay
+            # the backlog; the submenu still lists everything.
             state["last_seen_ts"] = max(e.ts for e in fresh)
-            for entry in fresh[:3]:
-                subprocess.run(notify_command(entry.title, entry.body), check=False)
+            if not state["banners_muted"]:
+                for entry in fresh[:3]:
+                    subprocess.run(notify_command(entry.title, entry.body), check=False)
 
     rumps.Timer(refresh, POLL_SECONDS).start()
     refresh()

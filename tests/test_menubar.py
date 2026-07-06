@@ -223,6 +223,24 @@ def test_server_addresses_lists_localhost_bonjour_and_lan() -> None:
     ]
 
 
+def test_banners_muted_defaults_false_and_round_trips(tmp_path: Path) -> None:
+    assert menubar.read_banners_muted(tmp_path) is False
+
+    menubar.write_banners_muted(tmp_path, True)
+    assert menubar.read_banners_muted(tmp_path) is True
+
+    menubar.write_banners_muted(tmp_path, False)
+    assert menubar.read_banners_muted(tmp_path) is False
+
+
+def test_banners_muted_tolerates_corrupt_settings(tmp_path: Path) -> None:
+    path = tmp_path / ".runtime" / "menubar_settings.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("not json", encoding="utf-8")
+
+    assert menubar.read_banners_muted(tmp_path) is False
+
+
 def test_run_menubar_without_rumps_explains_the_extra(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
