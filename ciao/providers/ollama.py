@@ -62,19 +62,16 @@ class OllamaSettings:
     api_key: str = "ollama"
     cookie: str = ""
     # Cheap free-tier model used to generate chat titles for Ollama-routed
-    # chats. Default ``ministral-3:3b`` because it's the smallest model in
-    # the cloud catalog (3B params, free-tier accessible) and titles are
-    # ~50 token tasks where any tier is overkill. Override with
-    # ``CIAO_OLLAMA_TITLE_MODEL`` if you prefer another small model
-    # (e.g. ``gemma3:4b``, ``qwen3:8b``).
-    title_model: str = "ministral-3:3b"
+    # chats. Default ``gemma4:e2b-it-qat`` because it's local, free, offline,
+    # and already pulled. Override with ``CIAO_OLLAMA_TITLE_MODEL``.
+    title_model: str = "gemma4:e2b-it-qat"
     # Per-tier Ollama model overrides. Used when a chat is configured with
     # Anthropic alias names (haiku/sonnet/opus) but the operator wants the
     # request routed through Ollama. Override with ``CIAO_OLLAMA_HAIKU_MODEL``
     # / ``_SONNET_MODEL`` / ``_OPUS_MODEL``.
     haiku_model: str = "deepseek-v4-flash:cloud"
     sonnet_model: str = "kimi-k2.7-code:cloud"
-    opus_model: str = "minimax-m3:cloud"
+    opus_model: str = "glm-5.2:cloud"
     # Models served by a *local* Ollama daemon, routed independently of the
     # cloud allowlist above so both flavours can coexist (cloud key set →
     # ``base_url`` points at ollama.com while ``local_models`` still go to
@@ -125,6 +122,49 @@ def _env_overrides(base_url: str, api_key: str) -> dict[str, str]:
     }
 
 
+def _tier_remap_env(
+    settings: OllamaSettings,
+    *,
+    haiku_model: str | None = None,
+    sonnet_model: str | None = None,
+    opus_model: str | None = None,
+) -> dict[str, str]:
+    """Tier-alias + control-plane model remaps for Ollama-routed CLIs.
+
+    The bundled ``claude`` CLI resolves the ``haiku``/``sonnet``/``opus``/
+    ``fable`` aliases, its small-fast control-plane calls, Agent-tool
+    subagents, and the auto-mode background classifier through
+    ``ANTHROPIC_BASE_URL``. When that points at ollama.com the default
+    resolutions (``claude-haiku-4-5-20251001`` etc.) are not served there,
+    so subagent dispatch and background calls fail with "model may not
+    exist or you may not have access to it". Remap every tier and
+    control-plane slot to an Ollama-served model so the CLI's internal
+    calls land on a model the backend actually hosts.
+
+    Cloud routes use the configured tier models. Local-daemon routes pass
+    the selected local model for every tier slot so internal subagent and
+    classifier calls do not fall back to unsupported ``claude-*`` aliases.
+    """
+    haiku = haiku_model or settings.haiku_model
+    sonnet = sonnet_model or settings.sonnet_model
+    opus = opus_model or settings.opus_model
+    return {
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": haiku,
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": sonnet,
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": opus,
+        # No dedicated Fable tier on Ollama; reuse the opus-tier model.
+        "ANTHROPIC_DEFAULT_FABLE_MODEL": opus,
+        "ANTHROPIC_SMALL_FAST_MODEL": haiku,
+        "CLAUDE_CODE_SUBAGENT_MODEL": sonnet,
+        # Auto-mode + background classifier: the env is set so the classifier
+        # call resolves to an Ollama-served haiku-tier model instead of a
+        # claude-* id that ollama.com rejects. Auto mode is now always live
+        # for Ollama-routed chats.
+        "CLAUDE_CODE_AUTO_MODE_MODEL": haiku,
+        "CLAUDE_CODE_BG_CLASSIFIER_MODEL": haiku,
+    }
+
+
 def ollama_env_for_model(model: str, settings: OllamaSettings) -> dict[str, str]:
     """Return the env overrides to merge into ``AgentRequest.extra_env``.
 
@@ -135,10 +175,23 @@ def ollama_env_for_model(model: str, settings: OllamaSettings) -> dict[str, str]
     """
     if is_local_ollama_model(model, settings):
         # The daemon expects the literal "ollama" token under device-linked
-        # auth; a cloud API key would be rejected.
-        return _env_overrides(settings.local_url, "ollama")
+        # auth; a cloud API key would be rejected. Use the selected local
+        # model for the CLI's internal tier/control-plane slots so Task
+        # subagents and auto-mode classifier calls stay on the daemon.
+        return {
+            **_env_overrides(settings.local_url, "ollama"),
+            **_tier_remap_env(
+                settings,
+                haiku_model=model,
+                sonnet_model=model,
+                opus_model=model,
+            ),
+        }
     if model and _is_ollama_shaped(model) and _cloud_available(settings):
-        return _env_overrides(settings.base_url, settings.api_key)
+        return {
+            **_env_overrides(settings.base_url, settings.api_key),
+            **_tier_remap_env(settings),
+        }
     return {}
 
 
@@ -190,4 +243,42 @@ def discover_local_models(local_url: str, timeout_s: float = 2.0) -> tuple[str, 
         for entry in models
         if isinstance(entry, dict) and entry.get("name", "").strip()
     ]
+    return tuple(dict.fromkeys(names))
+
+
+def discover_cloud_models(
+    settings: OllamaSettings, timeout_s: float = 4.0
+) -> tuple[str, ...]:
+    """List models available on Ollama Cloud via ``GET /api/tags``.
+
+    Returns an empty tuple when the cloud is unreachable or the response
+    is malformed. Models are formatted with a ``:cloud`` suffix if not
+    already tag-shaped, to fit Ciaobot's cloud routing expectation.
+    """
+    if not _cloud_available(settings):
+        return ()
+    # Use standard api/tags on the configured cloud base URL (typically https://ollama.com)
+    url = settings.base_url.rstrip("/") + "/api/tags"
+    req = urllib.request.Request(
+        url, headers={"Authorization": f"Bearer {settings.api_key}"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, ValueError) as exc:
+        logger.info("Ollama Cloud discovery skipped (%s unreachable: %s)", url, exc)
+        return ()
+    models = payload.get("models")
+    if not isinstance(models, list):
+        return ()
+    names = []
+    for entry in models:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name", "").strip()
+        if not name:
+            continue
+        # Suffix with :cloud to align with Ciaobot's cloud routing convention
+        suffix = "" if ":" in name else ":cloud"
+        names.append(f"{name}{suffix}")
     return tuple(dict.fromkeys(names))

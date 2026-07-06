@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import urllib.error
 import urllib.request
@@ -13,6 +14,12 @@ from ciao import __version__
 
 
 DEFAULT_PACKAGE_INDEX_URL = "https://pypi.org/pypi/ciao/json"
+DEFAULT_GITHUB_REPO = "raffaelefarinaro/ciaobot"
+
+
+def _github_repo() -> str:
+    """Return the GitHub repo (owner/name) used for changelog lookups."""
+    return (os.environ.get("CIAO_GITHUB_REPO") or "").strip() or DEFAULT_GITHUB_REPO
 
 
 def _version_key(value: str) -> tuple:
@@ -62,6 +69,74 @@ def package_status(
         "latest_version": latest,
         "update_available": update_available,
         "source": index_url,
+        "error": error,
+    }
+
+
+def package_changelog(
+    *,
+    current_version: str = __version__,
+    latest_version: str = "",
+    repo: str | None = None,
+    opener: Callable[..., object] = urllib.request.urlopen,
+    timeout: float = 4.0,
+) -> dict[str, object]:
+    """Return the commit subjects between the installed and latest release tags.
+
+    Uses the GitHub compare API (``v{current}...v{latest}``). Commits are
+    returned newest-first. Any failure is reported via ``error`` and yields an
+    empty commit list so the caller can still offer the update.
+    """
+    repo = (repo or _github_repo()).strip("/")
+    commits: list[dict[str, str]] = []
+    error = ""
+    compare_url = ""
+
+    if not latest_version:
+        return {
+            "commits": commits,
+            "compare_url": compare_url,
+            "repo": repo,
+            "error": "No newer version is available.",
+        }
+
+    base = f"v{current_version}"
+    head = f"v{latest_version}"
+    compare_url = f"https://github.com/{repo}/compare/{base}...{head}"
+    api_url = f"https://api.github.com/repos/{repo}/compare/{base}...{head}"
+    request = urllib.request.Request(
+        api_url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "ciaobot-package-updater",
+        },
+    )
+    try:
+        with opener(request, timeout=timeout) as response:
+            raw = response.read()
+        payload = json.loads(raw.decode("utf-8"))
+        raw_commits = payload.get("commits") if isinstance(payload, dict) else None
+        if isinstance(raw_commits, list):
+            for entry in raw_commits:
+                if not isinstance(entry, dict):
+                    continue
+                commit = entry.get("commit")
+                message = ""
+                if isinstance(commit, dict) and isinstance(commit.get("message"), str):
+                    message = commit["message"]
+                lines = [line for line in message.strip().splitlines() if line.strip()]
+                subject = lines[0].strip() if lines else ""
+                sha = entry.get("sha") if isinstance(entry.get("sha"), str) else ""
+                if subject:
+                    commits.append({"sha": sha[:7], "subject": subject})
+    except (OSError, urllib.error.URLError, ValueError, json.JSONDecodeError) as exc:
+        error = str(exc)
+
+    commits.reverse()  # GitHub returns oldest-first; show newest changes first.
+    return {
+        "commits": commits,
+        "compare_url": compare_url,
+        "repo": repo,
         "error": error,
     }
 

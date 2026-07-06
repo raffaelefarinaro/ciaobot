@@ -9,10 +9,12 @@ import mimetypes
 import os
 import re
 import hmac
+import shutil
 import subprocess
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
+from typing import Iterable
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -21,7 +23,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 
 from ciao.config import WorkspaceConfig, CLAUDE_AI_CONNECTORS, coerce_claude_ai_mcps
 from ciao.models import THINKING_LEVELS, ChatContext
-from ciao.package_version import package_status, update_package
+from ciao.package_version import package_changelog, package_status, update_package
 from ciao.providers.claude import _summarize_tool_input
 from ciao.schedules import (
     ScheduleEntry,
@@ -86,6 +88,20 @@ _PROVIDER_KEY_META = {
         "description": "Optional key for critique/review model routing.",
     },
 }
+_GWS_BUILTIN_PROFILES = ("personal", "work")
+_GWS_PROFILE_META = {
+    "personal": {
+        "label": "Personal Google account",
+        "purpose": "Private Gmail, Calendar, and Tasks. Keep this separate from company systems.",
+        "examples": ["Gmail", "Calendar", "Tasks"],
+    },
+    "work": {
+        "label": "Work Google account",
+        "purpose": "Company Drive, Docs, Sheets, Slides, Gmail, Calendar, and Tasks.",
+        "examples": ["Drive", "Docs", "Sheets", "Slides", "Gmail", "Calendar"],
+    },
+}
+_GWS_AUTH_FILES = ("credentials.json", "credentials.enc")
 
 
 def _known_workspace_names(pcm: object) -> set[str]:
@@ -436,6 +452,177 @@ def _summarize_task_notification(content: str) -> str | None:
     return f"{icon} Subagent {status}"
 
 
+def _render_subagent_messages(msgs: Iterable[object]) -> list[dict]:
+    """Render SDK or JSONL message objects for the subagent transcript UI."""
+    rendered: list[dict] = []
+    for m in msgs:
+        mtype = getattr(m, "type", None)
+        message = getattr(m, "message", None)
+        if isinstance(m, dict):
+            mtype = m.get("type", mtype)
+            message = m.get("message", message)
+        if mtype == "assistant":
+            blocks = _extract_assistant_blocks(message)
+            blocks = [
+                b for b in blocks
+                if not (b["kind"] == "text" and _is_no_response_sentinel(b["text"]))
+            ]
+            if not blocks:
+                continue
+            pending_tools: list[str] = []
+
+            def flush_tools() -> None:
+                if pending_tools:
+                    rendered.append({
+                        "role": "system",
+                        "content": "\n".join(pending_tools),
+                        "tool_name": "_activity",
+                    })
+                    pending_tools.clear()
+
+            for blk in blocks:
+                if blk["kind"] == "tool_use":
+                    name = blk["name"] or "tool"
+                    summary = blk.get("summary") or ""
+                    touch = blk.get("file_touch")
+                    if touch:
+                        flush_tools()
+                        rendered.append({
+                            "role": "system",
+                            "tool_name": "_filecard",
+                            "content": touch["file_path"],
+                            "file_path": touch["file_path"],
+                            "action": touch["action"],
+                            "tool": name,
+                        })
+                        continue
+                    line = f"{_tool_icon(name)} {name}"
+                    if summary:
+                        line += f" {summary}"
+                    pending_tools.append(line)
+                else:
+                    flush_tools()
+                    text = blk["text"].strip()
+                    if text:
+                        rendered.append({"role": "assistant", "content": text})
+            flush_tools()
+            continue
+
+        content = _extract_text_content(message).strip()
+        if not content:
+            continue
+        if _is_no_response_sentinel(content):
+            continue
+        rendered.append({"role": str(mtype or "system"), "content": content})
+    return rendered
+
+
+def _local_session_jsonl_paths(session_id: str, workspace_root: Path) -> list[Path]:
+    """Find local Claude Code JSONL files for ``session_id``."""
+    try:
+        from ciao.transcripts import _claude_projects_dir
+    except ImportError:
+        return []
+    paths: list[Path] = []
+    preferred = _claude_projects_dir(workspace_root) / f"{session_id}.jsonl"
+    if preferred.exists():
+        paths.append(preferred)
+    projects_root = Path.home() / ".claude" / "projects"
+    try:
+        for path in projects_root.glob(f"*/{session_id}.jsonl"):
+            if path not in paths:
+                paths.append(path)
+    except OSError:
+        pass
+    return paths
+
+
+def _jsonl_message_from_entry(entry: dict) -> dict | None:
+    etype = entry.get("type")
+    message = entry.get("message")
+    if etype in {"assistant", "user"} and isinstance(message, dict):
+        return {"type": etype, "message": message}
+    if etype == "progress":
+        nested = entry.get("data", {}).get("message")
+        if isinstance(nested, dict):
+            ntype = nested.get("type")
+            nmessage = nested.get("message")
+            if ntype in {"assistant", "user"} and isinstance(nmessage, dict):
+                return {"type": ntype, "message": nmessage}
+    return None
+
+
+def _read_jsonl_messages(path: Path) -> list[dict]:
+    messages: list[dict] = []
+    try:
+        with path.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                msg = _jsonl_message_from_entry(entry)
+                if msg is not None:
+                    messages.append(msg)
+    except OSError:
+        return []
+    return messages
+
+
+def _local_subagent_transcripts(session_id: str, workspace_root: Path) -> list[dict]:
+    """Fallback parser for nested subagent JSONL files and progress entries."""
+    projects_root = Path.home() / ".claude" / "projects"
+    grouped: dict[str, list[dict]] = {}
+
+    try:
+        nested_paths = sorted(projects_root.glob(f"*/{session_id}/subagents/*.jsonl"))
+    except OSError:
+        nested_paths = []
+    for path in nested_paths:
+        msgs = _read_jsonl_messages(path)
+        if msgs:
+            grouped.setdefault(path.stem, []).extend(msgs)
+
+    for path in _local_session_jsonl_paths(session_id, workspace_root):
+        try:
+            with path.open(encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(entry, dict) or entry.get("type") != "progress":
+                        continue
+                    msg = _jsonl_message_from_entry(entry)
+                    if msg is None:
+                        continue
+                    data = entry.get("data", {})
+                    agent_id = (
+                        data.get("agent_id")
+                        or data.get("subagent_id")
+                        or data.get("task_id")
+                        or data.get("parent_tool_use_id")
+                        or "progress"
+                    )
+                    grouped.setdefault(str(agent_id), []).append(msg)
+        except OSError:
+            continue
+
+    return [
+        {"agent_id": agent_id, "messages": _render_subagent_messages(messages)}
+        for agent_id, messages in sorted(grouped.items())
+        if messages
+    ]
+
+
 # ── Auth ────────────────────────────────────────────────────────────────
 
 # Simple in-memory rate limiter for auth_login: max 10 attempts per IP per minute.
@@ -531,6 +718,9 @@ def _workspaces_payload(config) -> dict:
     return {
         "workspaces": workspaces,
         "active": workspaces[0]["name"] if workspaces else None,
+        # App-wide fallback when a workspace's default_model is empty, so the
+        # PWA can label "Inherit default (<model>)" instead of a vague hint.
+        "app_default_model": getattr(config, "claude_default_model", "") or "",
         "provider_options": _workspace_provider_options(config),
         # The claude.ai connector set the toggle controls, so the PWA can label
         # the switch without hardcoding tool names.
@@ -813,6 +1003,406 @@ async def provider_config_settings(request: Request) -> JSONResponse:
                 raise RestartRequested(config.restart_exit_code)
         asyncio.create_task(_do_restart())
     return JSONResponse(_provider_config_payload(config))
+
+
+def _gws_profile_config_dir(config, profile: str) -> Path | None:
+    root = Path(config.workspace_root).resolve()
+    if profile == "personal":
+        return root / "secrets" / "gws-personal"
+    if profile == "work":
+        return root / "secrets" / "gws"
+    return None
+
+
+def _gws_file_present(config_dir: Path | None, names: tuple[str, ...]) -> bool:
+    if config_dir is None:
+        return False
+    return any((config_dir / name).is_file() for name in names)
+
+
+def _gws_profile_usage(config) -> dict[str, list[str]]:
+    default_profile = getattr(config, "gws_default_profile", "personal") or "personal"
+    usage: dict[str, list[str]] = {}
+    for workspace in config.workspaces.values():
+        profile = (getattr(workspace, "gws_profile", "") or default_profile).strip()
+        if not profile:
+            profile = default_profile
+        usage.setdefault(profile, []).append(getattr(workspace, "name", ""))
+    return usage
+
+
+def _gws_profile_names(config) -> list[str]:
+    names = list(_GWS_BUILTIN_PROFILES)
+    default_profile = getattr(config, "gws_default_profile", "personal") or "personal"
+    for profile in [default_profile, *_gws_profile_usage(config).keys()]:
+        profile = str(profile).strip()
+        if profile and profile not in names:
+            names.append(profile)
+    return names
+
+
+def _extract_email_from_id_token(id_token: str | None) -> str:
+    if not id_token:
+        return ""
+    try:
+        import base64
+        import json
+        parts = id_token.split(".")
+        if len(parts) >= 2:
+            payload_b64 = parts[1]
+            payload_b64 += "=" * ((4 - len(payload_b64) % 4) % 4)
+            payload_json = base64.urlsafe_b64decode(payload_b64.encode("utf-8")).decode("utf-8")
+            payload = json.loads(payload_json)
+            return payload.get("email") or ""
+    except Exception:
+        pass
+    return ""
+
+
+def _gws_profile_payload(config, profile: str, usage: dict[str, list[str]]) -> dict:
+    meta = _GWS_PROFILE_META.get(
+        profile,
+        {
+            "label": f"{profile} Google profile",
+            "purpose": "Custom Google Workspace profile configured outside the built-in personal/work wrapper.",
+            "examples": [],
+        },
+    )
+    config_dir = _gws_profile_config_dir(config, profile)
+    credentials_present = _gws_file_present(config_dir, _GWS_AUTH_FILES)
+    client_secret_present = _gws_file_present(config_dir, ("client_secret.json",))
+    wrapper_path = Path(config.workspace_root).resolve() / "scripts" / "gws-profile.sh"
+    helper_path = Path(config.workspace_root).resolve() / "scripts" / "gws-auth-helper.py"
+    setup_command = ""
+    headless_auth_command = ""
+    if profile in _GWS_BUILTIN_PROFILES:
+        setup_command = f"scripts/gws-profile.sh {profile} auth login --full"
+        headless_auth_command = f"python3 scripts/gws-auth-helper.py {profile}"
+
+    email = ""
+    if config_dir:
+        creds_path = config_dir / "credentials.json"
+        if creds_path.is_file():
+            try:
+                with open(creds_path, "r", encoding="utf-8") as f:
+                    creds_data = json.load(f)
+                email = creds_data.get("email") or ""
+            except Exception:
+                pass
+
+    return {
+        "name": profile,
+        "label": meta["label"],
+        "purpose": meta["purpose"],
+        "examples": meta["examples"],
+        "configured": credentials_present,
+        "credentials_present": credentials_present,
+        "client_secret_present": client_secret_present,
+        "config_dir": str(config_dir) if config_dir is not None else "",
+        "workspaces": usage.get(profile, []),
+        "setup_command": setup_command,
+        "headless_auth_command": headless_auth_command,
+        "wrapper_available": wrapper_path.is_file(),
+        "helper_available": helper_path.is_file(),
+        "email": email,
+    }
+
+
+def _gws_integration_payload(config) -> dict:
+    usage = _gws_profile_usage(config)
+    binary_path = shutil.which("gws") or ""
+    wrapper_path = Path(config.workspace_root).resolve() / "scripts" / "gws-profile.sh"
+    helper_path = Path(config.workspace_root).resolve() / "scripts" / "gws-auth-helper.py"
+    return {
+        "installed": bool(binary_path),
+        "binary_path": binary_path,
+        "default_profile": getattr(config, "gws_default_profile", "personal") or "personal",
+        "wrapper_path": str(wrapper_path) if wrapper_path.is_file() else "",
+        "headless_helper_path": str(helper_path) if helper_path.is_file() else "",
+        "profiles": [
+            _gws_profile_payload(config, profile, usage)
+            for profile in _gws_profile_names(config)
+        ],
+    }
+
+
+async def gws_integration_settings(request: Request) -> JSONResponse:
+    return JSONResponse(_gws_integration_payload(request.app.state.config))
+
+
+async def gws_save_client_secret(request: Request) -> JSONResponse:
+    config = request.app.state.config
+    try:
+        body = await request.json()
+        profile = body.get("profile")
+        client_secret_str = body.get("client_secret")
+    except Exception:
+        return JSONResponse({"error": "Invalid request payload"}, status_code=400)
+
+    if profile not in _GWS_BUILTIN_PROFILES:
+        return JSONResponse({"error": f"Invalid profile: {profile}"}, status_code=400)
+
+    if not client_secret_str:
+        return JSONResponse({"error": "Missing client_secret content"}, status_code=400)
+
+    try:
+        secret_json = json.loads(client_secret_str)
+        if "installed" not in secret_json and "web" not in secret_json:
+            return JSONResponse({"error": "client_secret.json missing 'installed' or 'web' section"}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": f"Invalid JSON format: {str(e)}"}, status_code=400)
+
+    config_dir = _gws_profile_config_dir(config, profile)
+    if config_dir is None:
+        return JSONResponse({"error": "Could not determine config directory"}, status_code=500)
+
+    try:
+        config_dir.mkdir(parents=True, exist_ok=True)
+        path = config_dir / "client_secret.json"
+        path.write_text(json.dumps(secret_json, indent=2), encoding="utf-8")
+        path.chmod(0o600)
+    except Exception as e:
+        return JSONResponse({"error": f"Failed to write client_secret.json: {str(e)}"}, status_code=500)
+
+    return JSONResponse(_gws_integration_payload(config))
+
+
+async def gws_auth_url(request: Request) -> JSONResponse:
+    config = request.app.state.config
+    try:
+        body = await request.json()
+        profile = body.get("profile")
+    except Exception:
+        return JSONResponse({"error": "Invalid request payload"}, status_code=400)
+
+    if profile not in _GWS_BUILTIN_PROFILES:
+        return JSONResponse({"error": f"Invalid profile: {profile}"}, status_code=400)
+
+    config_dir = _gws_profile_config_dir(config, profile)
+    if config_dir is None:
+        return JSONResponse({"error": "Could not determine config directory"}, status_code=500)
+
+    secret_path = config_dir / "client_secret.json"
+    if not secret_path.is_file():
+        return JSONResponse({"error": "client_secret.json not found for this profile"}, status_code=400)
+
+    try:
+        with open(secret_path, "r", encoding="utf-8") as f:
+            secret = json.load(f)
+        
+        installed = secret.get("installed") or secret.get("web")
+        if not installed:
+            return JSONResponse({"error": "client_secret.json missing 'installed' or 'web' section"}, status_code=400)
+
+        client_id = installed.get("client_id")
+        redirect_uris = installed.get("redirect_uris", ["http://localhost"])
+        redirect_uri = redirect_uris[0]
+        
+        if not client_id:
+            return JSONResponse({"error": "client_secret.json missing client_id"}, status_code=400)
+
+        scopes = (
+            "https://www.googleapis.com/auth/gmail.modify "
+            "https://www.googleapis.com/auth/calendar "
+            "https://www.googleapis.com/auth/tasks "
+            "openid "
+            "https://www.googleapis.com/auth/userinfo.email "
+            "https://www.googleapis.com/auth/userinfo.profile"
+        )
+        if profile == "work":
+            scopes = (
+                "https://www.googleapis.com/auth/drive "
+                "https://www.googleapis.com/auth/spreadsheets "
+                "https://www.googleapis.com/auth/gmail.modify "
+                "https://www.googleapis.com/auth/calendar "
+                "https://www.googleapis.com/auth/documents "
+                "https://www.googleapis.com/auth/presentations "
+                "https://www.googleapis.com/auth/tasks "
+                "openid "
+                "https://www.googleapis.com/auth/userinfo.email "
+                "https://www.googleapis.com/auth/userinfo.profile"
+            )
+
+        import urllib.parse
+        params = {
+            "scope": scopes,
+            "access_type": "offline",
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "client_id": client_id,
+            "prompt": "select_account consent",
+        }
+        auth_url = "https://accounts.google.com/o/oauth2/auth?" + urllib.parse.urlencode(params)
+        return JSONResponse({"auth_url": auth_url})
+    except Exception as e:
+        return JSONResponse({"error": f"Failed to generate authorization URL: {str(e)}"}, status_code=500)
+
+
+async def gws_exchange_code(request: Request) -> JSONResponse:
+    config = request.app.state.config
+    try:
+        body = await request.json()
+        profile = body.get("profile")
+        code_or_url = body.get("code")
+    except Exception:
+        return JSONResponse({"error": "Invalid request payload"}, status_code=400)
+
+    if profile not in _GWS_BUILTIN_PROFILES:
+        return JSONResponse({"error": f"Invalid profile: {profile}"}, status_code=400)
+
+    if not code_or_url:
+        return JSONResponse({"error": "Missing authorization code or redirect URL"}, status_code=400)
+
+    config_dir = _gws_profile_config_dir(config, profile)
+    if config_dir is None:
+        return JSONResponse({"error": "Could not determine config directory"}, status_code=500)
+
+    secret_path = config_dir / "client_secret.json"
+    if not secret_path.is_file():
+        return JSONResponse({"error": "client_secret.json not found for this profile"}, status_code=400)
+
+    try:
+        with open(secret_path, "r", encoding="utf-8") as f:
+            secret = json.load(f)
+        
+        installed = secret.get("installed") or secret.get("web")
+        if not installed:
+            return JSONResponse({"error": "client_secret.json missing 'installed' or 'web' section"}, status_code=400)
+
+        client_id = installed.get("client_id")
+        client_secret = installed.get("client_secret")
+        redirect_uris = installed.get("redirect_uris", ["http://localhost"])
+        redirect_uri = redirect_uris[0]
+
+        if not client_id or not client_secret:
+            return JSONResponse({"error": "client_secret.json missing client_id or client_secret"}, status_code=400)
+
+        code = code_or_url.strip()
+        if "code=" in code or code.startswith("http"):
+            import urllib.parse
+            parsed = urllib.parse.urlparse(code)
+            query = urllib.parse.parse_qs(parsed.query)
+            if "error" in query:
+                return JSONResponse({"error": f"Google returned error: {query['error'][0]}"}, status_code=400)
+            if "code" not in query:
+                return JSONResponse({"error": "No authorization 'code' found in the redirect URL"}, status_code=400)
+            code = query["code"][0]
+
+        import urllib.request
+        import urllib.error
+        import urllib.parse
+        
+        data = urllib.parse.urlencode(
+            {
+                "code": code,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uri": redirect_uri,
+                "grant_type": "authorization_code",
+            }
+        ).encode("utf-8")
+
+        req = urllib.request.Request(
+            "https://oauth2.googleapis.com/token",
+            data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+
+        def _do_exchange():
+            with urllib.request.urlopen(req) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+
+        try:
+            tokens = await asyncio.to_thread(_do_exchange)
+        except urllib.error.HTTPError as e:
+            try:
+                err_body = e.read().decode("utf-8")
+                err_json = json.loads(err_body)
+                err_desc = err_json.get("error_description") or err_json.get("error") or "Unknown OAuth error"
+            except Exception:
+                err_desc = f"HTTP {e.code}"
+            return JSONResponse({"error": f"Token exchange failed: {err_desc}"}, status_code=400)
+        except Exception as e:
+            return JSONResponse({"error": f"Token exchange failed: {str(e)}"}, status_code=400)
+
+        refresh_token = tokens.get("refresh_token")
+        if not refresh_token:
+            return JSONResponse({
+                "error": "No refresh token returned. The account might already be authorized. "
+                         "Please revoke the old grant at https://myaccount.google.com/permissions and try again."
+            }, status_code=400)
+
+        email = _extract_email_from_id_token(tokens.get("id_token"))
+
+        creds = {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "type": "authorized_user",
+        }
+        if email:
+            creds["email"] = email
+
+        creds_path = config_dir / "credentials.json"
+        
+        for name in ("credentials.enc", "token_cache.json"):
+            stale = config_dir / name
+            if stale.exists():
+                backup = config_dir / (name + ".old")
+                try:
+                    if backup.exists():
+                        backup.unlink()
+                    stale.rename(backup)
+                except Exception as e:
+                    logger.warning(f"Failed to move stale {name}: {e}")
+
+        creds_path.write_text(json.dumps(creds, indent=2), encoding="utf-8")
+        creds_path.chmod(0o600)
+
+        key_file = config_dir / ".encryption_key"
+        if key_file.exists():
+            try:
+                key_file.chmod(0o600)
+            except Exception as e:
+                logger.warning(f"Failed to fix .encryption_key permissions: {e}")
+
+        return JSONResponse(_gws_integration_payload(config))
+    except Exception as e:
+        return JSONResponse({"error": f"Authentication exchange failed: {str(e)}"}, status_code=500)
+
+
+async def gws_disconnect(request: Request) -> JSONResponse:
+    config = request.app.state.config
+    try:
+        body = await request.json()
+        profile = body.get("profile")
+        delete_client_secret = bool(body.get("delete_client_secret", False))
+    except Exception:
+        return JSONResponse({"error": "Invalid request payload"}, status_code=400)
+
+    if profile not in _GWS_BUILTIN_PROFILES:
+        return JSONResponse({"error": f"Invalid profile: {profile}"}, status_code=400)
+
+    config_dir = _gws_profile_config_dir(config, profile)
+    if config_dir is None:
+        return JSONResponse({"error": "Could not determine config directory"}, status_code=500)
+
+    try:
+        for name in ("credentials.json", "credentials.enc", "token_cache.json",
+                     "credentials.json.old", "credentials.enc.old", "token_cache.json.old"):
+            path = config_dir / name
+            if path.exists():
+                path.unlink()
+        
+        if delete_client_secret:
+            secret_path = config_dir / "client_secret.json"
+            if secret_path.exists():
+                secret_path.unlink()
+    except Exception as e:
+        return JSONResponse({"error": f"Failed to disconnect profile: {str(e)}"}, status_code=500)
+
+    return JSONResponse(_gws_integration_payload(config))
+
 
 
 async def list_projects(request: Request) -> JSONResponse:
@@ -1386,20 +1976,20 @@ async def chat_subagents(request: Request) -> JSONResponse:
     if not chat.session_id:
         return JSONResponse([])
 
-    try:
-        from claude_agent_sdk import get_subagent_messages, list_subagents
-    except ImportError:
-        return JSONResponse({"error": "SDK not available"}, status_code=500)
-
     config = request.app.state.config
     workspace = str(config.workspace_root)
 
     try:
+        from claude_agent_sdk import get_subagent_messages, list_subagents
+    except ImportError:
+        return JSONResponse(_local_subagent_transcripts(chat.session_id, Path(config.workspace_root)))
+
+    try:
         agent_ids = list_subagents(chat.session_id, directory=workspace)
     except (FileNotFoundError, ValueError):
-        return JSONResponse([])
+        return JSONResponse(_local_subagent_transcripts(chat.session_id, Path(config.workspace_root)))
     except Exception:  # noqa: BLE001 — defensive against SDK surprises
-        return JSONResponse([])
+        return JSONResponse(_local_subagent_transcripts(chat.session_id, Path(config.workspace_root)))
 
     result: list[dict] = []
     for agent_id in agent_ids:
@@ -1414,65 +2004,11 @@ async def chat_subagents(request: Request) -> JSONResponse:
         except Exception:  # noqa: BLE001 — defensive
             continue
 
-        rendered: list[dict] = []
-        for m in msgs:
-            if m.type == "assistant":
-                blocks = _extract_assistant_blocks(m.message)
-                # Drop the CLI's interrupted-turn sentinel (mirrors
-                # chat_messages above).
-                blocks = [
-                    b for b in blocks
-                    if not (b["kind"] == "text" and _is_no_response_sentinel(b["text"]))
-                ]
-                if not blocks:
-                    continue
-                pending_tools: list[str] = []
-
-                def flush_tools():
-                    if pending_tools:
-                        rendered.append({
-                            "role": "system",
-                            "content": "\n".join(pending_tools),
-                            "tool_name": "_activity",
-                        })
-                        pending_tools.clear()
-
-                for blk in blocks:
-                    if blk["kind"] == "tool_use":
-                        name = blk["name"] or "tool"
-                        summary = blk.get("summary") or ""
-                        touch = blk.get("file_touch")
-                        if touch:
-                            flush_tools()
-                            rendered.append({
-                                "role": "system",
-                                "tool_name": "_filecard",
-                                "content": touch["file_path"],
-                                "file_path": touch["file_path"],
-                                "action": touch["action"],
-                                "tool": name,
-                            })
-                            continue
-                        line = f"{_tool_icon(name)} {name}"
-                        if summary:
-                            line += f" {summary}"
-                        pending_tools.append(line)
-                    else:
-                        flush_tools()
-                        text = blk["text"].strip()
-                        if text:
-                            rendered.append({"role": "assistant", "content": text})
-                flush_tools()
-                continue
-
-            content = _extract_text_content(m.message).strip()
-            if not content:
-                continue
-            if _is_no_response_sentinel(content):
-                continue
-            rendered.append({"role": m.type, "content": content})
-
+        rendered = _render_subagent_messages(msgs)
         result.append({"agent_id": agent_id, "messages": rendered})
+
+    if not result:
+        result = _local_subagent_transcripts(chat.session_id, Path(config.workspace_root))
 
     return JSONResponse(result)
 
@@ -1958,7 +2494,7 @@ async def workspace_file_write(request: Request) -> Response:
     if len(content.encode("utf-8")) > _WORKSPACE_FILE_MAX_BYTES:
         return JSONResponse({"error": "content too large"}, status_code=413)
 
-    roots = _allowed_roots(config)
+    roots = _allowed_roots(config, for_write=True)
     result = _resolve_workspace_path(roots, raw_path, allow_fuzzy=False)
     if isinstance(result, Response):
         # Resolver returns 404 for missing files. For an edit-and-save flow
@@ -2315,10 +2851,12 @@ def _routines_payload(config, app_settings) -> dict:
         title_effective = config.title_model
     if config.critique_models:
         critique_effective = config.critique_models
-    elif os.environ.get("OPENROUTER_API_KEY"):
+    elif config.openrouter.available:
         critique_effective = "anthropic/claude-sonnet-4.5,anthropic/claude-haiku-4.5,anthropic/claude-opus-4.8"
+    elif config.ollama.api_key and config.ollama.api_key != "ollama":
+        critique_effective = f"{config.ollama.sonnet_model},{config.ollama.haiku_model},{config.ollama.opus_model}"
     else:
-        critique_effective = "kimi-k2.7-code:cloud,deepseek-v4-flash:cloud,minimax-m3:cloud"
+        critique_effective = "sonnet,haiku,opus"
 
     return {
         # Overrides as stored ("" = automatic default).
@@ -2389,9 +2927,14 @@ async def settings_routines(request: Request) -> JSONResponse:
         # Re-discover local daemon models so a freshly `ollama pull`-ed
         # model appears in the selectors without a restart. Bounded by the
         # discovery timeout (2s) and run off the event loop.
-        from ciao.config import refresh_local_ollama_models, refresh_openrouter_models
+        from ciao.config import (
+            refresh_local_ollama_models,
+            refresh_cloud_ollama_models,
+            refresh_openrouter_models,
+        )
 
         await asyncio.to_thread(refresh_local_ollama_models, config)
+        await asyncio.to_thread(refresh_cloud_ollama_models, config)
         await asyncio.to_thread(refresh_openrouter_models, config)
     if request.method == "PATCH":
         try:
@@ -2449,6 +2992,27 @@ async def package_status_endpoint(request: Request) -> JSONResponse:
     if callable(fetcher):
         return JSONResponse(await asyncio.to_thread(fetcher))
     return JSONResponse(await asyncio.to_thread(package_status))
+
+
+async def package_changelog_endpoint(request: Request) -> JSONResponse:
+    """Return the commits between the installed and latest release for the update modal."""
+    fetcher = getattr(request.app.state, "package_status_fetcher", None)
+    status = await asyncio.to_thread(fetcher if callable(fetcher) else package_status)
+    current = str(status.get("current_version") or "")
+    latest = str(status.get("latest_version") or "")
+    changelog = await asyncio.to_thread(
+        package_changelog,
+        current_version=current,
+        latest_version=latest,
+    )
+    return JSONResponse(
+        {
+            "current_version": current,
+            "latest_version": latest,
+            "update_available": bool(status.get("update_available")),
+            **changelog,
+        }
+    )
 
 
 async def package_update_endpoint(request: Request) -> JSONResponse:
@@ -3029,6 +3593,30 @@ async def handover_merge(request: Request) -> JSONResponse:
     merge = _open_merge_chat(request, branch)
     return JSONResponse(merge, status_code=200 if merge.get("ok") else 500)
 
+
+
+async def debug_issues(request: Request) -> JSONResponse:
+    """Runtime issue report (server errors + failed job runs) for self-fix.
+
+    Only available when ``CIAO_DEV_MODE`` is set; hidden (404) otherwise so
+    the endpoint does not advertise itself on production instances.
+    """
+    config = request.app.state.config
+    if not getattr(config, "dev_mode", False):
+        return JSONResponse(
+            {"error": "debug endpoints require CIAO_DEV_MODE"}, status_code=404
+        )
+    from ciao.debug_report import DEFAULT_LOG_LINES, build_issue_report
+
+    try:
+        lines = int(request.query_params.get("lines", DEFAULT_LOG_LINES))
+    except ValueError:
+        lines = DEFAULT_LOG_LINES
+    lines = max(1, min(lines, 2000))
+    report = await asyncio.to_thread(
+        build_issue_report, config.workspace_root, log_lines=lines
+    )
+    return JSONResponse(report)
 
 
 async def cli_stats(request: Request) -> JSONResponse:

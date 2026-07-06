@@ -6,9 +6,23 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+import pytest
+
 from ciao.app_settings import AppSettingsStore
 from ciao.config import CiaoConfig
 from ciao.web.routes_api import settings_routines
+
+
+@pytest.fixture(autouse=True)
+def mock_discoveries(monkeypatch):
+    monkeypatch.setattr(
+        "ciao.providers.ollama.discover_cloud_models",
+        lambda settings, timeout_s=4.0: (),
+    )
+    monkeypatch.setattr(
+        "ciao.providers.openrouter.discover_models",
+        lambda settings, timeout_s=4.0, anthropic_only=False: (),
+    )
 
 
 def _make_client(tmp_path, env_extra: dict[str, str] | None = None):
@@ -54,8 +68,8 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     assert data["model_options"]["ollama_cloud"] == [
         "kimi-k2.7-code:cloud",
         "deepseek-v4-flash:cloud",
-        "minimax-m3:cloud",
-        "ministral-3:3b",
+        "glm-5.2:cloud",
+        "gemma4:e2b-it-qat",
     ]
     assert data["model_options"]["ollama_local"] == ["gemma4:12b-it-qat"]
     assert data["workspace_context"] == {

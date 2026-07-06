@@ -199,6 +199,7 @@ async def ws_events(websocket: WebSocket) -> None:
     - `chat_streaming_started`  {chat_id, project_id}
     - `chat_streaming_done`     {chat_id, project_id, is_error}
     - `chat_result_ready`       {chat_id, project_id, title, snippet}
+    - `chat_subagents_ready`    {chat_id, project_id, remaining}
     - `chat_title`              {chat_id, title}
 
     On connect, sends a snapshot of currently-active streams so a fresh client

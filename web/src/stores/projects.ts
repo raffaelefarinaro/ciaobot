@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
 import { api } from '../lib/api'
 import { getPendingBucket, normalizePendingBuckets, setPendingBucket } from '../lib/pendingBuckets'
+import { buildFixPrompt } from '../lib/fixError'
 import type {
   ProjectInfo,
   ChatInfo,
@@ -37,6 +38,9 @@ export const useProjectStore = defineStore('projects', () => {
   // claude.ai connector MCP names the per-workspace toggle controls, for the
   // PWA Settings label. Populated from /api/workspaces; stable across writes.
   const workspaceClaudeAiConnectors = ref<string[]>([])
+  // App-wide fallback model when a workspace default_model is empty; lets
+  // Settings label the picker "Inherit default (<model>)".
+  const workspaceAppDefaultModel = ref('')
   const activeWorkspace = ref<WorkspaceName>('personal')
   const activeChatId = ref<string | null>(null)
   const messages = ref<Record<string, ChatMessage[]>>({})
@@ -195,6 +199,7 @@ export const useProjectStore = defineStore('projects', () => {
   const documentVisible = ref(
     typeof document !== 'undefined' ? document.visibilityState === 'visible' : true
   )
+  let latestSyncInFlight = false
 
   // ── Computed ─────────────────────────────────────────────────────────
 
@@ -302,14 +307,52 @@ export const useProjectStore = defineStore('projects', () => {
   function pushToast(toast: Omit<InAppToast, 'id'>): InAppToast {
     const t: InAppToast = { id: ++toastCounter, ...toast }
     toasts.value.push(t)
-    // Auto-dismiss after 5s.
-    setTimeout(() => dismissToast(t.id), 5000)
+    // Notifications auto-dismiss; error toasts persist until dismissed or acted on.
+    if (t.variant !== 'error') {
+      setTimeout(() => dismissToast(t.id), 5000)
+    }
     return t
+  }
+
+  // Surface a failure as a persistent, actionable error toast. `errorText` is
+  // the raw log seeded into a fix chat when the user clicks "Fix".
+  function pushErrorToast(title: string, errorText: string): InAppToast {
+    return pushToast({
+      chat_id: '',
+      title,
+      body: errorText,
+      variant: 'error',
+      errorText,
+    })
   }
 
   function dismissToast(id: number) {
     const idx = toasts.value.findIndex(t => t.id === id)
     if (idx >= 0) toasts.value.splice(idx, 1)
+  }
+
+  // Open a fresh chat in the active workspace's auto-managed General project,
+  // pre-filled with a prompt asking the agent to diagnose and fix `errorText`
+  // (falling back to a GitHub issue if the bug is in Ciaobot itself).
+  async function fixError(opts: {
+    errorText: string
+    context?: string
+    title?: string
+  }): Promise<ChatInfo | undefined> {
+    const general = projects.value.find(
+      p => p.workspace === activeWorkspace.value && p.is_auto && p.name === 'General',
+    )
+    if (!general) {
+      pushErrorToast(
+        'Cannot open fix chat',
+        'No General project found in this workspace to open a fix chat in.',
+      )
+      return
+    }
+    const chat = await createChat(general.project_id, opts.title || 'Fix error')
+    const prompt = buildFixPrompt({ errorText: opts.errorText, context: opts.context })
+    await sendMessage(chat.chat_id, prompt, 'queue')
+    return chat
   }
 
   // ── Persistence ─────────────────────────────────────────────────────
@@ -663,36 +706,11 @@ export const useProjectStore = defineStore('projects', () => {
       : [{ value: 'claude', label: 'Claude' }]
     workspaceClaudeAiConnectors.value = workspaceResponse.claude_ai_connectors || []
     projects.value = p
-    chats.value = c
+    reconcileChatList(c)
     const knownWorkspaceNames = workspaceOptions.value.map(w => w.name)
     if (!knownWorkspaceNames.includes(activeWorkspace.value)) {
       activeWorkspace.value = workspaceResponse.active || knownWorkspaceNames[0] || 'personal'
     }
-
-    // Prune messages for deleted chats
-    const validIds = new Set(c.map(ch => ch.chat_id))
-    for (const key of Object.keys(messages.value)) {
-      if (!validIds.has(key)) delete messages.value[key]
-    }
-    persistMessages()
-
-    // Reconcile overlay: drop entries for deleted chats, and for chats that
-    // the server already considers read (stale local flag from e.g. an
-    // offline push that was later read on another device).
-    const byId = new Map(c.map(ch => [ch.chat_id, ch]))
-    for (const key of Object.keys(unread.value)) {
-      const chat = byId.get(key)
-      if (!chat) {
-        delete unread.value[key]
-        continue
-      }
-      const act = chat.last_activity_at || ''
-      const read = chat.last_read_at || ''
-      if (!act || act <= read) {
-        delete unread.value[key]
-      }
-    }
-    persistUnread()
 
     // Initial active-chat resolution priority:
     //   1) URL /chat/:chatId (represents the user's direct intent on a reload
@@ -723,6 +741,87 @@ export const useProjectStore = defineStore('projects', () => {
     // notificationclick didn't fire (iOS quirk), the SW still has the
     // target chat cached. Query it and navigate if present.
     checkPendingTarget()
+  }
+
+  function reconcileChatList(nextChats: ChatInfo[]) {
+    chats.value = nextChats
+
+    // Prune messages for deleted chats.
+    const validIds = new Set(nextChats.map(ch => ch.chat_id))
+    for (const key of Object.keys(messages.value)) {
+      if (!validIds.has(key)) delete messages.value[key]
+    }
+    persistMessages()
+
+    // Reconcile overlay: drop entries for deleted chats, and for chats that
+    // the server already considers read (stale local flag from e.g. an
+    // offline push that was later read on another device).
+    const byId = new Map(nextChats.map(ch => [ch.chat_id, ch]))
+    for (const key of Object.keys(unread.value)) {
+      const chat = byId.get(key)
+      if (!chat) {
+        delete unread.value[key]
+        continue
+      }
+      const act = chat.last_activity_at || ''
+      const read = chat.last_read_at || ''
+      if (!act || act <= read) {
+        delete unread.value[key]
+      }
+    }
+    persistUnread()
+  }
+
+  function hasSettledHistory(chatId: string): boolean {
+    const localMessages = messages.value[chatId] || []
+    const last = localMessages[localMessages.length - 1]
+    if (!last) return false
+    if (last.role === 'assistant') return true
+    return last.role === 'system' && last.tool_name !== '_activity'
+  }
+
+  function clearStreamingState(chatId: string) {
+    streaming.value[chatId] = false
+    streamingText.value[chatId] = ''
+    streamingThinking.value[chatId] = ''
+    streamingTimeline.value[chatId] = []
+    delete projectStreaming.value[chatId]
+  }
+
+  async function syncLatest() {
+    if (latestSyncInFlight) return
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+    latestSyncInFlight = true
+    try {
+      const latestChats = await api.get<ChatInfo[]>('/api/chats')
+      reconcileChatList(latestChats)
+
+      const chatId = activeChatId.value
+      const chatStillOpen = chatId
+        ? latestChats.some(c => c.chat_id === chatId && !c.archived && c.local !== false)
+        : false
+      if (!chatId || !chatStillOpen) return
+
+      await loadMessages(chatId)
+      if (streaming.value[chatId] && !queuedMessages.value[chatId]?.length && hasSettledHistory(chatId)) {
+        clearStreamingState(chatId)
+      }
+      void loadSubagents(chatId)
+
+      if (typeof WebSocket !== 'undefined') {
+        const ws = sockets.value[chatId]
+        if (!ws || ws.readyState > WebSocket.OPEN) {
+          disconnectWs(chatId)
+          connectWs(chatId)
+        }
+      }
+      connectEventsWs()
+    } catch {
+      // Best-effort refresh. The existing websockets/resume handlers remain
+      // the primary live path, and the next interval will try again.
+    } finally {
+      latestSyncInFlight = false
+    }
   }
 
   // Reflect total unread in document.title so the user notices results
@@ -826,6 +925,7 @@ export const useProjectStore = defineStore('projects', () => {
   async function fetchWorkspaces() {
     const res = await api.get<WorkspacesResponse>('/api/workspaces')
     workspaces.value = res.workspaces || []
+    workspaceAppDefaultModel.value = res.app_default_model || ''
     workspaceProviderOptions.value = res.provider_options?.length
       ? res.provider_options
       : [{ value: 'claude', label: 'Claude' }]
@@ -1298,6 +1398,7 @@ export const useProjectStore = defineStore('projects', () => {
         // WebSockets can be silently dead — `readyState` may still
         // report OPEN, but no messages flow.
         void resumeActiveChat()
+        void syncLatest()
       } else if (activeChatId.value) {
         // Visibility → hidden: just notify the server of focus state.
         sendFocus(activeChatId.value)
@@ -1433,6 +1534,30 @@ export const useProjectStore = defineStore('projects', () => {
           }
         }
         // Refresh the chats list so last_activity_at + recent ordering update.
+        api.get<ChatInfo[]>('/api/chats').then(c => { chats.value = c }).catch(() => { /* ignore */ })
+        break
+      }
+      case 'chat_subagents_ready': {
+        const isFocused = activeChatId.value === msg.chat_id &&
+          (typeof document === 'undefined' || document.visibilityState === 'visible')
+        if (isFocused) {
+          // Subagent transcripts land after the parent turn's result. Refresh
+          // history and the subagent panel so the user sees the update without
+          // having to switch chats or wait for the next sync interval.
+          void reconcileAfterResult(msg.chat_id)
+          void loadSubagents(msg.chat_id)
+        } else {
+          unread.value[msg.chat_id] = 1
+          persistUnread()
+          if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+            pushToast({
+              chat_id: msg.chat_id,
+              title: 'Ciaobot',
+              body: msg.remaining === 0 ? 'Background agents finished' : 'Background agent update',
+            })
+          }
+        }
+        // Keep sidebar ordering and last-activity timestamps in sync.
         api.get<ChatInfo[]>('/api/chats').then(c => { chats.value = c }).catch(() => { /* ignore */ })
         break
       }
@@ -2450,7 +2575,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   return {
     // State
-    projects, chats, workspaces, workspaceProviderOptions, workspaceClaudeAiConnectors, activeWorkspace, activeChatId, messages, subagents, unread,
+    projects, chats, workspaces, workspaceProviderOptions, workspaceClaudeAiConnectors, workspaceAppDefaultModel, activeWorkspace, activeChatId, messages, subagents, unread,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
     projectStreaming, toasts, pendingPermissions, activeQuestions, creatingChatProjectIds,
     // Computed
@@ -2465,6 +2590,7 @@ export const useProjectStore = defineStore('projects', () => {
     createChat, renameChat, updateChat, handoverChat, moveChat, deleteChat, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, switchWorkspace,
+    syncLatest,
     sendMessage, stopChat, respondPermission, transcribeVoice, uploadImages, uploadImageRefs, removePendingImage, clearPendingImages,
     addPendingComment, removePendingComment, clearPendingComments,
     addPendingChatComment, removePendingChatComment, clearPendingChatComments, updatePendingChatComment,
@@ -2475,6 +2601,6 @@ export const useProjectStore = defineStore('projects', () => {
     removeQueued, clearQueued,
     loadMessages, loadSubagents,
     connectWs, disconnectWs, connectEventsWs,
-    pushToast, dismissToast,
+    pushToast, pushErrorToast, dismissToast, fixError,
   }
 })

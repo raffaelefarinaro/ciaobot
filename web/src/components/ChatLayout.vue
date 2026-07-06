@@ -150,7 +150,7 @@ import PaneHeader from './PaneHeader.vue'
 
 const store = useProjectStore()
 
-const DEFAULT_SIDEBAR_WIDTH = 260
+const DEFAULT_SIDEBAR_WIDTH = 280
 const MIN_SIDEBAR_WIDTH = 180
 const MAX_SIDEBAR_WIDTH = 500
 const SIDEBAR_SNAP_THRESHOLD = 15 // px
@@ -158,6 +158,7 @@ const SIDEBAR_SNAP_THRESHOLD = 15 // px
 const DEFAULT_SPLIT_RATIO = 0.5
 const MIN_PANE_WIDTH = 360
 const SPLIT_SNAP_THRESHOLD = 15 // px
+const LATEST_STATUS_SYNC_MS = 15000
 
 function safeGetItem(key: string): string | null {
   try {
@@ -305,6 +306,7 @@ const viewMode = computed<'chat' | 'project' | 'schedules' | 'settings'>(() => {
 const sidebarCollapsed = ref(false)
 const showNewSchedule = ref(false)
 const isMobile = ref(window.innerWidth < 768)
+let latestStatusSyncTimer: ReturnType<typeof window.setInterval> | null = null
 
 // Current project id for pinned-file lookup.
 const currentProjectId = computed(() => {
@@ -373,8 +375,22 @@ function onResize() {
 }
 window.addEventListener('resize', onResize)
 
+function startLatestStatusSync() {
+  if (latestStatusSyncTimer) return
+  latestStatusSyncTimer = window.setInterval(() => {
+    void store.syncLatest()
+  }, LATEST_STATUS_SYNC_MS)
+}
+
+function stopLatestStatusSync() {
+  if (!latestStatusSyncTimer) return
+  window.clearInterval(latestStatusSyncTimer)
+  latestStatusSyncTimer = null
+}
+
 onMounted(async () => {
   await store.fetchAll()
+  startLatestStatusSync()
   taskStore.fetchSchedules().catch(() => {})
   const chatId = route.params.chatId as string
   if (chatId && store.chats.find(c => c.chat_id === chatId)) {
@@ -484,6 +500,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  stopLatestStatusSync()
   window.removeEventListener('resize', onResize)
   window.removeEventListener('touchstart', onTouchStart)
   window.removeEventListener('touchend', onTouchEnd)

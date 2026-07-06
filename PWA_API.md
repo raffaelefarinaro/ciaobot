@@ -56,13 +56,21 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/schedule-run/{schedule_id}` | Run schedule now |
 | PATCH, DELETE | `/api/schedules/{schedule_id}` | Update or delete schedule |
 | GET | `/api/automation` | Background-job status (Settings → Automation): last run, duration, model, errors per process |
+| GET | `/api/debug/issues` | Runtime issue report (server error log tail + failed job runs) for the dev-mode "Fix issues in chat" flow; 404 unless `CIAO_DEV_MODE` is set |
 | GET | `/api/commands` | List slash commands |
+| GET | `/api/agent-assets` | List instruction sources, subagents, slash commands, and workspace health for Settings |
+| GET | `/api/workspace-health` | Scan workspace/vault/discovery-file health |
+| POST | `/api/agent-assets/subagents` | Create a workspace-owned subagent and vault mirror |
+| PATCH, DELETE | `/api/agent-assets/subagents/{name}` | Update or delete a custom workspace-owned subagent |
+| POST | `/api/agent-assets/commands` | Create a workspace-owned slash command and vault mirror |
+| PATCH, DELETE | `/api/agent-assets/commands/{name}` | Update or delete a custom workspace-owned slash command |
 | GET | `/api/rate-limits` | Read Claude rate-limit snapshots |
 | GET | `/api/models` | List configured models |
 | GET, PATCH | `/api/status` | Read or update status |
 | GET | `/api/startup-status` | Read startup phase progress |
 | GET | `/api/setup-status` | Read first-run setup checks and provider readiness |
 | GET | `/api/package/status` | Read installed package version and best-effort latest-version status |
+| GET | `/api/package/changelog` | List commits between the installed and latest release for the update prompt |
 | POST | `/api/package/update` | Upgrade ciao package and restart |
 | POST | `/api/voice/install-local` | Install local voice transcription dependencies and restart |
 | POST | `/api/setup/finish` | Finish first-run setup from bootstrap mode |
@@ -71,6 +79,11 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/workspaces/{name}` | Add or update a logical workspace config |
 | DELETE | `/api/workspaces/{name}` | Delete a logical workspace config |
 | POST | `/api/settings/providers` | Update configured LLM providers settings |
+| GET | `/api/integrations/gws` | Read Google Workspace CLI install, profile auth, and workspace usage status |
+| POST | `/api/integrations/gws/client-secret` | Upload GCP client_secret.json for a profile |
+| POST | `/api/integrations/gws/auth-url` | Generate Google OAuth authorization URL for a profile |
+| POST | `/api/integrations/gws/exchange` | Complete Google OAuth flow and exchange code for credentials |
+| POST | `/api/integrations/gws/disconnect` | Disconnect Google profile and clean up local credentials/client_secret |
 | GET | `/api/push/public-key` | Read VAPID public key |
 | POST | `/api/push/subscribe` | Store push subscription |
 | POST | `/api/push/unsubscribe` | Remove push subscription |
@@ -103,6 +116,42 @@ curl -sS -c /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/auth" 
 ```
 
 Reuse the jar with `-b /tmp/ciao.jar` on every other call. The Origin/Referer host-match check is skipped when those headers are absent, so plain curl works.
+
+**Agent assets**
+
+```bash
+# Inspect Claude Code instructions, generated Ciaobot prompt blocks, subagents, and commands.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/agent-assets"
+
+# Inspect workspace/vault health only.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspace-health"
+
+# Create a workspace-owned subagent.
+# Writes subagents/<name>.md, mirrors a vault note under memory-vault/Workspace/Subagents/,
+# then syncs the subagent into .claude/agents/.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/agent-assets/subagents" \
+  -H 'content-type: application/json' \
+  -d '{"name":"pr-reviewer","description":"Review pull-request diffs for regressions.","prompt":"Inspect the changed files, identify concrete risks, and report findings first."}'
+
+# Update or delete a custom subagent. Installed/system subagents are read-only.
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/agent-assets/subagents/pr-reviewer" \
+  -H 'content-type: application/json' \
+  -d '{"description":"Review pull-request diffs for regressions.","content":"# Pr Reviewer\n\nInspect changed files, identify concrete risks, and report findings first."}'
+curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/agent-assets/subagents/pr-reviewer"
+
+# Create a workspace-owned slash command.
+# Writes commands/<name>.md, mirrors a vault note under memory-vault/Workspace/Commands/,
+# then syncs the command into .claude/commands/.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/agent-assets/commands" \
+  -H 'content-type: application/json' \
+  -d '{"name":"decision-record","description":"Turn notes into a decision record.","argument_hint":"<notes>","prompt":"Convert $ARGUMENTS into a concise decision record with context, decision, and consequences."}'
+
+# Update or delete a custom slash command. Installed/system commands are read-only.
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/agent-assets/commands/decision-record" \
+  -H 'content-type: application/json' \
+  -d '{"description":"Turn notes into a decision record.","argument_hint":"<notes>","content":"# Decision Record: $ARGUMENTS\n\nConvert $ARGUMENTS into a concise decision record with context, decision, and consequences."}'
+curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/agent-assets/commands/decision-record"
+```
 
 **Projects**
 
@@ -254,7 +303,7 @@ curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routi
 # Update any subset. Persisted in .runtime/app_settings.json, applied to the
 # live config immediately (no restart). Empty string clears an override back
 # to the env default. transcription_engine ∈ {cloud, local}; "local" uses
-# mlx-whisper on-device (free) and falls back to cloud when unavailable.
+# mlx-whisper on-device (free).
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/routines" \
   -H 'content-type: application/json' \
   -d '{"title_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","transcription_engine":"local"}'
@@ -286,6 +335,18 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/handov
 ```
 
 When adding a new state-changing route (`POST/PATCH/DELETE /api/...`), add an entry here or add the path to `BROWSER_OR_INTERNAL_ROUTES` in `tests/test_pwa_api_docs.py` with a one-line reason. The doc-sync test enforces this.
+
+**WebSocket events**
+
+Global `/ws/events` payloads the PWA reacts to:
+
+- `chat_streaming_started` / `chat_streaming_done` / `chat_result_ready`: lifecycle of the main chat turn.
+- `chat_subagents_ready`: emitted when a background `Agent` (run_in_background) finishes or its count drops. Fields: `{chat_id, project_id, remaining}`.
+- `chat_read`: another client/device marked the chat read.
+- `chat_title`: auto-title finished.
+- `chat_moved` / `chat_deleted`: project changes.
+
+Per-chat `/ws/chat/{chat_id}` events include text/thinking deltas, `tool_use` (with optional `file_touch`), `permission_request`, `result`, `user_echo`, `queued`, `steered`, `status`, and `error`.
 
 **Message timings**
 

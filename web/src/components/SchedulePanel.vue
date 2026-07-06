@@ -72,10 +72,12 @@
           </div>
           <div class="form-group">
             <label>Model</label>
-            <select v-model="editData.model">
-              <option value="">Default ({{ store.models?.default || '—' }})</option>
-              <option v-for="m in store.models?.models || []" :key="m" :value="m">{{ m }}</option>
-            </select>
+            <ModelSelector
+              v-model="editData.model"
+              :sections="scheduleModelSections"
+              placeholder="Default ({{ store.models?.default || '—' }})"
+              empty-placeholder="Default ({{ store.models?.default || '—' }})"
+            />
           </div>
         </div>
         <div class="form-group">
@@ -178,6 +180,8 @@ import { useProjectStore } from '../stores/projects'
 import type { Schedule, ScheduleArchivePolicy } from '../lib/types'
 import NewScheduleForm from './NewScheduleForm.vue'
 import PaneHeader from './PaneHeader.vue'
+import ModelSelector from './ModelSelector.vue'
+import { sectionsFromModelsResponse } from '../lib/modelSections'
 
 const props = defineProps<{ showNew?: boolean }>()
 const emit = defineEmits<{ (e: 'created'): void; (e: 'open-sidebar'): void; (e: 'close'): void }>()
@@ -246,6 +250,8 @@ function formatWhen(iso: string | null): string {
   if (rel === 'now') return clock
   return past ? `${clock} (${rel} ago)` : `${clock} (in ${rel})`
 }
+
+const scheduleModelSections = computed(() => sectionsFromModelsResponse(store.models))
 
 const contextGroups = computed(() => {
   const groups: { label: string; items: { key: string; label: string }[] }[] = []

@@ -36,6 +36,7 @@ def build_skill_inventory(workspace_root: Path | str) -> dict[str, Any]:
                 "source": source,
                 "source_type": source_type,
                 "description": _description_for(root, name, prefer_custom=is_custom),
+                "content": _content_for(root, name, prefer_custom=is_custom),
                 "installed_targets": _installed_targets(root, name),
             }
         )
@@ -117,3 +118,22 @@ def _installed_targets(root: Path, name: str) -> list[str]:
     if path.exists():
         targets.append("claude")
     return targets
+
+
+def _content_for(root: Path, name: str, *, prefer_custom: bool) -> str:
+    candidates = []
+    if prefer_custom:
+        candidates.append(root / "skills" / name / "SKILL.md")
+    candidates.extend(
+        [
+            root / ".claude" / "skills" / name / "SKILL.md",
+        ]
+    )
+    for path in candidates:
+        if path.exists():
+            try:
+                return path.read_text(encoding="utf-8")
+            except OSError:
+                pass
+    return ""
+

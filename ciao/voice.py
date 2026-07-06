@@ -5,8 +5,7 @@ Two engines:
 * **cloud** — OpenAI ``gpt-4o-mini-transcribe`` (needs ``OPENAI_API_KEY``).
 * **local** — `mlx-whisper <https://pypi.org/project/mlx-whisper/>`_ on
   Apple Silicon, free and offline. Optional dependency
-  (``pip install 'ciao[voice-local]'``); when the package is missing the
-  caller falls back to cloud.
+  (``pip install 'ciao[voice-local]'``).
 
 Engine selection lives in ``CiaoConfig.transcription_engine`` (env default
 ``CIAO_TRANSCRIPTION_ENGINE``, runtime-overridable from the PWA Settings →

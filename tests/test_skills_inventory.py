@@ -59,6 +59,7 @@ def test_build_skill_inventory_labels_custom_and_github_sources(tmp_path: Path) 
             "source": "skills/",
             "source_type": "custom",
             "description": "Create Airtable projects",
+            "content": "---\nname: airtable-projects\ndescription: Create Airtable projects\n---\n\n# airtable-projects\n",
             "installed_targets": ["claude"],
         },
         {
@@ -67,6 +68,7 @@ def test_build_skill_inventory_labels_custom_and_github_sources(tmp_path: Path) 
             "source": "obra/superpowers",
             "source_type": "github",
             "description": "Installed GitHub",
+            "content": "---\nname: brainstorming\ndescription: Installed GitHub\n---\n\n# brainstorming\n",
             "installed_targets": ["claude"],
         },
     ]

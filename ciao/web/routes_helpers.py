@@ -11,7 +11,7 @@ from starlette.responses import JSONResponse, Response
 _LINE_SUFFIX_RE = re.compile(r":\d+$")
 
 
-def _allowed_roots(config) -> list[Path]:
+def _allowed_roots(config, for_write: bool = False) -> list[Path]:
     """Resolve the union of roots the viewer endpoints may serve from.
 
     The primary workspace root always comes first (relative paths anchor
@@ -19,6 +19,12 @@ def _allowed_roots(config) -> list[Path]:
     model). Extra roots come from ``config.extra_workspace_roots`` and let
     the viewer reach files outside the project tree, e.g. repos under
     ``~/repos`` linked into projects via the repo-link feature.
+
+    ``for_write`` controls the unrestricted-viewer escape hatch: when the
+    config opts in (``unrestricted_file_viewer``), read-only endpoints get
+    a catch-all ``/`` root so any absolute path serves. Writes never get
+    ``/`` — the editor stays sandboxed to the real roots regardless, so a
+    loosened read policy can't be turned into arbitrary file creation.
     """
     roots: list[Path] = [config.workspace_root.resolve()]
     vault_root = getattr(config, "vault_root", None)
@@ -36,6 +42,14 @@ def _allowed_roots(config) -> list[Path]:
             continue
         if r not in roots:
             roots.append(r)
+    # Unrestricted mode: accept any absolute path. We model this as a
+    # catch-all root of ``/`` so the existing ``is_relative_to`` checks in
+    # the resolver pass for every absolute path. Relative paths still
+    # anchor to ``roots[0]`` (the workspace), so workspace semantics are
+    # unchanged. ``_find_fuzzy_match`` prunes ``/`` from its walk list so
+    # a missing path never triggers a full-filesystem walk.
+    if getattr(config, "unrestricted_file_viewer", False) and not for_write:
+        roots.append(Path("/"))
     return roots
 
 
@@ -63,8 +77,13 @@ def _find_fuzzy_match(roots: list[Path], candidate: Path) -> Path | None:
 
     matches = []
     # If the candidate is a relative path, we only search the primary workspace root.
-    # If it is absolute, we can search all allowed roots.
-    search_roots = [roots[0]] if not candidate.is_absolute() else roots
+    # If it is absolute, we can search all allowed roots. Never walk a catch-all
+    # ``/`` root (unrestricted mode) — a full-filesystem walk is never sane and
+    # would hang the request. The direct-resolve path handles real absolute paths
+    # before fuzzy ever runs.
+    search_roots = [roots[0]] if not candidate.is_absolute() else [
+        r for r in roots if r != Path("/")
+    ]
 
     for root in search_roots:
         try:

@@ -26,3 +26,5 @@ dist/
 
 # OS noise
 .DS_Store
+# Private memory vault data must never be committed to the app repo
+memory-vault/

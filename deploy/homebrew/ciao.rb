@@ -4,11 +4,11 @@ class Ciao < Formula
   include Language::Python::Virtualenv
 
   desc "Local-first personal assistant server"
-  homepage "https://github.com/ciao-app/ciao"
+  homepage "https://github.com/raffaelefarinaro/ciaobot"
   license "Apache-2.0"
-  url "https://github.com/ciao-app/ciao/archive/refs/tags/v0.2.0.tar.gz"
+  url "https://github.com/raffaelefarinaro/ciaobot/archive/refs/tags/v0.2.0.tar.gz"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
-  head "https://github.com/ciao-app/ciao.git", branch: "main"
+  head "https://github.com/raffaelefarinaro/ciaobot.git", branch: "main"
 
   depends_on "python@3.12"
 

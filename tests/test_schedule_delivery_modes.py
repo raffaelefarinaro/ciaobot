@@ -66,3 +66,15 @@ def test_auto_policy_stays_visible_when_classifier_says_user_needed() -> None:
         )
         is False
     )
+
+
+def test_failed_run_is_not_clean_so_error_log_survives() -> None:
+    # A 429/stream failure mid-triage must not count as clean: the
+    # error-log clear in _dispatch gates on _schedule_run_clean.
+    from ciao.web.project_chats import _schedule_run_clean
+
+    assert _schedule_run_clean(ScheduleRunOutcome(completed=True, is_error=False)) is True
+    assert _schedule_run_clean(ScheduleRunOutcome(completed=True, stream_error=True)) is False
+    assert _schedule_run_clean(ScheduleRunOutcome(completed=True, is_error=True)) is False
+    assert _schedule_run_clean(ScheduleRunOutcome(completed=True, retry_pending=True)) is False
+    assert _schedule_run_clean(ScheduleRunOutcome(completed=False)) is False

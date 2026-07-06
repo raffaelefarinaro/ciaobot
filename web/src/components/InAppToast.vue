@@ -4,11 +4,17 @@
       v-for="t in store.toasts"
       :key="t.id"
       class="toast"
+      :class="{ 'toast-error': t.variant === 'error' }"
       role="status"
       @click="onClick(t)"
     >
       <div class="toast-title">{{ t.title }}</div>
       <div class="toast-body">{{ t.body }}</div>
+      <button
+        v-if="t.variant === 'error'"
+        class="toast-fix"
+        @click.stop="onFix(t)"
+      >Fix this error</button>
       <button
         class="toast-close"
         @click.stop="store.dismissToast(t.id)"
@@ -25,6 +31,9 @@ import type { InAppToast } from '../lib/types'
 const store = useProjectStore()
 
 async function onClick(toast: InAppToast) {
+  // Global error toasts aren't tied to a chat — clicking the body is a no-op
+  // (use the Fix / dismiss buttons instead).
+  if (!toast.chat_id) return
   // Switch workspace if needed (the toast may be for a chat in the other one)
   const project = store.projectFor(toast.chat_id)
   if (project && project.workspace !== store.activeWorkspace) {
@@ -32,6 +41,11 @@ async function onClick(toast: InAppToast) {
   }
   await store.switchChat(toast.chat_id)
   store.dismissToast(toast.id)
+}
+
+async function onFix(toast: InAppToast) {
+  store.dismissToast(toast.id)
+  await store.fixError({ errorText: toast.errorText || toast.body, title: 'Fix error' })
 }
 </script>
 
@@ -63,6 +77,27 @@ async function onClick(toast: InAppToast) {
 }
 
 .toast:hover { background: var(--bg3); }
+
+/* Error variant recolors the existing accent edge to a danger tone and drops
+   the pointer cursor since the body isn't clickable. */
+.toast-error {
+  border-left-color: var(--error);
+  cursor: default;
+  padding-bottom: 12px;
+}
+
+.toast-fix {
+  margin-top: 8px;
+  padding: 4px 12px;
+  background: transparent;
+  color: var(--error);
+  border: 1px solid var(--error);
+  border-radius: var(--radius-sm);
+  font-family: var(--font);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.toast-fix:hover { background: var(--error); color: var(--bg); }
 
 .toast-title {
   font-size: var(--text-base);

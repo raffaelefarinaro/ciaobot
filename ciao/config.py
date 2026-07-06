@@ -18,10 +18,9 @@ from ciao.providers.openrouter import OpenRouterSettings
 
 
 # claude.ai account-OAuth connector MCPs (Airtable, Atlassian, Slack, Asana,
-# BigQuery, incident.io, Salesforce, Sentry). These are work-only tools, gated
-# per workspace by the ``claude_ai_mcps`` toggle on ``WorkspaceConfig`` (default
-# off for personal, on for work). The toggle expands to this set in
-# ``CiaoConfig.disallowed_tools_for_workspace``.
+# BigQuery, incident.io, Salesforce, Sentry). These are gated per workspace
+# by the ``claude_ai_mcps`` toggle on ``WorkspaceConfig`` (default on). The
+# toggle expands to this set in ``CiaoConfig.disallowed_tools_for_workspace``.
 CLAUDE_AI_CONNECTORS: tuple[str, ...] = (
     "mcp__claude_ai_Airtable",
     "mcp__claude_ai_Asana",
@@ -85,7 +84,7 @@ class WorkspaceConfig:
     # default extras; ``[]`` = explicit opt-out (no extras).
     disallowed_tools: list[str] | None = None
     # Whether claude.ai account-OAuth connector MCPs are exposed in this
-    # workspace. ``None`` = per-workspace default (personal False, else True).
+    # workspace. ``None`` = default (True).
     # When False/defaults-off, ``CLAUDE_AI_CONNECTORS`` is added to the
     # effective denylist in ``disallowed_tools_for_workspace``.
     claude_ai_mcps: bool | None = None
@@ -259,6 +258,13 @@ class CiaoConfig:
     bootstrap_mode: bool = False
     vault_root: Path = Path("memory-vault")
     extra_workspace_roots: list[Path] = field(default_factory=list)
+    # When true, the PWA workspace-file/image/binary viewers drop the
+    # "path must land under an allowed root" sandbox and serve any
+    # allowlisted-extension file on the system. Relative paths still
+    # anchor to ``workspace_root``. The extension allowlist (no .env,
+    # no key files) and the size caps still apply. Opt-in via
+    # ``CIAO_WORKSPACE_UNRESTRICTED_FILE_VIEWER=1``.
+    unrestricted_file_viewer: bool = False
     max_image_size_bytes: int = 10 * 1024 * 1024
     max_voice_size_bytes: int = 25 * 1024 * 1024
     media_ttl_hours: int = 72
@@ -271,9 +277,8 @@ class CiaoConfig:
     # configured, else ``title_model``).
     title_model_override: str = ""
     # Voice transcription engine: ``cloud`` (OpenAI API, needs
-    # OPENAI_API_KEY) or ``local`` (mlx-whisper on Apple Silicon; falls
-    # back to cloud when the package is missing). Runtime-overridable from
-    # the PWA Settings → Models tab.
+    # OPENAI_API_KEY) or ``local`` (mlx-whisper on Apple Silicon).
+    # Runtime-overridable from the PWA Settings → Models tab.
     transcription_engine: str = "cloud"
     transcription_local_model: str = "mlx-community/whisper-large-v3-turbo"
     claude_models: list[str] = field(default_factory=lambda: ["opus", "sonnet", "haiku"])
@@ -290,10 +295,10 @@ class CiaoConfig:
     # defaults"; explicit ``[]`` = "operator opted out of the defaults".
     disallowed_tools_personal: list[str] | None = None
     disallowed_tools_work: list[str] | None = None
-    # Per-workspace claude.ai connector MCP toggle. ``None`` = per-workspace
-    # default (personal off, work on). When off, ``CLAUDE_AI_CONNECTORS`` is
-    # added to the effective denylist. Set via ``CIAO_CLAUDE_AI_MCPS_PERSONAL``
-    # / ``_WORK`` (true/false; ``default``/unset → per-workspace default).
+    # Per-workspace claude.ai connector MCP toggle. ``None`` = default (on).
+    # When off, ``CLAUDE_AI_CONNECTORS`` is added to the effective denylist.
+    # Set via ``CIAO_CLAUDE_AI_MCPS_PERSONAL`` / ``_WORK`` (true/false;
+    # ``default``/unset → default on).
     claude_ai_mcps_personal: bool | None = None
     claude_ai_mcps_work: bool | None = None
     workspaces: dict[str, WorkspaceConfig] = field(default_factory=dict)
@@ -401,15 +406,14 @@ class CiaoConfig:
     def claude_ai_mcps_for_workspace(self, workspace: str | None) -> bool:
         """Whether claude.ai connector MCPs are exposed in this workspace.
 
-        ``None`` on the workspace config resolves to the per-workspace default:
-        personal → False (work-only connectors blocked), everything else → True.
+        ``None`` on the workspace config resolves to the default: True.
         """
         workspace_config = self.workspace(workspace)
         if workspace_config is None:
             return True
         value = workspace_config.claude_ai_mcps
         if value is None:
-            return workspace_config.name != "personal"
+            return True
         return value
 
     def disallowed_tools_for_workspace(self, workspace: str | None) -> list[str]:
@@ -418,7 +422,7 @@ class CiaoConfig:
         The effective denylist is the union of:
 
         * the claude.ai connector set (``CLAUDE_AI_CONNECTORS``) when
-          ``claude_ai_mcps`` resolves to False (default for personal), and
+          ``claude_ai_mcps`` resolves to False, and
         * the workspace's extra tools (``disallowed_tools``), which defaults to
           ``_DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL`` (n8n) for personal and
           ``[]`` for every other workspace.
@@ -544,7 +548,7 @@ class CiaoConfig:
                 else "http://localhost:11434"
             )
         ollama_title_model = (
-            source.get("CIAO_OLLAMA_TITLE_MODEL", "").strip() or "ministral-3:3b"
+            source.get("CIAO_OLLAMA_TITLE_MODEL", "").strip() or "gemma4:e2b-it-qat"
         )
         ollama_haiku_model = (
             source.get("CIAO_OLLAMA_HAIKU_MODEL", "").strip()
@@ -556,7 +560,7 @@ class CiaoConfig:
         )
         ollama_opus_model = (
             source.get("CIAO_OLLAMA_OPUS_MODEL", "").strip()
-            or "minimax-m3:cloud"
+            or "glm-5.2:cloud"
         )
         ollama_settings = OllamaSettings(
             models=ollama_models,
@@ -596,6 +600,10 @@ class CiaoConfig:
                 continue
             if p != workspace_root and p.exists() and p not in extra_workspace_roots:
                 extra_workspace_roots.append(p)
+
+        unrestricted_file_viewer = (
+            source.get("CIAO_WORKSPACE_UNRESTRICTED_FILE_VIEWER", "").strip() == "1"
+        )
 
         default_model_personal = source.get("CLAUDE_DEFAULT_MODEL_PERSONAL", "").strip()
         default_model_work = source.get("CLAUDE_DEFAULT_MODEL_WORK", "").strip()
@@ -644,6 +652,7 @@ class CiaoConfig:
             bootstrap_mode=bootstrap_mode,
             vault_root=vault_root,
             extra_workspace_roots=extra_workspace_roots,
+            unrestricted_file_viewer=unrestricted_file_viewer,
             max_image_size_bytes=int(
                 _env(source, "CIAO_MAX_IMAGE_BYTES", "TELEGRAM_BRIDGE_MAX_IMAGE_BYTES", str(10 * 1024 * 1024))
             ),
@@ -773,7 +782,7 @@ def refresh_local_ollama_models(config: CiaoConfig) -> bool:
 
 
 def refresh_openrouter_models(config: "CiaoConfig") -> bool:
-    """Discover anthropic-family models from OpenRouter and merge into the picker.
+    """Discover models from OpenRouter and merge into the picker.
 
     Called at startup and when the Settings tab loads, so the OpenRouter
     model list is populated dynamically from the live catalogue rather than
@@ -783,13 +792,42 @@ def refresh_openrouter_models(config: "CiaoConfig") -> bool:
 
     if not config.openrouter.available:
         return False
-    discovered = discover_models(config.openrouter, anthropic_only=True)
+    discovered = discover_models(config.openrouter, anthropic_only=False)
     if not discovered:
         return False
     before = config.openrouter.models
     config.openrouter = merge_discovered(config.openrouter, discovered)
+    for m in config.openrouter.models:
+        if m not in config.claude_models:
+            config.claude_models.append(m)
     return config.openrouter.models != before
+
+
+def refresh_cloud_ollama_models(config: "CiaoConfig") -> bool:
+    """Discover models from Ollama Cloud and merge into the live config.
+
+    Called at startup and when the Settings tab loads, so the Ollama Cloud
+    model list is populated dynamically from the live catalogue. Returns True
+    when the set changed.
+    """
+    if not config.ollama.api_key or config.ollama.api_key == "ollama":
+        return False
+    from ciao.providers.ollama import discover_cloud_models
+    discovered = discover_cloud_models(config.ollama)
+    if not discovered:
+        return False
+    before = config.ollama.models
+    merged = tuple(dict.fromkeys([*config.ollama.models, *discovered]))
+    if merged == before:
+        return False
+    config.ollama = replace(config.ollama, models=merged)
+    for m in merged:
+        if m not in config.claude_models:
+            config.claude_models.append(m)
+    logger.info("Ollama Cloud models available: %s", ", ".join(merged))
+    return True
 
 
 # Backward-compatible alias used by project_chats.py and other modules
 BridgeConfig = CiaoConfig
+

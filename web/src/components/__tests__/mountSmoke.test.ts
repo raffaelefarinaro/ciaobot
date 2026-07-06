@@ -83,6 +83,7 @@ vi.mock('../../lib/api', () => {
           source: 'skills/',
           source_type: 'custom',
           description: 'Create Airtable projects',
+          content: '# airtable-projects\ncustom skill content',
           installed_targets: ['claude'],
         },
         {
@@ -91,7 +92,66 @@ vi.mock('../../lib/api', () => {
           source: 'obra/superpowers',
           source_type: 'github',
           description: 'Explore design before implementation',
+          content: '# brainstorming\ngithub skill content',
           installed_targets: ['claude'],
+        },
+      ],
+    },
+    '/api/commands': {
+      commands: [
+        {
+          name: 'remember',
+          description: 'Store a durable memory',
+          argument_hint: '<note>',
+          source: 'project',
+          path: '/tmp/workspace/.claude/commands/remember.md',
+        },
+      ],
+    },
+    '/api/agent-assets': {
+      instructions: [
+        {
+          id: 'claude-code-project-instructions',
+          title: 'Claude Code project instructions',
+          description: 'Project-local Claude Code instructions loaded by the CLI.',
+          source: 'file',
+          path: 'CLAUDE.md',
+          editable: true,
+          content: '# Instructions\n',
+        },
+        {
+          id: 'ciaobot-system-prompt',
+          title: 'Ciaobot system prompt append',
+          description: 'Generated instructions appended to Claude Code.',
+          source: 'generated',
+          path: '',
+          editable: false,
+          content: '# Ciaobot System Instructions\n',
+        },
+      ],
+      subagents: [
+        {
+          name: 'researcher',
+          description: 'Research current external information.',
+          source: 'project',
+          scope: 'installed',
+          path: '.claude/agents/researcher.md',
+          editable: false,
+          vault_path: '',
+          content: '',
+        },
+      ],
+      commands: [
+        {
+          name: 'remember',
+          description: 'Store a durable memory',
+          argument_hint: '<note>',
+          source: 'project',
+          scope: 'installed',
+          path: '.claude/commands/remember.md',
+          editable: false,
+          vault_path: '',
+          content: '',
         },
       ],
     },
@@ -256,6 +316,9 @@ describe('component mount smoke', () => {
     expect(wrapper.text()).toContain('Custom Skills')
     expect(wrapper.text()).toContain('brainstorming')
     expect(wrapper.text()).toContain('GitHub / Package Skills')
+    expect(wrapper.text()).toContain('Commands')
+    expect(wrapper.text()).toContain('/remember')
+    expect(wrapper.text()).toContain('Store a durable memory')
     wrapper.unmount()
   })
 
@@ -270,21 +333,30 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    const optionInputs = wrapper.findAll('.critique-option input')
-    const localModel = optionInputs.find((input) => input.element.parentElement?.textContent?.includes('llama3.1:latest'))
-    const anthropicModel = optionInputs.find((input) => input.element.parentElement?.textContent?.includes('anthropic/claude-sonnet-4.5'))
-    expect(localModel).toBeTruthy()
-    expect(anthropicModel).toBeTruthy()
-
-    await localModel!.setValue(true)
+    // The critique picker is now a searchable ModelSelector.
+    const critiqueSelector = wrapper.find('.critique-model-picker .model-selector')
+    expect(critiqueSelector.exists()).toBe(true)
+    await critiqueSelector.find('.model-selector__trigger').trigger('click')
     await flushPromises()
-    await anthropicModel!.setValue(true)
+    await nextTick()
+
+    const localOption = critiqueSelector.findAll('.model-selector__item')
+      .find((el) => el.text() === 'llama3.1:latest')
+    const anthropicOption = critiqueSelector.findAll('.model-selector__item')
+      .find((el) => el.text() === 'anthropic/claude-sonnet-4.5')
+    expect(localOption).toBeTruthy()
+    expect(anthropicOption).toBeTruthy()
+
+    await localOption!.trigger('click')
+    await flushPromises()
+    await anthropicOption!.trigger('click')
     await flushPromises()
 
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
       critique_models: 'llama3.1:latest,anthropic/claude-sonnet-4.5',
     })
-    expect(wrapper.text()).toContain('2 selected')
+    expect(wrapper.text()).toContain('llama3.1:latest')
+    expect(wrapper.text()).toContain('anthropic/claude-sonnet-4.5')
     wrapper.unmount()
   })
 
@@ -328,9 +400,18 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
-    const tierSelect = wrapper.find('.tier-provider-section select.routine-input')
-    expect(tierSelect.exists()).toBe(true)
-    await tierSelect.setValue('llama3.1:latest')
+    // The tier model picker is now a searchable ModelSelector.
+    const tierSelector = wrapper.findAll('.tier-provider-section .model-selector')
+      .find((el) => el.find('.model-selector__trigger').exists())
+    expect(tierSelector).toBeTruthy()
+    await tierSelector!.find('.model-selector__trigger').trigger('click')
+    await flushPromises()
+    await nextTick()
+
+    const tierOption = tierSelector!.findAll('.model-selector__item')
+      .find((el) => el.attributes('data-model') === 'llama3.1:latest')
+    expect(tierOption).toBeTruthy()
+    await tierOption!.trigger('click')
     await flushPromises()
 
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
@@ -365,14 +446,14 @@ describe('component mount smoke', () => {
       expect(labels.some((l) => l.includes('Ollama') && l.includes('not configured'))).toBe(true)
       expect(labels.some((l) => l.includes('OpenRouter') && l.includes('not configured'))).toBe(true)
 
-      // Select OpenRouter: tier selects render disabled, hint shown.
+      // Select OpenRouter: tier ModelSelectors render disabled, hint shown.
       await providerSelect.setValue('openrouter')
       await flushPromises()
       await nextTick()
-      const tierSelects = wrapper.findAll('.tier-provider-section select.routine-input')
-      expect(tierSelects.length).toBe(3)
-      for (const select of tierSelects) {
-        expect((select.element as HTMLSelectElement).disabled).toBe(true)
+      const tierSelectors = wrapper.findAll('.tier-provider-section .model-selector')
+      expect(tierSelectors.length).toBe(3)
+      for (const selector of tierSelectors) {
+        expect(selector.find('.model-selector__trigger').attributes('disabled')).toBeDefined()
       }
       const hint = wrapper.find('.tier-provider-note')
       expect(hint.exists()).toBe(true)

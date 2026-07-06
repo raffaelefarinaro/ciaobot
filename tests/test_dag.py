@@ -196,6 +196,46 @@ def test_prompt_node_requires_prompt_payload() -> None:
         run(dag, [], job="unit", label="prompt-empty")
 
 
+def test_subagent_node_merges_env_overrides(monkeypatch) -> None:
+    captured: dict = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        captured["env"] = kwargs.get("env")
+
+        class Proc:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+
+        return Proc()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    dag = [
+        Node(
+            id="agent",
+            kind="subagent",
+            model="kimi-k2.7-code:cloud",
+            payload={
+                "cli": "claude",
+                "prompt": "hi",
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://ollama.com",
+                    "ANTHROPIC_AUTH_TOKEN": "sk-test",
+                },
+            },
+        )
+    ]
+
+    ctx = run(dag, [], job="unit", label="subagent-env")
+
+    assert ctx["agent"].ok is True
+    assert captured["argv"][:4] == ["claude", "-p", "--model", "kimi-k2.7-code:cloud"]
+    assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://ollama.com"
+    assert captured["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-test"
+    assert "PATH" in captured["env"]
+
+
 # ── Retention kind: never blocks ────────────────────────────────────────
 
 

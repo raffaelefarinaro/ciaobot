@@ -362,3 +362,48 @@ def test_call_model_uses_oneshot_runner(
     assert "via oneshot" in text
     assert captured["model"] == "deepseek-v4-flash:cloud"
     assert captured["timeout_s"] == 120.0
+
+
+def test_run_oneshot_error_handling(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ciao.providers.oneshot import run_oneshot
+    from claude_agent_sdk import ResultMessage
+    from dataclasses import dataclass
+
+    # 1. Test ResultMessage with is_error=True
+    async def fake_query_result_error(prompt, options):
+        yield ResultMessage(
+            subtype="failure",
+            duration_ms=100,
+            duration_api_ms=0,
+            is_error=True,
+            num_turns=1,
+            session_id="123",
+            stop_reason="error",
+            total_cost_usd=0,
+            usage={},
+            result="API Error: Rate Limit Exceeded",
+        )
+
+    monkeypatch.setattr("ciao.providers.oneshot.query", fake_query_result_error)
+    with pytest.raises(RuntimeError, match="API Error: Rate Limit Exceeded"):
+        asyncio.run(run_oneshot("prompt", system_prompt="sys", model="m"))
+
+    # 2. Test AssistantMessage with error attribute
+    @dataclass
+    class DummyTextBlock:
+        text: str
+
+    @dataclass
+    class DummyAssistantMessage:
+        content: list
+        model: str = "<synthetic>"
+        error: str = "authentication_failed"
+
+    async def fake_query_asst_error(prompt, options):
+        yield DummyAssistantMessage(content=[DummyTextBlock(text="Failed to authenticate")])
+
+    monkeypatch.setattr("ciao.providers.oneshot.query", fake_query_asst_error)
+    monkeypatch.setattr("ciao.providers.oneshot.AssistantMessage", DummyAssistantMessage)
+    monkeypatch.setattr("ciao.providers.oneshot.TextBlock", DummyTextBlock)
+    with pytest.raises(RuntimeError, match="Failed to authenticate"):
+        asyncio.run(run_oneshot("prompt", system_prompt="sys", model="m"))

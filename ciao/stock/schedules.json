@@ -19,7 +19,7 @@
       "workspace": "default",
       "web_project_id": "",
       "web_chat_id": null,
-      "prompt": "Curate recent archived chats, memory proposals, and durable learnings. Use the memory agent. Prefer existing session-insights sections, update the configured vault, and report only processed counts plus changed files."
+      "prompt": "Curate recent archived chats, memory proposals, and durable learnings. Use the memory agent. Prefer existing session-insights sections and update the configured vault. Append durable learnings to the vault's Workspace/Learnings.md using the format `[YYYY-MM-DD] category: one-liner — confidence: high/medium/low`; capture error resolutions, non-obvious workarounds, user corrections, and outdated assumptions. Do not log routine work. Report only processed counts plus changed files."
     },
     {
       "schedule_id": "system-skill-evolution",
@@ -64,6 +64,27 @@
       "prompt": "Run the dependency review pipeline and report new releases, deprecations, and concrete follow-up actions. If the command fails, report the failure instead of claiming no changes."
     },
     {
+      "schedule_id": "system-error-triage",
+      "title": "Runtime error triage",
+      "scope": "system",
+      "editable": false,
+      "removable": false,
+      "enabled": true,
+      "frequency": "weekly",
+      "daily_time_utc": "03:00",
+      "days_of_week": ["sat"],
+      "day_of_month": null,
+      "run_at_date": null,
+      "timezone_name": "UTC",
+      "archive_policy": "manual",
+      "provider": "",
+      "model": "",
+      "workspace": "default",
+      "web_project_id": "",
+      "web_chat_id": null,
+      "prompt": "Triage this instance's runtime issue report below. If it says no issues, reply with a one-line all-clear and stop. Otherwise: group the entries by root cause, note frequency and impact, then investigate the top causes in the app and workspace code. Apply concrete low-risk fixes directly and report anything riskier for user approval. The error log is cleared after this run, so include enough context from it in your report.\n\n{{ISSUE_REPORT}}"
+    },
+    {
       "schedule_id": "system-weekly-review",
       "title": "Weekly self-improvement review",
       "scope": "system",
@@ -82,7 +103,7 @@
       "workspace": "default",
       "web_project_id": "",
       "web_chat_id": null,
-      "prompt": "Run the weekly self-improvement checklist from the packaged weekly-review-template.md asset. Apply concrete low-risk local fixes and report anything that needs user approval."
+      "prompt": "Run the weekly self-improvement checklist from the packaged weekly-review-template.md asset (locate it with: python3 -c \"from importlib import resources; print(resources.files('ciao.stock').joinpath('schedules/weekly-review-template.md'))\"). Apply concrete low-risk local fixes and report anything that needs user approval."
     }
   ]
 }

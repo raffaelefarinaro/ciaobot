@@ -10,6 +10,7 @@ from ciao.dependency_review import (
     TRACKED_TOOLS,
     _extract_json_block,
     _read_baseline,
+    _resolve_model,
     build_review_dag,
 )
 
@@ -26,6 +27,31 @@ def test_dag_structure_is_valid() -> None:
     assert _start_node(nodes, edges) == "read_baseline"
     ids = {n.id for n in nodes}
     assert ids == {"read_baseline", "installed", "research", "write_baseline"}
+
+
+def test_resolve_model_uses_ollama_sonnet_override(monkeypatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("CIAO_OLLAMA_SONNET_MODEL", "kimi-k2.7-code:cloud")
+    assert _resolve_model("sonnet") == "kimi-k2.7-code:cloud"
+    assert _resolve_model("opus") == "opus"
+
+
+def test_research_node_gets_ollama_routing_env(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("CIAO_OLLAMA_API_KEY", "sk-cloud")
+
+    nodes, _edges, _holder = build_review_dag(
+        baseline_path=tmp_path / ".runtime" / "dependency_baseline.json",
+        research_model="kimi-k2.7-code:cloud",
+        research_timeout_s=10,
+    )
+    research = next(n for n in nodes if n.id == "research")
+    env = research.payload["env"]
+
+    assert env["ANTHROPIC_BASE_URL"] == "https://ollama.com"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-cloud"
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "kimi-k2.7-code:cloud"
 
 
 def test_read_baseline_missing_file_is_empty(tmp_path: Path) -> None:

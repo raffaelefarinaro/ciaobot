@@ -189,3 +189,67 @@ def test_local_to_cloud_ollama_switch_rejected_mid_chat(tmp_path):
     fresh = pcm.create_chat(project.project_id, model="kimi-k2.7-code:cloud")
     updated = pcm.update_chat(fresh.chat_id, model="gemma4:12b-it-qat")
     assert updated is not None and updated.model == "gemma4:12b-it-qat"
+
+
+def test_discover_cloud_models(monkeypatch):
+    from ciao.providers.ollama import discover_cloud_models
+
+    payload = {
+        "models": [
+            {"name": "glm-5.2"},
+            {"name": "kimi-k2.7-code:cloud"},
+            {"name": ""},
+            "garbage",
+        ]
+    }
+
+    class FakeResponse:
+        def read(self):
+            return json.dumps(payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen", lambda req, timeout: FakeResponse()
+    )
+    s = OllamaSettings(api_key="sk-cloud", base_url="https://ollama.com")
+    # glm-5.2 gets :cloud appended; kimi-k2.7-code:cloud stays same
+    assert discover_cloud_models(s) == ("glm-5.2:cloud", "kimi-k2.7-code:cloud")
+
+
+def test_discover_cloud_models_unreachable(monkeypatch):
+    from ciao.providers.ollama import discover_cloud_models
+
+    def boom(req, timeout):
+        raise OSError("unreachable")
+
+    monkeypatch.setattr("urllib.request.urlopen", boom)
+    s = OllamaSettings(api_key="sk-cloud", base_url="https://ollama.com")
+    assert discover_cloud_models(s) == ()
+
+
+def test_refresh_cloud_ollama_models(tmp_path, monkeypatch):
+    from ciao.config import CiaoConfig, refresh_cloud_ollama_models
+
+    config = CiaoConfig.from_env(
+        {
+            "PWA_AUTH_TOKEN": "t",
+            "CIAO_WORKSPACE": str(tmp_path),
+            "CIAO_RUNTIME_ROOT": str(tmp_path / ".runtime"),
+            "CIAO_OLLAMA_API_KEY": "sk-cloud",
+        }
+    )
+    monkeypatch.setattr(
+        "ciao.providers.ollama.discover_cloud_models",
+        lambda settings, timeout_s=4.0: ("glm-5.2:cloud", "kimi-k2.7-code:cloud"),
+    )
+
+    assert refresh_cloud_ollama_models(config) is True
+    assert config.ollama.models == ("glm-5.2:cloud", "kimi-k2.7-code:cloud")
+    assert "glm-5.2:cloud" in config.claude_models
+    assert refresh_cloud_ollama_models(config) is False
+

@@ -516,12 +516,23 @@ input:focus, textarea:focus, select:focus {
   margin: 0;
   line-height: 1.5;
 }
-.hint--warn {
-  color: var(--warning);
-  background: rgba(255, 152, 0, 0.08);
-  border: 1px solid rgba(255, 152, 0, 0.3);
+.hint--info {
+  display: block;
+  color: var(--fg2);
+  background: color-mix(in srgb, var(--accent2) 6%, var(--bg2));
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent2);
   border-radius: var(--radius-sm);
-  padding: 8px 10px;
+  padding: 10px 12px;
+}
+.hint--warn {
+  display: block;
+  color: var(--fg2);
+  background: color-mix(in srgb, var(--warning) 6%, var(--bg2));
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--warning);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
 }
 
 /* ── Multi-select toggle pill (day-of-week selectors) ────────── */

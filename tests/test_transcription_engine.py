@@ -65,5 +65,83 @@ def test_ollama_local_env_parsing(tmp_path):
     assert config.ollama.local_models == ("gemma4:12b-it-qat",)
     assert config.ollama.local_url == "http://127.0.0.1:11434"
     assert config.ollama_local_discovery is False
-    # Manually pinned local models join the picker.
     assert "gemma4:12b-it-qat" in config.claude_models
+
+
+async def test_transcribe_voice_local_not_installed(tmp_path, monkeypatch):
+    from pathlib import Path
+    from ciao.web.project_chats import ProjectChatManager
+    from ciao.sessions import StateStore
+    from ciao.transcripts import TranscriptStore
+
+    monkeypatch.setattr(voice, "mlx_whisper_available", lambda: False)
+    
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        transcription_engine="local",
+    )
+    state = StateStore(config.state_path, tmp_path, config.media_root)
+    transcripts = TranscriptStore(runtime, tmp_path / "transcripts")
+    pcm = ProjectChatManager(
+        config,
+        state_store=state,
+        transcript_store=transcripts,
+        path=runtime / "web_projects.json",
+    )
+
+    audio_path = tmp_path / "test.webm"
+    audio_path.touch()
+
+    with pytest.raises(ValueError) as exc_info:
+        await pcm.transcribe_voice(audio_path)
+    assert "mlx-whisper is not installed" in str(exc_info.value)
+    assert "Settings → Models" in str(exc_info.value)
+
+
+async def test_transcribe_voice_local_fails(tmp_path, monkeypatch):
+    from pathlib import Path
+    from ciao.web.project_chats import ProjectChatManager
+    from ciao.sessions import StateStore
+    from ciao.transcripts import TranscriptStore
+
+    monkeypatch.setattr(voice, "mlx_whisper_available", lambda: True)
+    
+    class FailingTranscriber:
+        def __init__(self, model):
+            pass
+        async def transcribe(self, path):
+            raise RuntimeError("Out of memory on GPU")
+            
+    monkeypatch.setattr(voice, "MlxWhisperTranscriber", FailingTranscriber)
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        transcription_engine="local",
+    )
+    state = StateStore(config.state_path, tmp_path, config.media_root)
+    transcripts = TranscriptStore(runtime, tmp_path / "transcripts")
+    pcm = ProjectChatManager(
+        config,
+        state_store=state,
+        transcript_store=transcripts,
+        path=runtime / "web_projects.json",
+    )
+
+    audio_path = tmp_path / "test.webm"
+    audio_path.touch()
+
+    with pytest.raises(ValueError) as exc_info:
+        await pcm.transcribe_voice(audio_path)
+    assert "Local voice transcription failed" in str(exc_info.value)
+    assert "Out of memory on GPU" in str(exc_info.value)
+    assert "Settings → Models" in str(exc_info.value)

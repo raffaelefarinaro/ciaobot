@@ -401,7 +401,7 @@ async function diffAgainstSeq(seq: number): Promise<void> {
 async function restoreSeq(seq: number): Promise<void> {
   if (!confirm(`Restore snapshot #${seq} to disk? This writes a new snapshot so it can be undone.`)) return
   const ok = await store.restoreSnapshot(seq)
-  if (!ok) alert('Restore failed. See network console for details.')
+  if (!ok) projectsStore.pushErrorToast('Restore failed', `Could not restore snapshot #${seq}. See network console for details.`)
 }
 
 const diffLines = computed(() => createTerminalDiffLines(store.diffContentA, store.diffContentB))

@@ -96,6 +96,30 @@ def _env_overrides(base_url: str, api_key: str) -> dict[str, str]:
     }
 
 
+def _tier_remap_env(settings: OpenRouterSettings) -> dict[str, str]:
+    """Tier-alias + control-plane model remaps for OpenRouter-routed CLIs.
+
+    Mirrors :func:`ciao.providers.ollama._tier_remap_env`: the bundled
+    ``claude`` CLI resolves the ``haiku``/``sonnet``/``opus``/``fable``
+    aliases, its small-fast control-plane calls, Agent-tool subagents, and
+    the auto-mode background classifier through ``ANTHROPIC_BASE_URL``. When
+    that points at OpenRouter the default ``claude-*`` resolutions are not
+    served there in that form, so remap every slot to an OpenRouter id.
+    OpenRouter's tier defaults (``anthropic/claude-haiku-4.5`` etc.) are
+    all OpenRouter-served, so this is safe on the single routing path.
+    """
+    return {
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": settings.haiku_model,
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": settings.sonnet_model,
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": settings.opus_model,
+        "ANTHROPIC_DEFAULT_FABLE_MODEL": settings.opus_model,
+        "ANTHROPIC_SMALL_FAST_MODEL": settings.haiku_model,
+        "CLAUDE_CODE_SUBAGENT_MODEL": settings.sonnet_model,
+        "CLAUDE_CODE_AUTO_MODE_MODEL": settings.haiku_model,
+        "CLAUDE_CODE_BG_CLASSIFIER_MODEL": settings.haiku_model,
+    }
+
+
 def openrouter_env_for_model(
     model: str, settings: OpenRouterSettings
 ) -> dict[str, str]:
@@ -107,7 +131,10 @@ def openrouter_env_for_model(
     """
     if not settings.available or not is_openrouter_model(model, settings):
         return {}
-    return _env_overrides(settings.base_url, settings.api_key)
+    return {
+        **_env_overrides(settings.base_url, settings.api_key),
+        **_tier_remap_env(settings),
+    }
 
 
 def routine_env_for_model(model: str, settings: OpenRouterSettings) -> dict[str, str]:
@@ -127,7 +154,7 @@ def routine_env_for_model(model: str, settings: OpenRouterSettings) -> dict[str,
 
 
 def discover_models(
-    settings: OpenRouterSettings, *, timeout_s: float = 4.0, anthropic_only: bool = True
+    settings: OpenRouterSettings, *, timeout_s: float = 4.0, anthropic_only: bool = False
 ) -> tuple[str, ...]:
     """List models from OpenRouter's ``/api/v1/models`` endpoint.
 

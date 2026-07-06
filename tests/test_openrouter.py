@@ -35,6 +35,21 @@ def test_env_injection_points_at_anthropic_compat_endpoint() -> None:
     assert env["ANTHROPIC_API_KEY"] == ""
 
 
+def test_env_includes_tier_remaps() -> None:
+    """OpenRouter-routed CLIs get tier-alias + control-plane remaps so
+    subagents and the auto-mode classifier resolve to OpenRouter-served
+    ids instead of claude-* ids OpenRouter doesn't serve in that form."""
+    env = openrouter_env_for_model("anthropic/claude-haiku-4.5", _settings())
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "anthropic/claude-haiku-4.5"
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "anthropic/claude-sonnet-4.5"
+    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "anthropic/claude-opus-4.8"
+    assert env["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "anthropic/claude-opus-4.8"
+    assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "anthropic/claude-haiku-4.5"
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "anthropic/claude-sonnet-4.5"
+    assert env["CLAUDE_CODE_AUTO_MODE_MODEL"] == "anthropic/claude-haiku-4.5"
+    assert env["CLAUDE_CODE_BG_CLASSIFIER_MODEL"] == "anthropic/claude-haiku-4.5"
+
+
 def test_env_empty_when_no_api_key() -> None:
     s = OpenRouterSettings(api_key="")
     assert openrouter_env_for_model("anthropic/claude-haiku-4.5", s) == {}

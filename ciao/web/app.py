@@ -11,6 +11,16 @@ from starlette.staticfiles import StaticFiles
 from starlette.responses import FileResponse
 
 from ciao.web.auth import AuthMiddleware, make_serializer
+from ciao.web.agent_assets import (
+    agent_assets_endpoint,
+    create_command_endpoint,
+    create_subagent_endpoint,
+    delete_command_endpoint,
+    delete_subagent_endpoint,
+    update_command_endpoint,
+    update_subagent_endpoint,
+    workspace_health_endpoint,
+)
 from ciao.web.commands import list_commands_endpoint, rate_limits_endpoint
 from ciao.web.routes_api import (
     admin_add_skill,
@@ -41,6 +51,7 @@ from ciao.web.routes_api import (
     create_project,
     create_project_chat,
     create_schedule,
+    debug_issues,
     handover_merge,
     image_blob,
     local_handback,
@@ -50,6 +61,11 @@ from ciao.web.routes_api import (
     list_all_chats,
     list_models,
     delete_workspace_setting,
+    gws_integration_settings,
+    gws_save_client_secret,
+    gws_auth_url,
+    gws_exchange_code,
+    gws_disconnect,
     provider_config_settings,
     settings_routines,
     setup_finish_endpoint,
@@ -62,6 +78,7 @@ from ciao.web.routes_api import (
     project_chats,
     project_complete,
     project_detail,
+    package_changelog_endpoint,
     package_status_endpoint,
     package_update_endpoint,
     voice_install_local_endpoint,
@@ -162,18 +179,35 @@ def create_app(config, app_settings=None) -> Starlette:
         Route("/api/schedules/{schedule_id}", schedule_detail, methods=["PATCH", "DELETE"]),
         # Automation status (read-only) — Settings → Automation page
         Route("/api/automation", list_automation, methods=["GET"]),
+        # Runtime issue report (dev mode only) — Settings → Debug card
+        Route("/api/debug/issues", debug_issues, methods=["GET"]),
         # Slash commands (project + user level)
         Route("/api/commands", list_commands_endpoint, methods=["GET"]),
+        # Agent-facing instruction, subagent, and command assets.
+        Route("/api/agent-assets", agent_assets_endpoint, methods=["GET"]),
+        Route("/api/workspace-health", workspace_health_endpoint, methods=["GET"]),
+        Route("/api/agent-assets/subagents", create_subagent_endpoint, methods=["POST"]),
+        Route("/api/agent-assets/subagents/{name}", update_subagent_endpoint, methods=["PATCH"]),
+        Route("/api/agent-assets/subagents/{name}", delete_subagent_endpoint, methods=["DELETE"]),
+        Route("/api/agent-assets/commands", create_command_endpoint, methods=["POST"]),
+        Route("/api/agent-assets/commands/{name}", update_command_endpoint, methods=["PATCH"]),
+        Route("/api/agent-assets/commands/{name}", delete_command_endpoint, methods=["DELETE"]),
         # Claude subscription rate-limit buckets (5h / weekly / overage)
         Route("/api/rate-limits", rate_limits_endpoint, methods=["GET"]),
         # Models & Status
         Route("/api/models", list_models, methods=["GET"]),
         Route("/api/settings/routines", settings_routines, methods=["GET", "PATCH"]),
         Route("/api/settings/providers", provider_config_settings, methods=["GET", "PATCH"]),
+        Route("/api/integrations/gws", gws_integration_settings, methods=["GET"]),
+        Route("/api/integrations/gws/client-secret", gws_save_client_secret, methods=["POST"]),
+        Route("/api/integrations/gws/auth-url", gws_auth_url, methods=["POST"]),
+        Route("/api/integrations/gws/exchange", gws_exchange_code, methods=["POST"]),
+        Route("/api/integrations/gws/disconnect", gws_disconnect, methods=["POST"]),
         Route("/api/status", status_endpoint, methods=["GET", "PATCH"]),
         Route("/api/startup-status", startup_status_endpoint, methods=["GET"]),
         Route("/api/setup-status", setup_status_endpoint, methods=["GET"]),
         Route("/api/package/status", package_status_endpoint, methods=["GET"]),
+        Route("/api/package/changelog", package_changelog_endpoint, methods=["GET"]),
         Route("/api/package/update", package_update_endpoint, methods=["POST"]),
         Route("/api/voice/install-local", voice_install_local_endpoint, methods=["POST"]),
         Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"]),

@@ -1,0 +1,199 @@
+# Ciaobot Architecture
+
+Orientation doc for the codebase. Read this before making any change in `ciao/`, `web/`, `scripts/`, or `deploy/`. After a change that affects layout, capabilities, env vars, endpoints, or commands, dispatch the `doc-updater` agent to keep this file, `docs/DEVELOPMENT.md`, and `INTEGRATIONS.md` truthful.
+
+## App repo layout
+
+```
+README.md                      Product intro, quickstart, doc index.
+CLAUDE.md / AGENTS.md          Contributor guide for coding agents. Loaded every prompt.
+INTEGRATIONS.md                Operator config (env vars, OAuth, MCP connectors, server runtime knobs).
+PWA_API.md                     PWA API reference (endpoints, auth flow, state path).
+CONTRIBUTING.md                Contribution guide.
+docs/                          Long-form docs (this file, DEVELOPMENT.md).
+
+ciao/                          Python backend (Starlette).
+  main.py                      Web server entry point, route wiring, startup hooks.
+  cli.py                       Packaged `ciao` CLI: server, setup, dev, sync-skills, vault, memory, chat, public-preflight, and package-smoke commands.
+  setup_status.py              Bootstrap/setup readiness API and wizard finish handler.
+  dev.py                       Local dev runner: backend on :8543 plus Vite frontend on :5173. CLI: `ciao dev`.
+  config.py                    Env var loading, workspace config.
+  providers/                   Claude Agent SDK provider plus Anthropic/Ollama/OpenRouter routing helpers.
+    routing.py                 Resolve intended backend (Anthropic / Ollama / OpenRouter) from a model ID and build per-turn env injection. Used by chats and one-shot automations.
+    oneshot.py                 Single-turn provider call (max_turns=1, no tools). Used by critique.py and routine-model automations.
+  context/                     Per-turn context injection (workspace, project, vault hints).
+  observability/               Hooks: UserPromptSubmit (runtime context + vault entity tags) and PostToolUse (WebSearch backfill on Ollama-cloud routes). Plus logging, transcript capture.
+  schedules.py                 Cron-style schedule dispatch.
+  dag.py                       Tiny DAG runner (Node kinds: bash / prompt / gate / subagent / retention; edges: ok / fail / always). Subprocess nodes can merge per-node env overrides for routed models. Each node is timed via `job_runs.track_sync`, so Automation page shows per-node status. Used by skill evolution and dependency review.
+  sessions.py                  Session state, auth, signed cookies, JSON-backed StateStore for `.runtime/state.json`.
+  transcripts.py               Archive Claude Code JSONL into memory-vault/Logs/Chats/.
+  upgrade.py                   Self-update / deploy flow.
+  voice.py                     Voice transcription: cloud (OpenAI) and local (mlx-whisper) engines, selected by `CIAO_TRANSCRIPTION_ENGINE`.
+  app_settings.py              Runtime-mutable app settings (title, insights, and critique models, transcription engine/model), persisted at `.runtime/app_settings.json` and overlaid on CiaoConfig. Edited via Settings → Models.
+  error_log.py                 Rotating file handler for server ERROR+ logs. Consumed by the error-triage schedule and the debug issue report.
+  debug_report.py              Aggregate runtime issues (server error log + failed job runs) for the dev-mode `GET /api/debug/issues` endpoint and the `{{ISSUE_REPORT}}` schedule placeholder.
+  job_runs.py                  Fail-open recorder for background-job runs. Appends one JSON record per run to `.runtime/job_runs.jsonl` (size-trimmed like `error_log.py`). Background tasks wrap their work in `track()`/`track_sync()`; `automation_summary()` feeds the Settings → Automation page.
+  models.py                    Shared data models (ChatContext, AgentRequest, etc.).
+  provider_service.py          Provider request builder and execution wrapper.
+  signals.py                   Restart / deploy signals.
+  execution_modes.py           Claude permission mode normalization.
+  git_sync.py                  Startup git pull / merge-before-push helpers.
+  local_session.py             Per-device working-branch flow (LocalSessionManager): device branch, preflight, commit-to-main.
+  rate_limits.py               Rate-limit tracking and persistence.
+  insights.py                  Post-archive session insights extraction.
+  critique.py                  Multi-model adversarial review. Runs each reviewer through ciao/providers/oneshot.py with per-model routing (OpenRouter / Ollama / Anthropic). CLI: `python -m ciao.critique`. Used by the adversarial-review skill.
+  fts_search.py                SQLite FTS5 full-text indexing and search for vault and transcripts.
+  vault_index.py               Build/query memory-vault/INDEX.md from frontmatter and wikilinks. CLI: `ciao vault-index`.
+  vault_lint.py                Programmatic linter and wikilink validation for the memory-vault. CLI: `ciao vault-lint`.
+  trajectory_builder.py        Parse filtered session JSONL into a structured trajectory (turns, tools, skills, errors) and persist to ~/.ciao/trajectories/YYYY-MM/<session-id>.json. CLI: `python3 -m ciao.trajectory_builder --list [...]`.
+  skill_evolution.py           Weekly pass: mine trajectories, flag skills tied to non-success sessions, draft edit proposals to the vault's Workspace/Skill-Proposals/. 15KB skill cap, optional test gate, no auto-apply. `run_evolution_pass` builds a per-skill DAG (has_proposal → semantic → tests → write, with a write_stub fallback for over-cap skills) via `ciao/dag.py`.
+  dependency_review.py         Weekly dependency-changelog review as a `ciao/dag.py` pipeline (read_baseline gate → installed-versions gate → research subagent fanning out GitHub release checks → write_baseline gate). Trigger: `python3 -m ciao.dependency_review [--model sonnet] [--dry-run]`. Merges and gates the write to `.runtime/dependency_baseline.json` so a flaky run can't corrupt it.
+  skills_inventory.py          Build the Settings skill inventory from workspace skills and skills-lock.json, with installed Claude badges.
+  sync_skills.py               Install packaged stock skills and mirror workspace skills, commands, and agents into `.claude/`. CLI: `ciao sync-skills`.
+  skills_sync.py               Change-detect upstream skills in skills-lock.json so `ciao sync-skills` updates only moved repos. CLI: `ciao skills-sync`.
+  cleanup_sdk_blobs.py         Maintenance: drop archived Claude SDK JSONL blobs. CLI: `ciao cleanup-sdk-blobs`.
+  memory_injector.py           Read ~/.ciao/memory.md and ~/.ciao/user.md at session start, render as a system-prompt block; also injects the baseline Ciaobot system instructions into every chat.
+  memory_tool.py               Bounded memory files + in-process SDK MCP server exposing the `memory` tool (add/replace/remove/read).
+  memory_proposals.py          Scan archived `## Session insights` sections, propose memory entries to the vault's Workspace/Memory-Proposals.md.
+  public_release.py            Public extraction allowlist, export copier, and private-data preflight scanner. CLI: `ciao public-preflight export <src> <dest>` then `ciao public-preflight scan <export-root> --private-patterns <file>`.
+  release.py                   Release preparation: sync-bump versions across pyproject.toml, web/package.json, package-lock.json, and the Homebrew formula. CLI: `python -m ciao.release <version>`.
+  package_version.py           Best-effort version probe: reads ciao.__version__ and queries the package index for the latest published version. Powers GET /api/package/status.
+  package_smoke.py             Wheel smoke target: build web, build wheel, install in a clean venv, and probe the installed app. CLI: `ciao package-smoke`.
+  stock/                       Generic package-data assets for public installs: stock agents, commands, skills, launchd template, workspace docs, and system schedules.
+    skills/                    Packaged generic skills (ciao-schedules, create-chat, web-research, vault-read, workspace-authoring, adversarial-review). Installed into every workspace's `.claude/skills/` by `ciao sync-skills`; a same-named workspace skill overrides the packaged copy.
+    workspace/                 Agent-readable docs copied into installed workspaces (`CLAUDE.md`, `CIAO_CUSTOMIZATION.md`).
+    schedules.json             System schedules (memory curation, skill evolution, dependency review, error triage, weekly review).
+    schedules/                 Long-form schedule assets (weekly-review-template.md).
+  web/                         PWA web server (Python routes) + static assets (built by web/).
+
+web/                           Vue 3 PWA frontend.
+  src/App.vue                  Root component.
+  src/main.ts                  App bootstrap.
+  src/router.ts                Vue Router config.
+  src/components/              UI components (chat, projects, settings, voice, etc.).
+  src/stores/                  Pinia stores.
+  src/lib/                     Helpers (API client, formatters, etc.).
+  package.json                 npm deps and scripts (build, typecheck, test). Includes a small React bridge for the Excalidraw file previewer.
+  Vite + TypeScript. Build outputs to ciao/web/static/.
+
+scripts/
+  README.md                    Scripts directory orientation.
+  run-ciao.sh                  Start the Ciaobot server in dev.
+  dev.sh                       Compatibility wrapper for `ciao dev`.
+  create-chat.py               Compatibility wrapper for `ciao create-chat`.
+  ensure-deps.sh               Dependency verification and venv repair (macOS libexpat and SSL workarounds). Sourced by run-ciao.sh and dev.sh.
+  gws-profile.sh               Switch GWS profile (personal | work). Uses exec, do NOT source.
+  gws-auth-helper.py           Interactive headless OAuth re-auth for gws (personal | work).
+  install-custom-skills.sh     Compatibility wrapper for `ciao sync-skills`.
+  skills_add.py                Add an upstream skill repo to skills-lock.json.
+  skills_sync.py               Compatibility wrapper for `ciao skills-sync`.
+  vault_index.py               Compatibility wrapper for `ciao vault-index`.
+  vault-search.py              Compatibility wrapper for `ciao vault-search`.
+  vault-lint.py                Compatibility wrapper for `ciao vault-lint`.
+  memory-cli.py                Compatibility wrapper for `ciao memory`. Used by subagents that cannot load the in-process MCP server.
+  cleanup_sdk_blobs.py         Compatibility wrapper for `ciao cleanup-sdk-blobs`.
+  backfill_insights.py         One-off: backfill session insights for existing archives.
+  prepare-release              Release helper wrapper.
+
+deploy/
+  homebrew/ciao.rb             Homebrew formula scaffold.
+
+tests/                         pytest suite for the Python backend.
+pyproject.toml                 Python package metadata, package-data declarations, and dev/test deps.
+```
+
+## Workspace layout
+
+The app repo above is the installable package. A **workspace** is a separate directory (created by `ciao setup`, never committed to this repo) that holds the user's data and per-instance state:
+
+```
+.env                           Server, provider, workspace, and integration config.
+CLAUDE.md                      Workspace behavior instructions (seeded from ciao/stock/workspace/).
+CIAO_CUSTOMIZATION.md          Local customization surface.
+skills/  subagents/  commands/ Canonical user-owned sources; `ciao sync-skills` mirrors them into .claude/.
+.claude/{skills,agents,commands}/  Generated symlinks/copies (packaged stock assets + user sources). Do not edit by hand.
+memory-vault/                  Durable markdown memory: MEMORY.md, INDEX.md, entity folders, projects/{active,completed}/, Workspace/, Logs/Chats/.
+.runtime/                      Local state: schedules.json, web_projects.json, job_runs.jsonl, server_errors.log, snapshots/, transcripts/, state.json. Not committed.
+secrets/                       OAuth credentials (gitignored).
+```
+
+## Server and chat pipeline
+
+`ciao/` is a Starlette web server that mounts the PWA frontend, exposes a JSON API for projects/chats/schedules, and drives Claude Agent SDK sessions for each chat turn. Auth is a pre-shared token (`PWA_AUTH_TOKEN`) traded for a signed session cookie. Operational state lives in `.runtime/` under `CIAO_WORKSPACE`; durable memory lives under `CIAO_VAULT_ROOT` (default `<CIAO_WORKSPACE>/memory-vault`).
+
+Chat transcripts are streamed via WebSocket and archived to `Logs/Chats/<chat-id>/claude/` under the vault root (`transcripts.py`). The Claude Agent SDK is configured in `ciao/providers/claude.py` with a `fallback_model` chain (Opus to Sonnet to Haiku) and `setting_sources=["user", "project", "local"]` so `.claude/skills/`, `.claude/agents/`, and `.claude/commands/` auto-discover.
+
+When the model calls `AskUserQuestion` (which the headless CLI can't render, and would otherwise auto-answer empty), `ProjectChatManager._drive` interrupts the turn so generation stops at the question; the PWA surfaces it in its own picker (persisted as `ChatInfo.pending_question` so it survives a reload) and the user's reply resumes the session as a fresh turn.
+
+If a turn fails before any provider progress with a quota or session-limit error, `ProjectChatManager` stores the last prompt and schedules an hourly deferred retry; the chat view and sidebar surface the pending state, and `/api/chats/{chat_id}/retry` lets the UI set, stop, or run that retry immediately.
+
+## Memory, insights, and self-improvement
+
+When a chat is archived, the raw session JSONL is filtered and passed through a fast model to extract durable insights (errors, dead ends, new entities, decisions, reusable code) which are appended as a `## Session insights` section; this section is the preferred input for memory curation and downstream automation (`ciao/insights.py`, gated by `CIAO_INSIGHTS_DISABLED`, `CIAO_INSIGHTS_MIN_TURNS`, `CIAO_INSIGHTS_MODEL`).
+
+In the same archive hook, `ciao/trajectory_builder.py` writes a structured trajectory JSON (turns, tool counts, skills loaded, errors) to `~/.ciao/trajectories/YYYY-MM/<session-id>.json`; a weekly schedule runs `ciao/skill_evolution.py` to mine those trajectories and draft skill-edit proposals under the vault's `Workspace/Skill-Proposals/` (gated by `CIAO_TRAJECTORIES_DISABLED`, `CIAO_TRAJECTORY_RETENTION_MONTHS`, `CIAO_SKILL_EVOLUTION_DISABLED`). The per-skill pipeline inside `run_evolution_pass` is a small DAG executed by `ciao/dag.py`, so each step (proposal generation, semantic check, test gate, write) shows up in the Automation page with its own timing and error.
+
+Each session injects a bounded memory layer at the top of the system prompt: `~/.ciao/memory.md` (env facts, conventions, lessons) and `~/.ciao/user.md` (identity, preferences) are rendered as a labeled block by `ciao/memory_injector.py`, while `ciao/memory_tool.py` registers an in-process MCP server exposing a single `memory` tool the agent uses to add/replace/remove/read entries within char limits. `ciao/memory_proposals.py` mines archived `## Session insights` into the vault's `Workspace/Memory-Proposals.md` for human or next-session promotion. Daily memory curation also appends durable learnings to the vault's `Workspace/Learnings.md`; the weekly review promotes recurring high-confidence entries into CLAUDE.md rules.
+
+The server registers a `UserPromptSubmit` hook (`ciao/observability/hooks.py`) that injects today's date, the per-turn `CIAO_ACTIVE_WORKSPACE`, GWS profile, and any vault entities mentioned in the prompt; entity matching is index-backed via `INDEX.md` under the vault root and is scoped to the active workspace plus `shared/...` roots.
+
+## Schedules and background automation
+
+Schedule dispatch (`ciao/schedules.py`) runs cron-shaped jobs that use the same provider pipeline as a chat turn. System schedules ship in `ciao/stock/schedules.json` (memory curation, skill evolution, dependency review, error triage, weekly review); user schedules live in the workspace's `.runtime/schedules.json`. Schedule prompts support two placeholders substituted at dispatch: `{{ERROR_LOG}}` (server error-log tail) and `{{ISSUE_REPORT}}` (error log plus failed job runs); the error log is cleared only after a clean run.
+
+Background automations are instrumented through `ciao/job_runs.py`: title generation, schedule dispatch, session insights, memory proposals, trajectory capture, weekly skill evolution, weekly dependency review, and startup/system tasks (git sync, vault index refresh, PWA rebuild, skills update, device-branch backup) each record one run (status, duration, model/provider, error) to `.runtime/job_runs.jsonl`. `GET /api/automation` serves the grouped view that powers Settings → Automation.
+
+Schedules carry an `archive_policy`: `manual` or `auto`. All schedules execute through the normal chat pipeline for permissions and transcripts. `auto` runs a post-run classifier and archives only when the user does not need to see the result; failed, permission-blocked, retrying, or useful runs stay visible.
+
+**Automatic behavior.** Ciaobot automatically archives chat transcripts, runs the configured session-insights model on archived session JSONL when insights are enabled, appends `## Session insights`, records a structured trajectory JSON, and then runs a heuristic pass over those insights to draft memory proposals. It also dispatches enabled schedules on the device where `CIAO_DISPATCH_SCHEDULES` is set, records background-job telemetry, refreshes the vault index, updates configured skill mirrors, and backs up the device branch according to the startup/system automation configuration. The Settings → Models page only exposes routines that have a selectable model; heuristic follow-on jobs such as memory proposals and trajectory capture are tracked in Settings → Automation instead.
+
+**Not automatic.** Memory proposals are not promoted into `~/.ciao/memory.md` or `~/.ciao/user.md` without review. Skill-evolution output is a draft proposal under the vault's `Workspace/Skill-Proposals/`; Ciaobot does not apply those edits automatically. Scheduled chats still run through the normal provider pipeline and permission flow. A schedule with `archive_policy: auto` is archived only when the post-run classifier says the result does not need user attention; failed, blocked, retrying, or useful runs remain visible. Routine-model choices do not change an active chat's selected provider/model.
+
+## Providers
+
+Dispatch is provider-driven, not model-driven. Each chat and schedule carries an explicit provider and model. The main provider is `claude`, which runs Claude Code / Claude Agent SDK and can use Anthropic models directly, Ollama-routed models, or OpenRouter-routed `owner/model` IDs through environment injection. Ollama support covers cloud models and locally installed daemon models; the route also remaps Claude Code's internal tier/control-plane slots so subagents and auto-mode classifiers stay on Ollama. Local-daemon routes use the selected local model for those internal slots. OpenRouter support is enabled when `OPENROUTER_API_KEY` is set. Alias tiers such as `haiku`, `sonnet`, and `opus` can resolve differently per workspace model bucket, so a personal workspace can use Ollama while a work workspace keeps Anthropic aliases. The picker and routine settings expose the available Anthropic, Ollama, and OpenRouter options, while the backend keeps provider routing explicit so schedules and archived chats remain reproducible.
+
+## Frontend
+
+`web/` is a Vue 3 + Vite + Pinia + TypeScript PWA. The hierarchy is workspace → project → chat. Configured logical workspaces live in `CiaoConfig.workspaces` (loaded from `CIAO_WORKSPACES`, `.runtime/workspaces.json`, or legacy personal/work defaults) and are exposed through `GET /api/workspaces`. The Pinia project store loads that endpoint; the sidebar workspace switcher and empty-state General chat buttons render from the configured workspace list. Backend project discovery, completion, restore, schedule routing, spawned-agent `GWS_PROFILE`, `CIAO_ACTIVE_WORKSPACE`, and default model bucket also read from the workspace registry. Model bucket values are strings; the visible picker groups Claude routes by Anthropic, Ollama, and OpenRouter backends, while the backend accepts configured bucket names such as `anthropic` and `ollama`.
+
+Each workspace has a "General" project plus auto-discovered projects from its configured `vault_root/projects/active/`. Chats stream over WebSocket; voice recording captures audio and previews before transcribing; image uploads and pending comments are scoped to the active chat, then attached to that chat's next prompt. Pinned files are scoped per-chat (persisted in local storage, falling back to project scope if no active chat exists) and render in a split layout sidebar.
+
+Write/Edit/MultiEdit/NotebookEdit tool calls are tagged with `file_touch` by `ciao/web/chat_broker.py` and surface as standalone `_filecard` entries on reload, rendered as inline clickable preview cards that open `FileViewerModal` (see `PWA_API.md` → "File-touch cards" for the WS + `/messages` contract). On every file-touch event the broker also schedules a debounced content snapshot via `ProjectChatManager.snapshots` (`ciao/web/file_snapshots.py`, `SnapshotStore`), which writes append-only per-(chat, file) copies under `.runtime/snapshots/<chat_id>/<urlencoded_path>/NNNN.snap` plus a sibling `meta.json`. The PWA reads these back via `/api/file-history`, `/api/file-content`, and `/api/file-restore` to power the FileViewerModal's Preview / History / Diff tabs and one-click restore; Preview renders text/markdown, images, and `.excalidraw` JSON diagrams via a read-only Excalidraw bridge, while History/Diff remain text-snapshot based. An in-modal Edit mode posts user-edited text content via `POST /api/workspace-file`, which captures a `tool="PWAEdit"` snapshot. Snapshots are wiped on chat delete and preserved on archive.
+
+Archived chats are read-only but can be continued into a new active chat via the "Continue in new chat" button (calling `POST /api/chats/{chat_id}/continue`). A header "files touched" chip in `ChatPanel.vue` summarizes the dedupped set of files written/edited in the chat and links each entry back to the modal.
+
+Settings tabs: Home (deploy, notifications, theme and font scaling, local session, dev-mode Debug card), Models (provider/tier controls for title, insights, critique, Ollama/OpenRouter alias models, visible main workspace/vault roots, and the voice transcription engine, read/written via `GET`/`PATCH /api/settings/routines`, persisted in `.runtime/app_settings.json` by `ciao/app_settings.py` and overlaid on the live config without a restart), Providers, Workspaces, Instructions, Skills (expandable inventory with install badges), and Automation (per-process status, last-run time, duration, model/provider, recent history, and error text, split into Content automations and System, fed by `GET /api/automation`). `GET /api/agent-assets` surfaces Claude Code instruction files plus generated Ciaobot system/runtime prompt blocks, subagents, and slash commands. `POST /api/agent-assets/subagents` and `POST /api/agent-assets/commands` create workspace-owned assets under `subagents/` or `commands/`, mirror a note into `memory-vault/Workspace/`, and sync the generated `.claude/` links.
+
+Rendered markdown is sanitized through the shared frontend renderer before any `v-html` use. Keep new markdown surfaces on that helper. The build outputs to `ciao/web/static/` so the same Starlette server hosts both the API and the PWA.
+
+## Per-device working branch
+
+Every instance is identical (no primary/secondary, no cloud). On startup, each one checks out its own `dev/<device_name>` branch (cut from `origin/main`, reused across restarts, via `ciao/local_session.py::ensure_device_branch`) and works there. `CIAO_DEVICE_NAME` names the device (defaults to the sanitized hostname); a background loop pushes the branch for backup. Only the instance with `CIAO_DISPATCH_SCHEDULES` set (the always-on "main" device) dispatches scheduled automations, so schedules never double-fire when an occasional dev box is also running (`config.dispatch_schedules`).
+
+**Commit-to-main / handover flow** (`ciao/local_session.py`, `LocalSessionManager`). When the user clicks "Commit to main" in Settings, `POST /api/local/handback` commits + pushes the device branch, then tries to merge it into `main`: a **clean merge** is pushed directly (plain git) and the device branch is re-pointed at the merged `main`. Workspace handback never requests app deploy; app updates happen through package upgrades. A **conflicting merge** is aborted and `POST /api/handover/merge` opens an **interactive chat** in the personal `General` project: the chat's agent merges the branch into `main`, resolving conflicts and asking the user via `AskUserQuestion` (push-notified) when ambiguous, then pushes `main` (it does not redeploy). After that chat lands, `POST /api/local/resync` brings the device branch up to the merged `main` by committing any pending work and merging `origin/main` into the branch (fast-forwarding in the normal case). It merges rather than force-resetting, so it works on the live workspace's dirty tree and never discards device-branch commits made after the last push. The same endpoint backs the Settings "Sync to main" button. See `PWA_API.md` → "Local session / handover flow".
+
+## Package updates and setup
+
+**Package updates.** App code is a pip package, so workspace git handback never implies a deploy. `GET /api/package/status` reports `ciao.__version__` and a best-effort latest version from the package index, and `POST /api/package/update` upgrades the package based on the active installation mode (Homebrew or pip venv) and restarts the server, allowing the Settings PWA panel to handle upgrades seamlessly.
+
+**Setup readiness.** When `PWA_AUTH_TOKEN` is absent, Ciaobot starts in bootstrap mode using `~/.ciao/bootstrap` (or `CIAO_BOOTSTRAP_WORKSPACE`) and persists a generated temporary auth token under that workspace's `.runtime/`. `GET /api/setup-status` is public like startup status, because the first-run wizard needs it before a normal session exists. It reports workspace/vault/token/push-contact checks plus Claude Code, Ollama, and OpenRouter readiness probes, without returning secret values. The local first-launch URL `/?setup=<token>` redeems `.runtime/setup-token` on localhost only, sets the signed PWA session cookie, deletes the one-time token, and redirects to `/`. The wizard finishes with `POST /api/setup/finish`, which is bootstrap-only and localhost-only: it writes the real workspace `.env`, scaffolds the configured vault root, creates the LaunchAgent plist and local `Ciaobot.app` shortcut, then requests the normal restart exit so launchd can relaunch into the real workspace.
+
+## Project naming convention
+
+Every configured workspace uses the same shape: a project is a folder under `<workspace.vault_root>/projects/active/<name>/` with a same-named main doc `<name>/<name>.md` (or `README.md`). On completion it moves to `<workspace.vault_root>/projects/completed/<name>/` via the PWA's "Complete" button (or `complete_project()`).
+
+Completed projects can be restored. The sidebar footer has an archive icon next to "+ New Project" that opens a modal listing the current workspace's completed projects (`ProjectChatManager.list_completed_projects()` scans the `projects/completed/` tree read-only). Each entry has a Restore button: `restore_project(workspace, stem)` moves the folder back to `projects/active/`, flips frontmatter `status: completed` back to `active`, and re-runs auto-discovery to recreate the PWA project. The recreated project gets a fresh id; the original chats stay archived. Routes: `GET /api/projects/completed` (optional `?workspace=`) and `POST /api/projects/completed/restore` (see `PWA_API.md`).
+
+- **Folder name** is the slug used internally (`vault_folder`). Lowercase + kebab-case is preferred but not enforced; spaces, mixed case, and underscores all work. Avoid path separators and leading dots.
+- **PWA display name** comes from frontmatter `name:` (or `title:` if `name:` is absent), so it can be any human-friendly string with spaces (e.g. `name: AI Championship Project`). If both are missing, the folder name is used as the label.
+- Top-level reference docs that live directly under `projects/` never "complete"; don't put real projects there.
+- A stray `projects/active/<Name>.md` at the top level gets auto-promoted to `<Name>/<Name>.md` on the next server start, so the folder+file invariant always holds.
+- Every workspace has an auto-created `General` project bound to `projects/active/general/`. It is marked `is_auto` and displays the "auto" chip in the sidebar. It's where ad-hoc chats land and where scheduled automations run; don't delete it.
+
+## Related docs
+
+- `docs/DEVELOPMENT.md`: setup, dev workflow, testing, change guidelines.
+- `INTEGRATIONS.md`: env vars, OAuth setup, MCP connectors, server runtime knobs.
+- `PWA_API.md`: API endpoints, auth flow, state paths.
+- `web/README.md`: PWA frontend dev workflow, iOS Safari gotchas, design system tokens.
