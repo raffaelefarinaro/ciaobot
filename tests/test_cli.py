@@ -216,6 +216,57 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     setup_token = (workspace / ".runtime" / "setup-token").read_text(encoding="utf-8").strip()
     assert setup_token
     assert setup_token in app_text
+    icns = apps / "Ciaobot.app" / "Contents" / "Resources" / "Ciaobot.icns"
+    assert icns.is_file() and icns.stat().st_size > 0
+    info_plist = (apps / "Ciaobot.app" / "Contents" / "Info.plist").read_text(encoding="utf-8")
+    assert "<key>CFBundleIconFile</key>" in info_plist
+    assert "<string>Ciaobot</string>" in info_plist
+
+
+def test_setup_removes_our_legacy_ciao_app_only(tmp_path: Path) -> None:
+    apps = tmp_path / "Applications"
+    ours = apps / "Ciao.app" / "Contents"
+    ours.mkdir(parents=True)
+    (ours / "Info.plist").write_text(
+        "<plist><string>local.ciao.app</string></plist>", encoding="utf-8"
+    )
+    foreign = apps / "OtherCiao.app"
+
+    rc = cli.main([
+        "setup",
+        "--workspace",
+        str(tmp_path / "workspace"),
+        "--launch-agents-dir",
+        str(tmp_path / "LaunchAgents"),
+        "--app-dir",
+        str(apps),
+    ])
+
+    assert rc == 0
+    assert not (apps / "Ciao.app").exists()
+    assert (apps / "Ciaobot.app").is_dir()
+    assert not foreign.exists()  # untouched (never created); guard for typos
+
+
+def test_setup_keeps_unrelated_ciao_app(tmp_path: Path) -> None:
+    apps = tmp_path / "Applications"
+    unrelated = apps / "Ciao.app" / "Contents"
+    unrelated.mkdir(parents=True)
+    (unrelated / "Info.plist").write_text(
+        "<plist><string>com.somebody.else</string></plist>", encoding="utf-8"
+    )
+
+    assert cli.main([
+        "setup",
+        "--workspace",
+        str(tmp_path / "workspace"),
+        "--launch-agents-dir",
+        str(tmp_path / "LaunchAgents"),
+        "--app-dir",
+        str(apps),
+    ]) == 0
+
+    assert (apps / "Ciao.app").is_dir()
 
 
 def test_setup_is_idempotent_and_does_not_overwrite_env(tmp_path: Path) -> None:

@@ -9,11 +9,14 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import time
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+NOTIFICATION_LOG_MAX = 100
 
 
 def _b64url(data: bytes) -> str:
@@ -28,6 +31,7 @@ class PushManager:
         self._runtime.mkdir(parents=True, exist_ok=True)
         self._vapid_path = runtime_root / "vapid.json"
         self._subs_path = runtime_root / "push_subscriptions.json"
+        self._log_path = runtime_root / "notifications.jsonl"
         self._subject = subject
         self._lock = Lock()
         self._subs: list[dict[str, Any]] = []
@@ -126,10 +130,31 @@ class PushManager:
     def has(self, endpoint: str) -> bool:
         return any(s.get("endpoint") == endpoint for s in self._subs)
 
+    # ── Notification log ────────────────────────────────────────────────
+
+    def _log_notification(self, payload: dict[str, Any]) -> None:
+        """Append to .runtime/notifications.jsonl so local companions (the
+        macOS menu bar app) can show notifications even when no Web Push
+        subscription exists."""
+        try:
+            with self._lock:
+                entry = {"ts": time.time(), **payload}
+                with self._log_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(entry) + "\n")
+                lines = self._log_path.read_text(encoding="utf-8").splitlines()
+                if len(lines) > NOTIFICATION_LOG_MAX * 2:
+                    self._log_path.write_text(
+                        "\n".join(lines[-NOTIFICATION_LOG_MAX:]) + "\n",
+                        encoding="utf-8",
+                    )
+        except Exception:
+            logger.exception("Failed to log notification")
+
     # ── Send ────────────────────────────────────────────────────────────
 
     def send(self, payload: dict[str, Any]) -> None:
         """Fire-and-forget send to all known subscriptions. Prunes dead endpoints."""
+        self._log_notification(payload)
         if not self._subs:
             return
         try:
