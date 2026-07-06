@@ -47,7 +47,7 @@ def _write_release_tree(root: Path) -> None:
     )
     (root / "deploy" / "homebrew" / "ciao.rb").write_text(
         'class Ciao < Formula\n'
-        '  url "https://github.com/raffaelefarinaro/ciaobot/archive/refs/tags/v0.2.0.tar.gz"\n'
+        '  url "https://github.com/raffaelefarinaro/ciaobot/releases/download/v0.2.0/ciao-0.2.0.tar.gz"\n'
         f'  sha256 "{PLACEHOLDER_SHA256}"\n'
         'end\n',
         encoding="utf-8",
