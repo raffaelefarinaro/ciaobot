@@ -120,18 +120,40 @@ def _ensure_setup_token(workspace: Path) -> str:
     return token
 
 
-def _remove_legacy_app_shortcut(app_dir: Path) -> None:
-    """Remove the pre-rename Ciao.app launcher, but only if it is ours."""
+def _default_app_dir() -> Path:
+    """Prefer /Applications (what Finder's sidebar shows) when writable;
+    non-admin accounts fall back to the per-user folder."""
 
-    legacy = app_dir / "Ciao.app"
-    plist = legacy / "Contents" / "Info.plist"
-    try:
-        if not plist.is_file() or "local.ciao.app" not in plist.read_text(encoding="utf-8"):
-            return
-        shutil.rmtree(legacy)
-    except OSError:
-        logger_msg = f"Could not remove legacy app shortcut at {legacy}"
-        print(logger_msg, file=sys.stderr)
+    system_apps = Path("/Applications")
+    if os.access(system_apps, os.W_OK):
+        return system_apps
+    return Path.home() / "Applications"
+
+
+_OUR_BUNDLE_IDS = ("local.ciao.app", "local.ciaobot.app")
+
+
+def _remove_legacy_app_shortcuts(app_dir: Path) -> None:
+    """Remove stale launcher bundles we wrote earlier: the pre-rename
+    Ciao.app next to the target, and both names in ~/Applications when the
+    target moved to /Applications. Only bundles with our bundle id are
+    touched."""
+
+    candidates = {app_dir / "Ciao.app"}
+    home_apps = Path.home() / "Applications"
+    if app_dir != home_apps:
+        candidates.update({home_apps / "Ciao.app", home_apps / "Ciaobot.app"})
+    for legacy in candidates:
+        plist = legacy / "Contents" / "Info.plist"
+        try:
+            if not plist.is_file():
+                continue
+            text = plist.read_text(encoding="utf-8")
+            if not any(bundle_id in text for bundle_id in _OUR_BUNDLE_IDS):
+                continue
+            shutil.rmtree(legacy)
+        except OSError:
+            print(f"Could not remove legacy app shortcut at {legacy}", file=sys.stderr)
 
 
 def _write_app_shortcut(
@@ -141,7 +163,7 @@ def _write_app_shortcut(
     port: int,
 ) -> Path:
     token = _ensure_setup_token(workspace)
-    _remove_legacy_app_shortcut(app_dir.expanduser())
+    _remove_legacy_app_shortcuts(app_dir.expanduser())
     app_root = app_dir.expanduser() / "Ciaobot.app"
     contents = app_root / "Contents"
     macos = contents / "MacOS"
@@ -262,7 +284,7 @@ def setup_workspace(
     written.append(vault_path)
 
     launch_dir = Path(launch_agents_dir) if launch_agents_dir is not None else Path.home() / "Library" / "LaunchAgents"
-    app_root_dir = Path(app_dir) if app_dir is not None else Path.home() / "Applications"
+    app_root_dir = Path(app_dir) if app_dir is not None else _default_app_dir()
     for plist_name in ("com.ciao.server.plist", "com.ciao.menubar.plist"):
         written.append(_write_launchd_plist(
             workspace=root,
@@ -784,8 +806,8 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument(
         "--app-dir",
         type=Path,
-        default=Path.home() / "Applications",
-        help="Directory where Ciaobot.app is written.",
+        default=None,
+        help="Directory where Ciaobot.app is written. Defaults to /Applications when writable, else ~/Applications.",
     )
     setup_parser.add_argument(
         "--load-launchd",
