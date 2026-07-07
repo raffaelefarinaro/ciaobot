@@ -1,8 +1,7 @@
-"""Tests for the per-device config knobs (device name + schedule dispatch).
+"""Tests for the per-device config knobs (schedule dispatch, workspaces).
 
-Every instance works on its own ``dev/<device_name>`` branch. Only the
-designated "main" device sets ``CIAO_DISPATCH_SCHEDULES`` so schedules never
-double-fire when an occasional dev box is also running.
+Only the designated "main" device sets ``CIAO_DISPATCH_SCHEDULES`` so
+schedules never double-fire when an occasional dev box is also running.
 """
 
 from __future__ import annotations
@@ -19,17 +18,9 @@ def _config(**overrides: str) -> CiaoConfig:
     return CiaoConfig.from_env(env)
 
 
-def test_default_device_name_is_nonempty_and_does_not_dispatch() -> None:
+def test_default_does_not_dispatch() -> None:
     config = _config()
-    assert config.device_name  # sanitized hostname, never empty
-    assert config.device_name == config.device_name.lower()
     assert config.dispatch_schedules is False
-
-
-def test_device_name_is_sanitized_for_branch_use() -> None:
-    config = _config(CIAO_DEVICE_NAME="Dev Laptop.local")
-    # lowercased, non-alphanumeric collapsed to single dashes, trimmed
-    assert config.device_name == "dev-laptop-local"
 
 
 def test_dispatch_flag_is_opt_in() -> None:

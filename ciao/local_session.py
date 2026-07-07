@@ -1,18 +1,18 @@
-"""Per-device working-branch flow with direct or agent-merged handover.
+"""Current-branch git sync flow for the workspace repo.
 
-Every Ciaobot instance works on its own ``dev/<device_name>`` branch, cut from
-``origin/main`` and reused across restarts (unmerged work is preserved). When
-the user clicks "commit to main" in Settings, Ciaobot commits + pushes the branch,
-then tries to merge it into ``main``:
+Ciaobot never creates or switches local branches: it works on whatever branch
+the workspace checkout is currently on. When the user clicks "Sync with
+Remote" in Settings, Ciaobot commits pending work, pulls from origin
+(merge-based), and pushes the branch back:
 
-- clean merge -> pushed to ``main`` directly (plain git), and the device branch
-  is re-pointed at the merged ``main`` so work continues there;
-- conflicting merge -> the merge is aborted and an interactive Claude Code chat
-  is opened in Ciaobot to resolve it (see ``MERGE_PROMPT``), so questions
-  surface with push notifications and the user answers in that chat.
+- clean pull -> pushed to origin directly (plain git);
+- conflicting pull -> an interactive Claude Code chat is opened in Ciaobot to
+  resolve it (see ``MERGE_PROMPT``), so questions surface with push
+  notifications and the user answers in that chat.
 
-The git helpers here are unit-tested; the conflict merge runs as a normal PWA
-chat dispatched from the route layer.
+Workspaces that are not git repositories (or have no ``origin`` remote) skip
+all of this gracefully. The git helpers here are unit-tested; the conflict
+resolution runs as a normal PWA chat dispatched from the route layer.
 """
 
 from __future__ import annotations
@@ -25,43 +25,13 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BASE = "origin/main"
-BRANCH_PREFIX = "dev"
 BACKUP_PUSH_INTERVAL = 30  # seconds between background backup pushes
 
 
-def device_branch_name(device_name: str) -> str:
-    """The branch a device works on, e.g. ``dev/laptop``."""
-    return f"{BRANCH_PREFIX}/{device_name}"
-
-
-# The merge prompt dispatched into a chat when an automatic merge conflicts.
-# Filled with the branch via str.format / replace.
+# The prompt dispatched into a chat when an automatic pull/merge conflicts.
+# Filled with the branch via str.replace.
 MERGE_PROMPT = """\
-A local dev session on branch `{branch}` could not be merged into `main`
-automatically (merge conflict). Merge it for me, here, in this chat.
-
-Steps:
-1. `git fetch origin`, then `git checkout main` and `git pull --no-rebase`.
-2. Merge the branch: `git merge --no-ff origin/{branch}`.
-3. Resolve conflicts with judgement, NOT blindly:
-   - `memory-vault/**`: keep BOTH sides' content (union the notes; never drop entries).
-   - `.runtime/schedules.json`: union the schedule entries.
-   - If a conflict is ambiguous or risky (you might drop real work), STOP and ask me with
-     AskUserQuestion before deciding.
-4. Commit the merge and `git push` `main`.
-5. Re-point this device's branch at the merged main so work continues there:
-   `git checkout {branch}` then `git merge --no-edit origin/main` (this
-   fast-forwards now that the branch's work is in main). Do this BEFORE step 6.
-6. Do NOT restart or redeploy the service. Workspace merges do not deploy app code;
-   app upgrades happen through the package install/upgrade path.
-
-Report what you merged and any decisions you made.
-"""
-
-
-MERGE_PROMPT_MAIN = """\
-A git conflict occurred on the `main` branch of this workspace during remote synchronization.
+A git conflict occurred on branch `{branch}` of this workspace during remote synchronization.
 Please resolve the conflicts for me, here, in this chat.
 
 Steps:
@@ -72,8 +42,8 @@ Steps:
    - If a conflict is ambiguous or risky (you might drop real work), STOP and ask me with
      AskUserQuestion before deciding.
 3. Stage the resolved files: `git add <file>`.
-4. Commit the resolved changes: `git commit -m "resolve conflicts on main"`.
-5. Push the branch: `git push origin main`.
+4. Commit the resolved changes: `git commit -m "resolve sync conflicts"`.
+5. Push the branch: `git push origin {branch}`.
 6. Do NOT restart or redeploy the service.
 
 Report what you resolved and any decisions you made.
@@ -107,52 +77,40 @@ def _git_sync(workspace: Path, *args: str) -> tuple[int, str]:
     """Synchronous git for the quick read helpers (branch name, etc.)."""
     import subprocess
 
-    r = subprocess.run(
-        ["git", *args], cwd=str(workspace), capture_output=True, text=True
-    )
+    try:
+        r = subprocess.run(
+            ["git", *args], cwd=str(workspace), capture_output=True, text=True
+        )
+    except OSError as exc:
+        return 1, str(exc)
     return r.returncode, (r.stdout.strip() or r.stderr.strip())
 
 
-def current_branch(workspace: Path) -> str:
-    _, out = _git_sync(Path(workspace), "rev-parse", "--abbrev-ref", "HEAD")
+def is_git_repo(workspace: Path) -> bool:
+    """True when ``workspace`` is inside a git work tree."""
+    rc, _ = _git_sync(Path(workspace), "rev-parse", "--git-dir")
+    return rc == 0
+
+
+def workspace_branch(workspace: Path) -> str | None:
+    """The branch the workspace checkout is on.
+
+    Returns ``None`` when the workspace is not a git repository or the
+    checkout is on a detached HEAD.
+    """
+    rc, out = _git_sync(Path(workspace), "rev-parse", "--abbrev-ref", "HEAD")
+    if rc != 0 or out == "HEAD":
+        return None
     return out
 
 
-# ── branch lifecycle ───────────────────────────────────────────────────────
+def has_origin_remote(workspace: Path) -> bool:
+    """True when the workspace repo has an ``origin`` remote configured."""
+    rc, _ = _git_sync(Path(workspace), "remote", "get-url", "origin")
+    return rc == 0
 
 
-async def ensure_device_branch(
-    workspace: Path, *, device_name: str, base: str = DEFAULT_BASE, direct_main: bool = False
-) -> str:
-    """Make sure the checkout is on this device's ``dev/<device>`` branch or ``main``.
-
-    Fetches, then:
-    - if direct_main is True, checkout main if not already there;
-    - if already on the branch -> keep it (preserve unmerged work across
-      restarts; never reset);
-    - else -> create it from ``base`` (origin/main) and check it out.
-
-    Returns the branch name.
-    """
-    if direct_main:
-        await _git(workspace, "fetch", "origin", timeout=10.0)
-        if current_branch(workspace) != "main":
-            rc, _, err = await _git(workspace, "checkout", "main")
-            if rc != 0:
-                raise RuntimeError(f"could not checkout main: {err}")
-        return "main"
-
-    name = device_branch_name(device_name)
-    await _git(workspace, "fetch", "origin", timeout=10.0)
-    if current_branch(workspace) == name:
-        return name
-    rc, _, err = await _git(workspace, "checkout", "-B", name, base)
-    if rc != 0:
-        # base may not exist yet (fresh repo); fall back to a plain branch.
-        rc2, _, err2 = await _git(workspace, "checkout", "-B", name)
-        if rc2 != 0:
-            raise RuntimeError(f"could not create branch {name}: {err or err2}")
-    return name
+# ── sync flow ────────────────────────────────────────────────────────────────
 
 
 async def push_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
@@ -177,142 +135,59 @@ async def commit_pending(workspace: Path, *, branch: str) -> bool:
     return True
 
 
-async def try_merge_to_main(workspace: Path, *, branch: str) -> dict:
-    """Commit + push the branch, then try to merge it into ``main``.
+async def sync_branch(workspace: Path, *, branch: str) -> dict:
+    """Commit pending work, pull from origin, and push the current branch.
 
-    Returns one of:
-      {"ok": True, "merged": True, "deploy_needed": bool, "pushed": bool, "detail": str}
+    Never creates or switches branches. Returns one of:
+      {"ok": True, "merged": True, "deploy_needed": False, "pushed": True, "detail": str}
       {"ok": True, "merged": False, "conflict": True, "branch": branch}
       {"ok": False, "step": str, "error": str}
-    """
-    if branch == "main":
-        await commit_pending(workspace, branch="main")
-        await _git(workspace, "fetch", "origin", timeout=10.0)
-        rc_pull, pull_out, pull_err = await _git(workspace, "pull", "--no-rebase", timeout=10.0)
-        if rc_pull != 0:
-            return {"ok": True, "merged": False, "conflict": True, "branch": "main"}
-        rc, out, err = await _git(workspace, "push", "origin", "main", timeout=10.0)
-        if rc != 0:
-            return {"ok": False, "step": "push main", "error": err or out}
-        return {
-            "ok": True,
-            "merged": True,
-            "deploy_needed": False,
-            "pushed": True,
-            "detail": out or "pushed",
-        }
 
+    A conflicting pull is left in place (conflict markers in the tree) so the
+    conflict chat dispatched by the route layer can resolve it.
+    """
     await commit_pending(workspace, branch=branch)
+    await _git(workspace, "fetch", "origin", timeout=10.0)
+    # Pull only when the branch already exists on origin; a fresh branch has
+    # nothing to merge and a bare pull would fail on missing upstream.
+    rc_ref, _, _ = await _git(workspace, "rev-parse", "--verify", f"origin/{branch}")
+    if rc_ref == 0:
+        rc_pull, _, _ = await _git(
+            workspace, "pull", "--no-rebase", "origin", branch, timeout=10.0
+        )
+        if rc_pull != 0:
+            return {"ok": True, "merged": False, "conflict": True, "branch": branch}
     ok, detail = await push_branch(workspace, branch=branch)
     if not ok:
         return {"ok": False, "step": "push", "error": detail}
-
-    await _git(workspace, "fetch", "origin", timeout=10.0)
-    rc, _, err = await _git(workspace, "checkout", "main")
-    if rc != 0:
-        # No local main yet -> create it tracking origin/main.
-        rc, _, err = await _git(workspace, "checkout", "-B", "main", "origin/main")
-        if rc != 0:
-            await _git(workspace, "checkout", branch)
-            return {"ok": False, "step": "checkout main", "error": err}
-
-    # Ensure local main tracks origin/main if it exists.
-    rc_track, _, _ = await _git(workspace, "rev-parse", "--abbrev-ref", "main@{u}")
-    if rc_track != 0:
-        rc_ref, _, _ = await _git(workspace, "rev-parse", "--verify", "origin/main")
-        if rc_ref == 0:
-            await _git(workspace, "branch", "--set-upstream-to=origin/main", "main")
-
-    rc_pull, pull_out, pull_err = await _git(workspace, "pull", "--no-rebase", timeout=10.0)
-    if rc_pull != 0:
-        await _git(workspace, "merge", "--abort")
-        await _git(workspace, "checkout", branch)
-        return {"ok": False, "step": "pull main", "error": pull_err or pull_out}
-
-    _, before, _ = await _git(workspace, "rev-parse", "HEAD")
-
-    rc, _out, _err = await _git(workspace, "merge", "--no-ff", "--no-edit", branch)
-    if rc != 0:
-        # Conflict (or other merge failure) -> abort and hand back to a chat.
-        await _git(workspace, "merge", "--abort")
-        await _git(workspace, "checkout", branch)
-        return {"ok": True, "merged": False, "conflict": True, "branch": branch}
-
-    # Clean merge: push main, then re-point the device branch at the merged
-    # main so work continues. Workspace merges never imply an app deploy: after
-    # the public-package split, app code lives in the installed package, not in
-    # the workspace repo.
-    deploy_needed = False
-    rc, out, err = await _git(workspace, "push", "origin", "main", timeout=10.0)
-    if rc != 0:
-        # Push failed: revert the local merge to keep local main clean.
-        await _git(workspace, "reset", "--hard", before)
-        await _git(workspace, "checkout", branch)
-        return {"ok": False, "step": "push main", "error": err or out}
-
-    await _git(workspace, "checkout", "-B", branch, "HEAD")
     return {
         "ok": True,
         "merged": True,
-        "deploy_needed": deploy_needed,
+        "deploy_needed": False,
         "pushed": True,
-        "detail": out or "pushed",
+        "detail": detail,
     }
 
 
-async def resync_to_main(workspace: Path, *, branch: str) -> tuple[bool, str]:
-    """Bring the device branch up to the latest ``main`` without losing work.
+async def resync_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
+    """Bring the current branch up to its origin counterpart without losing work.
 
-    Used after the conflict-resolution chat has merged and pushed ``main`` (the
-    device's own commits are already there, so this fast-forwards) and by the
-    Settings "Sync to main" button.
-
-    It *merges* ``origin/main`` into the branch rather than resetting the branch
-    to it. That matters for the live PWA workspace:
-
-    - the working tree is almost always dirty (memory-vault notes, snapshots),
-      and a ``checkout -B branch origin/main`` would abort rather than clobber
-      tracked changes, silently leaving the branch behind;
-    - the device may hold commits not yet on main (e.g. a snapshot taken after
-      the last handback push); a force re-point would discard them.
-
-    Committing pending work first, then merging, keeps both safe: the normal
-    post-handback case fast-forwards cleanly, and any genuinely new local work
-    is preserved.
+    Used after the conflict-resolution chat has pushed the branch, and by the
+    Settings sync flow. Commits pending work first (the live PWA workspace is
+    almost always dirty), then *merges* ``origin/<branch>`` rather than
+    resetting, so local commits are never discarded.
     """
-    if branch == "main":
-        rc, _, err = await _git(workspace, "fetch", "origin", timeout=10.0)
-        if rc != 0:
-            return False, f"fetch failed: {err}"
-        await commit_pending(workspace, branch="main")
-        rc, out, err = await _git(workspace, "merge", "--no-edit", "origin/main")
-        if rc != 0:
-            await _git(workspace, "merge", "--abort")
-            return False, f"resync hit conflict on main: {err or out}"
-        return True, "resynced"
-
     rc, _, err = await _git(workspace, "fetch", "origin", timeout=10.0)
     if rc != 0:
         return False, f"fetch failed: {err}"
-    # Get onto the device branch. The merge chat leaves the checkout on ``main``;
-    # if the branch is gone entirely, recreate it from the merged ``origin/main``.
-    if current_branch(workspace) != branch:
-        rc, _, err = await _git(workspace, "checkout", branch)
-        if rc != 0:
-            rc, _, err = await _git(workspace, "checkout", "-B", branch, "origin/main")
-            if rc != 0:
-                return False, f"resync {branch} failed: {err}"
-            return True, "resynced"
-    # Commit any dirty state so the merge has a clean tree and nothing is lost.
     await commit_pending(workspace, branch=branch)
-    rc, out, err = await _git(workspace, "merge", "--no-edit", "origin/main")
+    rc_ref, _, _ = await _git(workspace, "rev-parse", "--verify", f"origin/{branch}")
+    if rc_ref != 0:
+        return True, "no remote branch to sync from"
+    rc, out, err = await _git(workspace, "merge", "--no-edit", f"origin/{branch}")
     if rc != 0:
         await _git(workspace, "merge", "--abort")
-        return (
-            False,
-            f"resync hit a conflict merging origin/main into {branch}; "
-            f"resolve it via Commit to main: {err or out}",
-        )
+        return False, f"resync hit conflict on {branch}: {err or out}"
     return True, "resynced"
 
 
@@ -320,42 +195,59 @@ async def resync_to_main(workspace: Path, *, branch: str) -> tuple[bool, str]:
 
 
 class LocalSessionManager:
-    """Wires the branch helpers for the /api/local routes.
+    """Wires the git-sync helpers for the /api/local routes.
 
-    One per process; every instance has one (no primary/secondary split).
+    One per process; every instance has one (no primary/secondary split). The
+    working branch is resolved dynamically from the checkout — Ciaobot never
+    creates or switches branches.
     """
 
-    def __init__(self, *, workspace: Path, runtime_root: Path, device_name: str, direct_main: bool = False, dev_mode: bool = False) -> None:
+    def __init__(self, *, workspace: Path, runtime_root: Path, dev_mode: bool = False) -> None:
         self.workspace = Path(workspace)
-        self.device_name = device_name
-        self.direct_main = direct_main
         self.dev_mode = dev_mode
-        self.branch = "main" if direct_main else device_branch_name(device_name)
+
+    @property
+    def branch(self) -> str | None:
+        return workspace_branch(self.workspace)
 
     def status(self) -> dict:
-        br = current_branch(self.workspace)
-        _, dirty = _git_sync(self.workspace, "status", "--porcelain")
+        repo = is_git_repo(self.workspace)
+        branch = workspace_branch(self.workspace) if repo else None
+        dirty = False
+        if repo:
+            rc, out = _git_sync(self.workspace, "status", "--porcelain")
+            dirty = rc == 0 and bool(out.strip())
         return {
-            "device_name": self.device_name,
-            "device_branch": self.branch,
-            "branch": br,
-            "on_device_branch": br == self.branch,
-            "dirty": bool(dirty.strip()),
-            "direct_main": self.direct_main,
+            "git_repo": repo,
+            "branch": branch,
+            "dirty": dirty,
             "dev_mode": self.dev_mode,
         }
 
-    async def commit_to_main(self) -> dict:
-        """Commit the session and try to land it on ``main``."""
-        return await try_merge_to_main(self.workspace, branch=self.branch)
+    async def commit_and_sync(self) -> dict:
+        """Commit the session and sync the current branch with origin."""
+        branch = workspace_branch(self.workspace)
+        if branch is None:
+            return {
+                "ok": False,
+                "step": "branch",
+                "error": "workspace is not a git repository (or is on a detached HEAD)",
+            }
+        return await sync_branch(self.workspace, branch=branch)
 
     async def resync(self) -> dict:
-        ok, detail = await resync_to_main(self.workspace, branch=self.branch)
+        branch = workspace_branch(self.workspace)
+        if branch is None:
+            return {
+                "ok": False,
+                "detail": "workspace is not a git repository (or is on a detached HEAD)",
+            }
+        ok, detail = await resync_branch(self.workspace, branch=branch)
         return {"ok": ok, "detail": detail}
 
     async def preflight(self) -> dict:
         """Run a git preflight check for dirty changes, file categories, and secrets."""
-        br = current_branch(self.workspace)
+        br = workspace_branch(self.workspace)
         rc, out, err = await _git(self.workspace, "status", "--porcelain")
         if rc != 0:
             return {
@@ -396,7 +288,7 @@ class LocalSessionManager:
 
         blockers = []
         warnings = []
-        
+
         categories: dict[str, list[str]] = {
             "code": [],
             "vault": [],
@@ -404,13 +296,13 @@ class LocalSessionManager:
             "config": [],
             "other": [],
         }
-        
+
         for p in changed_paths:
             try:
                 rel_path = str(p.relative_to(self.workspace))
             except ValueError:
                 continue
-            
+
             # Categorize
             if rel_path.startswith("ciao/") or (rel_path.startswith("web/") and not rel_path.startswith(("web/package", "web/tsconfig", "web/vite.config"))):
                 categories["code"].append(rel_path)
@@ -442,7 +334,7 @@ class LocalSessionManager:
         blockers = []
         warnings = []
         name = p.name.lower()
-        
+
         # Block env-style files
         if name.startswith(".env") or name.endswith(".env"):
             blockers.append(f"Blocked file '{p.name}': .env configuration files containing credentials must not be tracked.")
@@ -459,7 +351,7 @@ class LocalSessionManager:
             size = p.stat().st_size
         except OSError:
             return blockers, warnings
-            
+
         if size > 2 * 1024 * 1024:
             return blockers, warnings
 

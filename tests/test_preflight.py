@@ -44,7 +44,7 @@ def _init_repo(tmp_path: Path) -> Path:
 @pytest.mark.asyncio
 async def test_preflight_clean_repo(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
-    mgr = LocalSessionManager(workspace=repo, runtime_root=tmp_path / "rt", device_name="mini")
+    mgr = LocalSessionManager(workspace=repo, runtime_root=tmp_path / "rt")
     
     result = await mgr.preflight()
     assert result["dirty"] is False
@@ -57,7 +57,7 @@ async def test_preflight_clean_repo(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_preflight_categorization_without_deploy_signal(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
-    mgr = LocalSessionManager(workspace=repo, runtime_root=tmp_path / "rt", device_name="mini")
+    mgr = LocalSessionManager(workspace=repo, runtime_root=tmp_path / "rt")
     
     # Create files in various categories
     _write(repo / "ciao/web/routes_api.py", "# code change\n")
@@ -83,7 +83,7 @@ async def test_preflight_categorization_without_deploy_signal(tmp_path: Path) ->
 @pytest.mark.asyncio
 async def test_preflight_blockers_and_warnings(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
-    mgr = LocalSessionManager(workspace=repo, runtime_root=tmp_path / "rt", device_name="mini")
+    mgr = LocalSessionManager(workspace=repo, runtime_root=tmp_path / "rt")
     
     # 1. Blocker: .env file
     _write(repo / ".env", "API_KEY=secret\n")

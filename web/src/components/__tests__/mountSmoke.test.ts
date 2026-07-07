@@ -64,7 +64,7 @@ vi.mock('../../lib/api', () => {
   }
   const responses: Record<string, unknown> = {
     '/api/instance/pause': { paused: false, reason: '', paused_at: '', paused_by: '' },
-    '/api/settings': { device_name: 'testbox', dispatch_schedules: true },
+    '/api/settings': { dispatch_schedules: true },
     '/api/settings/providers': {
       keys: {
         ANTHROPIC_API_KEY: { label: 'Anthropic API key', description: '', configured: true },
@@ -73,7 +73,7 @@ vi.mock('../../lib/api', () => {
       requires_restart: true,
       env_path: '/tmp/workspace/.env',
     },
-    '/api/local/status': { device_name: 'testbox', device_branch: 'dev/testbox', branch: 'dev/testbox', on_device_branch: true, dirty: false },
+    '/api/local/status': { git_repo: true, branch: 'main', dirty: false },
     '/api/admin/skills': {
       counts: { custom: 1, github: 1 },
       skills: [

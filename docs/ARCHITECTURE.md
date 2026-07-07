@@ -38,7 +38,7 @@ ciao/                          Python backend (Starlette).
   signals.py                   Restart / deploy signals.
   execution_modes.py           Claude permission mode normalization.
   git_sync.py                  Startup git pull / merge-before-push helpers.
-  local_session.py             Per-device working-branch flow (LocalSessionManager): device branch, preflight, commit-to-main.
+  local_session.py             Current-branch git sync flow (LocalSessionManager): preflight, commit + pull + push, conflict chat.
   rate_limits.py               Rate-limit tracking and persistence.
   insights.py                  Post-archive session insights extraction.
   critique.py                  Multi-model adversarial review. Runs each reviewer through ciao/providers/oneshot.py with per-model routing (OpenRouter / Ollama / Anthropic). CLI: `python -m ciao.critique`. Used by the adversarial-review skill.
@@ -164,11 +164,11 @@ Settings tabs: Home (deploy, notifications, theme and font scaling, local sessio
 
 Rendered markdown is sanitized through the shared frontend renderer before any `v-html` use. Keep new markdown surfaces on that helper. The build outputs to `ciao/web/static/` so the same Starlette server hosts both the API and the PWA.
 
-## Per-device working branch
+## Workspace git sync
 
-Every instance is identical (no primary/secondary, no cloud). On startup, each one checks out its own `dev/<device_name>` branch (cut from `origin/main`, reused across restarts, via `ciao/local_session.py::ensure_device_branch`) and works there. `CIAO_DEVICE_NAME` names the device (defaults to the sanitized hostname); a background loop pushes the branch for backup. Only the instance with `CIAO_DISPATCH_SCHEDULES` set (the always-on "main" device) dispatches scheduled automations, so schedules never double-fire when an occasional dev box is also running (`config.dispatch_schedules`).
+Every instance is identical (no primary/secondary, no cloud). Ciaobot never creates or switches local branches: it works on whatever branch the workspace checkout is currently on (`ciao/local_session.py::workspace_branch`). A background loop pushes that branch for backup; workspaces that are not git repositories (a fresh `ciao setup`) or have no `origin` remote skip all git background work with a single INFO log. Only the instance with `CIAO_DISPATCH_SCHEDULES` set (the always-on "main" device) dispatches scheduled automations, so schedules never double-fire when an occasional dev box is also running (`config.dispatch_schedules`).
 
-**Commit-to-main / handover flow** (`ciao/local_session.py`, `LocalSessionManager`). When the user clicks "Commit to main" in Settings, `POST /api/local/handback` commits + pushes the device branch, then tries to merge it into `main`: a **clean merge** is pushed directly (plain git) and the device branch is re-pointed at the merged `main`. Workspace handback never requests app deploy; app updates happen through package upgrades. A **conflicting merge** is aborted and `POST /api/handover/merge` opens an **interactive chat** in the personal `General` project: the chat's agent merges the branch into `main`, resolving conflicts and asking the user via `AskUserQuestion` (push-notified) when ambiguous, then pushes `main` (it does not redeploy). After that chat lands, `POST /api/local/resync` brings the device branch up to the merged `main` by committing any pending work and merging `origin/main` into the branch (fast-forwarding in the normal case). It merges rather than force-resetting, so it works on the live workspace's dirty tree and never discards device-branch commits made after the last push. The same endpoint backs the Settings "Sync to main" button. See `PWA_API.md` → "Local session / handover flow".
+**Sync flow** (`ciao/local_session.py`, `LocalSessionManager`). When the user clicks "Sync with Remote" in Settings, `POST /api/local/handback` commits pending work, pulls from origin (merge-based), and pushes the current branch. Workspace sync never requests app deploy; app updates happen through package upgrades. A **conflicting pull** is left in the tree and `POST /api/handover/merge` opens an **interactive chat** in the personal `General` project: the chat's agent resolves the conflicts, asking the user via `AskUserQuestion` (push-notified) when ambiguous, then pushes the branch (it does not redeploy). After that chat lands, `POST /api/local/resync` merges `origin/<branch>` into the checkout after committing any pending work (fast-forwarding in the normal case). It merges rather than force-resetting, so it works on the live workspace's dirty tree and never discards local commits. See `PWA_API.md` → "Workspace git sync".
 
 ## Package updates and setup
 

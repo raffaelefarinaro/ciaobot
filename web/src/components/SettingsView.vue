@@ -12,8 +12,8 @@
             <p class="hint">Snapshot, sync, or restart this local Ciaobot instance.</p>
           </div>
           <div class="action-row action-row--spaced">
-            <button class="btn-primary" @click="() => localStatus?.direct_main ? localHandback() : doSnapshot()" :disabled="!!actionPending || !!localPending">
-              {{ actionPending === 'snapshot' || localPending === 'handback' ? (localStatus?.direct_main ? 'Syncing...' : 'Snapshotting...') : (localStatus?.direct_main ? 'Sync with Remote' : 'Git Snapshot') }}
+            <button class="btn-primary" @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()" :disabled="!!actionPending">
+              {{ actionPending === 'snapshot' ? (localStatus?.git_repo ? 'Syncing...' : 'Snapshotting...') : (localStatus?.git_repo ? 'Sync with Remote' : 'Git Snapshot') }}
             </button>
             <button class="btn-primary" @click="() => doDeploy()" :disabled="!!actionPending" title="Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code">
               {{ actionPending === 'deploy' ? 'Restarting...' : 'Restart' }}
@@ -203,34 +203,6 @@
               </div>
             </div>
           </div>
-        </div>
-
-        <!-- Commit to main (branch-per-device) -->
-        <div v-if="localStatus && !localStatus.direct_main" class="card">
-          <div class="settings-card-header">
-            <p class="section-title">Commit to main</p>
-            <p class="hint">
-              Land this device branch on <code>main</code>; conflicts open a chat for resolution.
-            </p>
-          </div>
-          <div class="dev-meta">
-            <div>
-              <span class="dev-label">Device</span> <code>{{ localStatus?.device_name || '...' }}</code>
-            </div>
-            <div>
-              <span class="dev-label">Branch</span> <code>{{ localStatus?.branch || '...' }}</code>
-              <span v-if="localStatus?.dirty" class="hint inline-hint">(uncommitted changes)</span>
-            </div>
-          </div>
-          <div class="action-row">
-            <button class="btn-primary" @click="() => localHandback()" :disabled="!!localPending">
-              {{ localPending === 'handback' ? 'Committing...' : 'Commit to main' }}
-            </button>
-            <button class="btn-primary" @click="localResync" :disabled="!!localPending">
-              {{ localPending === 'resync' ? 'Syncing...' : 'Sync to main' }}
-            </button>
-          </div>
-          <div v-if="localResult" class="action-result action-result--prewrap">{{ localResult }}</div>
         </div>
 
         <!-- Debug (dev mode only) -->
@@ -3057,10 +3029,8 @@ async function doLogout() {
   actionPending.value = null
 }
 
-// ── Commit to main (branch-per-device) ───────────────────────────────────
+// ── Workspace git sync (current branch) ──────────────────────────────────
 const localStatus = ref<LocalStatus | null>(null)
-const localPending = ref<string | null>(null)
-const localResult = ref('')
 
 async function fetchLocalStatus() {
   try {
@@ -3071,72 +3041,37 @@ async function fetchLocalStatus() {
 }
 
 async function localHandback(confirmWarnings = false) {
-  const isDirect = !!localStatus.value?.direct_main
-  const promptMsg = isDirect ? 'Sync changes with the remote repository?' : 'Commit this device\'s branch to main?'
-  if (!confirmWarnings && !confirm(promptMsg)) return
+  if (!confirmWarnings && !confirm('Sync changes with the remote repository?')) return
 
-  if (isDirect) {
-    actionPending.value = 'snapshot'
-    actionResult.value = ''
-  } else {
-    localPending.value = 'handback'
-    localResult.value = ''
-  }
+  actionPending.value = 'snapshot'
+  actionResult.value = ''
 
   try {
     const r = await api.post<any>('/api/local/handback', { confirm_warnings: confirmWarnings })
     if (r?.ok === false) {
-      const errText = `${r.step}: ${r.error}`
-      if (isDirect) actionResult.value = errText
-      else localResult.value = errText
+      actionResult.value = `${r.step}: ${r.error}`
     } else if (r?.merged === true) {
-      const successText = isDirect ? 'Synced with remote repository.' : 'Merged to main.'
-      if (isDirect) actionResult.value = successText
-      else localResult.value = successText
+      actionResult.value = 'Synced with remote repository.'
     } else if (r?.conflict === true) {
-      const conflictText = isDirect
-        ? 'Sync conflict — opened a chat to resolve it. Answer it, then Sync again.'
-        : 'Merge conflict — opened a chat to resolve it. Answer it, then Sync to main.'
-      if (isDirect) actionResult.value = conflictText
-      else localResult.value = conflictText
+      actionResult.value = 'Sync conflict — opened a chat to resolve it. Answer it, then Sync again.'
     }
     await fetchLocalStatus()
   } catch (e: any) {
     const payload = e?.payload
     if (payload?.blockers) {
-      alert(`${isDirect ? 'Sync' : 'Commit'} blocked by secrets:\n\n${payload.blockers.join('\n')}`)
-      if (isDirect) actionResult.value = 'Blocked by secrets.'
-      else localResult.value = 'Blocked by secrets.'
+      alert(`Sync blocked by secrets:\n\n${payload.blockers.join('\n')}`)
+      actionResult.value = 'Blocked by secrets.'
     } else if (payload?.warnings) {
       if (confirm(`Warnings found:\n\n${payload.warnings.join('\n')}\n\nDo you want to proceed anyway?`)) {
-        if (isDirect) actionPending.value = null
-        else localPending.value = null
+        actionPending.value = null
         return localHandback(true)
       }
-      const cancelText = 'Cancelled by user due to warnings.'
-      if (isDirect) actionResult.value = cancelText
-      else localResult.value = cancelText
+      actionResult.value = 'Cancelled by user due to warnings.'
     } else {
-      const errText = `Error: ${e.message || 'sync failed'}`
-      if (isDirect) actionResult.value = errText
-      else localResult.value = errText
+      actionResult.value = `Error: ${e.message || 'sync failed'}`
     }
   }
-  if (isDirect) actionPending.value = null
-  else localPending.value = null
-}
-
-async function localResync() {
-  localPending.value = 'resync'
-  localResult.value = ''
-  try {
-    const r = await api.post<{ ok: boolean; detail: string }>('/api/local/resync')
-    localResult.value = r?.detail || (r?.ok ? 'Synced to main.' : 'Sync failed.')
-    await fetchLocalStatus()
-  } catch (e: any) {
-    localResult.value = `Error: ${e.message || 'resync failed'}`
-  }
-  localPending.value = null
+  actionPending.value = null
 }
 
 // ── Package update ────────────────────────────────────────────────────────
