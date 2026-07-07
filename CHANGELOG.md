@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.4.5 - 2026-07-08
+
+### Added
+- feat: menubar update/notifications and shared pane title styling (`4dd52bc`)
+- feat: menubar unread dots on chats and icon badge count (`1e06395`)
+
+### Changed
+- Remove dispatch_schedules gate and improve schedule run-now UX. (`15f18e5`)
+- Show workspace tags on menubar open-chat entries. (`f0b3c9e`)
+- Ship gws skills as stock and document Google Workspace setup in the PWA. (`c3832e9`)
+- Make background subagent work visible in the PWA. (`0017f94`)
+- Merge pull request #40 from raffaelefarinaro/remove-dispatch-schedules-flag (`29e0a61`)
+
+### Fixed
+- Fix schedule running state and finish dispatch_schedules cleanup. (`d3f790b`)
+
 ## v0.4.4 - 2026-07-07
 
 ### Added
