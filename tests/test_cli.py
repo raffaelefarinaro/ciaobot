@@ -260,6 +260,11 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     menubar_plist = launch_agents / "com.ciao.menubar.plist"
     assert menubar_plist.is_file()
     menubar_text = menubar_plist.read_text(encoding="utf-8")
+    # Login Items groups both agents under Ciaobot.app instead of python3.13.
+    assert "<key>AssociatedBundleIdentifiers</key>" in plist_text
+    assert "<string>local.ciaobot.app</string>" in plist_text
+    assert "<key>AssociatedBundleIdentifiers</key>" in menubar_text
+    assert "<string>local.ciaobot.app</string>" in menubar_text
     assert "<string>com.ciao.menubar</string>" in menubar_text
     assert "<string>/opt/ciao/bin/python</string>" in menubar_text
     assert "<string>menubar</string>" in menubar_text
@@ -270,6 +275,9 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     assert app_exe.stat().st_mode & 0o111
     app_text = app_exe.read_text(encoding="utf-8")
     assert 'open "http://localhost:9443/?setup=' in app_text
+    # The launcher starts the server and menu bar agents when they're down.
+    assert 'launchctl kickstart "gui/$(id -u)/com.ciao.server"' in app_text
+    assert 'launchctl kickstart "gui/$(id -u)/com.ciao.menubar"' in app_text
     setup_token = (workspace / ".runtime" / "setup-token").read_text(encoding="utf-8").strip()
     assert setup_token
     assert setup_token in app_text
