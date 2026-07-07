@@ -76,6 +76,18 @@ def restart_server_command(uid: int | None = None) -> list[str]:
     return ["launchctl", "kickstart", "-k", f"gui/{resolved}/{SERVER_LAUNCHD_LABEL}"]
 
 
+def stop_server_command(uid: int | None = None) -> list[str]:
+    """Fully stop the server agent when quitting the menu bar.
+
+    The server plist sets KeepAlive=true, so a plain kill would be relaunched
+    immediately; `bootout` removes it from the launchd domain so it stays
+    down. Ciaobot.app reloads it (launchctl load -w) on the next launch.
+    """
+
+    resolved = os.getuid() if uid is None else uid
+    return ["launchctl", "bootout", f"gui/{resolved}/{SERVER_LAUNCHD_LABEL}"]
+
+
 def view_logs_command(workspace: Path) -> list[str]:
     return ["open", str(workspace / ".runtime" / "ciao.stderr.log")]
 
@@ -327,6 +339,23 @@ def run_menubar(workspace: Path, port: int) -> int:
     def on_logs(_sender) -> None:
         subprocess.run(view_logs_command(workspace), check=False)
 
+    def on_quit(_sender) -> None:
+        # The menu bar is the visible presence of a running Ciaobot: quitting
+        # it stops the server too. Confirm first, since that halts scheduled
+        # tasks and any in-flight agent work until Ciaobot is opened again.
+        if not rumps.alert(
+            title="Quit Ciaobot?",
+            message=(
+                "This also stops the Ciaobot server. Scheduled tasks and any "
+                "running agents won't run until you open Ciaobot again."
+            ),
+            ok="Quit",
+            cancel="Cancel",
+        ):
+            return
+        subprocess.run(stop_server_command(), check=False)
+        rumps.quit_application()
+
     def _rebuild_menu(
         status: ServerStatus,
         chats: list[OpenChat],
@@ -372,7 +401,7 @@ def run_menubar(workspace: Path, port: int) -> int:
             rumps.MenuItem("Restart Server", callback=on_restart),
             rumps.MenuItem("View Logs", callback=on_logs),
             None,
-            rumps.MenuItem("Quit", callback=lambda _sender: rumps.quit_application()),
+            rumps.MenuItem("Quit Ciaobot", callback=on_quit),
         ]
 
     def _mute_item():

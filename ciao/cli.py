@@ -199,7 +199,9 @@ def _write_app_shortcut(
     app_dir: Path,
     port: int,
 ) -> Path:
-    token = _ensure_setup_token(workspace)
+    # Create the setup token file if absent so the first launch can log in;
+    # the launcher script below reads its current value live at click time.
+    _ensure_setup_token(workspace)
     _remove_legacy_app_shortcuts(app_dir.expanduser())
     app_root = app_dir.expanduser() / "Ciaobot.app"
     contents = app_root / "Contents"
@@ -234,10 +236,17 @@ def _write_app_shortcut(
         ),
         encoding="utf-8",
     )
-    url = f"http://localhost:{port}/?setup={token}"
+    token_file = _setup_token_path(workspace)
     executable = macos / "Ciaobot"
     # Start the server via launchd when it isn't running, then open the PWA;
     # otherwise clicking the app lands on "site can't be reached".
+    #
+    # Read the setup token live from disk at click time rather than baking it
+    # into this script: the token is one-time-use (redeemed and deleted on
+    # first login), so a frozen "?setup=<token>" URL shows an "invalid setup
+    # token" error page on every launch after the first. Once the token file
+    # is gone we open the plain URL and rely on the session cookie -- matching
+    # how the menu bar builds its "Open Ciaobot" URL (menubar.open_url).
     executable.write_text(
         "#!/bin/sh\n"
         f'if ! curl -s -o /dev/null --max-time 2 "http://localhost:{port}/"; then\n'
@@ -252,7 +261,12 @@ def _write_app_shortcut(
         "fi\n"
         'launchctl kickstart "gui/$(id -u)/com.ciao.menubar" 2>/dev/null \\\n'
         '  || launchctl load -w "$HOME/Library/LaunchAgents/com.ciao.menubar.plist" 2>/dev/null\n'
-        f'open "{url}"\n',
+        f'token=$(tr -d "[:space:]" < "{token_file}" 2>/dev/null)\n'
+        "if [ -n \"$token\" ]; then\n"
+        f'  open "http://localhost:{port}/?setup=$token"\n'
+        "else\n"
+        f'  open "http://localhost:{port}/"\n'
+        "fi\n",
         encoding="utf-8",
     )
     executable.chmod(0o755)
