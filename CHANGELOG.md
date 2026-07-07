@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.2 - 2026-07-07
+
+### Fixed
+- fix: boot screen shows real version; drop startup PWA rebuild phase (#27) (`e7d68f3`)
+
 ## v0.4.1 - 2026-07-07
 
 ### Added
