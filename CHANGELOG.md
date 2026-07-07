@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.3 - 2026-07-07
+
+### Added
+- feat: folder picker + one-folder setup wizard (#18) (`8e8de47`)
+
+### Maintenance
+- docs: bump README install URL to v0.2.2 (`81100ed`)
+
 ## v0.2.2 - 2026-07-07
 
 ### Added
