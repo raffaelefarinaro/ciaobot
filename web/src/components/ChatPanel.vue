@@ -126,22 +126,13 @@
           <div v-if="openTraces[i]" class="trace-body">
             <template v-for="(step, j) in item.steps" :key="j">
               <div v-if="step.tool_name === '_activity'" class="trace-tools">
-                <details
+                <div
                   v-for="(line, k) in activityLines(step.content)"
                   :key="k"
-                  class="tool-card"
+                  class="activity-line"
                   :class="{ subagent: isSubagentLine(line) }"
-                  :open="activityDetail(line).length < 100"
-                >
-                  <summary class="tool-card-summary">
-                    <span class="tool-card-icon" aria-hidden="true">{{ activityIcon(line) }}</span>
-                    <span v-if="activitySubagentLabel(line)" class="tool-card-agent">{{ activitySubagentLabel(line) }}</span>
-                    <span class="tool-card-name">{{ activityName(line) }}</span>
-                    <span v-if="activitySummary(line)" class="tool-card-preview">{{ activitySummary(line) }}</span>
-                    <button class="tool-card-copy" type="button" title="Copy activity" @click.stop.prevent="copyActivityLine(line)">Copy</button>
-                  </summary>
-                  <div v-if="activityDetail(line)" class="tool-card-body" v-html="renderActivityLine(activityDetail(line))"></div>
-                </details>
+                  v-html="renderActivityLine(line)"
+                ></div>
               </div>
               <button
                 v-else-if="step.tool_name === '_filecard'"
@@ -170,29 +161,57 @@
           </div>
         </div>
         <!-- User message -->
-        <div v-else-if="item.kind === 'user'" class="message user">
-          <div class="message-content">
-            <div v-if="item.msg.images?.length" class="message-images">
-              <a
-                v-for="img in item.msg.images"
-                :key="img"
-                :href="img.startsWith('data:') ? img : `/api/images/${img}`"
-                target="_blank"
-                rel="noopener"
-                class="message-image-link"
-              >
-                <img :src="img.startsWith('data:') ? img : `/api/images/${img}`" :alt="img.startsWith('data:') ? 'image' : img" class="message-image" />
-              </a>
+        <div v-else-if="item.kind === 'user'" class="message-wrap user">
+          <div class="message user">
+            <div class="message-content">
+              <div v-if="item.msg.images?.length" class="message-images">
+                <a
+                  v-for="img in item.msg.images"
+                  :key="img"
+                  :href="img.startsWith('data:') ? img : `/api/images/${img}`"
+                  target="_blank"
+                  rel="noopener"
+                  class="message-image-link"
+                >
+                  <img :src="img.startsWith('data:') ? img : `/api/images/${img}`" :alt="img.startsWith('data:') ? 'image' : img" class="message-image" />
+                </a>
+              </div>
+              <div v-html="renderMarkdown(item.msg.content)"></div>
             </div>
-            <div v-html="renderMarkdown(item.msg.content)"></div>
+          </div>
+          <div v-if="item.msg.content?.trim()" class="message-actions">
+            <button
+              type="button"
+              class="message-action-btn"
+              :title="copiedMessageKey === `user-${i}` ? 'Copied' : 'Copy'"
+              :aria-label="copiedMessageKey === `user-${i}` ? 'Copied' : 'Copy message'"
+              @click="copyMessageText(item.msg.content, `user-${i}`)"
+            >
+              <svg v-if="copiedMessageKey === `user-${i}`" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+              <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            </button>
           </div>
           <div v-if="item.msg.timestamp" class="message-meta">
             {{ formatTime(item.msg.timestamp) }}
           </div>
         </div>
         <!-- Final assistant message -->
-        <div v-else-if="item.kind === 'assistant'" class="message assistant" :class="{ error: item.msg.is_error }">
-          <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
+        <div v-else-if="item.kind === 'assistant'" class="message-wrap assistant">
+          <div class="message assistant" :class="{ error: item.msg.is_error }">
+            <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
+          </div>
+          <div v-if="item.msg.content?.trim()" class="message-actions">
+            <button
+              type="button"
+              class="message-action-btn"
+              :title="copiedMessageKey === `assistant-${i}` ? 'Copied' : 'Copy'"
+              :aria-label="copiedMessageKey === `assistant-${i}` ? 'Copied' : 'Copy message'"
+              @click="copyMessageText(item.msg.content, `assistant-${i}`)"
+            >
+              <svg v-if="copiedMessageKey === `assistant-${i}`" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+              <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            </button>
+          </div>
           <div v-if="item.msg.timestamp || item.msg.effective_model" class="message-meta">
             <span v-if="item.msg.timestamp">{{ formatTime(item.msg.timestamp) }}</span>
             <span v-if="item.msg.duration_ms"> &middot; {{ formatDuration(item.msg.duration_ms) }}</span>
@@ -244,34 +263,27 @@
            All in-progress content (tool calls, intermediate text, and current
            streaming text) stays inside this block. The final answer bubble
            only appears after the result event. -->
-      <div v-if="store.isStreaming" class="trace-block open live">
-        <div class="trace-summary">
+      <div v-if="store.isStreaming" class="trace-block live" :class="{ open: liveTraceOpen }">
+        <div class="trace-summary" @click="toggleLiveTrace">
+          <span class="trace-chevron">{{ liveTraceOpen ? '\u25BE' : '\u25B8' }}</span>
           <span class="activity-spinner"></span>
           <span class="trace-icon">&#129504;</span>
           <span class="trace-label">{{ (store.currentTimeline.length || store.currentStreamingText) ? 'Working...' : 'Thinking...' }}</span>
+          <span v-if="liveTraceMeta" class="trace-meta">{{ liveTraceMeta }}</span>
         </div>
         <div
-          v-if="store.currentTimeline.length || store.currentStreamingText || store.currentStreamingThinking"
+          v-if="liveTraceOpen && (store.currentTimeline.length || store.currentStreamingText || store.currentStreamingThinking)"
           class="trace-body"
         >
           <template v-for="(entry, j) in store.currentTimeline" :key="j">
             <div v-if="entry.kind === 'tool'" class="trace-tools">
-              <details
+              <div
                 v-for="(line, k) in activityLines(entry.content)"
                 :key="k"
-                class="tool-card"
+                class="activity-line"
                 :class="{ subagent: isSubagentLine(line) }"
-                :open="activityDetail(line).length < 100"
-              >
-                <summary class="tool-card-summary">
-                  <span class="tool-card-icon" aria-hidden="true">{{ activityIcon(line) }}</span>
-                  <span v-if="activitySubagentLabel(line)" class="tool-card-agent">{{ activitySubagentLabel(line) }}</span>
-                  <span class="tool-card-name">{{ activityName(line) }}</span>
-                  <span v-if="activitySummary(line)" class="tool-card-preview">{{ activitySummary(line) }}</span>
-                  <button class="tool-card-copy" type="button" title="Copy activity" @click.stop.prevent="copyActivityLine(line)">Copy</button>
-                </summary>
-                <div v-if="activityDetail(line)" class="tool-card-body" v-html="renderActivityLine(activityDetail(line))"></div>
-              </details>
+                v-html="renderActivityLine(line)"
+              ></div>
             </div>
             <button
               v-else-if="entry.kind === 'filecard'"
@@ -752,8 +764,11 @@ const modelsResponse = ref<ModelsResponse | null>(null)
 const thinkingLevels = ref<Record<string, string[]>>({})
 
 const openTraces = ref<Record<number, boolean>>({})
+const liveTraceOpen = ref(false)
+const copiedMessageKey = ref<string | null>(null)
 const transcribing = ref(false)
 const isNearBottom = ref(true)
+let messagesResizeObserver: ResizeObserver | null = null
 const showScrollBtn = computed(() => Boolean(messagesEl.value && store.activeMessages.length > 0 && !isNearBottom.value))
 const showModelPicker = ref(false)
 const modelPickerRef = ref<HTMLElement>()
@@ -910,11 +925,15 @@ function toggleTrace(i: number) {
   openTraces.value = { ...openTraces.value, [i]: !openTraces.value[i] }
 }
 
+function toggleLiveTrace() {
+  liveTraceOpen.value = !liveTraceOpen.value
+}
+
 function checkScroll() {
   const el = messagesEl.value
   if (!el) return
-  const threshold = 80
-  isNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < threshold
+  const threshold = 4
+  isNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight <= threshold
 }
 
 function scrollToBottom() {
@@ -1520,6 +1539,10 @@ onMounted(async () => {
   } catch { /* leave empty; picker just won't show */ }
   notifyChatFocused(chat.value?.chat_id)
   messagesEl.value?.addEventListener('scroll', checkScroll, { passive: true })
+  if (messagesEl.value && typeof ResizeObserver !== 'undefined') {
+    messagesResizeObserver = new ResizeObserver(() => checkScroll())
+    messagesResizeObserver.observe(messagesEl.value)
+  }
   nextTick(() => {
     if (messagesEl.value) {
       messagesEl.value.scrollTop = messagesEl.value.scrollHeight
@@ -1533,6 +1556,8 @@ onBeforeUnmount(() => {
     document.removeEventListener('selectionchange', onChatSelectionChange)
   }
   messagesEl.value?.removeEventListener('scroll', checkScroll)
+  messagesResizeObserver?.disconnect()
+  messagesResizeObserver = null
   if (spinnerTimer) { clearInterval(spinnerTimer); spinnerTimer = null }
 })
 
@@ -1558,55 +1583,15 @@ function activityLines(content: string): string[] {
   return content.split('\n').map(line => line.trim()).filter(Boolean)
 }
 
-function activityParts(line: string): { icon: string; name: string; detail: string; agent: string } {
-  let text = line.trim()
-  let agent = ''
-  if (text.startsWith('↳')) {
-    text = text.slice(1).trim()
-    const match = text.match(/^\[([^\]]+)\]\s*(.*)$/)
-    if (match) {
-      agent = match[1]
-      text = match[2].trim()
-    } else {
-      agent = 'subagent'
-    }
-  }
-  const match = text.match(/^(\S+)\s+(\S+)(?:\s+([\s\S]*))?$/)
-  if (!match) {
-    return { icon: '•', name: text || 'Activity', detail: '', agent }
-  }
-  return {
-    icon: match[1],
-    name: match[2],
-    detail: (match[3] || '').trim(),
-    agent,
-  }
-}
-
-function activityIcon(line: string): string {
-  return activityParts(line).icon
-}
-
-function activityName(line: string): string {
-  return activityParts(line).name
-}
-
-function activityDetail(line: string): string {
-  return activityParts(line).detail
-}
-
-function activitySummary(line: string): string {
-  const detail = activityDetail(line)
-  return detail.length > 120 ? `${detail.slice(0, 117)}...` : detail
-}
-
-function activitySubagentLabel(line: string): string {
-  return activityParts(line).agent
-}
-
-async function copyActivityLine(line: string): Promise<void> {
+async function copyMessageText(text: string, key: string): Promise<void> {
+  const trimmed = text.trim()
+  if (!trimmed) return
   try {
-    await navigator.clipboard.writeText(line.trim())
+    await navigator.clipboard.writeText(trimmed)
+    copiedMessageKey.value = key
+    setTimeout(() => {
+      if (copiedMessageKey.value === key) copiedMessageKey.value = null
+    }, 1500)
   } catch {
     // Clipboard can be unavailable in older standalone PWA contexts.
   }
@@ -1632,6 +1617,32 @@ function handleFileLinkClick(e: MouseEvent): void {
   const line = lineAttr ? parseInt(lineAttr, 10) : null
   fileViewer.open(path, Number.isFinite(line as number) ? line : null)
 }
+
+const liveTraceMeta = computed(() => {
+  let toolCount = 0
+  let textCount = 0
+  let thinkingCount = 0
+  let fileCount = 0
+  for (const e of store.currentTimeline) {
+    if (e.kind === 'tool') {
+      toolCount += e.content.split('\n').filter(Boolean).length
+    } else if (e.kind === 'thinking') {
+      thinkingCount += 1
+    } else if (e.kind === 'filecard') {
+      fileCount += 1
+    } else if (e.kind === 'text') {
+      textCount += 1
+    }
+  }
+  if (store.currentStreamingThinking) thinkingCount += 1
+  if (store.currentStreamingText) textCount += 1
+  const parts: string[] = []
+  if (thinkingCount) parts.push(`${thinkingCount} thought${thinkingCount === 1 ? '' : 's'}`)
+  if (textCount) parts.push(`${textCount} note${textCount === 1 ? '' : 's'}`)
+  if (toolCount) parts.push(`${toolCount} tool call${toolCount === 1 ? '' : 's'}`)
+  if (fileCount) parts.push(`${fileCount} file${fileCount === 1 ? '' : 's'}`)
+  return parts.join(' · ')
+})
 
 function traceSummaryMeta(steps: ChatMessage[]): string {
   let toolCount = 0
@@ -1807,10 +1818,12 @@ watch(() => store.activeChatId, () => {
 watch(
   () => [store.activeMessages.length, store.currentStreamingText, store.currentActivity.length],
   () => {
-    if (!isNearBottom.value) return
     nextTick(() => {
+      checkScroll()
+      if (!isNearBottom.value) return
       if (messagesEl.value) {
         messagesEl.value.scrollTop = messagesEl.value.scrollHeight
+        checkScroll()
       }
     })
   },
@@ -2217,11 +2230,13 @@ function insertImageRef(n: number) {
   pointer-events: none;
 }
 
-/* Scroll-to-bottom float button */
+/* Scroll-to-bottom float button — centered above the input bar so it
+   doesn't overlap the send button on the right. */
 .scroll-to-bottom-btn {
   position: absolute;
-  bottom: 80px;
-  right: calc(16px + var(--safe-right));
+  bottom: 72px;
+  left: 50%;
+  transform: translateX(-50%);
   width: 36px;
   height: 36px;
   border-radius: 50%;
@@ -2241,7 +2256,7 @@ function insertImageRef(n: number) {
   border-color: var(--fg2);
 }
 .scroll-to-bottom-btn:active {
-  transform: scale(0.92);
+  transform: translateX(-50%) scale(0.92);
 }
 
 /* Header */
@@ -2461,8 +2476,24 @@ function insertImageRef(n: number) {
   margin-top: auto;
 }
 
-.message {
+.message-wrap {
+  display: flex;
+  flex-direction: column;
   max-width: 85%;
+  min-width: 0;
+}
+
+.message-wrap.user {
+  align-self: flex-end;
+}
+
+.message-wrap.assistant {
+  align-self: flex-start;
+  max-width: 90%;
+}
+
+.message {
+  max-width: 100%;
   padding: 8px 12px;
   border-radius: var(--radius);
   font-size: var(--text-base);
@@ -2472,16 +2503,61 @@ function insertImageRef(n: number) {
 }
 
 .message.user {
-  align-self: flex-end;
   background: var(--bg3);
   color: var(--fg);
 }
 
 .message.assistant {
-  align-self: flex-start;
   background: var(--bg2);
   border: 1px solid var(--border);
-  max-width: 90%;
+}
+
+.message-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+
+.message-wrap.user .message-actions {
+  justify-content: flex-end;
+}
+
+.message-wrap.assistant .message-actions {
+  justify-content: flex-start;
+}
+
+.message-wrap:hover .message-actions,
+.message-wrap:focus-within .message-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.message-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--touch, 44px);
+  height: var(--touch, 44px);
+  margin: -10px 0;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg2);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s;
+}
+
+.message-action-btn:hover {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+
+.message-action-btn:active {
+  transform: scale(0.95);
 }
 
 .message.assistant.error {
@@ -2650,106 +2726,7 @@ function insertImageRef(n: number) {
   padding: 4px 8px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-}
-
-.tool-card {
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  overflow: hidden;
-}
-
-.tool-card.subagent {
-  border-left: 3px solid var(--accent2);
-  opacity: 0.9;
-}
-
-.tool-card-summary {
-  min-height: 34px;
-  padding: 6px 8px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--fg2);
-  cursor: pointer;
-  list-style: none;
-  min-width: 0;
-}
-
-.tool-card-summary::-webkit-details-marker { display: none; }
-
-.tool-card-summary::before {
-  content: '\25B8';
-  flex: 0 0 auto;
-  font-size: calc(9px * var(--font-scale));
-  opacity: 0.7;
-  transition: transform 0.15s;
-}
-
-.tool-card[open] > .tool-card-summary::before {
-  transform: rotate(90deg);
-}
-
-.tool-card-icon {
-  flex: 0 0 auto;
-  width: 18px;
-  text-align: center;
-  color: var(--accent);
-}
-
-.tool-card-agent {
-  flex: 0 0 auto;
-  max-width: 120px;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent2) 18%, transparent);
-  color: var(--fg);
-  font-size: var(--text-xs);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tool-card-name {
-  flex: 0 0 auto;
-  color: var(--fg);
-  font-weight: 600;
-}
-
-.tool-card-preview {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tool-card-copy {
-  flex: 0 0 auto;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--bg);
-  color: var(--fg2);
-  font: inherit;
-  font-size: var(--text-xs);
-  padding: 3px 6px;
-  cursor: pointer;
-}
-
-.tool-card-copy:hover {
-  color: var(--fg);
-  border-color: var(--accent2);
-}
-
-.tool-card-body {
-  padding: 8px 10px 10px 42px;
-  border-top: 1px solid var(--border);
-  color: var(--fg2);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  line-height: 1.45;
-  font-size: var(--text-sm);
+  gap: 2px;
 }
 
 /* Inline file card. Rendered inside the reasoning trace whenever the agent
@@ -2901,9 +2878,9 @@ details[open] > .activity-summary::before {
   color: var(--fg2);
   font-family: var(--font);
   font-size: var(--text-sm);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
 }
 
 /* Subagent activity (parent_tool_use_id was set on the WS event). Indented
@@ -3801,8 +3778,9 @@ details[open] > .activity-summary::before {
     width: min(320px, calc(100vw - 24px));
     max-width: none;
   }
-  .message { max-width: 92%; padding: 10px 14px; }
-  .message.assistant { max-width: 92%; }
+  .message-wrap { max-width: 92%; }
+  .message-wrap.assistant { max-width: 92%; }
+  .message { padding: 10px 14px; }
   .chat-title {
     flex: 1 1 100%;
     display: -webkit-box;
