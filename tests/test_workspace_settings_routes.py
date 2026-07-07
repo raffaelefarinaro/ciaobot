@@ -11,6 +11,7 @@ from ciao.config import CiaoConfig
 from ciao.web.routes_api import (
     delete_workspace_setting,
     gws_integration_settings,
+    gws_install,
     gws_save_client_secret,
     gws_auth_url,
     gws_exchange_code,
@@ -62,6 +63,11 @@ def _client(tmp_path: Path, env_extra: dict[str, str] | None = None):
                 "/api/integrations/gws",
                 gws_integration_settings,
                 methods=["GET"],
+            ),
+            Route(
+                "/api/integrations/gws/install",
+                gws_install,
+                methods=["POST"],
             ),
             Route(
                 "/api/integrations/gws/client-secret",
@@ -314,8 +320,8 @@ def test_gws_integration_reports_profile_status_and_usage(tmp_path, monkeypatch)
     from ciao.web import routes_api
 
     monkeypatch.setattr(
-        routes_api.shutil,
-        "which",
+        routes_api,
+        "resolve_tool",
         lambda name: "/usr/local/bin/gws" if name == "gws" else None,
     )
     personal_dir = tmp_path / "secrets" / "gws-personal"
@@ -339,6 +345,68 @@ def test_gws_integration_reports_profile_status_and_usage(tmp_path, monkeypatch)
     assert profiles["work"]["configured"] is False
     assert profiles["work"]["workspaces"] == ["work"]
     assert str(personal_dir) in profiles["personal"]["config_dir"]
+
+
+def test_gws_install_when_already_present_is_noop(tmp_path, monkeypatch):
+    from ciao.web import routes_api
+
+    monkeypatch.setattr(
+        routes_api,
+        "resolve_tool",
+        lambda name: "/usr/local/bin/gws" if name == "gws" else None,
+    )
+    client, _config, _pcm = _client(tmp_path)
+
+    resp = client.post("/api/integrations/gws/install")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["integration"]["installed"] is True
+
+
+def test_gws_install_reports_missing_npm(tmp_path, monkeypatch):
+    from ciao.web import routes_api
+
+    # Neither gws nor npm resolvable.
+    monkeypatch.setattr(routes_api, "resolve_tool", lambda name: None)
+    client, _config, _pcm = _client(tmp_path)
+
+    resp = client.post("/api/integrations/gws/install")
+    assert resp.status_code == 500
+    body = resp.json()
+    assert body["ok"] is False
+    assert "npm" in body["error"]
+
+
+def test_gws_install_runs_npm_and_returns_refreshed_status(tmp_path, monkeypatch):
+    from ciao.web import routes_api
+
+    resolved = {"gws": None, "npm": "/usr/local/bin/npm"}
+    monkeypatch.setattr(routes_api, "resolve_tool", lambda name: resolved.get(name))
+
+    captured = {}
+
+    class _Result:
+        returncode = 0
+        stdout = "+ @googleworkspace/cli@1.2.3"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        # Simulate gws now being installed for the post-install refresh.
+        resolved["gws"] = "/usr/local/bin/gws"
+        return _Result()
+
+    monkeypatch.setattr(routes_api.subprocess, "run", fake_run)
+    client, _config, _pcm = _client(tmp_path)
+
+    resp = client.post("/api/integrations/gws/install")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert captured["cmd"] == ["/usr/local/bin/npm", "install", "-g", "@googleworkspace/cli"]
+    assert body["integration"]["installed"] is True
+    assert body["integration"]["binary_path"] == "/usr/local/bin/gws"
 
 
 def test_gws_setup_endpoints(tmp_path, monkeypatch):

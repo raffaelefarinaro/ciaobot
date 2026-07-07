@@ -83,6 +83,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | DELETE | `/api/workspaces/{name}` | Delete a logical workspace config |
 | POST | `/api/settings/providers` | Update configured LLM providers settings |
 | GET | `/api/integrations/gws` | Read Google Workspace CLI install, profile auth, and workspace usage status |
+| POST | `/api/integrations/gws/install` | Install the `@googleworkspace/cli` (`gws`) binary globally via npm |
 | POST | `/api/integrations/gws/client-secret` | Upload GCP client_secret.json for a profile |
 | POST | `/api/integrations/gws/auth-url` | Generate Google OAuth authorization URL for a profile |
 | POST | `/api/integrations/gws/exchange` | Complete Google OAuth flow and exchange code for credentials |

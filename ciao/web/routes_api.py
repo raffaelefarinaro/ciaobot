@@ -25,6 +25,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from ciao.config import WorkspaceConfig, CLAUDE_AI_CONNECTORS, coerce_claude_ai_mcps
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.package_version import package_changelog, package_status, update_package
+from ciao.tool_path import login_shell_path, resolve_tool
 from ciao.providers.claude import _summarize_tool_input
 from ciao.schedules import (
     ScheduleEntry,
@@ -1111,7 +1112,7 @@ def _gws_profile_payload(config, profile: str, usage: dict[str, list[str]]) -> d
 
 def _gws_integration_payload(config) -> dict:
     usage = _gws_profile_usage(config)
-    binary_path = shutil.which("gws") or ""
+    binary_path = resolve_tool("gws") or ""
     wrapper_path = Path(config.workspace_root).resolve() / "scripts" / "gws-profile.sh"
     helper_path = Path(config.workspace_root).resolve() / "scripts" / "gws-auth-helper.py"
     return {
@@ -1129,6 +1130,76 @@ def _gws_integration_payload(config) -> dict:
 
 async def gws_integration_settings(request: Request) -> JSONResponse:
     return JSONResponse(_gws_integration_payload(request.app.state.config))
+
+
+GWS_CLI_PACKAGE = "@googleworkspace/cli"
+
+
+async def gws_install(request: Request) -> JSONResponse:
+    """Install the Google Workspace CLI globally via npm.
+
+    Runs ``npm install -g @googleworkspace/cli`` so the ``gws`` binary becomes
+    available on PATH. Returns the refreshed integration payload so the UI can
+    reflect the new status without a restart (unlike the local voice engine, no
+    Python import changes, so no server restart is needed).
+    """
+    config = request.app.state.config
+
+    if resolve_tool("gws"):
+        return JSONResponse(
+            {
+                "ok": True,
+                "output": "gws is already installed.",
+                "integration": _gws_integration_payload(config),
+            }
+        )
+
+    npm = resolve_tool("npm")
+    if not npm:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": (
+                    "npm was not found on PATH. Install Node.js/npm, then run "
+                    f"'npm install -g {GWS_CLI_PACKAGE}' manually."
+                ),
+            },
+            status_code=500,
+        )
+
+    cmd = [npm, "install", "-g", GWS_CLI_PACKAGE]
+    env = dict(os.environ)
+    env["PATH"] = login_shell_path()
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env=env,
+        )
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+    output = (result.stdout.strip() + "\n" + result.stderr.strip()).strip()
+    if result.returncode != 0:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": f"npm exited with code {result.returncode}",
+                "output": output,
+            },
+            status_code=500,
+        )
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "output": output,
+            "integration": _gws_integration_payload(config),
+        }
+    )
 
 
 async def gws_save_client_secret(request: Request) -> JSONResponse:

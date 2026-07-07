@@ -198,8 +198,13 @@ def get_installed_npm_version(workspace_root: Path, name: str) -> str:
 
 
 def get_installed_cli_version(cmd: str) -> str:
+    from ciao.tool_path import resolve_tool
+
+    # Resolve against the login-shell PATH so npm/brew-installed CLIs are found
+    # even when the server was launched by a GUI/launchd job with a stripped PATH.
+    binary = resolve_tool(cmd) or cmd
     try:
-        res = subprocess.run([cmd, "--version"], capture_output=True, text=True, timeout=2.0)
+        res = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=2.0)
         if res.returncode == 0:
             return res.stdout.strip()
     except Exception:
