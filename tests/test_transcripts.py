@@ -52,7 +52,7 @@ def test_transcript_store_archives_markdown_with_usage_totals(tmp_path: Path) ->
 
     assert archived is not None
     content = archived.read_text(encoding="utf-8")
-    assert "type: telegram-transcript" in content
+    assert "type:" not in content
     assert "turn_count: 2" in content
     assert "input_tokens: 14" in content
     assert "output_tokens: 8" in content

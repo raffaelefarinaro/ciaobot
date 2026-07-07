@@ -16,7 +16,6 @@ from ciao.web.routes_api import chat_messages
 
 
 _TRANSCRIPT = """---
-type: telegram-transcript
 provider: claude
 context: archived fallback test
 selected_model: opus
@@ -28,7 +27,7 @@ ended: 2026-06-19T10:05:00Z
 turn_count: 2
 ---
 
-# Telegram Transcript (claude)
+# Chat Transcript (claude)
 
 ## Turn 1
 

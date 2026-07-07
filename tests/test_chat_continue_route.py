@@ -58,7 +58,6 @@ def test_route_chat_continue(tmp_path: Path) -> None:
     chat_md = chat_provider_dir / "2026-06-10T12-00-00Z-sess.md"
     chat_content = (
         "---\n"
-        "type: telegram-transcript\n"
         "provider: claude\n"
         "context: Chat to Continue\n"
         "active_model: sonnet\n"

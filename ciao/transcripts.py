@@ -255,7 +255,6 @@ class TranscriptStore:
         context_label = transcript.get("context_label", "")
         context_key = transcript.get("context_key", "")
         frontmatter = {
-            "type": "telegram-transcript",
             "provider": transcript.get("provider", ""),
             "context": context_label or context_key or "",
             "selected_model": transcript.get("selected_model", ""),
@@ -265,7 +264,7 @@ class TranscriptStore:
             "started": transcript.get("started_at", ""),
             "ended": transcript.get("ended_at", ""),
             "turn_count": len(turns),
-            "tags": ["telegram", "transcript", str(transcript.get("provider", ""))],
+            "tags": ["transcript", str(transcript.get("provider", ""))],
             "usage_totals": usage_totals,
         }
         lines = ["---"]
@@ -275,7 +274,7 @@ class TranscriptStore:
             [
                 "---",
                 "",
-                f"# Telegram Transcript ({transcript.get('provider', '')})",
+                f"# Chat Transcript ({transcript.get('provider', '')})",
                 "",
                 f"- Started: {transcript.get('started_at', '-')}",
                 f"- Ended: {transcript.get('ended_at', '-')}",
