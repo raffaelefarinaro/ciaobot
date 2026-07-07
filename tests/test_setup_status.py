@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from itsdangerous import URLSafeTimedSerializer
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -9,7 +11,12 @@ from starlette.testclient import TestClient
 from ciao.config import CiaoConfig
 from ciao.setup_status import setup_status
 from ciao.web.auth import AuthMiddleware
-from ciao.web.routes_api import setup_finish_endpoint, setup_status_endpoint
+from ciao.web.routes_api import (
+    setup_finish_endpoint,
+    setup_list_dirs_endpoint,
+    setup_mkdir_endpoint,
+    setup_status_endpoint,
+)
 
 
 def _config(tmp_path, env_extra: dict[str, str] | None = None) -> CiaoConfig:
@@ -241,3 +248,108 @@ def test_setup_finish_is_localhost_only(tmp_path) -> None:
     )
 
     assert resp.status_code == 403
+
+
+def _folder_picker_client(tmp_path, *, bootstrap: bool = True, base_url: str = "http://localhost:8443") -> TestClient:
+    if bootstrap:
+        config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+    else:
+        config = _config(tmp_path)
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[
+            Route("/api/setup/list-dirs", setup_list_dirs_endpoint, methods=["GET"]),
+            Route("/api/setup/mkdir", setup_mkdir_endpoint, methods=["POST"]),
+        ],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.serializer = serializer
+    return TestClient(app, base_url=base_url)
+
+
+def test_setup_list_dirs_requires_bootstrap_mode(tmp_path) -> None:
+    client = _folder_picker_client(tmp_path, bootstrap=False)
+
+    resp = client.get("/api/setup/list-dirs", params={"path": str(tmp_path)})
+
+    assert resp.status_code == 404
+
+
+def test_setup_list_dirs_is_localhost_only(tmp_path) -> None:
+    client = _folder_picker_client(tmp_path, base_url="https://ciao.example")
+
+    resp = client.get("/api/setup/list-dirs", params={"path": str(tmp_path)})
+
+    assert resp.status_code == 403
+
+
+def test_setup_list_dirs_lists_visible_directories_only(tmp_path) -> None:
+    (tmp_path / "beta").mkdir()
+    (tmp_path / "Alpha").mkdir()
+    (tmp_path / ".hidden").mkdir()
+    (tmp_path / "notes.txt").write_text("nope", encoding="utf-8")
+    client = _folder_picker_client(tmp_path)
+
+    resp = client.get("/api/setup/list-dirs", params={"path": str(tmp_path)})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["path"] == str(tmp_path.resolve())
+    assert body["parent"] == str(tmp_path.resolve().parent)
+    assert [d["name"] for d in body["dirs"]] == ["Alpha", "beta", "boot"]
+    assert body["dirs"][0]["path"] == str(tmp_path.resolve() / "Alpha")
+    assert body["home"] == str(Path.home().resolve())
+
+
+def test_setup_list_dirs_defaults_to_home_and_abbreviates_display_path(tmp_path) -> None:
+    client = _folder_picker_client(tmp_path)
+
+    resp = client.get("/api/setup/list-dirs")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["path"] == str(Path.home().resolve())
+    assert body["display_path"] == "~"
+
+
+def test_setup_list_dirs_rejects_missing_or_file_path(tmp_path) -> None:
+    (tmp_path / "notes.txt").write_text("nope", encoding="utf-8")
+    client = _folder_picker_client(tmp_path)
+
+    assert client.get("/api/setup/list-dirs", params={"path": str(tmp_path / "nope")}).status_code == 400
+    assert client.get("/api/setup/list-dirs", params={"path": str(tmp_path / "notes.txt")}).status_code == 400
+
+
+def test_setup_mkdir_creates_folder_and_returns_parent_listing(tmp_path) -> None:
+    client = _folder_picker_client(tmp_path)
+
+    resp = client.post("/api/setup/mkdir", json={"path": str(tmp_path), "name": "workspace"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert (tmp_path / "workspace").is_dir()
+    assert body["path"] == str(tmp_path.resolve())
+    assert "workspace" in [d["name"] for d in body["dirs"]]
+
+
+def test_setup_mkdir_rejects_invalid_names_and_paths(tmp_path) -> None:
+    client = _folder_picker_client(tmp_path)
+
+    for name in ["", "a/b", "a\\b", ".hidden", "../escape"]:
+        resp = client.post("/api/setup/mkdir", json={"path": str(tmp_path), "name": name})
+        assert resp.status_code == 400, name
+    assert client.post("/api/setup/mkdir", json={"path": str(tmp_path / "nope"), "name": "ok"}).status_code == 400
+
+    (tmp_path / "taken").mkdir()
+    resp = client.post("/api/setup/mkdir", json={"path": str(tmp_path), "name": "taken"})
+    assert resp.status_code == 400
+
+
+def test_setup_mkdir_requires_bootstrap_mode(tmp_path) -> None:
+    client = _folder_picker_client(tmp_path, bootstrap=False)
+
+    resp = client.post("/api/setup/mkdir", json={"path": str(tmp_path), "name": "workspace"})
+
+    assert resp.status_code == 404
+    assert not (tmp_path / "workspace").exists()
