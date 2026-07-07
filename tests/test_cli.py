@@ -274,13 +274,20 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     assert app_exe.is_file()
     assert app_exe.stat().st_mode & 0o111
     app_text = app_exe.read_text(encoding="utf-8")
-    assert 'open "http://localhost:9443/?setup=' in app_text
+    # The launcher reads the one-time setup token live from disk (it is
+    # deleted after first login), so it must NOT bake a frozen token value
+    # into the URL -- otherwise a second launch shows "invalid setup token".
+    token_file = workspace / ".runtime" / "setup-token"
+    assert f'token=$(tr -d "[:space:]" < "{token_file}"' in app_text
+    assert 'open "http://localhost:9443/?setup=$token"' in app_text
+    assert 'open "http://localhost:9443/"' in app_text
     # The launcher starts the server and menu bar agents when they're down.
     assert 'launchctl kickstart "gui/$(id -u)/com.ciao.server"' in app_text
     assert 'launchctl kickstart "gui/$(id -u)/com.ciao.menubar"' in app_text
-    setup_token = (workspace / ".runtime" / "setup-token").read_text(encoding="utf-8").strip()
+    setup_token = token_file.read_text(encoding="utf-8").strip()
     assert setup_token
-    assert setup_token in app_text
+    # The literal token value must not appear in the script -- it is read live.
+    assert setup_token not in app_text
     icns = apps / "Ciaobot.app" / "Contents" / "Resources" / "Ciaobot.icns"
     assert icns.is_file() and icns.stat().st_size > 0
     info_plist = (apps / "Ciaobot.app" / "Contents" / "Info.plist").read_text(encoding="utf-8")

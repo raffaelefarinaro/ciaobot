@@ -97,6 +97,16 @@ def test_restart_server_command_targets_launchd_label() -> None:
     ]
 
 
+def test_stop_server_command_boots_out_launchd_label() -> None:
+    # bootout (not kill) because the server plist is KeepAlive=true, so a
+    # plain kill would be relaunched; bootout takes it out of the domain.
+    assert menubar.stop_server_command(uid=501) == [
+        "launchctl",
+        "bootout",
+        "gui/501/com.ciao.server",
+    ]
+
+
 def test_view_logs_command_opens_stderr_log(tmp_path: Path) -> None:
     assert menubar.view_logs_command(tmp_path) == [
         "open",
