@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.4.3 - 2026-07-07
+
+### Added
+- feat: detect gws via login-shell PATH; add Install gws button (#36) (`d4ed632`)
+- feat: collapse live thinking trace by default in chat (`ebefeb1`)
+
+### Changed
+- Merge branch 'main' of https://github.com/raffaelefarinaro/ciaobot (`6dea3c9`)
+
+### Fixed
+- fix: setup_workspace honors existing .env vault root on re-run (#29) (`c08bba9`)
+- fix: evaluate provider-alias tier placeholder instead of showing raw template (#30) (`0005864`)
+- fix: move menu bar template icons out of the PWA build output dir (#31) (`62f024c`)
+- fix: default skills auto-update off and theme to system (#32) (`6ffca13`)
+- fix: reliable chat updates during subagent/background work (#34) (`7e7b16a`)
+- fix: return 409 instead of 500 when running a schedule while paused (#35) (`dd6f357`)
+- fix: update check no longer fails on GitHub rate limits (use public redirect) (#33) (`666239e`)
+- fix: tie server lifecycle to menu bar and stop baking one-time token into app launcher (#37) (`cd8acd4`)
+
+### Maintenance
+- chore(deps): bump claude-agent-sdk to 0.2.111 (`e0eb1e1`)
+
 ## v0.4.2 - 2026-07-07
 
 ### Fixed
