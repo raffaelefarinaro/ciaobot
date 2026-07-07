@@ -5,6 +5,7 @@
         v-if="showStartup"
         :phases="phases"
         :overall-ready="overallReady"
+        :version="serverVersion"
         @skip="skipped = true"
       />
     </Transition>
@@ -28,6 +29,7 @@ interface Phase {
 
 const phases = ref<Phase[]>([])
 const overallReady = ref(false)
+const serverVersion = ref('')
 const skipped = ref(false)
 const startupDone = ref(false)
 
@@ -40,6 +42,9 @@ async function pollStartup() {
     const res = await fetch('/api/startup-status')
     if (!res.ok) return
     const data = await res.json()
+    if (data.version && serverVersion.value !== data.version) {
+      serverVersion.value = data.version
+    }
     const nextPhases = data.phases || []
     if (JSON.stringify(phases.value) !== JSON.stringify(nextPhases)) {
       phases.value = nextPhases

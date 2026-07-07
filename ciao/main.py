@@ -136,25 +136,6 @@ def _refresh_vault_index(workspace: Path, vault_root: Path | None = None) -> boo
         return False
 
 
-def _rebuild_pwa(workspace: Path) -> bool:
-    """Rebuild PWA frontend if web/ source exists."""
-    web_dir = workspace / "web"
-    if not (web_dir / "package.json").exists():
-        return False
-    try:
-        subprocess.run(
-            ["npm", "run", "build"],
-            cwd=str(web_dir),
-            capture_output=True,
-            timeout=120,
-        )
-        logger.info("PWA frontend rebuilt.")
-        return True
-    except Exception:
-        logger.exception("PWA frontend rebuild failed")
-        return False
-
-
 def _push_subject_from_env(env: dict[str, str] | None = None) -> str:
     """Web Push VAPID subject, or "" when CIAO_PUSH_CONTACT is unset.
 
@@ -261,14 +242,8 @@ async def _async_main() -> int:
             tracker.fail("refresh_vault_index", "index refresh failed")
             logger.exception("Vault index refresh failed")
 
-    # Rebuild PWA frontend so served assets match latest source
-    tracker.start("rebuild_pwa")
-    try:
-        await asyncio.to_thread(_rebuild_pwa, config.workspace_root)
-        tracker.done("rebuild_pwa")
-    except Exception:
-        tracker.fail("rebuild_pwa", "npm build failed")
-        logger.exception("PWA rebuild failed")
+    # The PWA ships pre-built in the installed package; workspaces never
+    # contain app source, so there is no frontend rebuild at startup.
 
     # Update skills in the background, startup should not wait on npm.
     tracker.start("update_skills")
