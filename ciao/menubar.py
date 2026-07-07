@@ -150,13 +150,35 @@ def notification_menu_title(notification: Notification, *, max_length: int = 60)
     return text
 
 
-def chat_menu_title(title: str, *, unread: bool, max_length: int = 58) -> str:
+def workspace_menu_label(name: str) -> str:
+    """Human-readable workspace name for menu labels (matches the PWA sidebar)."""
+
+    text = name.strip()
+    if not text:
+        return "Workspace"
+    parts = re.split(r"[-_\s]+", text)
+    return " ".join(part.capitalize() for part in parts if part)
+
+
+def chat_menu_title(
+    title: str,
+    *,
+    unread: bool,
+    workspace: str = "",
+    show_workspace: bool = False,
+    max_length: int = 58,
+) -> str:
     """Menu label for an open chat; prefix with a dot when it has unread activity."""
 
     text = title.strip() or "Untitled chat"
-    if len(text) > max_length:
-        text = text[: max_length - 1] + "…"
-    return f"● {text}" if unread else text
+    prefix = "● " if unread else ""
+    suffix = ""
+    if show_workspace and workspace.strip():
+        suffix = f" [{workspace_menu_label(workspace)}]"
+    budget = max_length - len(prefix) - len(suffix)
+    if len(text) > budget:
+        text = text[: max(0, budget - 1)] + "…"
+    return f"{prefix}{text}{suffix}"
 
 
 def menubar_badge_title(unread_count: int) -> str:
@@ -189,20 +211,42 @@ class OpenChat:
     chat_id: str
     title: str
     last_activity_at: str
+    workspace: str = ""
 
 
-def _load_chats(workspace: Path) -> dict[str, dict]:
-    """Chats from the server's persisted PWA state (``.runtime/web_projects.json``)."""
+def _load_web_state(workspace: Path) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Projects and chats from the server's persisted PWA state."""
 
     state_path = workspace / ".runtime" / "web_projects.json"
     try:
         data = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {}
-    chats = data.get("chats") if isinstance(data, dict) else None
-    if not isinstance(chats, dict):
-        return {}
-    return {str(chat_id): chat for chat_id, chat in chats.items() if isinstance(chat, dict)}
+        return {}, {}
+    if not isinstance(data, dict):
+        return {}, {}
+    projects_raw = data.get("projects")
+    chats_raw = data.get("chats")
+    projects = (
+        {str(project_id): project for project_id, project in projects_raw.items() if isinstance(project, dict)}
+        if isinstance(projects_raw, dict)
+        else {}
+    )
+    chats = (
+        {str(chat_id): chat for chat_id, chat in chats_raw.items() if isinstance(chat, dict)}
+        if isinstance(chats_raw, dict)
+        else {}
+    )
+    return projects, chats
+
+
+def _load_chats(workspace: Path) -> dict[str, dict]:
+    return _load_web_state(workspace)[1]
+
+
+def _chat_workspace(chat: dict, projects: dict[str, dict]) -> str:
+    project_id = str(chat.get("project_id") or "")
+    project = projects.get(project_id, {})
+    return str(project.get("workspace") or "") if isinstance(project, dict) else ""
 
 
 def chat_is_unread(chat: dict) -> bool:
@@ -215,11 +259,14 @@ def chat_is_unread(chat: dict) -> bool:
     return bool(activity) and activity > read
 
 
-def _open_chat_from_state(chat_id: str, chat: dict) -> OpenChat:
+def _open_chat_from_state(
+    chat_id: str, chat: dict, *, projects: dict[str, dict]
+) -> OpenChat:
     return OpenChat(
         chat_id=chat_id,
         title=str(chat.get("title") or "Untitled chat"),
         last_activity_at=str(chat.get("last_activity_at") or ""),
+        workspace=_chat_workspace(chat, projects),
     )
 
 
@@ -227,11 +274,12 @@ def read_open_chats(workspace: Path, *, limit: int = 10) -> list[OpenChat]:
     """Return non-archived chats from the server's persisted PWA state,
     most recently active first."""
 
+    projects, chats = _load_web_state(workspace)
     open_chats: list[OpenChat] = []
-    for chat_id, chat in _load_chats(workspace).items():
+    for chat_id, chat in chats.items():
         if chat.get("archived"):
             continue
-        open_chats.append(_open_chat_from_state(chat_id, chat))
+        open_chats.append(_open_chat_from_state(chat_id, chat, projects=projects))
     open_chats.sort(key=lambda chat: chat.last_activity_at, reverse=True)
     return open_chats[:limit]
 
@@ -239,11 +287,12 @@ def read_open_chats(workspace: Path, *, limit: int = 10) -> list[OpenChat]:
 def read_unread_chats(workspace: Path, *, limit: int = 10) -> list[OpenChat]:
     """Unread non-archived chats, most recently active first — mirrors the PWA bell."""
 
+    projects, chats = _load_web_state(workspace)
     unread: list[OpenChat] = []
-    for chat_id, chat in _load_chats(workspace).items():
+    for chat_id, chat in chats.items():
         if not chat_is_unread(chat):
             continue
-        unread.append(_open_chat_from_state(chat_id, chat))
+        unread.append(_open_chat_from_state(chat_id, chat, projects=projects))
     unread.sort(key=lambda chat: chat.last_activity_at, reverse=True)
     return unread[:limit]
 
@@ -484,9 +533,15 @@ def run_menubar(workspace: Path, port: int) -> int:
             addresses_menu.add(rumps.MenuItem(url, callback=_copy_address_callback(url)))
 
         # Open chats live directly in the menu, no header — just the list.
+        show_workspace = len({chat.workspace for chat in chats if chat.workspace}) > 1
         chat_items = [
             rumps.MenuItem(
-                chat_menu_title(chat.title, unread=chat.chat_id in unread_ids),
+                chat_menu_title(
+                    chat.title,
+                    unread=chat.chat_id in unread_ids,
+                    workspace=chat.workspace,
+                    show_workspace=show_workspace,
+                ),
                 callback=_open_chat_callback(chat.chat_id),
             )
             for chat in chats
@@ -543,9 +598,13 @@ def run_menubar(workspace: Path, port: int) -> int:
         app.title = menubar_badge_title(len(unread_ids))
 
         # Rebuild only when content changed so an open menu doesn't flicker.
+        show_workspace = len({chat.workspace for chat in chats if chat.workspace}) > 1
         fingerprint = (
             status,
-            tuple((c.chat_id, c.title, c.chat_id in unread_ids) for c in chats),
+            tuple(
+                (c.chat_id, c.title, c.workspace, c.chat_id in unread_ids, show_workspace)
+                for c in chats
+            ),
             len(unread_ids),
             tuple(addresses),
             package_update_fingerprint(pkg),

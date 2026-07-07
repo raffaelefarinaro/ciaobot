@@ -194,6 +194,64 @@ def test_chat_menu_title_marks_unread_with_dot() -> None:
     assert menubar.chat_menu_title("x" * 80, unread=True, max_length=10).startswith("● ")
 
 
+def test_workspace_menu_label_formats_names() -> None:
+    assert menubar.workspace_menu_label("personal") == "Personal"
+    assert menubar.workspace_menu_label("my-work") == "My Work"
+    assert menubar.workspace_menu_label("") == "Workspace"
+
+
+def test_chat_menu_title_adds_workspace_tag_when_requested() -> None:
+    assert menubar.chat_menu_title(
+        "Morning briefing",
+        unread=False,
+        workspace="personal",
+        show_workspace=True,
+    ) == "Morning briefing [Personal]"
+    assert menubar.chat_menu_title(
+        "Needs attention",
+        unread=True,
+        workspace="work",
+        show_workspace=True,
+    ) == "● Needs attention [Work]"
+
+
+def test_read_open_chats_resolves_workspace_from_project(tmp_path: Path) -> None:
+    state = tmp_path / ".runtime" / "web_projects.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(
+        json.dumps(
+            {
+                "projects": {
+                    "proj-personal": {"name": "General", "workspace": "personal"},
+                    "proj-work": {"name": "General", "workspace": "work"},
+                },
+                "chats": {
+                    "personal-chat": {
+                        "project_id": "proj-personal",
+                        "title": "Personal chat",
+                        "archived": False,
+                        "last_activity_at": "2026-01-02T10:00:00",
+                    },
+                    "work-chat": {
+                        "project_id": "proj-work",
+                        "title": "Work chat",
+                        "archived": False,
+                        "last_activity_at": "2026-01-01T10:00:00",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    chats = menubar.read_open_chats(tmp_path)
+
+    assert [(chat.chat_id, chat.workspace) for chat in chats] == [
+        ("personal-chat", "personal"),
+        ("work-chat", "work"),
+    ]
+
+
 def test_menubar_badge_title() -> None:
     assert menubar.menubar_badge_title(0) == ""
     assert menubar.menubar_badge_title(3) == "3"
