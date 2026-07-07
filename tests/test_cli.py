@@ -393,6 +393,72 @@ def test_setup_is_idempotent_and_does_not_overwrite_env(tmp_path: Path) -> None:
     assert (workspace / ".env").read_text(encoding="utf-8") == "PWA_AUTH_TOKEN=existing\n"
 
 
+def test_setup_prints_workspace_and_login_url(tmp_path: Path, capsys) -> None:
+    workspace = tmp_path / "workspace"
+
+    assert cli.main([
+        "setup",
+        "--workspace",
+        str(workspace),
+        "--launch-agents-dir",
+        str(tmp_path / "LaunchAgents"),
+        "--app-dir",
+        str(tmp_path / "Applications"),
+        "--port",
+        "9443",
+    ]) == 0
+
+    out = capsys.readouterr().out
+    token = (workspace / ".runtime" / "setup-token").read_text(encoding="utf-8").strip()
+    assert f"Workspace: {workspace.resolve()}" in out
+    assert f"Open Ciaobot: http://localhost:9443/?setup={token}" in out
+
+
+def test_path_export_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    bin_dir = Path(cli.sys.executable).parent
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    assert cli._path_export_hint() == f'export PATH="{bin_dir}:$PATH"'
+    monkeypatch.setenv("PATH", f"/usr/bin:{bin_dir}")
+    assert cli._path_export_hint() is None
+
+
+def test_setup_url_rotates_token_by_default(tmp_path: Path, capsys) -> None:
+    workspace = tmp_path / "workspace"
+    token_path = workspace / ".runtime" / "setup-token"
+    token_path.parent.mkdir(parents=True)
+    token_path.write_text("stale-token\n", encoding="utf-8")
+
+    assert cli.main(["setup-url", "--workspace", str(workspace)]) == 0
+
+    new_token = token_path.read_text(encoding="utf-8").strip()
+    assert new_token and new_token != "stale-token"
+    out = capsys.readouterr().out
+    assert f"Workspace: {workspace.resolve()}" in out
+    assert f"http://localhost:8443/?setup={new_token}" in out
+
+
+def test_setup_url_no_rotate_reuses_existing_token(tmp_path: Path, capsys) -> None:
+    workspace = tmp_path / "workspace"
+    token_path = workspace / ".runtime" / "setup-token"
+    token_path.parent.mkdir(parents=True)
+    token_path.write_text("keep-me\n", encoding="utf-8")
+
+    assert cli.main(["setup-url", "--workspace", str(workspace), "--no-rotate"]) == 0
+
+    assert token_path.read_text(encoding="utf-8").strip() == "keep-me"
+    assert "http://localhost:8443/?setup=keep-me" in capsys.readouterr().out
+
+
+def test_setup_url_reads_port_from_env(tmp_path: Path, capsys) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".env").write_text("PWA_PORT=9999\n", encoding="utf-8")
+
+    assert cli.main(["setup-url", "--workspace", str(workspace)]) == 0
+
+    assert "http://localhost:9999/?setup=" in capsys.readouterr().out
+
+
 def test_auth_print_only_outputs_terminal_command(capsys) -> None:
     assert cli.main(["auth", "ollama", "--print-only"]) == 0
 

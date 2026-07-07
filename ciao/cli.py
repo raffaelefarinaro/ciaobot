@@ -151,10 +151,87 @@ def _ensure_setup_token(workspace: Path) -> str:
         token = path.read_text(encoding="utf-8").strip()
         if token:
             return token
+    return _rotate_setup_token(workspace)
+
+
+def _rotate_setup_token(workspace: Path) -> str:
+    """Write a fresh one-time setup token, replacing any existing one.
+
+    Unlike ``_ensure_setup_token`` this always mints a new value: use it when
+    the caller wants a guaranteed-valid login URL (the token is redeemed and
+    deleted on first login, so a stale file otherwise yields "invalid setup
+    token"). The app launcher and menu bar read the token live from disk, so
+    they pick up the rotated value on the next open.
+    """
+
+    path = _setup_token_path(workspace)
     token = secrets.token_urlsafe(24)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(token + "\n", encoding="utf-8")
     return token
+
+
+def _pwa_port_from_env(workspace: Path, fallback: int) -> int:
+    """Port the server actually listens on, read from the workspace ``.env``.
+
+    Falls back to ``fallback`` when ``.env`` is absent or has no ``PWA_PORT``,
+    so ``setup-url`` reports a URL that matches a configured install rather
+    than a hard-coded default.
+    """
+
+    env_path = workspace / ".env"
+    if not env_path.exists():
+        return fallback
+    try:
+        from dotenv import dotenv_values
+
+        raw = (dotenv_values(env_path).get("PWA_PORT") or "").strip()
+        return int(raw) if raw else fallback
+    except (OSError, ValueError):
+        return fallback
+
+
+def _path_export_hint() -> str | None:
+    """An ``export PATH=...`` line for the running interpreter's bin dir, or
+    ``None`` when it is already on PATH.
+
+    Ciaobot installs into a standalone venv (``~/.ciaobot-venv``) that is not
+    added to PATH, so ``ciao`` is normally invoked by absolute path. Shell
+    users who want to type ``ciao`` need this hint.
+    """
+
+    # Not .resolve(): a venv's bin/python is a symlink to the base interpreter,
+    # and resolving it would report the base (e.g. Homebrew) bin dir instead of
+    # the venv's own bin/ where the `ciao` entry point actually lives.
+    bin_dir = Path(sys.executable).parent
+    entries = {
+        str(Path(p).expanduser())
+        for p in os.environ.get("PATH", "").split(os.pathsep)
+        if p
+    }
+    if str(bin_dir) in entries:
+        return None
+    return f'export PATH="{bin_dir}:$PATH"'
+
+
+def _print_setup_summary(workspace: Path, port: int) -> None:
+    """Print the resolved workspace, the login URL, and a PATH hint.
+
+    Surfaces the two things setup previously left implicit: which workspace was
+    configured (a mismatch with the running server produces "invalid setup
+    token"), and the URL to open when the generated app is unavailable.
+    """
+
+    token = _setup_token_path(workspace).read_text(encoding="utf-8").strip()
+    base = f"http://localhost:{port}/"
+    url = f"{base}?setup={token}" if token else base
+    print()
+    print(f"Workspace: {workspace}")
+    print(f"Open Ciaobot: {url}")
+    hint = _path_export_hint()
+    if hint is not None:
+        print("To run `ciao` from a shell, add its venv to PATH:")
+        print(f"  {hint}")
 
 
 def _default_app_dir() -> Path:
@@ -546,6 +623,7 @@ def _setup_command(args: argparse.Namespace) -> int:
         Path(args.launch_agents_dir).expanduser() / name
         for name in ("com.ciao.server.plist", "com.ciao.menubar.plist")
     ]
+    root = Path(args.workspace).expanduser().resolve()
     if args.load_launchd:
         rc = 0
         for plist in plists:
@@ -553,9 +631,26 @@ def _setup_command(args: argparse.Namespace) -> int:
             rc = subprocess.run(
                 ["launchctl", "load", "-w", str(plist)], check=False
             ).returncode or rc
+        _print_setup_summary(root, args.port)
         return rc
     for plist in plists:
         print(f"LaunchAgent not loaded. To load it: launchctl load -w {plist}")
+    _print_setup_summary(root, args.port)
+    return 0
+
+
+def _setup_url_command(args: argparse.Namespace) -> int:
+    """Print the localhost login URL for a workspace, minting a fresh one-time
+    setup token by default (``--no-rotate`` reuses the existing token)."""
+
+    root = Path(args.workspace).expanduser().resolve()
+    port = _pwa_port_from_env(root, args.port)
+    if args.rotate:
+        token = _rotate_setup_token(root)
+    else:
+        token = _ensure_setup_token(root)
+    print(f"Workspace: {root}")
+    print(f"http://localhost:{port}/?setup={token}")
     return 0
 
 
@@ -1042,6 +1137,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run launchctl unload/load after writing the LaunchAgent.",
     )
     setup_parser.set_defaults(func=_setup_command)
+
+    setup_url_parser = subparsers.add_parser(
+        "setup-url",
+        help="Print the localhost login URL, minting a fresh setup token.",
+    )
+    setup_url_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=Path(os.environ.get("CIAO_WORKSPACE", ".")),
+        help="Workspace directory (defaults to $CIAO_WORKSPACE or cwd).",
+    )
+    setup_url_parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("CIAO_PORT", "8443")),
+        help="Fallback port when the workspace .env has no PWA_PORT.",
+    )
+    setup_url_parser.add_argument(
+        "--rotate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Mint a fresh token (default); --no-rotate reuses the existing one.",
+    )
+    setup_url_parser.set_defaults(func=_setup_url_command)
 
     auth_parser = subparsers.add_parser(
         "auth",
