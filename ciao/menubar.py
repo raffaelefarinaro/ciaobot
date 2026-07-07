@@ -281,10 +281,13 @@ def run_menubar(workspace: Path, port: int) -> int:
     except Exception:
         pass
 
-    face = icon_path("face.png")
-    face_scared = icon_path("face_scared.png")
+    # Monochrome template images (black + alpha): macOS tints them to
+    # match the menu bar, like the built-in status icons. Regenerate
+    # with scripts/make_menubar_template_icons.py.
+    face = icon_path("face_template.png")
+    face_scared = icon_path("face_scared_template.png")
 
-    app = rumps.App("Ciaobot", icon=face, quit_button=None)
+    app = rumps.App("Ciaobot", icon=face, template=True, quit_button=None)
 
     # Only notify for entries newer than launch, not the whole backlog.
     state = {
