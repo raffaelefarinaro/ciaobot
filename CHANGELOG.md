@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.1 - 2026-07-07
+
+### Added
+- feat: LaunchAgents identify as Ciaobot; app launcher starts the server (#25) (`ba2ccbb`)
+
 ## v0.4.0 - 2026-07-07
 
 ### Added
