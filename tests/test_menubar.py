@@ -187,6 +187,19 @@ def test_notification_menu_title_truncates() -> None:
     assert title.endswith("…")
 
 
+def test_chat_menu_title_marks_unread_with_dot() -> None:
+    assert menubar.chat_menu_title("Test", unread=True) == "● Test"
+    assert menubar.chat_menu_title("Test", unread=False) == "Test"
+    assert menubar.chat_menu_title("x" * 80, unread=True, max_length=10).endswith("…")
+    assert menubar.chat_menu_title("x" * 80, unread=True, max_length=10).startswith("● ")
+
+
+def test_menubar_badge_title() -> None:
+    assert menubar.menubar_badge_title(0) == ""
+    assert menubar.menubar_badge_title(3) == "3"
+    assert menubar.menubar_badge_title(100) == "99+"
+
+
 def test_chat_url_deep_links_to_chat(tmp_path: Path) -> None:
     assert menubar.chat_url(tmp_path, 8443, "abc") == "http://localhost:8443/chat/abc"
     assert menubar.chat_url(tmp_path, 8443, "") == "http://localhost:8443/"
@@ -288,65 +301,6 @@ def test_read_unread_chats_filters_read_and_sorts_by_activity(tmp_path: Path) ->
 
     assert [chat.chat_id for chat in unread] == ["unread-new", "unread-old"]
     assert [chat.title for chat in unread] == ["Unread new", "Unread old"]
-
-
-def test_read_menu_notifications_keeps_unread_log_entries(tmp_path: Path) -> None:
-    state = tmp_path / ".runtime" / "web_projects.json"
-    state.parent.mkdir(parents=True)
-    state.write_text(
-        json.dumps(
-            {
-                "chats": {
-                    "c1": {
-                        "title": "Chat one",
-                        "last_activity_at": "2026-01-02T10:00:00",
-                        "last_read_at": "2026-01-01T10:00:00",
-                    },
-                    "c2": {
-                        "title": "Chat two",
-                        "last_activity_at": "2026-01-02T10:00:00",
-                        "last_read_at": "2026-01-02T11:00:00",
-                    },
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    _write_log(
-        tmp_path,
-        [
-            {
-                "ts": 1.0,
-                "title": "Ciaobot",
-                "body": "Read chat ping",
-                "chat_id": "c2",
-            },
-            {
-                "ts": 2.0,
-                "title": "Ciaobot",
-                "body": "Unread chat ping",
-                "chat_id": "c1",
-            },
-        ],
-    )
-
-    entries = menubar.read_menu_notifications(tmp_path)
-
-    assert len(entries) == 1
-    assert entries[0].body == "Unread chat ping"
-    assert entries[0].chat_id == "c1"
-
-
-def test_menu_notification_fingerprint_prefers_log_entries() -> None:
-    notifications = [
-        menubar.Notification(ts=1.0, title="Ciaobot", body="Hi", chat_id="c1")
-    ]
-    unread = [menubar.OpenChat(chat_id="c1", title="Chat", last_activity_at="")]
-
-    assert menubar.menu_notification_fingerprint(notifications, unread) == (
-        (1.0, "c1", "Ciaobot", "Hi"),
-    )
-    assert menubar.menu_notification_fingerprint([], unread) == (("c1", "Chat"),)
 
 
 def test_read_open_chats_missing_state_returns_empty(tmp_path: Path) -> None:

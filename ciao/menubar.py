@@ -150,6 +150,25 @@ def notification_menu_title(notification: Notification, *, max_length: int = 60)
     return text
 
 
+def chat_menu_title(title: str, *, unread: bool, max_length: int = 58) -> str:
+    """Menu label for an open chat; prefix with a dot when it has unread activity."""
+
+    text = title.strip() or "Untitled chat"
+    if len(text) > max_length:
+        text = text[: max_length - 1] + "…"
+    return f"● {text}" if unread else text
+
+
+def menubar_badge_title(unread_count: int) -> str:
+    """Short count shown beside the menu bar icon (empty when there is nothing unread)."""
+
+    if unread_count <= 0:
+        return ""
+    if unread_count > 99:
+        return "99+"
+    return str(unread_count)
+
+
 def chat_url(workspace: Path, port: int, chat_id: str) -> str:
     base = f"http://localhost:{port}"
     return f"{base}/chat/{chat_id}" if chat_id else open_url(workspace, port)
@@ -227,29 +246,6 @@ def read_unread_chats(workspace: Path, *, limit: int = 10) -> list[OpenChat]:
         unread.append(_open_chat_from_state(chat_id, chat))
     unread.sort(key=lambda chat: chat.last_activity_at, reverse=True)
     return unread[:limit]
-
-
-def read_menu_notifications(workspace: Path, *, limit: int = 10) -> list[Notification]:
-    """Recent notification-log entries whose chat is still unread — mirrors the bell."""
-
-    chats = _load_chats(workspace)
-    unread: list[Notification] = []
-    for entry in read_notifications(workspace, limit=limit * 3):
-        if entry.chat_id and not chat_is_unread(chats.get(entry.chat_id, {})):
-            continue
-        unread.append(entry)
-        if len(unread) >= limit:
-            break
-    return unread
-
-
-def menu_notification_fingerprint(
-    notifications: list[Notification],
-    unread_chats: list[OpenChat],
-) -> tuple[tuple[float, str, str, str], ...] | tuple[tuple[str, str], ...]:
-    if notifications:
-        return tuple((n.ts, n.chat_id, n.title, n.body) for n in notifications)
-    return tuple((chat.chat_id, chat.title) for chat in unread_chats)
 
 
 _INET_RE = re.compile(r"^\s*inet (\d+\.\d+\.\d+\.\d+)", re.MULTILINE)
@@ -396,18 +392,6 @@ def run_menubar(workspace: Path, port: int) -> int:
 
         return _callback
 
-    def _open_notification_callback(entry: Notification):
-        def _callback(_sender) -> None:
-            if entry.chat_id:
-                subprocess.run(
-                    ["open", chat_url(workspace, port, entry.chat_id)],
-                    check=False,
-                )
-            else:
-                subprocess.run(open_app_command(workspace, port), check=False)
-
-        return _callback
-
     def _copy_address_callback(url: str):
         def _callback(_sender) -> None:
             copy_to_clipboard(url)
@@ -491,30 +475,10 @@ def run_menubar(workspace: Path, port: int) -> int:
     def _rebuild_menu(
         status: ServerStatus,
         chats: list[OpenChat],
-        unread_chats: list[OpenChat],
-        menu_notifications: list[Notification],
+        unread_ids: set[str],
         addresses: list[str],
         pkg: dict[str, object],
     ) -> None:
-        notification_items: list[object] = []
-        if menu_notifications:
-            for entry in menu_notifications:
-                notification_items.append(
-                    rumps.MenuItem(
-                        notification_menu_title(entry),
-                        callback=_open_notification_callback(entry),
-                    )
-                )
-        elif unread_chats:
-            for chat in unread_chats:
-                title = chat.title if len(chat.title) <= 60 else chat.title[:59] + "…"
-                notification_items.append(
-                    rumps.MenuItem(title, callback=_open_chat_callback(chat.chat_id))
-                )
-        else:
-            notification_items = [_disabled_item(rumps, "No unread notifications")]
-        notification_section = [*notification_items, None]
-
         addresses_menu = rumps.MenuItem("Addresses (click to copy)")
         for url in addresses:
             addresses_menu.add(rumps.MenuItem(url, callback=_copy_address_callback(url)))
@@ -522,7 +486,7 @@ def run_menubar(workspace: Path, port: int) -> int:
         # Open chats live directly in the menu, no header — just the list.
         chat_items = [
             rumps.MenuItem(
-                chat.title if len(chat.title) <= 60 else chat.title[:59] + "…",
+                chat_menu_title(chat.title, unread=chat.chat_id in unread_ids),
                 callback=_open_chat_callback(chat.chat_id),
             )
             for chat in chats
@@ -549,7 +513,6 @@ def run_menubar(workspace: Path, port: int) -> int:
             _disabled_item(rumps, status_label(status)),
             *update_section,
             *chat_section,
-            *notification_section,
             addresses_menu,
             None,
             _mute_item(),
@@ -572,26 +535,25 @@ def run_menubar(workspace: Path, port: int) -> int:
         log_entries = read_notifications(workspace)
         chats = read_open_chats(workspace)
         unread_chats = read_unread_chats(workspace)
-        menu_notifications = read_menu_notifications(workspace)
+        unread_ids = {chat.chat_id for chat in unread_chats}
         chats_by_id = _load_chats(workspace)
         addresses = server_addresses(port)
         pkg = status_fetcher()
         state["package_status"] = pkg
+        app.title = menubar_badge_title(len(unread_ids))
 
         # Rebuild only when content changed so an open menu doesn't flicker.
         fingerprint = (
             status,
-            tuple((c.chat_id, c.title) for c in chats),
-            menu_notification_fingerprint(menu_notifications, unread_chats),
+            tuple((c.chat_id, c.title, c.chat_id in unread_ids) for c in chats),
+            len(unread_ids),
             tuple(addresses),
             package_update_fingerprint(pkg),
             state["updating"],
         )
         if fingerprint != state["fingerprint"]:
             state["fingerprint"] = fingerprint
-            _rebuild_menu(
-                status, chats, unread_chats, menu_notifications, addresses, pkg
-            )
+            _rebuild_menu(status, chats, unread_ids, addresses, pkg)
 
         # Banner only for new log lines whose chat is still unread (same rule
         # as the PWA bell). Reading a chat in the webapp clears it here too.
@@ -604,7 +566,7 @@ def run_menubar(workspace: Path, port: int) -> int:
         ]
         if fresh:
             # Advance the cursor even when muted so unmuting doesn't replay
-            # the backlog; the menu still lists unread notifications only.
+            # the backlog; unread chats show a dot in the open-chat list.
             state["last_seen_ts"] = max(entry.ts for entry in fresh)
             if not state["banners_muted"]:
                 for entry in fresh[:3]:
