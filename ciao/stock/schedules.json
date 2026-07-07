@@ -43,27 +43,6 @@
       "prompt": "Run the skill-evolution maintenance pipeline with the configured model. Surface generated proposals and any failed gates. Do not apply proposals automatically."
     },
     {
-      "schedule_id": "system-dependency-review",
-      "title": "Dependency review",
-      "scope": "system",
-      "editable": false,
-      "removable": false,
-      "enabled": true,
-      "frequency": "weekly",
-      "daily_time_utc": "09:00",
-      "days_of_week": ["mon"],
-      "day_of_month": null,
-      "run_at_date": null,
-      "timezone_name": "UTC",
-      "archive_policy": "auto",
-      "provider": "",
-      "model": "",
-      "workspace": "default",
-      "web_project_id": "",
-      "web_chat_id": null,
-      "prompt": "Run the dependency review pipeline and report new releases, deprecations, and concrete follow-up actions. If the command fails, report the failure instead of claiming no changes."
-    },
-    {
       "schedule_id": "system-error-triage",
       "title": "Runtime error triage",
       "scope": "system",

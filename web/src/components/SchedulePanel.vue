@@ -18,7 +18,7 @@
           v-if="schedule && !editing"
           class="btn-small"
           :class="{ 'btn-running': showRunning }"
-          :disabled="startingRun && !runningChatId"
+          :disabled="isStarting && !runningChatId"
           @click="onRunButtonClick"
         >
           {{ showRunning ? 'Running...' : 'Run now' }}
@@ -199,8 +199,8 @@ const projectStore = useProjectStore()
 
 const allDays = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
 const editing = ref(false)
-const startingRun = ref(false)
-// schedule_id -> chat_id for manual runs still in flight
+const startingBySchedule = ref<Set<string>>(new Set())
+// schedule_id -> chat_id while the linked chat is still streaming
 const runningBySchedule = ref<Record<string, string>>({})
 const editData = ref({
   time: '',
@@ -223,25 +223,54 @@ const schedule = computed(() =>
   store.schedules.find(s => s.schedule_id === scheduleId.value) || null,
 )
 
-watch(scheduleId, () => { editing.value = false })
+watch(scheduleId, () => {
+  editing.value = false
+  purgeFinishedRuns()
+})
+
+const isStarting = computed(() =>
+  scheduleId.value ? startingBySchedule.value.has(scheduleId.value) : false,
+)
 
 const runningChatId = computed(() =>
   scheduleId.value ? runningBySchedule.value[scheduleId.value] : undefined,
 )
 
-const showRunning = computed(() =>
-  startingRun.value || Boolean(runningChatId.value),
-)
+const showRunning = computed(() => {
+  if (isStarting.value) return true
+  const chatId = runningChatId.value
+  return chatId ? projectStore.isChatStreaming(chatId) : false
+})
+
+function purgeFinishedRuns() {
+  const next: Record<string, string> = {}
+  for (const [sid, chatId] of Object.entries(runningBySchedule.value)) {
+    if (projectStore.isChatStreaming(chatId)) next[sid] = chatId
+  }
+  runningBySchedule.value = next
+}
+
+const lastStreamingBySchedule = ref<Record<string, boolean>>({})
 
 watch(
-  () => runningChatId.value && projectStore.isChatStreaming(runningChatId.value),
-  (streaming) => {
-    if (!streaming && scheduleId.value && runningBySchedule.value[scheduleId.value]) {
-      const next = { ...runningBySchedule.value }
-      delete next[scheduleId.value]
-      runningBySchedule.value = next
+  () => Object.entries(runningBySchedule.value).map(([sid, chatId]) => ({
+    sid,
+    streaming: projectStore.isChatStreaming(chatId),
+  })),
+  (entries) => {
+    const next = { ...runningBySchedule.value }
+    let changed = false
+    for (const { sid, streaming } of entries) {
+      const wasStreaming = lastStreamingBySchedule.value[sid] ?? false
+      lastStreamingBySchedule.value[sid] = streaming
+      if (wasStreaming && !streaming && next[sid]) {
+        delete next[sid]
+        changed = true
+      }
     }
+    if (changed) runningBySchedule.value = next
   },
+  { deep: true },
 )
 
 // Overview (homepage): soonest upcoming runs and missed runs (expected to
@@ -414,17 +443,25 @@ function openRunningChat() {
 }
 
 function onRunButtonClick() {
-  if (runningChatId.value) {
+  if (showRunning.value && runningChatId.value) {
     openRunningChat()
     return
   }
   void runNow()
 }
 
+function stopStarting(scheduleKey: string) {
+  if (!startingBySchedule.value.has(scheduleKey)) return
+  const next = new Set(startingBySchedule.value)
+  next.delete(scheduleKey)
+  startingBySchedule.value = next
+}
+
 async function runNow() {
-  if (!schedule.value || startingRun.value) return
-  startingRun.value = true
+  if (!schedule.value) return
   const scheduleKey = schedule.value.schedule_id
+  if (startingBySchedule.value.has(scheduleKey)) return
+  startingBySchedule.value = new Set([...startingBySchedule.value, scheduleKey])
   try {
     const result = await store.runScheduleNow(scheduleKey)
     await store.fetchSchedules()
@@ -437,9 +474,13 @@ async function runNow() {
         title: 'Schedule started',
         body: schedule.value.title || promptTitle(schedule.value.prompt),
       })
+      // Keep "Running..." through the API→stream handoff.
+      for (let i = 0; i < 50 && !projectStore.isChatStreaming(result.chat_id); i++) {
+        await new Promise(resolve => window.setTimeout(resolve, 100))
+      }
     }
   } finally {
-    startingRun.value = false
+    stopStarting(scheduleKey)
   }
 }
 

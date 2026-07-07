@@ -1,8 +1,4 @@
-"""Tests for the per-device config knobs (schedule dispatch, workspaces).
-
-Only the designated "main" device sets ``CIAO_DISPATCH_SCHEDULES`` so
-schedules never double-fire when an occasional dev box is also running.
-"""
+"""Tests for the per-device config knobs (workspaces, vault layout)."""
 
 from __future__ import annotations
 
@@ -16,19 +12,6 @@ def _config(**overrides: str) -> CiaoConfig:
     env = {"PWA_AUTH_TOKEN": "test-token"}
     env.update(overrides)
     return CiaoConfig.from_env(env)
-
-
-def test_default_does_not_dispatch() -> None:
-    config = _config()
-    assert config.dispatch_schedules is False
-
-
-def test_dispatch_flag_is_opt_in() -> None:
-    assert _config(CIAO_DISPATCH_SCHEDULES="1").dispatch_schedules is True
-    assert _config(CIAO_DISPATCH_SCHEDULES="true").dispatch_schedules is True
-    assert _config(CIAO_DISPATCH_SCHEDULES="ON").dispatch_schedules is True
-    assert _config(CIAO_DISPATCH_SCHEDULES="0").dispatch_schedules is False
-    assert _config(CIAO_DISPATCH_SCHEDULES="").dispatch_schedules is False
 
 
 def test_vault_root_defaults_under_workspace_root(tmp_path: Path) -> None:

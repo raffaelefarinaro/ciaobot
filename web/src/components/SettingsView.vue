@@ -3423,16 +3423,6 @@ async function doPackageUpdate() {
   overflow-x: auto;
 }
 
-.pause-badge {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-size: var(--text-sm);
-  font-weight: 600;
-  background: var(--success, #4caf50);
-  color: white;
-}
-
 .instance-toggle {
   display: flex;
   gap: 0;
