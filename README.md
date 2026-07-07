@@ -36,8 +36,10 @@ The model is project-first: a workspace represents a life area (personal, work, 
 
 Install from the [latest release](https://github.com/raffaelefarinaro/ciaobot/releases/latest) — the wheel ships with the pre-built PWA:
 
+Requires Python 3.12 or newer (use whichever `python3.X` you have, e.g. `brew install python@3.13`):
+
 ```bash
-python3.12 -m venv ~/.ciaobot-venv
+python3.13 -m venv ~/.ciaobot-venv
 ~/.ciaobot-venv/bin/pip install https://github.com/raffaelefarinaro/ciaobot/releases/download/v0.2.1/ciao-0.2.1-py3-none-any.whl
 ~/.ciaobot-venv/bin/ciao setup --workspace ~/ciao-workspace
 ~/.ciaobot-venv/bin/ciao run
