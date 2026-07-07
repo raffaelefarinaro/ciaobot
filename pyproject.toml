@@ -61,6 +61,7 @@ packages = ["ciao", "ciao.context", "ciao.observability", "ciao.providers", "cia
   "commands/*.md",
   "deploy/*.tmpl",
   "deploy/*.icns",
+  "deploy/*.png",
   "public/*.md",
   "workspace/*.md",
   "skills/.gitkeep",

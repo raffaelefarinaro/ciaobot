@@ -25,10 +25,6 @@ jobs:
         run: |
           npm ci
           npm run build
-      - name: Restore committed static assets clobbered by the PWA build
-        # The Vite build empties ciao/web/static and deletes the committed
-        # menu bar template icons (see issue #12).
-        run: git checkout -- ciao/web/static/face_scared_template.png ciao/web/static/face_template.png
       - name: Build wheel and sdist
         run: |
           python -m pip install --quiet build

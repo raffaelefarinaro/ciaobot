@@ -81,7 +81,9 @@ def view_logs_command(workspace: Path) -> list[str]:
 
 
 def icon_path(name: str) -> str:
-    return str(resources.files("ciao.web").joinpath("static", name))
+    # Menu bar assets ship in ciao.stock/deploy: the PWA build empties
+    # ciao/web/static, so nothing committed may live there.
+    return str(resources.files("ciao.stock").joinpath("deploy", name))
 
 
 @dataclass(frozen=True, slots=True)

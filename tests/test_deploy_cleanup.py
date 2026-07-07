@@ -11,7 +11,7 @@ def test_deploy_folder_has_no_private_reverse_proxy_or_absolute_paths() -> None:
     deploy_text = "\n".join(
         path.read_text(encoding="utf-8")
         for path in (repo / "ciao" / "stock" / "deploy").rglob("*")
-        if path.is_file() and path.suffix != ".icns"
+        if path.is_file() and path.suffix not in {".icns", ".png"}
     )
     forbidden = (
         "raff" + "aelefarinaro",
