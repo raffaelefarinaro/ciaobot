@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.2.1 - 2026-07-07
+
+### Added
+- feat: macOS menu bar companion showing Ciaobot server status (`7f7973b`)
+- feat: menu bar notifications, open chats, reachable addresses; app bundle icon (`f7753a3`)
+- feat: install Ciaobot.app to /Applications; open chats inline in menu bar (`ce5fbf1`)
+- feat: mute-banners toggle in menu bar; drop Open Chats header (`0ca7323`)
+- feat: backfill WebSearch on OpenRouter-routed chats via web plugin (#8) (`f20dabe`)
+- feat: monochrome template icon for the macOS menu bar (#9) (`f1ed5ea`)
+- feat: ciao-capabilities stock skill + onboarding capabilities tour (#10) (`ec62913`)
+
+### Fixed
+- fix: install Homebrew formula from the release sdist, not the source tarball (`c4ff29e`)
+
+### Maintenance
+- chore: set Homebrew formula sha256 for v0.2.0 tarball (`b50e045`)
+- docs: add release install instructions to README; note PWA build for source installs (`8b90d0b`)
+
 ## v0.2.0 - 2026-07-06
 
 First public release of Ciaobot: a local-first web app that turns Claude Code into a personal assistant and second brain, with chats, projects, files, schedules, and memory in one interface.
