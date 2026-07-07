@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.2 - 2026-07-07
+
+### Fixed
+- fix: never create/switch workspace branches; smooth fresh-install start (#14) (`ad6451a`)
+
+### Maintenance
+- chore: set Homebrew formula sha256 for v0.2.1 tarball; bump README install URL (`6c98ad6`)
+- chore: remove Homebrew distribution support (pip-only for now) (#13) (`5800358`)
+
 ## v0.2.1 - 2026-07-07
 
 ### Added
