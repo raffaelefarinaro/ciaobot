@@ -905,13 +905,15 @@ class ProjectChatManager:
                 f"1. **Analyze Folder**: Scan the existing vault directory to see what directories and files are present.\n"
                 f"2. **Structure Verification**: Check if the standard directories (`personal/`, `work/`, `Templates/`) exist. If not, plan to create them.\n"
                 f"3. **Hygiene & Scaffolding**: Verify if `CLAUDE.md` (defining identity, memory, styles) and `MEMORY.md` exist. If missing, plan to create them using clean Markdown structures (no em-dashes, no horizontal rules `---` as section dividers).\n"
-                f"4. **Onboarding Interview**: Ask the user 2-3 important questions to collect basic info (their name, their role/work context, key people, and active projects) to populate `CLAUDE.md` and `MEMORY.md` correctly.\n\n"
+                f"4. **Onboarding Interview**: Ask the user 2-3 important questions to collect basic info (their name, their role/work context, key people, and active projects) to populate `CLAUDE.md` and `MEMORY.md` correctly.\n"
+                f"5. **Capabilities Tour**: Once the interview is done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill) and mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
                 f"Introduce yourself to the user, tell them you've scanned their vault at `{vault_root}`, outline your findings, and ask the first onboarding questions to fill out their profile."
             )
             assistant_msg = (
                 f"Hello! I am Ciaobot, your agentic second brain. 👋\n\n"
                 f"I've initialized our session and connected to your existing folder at `{vault_root}`. "
                 f"I'm ready to inspect your vault, organize it into Ciaobot's structure, and bootstrap our core notes. "
+                f"You can also ask me **\"what can Ciaobot do?\"** anytime for a tour of the app. "
                 f"To get started, tell me: **What is your name, and what is your primary focus (work/personal) right now?**"
             )
         else:
@@ -923,13 +925,15 @@ class ProjectChatManager:
                 f"Your task is to bootstrap the vault structure and core documentation:\n"
                 f"1. **Create Directory Structure**: Plan to create: `personal/`, `work/`, and `Templates/` (scaffold markdown templates for logs, projects, and people).\n"
                 f"2. **Generate Core Files**: Plan to generate clean initial templates for `CLAUDE.md` (defining instructions, memory rules, styles) and `MEMORY.md`.\n"
-                f"3. **Onboarding Interview**: Ask the user 2-3 important questions to collect basic info (their name, GWS profiles, key projects) to customize `CLAUDE.md` and `MEMORY.md`.\n\n"
+                f"3. **Onboarding Interview**: Ask the user 2-3 important questions to collect basic info (their name, GWS profiles, key projects) to customize `CLAUDE.md` and `MEMORY.md`.\n"
+                f"4. **Capabilities Tour**: Once the interview is done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill) and mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
                 f"Introduce yourself to the user, explain that you are starting fresh at `{vault_root}`, and ask the first onboarding questions to bootstrap your profile."
             )
             assistant_msg = (
                 f"Hello! I am Ciaobot, your agentic second brain. 👋\n\n"
                 f"Welcome! I've initialized our workspace at `{vault_root}` from scratch. "
                 f"I'm ready to create our core structure (`personal/`, `work/`, `Templates/`) and customize our settings. "
+                f"You can also ask me **\"what can Ciaobot do?\"** anytime for a tour of the app. "
                 f"To begin, tell me: **What is your name, and what is your primary focus (work/personal) right now?**"
             )
 
