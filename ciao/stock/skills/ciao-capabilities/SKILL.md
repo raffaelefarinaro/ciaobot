@@ -59,7 +59,7 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 
 - **Settings page**: provider keys, model lists, skill/agent inventory, the injected system prompt (read-only), and local package updates from the UI.
 - **macOS extras**: a menu bar companion (`ciao menubar`) with server status and open/restart/logs actions (the Ciaobot face turns scared when the server is down), a `Ciaobot.app` shortcut, and LaunchAgents so everything starts on login.
-- **Local HTTP API**: the app exposes an API an in-chat agent can drive (create chats, subagents, commands) — recipes are in `PWA_API.md`, which ships with every release.
+- **Local HTTP API**: the app exposes an API an in-chat agent can drive (create chats, subagents, commands) — recipes are in `PWA_API.md` in the Ciaobot GitHub repo (`raffaelefarinaro/ciaobot`); fetch it when you need the raw API surface. For the common cases, the shipped `create-chat` and `ciao-schedules` skills already contain the working recipes.
 
 ### Privacy and trust posture
 
@@ -82,4 +82,4 @@ Close with: they can ask "what can Ciaobot do?" (or about any specific feature) 
 
 - Workspace customization surface (env vars, workspaces registry, tool deny-lists, model routing): `CIAO_CUSTOMIZATION.md` in the workspace root.
 - Schedules how-to: the `ciao-schedules` skill. Spawning chats: the `create-chat` skill. Vault conventions: the `vault-read` skill.
-- Canonical docs (shipped with releases and in the source repo): `README.md`, `docs/ARCHITECTURE.md`, and `PWA_API.md` (routes, auth, agent recipes).
+- Canonical docs in the Ciaobot GitHub repo (`raffaelefarinaro/ciaobot`, also present in source checkouts): `README.md`, `docs/ARCHITECTURE.md`, and `PWA_API.md` (routes, auth, agent recipes).
