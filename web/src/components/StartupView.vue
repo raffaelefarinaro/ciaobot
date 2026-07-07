@@ -3,7 +3,7 @@
     <div class="startup-content">
       <div class="startup-head">
         <span class="wordmark wordmark--lg">ciaobot</span>
-        <span class="startup-version">boot · v0.1</span>
+        <span class="startup-version">boot · v{{ version || '…' }}</span>
       </div>
 
       <!-- Mono progress bar: filled █, partial ▓, empty ░ -->
@@ -58,6 +58,7 @@ interface Phase {
 const props = defineProps<{
   phases: Phase[]
   overallReady: boolean
+  version?: string
 }>()
 
 defineEmits<{
@@ -82,7 +83,6 @@ function phaseLabel(name: string): string {
     connect_pi: 'connect_pi',
     sync_workspace: 'sync_workspace',
     refresh_vault_index: 'refresh_vault_index',
-    rebuild_pwa: 'rebuild_pwa',
     update_skills: 'update_skills',
     server_starting: 'server_starting',
   }

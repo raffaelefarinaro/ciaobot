@@ -2976,10 +2976,12 @@ async def status_endpoint(request: Request) -> JSONResponse:
 
 async def startup_status_endpoint(request: Request) -> JSONResponse:
     """Return startup phase progress."""
+    from ciao import __version__
+
     tracker = getattr(request.app.state, "startup_tracker", None)
     if tracker is None:
-        return JSONResponse({"phases": [], "overall_ready": True})
-    return JSONResponse(tracker.to_dict())
+        return JSONResponse({"phases": [], "overall_ready": True, "version": __version__})
+    return JSONResponse({**tracker.to_dict(), "version": __version__})
 
 
 async def setup_status_endpoint(request: Request) -> JSONResponse:
