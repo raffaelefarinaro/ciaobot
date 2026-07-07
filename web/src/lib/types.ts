@@ -355,7 +355,6 @@ export interface AdminStatus {
   models: string[]
   default_model: string
   default_mode: string
-  dispatch_schedules?: boolean
 }
 
 export interface LocalStatus {

@@ -14,8 +14,14 @@
         </div>
       </template>
       <template #actions>
-        <button v-if="schedule && !editing" class="btn-small" @click="runNow" :disabled="runningNow">
-          {{ runningNow ? 'Running...' : 'Run now' }}
+        <button
+          v-if="schedule && !editing"
+          class="btn-small"
+          :class="{ 'btn-running': showRunning }"
+          :disabled="startingRun && !runningChatId"
+          @click="onRunButtonClick"
+        >
+          {{ showRunning ? 'Running...' : 'Run now' }}
         </button>
         <button v-if="schedule && !editing && schedule.scope !== 'system'" class="btn-small" @click="startEdit">Edit</button>
         <button v-if="schedule && !editing && schedule.scope !== 'system'" class="btn-small btn-danger" @click="onDelete">Delete</button>
@@ -193,7 +199,9 @@ const projectStore = useProjectStore()
 
 const allDays = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
 const editing = ref(false)
-const runningNow = ref(false)
+const startingRun = ref(false)
+// schedule_id -> chat_id for manual runs still in flight
+const runningBySchedule = ref<Record<string, string>>({})
 const editData = ref({
   time: '',
   prompt: '',
@@ -216,6 +224,25 @@ const schedule = computed(() =>
 )
 
 watch(scheduleId, () => { editing.value = false })
+
+const runningChatId = computed(() =>
+  scheduleId.value ? runningBySchedule.value[scheduleId.value] : undefined,
+)
+
+const showRunning = computed(() =>
+  startingRun.value || Boolean(runningChatId.value),
+)
+
+watch(
+  () => runningChatId.value && projectStore.isChatStreaming(runningChatId.value),
+  (streaming) => {
+    if (!streaming && scheduleId.value && runningBySchedule.value[scheduleId.value]) {
+      const next = { ...runningBySchedule.value }
+      delete next[scheduleId.value]
+      runningBySchedule.value = next
+    }
+  },
+)
 
 // Overview (homepage): soonest upcoming runs and missed runs (expected to
 // fire, no trigger recorded — flagged server-side via the `missed` field).
@@ -380,13 +407,29 @@ async function saveEdit() {
   editing.value = false
 }
 
+function openRunningChat() {
+  const chatId = runningChatId.value
+  if (!chatId) return
+  router.push(`/chat/${chatId}`)
+}
+
+function onRunButtonClick() {
+  if (runningChatId.value) {
+    openRunningChat()
+    return
+  }
+  void runNow()
+}
+
 async function runNow() {
-  if (!schedule.value) return
-  runningNow.value = true
+  if (!schedule.value || startingRun.value) return
+  startingRun.value = true
+  const scheduleKey = schedule.value.schedule_id
   try {
-    const result = await store.runScheduleNow(schedule.value.schedule_id)
+    const result = await store.runScheduleNow(scheduleKey)
     await store.fetchSchedules()
     if (result.chat_id) {
+      runningBySchedule.value = { ...runningBySchedule.value, [scheduleKey]: result.chat_id }
       // Refresh chats so the new chat is available for navigation
       await projectStore.fetchAll()
       projectStore.pushToast({
@@ -396,7 +439,7 @@ async function runNow() {
       })
     }
   } finally {
-    runningNow.value = false
+    startingRun.value = false
   }
 }
 
@@ -594,4 +637,11 @@ function closeSchedule() {
   justify-content: center;
 }
 .close-btn:hover { color: var(--fg); }
+
+.btn-running:not(:disabled) {
+  cursor: pointer;
+}
+.btn-running:not(:disabled):hover {
+  filter: brightness(1.08);
+}
 </style>

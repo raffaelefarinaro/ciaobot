@@ -292,10 +292,6 @@ class CiaoConfig:
     pwa_port: int = 8443
     pwa_host: str = "0.0.0.0"
     gws_default_profile: str = "personal"
-    # Only the always-on "main" device dispatches scheduled automations, so
-    # schedules never double-fire when an occasional dev box is also running.
-    # Off by default (opt-in); the main device sets ``CIAO_DISPATCH_SCHEDULES=1``.
-    dispatch_schedules: bool = False
     # Models in `ollama.models` get rerouted to a local Ollama daemon via
     # the Anthropic-compatible API. Empty allowlist disables the routing.
     ollama: OllamaSettings = field(default_factory=OllamaSettings)
@@ -671,8 +667,6 @@ class CiaoConfig:
             pwa_port=int(source.get("PWA_PORT", "8443")),
             pwa_host=source.get("PWA_HOST", "0.0.0.0").strip(),
             gws_default_profile=gws_default_profile,
-            dispatch_schedules=source.get("CIAO_DISPATCH_SCHEDULES", "").strip().lower()
-            in {"1", "true", "yes", "on"},
             ollama=ollama_settings,
             openrouter=openrouter_settings,
             default_model_personal=default_model_personal,

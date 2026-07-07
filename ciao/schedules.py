@@ -456,13 +456,11 @@ class ScheduleManager:
             [ScheduleEntry, str, str, BridgeMode, str], str | None
         ]
         | None = None,
-        is_paused: Callable[[], bool] | None = None,
     ) -> None:
         self._store = store
         self._resolve_target = resolve_target
         self._dispatch_to_web = dispatch_to_web
         self._prepare_chat = prepare_chat
-        self._is_paused = is_paused
         self._loop_task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
@@ -561,8 +559,6 @@ class ScheduleManager:
         Returns the schedule_id and, when available, the chat_id of the
         created/target chat so the frontend can link to it.
         """
-        if self._is_paused is not None and self._is_paused():
-            raise RuntimeError("Instance is paused; cannot run schedule now.")
         entry = self._store.get(schedule_id)
         if entry is None:
             raise ValueError(f"Schedule '{schedule_id}' not found.")
@@ -576,16 +572,13 @@ class ScheduleManager:
         chat_id: str | None = None
         if self._prepare_chat is not None:
             chat_id = self._prepare_chat(entry, entry.prompt, model, mode, provider)
-        should_wait = entry.archive_policy == "auto"
-        if should_wait:
-            dispatch_result = await self._dispatch_entry_and_wait(
-                entry, model, mode, provider, target_chat_id=chat_id
-            )
-        else:
-            await self._dispatch_entry(
-                entry, model, mode, provider, target_chat_id=chat_id
-            )
-            dispatch_result = {}
+        # Always dispatch in the background for manual "Run now" so the API can
+        # return the prepared chat_id immediately and the PWA can link to the
+        # live run while it is still streaming.
+        await self._dispatch_entry(
+            entry, model, mode, provider, target_chat_id=chat_id
+        )
+        dispatch_result: dict = {}
         # One-off schedules are consumed by any fire path (auto, catch-up,
         # or "Run now"). Removing the entry here keeps the semantics simple:
         # once it has run, it's gone. Stamp the dispatch timestamp FIRST so
@@ -610,11 +603,6 @@ class ScheduleManager:
 
     async def tick(self, now: datetime | None = None) -> None:
         current = now or _now_utc()
-        if self._is_paused is not None and self._is_paused():
-            # Paused: don't dispatch, don't mark last_triggered_on.
-            # When the instance resumes, schedules whose minute has already
-            # passed for the day won't fire until the next matching tick.
-            return
         for entry in self._store.list():
             # Manual and disabled schedules never auto-fire.
             if entry.frequency == "manual" or not entry.enabled:
@@ -669,13 +657,11 @@ class ScheduleManager:
         Scope: today only. Missed runs from *previous* days are NOT replayed,
         because a stale "morning briefing" from yesterday is worse than none.
 
-        Called once on startup. Respects pause state and the same day-of-week /
-        day-of-month filters that `tick` uses.
+        Called once on startup. Respects the same day-of-week / day-of-month
+        filters that `tick` uses.
 
         Returns the list of schedule_ids that were fired.
         """
-        if self._is_paused is not None and self._is_paused():
-            return []
         current = now or _now_utc()
         fired: list[str] = []
         for entry in self._store.list():

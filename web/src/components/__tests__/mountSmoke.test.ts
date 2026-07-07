@@ -63,8 +63,7 @@ vi.mock('../../lib/api', () => {
     },
   }
   const responses: Record<string, unknown> = {
-    '/api/instance/pause': { paused: false, reason: '', paused_at: '', paused_by: '' },
-    '/api/settings': { dispatch_schedules: true },
+    '/api/settings': {},
     '/api/settings/providers': {
       keys: {
         ANTHROPIC_API_KEY: { label: 'Anthropic API key', description: '', configured: true },

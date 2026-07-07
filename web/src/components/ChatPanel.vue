@@ -162,61 +162,65 @@
         </div>
         <!-- User message -->
         <div v-else-if="item.kind === 'user'" class="message-wrap user">
-          <div class="message user">
-            <div class="message-content">
-              <div v-if="item.msg.images?.length" class="message-images">
-                <a
-                  v-for="img in item.msg.images"
-                  :key="img"
-                  :href="img.startsWith('data:') ? img : `/api/images/${img}`"
-                  target="_blank"
-                  rel="noopener"
-                  class="message-image-link"
-                >
-                  <img :src="img.startsWith('data:') ? img : `/api/images/${img}`" :alt="img.startsWith('data:') ? 'image' : img" class="message-image" />
-                </a>
+          <div class="message-row">
+            <div class="message user">
+              <div class="message-content">
+                <div v-if="item.msg.images?.length" class="message-images">
+                  <a
+                    v-for="img in item.msg.images"
+                    :key="img"
+                    :href="img.startsWith('data:') ? img : `/api/images/${img}`"
+                    target="_blank"
+                    rel="noopener"
+                    class="message-image-link"
+                  >
+                    <img :src="img.startsWith('data:') ? img : `/api/images/${img}`" :alt="img.startsWith('data:') ? 'image' : img" class="message-image" />
+                  </a>
+                </div>
+                <div v-html="renderMarkdown(item.msg.content)"></div>
               </div>
-              <div v-html="renderMarkdown(item.msg.content)"></div>
+              <div v-if="item.msg.timestamp" class="message-meta">
+                {{ formatTime(item.msg.timestamp) }}
+              </div>
             </div>
-          </div>
-          <div v-if="item.msg.content?.trim()" class="message-actions">
-            <button
-              type="button"
-              class="message-action-btn"
-              :title="copiedMessageKey === `user-${i}` ? 'Copied' : 'Copy'"
-              :aria-label="copiedMessageKey === `user-${i}` ? 'Copied' : 'Copy message'"
-              @click="copyMessageText(item.msg.content, `user-${i}`)"
-            >
-              <svg v-if="copiedMessageKey === `user-${i}`" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
-              <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-            </button>
-          </div>
-          <div v-if="item.msg.timestamp" class="message-meta">
-            {{ formatTime(item.msg.timestamp) }}
+            <div v-if="item.msg.content?.trim()" class="message-actions">
+              <button
+                type="button"
+                class="message-action-btn"
+                :title="copiedMessageKey === `user-${i}` ? 'Copied' : 'Copy'"
+                :aria-label="copiedMessageKey === `user-${i}` ? 'Copied' : 'Copy message'"
+                @click="copyMessageText(item.msg.content, `user-${i}`)"
+              >
+                <svg v-if="copiedMessageKey === `user-${i}`" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              </button>
+            </div>
           </div>
         </div>
         <!-- Final assistant message -->
         <div v-else-if="item.kind === 'assistant'" class="message-wrap assistant">
-          <div class="message assistant" :class="{ error: item.msg.is_error }">
-            <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
-          </div>
-          <div v-if="item.msg.content?.trim()" class="message-actions">
-            <button
-              type="button"
-              class="message-action-btn"
-              :title="copiedMessageKey === `assistant-${i}` ? 'Copied' : 'Copy'"
-              :aria-label="copiedMessageKey === `assistant-${i}` ? 'Copied' : 'Copy message'"
-              @click="copyMessageText(item.msg.content, `assistant-${i}`)"
-            >
-              <svg v-if="copiedMessageKey === `assistant-${i}`" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
-              <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-            </button>
-          </div>
-          <div v-if="item.msg.timestamp || item.msg.effective_model" class="message-meta">
-            <span v-if="item.msg.timestamp">{{ formatTime(item.msg.timestamp) }}</span>
-            <span v-if="item.msg.duration_ms"> &middot; {{ formatDuration(item.msg.duration_ms) }}</span>
-            <span v-if="item.msg.effective_model"> &middot; {{ item.msg.effective_model }}</span>
-            <span v-if="item.msg.usage?.input_tokens"> | in:{{ item.msg.usage.input_tokens }} out:{{ item.msg.usage.output_tokens }}</span>
+          <div class="message-row">
+            <div class="message assistant" :class="{ error: item.msg.is_error }">
+              <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
+              <div v-if="item.msg.timestamp || item.msg.effective_model" class="message-meta">
+                <span v-if="item.msg.timestamp">{{ formatTime(item.msg.timestamp) }}</span>
+                <span v-if="item.msg.duration_ms"> &middot; {{ formatDuration(item.msg.duration_ms) }}</span>
+                <span v-if="item.msg.effective_model"> &middot; {{ item.msg.effective_model }}</span>
+                <span v-if="item.msg.usage?.input_tokens"> | in:{{ item.msg.usage.input_tokens }} out:{{ item.msg.usage.output_tokens }}</span>
+              </div>
+            </div>
+            <div v-if="item.msg.content?.trim()" class="message-actions">
+              <button
+                type="button"
+                class="message-action-btn"
+                :title="copiedMessageKey === `assistant-${i}` ? 'Copied' : 'Copy'"
+                :aria-label="copiedMessageKey === `assistant-${i}` ? 'Copied' : 'Copy message'"
+                @click="copyMessageText(item.msg.content, `assistant-${i}`)"
+              >
+                <svg v-if="copiedMessageKey === `assistant-${i}`" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              </button>
+            </div>
           </div>
           <button
             v-if="item.msg.is_error"
@@ -2478,6 +2482,18 @@ function insertImageRef(n: number) {
   max-width: 90%;
 }
 
+.message-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.message-wrap.user .message-row {
+  flex-direction: row-reverse;
+}
+
 .message {
   max-width: 100%;
   padding: 8px 12px;
@@ -2500,19 +2516,12 @@ function insertImageRef(n: number) {
 
 .message-actions {
   display: flex;
+  flex-shrink: 0;
+  align-self: center;
   gap: 4px;
-  margin-top: 2px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s;
-}
-
-.message-wrap.user .message-actions {
-  justify-content: flex-end;
-}
-
-.message-wrap.assistant .message-actions {
-  justify-content: flex-start;
 }
 
 .message-wrap:hover .message-actions,
@@ -2527,7 +2536,7 @@ function insertImageRef(n: number) {
   justify-content: center;
   width: var(--touch, 44px);
   height: var(--touch, 44px);
-  margin: -10px 0;
+  margin: 0;
   padding: 0;
   border: none;
   border-radius: 6px;
@@ -2964,7 +2973,14 @@ details[open] > .activity-summary::before {
 .message-meta {
   font-size: 10px;
   color: var(--fg2);
-  margin-top: 4px;
+  margin-top: 6px;
+  padding-top: 4px;
+  border-top: 1px solid color-mix(in srgb, var(--fg2) 18%, transparent);
+  line-height: 1.3;
+}
+
+.message.user .message-meta {
+  text-align: right;
 }
 
 .message-images { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }

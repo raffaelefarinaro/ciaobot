@@ -304,10 +304,6 @@ async def _async_main() -> int:
         resolve_target=_resolve_schedule_target,
         dispatch_to_web=_dispatch_to_web,
         prepare_chat=_prepare_chat,
-        # A secondary instance (the local dev box) never dispatches, so the
-        # cloud primary stays the single scheduler and automations don't
-        # double-fire while both machines run.
-        is_paused=lambda: not config.dispatch_schedules,
     )
 
     # Create and wire up web app
