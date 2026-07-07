@@ -2,9 +2,12 @@
   <div v-if="subs.length" class="subagent-panel" :class="{ open: panelOpen }">
     <div class="subagent-summary" @click="togglePanel">
       <span class="chevron">{{ panelOpen ? '\u25BE' : '\u25B8' }}</span>
-      <span class="icon">&#129302;</span>
+      <span v-if="runningCount" class="running-spinner" aria-hidden="true"></span>
+      <span v-else class="icon">&#129302;</span>
       <span class="label">Subagent activity</span>
-      <span class="meta">{{ subs.length }} subagent{{ subs.length === 1 ? '' : 's' }}</span>
+      <span class="meta">
+        {{ subs.length }} subagent{{ subs.length === 1 ? '' : 's' }}<template v-if="runningCount"> &middot; {{ runningCount }} running</template>
+      </span>
     </div>
     <div v-if="panelOpen" class="subagent-body">
       <div
@@ -15,7 +18,10 @@
       >
         <div class="subagent-head" @click="toggleAgent(i)">
           <span class="chevron">{{ openAgents[i] ? '\u25BE' : '\u25B8' }}</span>
-          <span class="agent-id">#{{ i + 1 }} · <code>{{ shortId(sub.agent_id) }}</code></span>
+          <span class="agent-id">
+            <template v-if="sub.subagent_type">[{{ sub.subagent_type }}]&nbsp;</template>{{ sub.description || shortId(sub.agent_id) }}
+          </span>
+          <span v-if="sub.status" class="status-chip" :class="sub.status">{{ sub.status }}</span>
           <span class="meta">{{ agentMeta(sub) }}</span>
         </div>
         <div v-if="openAgents[i]" class="subagent-turns">
@@ -56,7 +62,12 @@ import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
 const props = defineProps<{ subagents: SubagentTranscript[] }>()
 
 const subs = computed<SubagentTranscript[]>(() => props.subagents || [])
-const panelOpen = ref(false)
+const runningCount = computed(
+  () => subs.value.filter(s => s.status === 'running').length,
+)
+// Open by default while agents are still working so the live feed is
+// visible without a click; collapsed once everything has completed.
+const panelOpen = ref(runningCount.value > 0)
 const openAgents = ref<Record<number, boolean>>({})
 
 function togglePanel() {
@@ -119,6 +130,32 @@ function renderMarkdown(text: string): string {
 .chevron { font-size: 10px; color: var(--fg2); }
 .icon { font-size: 14px; }
 .label { color: var(--fg2); }
+
+.running-spinner {
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent2);
+  border-radius: 50%;
+  animation: subagent-spin 0.9s linear infinite;
+}
+
+@keyframes subagent-spin {
+  to { transform: rotate(360deg); }
+}
+
+.status-chip {
+  font-size: 10px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--fg2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.status-chip.running { color: var(--accent2); border-color: var(--accent2); }
+.status-chip.failed { color: var(--error, #e5484d); border-color: var(--error, #e5484d); }
 .meta {
   color: var(--fg2);
   opacity: 0.7;

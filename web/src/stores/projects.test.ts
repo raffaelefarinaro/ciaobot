@@ -192,7 +192,7 @@ describe('background agents indicator', () => {
     expect(store.activeBackgroundAgents).toBe(0)
   })
 
-  test('a new turn clears a stale background-agents count', () => {
+  test('a new turn keeps the background-agents count (agents outlive turns)', () => {
     apiGet.mockResolvedValue([])
     const store = useProjectStore()
     const chatId = 'c-bg2'
@@ -203,7 +203,24 @@ describe('background agents indicator', () => {
     sock.onmessage?.({
       data: JSON.stringify({ type: 'chat_streaming_started', chat_id: chatId, project_id: 'p1' }),
     })
-    expect(store.backgroundAgents[chatId]).toBeUndefined()
+    expect(store.backgroundAgents[chatId]).toBe(4)
+  })
+
+  test('the events snapshot replaces background-agent counts wholesale', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    store.backgroundAgents['c-stale'] = 7
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'snapshot',
+        active_streams: [],
+        background_agents: { 'c-live': 2 },
+      }),
+    })
+    expect(store.backgroundAgents['c-stale']).toBeUndefined()
+    expect(store.backgroundAgents['c-live']).toBe(2)
   })
 })
 

@@ -84,6 +84,14 @@
         </div>
       </template>
       <template #actions>
+        <span
+          v-if="store.activeBackgroundAgents > 0"
+          class="bg-agents-pill"
+          :title="`${store.activeBackgroundAgents} background agent${store.activeBackgroundAgents === 1 ? '' : 's'} running`"
+        >
+          <span class="bg-agents-dot" aria-hidden="true"></span>
+          {{ store.activeBackgroundAgents }} agent{{ store.activeBackgroundAgents === 1 ? '' : 's' }}
+        </span>
         <div class="model-picker-wrap" ref="modelPickerRef">
           <button
             class="model-picker-btn btn-icon"
@@ -228,6 +236,8 @@
             @click="openFixChat(i)"
           >Fix this error</button>
         </div>
+        <!-- Subagent activity for the turn that dispatched the agents -->
+        <SubagentPanel v-else-if="item.kind === 'subagents'" :subagents="item.subs" />
         <!-- System message (errors, etc) -->
         <div v-else-if="item.kind === 'system'" class="message system">
           <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
@@ -665,11 +675,12 @@ import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
 import VoiceRecorder from './VoiceRecorder.vue'
-// SubagentPanel removed: subagent data is per-chat, not per-turn, so it
-// doesn't map well to the turn-based rendering. Re-add when we have
-// per-turn subagent association.
+// Subagent transcripts carry `turn_index` (the user turn that dispatched
+// them, parsed server-side from the session JSONL), so each panel anchors
+// under the turn that spawned its agents.
+import SubagentPanel from './SubagentPanel.vue'
 import { api } from '../lib/api'
-import type { ModelsResponse, ChatMessage } from '../lib/types'
+import type { ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import { linkifyText } from '../lib/filePaths'
@@ -682,6 +693,7 @@ type RenderItem =
   | { kind: 'assistant'; msg: ChatMessage }
   | { kind: 'system'; msg: ChatMessage }
   | { kind: 'trace'; steps: ChatMessage[] }
+  | { kind: 'subagents'; subs: SubagentTranscript[] }
 
 type ChatComment = {
   id: string
@@ -1715,6 +1727,31 @@ const renderItems = computed<RenderItem[]>(() => {
   const items: RenderItem[] = []
   let buffer: ChatMessage[] = []
 
+  // Subagent transcripts grouped by the user turn that dispatched them.
+  // Entries without a resolvable turn (older sessions, remote chats) attach
+  // to the last turn so they stay visible.
+  const subsByTurn = new Map<number, SubagentTranscript[]>()
+  const unanchoredSubs: SubagentTranscript[] = []
+  for (const sub of store.activeSubagents) {
+    if (typeof sub.turn_index === 'number') {
+      const list = subsByTurn.get(sub.turn_index) || []
+      list.push(sub)
+      subsByTurn.set(sub.turn_index, list)
+    } else {
+      unanchoredSubs.push(sub)
+    }
+  }
+  let currentTurnIndex: number | null = null
+
+  const flushSubagents = () => {
+    if (currentTurnIndex === null) return
+    const subs = subsByTurn.get(currentTurnIndex)
+    if (subs?.length) {
+      items.push({ kind: 'subagents', subs })
+      subsByTurn.delete(currentTurnIndex)
+    }
+  }
+
   const flushTurn = (isFinal = false) => {
     if (!buffer.length) return
     // Find index of the LAST assistant text message (the final answer).
@@ -1772,6 +1809,10 @@ const renderItems = computed<RenderItem[]>(() => {
   for (const msg of store.activeMessages) {
     if (msg.role === 'user') {
       flushTurn()
+      flushSubagents()
+      currentTurnIndex = typeof msg.turn_index === 'number'
+        ? msg.turn_index
+        : currentTurnIndex === null ? 0 : currentTurnIndex + 1
       items.push({ kind: 'user', msg })
     } else if (
       msg.role === 'system'
@@ -1788,6 +1829,13 @@ const renderItems = computed<RenderItem[]>(() => {
     }
   }
   flushTurn(true)
+  flushSubagents()
+  // Anything still unplaced (turn not in history yet, or no turn info):
+  // show after the last turn rather than dropping it.
+  const leftovers = [...subsByTurn.values()].flat().concat(unanchoredSubs)
+  if (leftovers.length) {
+    items.push({ kind: 'subagents', subs: leftovers })
+  }
   return items
 })
 
@@ -2887,6 +2935,33 @@ details[open] > .activity-summary::before {
   opacity: 0.78;
   border-left: 2px solid var(--border);
   margin-left: 4px;
+}
+
+/* "N agents" header pill: background subagents still running after the
+   parent turn ended (store.activeBackgroundAgents, fed by /ws/events). */
+.bg-agents-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--fg2);
+  white-space: nowrap;
+}
+
+.bg-agents-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent2);
+  animation: bg-agents-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes bg-agents-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
 }
 
 /* Message content (markdown) */

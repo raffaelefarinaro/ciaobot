@@ -287,6 +287,26 @@ export const useProjectStore = defineStore('projects', () => {
     backgroundAgents.value[activeChatId.value || ''] || 0
   )
 
+  // Live view while background subagents run: refresh the active chat's
+  // subagent transcripts on a short interval so the panel updates as the
+  // agents work. The CLI appends to the transcript files continuously, so
+  // polling the REST endpoint is enough for a near-live feed. The interval
+  // only exists while the active chat has running agents.
+  let subagentPollTimer: ReturnType<typeof setInterval> | null = null
+  watch(
+    () => [activeChatId.value, activeBackgroundAgents.value] as const,
+    ([chatId, count]) => {
+      if (subagentPollTimer !== null) {
+        clearInterval(subagentPollTimer)
+        subagentPollTimer = null
+      }
+      if (!chatId || count <= 0) return
+      subagentPollTimer = setInterval(() => {
+        void loadSubagents(chatId)
+      }, 4000)
+    },
+  )
+
   function projectChats(projectId: string): ChatInfo[] {
     // Hide remote chats (session lives on another device, not openable here).
     return chats.value
@@ -310,6 +330,13 @@ export const useProjectStore = defineStore('projects', () => {
 
   function isChatStreaming(chatId: string): boolean {
     return Boolean(projectStreaming.value[chatId] || streaming.value[chatId])
+  }
+
+  // Background subagents outlive the turn that spawned them; this powers the
+  // sidebar/header indicators during the quiet gap where no turn is
+  // streaming but agents are still working.
+  function chatHasBackgroundAgents(chatId: string): boolean {
+    return (backgroundAgents.value[chatId] || 0) > 0
   }
 
   function projectIsStreaming(projectId: string): boolean {
@@ -1540,6 +1567,10 @@ export const useProjectStore = defineStore('projects', () => {
         for (const entry of msg.active_streams) {
           projectStreaming.value[entry.chat_id] = true
         }
+        // Authoritative background-agent counts: replace local state so a
+        // count left stale by a missed event (WS gap, server restart) heals
+        // on reconnect.
+        backgroundAgents.value = { ...(msg.background_agents || {}) }
         // Recovery: if we locally think the active chat is streaming but
         // the snapshot shows no stream is running for it, the turn ended
         // server-side while our events socket was disconnected (and the
@@ -1554,9 +1585,10 @@ export const useProjectStore = defineStore('projects', () => {
       }
       case 'chat_streaming_started':
         projectStreaming.value[msg.chat_id] = true
-        // A fresh turn supersedes the prior turn's background-agent display
-        // (and self-heals a count left stale by a missed drop during a WS gap).
-        delete backgroundAgents.value[msg.chat_id]
+        // Note: backgroundAgents is NOT cleared here — agents from a prior
+        // turn keep running across new turns. The server's JSONL watcher
+        // re-announces the count at every turn end (including 0), and the
+        // events snapshot heals stale counts on reconnect.
         if (
           msg.chat_id === activeChatId.value &&
           shouldReconnectActiveChatOnStreamingStarted(sockets.value[msg.chat_id])
@@ -2666,7 +2698,7 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, projectChats,
     chatUnread, projectUnread, workspaceUnread, clearUnread, markRead, markAllRead,
-    recentChats, projectIsStreaming, isChatStreaming, workspaceIsStreaming, projectFor,
+    recentChats, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
     // Actions
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
     createProject, updateProject, deleteProject, completeProject,

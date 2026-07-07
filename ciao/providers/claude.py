@@ -501,6 +501,64 @@ class ClaudeProvider(BaseSDKProvider):
             logger.warning("Claude steer query failed; caller should fall back to queue")
             return False
 
+    @property
+    def can_drain(self) -> bool:
+        """True when a connected client exists to drain between turns."""
+        return self._client is not None and self._connected
+
+    async def drain_events(self) -> AsyncGenerator[StreamEvent, None]:
+        """Yield SDK events arriving *between* turns until cancelled.
+
+        Background subagents outlive the parent turn: when one completes, the
+        CLI injects a task-notification and runs a fresh parent turn whose
+        messages land on stdout with nobody consuming them. Left unread they
+        sit in the transport buffer and the stale ResultMessage would
+        terminate the *next* ``receive_response()`` immediately, bleeding one
+        turn's output into the next. This generator keeps the pipe drained
+        and hands the events to the caller for live display.
+
+        The caller owns the lifecycle: it MUST cancel this generator before
+        starting a new turn (``receive_response`` and this iterator consume
+        from the same underlying stream and must not run concurrently).
+        """
+        client = self._client
+        if client is None or not self._connected:
+            return
+
+        merged: asyncio.Queue[object] = asyncio.Queue()
+        _DONE = object()
+        # Background turns can hit Auto-mode tool gating too; surface the
+        # permission request instead of leaving the can_use_tool await to
+        # silently time out.
+        self._permission_gate.set_emit(lambda ev: merged.put_nowait(ev))
+
+        async def consume() -> None:
+            try:
+                async for msg in client.receive_messages():
+                    for event in self._convert_message(msg):
+                        merged.put_nowait(event)
+            except _CLAUDE_OP_ERRORS:
+                logger.debug("Between-turns drain ended on SDK error", exc_info=True)
+            finally:
+                merged.put_nowait(_DONE)
+
+        consumer = asyncio.create_task(consume())
+        try:
+            while True:
+                item = await merged.get()
+                if item is _DONE:
+                    return
+                yield item  # type: ignore[misc]
+        finally:
+            self._permission_gate.set_emit(None)
+            self._permission_gate.cancel_all("Background drain ended before approval")
+            if not consumer.done():
+                consumer.cancel()
+                try:
+                    await consumer
+                except (asyncio.CancelledError, *_CLAUDE_OP_ERRORS):
+                    pass
+
     async def run_streaming(
         self,
         request: AgentRequest,

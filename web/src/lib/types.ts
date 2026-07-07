@@ -115,9 +115,19 @@ export interface ChatMessage {
 // Subagent transcripts from /api/chats/{id}/subagents. One entry per subagent
 // spawned inside the chat's parent Claude session. Messages share the same
 // shape as /messages (role, content, tool_name for _activity rollups).
+// Dispatch metadata (tool_use_id, description, status, turn_index) is parsed
+// from the parent session JSONL and may be absent for sessions the server
+// can't inspect locally. `turn_index` matches the index stamped on user
+// bubbles by /messages, anchoring the panel to the dispatching turn.
 export interface SubagentTranscript {
   agent_id: string
   messages: ChatMessage[]
+  tool_use_id?: string
+  description?: string
+  subagent_type?: string
+  is_async?: boolean
+  status?: 'running' | 'completed' | 'failed' | ''
+  turn_index?: number
 }
 
 // ── WebSocket events ────────────────────────────────────────────────────
@@ -153,7 +163,7 @@ export type WsEvent =
 
 // Global awareness events from /ws/events
 export type EventsWsMessage =
-  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[] }
+  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number> }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean }
   | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string }

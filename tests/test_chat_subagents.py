@@ -55,6 +55,48 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
     )
 
 
+def _dispatch_records(tool_use_id: str, agent_id: str) -> list[dict]:
+    return [
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": tool_use_id,
+                        "name": "Agent",
+                        "input": {"description": f"work {agent_id}", "run_in_background": True},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": tool_use_id, "content": []}
+                ],
+            },
+            "toolUseResult": {"isAsync": True, "agentId": agent_id},
+        },
+    ]
+
+
+def _completion_record(agent_id: str) -> dict:
+    return {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": (
+                f"<task-notification>\n<task-id>{agent_id}</task-id>\n"
+                "<status>completed</status>\n</task-notification>"
+            ),
+        },
+    }
+
+
 async def test_watch_subagent_completion_emits_ready_events(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -65,26 +107,39 @@ async def test_watch_subagent_completion_emits_ready_events(
     chat.session_id = "sess-watch-1"
     pcm._save()
 
-    # Speed the polling loop so the test finishes instantly.
-    sleep_calls: list[float] = []
+    # Session JSONL with two background dispatches running. The watcher
+    # re-parses whenever the file grows; each fake sleep appends one
+    # completion notification so the running count steps 2 → 1 → 0.
+    session_path = tmp_path / "sess-watch-1.jsonl"
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "kick off work"}},
+        *_dispatch_records("toolu_1", "agent-a"),
+        *_dispatch_records("toolu_2", "agent-b"),
+    ]
+    completions = iter([_completion_record("agent-a"), _completion_record("agent-b")])
+
+    def flush() -> None:
+        session_path.write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+        )
+
+    flush()
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root: session_path,
+    )
 
     async def fake_sleep(seconds: float) -> None:
-        sleep_calls.append(seconds)
+        record = next(completions, None)
+        if record is not None:
+            records.append(record)
+            flush()
 
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-
-    # Sequence: two agents running, then one left, then none.
-    responses = iter(
-        [
-            ["agent-1", "agent-2"],
-            ["agent-2"],
-            [],
-        ]
-    )
-    mock_sdk = SimpleNamespace(
-        list_subagents=lambda session_id, directory=None: next(responses),
-    )
-    monkeypatch.setitem(sys.modules, "claude_agent_sdk", mock_sdk)
 
     published: list[dict] = []
     original_publish = pcm._events.publish
@@ -106,6 +161,9 @@ async def test_watch_subagent_completion_emits_ready_events(
     assert ready_events[2]["remaining"] == 0
     assert ready_events[0]["chat_id"] == chat.chat_id
     assert ready_events[0]["project_id"] == project.project_id
+    # The last-count cache is cleared once the watcher exits so the events
+    # snapshot doesn't advertise a stale count.
+    assert pcm.background_agent_counts == {}
 
 
 def test_chat_subagents_falls_back_to_nested_jsonl_and_progress_entries(

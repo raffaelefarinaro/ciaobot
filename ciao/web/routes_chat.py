@@ -46,6 +46,29 @@ async def _forward_stream(websocket: WebSocket, stream: ChatStream) -> bool:
     return True
 
 
+# How often the per-connection attach loop re-checks the broker for a stream
+# it isn't forwarding yet. Streams can start without any client send —
+# schedules, queued follow-ups, and between-turns background-subagent turns —
+# so attachment can't be driven by the send path alone. Replay of buffered
+# events makes the poll gap lossless.
+_ATTACH_POLL_SECONDS = 0.5
+
+
+async def _attach_streams(websocket: WebSocket, pcm, chat_id: str) -> None:
+    """Forward every broker stream for this chat until the socket dies."""
+    last: ChatStream | None = None
+    while True:
+        stream = pcm.get_active_stream(chat_id)
+        if stream is not None and stream is not last:
+            last = stream
+            if not await _forward_stream(websocket, stream):
+                return
+            # Immediately re-check: a queued follow-up or background stream
+            # may already have replaced the one that just finished.
+            continue
+        await asyncio.sleep(_ATTACH_POLL_SECONDS)
+
+
 async def ws_chat(websocket: WebSocket) -> None:
     """Per-chat streaming WebSocket."""
     serializer = websocket.app.state.serializer
@@ -75,13 +98,13 @@ async def ws_chat(websocket: WebSocket) -> None:
             0, app.state.focused_chats.get(chat_id, 0) + delta
         )
 
-    # Re-attach to any in-flight stream from a prior WS connection so the UI
-    # picks up exactly where it left off via buffered-event replay.
-    active = pcm.get_active_stream(chat_id)
-    forward_task: asyncio.Task | None = None
-
-    if active is not None:
-        forward_task = asyncio.create_task(_forward_stream(websocket, active))
+    # One persistent attach loop per connection: it re-attaches to any
+    # in-flight stream (buffered-event replay covers the gap) and picks up
+    # streams that start without a client send — schedules, queued
+    # follow-ups, and between-turns background-subagent turns.
+    forward_task: asyncio.Task = asyncio.create_task(
+        _attach_streams(websocket, pcm, chat_id)
+    )
 
     try:
         while True:
@@ -165,7 +188,7 @@ async def ws_chat(websocket: WebSocket) -> None:
                     break
 
                 try:
-                    stream = pcm.start_stream(chat_id, text, images=images or None)
+                    pcm.start_stream(chat_id, text, images=images or None)
                 except Exception as exc:
                     logger.exception("Failed to start stream for %s", chat_id)
                     try:
@@ -173,11 +196,8 @@ async def ws_chat(websocket: WebSocket) -> None:
                     except (WebSocketDisconnect, RuntimeError):
                         break
                     continue
-
-                # Replace any stale forwarder with a fresh one tied to this stream.
-                if forward_task is not None and not forward_task.done():
-                    forward_task.cancel()
-                forward_task = asyncio.create_task(_forward_stream(websocket, stream))
+                # The attach loop picks the new stream up on its next tick;
+                # the user_echo is buffered so nothing is lost to the gap.
 
     except WebSocketDisconnect:
         pass
@@ -188,7 +208,7 @@ async def ws_chat(websocket: WebSocket) -> None:
             )
         # Detach forwarders; the underlying stream keeps running server-side
         # so a later reconnect can resume it.
-        if forward_task is not None and not forward_task.done():
+        if not forward_task.done():
             forward_task.cancel()
 
 
@@ -226,6 +246,10 @@ async def ws_events(websocket: WebSocket) -> None:
         await websocket.send_json({
             "type": "snapshot",
             "active_streams": snapshot,
+            # Chats with background subagents still running, so a fresh
+            # client can paint the "N agents running" indicator immediately
+            # (and clear a count left stale by a missed event during a gap).
+            "background_agents": pcm.background_agent_counts,
         })
     except (WebSocketDisconnect, RuntimeError):
         return

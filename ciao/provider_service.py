@@ -50,6 +50,18 @@ class ProviderService:
         async for event in provider.run_streaming(request, self._register_handle):
             yield event
 
+    @property
+    def can_drain(self) -> bool:
+        """True when the provider has a live client to drain between turns."""
+        return bool(self._provider is not None and getattr(self._provider, "can_drain", False))
+
+    async def drain_events(self) -> AsyncGenerator[StreamEvent, None]:
+        """Yield between-turns provider events (see ClaudeProvider.drain_events)."""
+        if self._provider is None:
+            return
+        async for event in self._provider.drain_events():
+            yield event
+
     async def steer(self, request: AgentRequest) -> bool:
         """Inject a user message into the provider's active turn.
 

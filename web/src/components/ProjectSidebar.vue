@@ -231,6 +231,7 @@
               :title="chat.local === false ? 'This chat lives on another instance' : ''"
             >
               <span v-if="store.isChatStreaming(chat.chat_id)" class="spinner-dot" />
+              <span v-else-if="store.chatHasBackgroundAgents(chat.chat_id)" class="spinner-dot bg-agents" title="Background agents running" />
               <span
                 v-if="chat.title_status === 'pending'"
                 class="title-shimmer"
@@ -334,6 +335,7 @@
                 />
                 <span v-else class="chat-title">{{ chat.title }}</span>
                 <span v-if="store.isChatStreaming(chat.chat_id)" class="spinner-dot" title="Working" />
+                <span v-else-if="store.chatHasBackgroundAgents(chat.chat_id)" class="spinner-dot bg-agents" title="Background agents running" />
                 <span v-else-if="chat.retry?.status === 'pending'" class="retry-dot" title="Retry scheduled" />
                 <span v-if="chat.local === false" class="remote-chip">remote</span>
                 <span v-if="store.chatUnread(chat.chat_id) > 0" class="badge">{{ store.chatUnread(chat.chat_id) }}</span>
@@ -828,6 +830,14 @@ async function confirmDeleteChat(chatId: string) {
 
 @keyframes ciao-spin {
   to { transform: rotate(360deg); }
+}
+
+/* Slower, dimmer variant: background subagents still working after the
+   parent turn ended (no turn is streaming, but the chat isn't idle). */
+.spinner-dot.bg-agents {
+  border-color: var(--border);
+  border-top-color: var(--accent2);
+  animation-duration: 1.6s;
 }
 
 .retry-dot {
