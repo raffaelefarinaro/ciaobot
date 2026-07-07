@@ -40,7 +40,7 @@ Requires Python 3.12 or newer (use whichever `python3.X` you have, e.g. `brew in
 
 ```bash
 python3.13 -m venv ~/.ciaobot-venv
-~/.ciaobot-venv/bin/pip install https://github.com/raffaelefarinaro/ciaobot/releases/download/v0.2.1/ciao-0.2.1-py3-none-any.whl
+~/.ciaobot-venv/bin/pip install https://github.com/raffaelefarinaro/ciaobot/releases/download/v0.2.2/ciao-0.2.2-py3-none-any.whl
 ~/.ciaobot-venv/bin/ciao run
 ```
 
