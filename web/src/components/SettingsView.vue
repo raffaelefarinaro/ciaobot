@@ -514,9 +514,21 @@
               {{ gwsIntegrationError }}
             </p>
             <template v-else-if="gwsIntegration">
-              <p v-if="!gwsIntegration.installed" class="hint hint--warn integration-warning">
-                Install <code>@googleworkspace/cli</code> before enabling Google Workspace tools for chats and schedules.
-              </p>
+              <div v-if="!gwsIntegration.installed" class="integration-warning">
+                <p class="hint hint--warn">
+                  Install <code>@googleworkspace/cli</code> before enabling Google Workspace tools for chats and schedules.
+                </p>
+                <div class="action-row">
+                  <button
+                    class="btn-primary btn-small"
+                    :disabled="gwsInstalling"
+                    @click="installGws"
+                  >
+                    {{ gwsInstalling ? 'Installing…' : 'Install gws' }}
+                  </button>
+                </div>
+                <p v-if="gwsInstallResult" class="hint hint--compact gws-install-result">{{ gwsInstallResult }}</p>
+              </div>
               <div class="gws-profile-list">
                 <div
                   v-for="profile in gwsIntegration.profiles"
@@ -1904,6 +1916,30 @@ async function fetchGwsIntegration() {
     gwsIntegrationError.value = `Failed to load Google Workspace integration: ${e?.message || e}`
   } finally {
     gwsIntegrationLoaded.value = true
+  }
+}
+
+const gwsInstalling = ref(false)
+const gwsInstallResult = ref('')
+
+async function installGws() {
+  gwsInstalling.value = true
+  gwsInstallResult.value = 'Installing @googleworkspace/cli via npm…'
+  try {
+    const res = await api.post<{ ok: boolean; output?: string; error?: string; integration?: GwsIntegrationSettings }>(
+      '/api/integrations/gws/install',
+      {},
+    )
+    if (res.ok) {
+      if (res.integration) gwsIntegration.value = res.integration
+      gwsInstallResult.value = 'gws installed successfully.'
+    } else {
+      gwsInstallResult.value = res.error || 'Installation failed.'
+    }
+  } catch (e: any) {
+    gwsInstallResult.value = `Error installing gws: ${e?.message || e}`
+  } finally {
+    gwsInstalling.value = false
   }
 }
 
