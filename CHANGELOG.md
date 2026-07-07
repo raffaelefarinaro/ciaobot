@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.0 - 2026-07-07
+
+### Added
+- feat: workspace-first one-folder setup; localhost DX; self-relaunching run (#23) (`4bfe201`)
+
 ## v0.3.0 - 2026-07-07
 
 ### Added
