@@ -9,8 +9,8 @@
       <template #title>
         <div class="header-left">
           <button class="close-btn desktop-only" @click="closeSchedule" title="Close">&times;</button>
-          <h2 v-if="schedule">{{ schedule.title || promptTitle(schedule.prompt) }}</h2>
-          <h2 v-else-if="showNew">New schedule</h2>
+          <span v-if="schedule" class="pane-title">{{ schedule.title || promptTitle(schedule.prompt) }}</span>
+          <span v-else-if="showNew" class="pane-title">New schedule</span>
         </div>
       </template>
       <template #actions>
@@ -578,14 +578,6 @@ function closeSchedule() {
 /* Close button */
 .desktop-only { display: inline-flex; }
 @media (max-width: 768px) { .desktop-only { display: none; } }
-
-.header-left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  text-align: left;
-}
 
 .close-btn {
   background: none;

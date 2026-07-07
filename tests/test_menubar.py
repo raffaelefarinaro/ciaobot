@@ -97,6 +97,15 @@ def test_restart_server_command_targets_launchd_label() -> None:
     ]
 
 
+def test_restart_menubar_command_targets_launchd_label() -> None:
+    assert menubar.restart_menubar_command(uid=501) == [
+        "launchctl",
+        "kickstart",
+        "-k",
+        "gui/501/com.ciao.menubar",
+    ]
+
+
 def test_stop_server_command_boots_out_launchd_label() -> None:
     # bootout (not kill) because the server plist is KeepAlive=true, so a
     # plain kill would be relaunched; bootout takes it out of the domain.
@@ -281,6 +290,65 @@ def test_read_unread_chats_filters_read_and_sorts_by_activity(tmp_path: Path) ->
     assert [chat.title for chat in unread] == ["Unread new", "Unread old"]
 
 
+def test_read_menu_notifications_keeps_unread_log_entries(tmp_path: Path) -> None:
+    state = tmp_path / ".runtime" / "web_projects.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(
+        json.dumps(
+            {
+                "chats": {
+                    "c1": {
+                        "title": "Chat one",
+                        "last_activity_at": "2026-01-02T10:00:00",
+                        "last_read_at": "2026-01-01T10:00:00",
+                    },
+                    "c2": {
+                        "title": "Chat two",
+                        "last_activity_at": "2026-01-02T10:00:00",
+                        "last_read_at": "2026-01-02T11:00:00",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_log(
+        tmp_path,
+        [
+            {
+                "ts": 1.0,
+                "title": "Ciaobot",
+                "body": "Read chat ping",
+                "chat_id": "c2",
+            },
+            {
+                "ts": 2.0,
+                "title": "Ciaobot",
+                "body": "Unread chat ping",
+                "chat_id": "c1",
+            },
+        ],
+    )
+
+    entries = menubar.read_menu_notifications(tmp_path)
+
+    assert len(entries) == 1
+    assert entries[0].body == "Unread chat ping"
+    assert entries[0].chat_id == "c1"
+
+
+def test_menu_notification_fingerprint_prefers_log_entries() -> None:
+    notifications = [
+        menubar.Notification(ts=1.0, title="Ciaobot", body="Hi", chat_id="c1")
+    ]
+    unread = [menubar.OpenChat(chat_id="c1", title="Chat", last_activity_at="")]
+
+    assert menubar.menu_notification_fingerprint(notifications, unread) == (
+        (1.0, "c1", "Ciaobot", "Hi"),
+    )
+    assert menubar.menu_notification_fingerprint([], unread) == (("c1", "Chat"),)
+
+
 def test_read_open_chats_missing_state_returns_empty(tmp_path: Path) -> None:
     assert menubar.read_open_chats(tmp_path) == []
 
@@ -326,6 +394,20 @@ def test_banners_muted_tolerates_corrupt_settings(tmp_path: Path) -> None:
     path.write_text("not json", encoding="utf-8")
 
     assert menubar.read_banners_muted(tmp_path) is False
+
+
+def test_update_menu_label_includes_version() -> None:
+    assert menubar.update_menu_label("1.2.3") == "Update to 1.2.3"
+    assert menubar.update_menu_label("  ") == "Update available"
+
+
+def test_package_update_fingerprint_tracks_availability() -> None:
+    assert menubar.package_update_fingerprint(
+        {"update_available": True, "latest_version": "2.0.0"}
+    ) == (True, "2.0.0")
+    assert menubar.package_update_fingerprint(
+        {"update_available": False, "latest_version": "1.0.0"}
+    ) == (False, "1.0.0")
 
 
 def test_run_menubar_without_rumps_explains_the_dependency(

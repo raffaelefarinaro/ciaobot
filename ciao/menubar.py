@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -21,8 +22,11 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 
+from ciao.package_version import make_cached_package_status, update_package
+
 
 SERVER_LAUNCHD_LABEL = "com.ciao.server"
+MENUBAR_LAUNCHD_LABEL = "com.ciao.menubar"
 POLL_SECONDS = 10.0
 
 
@@ -74,6 +78,11 @@ def open_app_command(workspace: Path, port: int) -> list[str]:
 def restart_server_command(uid: int | None = None) -> list[str]:
     resolved = os.getuid() if uid is None else uid
     return ["launchctl", "kickstart", "-k", f"gui/{resolved}/{SERVER_LAUNCHD_LABEL}"]
+
+
+def restart_menubar_command(uid: int | None = None) -> list[str]:
+    resolved = os.getuid() if uid is None else uid
+    return ["launchctl", "kickstart", "-k", f"gui/{resolved}/{MENUBAR_LAUNCHD_LABEL}"]
 
 
 def stop_server_command(uid: int | None = None) -> list[str]:
@@ -220,6 +229,29 @@ def read_unread_chats(workspace: Path, *, limit: int = 10) -> list[OpenChat]:
     return unread[:limit]
 
 
+def read_menu_notifications(workspace: Path, *, limit: int = 10) -> list[Notification]:
+    """Recent notification-log entries whose chat is still unread — mirrors the bell."""
+
+    chats = _load_chats(workspace)
+    unread: list[Notification] = []
+    for entry in read_notifications(workspace, limit=limit * 3):
+        if entry.chat_id and not chat_is_unread(chats.get(entry.chat_id, {})):
+            continue
+        unread.append(entry)
+        if len(unread) >= limit:
+            break
+    return unread
+
+
+def menu_notification_fingerprint(
+    notifications: list[Notification],
+    unread_chats: list[OpenChat],
+) -> tuple[tuple[float, str, str, str], ...] | tuple[tuple[str, str], ...]:
+    if notifications:
+        return tuple((n.ts, n.chat_id, n.title, n.body) for n in notifications)
+    return tuple((chat.chat_id, chat.title) for chat in unread_chats)
+
+
 _INET_RE = re.compile(r"^\s*inet (\d+\.\d+\.\d+\.\d+)", re.MULTILINE)
 
 
@@ -299,6 +331,18 @@ def _disabled_item(rumps, title: str):
     return item
 
 
+def update_menu_label(latest_version: str) -> str:
+    version = latest_version.strip()
+    return f"Update to {version}" if version else "Update available"
+
+
+def package_update_fingerprint(status: dict[str, object]) -> tuple[bool, str]:
+    return (
+        bool(status.get("update_available")),
+        str(status.get("latest_version") or ""),
+    )
+
+
 def run_menubar(workspace: Path, port: int) -> int:
     """Run the rumps status-bar app. Returns 1 if rumps is not installed."""
 
@@ -331,10 +375,13 @@ def run_menubar(workspace: Path, port: int) -> int:
     app = rumps.App("Ciaobot", icon=face, template=True, quit_button=None)
 
     # Only notify for entries newer than launch, not the whole backlog.
+    status_fetcher = make_cached_package_status()
     state = {
         "last_seen_ts": time.time(),
         "fingerprint": None,
         "banners_muted": read_banners_muted(workspace),
+        "package_status": status_fetcher(),
+        "updating": False,
     }
 
     def on_toggle_mute(sender) -> None:
@@ -346,6 +393,18 @@ def run_menubar(workspace: Path, port: int) -> int:
     def _open_chat_callback(chat_id: str):
         def _callback(_sender) -> None:
             subprocess.run(["open", chat_url(workspace, port, chat_id)], check=False)
+
+        return _callback
+
+    def _open_notification_callback(entry: Notification):
+        def _callback(_sender) -> None:
+            if entry.chat_id:
+                subprocess.run(
+                    ["open", chat_url(workspace, port, entry.chat_id)],
+                    check=False,
+                )
+            else:
+                subprocess.run(open_app_command(workspace, port), check=False)
 
         return _callback
 
@@ -364,6 +423,52 @@ def run_menubar(workspace: Path, port: int) -> int:
 
     def on_logs(_sender) -> None:
         subprocess.run(view_logs_command(workspace), check=False)
+
+    def on_update(_sender) -> None:
+        if state["updating"]:
+            return
+        pkg = state["package_status"]
+        latest = str(pkg.get("latest_version") or "the latest version")
+        if not rumps.alert(
+            title="Update Ciaobot?",
+            message=(
+                f"This installs version {latest} and restarts the server. "
+                "Scheduled tasks pause briefly during the restart."
+            ),
+            ok="Update",
+            cancel="Cancel",
+            icon_path=icon_path("Ciaobot.icns"),
+        ):
+            return
+
+        state["updating"] = True
+        refresh()
+
+        def _do_update() -> None:
+            try:
+                res = update_package()
+                if res.get("ok"):
+                    subprocess.run(restart_server_command(), check=False)
+                    subprocess.run(
+                        notify_command(
+                            "Ciaobot updated",
+                            f"Version {latest} is installed.",
+                        ),
+                        check=False,
+                    )
+                    # Relaunch via launchd so this process loads the new wheel.
+                    subprocess.run(restart_menubar_command(), check=False)
+                    return
+                error = str(res.get("error") or "Update failed.")
+                command = str(res.get("command") or "")
+                message = error + (f"\n\nTry manually:\n{command}" if command else "")
+                rumps.alert(title="Update failed", message=message, ok="OK")
+            finally:
+                state["updating"] = False
+                state["package_status"] = status_fetcher()
+                refresh()
+
+        threading.Thread(target=_do_update, daemon=True).start()
 
     def on_quit(_sender) -> None:
         # The menu bar is the visible presence of a running Ciaobot: quitting
@@ -387,16 +492,28 @@ def run_menubar(workspace: Path, port: int) -> int:
         status: ServerStatus,
         chats: list[OpenChat],
         unread_chats: list[OpenChat],
+        menu_notifications: list[Notification],
         addresses: list[str],
+        pkg: dict[str, object],
     ) -> None:
-        notifications_menu = rumps.MenuItem("Notifications")
-        if not unread_chats:
-            notifications_menu.add(_disabled_item(rumps, "No unread chats"))
-        for chat in unread_chats:
-            title = chat.title if len(chat.title) <= 60 else chat.title[:59] + "…"
-            notifications_menu.add(
-                rumps.MenuItem(title, callback=_open_chat_callback(chat.chat_id))
-            )
+        notification_items: list[object] = []
+        if menu_notifications:
+            for entry in menu_notifications:
+                notification_items.append(
+                    rumps.MenuItem(
+                        notification_menu_title(entry),
+                        callback=_open_notification_callback(entry),
+                    )
+                )
+        elif unread_chats:
+            for chat in unread_chats:
+                title = chat.title if len(chat.title) <= 60 else chat.title[:59] + "…"
+                notification_items.append(
+                    rumps.MenuItem(title, callback=_open_chat_callback(chat.chat_id))
+                )
+        else:
+            notification_items = [_disabled_item(rumps, "No unread notifications")]
+        notification_section = [*notification_items, None]
 
         addresses_menu = rumps.MenuItem("Addresses (click to copy)")
         for url in addresses:
@@ -412,13 +529,27 @@ def run_menubar(workspace: Path, port: int) -> int:
         ]
         chat_section = [*chat_items, None] if chat_items else []
 
+        update_section: list[object] = []
+        if pkg.get("update_available"):
+            label = (
+                "Updating…"
+                if state["updating"]
+                else update_menu_label(str(pkg.get("latest_version") or ""))
+            )
+            if state["updating"]:
+                update_section = [_disabled_item(rumps, label), None]
+            else:
+                update_section = [rumps.MenuItem(label, callback=on_update), None]
+        elif not chat_section:
+            update_section = [None]
+
         app.menu.clear()
         app.menu = [
             rumps.MenuItem("Open Ciaobot", callback=on_open),
             _disabled_item(rumps, status_label(status)),
-            None,
+            *update_section,
             *chat_section,
-            notifications_menu,
+            *notification_section,
             addresses_menu,
             None,
             _mute_item(),
@@ -441,19 +572,26 @@ def run_menubar(workspace: Path, port: int) -> int:
         log_entries = read_notifications(workspace)
         chats = read_open_chats(workspace)
         unread_chats = read_unread_chats(workspace)
+        menu_notifications = read_menu_notifications(workspace)
         chats_by_id = _load_chats(workspace)
         addresses = server_addresses(port)
+        pkg = status_fetcher()
+        state["package_status"] = pkg
 
         # Rebuild only when content changed so an open menu doesn't flicker.
         fingerprint = (
             status,
             tuple((c.chat_id, c.title) for c in chats),
-            tuple((c.chat_id, c.title) for c in unread_chats),
+            menu_notification_fingerprint(menu_notifications, unread_chats),
             tuple(addresses),
+            package_update_fingerprint(pkg),
+            state["updating"],
         )
         if fingerprint != state["fingerprint"]:
             state["fingerprint"] = fingerprint
-            _rebuild_menu(status, chats, unread_chats, addresses)
+            _rebuild_menu(
+                status, chats, unread_chats, menu_notifications, addresses, pkg
+            )
 
         # Banner only for new log lines whose chat is still unread (same rule
         # as the PWA bell). Reading a chat in the webapp clears it here too.
@@ -466,7 +604,7 @@ def run_menubar(workspace: Path, port: int) -> int:
         ]
         if fresh:
             # Advance the cursor even when muted so unmuting doesn't replay
-            # the backlog; the submenu still lists unread chats only.
+            # the backlog; the menu still lists unread notifications only.
             state["last_seen_ts"] = max(entry.ts for entry in fresh)
             if not state["banners_muted"]:
                 for entry in fresh[:3]:

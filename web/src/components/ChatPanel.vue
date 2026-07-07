@@ -26,7 +26,7 @@
                 :class="{ active: showContext }"
               >{{ project.name }}</span>
               <span v-if="project && project.name !== 'General'" class="breadcrumb-separator">/</span>
-              <span class="chat-title" @dblclick.stop="startEditTitle" @click.stop>{{ chat.title }}</span>
+              <span class="pane-title chat-title" @dblclick.stop="startEditTitle" @click.stop>{{ chat.title }}</span>
             </template>
             <!-- Project context popup -->
             <div
@@ -2427,21 +2427,7 @@ function insertImageRef(n: number) {
 }
 
 .chat-title {
-  font-weight: 600;
-  font-size: 16px;
   cursor: pointer;
-  /* Block + min-width:0 + max-width:100% are all needed together for
-     text-overflow: ellipsis to actually kick in when the title is longer
-     than the parent. Inline (the default for <span>) ignores overflow. */
-  display: block;
-  min-width: 0;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  /* In a flex row with the project name, claim available space so the
-     title doesn't get pushed to width:0 when the project name is long. */
-  flex: 1;
 }
 
 .title-input {
@@ -3781,15 +3767,6 @@ details[open] > .activity-summary::before {
   .message-wrap { max-width: 92%; }
   .message-wrap.assistant { max-width: 92%; }
   .message { padding: 10px 14px; }
-  .chat-title {
-    flex: 1 1 100%;
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    font-size: 12px;
-    line-height: 1.2;
-    white-space: normal;
-  }
   /* Keep input and placeholder at the same size so the text doesn't jump
      when the user starts typing. 16px is the iOS auto-zoom floor: any
      smaller and Safari zooms the page on focus, which is worse than a

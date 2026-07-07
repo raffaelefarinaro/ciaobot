@@ -43,12 +43,32 @@ defineEmits<{ 'open-sidebar': [] }>()
   min-width: 0;
   text-align: center;
 }
+:deep(.header-left) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+  text-align: left;
+}
 .header-title h2 {
   margin: 0;
   font-size: 16px;
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+:deep(.pane-title) {
+  font-weight: 600;
+  font-size: 16px;
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
 }
 .header-actions {
   display: flex;
@@ -100,9 +120,26 @@ defineEmits<{ 'open-sidebar': [] }>()
 @media (max-width: 768px) {
   .pane-header {
     height: auto;
+    padding-left: calc(12px + var(--safe-left));
+    padding-right: calc(12px + var(--safe-right));
   }
   .header-hamburger,
   .header-bell { display: flex; }
+  .header-title { text-align: left; min-width: 0; }
+  :deep(.header-left) { min-width: 0; }
+  :deep(.header-actions) {
+    flex-shrink: 0;
+    gap: 6px;
+  }
+  :deep(.pane-title) {
+    flex: 1 1 100%;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    font-size: 12px;
+    line-height: 1.2;
+    white-space: normal;
+  }
   :deep(.btn-icon),
   :deep(.model-picker-btn) {
     min-width: var(--touch);
