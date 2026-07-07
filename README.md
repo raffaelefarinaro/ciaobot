@@ -41,9 +41,12 @@ Requires Python 3.12 or newer (use whichever `python3.X` you have, e.g. `brew in
 ```bash
 python3.13 -m venv ~/.ciaobot-venv
 ~/.ciaobot-venv/bin/pip install https://github.com/raffaelefarinaro/ciaobot/releases/download/v0.2.1/ciao-0.2.1-py3-none-any.whl
-~/.ciaobot-venv/bin/ciao setup --workspace ~/ciao-workspace
 ~/.ciaobot-venv/bin/ciao run
 ```
+
+Then open `http://localhost:8443`: with no configured workspace the server starts in bootstrap mode and the setup wizard walks you through choosing the workspace folder, the vault folder (fresh scaffold or an existing notes folder), and the rest of the local config before anything is created. When you finish, it writes the config, scaffolds the vault where you chose, and (on macOS) renders the LaunchAgents and `Ciaobot.app`.
+
+For scripted or headless setups, `ciao setup --workspace <dir>` pre-creates a workspace with defaults and skips the wizard.
 
 ## Quickstart (from source)
 
@@ -74,7 +77,7 @@ Optional capabilities (Google Workspace, Apple Intelligence titles, MCP connecto
 | [SECURITY.md](SECURITY.md) | Security policy. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute. |
 
-Naming note: the user-facing product is **Ciaobot**. The Python package, import path, CLI command, and many environment variables are still named `ciao`/`CIAO_*` for compatibility.
+Naming note: the user-facing product is **Ciaobot**. The CLI is installed as both `ciaobot` and `ciao` (same command); the Python package, import path, and many environment variables are still named `ciao`/`CIAO_*` for compatibility.
 
 ## For coding agents
 

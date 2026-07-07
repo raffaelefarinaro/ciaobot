@@ -122,6 +122,11 @@ def _refresh_vault_index(workspace: Path, vault_root: Path | None = None) -> boo
         from ciao import vault_index
 
         root = vault_root or (workspace / "memory-vault")
+        if not root.is_dir():
+            # Bootstrap mode has no vault yet (the setup wizard creates it);
+            # never scaffold one preemptively.
+            logger.info("Vault root %s does not exist yet; skipping index refresh", root)
+            return False
         entries = vault_index.scan_vault(root)
         vault_index.write_index_file(entries, root / "INDEX.md")
         logger.info("Vault index refreshed.")
@@ -336,16 +341,14 @@ async def _async_main() -> int:
     app.state.transcript_store = transcripts
     app.state.project_chat_manager = pcm
 
-    # Per-device working-branch flow: every instance runs on its own
-    # `dev/<device>` branch and lands work on `main` via the Settings "commit"
-    # button (clean merge -> direct push; conflict -> interactive merge chat).
+    # Workspace git sync: every instance works on whatever branch the
+    # workspace checkout is on and syncs it via the Settings button (clean
+    # pull -> direct push; conflict -> interactive resolution chat).
     from ciao.local_session import LocalSessionManager
 
     app.state.local_session_manager = LocalSessionManager(
         workspace=config.workspace_root,
         runtime_root=config.state_path.parent,
-        device_name=config.device_name,
-        direct_main=config.git_direct_main,
         dev_mode=config.dev_mode,
     )
     push_subject = _push_subject_for_config(config)
@@ -466,30 +469,37 @@ async def _async_main() -> int:
 
     asyncio.create_task(_run_catch_up())
 
-    # ── Per-device working branch ────────────────────────────
-    # Every instance works on its own `dev/<device>` branch (cut from
-    # origin/main, reused across restarts) and lands work on `main` via the
-    # Settings "commit" button. A background loop pushes the branch for backup.
+    # ── Workspace branch backup ──────────────────────────────
+    # Every instance works on whatever branch the workspace checkout is on;
+    # Ciaobot never creates or switches branches. A background loop pushes the
+    # branch for backup. Non-git workspaces (fresh `ciao setup`) and repos
+    # without an `origin` remote skip this gracefully.
     from ciao.local_session import (
         BACKUP_PUSH_INTERVAL,
-        ensure_device_branch,
+        has_origin_remote,
         push_branch,
+        workspace_branch,
     )
 
-    async def _device_branch_loop() -> None:
-        try:
-            branch = await ensure_device_branch(
-                config.workspace_root, device_name=config.device_name, direct_main=config.git_direct_main
+    async def _branch_backup_loop() -> None:
+        branch = await asyncio.to_thread(workspace_branch, config.workspace_root)
+        if branch is None:
+            logger.info(
+                "Workspace %s is not a git repository (or is on a detached HEAD); "
+                "skipping branch backup.", config.workspace_root,
             )
-            logger.info("Working on device branch '%s'", branch)
-        except Exception:
-            logger.exception("Could not ensure device branch")
             return
+        if not await asyncio.to_thread(has_origin_remote, config.workspace_root):
+            logger.info(
+                "Workspace has no 'origin' remote; skipping branch backup.",
+            )
+            return
+        logger.info("Working on branch '%s'", branch)
         while True:
             try:
                 await asyncio.sleep(BACKUP_PUSH_INTERVAL)
                 async with job_runs.track(
-                    "branch_backup", "Device-branch backup",
+                    "branch_backup", "Branch backup",
                     category="system", extra={"branch": branch},
                 ) as run:
                     ok, detail = await push_branch(config.workspace_root, branch=branch)
@@ -502,7 +512,7 @@ async def _async_main() -> int:
             except Exception:
                 logger.exception("Branch backup push failed")
 
-    asyncio.create_task(_device_branch_loop())
+    asyncio.create_task(_branch_backup_loop())
 
 
     import uvicorn

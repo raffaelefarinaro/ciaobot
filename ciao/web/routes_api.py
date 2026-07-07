@@ -3466,14 +3466,11 @@ async def admin_status(request: Request) -> JSONResponse:
         "models": config.claude_models,
         "default_model": config.claude_default_model,
         "default_mode": config.claude_mode,
-        # Device identity for the Settings "commit to main" panel (always
-        # shown now: every instance works on its own dev/<device> branch).
-        "device_name": config.device_name,
         "dispatch_schedules": config.dispatch_schedules,
     })
 
 
-# ── Local session flow (per-device branch + direct/agent-merged handover) ──
+# ── Local session flow (current-branch sync + conflict-resolution chat) ──
 
 
 def _local_manager(request: Request):
@@ -3481,8 +3478,8 @@ def _local_manager(request: Request):
 
 
 def _open_merge_chat(request: Request, branch: str) -> dict:
-    """Open an interactive chat that merges ``branch`` into ``main``, resolving
-    conflicts with the user. Returns {ok, chat_id, project_id} or {error}."""
+    """Open an interactive chat that resolves sync conflicts on ``branch``
+    with the user. Returns {ok, chat_id, project_id} or {error}."""
     config = request.app.state.config
     pcm = request.app.state.project_chat_manager
     projects = pcm.list_projects("personal")
@@ -3491,14 +3488,10 @@ def _open_merge_chat(request: Request, branch: str) -> dict:
         return {"error": "no personal project to host the merge chat"}
 
     from datetime import UTC, datetime
-    from ciao.local_session import MERGE_PROMPT, MERGE_PROMPT_MAIN
+    from ciao.local_session import MERGE_PROMPT
 
-    if branch == "main":
-        title = f"Resolve sync conflicts: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M')}"
-        prompt = MERGE_PROMPT_MAIN
-    else:
-        title = f"Merge to main: {branch} {datetime.now(UTC).strftime('%Y-%m-%d %H:%M')}"
-        prompt = MERGE_PROMPT.replace("{branch}", str(branch))
+    title = f"Resolve sync conflicts: {branch} {datetime.now(UTC).strftime('%Y-%m-%d %H:%M')}"
+    prompt = MERGE_PROMPT.replace("{branch}", str(branch))
 
     chat = pcm.create_chat(
         project.project_id, title=title, model=config.claude_default_model
@@ -3518,7 +3511,7 @@ async def local_preflight(request: Request) -> JSONResponse:
 
 
 async def local_status(request: Request) -> JSONResponse:
-    """Current device-session state: device name, branch, dirty."""
+    """Current workspace git state: git_repo, branch (may be null), dirty."""
     mgr = _local_manager(request)
     if mgr is None:
         return JSONResponse(
@@ -3528,15 +3521,21 @@ async def local_status(request: Request) -> JSONResponse:
 
 
 async def local_handback(request: Request) -> JSONResponse:
-    """Commit the device session and land it on ``main``.
+    """Commit the session and sync the current branch with origin.
 
-    Clean merge -> pushed to main directly. Conflict -> an interactive merge
-    chat is opened in Ciaobot to resolve it.
+    Clean pull -> pushed directly. Conflict -> an interactive resolution chat
+    is opened in Ciaobot. Never creates or switches branches.
     """
     mgr = _local_manager(request)
     if mgr is None:
         return JSONResponse(
             {"error": "local session manager not initialised"}, status_code=500
+        )
+    branch = mgr.branch
+    if branch is None:
+        return JSONResponse(
+            {"ok": False, "error": "workspace is not a git repository (or is on a detached HEAD)"},
+            status_code=400,
         )
 
     confirm_warnings = False
@@ -3558,18 +3557,18 @@ async def local_handback(request: Request) -> JSONResponse:
             status_code=400
         )
 
-    result = await mgr.commit_to_main()
+    result = await mgr.commit_and_sync()
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)
     if result.get("merged"):
         return JSONResponse(result)
-    # Conflict: hand off to an interactive merge chat.
-    merge = _open_merge_chat(request, result.get("branch") or mgr.branch)
+    # Conflict: hand off to an interactive resolution chat.
+    merge = _open_merge_chat(request, result.get("branch") or branch)
     return JSONResponse({**result, "merge": merge})
 
 
 async def local_resync(request: Request) -> JSONResponse:
-    """After the merge chat pushed main, re-point the device branch at it."""
+    """After the conflict chat pushed the branch, merge origin/<branch> in."""
     mgr = _local_manager(request)
     if mgr is None:
         return JSONResponse(
@@ -3580,8 +3579,8 @@ async def local_resync(request: Request) -> JSONResponse:
 
 
 async def handover_merge(request: Request) -> JSONResponse:
-    """Open an interactive chat that merges a branch into ``main``. Also used
-    by ``local_handback`` when the automatic merge conflicts."""
+    """Open an interactive chat that resolves sync conflicts on a branch. Also
+    used by ``local_handback`` when the automatic pull conflicts."""
     try:
         body = await request.json()
     except (json.JSONDecodeError, ValueError):
@@ -3589,7 +3588,12 @@ async def handover_merge(request: Request) -> JSONResponse:
     branch = (body.get("branch") if isinstance(body, dict) else None) or ""
     if not branch:
         mgr = _local_manager(request)
-        branch = mgr.branch if mgr else "main"
+        branch = (mgr.branch if mgr else None) or ""
+    if not branch:
+        return JSONResponse(
+            {"error": "workspace is not a git repository (or is on a detached HEAD)"},
+            status_code=400,
+        )
     merge = _open_merge_chat(request, branch)
     return JSONResponse(merge, status_code=200 if merge.get("ok") else 500)
 
