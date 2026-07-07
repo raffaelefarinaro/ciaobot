@@ -3168,6 +3168,104 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     })
 
 
+def _setup_fs_guard(request: Request) -> JSONResponse | None:
+    """Bootstrap-mode + localhost guard shared by the setup folder-picker routes."""
+    config = request.app.state.config
+    if not getattr(config, "bootstrap_mode", False):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if not _localhost_request(request) or not _setup_finish_origin_allowed(request):
+        return JSONResponse({"error": "setup filesystem access is localhost-only"}, status_code=403)
+    return None
+
+
+def _setup_dir_listing(target: Path) -> dict:
+    """Return the folder-picker listing payload for a resolved directory."""
+    home = Path.home().resolve()
+    dirs: list[dict[str, str]] = []
+    for entry in target.iterdir():
+        if entry.name.startswith("."):
+            continue
+        try:
+            if not entry.is_dir():
+                continue
+        except OSError:
+            continue
+        dirs.append({"name": entry.name, "path": str(entry)})
+    dirs.sort(key=lambda row: row["name"].lower())
+    display = str(target)
+    if target == home:
+        display = "~"
+    elif str(target).startswith(str(home) + os.sep):
+        display = "~" + str(target)[len(str(home)):]
+    parent = target.parent
+    return {
+        "path": str(target),
+        "display_path": display,
+        "parent": str(parent) if parent != target else None,
+        "dirs": dirs,
+        "home": str(home),
+    }
+
+
+def _resolve_setup_dir(raw: str) -> Path | None:
+    """Expand and resolve a picker path; None when it is not an existing directory."""
+    try:
+        target = Path(raw).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not target.is_dir():
+        return None
+    return target
+
+
+async def setup_list_dirs_endpoint(request: Request) -> JSONResponse:
+    """List local subdirectories for the first-run setup folder picker."""
+    guard = _setup_fs_guard(request)
+    if guard is not None:
+        return guard
+    raw = str(request.query_params.get("path") or "~").strip() or "~"
+    target = _resolve_setup_dir(raw)
+    if target is None:
+        return JSONResponse({"error": f"not a directory: {raw}"}, status_code=400)
+    try:
+        return JSONResponse(_setup_dir_listing(target))
+    except PermissionError:
+        return JSONResponse({"error": f"permission denied: {target}"}, status_code=400)
+    except OSError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def setup_mkdir_endpoint(request: Request) -> JSONResponse:
+    """Create a folder from the first-run setup folder picker and return the refreshed listing."""
+    guard = _setup_fs_guard(request)
+    if guard is not None:
+        return guard
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json object is required"}, status_code=400)
+    name = str(body.get("name", "")).strip()
+    if not name:
+        return JSONResponse({"error": "name is required"}, status_code=400)
+    if "/" in name or "\\" in name or os.sep in name or name.startswith("."):
+        return JSONResponse({"error": "folder name must not contain path separators or start with a dot"}, status_code=400)
+    parent = _resolve_setup_dir(str(body.get("path", "")).strip())
+    if parent is None:
+        return JSONResponse({"error": "path must be an existing directory"}, status_code=400)
+    try:
+        (parent / name).mkdir()
+    except FileExistsError:
+        return JSONResponse({"error": f"already exists: {name}"}, status_code=400)
+    except OSError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    try:
+        return JSONResponse(_setup_dir_listing(parent))
+    except OSError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
 # ── Admin ────────────────────────────────────────────────────────────────
 
 async def admin_snapshot(request: Request) -> JSONResponse:

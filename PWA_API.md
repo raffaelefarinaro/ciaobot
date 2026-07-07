@@ -10,8 +10,9 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 - `GET /?setup=<token>` is the local first-launch shortcut path. It is accepted only on `localhost`, `127.0.0.1`, or `::1`; when the token matches `.runtime/setup-token`, the server sets the same signed `ciao_session` cookie, deletes the token file, and redirects to `/`.
 - Production cookies are `Secure`, `SameSite=Lax`, and host-only (scoped to the exact host that served them).
 - `POST /api/auth/logout` clears the same host-only cookie.
-- All `/api/*` routes except `POST /api/auth`, `GET /api/startup-status`, `GET /api/setup-status`, and `POST /api/setup/finish` require the signed session cookie. All `/ws/*` routes require the signed session cookie.
+- All `/api/*` routes except `POST /api/auth`, `GET /api/startup-status`, `GET /api/setup-status`, `POST /api/setup/finish`, `GET /api/setup/list-dirs`, and `POST /api/setup/mkdir` require the signed session cookie. All `/ws/*` routes require the signed session cookie.
 - `POST /api/setup/finish` is only accepted in bootstrap mode from localhost with a matching browser origin/referer. It writes the real workspace config, creates local launch artifacts, and asks the supervisor to restart into the configured workspace.
+- `GET /api/setup/list-dirs` and `POST /api/setup/mkdir` back the setup wizard's folder picker. They are only accepted in bootstrap mode from localhost with a matching browser origin/referer (404 outside bootstrap mode, 403 off-localhost), list directories only, and never read file contents.
 - State-changing `/api/*` requests with an `Origin` or `Referer` header must match the request host. Missing headers are accepted for non-browser clients.
 - HTTP responses include baseline security headers, including CSP, `X-Content-Type-Options`, `Referrer-Policy`, and frame denial.
 
@@ -74,6 +75,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/package/update` | Upgrade ciao package from the latest GitHub release wheel and restart |
 | POST | `/api/voice/install-local` | Install local voice transcription dependencies and restart |
 | POST | `/api/setup/finish` | Finish first-run setup from bootstrap mode |
+| GET | `/api/setup/list-dirs` | List local subdirectories for the setup wizard folder picker (bootstrap mode, localhost only) |
+| POST | `/api/setup/mkdir` | Create a folder from the setup wizard folder picker (bootstrap mode, localhost only) |
 | GET | `/api/stats` | Read CLI stats |
 | GET | `/api/workspaces` | List configured logical workspaces |
 | POST | `/api/workspaces/{name}` | Add or update a logical workspace config |

@@ -97,9 +97,99 @@ describe('LoginView setup wizard tests', () => {
     const wrapper = await mountLoginView()
     expect(wrapper.find('input[type="password"]').exists()).toBe(false)
     expect(wrapper.find('#setup-workspace').exists()).toBe(true)
-    expect(wrapper.find('#setup-vault').exists()).toBe(true)
+    expect(wrapper.find('#setup-workspace-browse').exists()).toBe(true)
+    // scratch mode hides the vault input behind the derived-path hint
+    expect(wrapper.find('#setup-vault').exists()).toBe(false)
     expect(wrapper.find('#setup-push').exists()).toBe(true)
     expect(wrapper.text()).toContain('ciao auth claude')
+  })
+
+  it('shows a live derived vault hint in scratch mode and reveals the input via change location', async () => {
+    mockApiGet.mockResolvedValue({
+      configured: false,
+      bootstrap: true,
+      mode: 'bootstrap',
+      providers: {}
+    })
+
+    const wrapper = await mountLoginView()
+    // hidden by default, hint shows the derived path
+    expect(wrapper.find('#setup-vault').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Your second-brain vault will be created at')
+    expect(wrapper.text()).toContain('~/ciaobot/memory-vault')
+
+    // hint live-updates when the workspace changes
+    await wrapper.find('#setup-workspace').setValue('/tmp/space')
+    await nextTick()
+    expect(wrapper.text()).toContain('/tmp/space/memory-vault')
+
+    // "change location" reveals the vault input with its Browse button
+    await wrapper.find('#setup-vault-change').trigger('click')
+    await nextTick()
+    const vaultInput = wrapper.find('#setup-vault')
+    expect(vaultInput.exists()).toBe(true)
+    expect(wrapper.find('#setup-vault-browse').exists()).toBe(true)
+    expect((vaultInput.element as HTMLInputElement).value).toBe('/tmp/space/memory-vault')
+  })
+
+  it('shows the vault input when vault mode is existing', async () => {
+    mockApiGet.mockResolvedValue({
+      configured: false,
+      bootstrap: true,
+      mode: 'bootstrap',
+      providers: {}
+    })
+
+    const wrapper = await mountLoginView()
+    expect(wrapper.find('#setup-vault').exists()).toBe(false)
+
+    await wrapper.find('input[type="radio"][value="existing"]').setValue()
+    await nextTick()
+    expect(wrapper.find('#setup-vault').exists()).toBe(true)
+    expect(wrapper.find('#setup-vault-browse').exists()).toBe(true)
+    expect(wrapper.text()).toContain('Existing Notes Folder')
+  })
+
+  it('opens the folder picker, lists directories, and writes the selection into the workspace field', async () => {
+    const listing = {
+      path: '/Users/me/ciaobot',
+      display_path: '~/ciaobot',
+      parent: '/Users/me',
+      dirs: [
+        { name: 'memory-vault', path: '/Users/me/ciaobot/memory-vault' },
+        { name: 'projects', path: '/Users/me/ciaobot/projects' },
+      ],
+      home: '/Users/me',
+    }
+    mockApiGet.mockImplementation((path: string) => {
+      if (path.startsWith('/api/setup/list-dirs')) return Promise.resolve(listing)
+      return Promise.resolve({
+        configured: false,
+        bootstrap: true,
+        mode: 'bootstrap',
+        providers: {}
+      })
+    })
+
+    const wrapper = await mountLoginView()
+    expect(wrapper.find('.picker-modal').exists()).toBe(false)
+
+    await wrapper.find('#setup-workspace-browse').trigger('click')
+    await flushPromises()
+    expect(mockApiGet).toHaveBeenCalledWith(
+      `/api/setup/list-dirs?path=${encodeURIComponent('~/ciaobot')}`
+    )
+    expect(wrapper.find('.picker-modal').exists()).toBe(true)
+    expect(wrapper.find('.picker-path').text()).toBe('~/ciaobot')
+    const dirButtons = wrapper.findAll('.picker-dir')
+    expect(dirButtons.map(b => b.text())).toEqual(['memory-vault/', 'projects/'])
+
+    await wrapper.find('.picker-select').trigger('click')
+    await nextTick()
+    expect(wrapper.find('.picker-modal').exists()).toBe(false)
+    expect((wrapper.find('#setup-workspace').element as HTMLInputElement).value).toBe('/Users/me/ciaobot')
+    // workspace selection re-derives the hidden vault suggestion
+    expect(wrapper.text()).toContain('/Users/me/ciaobot/memory-vault')
   })
 
   it('validates required fields and enables Finish on valid form', async () => {

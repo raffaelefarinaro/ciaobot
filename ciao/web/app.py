@@ -69,6 +69,8 @@ from ciao.web.routes_api import (
     provider_config_settings,
     settings_routines,
     setup_finish_endpoint,
+    setup_list_dirs_endpoint,
+    setup_mkdir_endpoint,
     setup_status_endpoint,
     list_automation,
     list_completed_projects,
@@ -211,6 +213,8 @@ def create_app(config, app_settings=None) -> Starlette:
         Route("/api/package/update", package_update_endpoint, methods=["POST"]),
         Route("/api/voice/install-local", voice_install_local_endpoint, methods=["POST"]),
         Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"]),
+        Route("/api/setup/list-dirs", setup_list_dirs_endpoint, methods=["GET"]),
+        Route("/api/setup/mkdir", setup_mkdir_endpoint, methods=["POST"]),
         Route("/api/stats", cli_stats, methods=["GET"]),
         # Push notifications
         Route("/api/push/public-key", push_public_key, methods=["GET"]),
