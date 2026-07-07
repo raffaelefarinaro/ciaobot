@@ -386,13 +386,14 @@ class ClaudeProvider(BaseSDKProvider):
                         request.extra_env or {},
                     )],
                 )],
-                # Backfill WebSearch on Ollama-routed chats. Ollama's
-                # Anthropic-compat layer doesn't execute the server-side
+                # Backfill WebSearch on Ollama- and OpenRouter-routed chats.
+                # Their Anthropic-compat layers don't execute the server-side
                 # web_search tool, so WebSearch returns an empty boilerplate;
-                # this PostToolUse hook reruns the query against Ollama's
-                # standalone /api/web_search and injects the real results.
-                # No-op on the Anthropic path and when WebSearch already
-                # returned results. See ciao/observability/hooks.py.
+                # this PostToolUse hook reruns the query against the backend's
+                # own search surface (Ollama /api/web_search, OpenRouter web
+                # plugin) and injects the real results. No-op on the Anthropic
+                # path and when WebSearch already returned results. See
+                # ciao/observability/hooks.py.
                 "PostToolUse": [HookMatcher(
                     matcher="WebSearch",
                     hooks=[build_web_search_post_tooluse_hook(

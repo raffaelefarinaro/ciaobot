@@ -16,6 +16,8 @@ import pytest
 from ciao.observability.hooks import (
     _format_search_results,
     _ollama_cloud_route,
+    _openrouter_route,
+    _openrouter_web_search,
     _websearch_response_has_results,
     build_web_search_post_tooluse_hook,
 )
@@ -83,6 +85,43 @@ def test_kill_switch_disables_route() -> None:
     assert route is None
 
 
+def test_openrouter_route_returns_credentials_and_search_model() -> None:
+    route = _openrouter_route(
+        {
+            "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
+            "ANTHROPIC_AUTH_TOKEN": "sk-or-1",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "anthropic/claude-haiku-4.5",
+        }
+    )
+    assert route == ("https://openrouter.ai/api", "sk-or-1", "anthropic/claude-haiku-4.5")
+
+
+def test_openrouter_route_falls_back_to_default_search_model() -> None:
+    route = _openrouter_route(
+        {"ANTHROPIC_BASE_URL": "https://openrouter.ai/api", "ANTHROPIC_AUTH_TOKEN": "sk-or-1"}
+    )
+    assert route is not None
+    assert route[2] == "openai/gpt-4o-mini"
+
+
+def test_openrouter_route_skipped_on_other_backends() -> None:
+    assert _openrouter_route({"GWS_PROFILE": "personal"}) is None
+    assert _openrouter_route(
+        {"ANTHROPIC_BASE_URL": "https://ollama.com", "ANTHROPIC_AUTH_TOKEN": "key123"}
+    ) is None
+
+
+def test_openrouter_kill_switch_disables_route() -> None:
+    route = _openrouter_route(
+        {
+            "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
+            "ANTHROPIC_AUTH_TOKEN": "sk-or-1",
+            "CIAO_OPENROUTER_WEBSEARCH_HOOK": "0",
+        }
+    )
+    assert route is None
+
+
 # --- formatting --------------------------------------------------------------
 
 def test_format_caps_results_and_truncates_content() -> None:
@@ -128,6 +167,82 @@ def test_callback_backfills_empty_websearch_on_ollama_route(monkeypatch) -> None
     assert "Paris" in ctx
     assert "https://britannica.com/place/Paris" in ctx
     assert "Capital of France." in ctx
+
+
+def test_callback_backfills_empty_websearch_on_openrouter_route(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "ciao.observability.hooks._openrouter_web_search",
+        lambda base_url, api_key, model, query, timeout_s=20.0: [
+            {"title": "Paris", "url": "https://britannica.com/place/Paris", "content": "Capital of France."},
+        ],
+    )
+    hook = build_web_search_post_tooluse_hook(
+        {
+            "ANTHROPIC_BASE_URL": "https://openrouter.ai/api",
+            "ANTHROPIC_AUTH_TOKEN": "sk-or-1",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "anthropic/claude-haiku-4.5",
+        }
+    )
+    out = _run(hook(
+        {"tool_name": "WebSearch", "tool_input": {"query": "capital of France"},
+         "tool_response": EMPTY_BOILERPLATE},
+        None,
+        None,
+    ))
+    assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    assert "via OpenRouter" in ctx
+    assert "https://britannica.com/place/Paris" in ctx
+
+
+def test_openrouter_web_search_parses_url_citations(monkeypatch) -> None:
+    class _FakeResponse:
+        def __init__(self, payload: dict) -> None:
+            self._payload = payload
+
+        def read(self) -> bytes:
+            import json as _json
+            return _json.dumps(self._payload).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    payload = {
+        "choices": [
+            {
+                "message": {
+                    "content": "Paris is the capital.",
+                    "annotations": [
+                        {
+                            "type": "url_citation",
+                            "url_citation": {
+                                "url": "https://britannica.com/place/Paris",
+                                "title": "Paris",
+                                "content": "Capital of France.",
+                            },
+                        },
+                        {"type": "other", "data": {}},
+                    ],
+                }
+            }
+        ]
+    }
+    monkeypatch.setattr(
+        "urllib.request.urlopen", lambda req, timeout=20.0: _FakeResponse(payload)
+    )
+    results = _openrouter_web_search(
+        "https://openrouter.ai/api", "sk-or-1", "anthropic/claude-haiku-4.5", "capital of France"
+    )
+    assert results == [
+        {
+            "title": "Paris",
+            "url": "https://britannica.com/place/Paris",
+            "content": "Capital of France.",
+        }
+    ]
 
 
 def test_callback_noop_when_results_already_present(monkeypatch) -> None:
