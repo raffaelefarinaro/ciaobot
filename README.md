@@ -38,7 +38,7 @@ Install from the [latest release](https://github.com/raffaelefarinaro/ciaobot/re
 
 ```bash
 python3.12 -m venv ~/.ciaobot-venv
-~/.ciaobot-venv/bin/pip install https://github.com/raffaelefarinaro/ciaobot/releases/download/v0.2.0/ciao-0.2.0-py3-none-any.whl
+~/.ciaobot-venv/bin/pip install https://github.com/raffaelefarinaro/ciaobot/releases/download/v0.2.1/ciao-0.2.1-py3-none-any.whl
 ~/.ciaobot-venv/bin/ciao setup --workspace ~/ciao-workspace
 ~/.ciaobot-venv/bin/ciao run
 ```

@@ -7,7 +7,7 @@ class Ciao < Formula
   homepage "https://github.com/raffaelefarinaro/ciaobot"
   license "Apache-2.0"
   url "https://github.com/raffaelefarinaro/ciaobot/releases/download/v0.2.1/ciao-0.2.1.tar.gz"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  sha256 "d4c2d19e81d21b439aef83da1822f14605719a554be73cf660cb309f5bb43ee6"
   head "https://github.com/raffaelefarinaro/ciaobot.git", branch: "main"
 
   depends_on "python@3.12"
