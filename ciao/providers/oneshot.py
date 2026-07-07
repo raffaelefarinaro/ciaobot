@@ -47,19 +47,34 @@ async def run_oneshot(
 
     async def _collect() -> str:
         parts: list[str] = []
-        async for msg in query(prompt=prompt, options=options):
-            if isinstance(msg, AssistantMessage):
-                if getattr(msg, "error", None):
-                    error_text = "".join(
-                        block.text for block in msg.content if isinstance(block, TextBlock)
-                    ).strip()
-                    raise RuntimeError(error_text or f"Assistant error: {msg.error}")
-                for block in msg.content:
-                    if isinstance(block, TextBlock):
-                        parts.append(block.text)
-            elif isinstance(msg, ResultMessage):
-                if msg.is_error:
-                    raise RuntimeError(msg.result or "One-shot query failed")
+        agen = query(prompt=prompt, options=options)
+        try:
+            async for msg in agen:
+                if isinstance(msg, AssistantMessage):
+                    if getattr(msg, "error", None):
+                        error_text = "".join(
+                            block.text for block in msg.content
+                            if isinstance(block, TextBlock)
+                        ).strip()
+                        raise RuntimeError(error_text or f"Assistant error: {msg.error}")
+                    for block in msg.content:
+                        if isinstance(block, TextBlock):
+                            parts.append(block.text)
+                elif isinstance(msg, ResultMessage):
+                    if msg.is_error:
+                        raise RuntimeError(msg.result or "One-shot query failed")
+        finally:
+            # Close the SDK generator deterministically. When the loop
+            # raises (model error, subprocess exit 1) or wait_for cancels
+            # us on timeout, the generator is otherwise left for GC to
+            # close in a fire-and-forget task; the SDK's teardown then
+            # re-surfaces the ProcessError as a "Task exception was never
+            # retrieved" log entry. aclose() is a no-op on an exhausted
+            # generator, so the normal path is unaffected.
+            try:
+                await agen.aclose()
+            except Exception:  # noqa: BLE001
+                logger.debug("oneshot query generator cleanup raised; already handled")
         return "".join(parts).strip()
 
     return await asyncio.wait_for(_collect(), timeout=timeout_s)

@@ -55,6 +55,13 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 - Backends: **Claude Code** (Claude subscription or Anthropic API key), **Ollama** (cloud or local daemon), **OpenRouter**. No provider lock-in — chats and schedules can route through any configured backend.
 - Per-workspace default model and model bucket (which controls how aliases like `opus`/`sonnet` resolve), per-chat override in the picker.
 
+### 7. Google Workspace (`gws`)
+
+- Ciaobot integrates with Gmail, Calendar, Drive, Docs, Sheets, Slides, and Tasks through the [`gws` CLI](https://github.com/googleworkspace/cli).
+- **Settings → Integrations**: install `gws`, upload a GCP OAuth `client_secret.json` per profile, and connect Google accounts from the browser (no terminal required).
+- Separate **personal** and **work** profiles; each workspace picks which profile to use (Settings → Workspaces).
+- Stock **`gws-*` skills** ship with the app (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). Setup details: `gws-shared` skill and the ⓘ panel on the Integrations page.
+
 ### App and system surface
 
 - **Settings page**: provider keys, model lists, skill/agent inventory, the injected system prompt (read-only), and local package updates from the UI.

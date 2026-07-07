@@ -26,7 +26,7 @@
                 :class="{ active: showContext }"
               >{{ project.name }}</span>
               <span v-if="project && project.name !== 'General'" class="breadcrumb-separator">/</span>
-              <span class="chat-title" @dblclick.stop="startEditTitle" @click.stop>{{ chat.title }}</span>
+              <span class="pane-title chat-title" @dblclick.stop="startEditTitle" @click.stop>{{ chat.title }}</span>
             </template>
             <!-- Project context popup -->
             <div
@@ -84,6 +84,14 @@
         </div>
       </template>
       <template #actions>
+        <span
+          v-if="store.activeBackgroundAgents > 0"
+          class="bg-agents-pill"
+          :title="`${store.activeBackgroundAgents} background agent${store.activeBackgroundAgents === 1 ? '' : 's'} running`"
+        >
+          <span class="bg-agents-dot" aria-hidden="true"></span>
+          {{ store.activeBackgroundAgents }} agent{{ store.activeBackgroundAgents === 1 ? '' : 's' }}
+        </span>
         <div class="model-picker-wrap" ref="modelPickerRef">
           <button
             class="model-picker-btn btn-icon"
@@ -162,61 +170,65 @@
         </div>
         <!-- User message -->
         <div v-else-if="item.kind === 'user'" class="message-wrap user">
-          <div class="message user">
-            <div class="message-content">
-              <div v-if="item.msg.images?.length" class="message-images">
-                <a
-                  v-for="img in item.msg.images"
-                  :key="img"
-                  :href="img.startsWith('data:') ? img : `/api/images/${img}`"
-                  target="_blank"
-                  rel="noopener"
-                  class="message-image-link"
-                >
-                  <img :src="img.startsWith('data:') ? img : `/api/images/${img}`" :alt="img.startsWith('data:') ? 'image' : img" class="message-image" />
-                </a>
+          <div class="message-row">
+            <div class="message user">
+              <div class="message-content">
+                <div v-if="item.msg.images?.length" class="message-images">
+                  <a
+                    v-for="img in item.msg.images"
+                    :key="img"
+                    :href="img.startsWith('data:') ? img : `/api/images/${img}`"
+                    target="_blank"
+                    rel="noopener"
+                    class="message-image-link"
+                  >
+                    <img :src="img.startsWith('data:') ? img : `/api/images/${img}`" :alt="img.startsWith('data:') ? 'image' : img" class="message-image" />
+                  </a>
+                </div>
+                <div v-html="renderMarkdown(item.msg.content)"></div>
               </div>
-              <div v-html="renderMarkdown(item.msg.content)"></div>
+              <div v-if="item.msg.timestamp" class="message-meta">
+                {{ formatTime(item.msg.timestamp) }}
+              </div>
             </div>
-          </div>
-          <div v-if="item.msg.content?.trim()" class="message-actions">
-            <button
-              type="button"
-              class="message-action-btn"
-              :title="copiedMessageKey === `user-${i}` ? 'Copied' : 'Copy'"
-              :aria-label="copiedMessageKey === `user-${i}` ? 'Copied' : 'Copy message'"
-              @click="copyMessageText(item.msg.content, `user-${i}`)"
-            >
-              <svg v-if="copiedMessageKey === `user-${i}`" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
-              <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-            </button>
-          </div>
-          <div v-if="item.msg.timestamp" class="message-meta">
-            {{ formatTime(item.msg.timestamp) }}
+            <div v-if="item.msg.content?.trim()" class="message-actions">
+              <button
+                type="button"
+                class="message-action-btn"
+                :title="copiedMessageKey === `user-${i}` ? 'Copied' : 'Copy'"
+                :aria-label="copiedMessageKey === `user-${i}` ? 'Copied' : 'Copy message'"
+                @click="copyMessageText(item.msg.content, `user-${i}`)"
+              >
+                <svg v-if="copiedMessageKey === `user-${i}`" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              </button>
+            </div>
           </div>
         </div>
         <!-- Final assistant message -->
         <div v-else-if="item.kind === 'assistant'" class="message-wrap assistant">
-          <div class="message assistant" :class="{ error: item.msg.is_error }">
-            <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
-          </div>
-          <div v-if="item.msg.content?.trim()" class="message-actions">
-            <button
-              type="button"
-              class="message-action-btn"
-              :title="copiedMessageKey === `assistant-${i}` ? 'Copied' : 'Copy'"
-              :aria-label="copiedMessageKey === `assistant-${i}` ? 'Copied' : 'Copy message'"
-              @click="copyMessageText(item.msg.content, `assistant-${i}`)"
-            >
-              <svg v-if="copiedMessageKey === `assistant-${i}`" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
-              <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-            </button>
-          </div>
-          <div v-if="item.msg.timestamp || item.msg.effective_model" class="message-meta">
-            <span v-if="item.msg.timestamp">{{ formatTime(item.msg.timestamp) }}</span>
-            <span v-if="item.msg.duration_ms"> &middot; {{ formatDuration(item.msg.duration_ms) }}</span>
-            <span v-if="item.msg.effective_model"> &middot; {{ item.msg.effective_model }}</span>
-            <span v-if="item.msg.usage?.input_tokens"> | in:{{ item.msg.usage.input_tokens }} out:{{ item.msg.usage.output_tokens }}</span>
+          <div class="message-row">
+            <div class="message assistant" :class="{ error: item.msg.is_error }">
+              <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
+              <div v-if="item.msg.timestamp || item.msg.effective_model" class="message-meta">
+                <span v-if="item.msg.timestamp">{{ formatTime(item.msg.timestamp) }}</span>
+                <span v-if="item.msg.duration_ms"> &middot; {{ formatDuration(item.msg.duration_ms) }}</span>
+                <span v-if="item.msg.effective_model"> &middot; {{ item.msg.effective_model }}</span>
+                <span v-if="item.msg.usage?.input_tokens"> | in:{{ item.msg.usage.input_tokens }} out:{{ item.msg.usage.output_tokens }}</span>
+              </div>
+            </div>
+            <div v-if="item.msg.content?.trim()" class="message-actions">
+              <button
+                type="button"
+                class="message-action-btn"
+                :title="copiedMessageKey === `assistant-${i}` ? 'Copied' : 'Copy'"
+                :aria-label="copiedMessageKey === `assistant-${i}` ? 'Copied' : 'Copy message'"
+                @click="copyMessageText(item.msg.content, `assistant-${i}`)"
+              >
+                <svg v-if="copiedMessageKey === `assistant-${i}`" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              </button>
+            </div>
           </div>
           <button
             v-if="item.msg.is_error"
@@ -224,6 +236,8 @@
             @click="openFixChat(i)"
           >Fix this error</button>
         </div>
+        <!-- Subagent activity for the turn that dispatched the agents -->
+        <SubagentPanel v-else-if="item.kind === 'subagents'" :subagents="item.subs" />
         <!-- System message (errors, etc) -->
         <div v-else-if="item.kind === 'system'" class="message system">
           <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
@@ -661,11 +675,12 @@ import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
 import VoiceRecorder from './VoiceRecorder.vue'
-// SubagentPanel removed: subagent data is per-chat, not per-turn, so it
-// doesn't map well to the turn-based rendering. Re-add when we have
-// per-turn subagent association.
+// Subagent transcripts carry `turn_index` (the user turn that dispatched
+// them, parsed server-side from the session JSONL), so each panel anchors
+// under the turn that spawned its agents.
+import SubagentPanel from './SubagentPanel.vue'
 import { api } from '../lib/api'
-import type { ModelsResponse, ChatMessage } from '../lib/types'
+import type { ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import { linkifyText } from '../lib/filePaths'
@@ -678,6 +693,7 @@ type RenderItem =
   | { kind: 'assistant'; msg: ChatMessage }
   | { kind: 'system'; msg: ChatMessage }
   | { kind: 'trace'; steps: ChatMessage[] }
+  | { kind: 'subagents'; subs: SubagentTranscript[] }
 
 type ChatComment = {
   id: string
@@ -1711,6 +1727,31 @@ const renderItems = computed<RenderItem[]>(() => {
   const items: RenderItem[] = []
   let buffer: ChatMessage[] = []
 
+  // Subagent transcripts grouped by the user turn that dispatched them.
+  // Entries without a resolvable turn (older sessions, remote chats) attach
+  // to the last turn so they stay visible.
+  const subsByTurn = new Map<number, SubagentTranscript[]>()
+  const unanchoredSubs: SubagentTranscript[] = []
+  for (const sub of store.activeSubagents) {
+    if (typeof sub.turn_index === 'number') {
+      const list = subsByTurn.get(sub.turn_index) || []
+      list.push(sub)
+      subsByTurn.set(sub.turn_index, list)
+    } else {
+      unanchoredSubs.push(sub)
+    }
+  }
+  let currentTurnIndex: number | null = null
+
+  const flushSubagents = () => {
+    if (currentTurnIndex === null) return
+    const subs = subsByTurn.get(currentTurnIndex)
+    if (subs?.length) {
+      items.push({ kind: 'subagents', subs })
+      subsByTurn.delete(currentTurnIndex)
+    }
+  }
+
   const flushTurn = (isFinal = false) => {
     if (!buffer.length) return
     // Find index of the LAST assistant text message (the final answer).
@@ -1768,6 +1809,10 @@ const renderItems = computed<RenderItem[]>(() => {
   for (const msg of store.activeMessages) {
     if (msg.role === 'user') {
       flushTurn()
+      flushSubagents()
+      currentTurnIndex = typeof msg.turn_index === 'number'
+        ? msg.turn_index
+        : currentTurnIndex === null ? 0 : currentTurnIndex + 1
       items.push({ kind: 'user', msg })
     } else if (
       msg.role === 'system'
@@ -1784,6 +1829,13 @@ const renderItems = computed<RenderItem[]>(() => {
     }
   }
   flushTurn(true)
+  flushSubagents()
+  // Anything still unplaced (turn not in history yet, or no turn info):
+  // show after the last turn rather than dropping it.
+  const leftovers = [...subsByTurn.values()].flat().concat(unanchoredSubs)
+  if (leftovers.length) {
+    items.push({ kind: 'subagents', subs: leftovers })
+  }
   return items
 })
 
@@ -2427,21 +2479,7 @@ function insertImageRef(n: number) {
 }
 
 .chat-title {
-  font-weight: 600;
-  font-size: 16px;
   cursor: pointer;
-  /* Block + min-width:0 + max-width:100% are all needed together for
-     text-overflow: ellipsis to actually kick in when the title is longer
-     than the parent. Inline (the default for <span>) ignores overflow. */
-  display: block;
-  min-width: 0;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  /* In a flex row with the project name, claim available space so the
-     title doesn't get pushed to width:0 when the project name is long. */
-  flex: 1;
 }
 
 .title-input {
@@ -2492,6 +2530,18 @@ function insertImageRef(n: number) {
   max-width: 90%;
 }
 
+.message-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.message-wrap.user .message-row {
+  flex-direction: row-reverse;
+}
+
 .message {
   max-width: 100%;
   padding: 8px 12px;
@@ -2514,19 +2564,12 @@ function insertImageRef(n: number) {
 
 .message-actions {
   display: flex;
+  flex-shrink: 0;
+  align-self: center;
   gap: 4px;
-  margin-top: 2px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s;
-}
-
-.message-wrap.user .message-actions {
-  justify-content: flex-end;
-}
-
-.message-wrap.assistant .message-actions {
-  justify-content: flex-start;
 }
 
 .message-wrap:hover .message-actions,
@@ -2541,7 +2584,7 @@ function insertImageRef(n: number) {
   justify-content: center;
   width: var(--touch, 44px);
   height: var(--touch, 44px);
-  margin: -10px 0;
+  margin: 0;
   padding: 0;
   border: none;
   border-radius: 6px;
@@ -2894,6 +2937,33 @@ details[open] > .activity-summary::before {
   margin-left: 4px;
 }
 
+/* "N agents" header pill: background subagents still running after the
+   parent turn ended (store.activeBackgroundAgents, fed by /ws/events). */
+.bg-agents-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--fg2);
+  white-space: nowrap;
+}
+
+.bg-agents-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent2);
+  animation: bg-agents-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes bg-agents-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
 /* Message content (markdown) */
 .message-content {
   min-width: 0;
@@ -2978,7 +3048,14 @@ details[open] > .activity-summary::before {
 .message-meta {
   font-size: 10px;
   color: var(--fg2);
-  margin-top: 4px;
+  margin-top: 6px;
+  padding-top: 4px;
+  border-top: 1px solid color-mix(in srgb, var(--fg2) 18%, transparent);
+  line-height: 1.3;
+}
+
+.message.user .message-meta {
+  text-align: right;
 }
 
 .message-images { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
@@ -3781,15 +3858,6 @@ details[open] > .activity-summary::before {
   .message-wrap { max-width: 92%; }
   .message-wrap.assistant { max-width: 92%; }
   .message { padding: 10px 14px; }
-  .chat-title {
-    flex: 1 1 100%;
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    font-size: 12px;
-    line-height: 1.2;
-    white-space: normal;
-  }
   /* Keep input and placeholder at the same size so the text doesn't jump
      when the user starts typing. 16px is the iOS auto-zoom floor: any
      smaller and Safari zooms the page on focus, which is worse than a

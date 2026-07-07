@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
+from ciao import subagent_tracking
 from ciao.config import WorkspaceConfig, CLAUDE_AI_CONNECTORS, coerce_claude_ai_mcps
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.package_version import package_changelog, package_status, update_package
@@ -2036,6 +2037,14 @@ async def chat_subagents(request: Request) -> JSONResponse:
 
     ``[{"agent_id": str, "messages": [...same shape as /messages...]}]``
 
+    Each entry additionally carries dispatch metadata parsed from the parent
+    session JSONL when available (see ciao/subagent_tracking.py):
+    ``tool_use_id``, ``description``, ``subagent_type``, ``is_async``,
+    ``status`` ("running"/"completed"/"failed"), and ``turn_index`` — the
+    user turn that dispatched the agent, aligned with the ``turn_index``
+    stamped on user bubbles by /messages so the PWA can anchor the subagent
+    panel to the right turn.
+
     Empty array when the chat has no session, no subagents were spawned, or
     the SDK can't find the session on this machine (e.g. a remote chat that
     hasn't been pulled locally).
@@ -2051,17 +2060,23 @@ async def chat_subagents(request: Request) -> JSONResponse:
     config = request.app.state.config
     workspace = str(config.workspace_root)
 
+    def _finalize(entries: list[dict]) -> JSONResponse:
+        _merge_subagent_dispatch_meta(
+            entries, chat.session_id, Path(config.workspace_root)
+        )
+        return JSONResponse(entries)
+
     try:
         from claude_agent_sdk import get_subagent_messages, list_subagents
     except ImportError:
-        return JSONResponse(_local_subagent_transcripts(chat.session_id, Path(config.workspace_root)))
+        return _finalize(_local_subagent_transcripts(chat.session_id, Path(config.workspace_root)))
 
     try:
         agent_ids = list_subagents(chat.session_id, directory=workspace)
     except (FileNotFoundError, ValueError):
-        return JSONResponse(_local_subagent_transcripts(chat.session_id, Path(config.workspace_root)))
+        return _finalize(_local_subagent_transcripts(chat.session_id, Path(config.workspace_root)))
     except Exception:  # noqa: BLE001 — defensive against SDK surprises
-        return JSONResponse(_local_subagent_transcripts(chat.session_id, Path(config.workspace_root)))
+        return _finalize(_local_subagent_transcripts(chat.session_id, Path(config.workspace_root)))
 
     result: list[dict] = []
     for agent_id in agent_ids:
@@ -2082,7 +2097,37 @@ async def chat_subagents(request: Request) -> JSONResponse:
     if not result:
         result = _local_subagent_transcripts(chat.session_id, Path(config.workspace_root))
 
-    return JSONResponse(result)
+    return _finalize(result)
+
+
+def _merge_subagent_dispatch_meta(
+    entries: list[dict], session_id: str, workspace_root: Path
+) -> None:
+    """Attach dispatch metadata from the parent session JSONL in place."""
+    if not entries:
+        return
+    path = subagent_tracking.find_parent_session_file(session_id, workspace_root)
+    if path is None:
+        return
+    try:
+        state = subagent_tracking.parse_session_subagents(path)
+    except Exception:  # noqa: BLE001 — metadata is best-effort decoration
+        logger.exception("subagent dispatch-meta parse failed for %s", session_id)
+        return
+    for entry in entries:
+        # SDK ids are bare ("a319..."); the local-JSONL fallback uses the
+        # file stem ("agent-a319...").
+        agent_id = str(entry.get("agent_id", "")).removeprefix("agent-")
+        info = state.subagents.get(agent_id)
+        if info is None:
+            continue
+        entry["tool_use_id"] = info.tool_use_id
+        entry["description"] = info.description
+        entry["subagent_type"] = info.subagent_type
+        entry["is_async"] = info.is_async
+        entry["status"] = info.status
+        if info.turn_index is not None:
+            entry["turn_index"] = info.turn_index
 
 
 # ── Voice ────────────────────────────────────────────────────────────────
@@ -2766,11 +2811,6 @@ async def run_schedule_now(request: Request) -> JSONResponse:
         result = await sm.dispatch_now(schedule_id)
     except ValueError:
         return JSONResponse({"error": "not found"}, status_code=404)
-    except RuntimeError as exc:
-        # dispatch_now raises RuntimeError when the instance is paused. That's
-        # a client-visible conflict, not a server fault, so return 409 with the
-        # message instead of leaking an unhandled 500 ("Internal Server Error").
-        return JSONResponse({"error": str(exc)}, status_code=409)
     return JSONResponse(result, status_code=201)
 
 
@@ -3683,7 +3723,6 @@ async def admin_status(request: Request) -> JSONResponse:
         "models": config.claude_models,
         "default_model": config.claude_default_model,
         "default_mode": config.claude_mode,
-        "dispatch_schedules": config.dispatch_schedules,
     })
 
 

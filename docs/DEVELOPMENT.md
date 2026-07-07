@@ -80,7 +80,7 @@ cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 
 ## Skills, subagents, and slash commands
 
-Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories. A workspace skill with the same name as a packaged one overrides it.
+Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `ciao-schedules`, `vault-read`, …) and the upstream **`gws-*` skills** for Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). The packaged `gws-shared` skill documents Ciaobot profile/auth conventions (`scripts/gws-profile.sh`, PWA OAuth upload). In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories. A workspace skill with the same name as a packaged one overrides it.
 
 Edit canonical sources, not the generated `.claude/` dirs. Do not run `npx skills update` or `gws generate-skills` ad-hoc; both re-expand the lockfile and repopulate bloat.
 

@@ -164,9 +164,10 @@ class ChatStream:
         "prompt_text",
         "_pending",
         "user_stopped",
+        "background",
     )
 
-    def __init__(self, prompt_text: str = "") -> None:
+    def __init__(self, prompt_text: str = "", *, background: bool = False) -> None:
         self._events: list[dict] = []
         self._subs: set[asyncio.Queue[dict | None]] = set()
         self._done: bool = False
@@ -182,6 +183,11 @@ class ChatStream:
         # after an interrupted turn (a user stop is intentional, not an
         # error, so queued follow-ups should still go out).
         self.user_stopped: bool = False
+        # True for streams carrying between-turns background-subagent events
+        # (no user prompt drove them). A background stream must never absorb
+        # queued/steered user messages — a user send while one is active
+        # starts a real turn instead (the drain is cancelled first).
+        self.background: bool = background
 
     def enqueue(self, text: str, images: list[str] | None = None) -> None:
         """Queue a user message to flush after this stream finishes."""

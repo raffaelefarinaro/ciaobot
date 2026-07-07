@@ -338,7 +338,7 @@ async def test_dispatch_now_interactive_run_returns_immediately(store: ScheduleS
     await asyncio.sleep(0.05)
 
 
-async def test_dispatch_now_returns_archive_metadata_for_background_run(
+async def test_dispatch_now_returns_chat_id_immediately_for_auto_archive(
     store: ScheduleStore,
 ) -> None:
     entry = store.create(
@@ -350,9 +350,13 @@ async def test_dispatch_now_returns_archive_metadata_for_background_run(
         frequency="manual",
         archive_policy="auto",
     )
+    started = asyncio.Event()
+    release = asyncio.Event()
 
     async def dispatch(entry, model, mode, provider, *, target_chat_id=None):
         assert target_chat_id == "chat-sched"
+        started.set()
+        await release.wait()
         return {
             "chat_id": target_chat_id,
             "archived_to": "memory-vault/Logs/Chats/chat-sched/run.md",
@@ -367,9 +371,12 @@ async def test_dispatch_now_returns_archive_metadata_for_background_run(
         prepare_chat=prepare_chat,
     )
     result = await mgr.dispatch_now(entry.schedule_id)
+    await asyncio.wait_for(started.wait(), timeout=1)
     assert result["chat_id"] == "chat-sched"
-    assert result["archived_to"] == "memory-vault/Logs/Chats/chat-sched/run.md"
+    assert "archived_to" not in result
     assert result["archive_policy"] == "auto"
+    release.set()
+    await asyncio.sleep(0.05)
 
 
 def test_compute_next_run_returns_none_for_manual(store: ScheduleStore):

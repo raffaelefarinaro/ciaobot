@@ -18,7 +18,7 @@ from typing import Any, AsyncGenerator
 
 import yaml
 
-from ciao import job_runs
+from ciao import job_runs, subagent_tracking
 from ciao.config import BridgeConfig
 from ciao.error_log import clear_error_log, tail_error_log
 from ciao.models import (
@@ -612,6 +612,14 @@ class ProjectChatManager:
         # may spawn subagents; we keep at most one watcher per chat so rapid
         # successive turns do not accumulate overlapping pollers.
         self._pending_subagent_watchers: dict[str, asyncio.Task] = {}
+        # Per-chat between-turns SDK drain tasks (see _drain_between_turns).
+        # At most one per chat; cancelled before a new user turn starts so
+        # the drain never competes with receive_response for SDK messages.
+        self._between_turn_drains: dict[str, asyncio.Task] = {}
+        # Last announced running-background-subagent count per chat. Feeds
+        # the /ws/events connect snapshot so a fresh client can paint the
+        # "N agents running" indicator without waiting for the next change.
+        self._background_agents_last: dict[str, int] = {}
         # Per-chat deferred quota retry loops. Each loop sleeps until the
         # chat's retry_next_at, tries the saved prompt if idle, then repeats
         # hourly until success/stop/archive/delete.
@@ -1830,6 +1838,7 @@ class ProjectChatManager:
                 continue
             # No session, no images, no transcript -> nothing else to clean
             # up. Still cancel any in-flight provider just in case.
+            self._cancel_between_turns_drain(cid)
             provider = self._providers.pop(cid, None)
             if provider:
                 asyncio.ensure_future(provider.disconnect())
@@ -2076,6 +2085,7 @@ class ProjectChatManager:
 
         ctx = ChatContext.for_web(chat_id)
         self._state.reset_active_session(ctx)
+        self._cancel_between_turns_drain(chat_id)
         provider_service = self._providers.pop(chat_id, None)
         if provider_service:
             asyncio.ensure_future(provider_service.disconnect())
@@ -2096,6 +2106,7 @@ class ProjectChatManager:
         task = self._retry_tasks.pop(chat_id, None)
         if task is not None and not task.done():
             task.cancel()
+        self._cancel_between_turns_drain(chat_id)
         provider = self._providers.pop(chat_id, None)
         if provider:
             asyncio.ensure_future(provider.disconnect())
@@ -2159,6 +2170,7 @@ class ProjectChatManager:
         if chat.retry_status:
             self._clear_chat_retry(chat)
         self._cancel_pending_push(chat_id)
+        self._cancel_between_turns_drain(chat_id)
         provider = self._providers.pop(chat_id, None)
         if provider:
             asyncio.ensure_future(provider.disconnect())
@@ -2287,6 +2299,7 @@ class ProjectChatManager:
             self._clear_chat_retry(chat)
         self._state.reset_active_session(ctx)
         # Disconnect old provider so a fresh one is created
+        self._cancel_between_turns_drain(chat_id)
         provider = self._providers.pop(chat_id, None)
         if provider:
             asyncio.ensure_future(provider.disconnect())
@@ -2808,7 +2821,9 @@ class ProjectChatManager:
         should fall through to `start_stream`).
         """
         stream = self._broker.get(chat_id)
-        if stream is None:
+        if stream is None or stream.background:
+            # Background drain streams have no drive loop to flush a queue;
+            # the caller starts a real turn instead (which cancels the drain).
             return False
         image_refs: list[str] = []
         for img in images or []:
@@ -2835,7 +2850,9 @@ class ProjectChatManager:
         (caller should fall back to queuing).
         """
         stream = self._broker.get(chat_id)
-        if stream is None:
+        if stream is None or stream.background:
+            # No live turn to steer into during a background drain; the
+            # caller falls through to queue → start_stream.
             return False
         provider = self._providers.get(chat_id)
         if provider is None:
@@ -2894,6 +2911,11 @@ class ProjectChatManager:
     def active_stream_chat_ids(self) -> list[str]:
         """Chats currently driving an in-flight broker stream."""
         return [cid for cid in list(self._broker._streams) if self._broker.get(cid) is not None]
+
+    @property
+    def background_agent_counts(self) -> dict[str, int]:
+        """Last announced running-background-subagent count per chat (>0 only)."""
+        return {cid: n for cid, n in self._background_agents_last.items() if n > 0}
 
     def set_chat_retry(
         self,
@@ -3063,7 +3085,13 @@ class ProjectChatManager:
         the result event on their own subscription.
         """
         existing = self._broker.get(chat_id)
-        if existing is not None:
+        if existing is not None and existing.background:
+            # A between-turns drain stream is live. The user's send starts a
+            # real turn: cancel the drain (its cleanup finishes the stream)
+            # and fall through — the new stream replaces it in the broker.
+            self._cancel_between_turns_drain(chat_id)
+            self._broker.clear(chat_id, existing)
+        elif existing is not None:
             logger.debug("Chat %s already has an active stream; reusing", chat_id)
             return existing
 
@@ -3171,6 +3199,11 @@ class ProjectChatManager:
             last_assistant_text = ""
             had_error = False
             had_provider_progress = False
+            # A between-turns drain and receive_response() consume from the
+            # same SDK stream and must never run concurrently. The cancel in
+            # start_stream is fire-and-forget; await the task here so the
+            # drain has fully unwound before the first provider call.
+            await self._await_between_turns_drain(chat_id)
             try:
                 while True:
                     turn_assistant_text = ""
@@ -3427,6 +3460,13 @@ class ProjectChatManager:
                 chat_for_watcher = self._chats.get(chat_id)
                 if chat_for_watcher is not None and chat_for_watcher.session_id:
                     self._start_subagent_watcher(chat_id, project_id)
+                    # Keep the SDK pipe drained while the client idles: a
+                    # finishing background subagent triggers a CLI-initiated
+                    # parent turn whose events would otherwise rot in the
+                    # transport buffer (and its stale ResultMessage would
+                    # truncate the next turn). The drain also gives the PWA
+                    # a live view of that follow-up turn.
+                    self._start_between_turns_drain(chat_id, project_id)
                 # Successful turn(s): announce result ready (drives unread
                 # badges + in-app toast on clients that aren't focused on
                 # this chat) and dispatch web push (decoupled from any WS).
@@ -3580,75 +3620,176 @@ class ProjectChatManager:
         task = asyncio.create_task(self._watch_subagent_completion(chat_id, project_id))
         self._pending_subagent_watchers[chat_id] = task
 
-    async def _watch_subagent_completion(self, chat_id: str, project_id: str) -> None:
-        """Poll the SDK until background subagents for this chat finish.
-
-        Emits a ``chat_subagents_ready`` event each time the running count
-        drops, and schedules a delayed push when the last one completes. The
-        watcher stops once no subagents remain, the session disappears, or
-        after a generous timeout.
-        """
-        chat = self._chats.get(chat_id)
-        if chat is None or not chat.session_id:
-            return
-        session_id = chat.session_id
-        workspace = str(self._config.workspace_root)
-        try:
-            from claude_agent_sdk import list_subagents
-        except Exception:
-            return
-
-        try:
-            current_ids = set(list_subagents(session_id, directory=workspace))
-        except Exception:
-            logger.debug("list_subagents failed for watcher %s", session_id)
-            return
-        if not current_ids:
-            return
-
-        last_count = len(current_ids)
-        # Announce the initial running count right away so the PWA can show a
-        # persistent "N background agents running" indicator the moment the
-        # parent turn ends, instead of only once one finishes. Clients treat a
-        # non-decreasing count as a silent badge update (no unread/toast); only
-        # drops (emitted in the loop below) mean an agent finished.
+    def _publish_subagent_count(self, chat_id: str, project_id: str, count: int) -> None:
+        self._background_agents_last[chat_id] = count
         self._events.publish({
             "type": "chat_subagents_ready",
             "chat_id": chat_id,
             "project_id": project_id,
-            "remaining": last_count,
+            "remaining": count,
         })
-        deadline = time.perf_counter() + 600  # 10 minutes is plenty
-        while time.perf_counter() < deadline:
-            await asyncio.sleep(3)
-            try:
-                current_ids = set(list_subagents(session_id, directory=workspace))
-            except Exception:
-                # Session deleted or SDK unavailable: stop watching.
-                break
-            new_count = len(current_ids)
-            if new_count < last_count:
-                self._events.publish({
-                    "type": "chat_subagents_ready",
-                    "chat_id": chat_id,
-                    "project_id": project_id,
-                    "remaining": new_count,
-                })
-                if new_count == 0:
-                    chat_now = self._chats.get(chat_id)
-                    if chat_now is not None:
-                        chat_now.last_activity_at = _now_iso()
-                        self._save()
-                    title = chat_now.title if chat_now else "Ciaobot"
-                    self._schedule_push(chat_id, title, "Background agents finished")
-                last_count = new_count
-            elif new_count > last_count:
-                # A subagent spawned additional subagents; extend the watch.
-                last_count = new_count
-        # Clean up our slot when the watcher exits.
-        current = self._pending_subagent_watchers.get(chat_id)
-        if current is not None and current.done():
-            self._pending_subagent_watchers.pop(chat_id, None)
+
+    async def _watch_subagent_completion(self, chat_id: str, project_id: str) -> None:
+        """Watch the session JSONL until background subagents finish.
+
+        The SDK's ``list_subagents`` enumerates transcript *files*, which
+        persist after completion, so its count never drops. The parent
+        session JSONL is the reliable signal: async Agent dispatches are
+        recorded with ``toolUseResult.isAsync`` and each completion appends a
+        ``<task-notification>`` envelope (see ciao/subagent_tracking.py).
+
+        Emits ``chat_subagents_ready`` whenever the running count changes and
+        schedules a delayed push when the last one completes.
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None or not chat.session_id:
+            return
+        path = subagent_tracking.find_parent_session_file(
+            chat.session_id, self._config.workspace_root
+        )
+        if path is None:
+            return
+
+        last_count = -1
+        last_size = -1
+        # Background agents can run for a long while; poll cheaply (a stat
+        # per tick, a re-parse only when the file grew) with a wide horizon.
+        deadline = time.perf_counter() + 3600
+        try:
+            while time.perf_counter() < deadline:
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    break
+                if size != last_size:
+                    last_size = size
+                    count = subagent_tracking.parse_session_subagents(
+                        path
+                    ).running_background
+                    if count != last_count:
+                        self._publish_subagent_count(chat_id, project_id, count)
+                        if count == 0 and last_count > 0:
+                            chat_now = self._chats.get(chat_id)
+                            if chat_now is not None:
+                                chat_now.last_activity_at = _now_iso()
+                                self._save()
+                            title = chat_now.title if chat_now else "Ciaobot"
+                            self._schedule_push(
+                                chat_id, title, "Background agents finished"
+                            )
+                        last_count = count
+                    if count == 0:
+                        break
+                await asyncio.sleep(3)
+        finally:
+            self._background_agents_last.pop(chat_id, None)
+            # Clean up our slot when the watcher exits.
+            current = self._pending_subagent_watchers.get(chat_id)
+            if current is not None and current.done():
+                self._pending_subagent_watchers.pop(chat_id, None)
+
+    # ── Between-turns SDK drain ──────────────────────────────────────────
+
+    def _cancel_between_turns_drain(self, chat_id: str) -> None:
+        """Fire-and-forget cancel; pair with _await_between_turns_drain."""
+        task = self._between_turn_drains.get(chat_id)
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _await_between_turns_drain(self, chat_id: str) -> None:
+        """Wait until any drain task for this chat has fully unwound."""
+        task = self._between_turn_drains.pop(chat_id, None)
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001 — drain errors must not kill the turn
+            pass
+
+    def _start_between_turns_drain(self, chat_id: str, project_id: str) -> None:
+        provider_service = self._providers.get(chat_id)
+        if provider_service is None or not provider_service.can_drain:
+            return
+        self._cancel_between_turns_drain(chat_id)
+        task = asyncio.create_task(self._drain_between_turns(chat_id, project_id))
+        self._between_turn_drains[chat_id] = task
+
+    async def _drain_between_turns(self, chat_id: str, project_id: str) -> None:
+        """Consume and publish SDK events that arrive with no turn active.
+
+        When a background subagent completes, the CLI injects a
+        task-notification and runs a parent follow-up turn on its own. This
+        loop forwards those events to a broker stream (so open chat sockets
+        render them live) and announces the follow-up's result like a normal
+        turn (unread badge, toast, delayed push). Each CLI-initiated turn
+        gets its own background ChatStream so replay stays turn-shaped.
+        """
+        from ciao.web.chat_broker import event_to_json
+
+        provider_service = self._providers.get(chat_id)
+        if provider_service is None:
+            return
+        stream: ChatStream | None = None
+
+        def close_stream(had_error: bool) -> None:
+            nonlocal stream
+            if stream is None:
+                return
+            stream.finish()
+            self._broker.clear(chat_id, stream)
+            self._events.publish({
+                "type": "chat_streaming_done",
+                "chat_id": chat_id,
+                "project_id": project_id,
+                "is_error": had_error,
+            })
+            stream = None
+
+        try:
+            async for event in provider_service.drain_events():
+                payload = event_to_json(event)
+                if payload is None:
+                    continue
+                if stream is None:
+                    # Only open a visible stream when a real event arrives —
+                    # most drains sit idle until cancelled by the next turn.
+                    stream = ChatStream(background=True)
+                    self._broker.register(chat_id, stream)
+                    self._events.publish({
+                        "type": "chat_streaming_started",
+                        "chat_id": chat_id,
+                        "project_id": project_id,
+                    })
+                stream.publish(payload)
+                if isinstance(event, PermissionRequestEvent):
+                    self._notify_permission(chat_id, event)
+                if isinstance(event, ResultEvent):
+                    text = event.result or ""
+                    is_error = bool(event.is_error)
+                    close_stream(is_error)
+                    if not is_error and text:
+                        chat_now = self._chats.get(chat_id)
+                        if chat_now is not None:
+                            chat_now.last_activity_at = _now_iso()
+                            self._save()
+                        title = chat_now.title if chat_now else "Ciaobot"
+                        snippet = self._result_snippet(text)
+                        self._events.publish({
+                            "type": "chat_result_ready",
+                            "chat_id": chat_id,
+                            "project_id": project_id,
+                            "title": title,
+                            "snippet": snippet,
+                        })
+                        self._schedule_push(chat_id, title, snippet)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a broken drain must not crash the app
+            logger.exception("Between-turns drain failed for chat %s", chat_id)
+        finally:
+            close_stream(False)
 
     def _notify_permission(
         self, chat_id: str, event: PermissionRequestEvent
@@ -3740,6 +3881,11 @@ class ProjectChatManager:
         stream = self._broker.get(chat_id)
         if stream is not None:
             stream.user_stopped = True
+            if stream.background:
+                # No active handle exists between turns; stopping means
+                # ending the drain (its cleanup finishes the stream).
+                await self._await_between_turns_drain(chat_id)
+                return True
         provider = self._providers.get(chat_id)
         if provider is None:
             return False
@@ -4398,6 +4544,7 @@ class ProjectChatManager:
         if chat is not None:
             self._unlink_chat_images(chat)
         self._chats.pop(chat_id, None)
+        self._cancel_between_turns_drain(chat_id)
         provider = self._providers.pop(chat_id, None)
         if provider:
             asyncio.ensure_future(provider.disconnect())

@@ -503,7 +503,39 @@
           <div class="card">
             <div class="settings-card-header settings-card-header--split">
               <div>
-                <p class="section-title">Google Workspace</p>
+                <div class="settings-label-row">
+                  <p class="section-title">Google Workspace</p>
+                  <details class="field-info">
+                    <summary aria-label="About Google Workspace integration" title="About Google Workspace integration">i</summary>
+                    <div class="field-info-panel">
+                      <p>
+                        Ciaobot uses the
+                        <a href="https://github.com/googleworkspace/cli" target="_blank" rel="noopener noreferrer">Google Workspace CLI (<code>gws</code>)</a>
+                        to reach Gmail, Calendar, Drive, Docs, Sheets, Slides, and Tasks from chats and schedules.
+                        Stock <code>gws-*</code> skills ship with the app once <code>gws</code> is installed and authenticated.
+                      </p>
+                      <p>
+                        Use separate <strong>personal</strong> and <strong>work</strong> profiles so a personal chat never inherits work Drive or calendar access.
+                        Each workspace picks its profile under Settings &rarr; Workspaces.
+                      </p>
+                      <p><strong>One-time setup per profile</strong></p>
+                      <ol class="field-info-steps">
+                        <li>Install <code>gws</code> (button below or <code>npm install -g @googleworkspace/cli</code>).</li>
+                        <li>
+                          In
+                          <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer">Google Cloud Console &rarr; Credentials</a>,
+                          create an OAuth client (Desktop app, or Web app with redirect URI <code>http://localhost</code>).
+                        </li>
+                        <li>Download the JSON file Google gives you (often named like <code>client_secret_….json</code>).</li>
+                        <li>Upload it below as <code>client_secret.json</code>, then click <strong>Connect Google Account</strong>.</li>
+                      </ol>
+                      <p>
+                        Enable the APIs you need in your GCP project (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks).
+                        Terminal alternative: <code>scripts/gws-profile.sh &lt;profile&gt; auth login --full</code>.
+                      </p>
+                    </div>
+                  </details>
+                </div>
                 <p class="hint">
                   Connect Gmail, Calendar, Drive, Docs, Sheets, Slides, and Tasks through separate local <code>gws</code> profiles.
                   Workspaces choose which profile to use in Settings &rarr; Workspaces.
@@ -597,7 +629,7 @@
                     <!-- State 1: Needs client_secret.json -->
                     <template v-if="!profile.client_secret_present">
                       <p class="gws-action-hint">
-                        Upload <code>client_secret.json</code> to start:
+                        Upload your OAuth <code>client_secret.json</code> to start (see the ⓘ button above for Google Cloud setup steps).
                       </p>
                       <label class="btn-small file-upload-btn">
                         Choose JSON file
@@ -3423,16 +3455,6 @@ async function doPackageUpdate() {
   overflow-x: auto;
 }
 
-.pause-badge {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-size: var(--text-sm);
-  font-weight: 600;
-  background: var(--success, #4caf50);
-  color: white;
-}
-
 .instance-toggle {
   display: flex;
   gap: 0;
@@ -4247,6 +4269,16 @@ async function doPackageUpdate() {
 }
 .field-info-panel p + p {
   margin-top: var(--space-2);
+}
+.field-info-panel ol.field-info-steps {
+  margin: var(--space-2) 0 0;
+  padding-left: 1.2em;
+}
+.field-info-panel ol.field-info-steps li + li {
+  margin-top: var(--space-1);
+}
+.field-info-panel a {
+  color: var(--accent);
 }
 .settings-field--wide {
   grid-column: 1 / -1;

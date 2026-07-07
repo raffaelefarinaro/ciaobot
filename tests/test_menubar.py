@@ -97,6 +97,15 @@ def test_restart_server_command_targets_launchd_label() -> None:
     ]
 
 
+def test_restart_menubar_command_targets_launchd_label() -> None:
+    assert menubar.restart_menubar_command(uid=501) == [
+        "launchctl",
+        "kickstart",
+        "-k",
+        "gui/501/com.ciao.menubar",
+    ]
+
+
 def test_stop_server_command_boots_out_launchd_label() -> None:
     # bootout (not kill) because the server plist is KeepAlive=true, so a
     # plain kill would be relaunched; bootout takes it out of the domain.
@@ -176,6 +185,77 @@ def test_notification_menu_title_truncates() -> None:
 
     assert len(title) == 30
     assert title.endswith("…")
+
+
+def test_chat_menu_title_marks_unread_with_dot() -> None:
+    assert menubar.chat_menu_title("Test", unread=True) == "● Test"
+    assert menubar.chat_menu_title("Test", unread=False) == "Test"
+    assert menubar.chat_menu_title("x" * 80, unread=True, max_length=10).endswith("…")
+    assert menubar.chat_menu_title("x" * 80, unread=True, max_length=10).startswith("● ")
+
+
+def test_workspace_menu_label_formats_names() -> None:
+    assert menubar.workspace_menu_label("personal") == "Personal"
+    assert menubar.workspace_menu_label("my-work") == "My Work"
+    assert menubar.workspace_menu_label("") == "Workspace"
+
+
+def test_chat_menu_title_adds_workspace_tag_when_requested() -> None:
+    assert menubar.chat_menu_title(
+        "Morning briefing",
+        unread=False,
+        workspace="personal",
+        show_workspace=True,
+    ) == "Morning briefing [Personal]"
+    assert menubar.chat_menu_title(
+        "Needs attention",
+        unread=True,
+        workspace="work",
+        show_workspace=True,
+    ) == "● Needs attention [Work]"
+
+
+def test_read_open_chats_resolves_workspace_from_project(tmp_path: Path) -> None:
+    state = tmp_path / ".runtime" / "web_projects.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(
+        json.dumps(
+            {
+                "projects": {
+                    "proj-personal": {"name": "General", "workspace": "personal"},
+                    "proj-work": {"name": "General", "workspace": "work"},
+                },
+                "chats": {
+                    "personal-chat": {
+                        "project_id": "proj-personal",
+                        "title": "Personal chat",
+                        "archived": False,
+                        "last_activity_at": "2026-01-02T10:00:00",
+                    },
+                    "work-chat": {
+                        "project_id": "proj-work",
+                        "title": "Work chat",
+                        "archived": False,
+                        "last_activity_at": "2026-01-01T10:00:00",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    chats = menubar.read_open_chats(tmp_path)
+
+    assert [(chat.chat_id, chat.workspace) for chat in chats] == [
+        ("personal-chat", "personal"),
+        ("work-chat", "work"),
+    ]
+
+
+def test_menubar_badge_title() -> None:
+    assert menubar.menubar_badge_title(0) == ""
+    assert menubar.menubar_badge_title(3) == "3"
+    assert menubar.menubar_badge_title(100) == "99+"
 
 
 def test_chat_url_deep_links_to_chat(tmp_path: Path) -> None:
@@ -326,6 +406,20 @@ def test_banners_muted_tolerates_corrupt_settings(tmp_path: Path) -> None:
     path.write_text("not json", encoding="utf-8")
 
     assert menubar.read_banners_muted(tmp_path) is False
+
+
+def test_update_menu_label_includes_version() -> None:
+    assert menubar.update_menu_label("1.2.3") == "Update to 1.2.3"
+    assert menubar.update_menu_label("  ") == "Update available"
+
+
+def test_package_update_fingerprint_tracks_availability() -> None:
+    assert menubar.package_update_fingerprint(
+        {"update_available": True, "latest_version": "2.0.0"}
+    ) == (True, "2.0.0")
+    assert menubar.package_update_fingerprint(
+        {"update_available": False, "latest_version": "1.0.0"}
+    ) == (False, "1.0.0")
 
 
 def test_run_menubar_without_rumps_explains_the_dependency(

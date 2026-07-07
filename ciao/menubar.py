@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -21,8 +22,11 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 
+from ciao.package_version import make_cached_package_status, update_package
+
 
 SERVER_LAUNCHD_LABEL = "com.ciao.server"
+MENUBAR_LAUNCHD_LABEL = "com.ciao.menubar"
 POLL_SECONDS = 10.0
 
 
@@ -74,6 +78,11 @@ def open_app_command(workspace: Path, port: int) -> list[str]:
 def restart_server_command(uid: int | None = None) -> list[str]:
     resolved = os.getuid() if uid is None else uid
     return ["launchctl", "kickstart", "-k", f"gui/{resolved}/{SERVER_LAUNCHD_LABEL}"]
+
+
+def restart_menubar_command(uid: int | None = None) -> list[str]:
+    resolved = os.getuid() if uid is None else uid
+    return ["launchctl", "kickstart", "-k", f"gui/{resolved}/{MENUBAR_LAUNCHD_LABEL}"]
 
 
 def stop_server_command(uid: int | None = None) -> list[str]:
@@ -141,6 +150,47 @@ def notification_menu_title(notification: Notification, *, max_length: int = 60)
     return text
 
 
+def workspace_menu_label(name: str) -> str:
+    """Human-readable workspace name for menu labels (matches the PWA sidebar)."""
+
+    text = name.strip()
+    if not text:
+        return "Workspace"
+    parts = re.split(r"[-_\s]+", text)
+    return " ".join(part.capitalize() for part in parts if part)
+
+
+def chat_menu_title(
+    title: str,
+    *,
+    unread: bool,
+    workspace: str = "",
+    show_workspace: bool = False,
+    max_length: int = 58,
+) -> str:
+    """Menu label for an open chat; prefix with a dot when it has unread activity."""
+
+    text = title.strip() or "Untitled chat"
+    prefix = "● " if unread else ""
+    suffix = ""
+    if show_workspace and workspace.strip():
+        suffix = f" [{workspace_menu_label(workspace)}]"
+    budget = max_length - len(prefix) - len(suffix)
+    if len(text) > budget:
+        text = text[: max(0, budget - 1)] + "…"
+    return f"{prefix}{text}{suffix}"
+
+
+def menubar_badge_title(unread_count: int) -> str:
+    """Short count shown beside the menu bar icon (empty when there is nothing unread)."""
+
+    if unread_count <= 0:
+        return ""
+    if unread_count > 99:
+        return "99+"
+    return str(unread_count)
+
+
 def chat_url(workspace: Path, port: int, chat_id: str) -> str:
     base = f"http://localhost:{port}"
     return f"{base}/chat/{chat_id}" if chat_id else open_url(workspace, port)
@@ -161,20 +211,42 @@ class OpenChat:
     chat_id: str
     title: str
     last_activity_at: str
+    workspace: str = ""
 
 
-def _load_chats(workspace: Path) -> dict[str, dict]:
-    """Chats from the server's persisted PWA state (``.runtime/web_projects.json``)."""
+def _load_web_state(workspace: Path) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Projects and chats from the server's persisted PWA state."""
 
     state_path = workspace / ".runtime" / "web_projects.json"
     try:
         data = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {}
-    chats = data.get("chats") if isinstance(data, dict) else None
-    if not isinstance(chats, dict):
-        return {}
-    return {str(chat_id): chat for chat_id, chat in chats.items() if isinstance(chat, dict)}
+        return {}, {}
+    if not isinstance(data, dict):
+        return {}, {}
+    projects_raw = data.get("projects")
+    chats_raw = data.get("chats")
+    projects = (
+        {str(project_id): project for project_id, project in projects_raw.items() if isinstance(project, dict)}
+        if isinstance(projects_raw, dict)
+        else {}
+    )
+    chats = (
+        {str(chat_id): chat for chat_id, chat in chats_raw.items() if isinstance(chat, dict)}
+        if isinstance(chats_raw, dict)
+        else {}
+    )
+    return projects, chats
+
+
+def _load_chats(workspace: Path) -> dict[str, dict]:
+    return _load_web_state(workspace)[1]
+
+
+def _chat_workspace(chat: dict, projects: dict[str, dict]) -> str:
+    project_id = str(chat.get("project_id") or "")
+    project = projects.get(project_id, {})
+    return str(project.get("workspace") or "") if isinstance(project, dict) else ""
 
 
 def chat_is_unread(chat: dict) -> bool:
@@ -187,11 +259,14 @@ def chat_is_unread(chat: dict) -> bool:
     return bool(activity) and activity > read
 
 
-def _open_chat_from_state(chat_id: str, chat: dict) -> OpenChat:
+def _open_chat_from_state(
+    chat_id: str, chat: dict, *, projects: dict[str, dict]
+) -> OpenChat:
     return OpenChat(
         chat_id=chat_id,
         title=str(chat.get("title") or "Untitled chat"),
         last_activity_at=str(chat.get("last_activity_at") or ""),
+        workspace=_chat_workspace(chat, projects),
     )
 
 
@@ -199,11 +274,12 @@ def read_open_chats(workspace: Path, *, limit: int = 10) -> list[OpenChat]:
     """Return non-archived chats from the server's persisted PWA state,
     most recently active first."""
 
+    projects, chats = _load_web_state(workspace)
     open_chats: list[OpenChat] = []
-    for chat_id, chat in _load_chats(workspace).items():
+    for chat_id, chat in chats.items():
         if chat.get("archived"):
             continue
-        open_chats.append(_open_chat_from_state(chat_id, chat))
+        open_chats.append(_open_chat_from_state(chat_id, chat, projects=projects))
     open_chats.sort(key=lambda chat: chat.last_activity_at, reverse=True)
     return open_chats[:limit]
 
@@ -211,11 +287,12 @@ def read_open_chats(workspace: Path, *, limit: int = 10) -> list[OpenChat]:
 def read_unread_chats(workspace: Path, *, limit: int = 10) -> list[OpenChat]:
     """Unread non-archived chats, most recently active first — mirrors the PWA bell."""
 
+    projects, chats = _load_web_state(workspace)
     unread: list[OpenChat] = []
-    for chat_id, chat in _load_chats(workspace).items():
+    for chat_id, chat in chats.items():
         if not chat_is_unread(chat):
             continue
-        unread.append(_open_chat_from_state(chat_id, chat))
+        unread.append(_open_chat_from_state(chat_id, chat, projects=projects))
     unread.sort(key=lambda chat: chat.last_activity_at, reverse=True)
     return unread[:limit]
 
@@ -299,6 +376,18 @@ def _disabled_item(rumps, title: str):
     return item
 
 
+def update_menu_label(latest_version: str) -> str:
+    version = latest_version.strip()
+    return f"Update to {version}" if version else "Update available"
+
+
+def package_update_fingerprint(status: dict[str, object]) -> tuple[bool, str]:
+    return (
+        bool(status.get("update_available")),
+        str(status.get("latest_version") or ""),
+    )
+
+
 def run_menubar(workspace: Path, port: int) -> int:
     """Run the rumps status-bar app. Returns 1 if rumps is not installed."""
 
@@ -331,10 +420,13 @@ def run_menubar(workspace: Path, port: int) -> int:
     app = rumps.App("Ciaobot", icon=face, template=True, quit_button=None)
 
     # Only notify for entries newer than launch, not the whole backlog.
+    status_fetcher = make_cached_package_status()
     state = {
         "last_seen_ts": time.time(),
         "fingerprint": None,
         "banners_muted": read_banners_muted(workspace),
+        "package_status": status_fetcher(),
+        "updating": False,
     }
 
     def on_toggle_mute(sender) -> None:
@@ -365,6 +457,52 @@ def run_menubar(workspace: Path, port: int) -> int:
     def on_logs(_sender) -> None:
         subprocess.run(view_logs_command(workspace), check=False)
 
+    def on_update(_sender) -> None:
+        if state["updating"]:
+            return
+        pkg = state["package_status"]
+        latest = str(pkg.get("latest_version") or "the latest version")
+        if not rumps.alert(
+            title="Update Ciaobot?",
+            message=(
+                f"This installs version {latest} and restarts the server. "
+                "Scheduled tasks pause briefly during the restart."
+            ),
+            ok="Update",
+            cancel="Cancel",
+            icon_path=icon_path("Ciaobot.icns"),
+        ):
+            return
+
+        state["updating"] = True
+        refresh()
+
+        def _do_update() -> None:
+            try:
+                res = update_package()
+                if res.get("ok"):
+                    subprocess.run(restart_server_command(), check=False)
+                    subprocess.run(
+                        notify_command(
+                            "Ciaobot updated",
+                            f"Version {latest} is installed.",
+                        ),
+                        check=False,
+                    )
+                    # Relaunch via launchd so this process loads the new wheel.
+                    subprocess.run(restart_menubar_command(), check=False)
+                    return
+                error = str(res.get("error") or "Update failed.")
+                command = str(res.get("command") or "")
+                message = error + (f"\n\nTry manually:\n{command}" if command else "")
+                rumps.alert(title="Update failed", message=message, ok="OK")
+            finally:
+                state["updating"] = False
+                state["package_status"] = status_fetcher()
+                refresh()
+
+        threading.Thread(target=_do_update, daemon=True).start()
+
     def on_quit(_sender) -> None:
         # The menu bar is the visible presence of a running Ciaobot: quitting
         # it stops the server too. Confirm first, since that halts scheduled
@@ -386,39 +524,50 @@ def run_menubar(workspace: Path, port: int) -> int:
     def _rebuild_menu(
         status: ServerStatus,
         chats: list[OpenChat],
-        unread_chats: list[OpenChat],
+        unread_ids: set[str],
         addresses: list[str],
+        pkg: dict[str, object],
     ) -> None:
-        notifications_menu = rumps.MenuItem("Notifications")
-        if not unread_chats:
-            notifications_menu.add(_disabled_item(rumps, "No unread chats"))
-        for chat in unread_chats:
-            title = chat.title if len(chat.title) <= 60 else chat.title[:59] + "…"
-            notifications_menu.add(
-                rumps.MenuItem(title, callback=_open_chat_callback(chat.chat_id))
-            )
-
         addresses_menu = rumps.MenuItem("Addresses (click to copy)")
         for url in addresses:
             addresses_menu.add(rumps.MenuItem(url, callback=_copy_address_callback(url)))
 
         # Open chats live directly in the menu, no header — just the list.
+        show_workspace = len({chat.workspace for chat in chats if chat.workspace}) > 1
         chat_items = [
             rumps.MenuItem(
-                chat.title if len(chat.title) <= 60 else chat.title[:59] + "…",
+                chat_menu_title(
+                    chat.title,
+                    unread=chat.chat_id in unread_ids,
+                    workspace=chat.workspace,
+                    show_workspace=show_workspace,
+                ),
                 callback=_open_chat_callback(chat.chat_id),
             )
             for chat in chats
         ]
         chat_section = [*chat_items, None] if chat_items else []
 
+        update_section: list[object] = []
+        if pkg.get("update_available"):
+            label = (
+                "Updating…"
+                if state["updating"]
+                else update_menu_label(str(pkg.get("latest_version") or ""))
+            )
+            if state["updating"]:
+                update_section = [_disabled_item(rumps, label), None]
+            else:
+                update_section = [rumps.MenuItem(label, callback=on_update), None]
+        elif not chat_section:
+            update_section = [None]
+
         app.menu.clear()
         app.menu = [
             rumps.MenuItem("Open Ciaobot", callback=on_open),
             _disabled_item(rumps, status_label(status)),
-            None,
+            *update_section,
             *chat_section,
-            notifications_menu,
             addresses_menu,
             None,
             _mute_item(),
@@ -441,19 +590,29 @@ def run_menubar(workspace: Path, port: int) -> int:
         log_entries = read_notifications(workspace)
         chats = read_open_chats(workspace)
         unread_chats = read_unread_chats(workspace)
+        unread_ids = {chat.chat_id for chat in unread_chats}
         chats_by_id = _load_chats(workspace)
         addresses = server_addresses(port)
+        pkg = status_fetcher()
+        state["package_status"] = pkg
+        app.title = menubar_badge_title(len(unread_ids))
 
         # Rebuild only when content changed so an open menu doesn't flicker.
+        show_workspace = len({chat.workspace for chat in chats if chat.workspace}) > 1
         fingerprint = (
             status,
-            tuple((c.chat_id, c.title) for c in chats),
-            tuple((c.chat_id, c.title) for c in unread_chats),
+            tuple(
+                (c.chat_id, c.title, c.workspace, c.chat_id in unread_ids, show_workspace)
+                for c in chats
+            ),
+            len(unread_ids),
             tuple(addresses),
+            package_update_fingerprint(pkg),
+            state["updating"],
         )
         if fingerprint != state["fingerprint"]:
             state["fingerprint"] = fingerprint
-            _rebuild_menu(status, chats, unread_chats, addresses)
+            _rebuild_menu(status, chats, unread_ids, addresses, pkg)
 
         # Banner only for new log lines whose chat is still unread (same rule
         # as the PWA bell). Reading a chat in the webapp clears it here too.
@@ -466,7 +625,7 @@ def run_menubar(workspace: Path, port: int) -> int:
         ]
         if fresh:
             # Advance the cursor even when muted so unmuting doesn't replay
-            # the backlog; the submenu still lists unread chats only.
+            # the backlog; unread chats show a dot in the open-chat list.
             state["last_seen_ts"] = max(entry.ts for entry in fresh)
             if not state["banners_muted"]:
                 for entry in fresh[:3]:

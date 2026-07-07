@@ -9,13 +9,19 @@
       <template #title>
         <div class="header-left">
           <button class="close-btn desktop-only" @click="closeSchedule" title="Close">&times;</button>
-          <h2 v-if="schedule">{{ schedule.title || promptTitle(schedule.prompt) }}</h2>
-          <h2 v-else-if="showNew">New schedule</h2>
+          <span v-if="schedule" class="pane-title">{{ schedule.title || promptTitle(schedule.prompt) }}</span>
+          <span v-else-if="showNew" class="pane-title">New schedule</span>
         </div>
       </template>
       <template #actions>
-        <button v-if="schedule && !editing" class="btn-small" @click="runNow" :disabled="runningNow">
-          {{ runningNow ? 'Running...' : 'Run now' }}
+        <button
+          v-if="schedule && !editing"
+          class="btn-small"
+          :class="{ 'btn-running': showRunning }"
+          :disabled="isStarting && !runningChatId"
+          @click="onRunButtonClick"
+        >
+          {{ showRunning ? 'Running...' : 'Run now' }}
         </button>
         <button v-if="schedule && !editing && schedule.scope !== 'system'" class="btn-small" @click="startEdit">Edit</button>
         <button v-if="schedule && !editing && schedule.scope !== 'system'" class="btn-small btn-danger" @click="onDelete">Delete</button>
@@ -193,7 +199,9 @@ const projectStore = useProjectStore()
 
 const allDays = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
 const editing = ref(false)
-const runningNow = ref(false)
+const startingBySchedule = ref<Set<string>>(new Set())
+// schedule_id -> chat_id while the linked chat is still streaming
+const runningBySchedule = ref<Record<string, string>>({})
 const editData = ref({
   time: '',
   prompt: '',
@@ -215,7 +223,55 @@ const schedule = computed(() =>
   store.schedules.find(s => s.schedule_id === scheduleId.value) || null,
 )
 
-watch(scheduleId, () => { editing.value = false })
+watch(scheduleId, () => {
+  editing.value = false
+  purgeFinishedRuns()
+})
+
+const isStarting = computed(() =>
+  scheduleId.value ? startingBySchedule.value.has(scheduleId.value) : false,
+)
+
+const runningChatId = computed(() =>
+  scheduleId.value ? runningBySchedule.value[scheduleId.value] : undefined,
+)
+
+const showRunning = computed(() => {
+  if (isStarting.value) return true
+  const chatId = runningChatId.value
+  return chatId ? projectStore.isChatStreaming(chatId) : false
+})
+
+function purgeFinishedRuns() {
+  const next: Record<string, string> = {}
+  for (const [sid, chatId] of Object.entries(runningBySchedule.value)) {
+    if (projectStore.isChatStreaming(chatId)) next[sid] = chatId
+  }
+  runningBySchedule.value = next
+}
+
+const lastStreamingBySchedule = ref<Record<string, boolean>>({})
+
+watch(
+  () => Object.entries(runningBySchedule.value).map(([sid, chatId]) => ({
+    sid,
+    streaming: projectStore.isChatStreaming(chatId),
+  })),
+  (entries) => {
+    const next = { ...runningBySchedule.value }
+    let changed = false
+    for (const { sid, streaming } of entries) {
+      const wasStreaming = lastStreamingBySchedule.value[sid] ?? false
+      lastStreamingBySchedule.value[sid] = streaming
+      if (wasStreaming && !streaming && next[sid]) {
+        delete next[sid]
+        changed = true
+      }
+    }
+    if (changed) runningBySchedule.value = next
+  },
+  { deep: true },
+)
 
 // Overview (homepage): soonest upcoming runs and missed runs (expected to
 // fire, no trigger recorded — flagged server-side via the `missed` field).
@@ -380,13 +436,37 @@ async function saveEdit() {
   editing.value = false
 }
 
+function openRunningChat() {
+  const chatId = runningChatId.value
+  if (!chatId) return
+  router.push(`/chat/${chatId}`)
+}
+
+function onRunButtonClick() {
+  if (showRunning.value && runningChatId.value) {
+    openRunningChat()
+    return
+  }
+  void runNow()
+}
+
+function stopStarting(scheduleKey: string) {
+  if (!startingBySchedule.value.has(scheduleKey)) return
+  const next = new Set(startingBySchedule.value)
+  next.delete(scheduleKey)
+  startingBySchedule.value = next
+}
+
 async function runNow() {
   if (!schedule.value) return
-  runningNow.value = true
+  const scheduleKey = schedule.value.schedule_id
+  if (startingBySchedule.value.has(scheduleKey)) return
+  startingBySchedule.value = new Set([...startingBySchedule.value, scheduleKey])
   try {
-    const result = await store.runScheduleNow(schedule.value.schedule_id)
+    const result = await store.runScheduleNow(scheduleKey)
     await store.fetchSchedules()
     if (result.chat_id) {
+      runningBySchedule.value = { ...runningBySchedule.value, [scheduleKey]: result.chat_id }
       // Refresh chats so the new chat is available for navigation
       await projectStore.fetchAll()
       projectStore.pushToast({
@@ -394,9 +474,13 @@ async function runNow() {
         title: 'Schedule started',
         body: schedule.value.title || promptTitle(schedule.value.prompt),
       })
+      // Keep "Running..." through the API→stream handoff.
+      for (let i = 0; i < 50 && !projectStore.isChatStreaming(result.chat_id); i++) {
+        await new Promise(resolve => window.setTimeout(resolve, 100))
+      }
     }
   } finally {
-    runningNow.value = false
+    stopStarting(scheduleKey)
   }
 }
 
@@ -579,14 +663,6 @@ function closeSchedule() {
 .desktop-only { display: inline-flex; }
 @media (max-width: 768px) { .desktop-only { display: none; } }
 
-.header-left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  text-align: left;
-}
-
 .close-btn {
   background: none;
   border: none;
@@ -602,4 +678,11 @@ function closeSchedule() {
   justify-content: center;
 }
 .close-btn:hover { color: var(--fg); }
+
+.btn-running:not(:disabled) {
+  cursor: pointer;
+}
+.btn-running:not(:disabled):hover {
+  filter: brightness(1.08);
+}
 </style>
