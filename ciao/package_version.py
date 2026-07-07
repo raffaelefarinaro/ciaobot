@@ -142,9 +142,8 @@ def package_changelog(
 
 
 def detect_install_mode() -> str:
-    """Return "homebrew", "pip_venv", "editable", or "unknown"."""
+    """Return "pip_venv", "editable", or "unknown"."""
     import sys
-    import shutil
     from pathlib import Path
 
     try:
@@ -153,15 +152,6 @@ def detect_install_mode() -> str:
         project_root = ciao_file.parent.parent
         if (project_root / "pyproject.toml").is_file() and (project_root / ".git").is_dir():
             return "editable"
-    except Exception:
-        ciao_file = None
-
-    try:
-        executable = Path(sys.executable).resolve()
-        if "Cellar/ciao" in str(executable):
-            return "homebrew"
-        if ciao_file and "Cellar/ciao" in str(ciao_file):
-            return "homebrew"
     except Exception:
         pass
 
@@ -188,22 +178,7 @@ def update_package() -> dict[str, Any]:
             "command": "git pull",
         }
 
-    if mode == "homebrew":
-        brew = shutil.which("brew")
-        if not brew:
-            for path in ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]:
-                if Path(path).exists():
-                    brew = path
-                    break
-        if not brew:
-            return {
-                "ok": False,
-                "mode": mode,
-                "error": "Homebrew 'brew' command not found in PATH.",
-                "command": "brew upgrade ciao",
-            }
-        cmd = [brew, "upgrade", "ciao"]
-    elif mode == "pip_venv":
+    if mode == "pip_venv":
         cmd = [sys.executable, "-m", "pip", "install", "-U", "ciao"]
     else:
         return {

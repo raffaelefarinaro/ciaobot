@@ -117,7 +117,6 @@ def test_export_public_tree_copies_only_allowlisted_paths(tmp_path: Path) -> Non
     assert sorted(copied) == [
         ".github/workflows/ci.yml",
         "ciao/main.py",
-        "deploy/homebrew/ciao.rb",
         "pyproject.toml",
         "scripts/vault_index.py",
         "web/src/main.ts",

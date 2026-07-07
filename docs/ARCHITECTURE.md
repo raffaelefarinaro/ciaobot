@@ -56,7 +56,7 @@ ciao/                          Python backend (Starlette).
   memory_tool.py               Bounded memory files + in-process SDK MCP server exposing the `memory` tool (add/replace/remove/read).
   memory_proposals.py          Scan archived `## Session insights` sections, propose memory entries to the vault's Workspace/Memory-Proposals.md.
   public_release.py            Public extraction allowlist, export copier, and private-data preflight scanner. CLI: `ciao public-preflight export <src> <dest>` then `ciao public-preflight scan <export-root> --private-patterns <file>`.
-  release.py                   Release preparation: sync-bump versions across pyproject.toml, web/package.json, package-lock.json, and the Homebrew formula. CLI: `python -m ciao.release <version>`.
+  release.py                   Release preparation: sync-bump versions across pyproject.toml, web/package.json, and package-lock.json. CLI: `python -m ciao.release <version>`.
   package_version.py           Best-effort version probe: reads ciao.__version__ and queries the package index for the latest published version. Powers GET /api/package/status.
   package_smoke.py             Wheel smoke target: build web, build wheel, install in a clean venv, and probe the installed app. CLI: `ciao package-smoke`.
   stock/                       Generic package-data assets for public installs: stock agents, commands, skills, launchd template, workspace docs, and system schedules.
@@ -94,9 +94,6 @@ scripts/
   cleanup_sdk_blobs.py         Compatibility wrapper for `ciao cleanup-sdk-blobs`.
   backfill_insights.py         One-off: backfill session insights for existing archives.
   prepare-release              Release helper wrapper.
-
-deploy/
-  homebrew/ciao.rb             Homebrew formula scaffold.
 
 tests/                         pytest suite for the Python backend.
 pyproject.toml                 Python package metadata, package-data declarations, and dev/test deps.
@@ -175,7 +172,7 @@ Every instance is identical (no primary/secondary, no cloud). On startup, each o
 
 ## Package updates and setup
 
-**Package updates.** App code is a pip package, so workspace git handback never implies a deploy. `GET /api/package/status` reports `ciao.__version__` and a best-effort latest version from the package index, and `POST /api/package/update` upgrades the package based on the active installation mode (Homebrew or pip venv) and restarts the server, allowing the Settings PWA panel to handle upgrades seamlessly.
+**Package updates.** App code is a pip package, so workspace git handback never implies a deploy. `GET /api/package/status` reports `ciao.__version__` and a best-effort latest version from the package index, and `POST /api/package/update` upgrades the package based on the active installation mode (pip venv) and restarts the server, allowing the Settings PWA panel to handle upgrades seamlessly.
 
 **Setup readiness.** When `PWA_AUTH_TOKEN` is absent, Ciaobot starts in bootstrap mode using `~/.ciao/bootstrap` (or `CIAO_BOOTSTRAP_WORKSPACE`) and persists a generated temporary auth token under that workspace's `.runtime/`. `GET /api/setup-status` is public like startup status, because the first-run wizard needs it before a normal session exists. It reports workspace/vault/token/push-contact checks plus Claude Code, Ollama, and OpenRouter readiness probes, without returning secret values. The local first-launch URL `/?setup=<token>` redeems `.runtime/setup-token` on localhost only, sets the signed PWA session cookie, deletes the one-time token, and redirects to `/`. The wizard finishes with `POST /api/setup/finish`, which is bootstrap-only and localhost-only: it writes the real workspace `.env`, scaffolds the configured vault root, creates the LaunchAgent plist and local `Ciaobot.app` shortcut, then requests the normal restart exit so launchd can relaunch into the real workspace.
 

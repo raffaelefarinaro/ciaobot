@@ -13,7 +13,6 @@ from pathlib import Path
 
 
 VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
-PLACEHOLDER_SHA256 = "0" * 64
 
 
 class ReleaseError(RuntimeError):
@@ -26,7 +25,6 @@ class RepoVersions:
     package: str
     pwa: str
     package_lock: str
-    formula: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +39,6 @@ class ReleaseFiles:
     package_init: Path
     web_package: Path
     web_lock: Path
-    homebrew_formula: Path
     changelog: Path
 
     @classmethod
@@ -51,7 +48,6 @@ class ReleaseFiles:
             package_init=root / "ciao" / "__init__.py",
             web_package=root / "web" / "package.json",
             web_lock=root / "web" / "package-lock.json",
-            homebrew_formula=root / "deploy" / "homebrew" / "ciao.rb",
             changelog=root / "CHANGELOG.md",
         )
 
@@ -61,7 +57,6 @@ class ReleaseFiles:
             self.package_init,
             self.web_package,
             self.web_lock,
-            self.homebrew_formula,
             self.changelog,
         ]
 
@@ -107,11 +102,9 @@ def read_versions(root: Path | str) -> RepoVersions:
     files = ReleaseFiles.for_root(repo)
     pyproject_text = files.pyproject.read_text(encoding="utf-8")
     init_text = files.package_init.read_text(encoding="utf-8")
-    formula_text = files.homebrew_formula.read_text(encoding="utf-8")
     web_package = _read_json(files.web_package)
     web_lock = _read_json(files.web_lock)
 
-    formula_match = re.search(r"/releases/download/v([^/]+)/", formula_text)
     return RepoVersions(
         pyproject=_extract_one(
             r'^version\s*=\s*"([^"]+)"',
@@ -127,7 +120,6 @@ def read_versions(root: Path | str) -> RepoVersions:
         ),
         pwa=str(web_package.get("version", "")),
         package_lock=str(web_lock.get("version", "")),
-        formula=formula_match.group(1) if formula_match else None,
     )
 
 
@@ -200,14 +192,10 @@ def apply_release_files(
     *,
     version: str,
     changelog_section: str,
-    formula_sha256: str = PLACEHOLDER_SHA256,
 ) -> list[Path]:
     """Update version-bearing files and return the files touched."""
 
     _require_version(version, label="release version")
-    if not re.fullmatch(r"[0-9a-f]{64}", formula_sha256):
-        raise ReleaseError("formula sha256 must be 64 lowercase hex characters")
-
     repo = Path(root).resolve()
     files = ReleaseFiles.for_root(repo)
 
@@ -243,21 +231,6 @@ def apply_release_files(
     if isinstance(packages, dict) and isinstance(packages.get(""), dict):
         packages[""]["version"] = version
     _dump_json(files.web_lock, web_lock)
-
-    formula_text = files.homebrew_formula.read_text(encoding="utf-8")
-    formula_text = _replace_once(
-        r'url "https://github\.com/raffaelefarinaro/ciaobot/releases/download/v[^"]+/ciao-[^"]+\.tar\.gz"',
-        formula_text,
-        f'url "https://github.com/raffaelefarinaro/ciaobot/releases/download/v{version}/ciao-{version}.tar.gz"',
-        path=files.homebrew_formula,
-    )
-    formula_text = _replace_once(
-        r'sha256 "[0-9a-f]{64}"',
-        formula_text,
-        f'sha256 "{formula_sha256}"',
-        path=files.homebrew_formula,
-    )
-    files.homebrew_formula.write_text(formula_text, encoding="utf-8")
 
     existing_changelog = (
         files.changelog.read_text(encoding="utf-8") if files.changelog.exists() else ""
@@ -379,7 +352,7 @@ def _pr_body(version: str, changelog_section: str, checks: list[str]) -> str:
     testing = "\n".join(f"- {label}" for label in checks) or "- Not run"
     return f"""## Summary
 - Prepare Ciaobot v{version}
-- Update package, PWA, package-lock, and Homebrew formula versions
+- Update package, PWA, and package-lock versions
 - Add changelog notes for the release range
 
 ## Release notes
@@ -391,7 +364,6 @@ def _pr_body(version: str, changelog_section: str, checks: list[str]) -> str:
 ## After approval
 - Merge this PR
 - Create and push tag `v{version}`
-- Replace the Homebrew formula sha256 after the tag archive exists
 - Publish the package artifact from the tagged commit
 """
 
@@ -445,11 +417,6 @@ def main(argv: list[str] | None = None) -> int:
         "--date",
         default=date.today().isoformat(),
         help="Release date for CHANGELOG.md.",
-    )
-    parser.add_argument(
-        "--formula-sha256",
-        default=PLACEHOLDER_SHA256,
-        help="Homebrew source tarball sha256, if already known.",
     )
     parser.add_argument(
         "--apply",
@@ -542,7 +509,6 @@ def main(argv: list[str] | None = None) -> int:
         root,
         version=version,
         changelog_section=changelog_section,
-        formula_sha256=args.formula_sha256,
     )
 
     checks = [] if args.skip_checks else _run_checks(root, skip_frontend=args.skip_frontend)
