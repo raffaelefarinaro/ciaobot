@@ -43,13 +43,6 @@ python3.12 -m venv ~/.ciaobot-venv
 ~/.ciaobot-venv/bin/ciao run
 ```
 
-On macOS you can use the Homebrew formula instead:
-
-```bash
-curl -fsSLO https://raw.githubusercontent.com/raffaelefarinaro/ciaobot/main/deploy/homebrew/ciao.rb
-brew install --formula ./ciao.rb
-```
-
 ## Quickstart (from source)
 
 A git checkout does not include the built PWA bundle, so build it once before running:
@@ -63,7 +56,7 @@ ciao setup --workspace ~/ciao-workspace
 ciao run
 ```
 
-`ciao setup` is idempotent: it writes the initial `.env`, seeds the workspace docs and vault, and (on macOS) renders LaunchAgents for the server and the menu bar companion plus a `Ciaobot.app` shortcut that opens the local PWA. The menu bar icon needs the optional extra (`pip install 'ciao[menubar]'` — the Homebrew install includes it). Full setup details, optional Node tooling, and the Homebrew formula: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+`ciao setup` is idempotent: it writes the initial `.env`, seeds the workspace docs and vault, and (on macOS) renders LaunchAgents for the server and the menu bar companion plus a `Ciaobot.app` shortcut that opens the local PWA. The menu bar icon needs the optional extra (`pip install 'ciao[menubar]'`). Full setup details and optional Node tooling: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 Optional capabilities (Google Workspace, Apple Intelligence titles, MCP connectors) each have their own setup in [INTEGRATIONS.md](INTEGRATIONS.md).
 

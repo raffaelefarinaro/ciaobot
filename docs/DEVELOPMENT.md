@@ -14,8 +14,6 @@ ciao run
 
 `ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies agent-readable workspace docs (`CLAUDE.md`, `CIAO_CUSTOMIZATION.md`), renders `~/Library/LaunchAgents/com.ciao.server.plist`, and creates `~/Applications/Ciaobot.app`, which opens the local PWA. By default it does not load launchd; add `--load-launchd` when you want setup to run `launchctl`.
 
-The Homebrew formula scaffold lives at `deploy/homebrew/ciao.rb`. It is a `--HEAD` formula until the public repo cuts a tagged release with a stable source URL and SHA. It installs Ciaobot into a `python@3.12` virtualenv, links the `ciao` CLI, and runs `ciao setup --load-launchd` from `post_install` only when a GUI launchd session is available. Headless installs print the terminal command to finish setup instead of failing silently.
-
 Common package CLI entry points:
 
 ```bash

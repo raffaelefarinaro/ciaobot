@@ -18,7 +18,7 @@ def test_detect_install_mode(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(Path, "is_file", lambda self: False)
     monkeypatch.setattr(Path, "is_dir", lambda self: False)
 
-    # Test venv check when not editable or homebrew
+    # Test venv check when not editable
     monkeypatch.setattr(sys, "prefix", "/foo/venv")
     monkeypatch.setattr(sys, "base_prefix", "/foo/python")
     assert detect_install_mode() == "pip_venv"

@@ -17,7 +17,6 @@ PUBLIC_EXPORT_ALLOWLIST: tuple[str, ...] = (
     "tests/",
     "docs/",
     ".github/workflows/",
-    "deploy/homebrew/",
     "pyproject.toml",
     "README.md",
     "INTEGRATIONS.md",
