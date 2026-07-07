@@ -236,8 +236,22 @@ def _write_app_shortcut(
     )
     url = f"http://localhost:{port}/?setup={token}"
     executable = macos / "Ciaobot"
+    # Start the server via launchd when it isn't running, then open the PWA;
+    # otherwise clicking the app lands on "site can't be reached".
     executable.write_text(
         "#!/bin/sh\n"
+        f'if ! curl -s -o /dev/null --max-time 2 "http://localhost:{port}/"; then\n'
+        '  launchctl kickstart "gui/$(id -u)/com.ciao.server" 2>/dev/null \\\n'
+        '    || launchctl load -w "$HOME/Library/LaunchAgents/com.ciao.server.plist" 2>/dev/null\n'
+        "  i=0\n"
+        "  while [ $i -lt 20 ]; do\n"
+        f'    curl -s -o /dev/null --max-time 1 "http://localhost:{port}/" && break\n'
+        "    sleep 0.5\n"
+        "    i=$((i+1))\n"
+        "  done\n"
+        "fi\n"
+        'launchctl kickstart "gui/$(id -u)/com.ciao.menubar" 2>/dev/null \\\n'
+        '  || launchctl load -w "$HOME/Library/LaunchAgents/com.ciao.menubar.plist" 2>/dev/null\n'
         f'open "{url}"\n',
         encoding="utf-8",
     )

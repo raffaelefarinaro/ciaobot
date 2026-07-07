@@ -11,6 +11,7 @@ import re
 import hmac
 import shutil
 import subprocess
+import sys
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
@@ -3166,6 +3167,28 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         launch_agents_dir=str(body.get("launch_agents_dir", "")).strip() or None,
         app_dir=str(body.get("app_dir", "")).strip() or None,
     )
+    # Best-effort: bring the menu bar companion up right away so setup ends
+    # with the icon visible instead of waiting for the next login. Only for
+    # the real per-user LaunchAgents dir — scripted/test setups pass a custom
+    # dir and must not register anything with launchd. The server agent is
+    # intentionally NOT loaded here — a foreground `ciao run` relaunches
+    # itself, and a launchd copy would fight it for the port.
+    if sys.platform == "darwin" and not str(body.get("launch_agents_dir", "")).strip():
+        menubar_plist = Path.home() / "Library" / "LaunchAgents" / "com.ciao.menubar.plist"
+        if menubar_plist.exists():
+            try:
+                loaded = subprocess.run(
+                    ["launchctl", "kickstart", f"gui/{os.getuid()}/com.ciao.menubar"],
+                    capture_output=True, timeout=10,
+                )
+                if loaded.returncode != 0:
+                    subprocess.run(
+                        ["launchctl", "load", "-w", str(menubar_plist)],
+                        capture_output=True, timeout=10,
+                    )
+            except (OSError, subprocess.SubprocessError):
+                logger.info("Could not start the menu bar agent; it will load at next login.")
+
     restart = bool(body.get("restart", True))
     if restart:
         restart_fn = getattr(request.app.state, "request_restart", None)
