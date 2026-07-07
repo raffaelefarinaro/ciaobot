@@ -13,13 +13,28 @@ from typing import Any
 from ciao import __version__
 
 
-DEFAULT_PACKAGE_INDEX_URL = "https://pypi.org/pypi/ciao/json"
 DEFAULT_GITHUB_REPO = "raffaelefarinaro/ciaobot"
 
 
 def _github_repo() -> str:
-    """Return the GitHub repo (owner/name) used for changelog lookups."""
+    """Return the GitHub repo (owner/name) used for release lookups."""
     return (os.environ.get("CIAO_GITHUB_REPO") or "").strip() or DEFAULT_GITHUB_REPO
+
+
+def latest_release_url(repo: str | None = None) -> str:
+    """Return the GitHub API URL for the latest release of the app repo."""
+    repo = (repo or _github_repo()).strip("/")
+    return f"https://api.github.com/repos/{repo}/releases/latest"
+
+
+def _github_request(url: str) -> urllib.request.Request:
+    return urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "ciaobot-package-updater",
+        },
+    )
 
 
 def _version_key(value: str) -> tuple:
@@ -33,27 +48,25 @@ def _version_key(value: str) -> tuple:
 
 
 def _latest_from_payload(payload: dict[str, Any]) -> str:
-    info = payload.get("info")
-    if isinstance(info, dict) and isinstance(info.get("version"), str):
-        return info["version"].strip()
-    version = payload.get("version")
-    if isinstance(version, str):
-        return version.strip()
+    tag = payload.get("tag_name")
+    if isinstance(tag, str):
+        return tag.strip().removeprefix("v")
     return ""
 
 
 def package_status(
     *,
     current_version: str = __version__,
-    index_url: str = DEFAULT_PACKAGE_INDEX_URL,
+    repo: str | None = None,
     opener: Callable[..., object] = urllib.request.urlopen,
     timeout: float = 2.5,
 ) -> dict[str, object]:
-    """Return installed and latest package versions."""
+    """Return installed and latest (GitHub release) package versions."""
+    source = latest_release_url(repo)
     latest = ""
     error = ""
     try:
-        with opener(index_url, timeout=timeout) as response:
+        with opener(_github_request(source), timeout=timeout) as response:
             raw = response.read()
         payload = json.loads(raw.decode("utf-8"))
         if isinstance(payload, dict):
@@ -68,7 +81,7 @@ def package_status(
         "current_version": current_version,
         "latest_version": latest,
         "update_available": update_available,
-        "source": index_url,
+        "source": source,
         "error": error,
     }
 
@@ -104,13 +117,7 @@ def package_changelog(
     head = f"v{latest_version}"
     compare_url = f"https://github.com/{repo}/compare/{base}...{head}"
     api_url = f"https://api.github.com/repos/{repo}/compare/{base}...{head}"
-    request = urllib.request.Request(
-        api_url,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "ciaobot-package-updater",
-        },
-    )
+    request = _github_request(api_url)
     try:
         with opener(request, timeout=timeout) as response:
             raw = response.read()
@@ -161,14 +168,49 @@ def detect_install_mode() -> str:
     return "unknown"
 
 
-def update_package() -> dict[str, Any]:
-    """Perform package upgrade based on active install mode."""
-    import sys
-    import shutil
-    import subprocess
-    from pathlib import Path
-    from typing import Any
+def _latest_wheel_url(
+    *,
+    opener: Callable[..., object],
+    timeout: float,
+) -> tuple[str, str]:
+    """Return (wheel_url, error) for the latest GitHub release."""
+    source = latest_release_url()
+    try:
+        with opener(_github_request(source), timeout=timeout) as response:
+            raw = response.read()
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, urllib.error.URLError, ValueError, json.JSONDecodeError) as exc:
+        return "", f"Could not fetch the latest release from {source}: {exc}"
 
+    assets = payload.get("assets") if isinstance(payload, dict) else None
+    if isinstance(assets, list):
+        for asset in assets:
+            if not isinstance(asset, dict):
+                continue
+            url = asset.get("browser_download_url")
+            if isinstance(url, str) and str(asset.get("name", url)).endswith(".whl"):
+                return url, ""
+    return "", "The latest release has no .whl asset."
+
+
+def update_package(
+    *,
+    opener: Callable[..., object] = urllib.request.urlopen,
+    timeout: float = 10.0,
+) -> dict[str, Any]:
+    """Perform package upgrade based on active install mode.
+
+    Upgrades install the wheel asset of the latest GitHub release. The
+    package is intentionally never upgraded from the PyPI index: the
+    ``ciao`` name there belongs to an unrelated project.
+    """
+    import sys
+    import subprocess
+
+    manual_command = (
+        "pip install -U <wheel from "
+        f"https://github.com/{_github_repo()}/releases/latest>"
+    )
     mode = detect_install_mode()
     if mode == "editable":
         return {
@@ -179,13 +221,21 @@ def update_package() -> dict[str, Any]:
         }
 
     if mode == "pip_venv":
-        cmd = [sys.executable, "-m", "pip", "install", "-U", "ciao"]
+        wheel_url, error = _latest_wheel_url(opener=opener, timeout=timeout)
+        if not wheel_url:
+            return {
+                "ok": False,
+                "mode": mode,
+                "error": f"{error} Please upgrade manually.",
+                "command": manual_command,
+            }
+        cmd = [sys.executable, "-m", "pip", "install", "-U", wheel_url]
     else:
         return {
             "ok": False,
             "mode": mode,
             "error": f"Unknown install mode '{mode}'. Please upgrade manually.",
-            "command": "pip install -U ciao",
+            "command": manual_command,
         }
 
     try:

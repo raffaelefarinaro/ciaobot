@@ -44,7 +44,7 @@ python3.13 -m venv ~/.ciaobot-venv
 ~/.ciaobot-venv/bin/ciao run
 ```
 
-Then open `http://localhost:8443`: with no configured workspace the server starts in bootstrap mode and the setup wizard walks you through choosing the workspace folder, the vault folder (fresh scaffold or an existing notes folder), and the rest of the local config before anything is created. When you finish, it writes the config, scaffolds the vault where you chose, and (on macOS) renders the LaunchAgents and `Ciaobot.app`.
+Then open `http://localhost:8443`: with no configured workspace the server starts in bootstrap mode and the setup wizard walks you through choosing the workspace folder, the vault folder (fresh scaffold or an existing notes folder), and the rest of the local config before anything is created. When you finish, it writes the config, scaffolds the vault where you chose, and (on macOS) renders the LaunchAgents and `Ciaobot.app`. Setup also makes sure the workspace folder is a git repository (running `git init` with a `.gitignore` that keeps `.env` and runtime state out of commits) so snapshots and sync work from the start.
 
 For scripted or headless setups, `ciao setup --workspace <dir>` pre-creates a workspace with defaults and skips the wizard.
 

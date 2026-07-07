@@ -69,9 +69,9 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET, PATCH | `/api/status` | Read or update status |
 | GET | `/api/startup-status` | Read startup phase progress |
 | GET | `/api/setup-status` | Read first-run setup checks and provider readiness |
-| GET | `/api/package/status` | Read installed package version and best-effort latest-version status |
+| GET | `/api/package/status` | Read installed package version and best-effort latest GitHub release version |
 | GET | `/api/package/changelog` | List commits between the installed and latest release for the update prompt |
-| POST | `/api/package/update` | Upgrade ciao package and restart |
+| POST | `/api/package/update` | Upgrade ciao package from the latest GitHub release wheel and restart |
 | POST | `/api/voice/install-local` | Install local voice transcription dependencies and restart |
 | POST | `/api/setup/finish` | Finish first-run setup from bootstrap mode |
 | GET | `/api/stats` | Read CLI stats |

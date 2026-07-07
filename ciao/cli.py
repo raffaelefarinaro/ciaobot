@@ -208,6 +208,68 @@ def _write_app_shortcut(
     return app_root
 
 
+_WORKSPACE_GITIGNORE_ENTRIES = (".env", ".runtime/", ".claude/", "*.log")
+
+
+def _ensure_workspace_gitignore(root: Path) -> None:
+    """Make sure `git add -A` snapshots never pick up secrets or runtime state."""
+    gitignore = root / ".gitignore"
+    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+    present = {line.strip() for line in existing.splitlines()}
+    missing = [e for e in _WORKSPACE_GITIGNORE_ENTRIES if e not in present]
+    if not missing:
+        return
+    if existing:
+        text = existing if existing.endswith("\n") else existing + "\n"
+    else:
+        text = "# Ciaobot: keep secrets and runtime state out of git snapshots\n"
+    gitignore.write_text(text + "\n".join(missing) + "\n", encoding="utf-8")
+
+
+def ensure_workspace_git(root: Path) -> None:
+    """Make sure the workspace is a git repository with a protective .gitignore.
+
+    Snapshots and sync rely on git; a fresh workspace gets `git init` plus an
+    initial commit. An existing repo is left untouched apart from appending
+    missing .gitignore guards. Missing git binary is a non-fatal skip.
+    """
+    root = Path(root).expanduser().resolve()
+    if shutil.which("git") is None:
+        print("git not found; skipping workspace git init", file=sys.stderr)
+        return
+    _ensure_workspace_gitignore(root)
+    probe = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True, text=True,
+    )
+    if probe.returncode == 0 and probe.stdout.strip() == "true":
+        return
+    init = subprocess.run(
+        ["git", "init", "-b", "main", str(root)],
+        capture_output=True, text=True,
+    )
+    if init.returncode != 0:
+        print(f"git init failed for {root}: {init.stderr.strip()}", file=sys.stderr)
+        return
+    subprocess.run(
+        ["git", "-C", str(root), "add", "-A"],
+        capture_output=True, text=True,
+    )
+    commit = subprocess.run(
+        [
+            "git", "-C", str(root),
+            "-c", "user.name=Ciaobot", "-c", "user.email=ciaobot@localhost",
+            "commit", "-m", "Initialize Ciaobot workspace",
+        ],
+        capture_output=True, text=True,
+    )
+    if commit.returncode != 0:
+        print(
+            f"initial workspace commit failed for {root}: {commit.stderr.strip()}",
+            file=sys.stderr,
+        )
+
+
 def setup_workspace(
     workspace: Path | str,
     *,
@@ -299,6 +361,8 @@ def setup_workspace(
         app_dir=app_root_dir,
         port=port,
     ))
+
+    ensure_workspace_git(root)
 
     return written
 
