@@ -98,9 +98,12 @@ async def test_watch_subagent_completion_emits_ready_events(
     await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
 
     ready_events = [ev for ev in published if ev.get("type") == "chat_subagents_ready"]
-    assert len(ready_events) == 2
-    assert ready_events[0]["remaining"] == 1
-    assert ready_events[1]["remaining"] == 0
+    # First event is the initial running count emitted at watcher start (so the
+    # PWA can show the indicator immediately); then one per drop down to zero.
+    assert len(ready_events) == 3
+    assert ready_events[0]["remaining"] == 2
+    assert ready_events[1]["remaining"] == 1
+    assert ready_events[2]["remaining"] == 0
     assert ready_events[0]["chat_id"] == chat.chat_id
     assert ready_events[0]["project_id"] == project.project_id
 
