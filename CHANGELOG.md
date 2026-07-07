@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.4.4 - 2026-07-07
+
+### Added
+- feat: add `ciao setup-url` and print login URL + PATH hint after setup (`500ab24`)
+- feat: menu bar Notifications submenu lists unread chats, matching the PWA bell (`de20c4b`)
+- feat: tidy routine model settings for tier-less providers (`b87c602`)
+
+### Changed
+- refactor: drop Telegram-specific labels from archived transcripts (`a7bbe06`)
+
 ## v0.4.3 - 2026-07-07
 
 ### Added

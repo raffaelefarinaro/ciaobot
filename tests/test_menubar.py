@@ -119,6 +119,7 @@ def test_icon_paths_resolve_to_packaged_faces() -> None:
     # ciao.stock/deploy (never in web/static, which the PWA build empties).
     assert Path(menubar.icon_path("face_template.png")).is_file()
     assert Path(menubar.icon_path("face_scared_template.png")).is_file()
+    assert Path(menubar.icon_path("Ciaobot.icns")).is_file()
 
 
 def test_menubar_template_icons_are_packaged() -> None:
@@ -197,9 +198,21 @@ def test_read_open_chats_filters_archived_and_sorts_by_activity(tmp_path: Path) 
         json.dumps(
             {
                 "chats": {
-                    "old": {"title": "Old", "archived": False, "last_activity_at": 1.0},
-                    "new": {"title": "New", "archived": False, "last_activity_at": 9.0},
-                    "gone": {"title": "Gone", "archived": True, "last_activity_at": 99.0},
+                    "old": {
+                        "title": "Old",
+                        "archived": False,
+                        "last_activity_at": "2026-01-01T10:00:00",
+                    },
+                    "new": {
+                        "title": "New",
+                        "archived": False,
+                        "last_activity_at": "2026-01-02T10:00:00",
+                    },
+                    "gone": {
+                        "title": "Gone",
+                        "archived": True,
+                        "last_activity_at": "2026-12-31T10:00:00",
+                    },
                 }
             }
         ),
@@ -210,6 +223,62 @@ def test_read_open_chats_filters_archived_and_sorts_by_activity(tmp_path: Path) 
 
     assert [chat.chat_id for chat in chats] == ["new", "old"]
     assert chats[0].title == "New"
+
+
+def test_chat_is_unread_matches_pwa_logic() -> None:
+    assert menubar.chat_is_unread(
+        {"last_activity_at": "2026-01-02T10:00:00", "last_read_at": "2026-01-01T10:00:00"}
+    )
+    assert not menubar.chat_is_unread(
+        {"last_activity_at": "2026-01-01T10:00:00", "last_read_at": "2026-01-02T10:00:00"}
+    )
+    assert not menubar.chat_is_unread(
+        {
+            "archived": True,
+            "last_activity_at": "2026-01-02T10:00:00",
+            "last_read_at": "",
+        }
+    )
+
+
+def test_read_unread_chats_filters_read_and_sorts_by_activity(tmp_path: Path) -> None:
+    state = tmp_path / ".runtime" / "web_projects.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(
+        json.dumps(
+            {
+                "chats": {
+                    "read": {
+                        "title": "Read",
+                        "last_activity_at": "2026-01-03T10:00:00",
+                        "last_read_at": "2026-01-03T11:00:00",
+                    },
+                    "unread-old": {
+                        "title": "Unread old",
+                        "last_activity_at": "2026-01-01T10:00:00",
+                        "last_read_at": "2026-01-01T09:00:00",
+                    },
+                    "unread-new": {
+                        "title": "Unread new",
+                        "last_activity_at": "2026-01-02T10:00:00",
+                        "last_read_at": "",
+                    },
+                    "archived": {
+                        "title": "Archived",
+                        "archived": True,
+                        "last_activity_at": "2026-12-31T10:00:00",
+                        "last_read_at": "",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    unread = menubar.read_unread_chats(tmp_path)
+
+    assert [chat.chat_id for chat in unread] == ["unread-new", "unread-old"]
+    assert [chat.title for chat in unread] == ["Unread new", "Unread old"]
 
 
 def test_read_open_chats_missing_state_returns_empty(tmp_path: Path) -> None:

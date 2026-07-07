@@ -50,7 +50,6 @@ def test_discover_archived_chats_happy_path(tmp_path: Path) -> None:
     chat1_md = chat1_provider_dir / "2026-06-10T12-00-00Z-sess1.md"
     chat1_content = (
         "---\n"
-        "type: telegram-transcript\n"
         "provider: claude\n"
         "context: Work Chat Title\n"
         "active_model: sonnet\n"
@@ -78,7 +77,6 @@ def test_discover_archived_chats_happy_path(tmp_path: Path) -> None:
     chat2_md = chat2_provider_dir / "2026-06-10T14-00-00Z-sess2.md"
     chat2_content = (
         "---\n"
-        "type: telegram-transcript\n"
         "provider: pi\n"
         "context: Personal Chat Title\n"
         "selected_model: qwen3\n"
@@ -105,7 +103,6 @@ def test_discover_archived_chats_happy_path(tmp_path: Path) -> None:
     chat3_md = chat3_provider_dir / "2026-06-10T16-00-00Z-sess3.md"
     chat3_content = (
         "---\n"
-        "type: telegram-transcript\n"
         "provider: claude\n"
         "context: Work General Chat Title\n"
         "active_model: opus\n"
@@ -222,7 +219,6 @@ def test_continue_archived_chat(tmp_path: Path) -> None:
     chat_md = chat_provider_dir / "2026-06-10T12-00-00Z-sess.md"
     chat_content = (
         "---\n"
-        "type: telegram-transcript\n"
         "provider: claude\n"
         "context: Chat to Continue\n"
         "active_model: sonnet\n"

@@ -475,10 +475,13 @@ describe('component mount smoke', () => {
     await flushPromises()
     await nextTick()
 
+    // title_model (0) and insights_model (1) each carry a provider select;
+    // the title tier select is hidden for tier-less providers (apple/automatic),
+    // so scope the tier lookup to the insights block rather than a fixed index.
+    const controls = wrapper.findAll('.routine-model-controls')
     const providerSelects = wrapper.findAll('.routine-model-controls .routine-select--provider')
-    const tierSelects = wrapper.findAll('.routine-model-controls .routine-select--tier')
     expect(providerSelects.length).toBeGreaterThanOrEqual(2)
-    expect(tierSelects.length).toBeGreaterThanOrEqual(2)
+    const insightsControls = controls[1]
 
     await providerSelects[1].setValue('openrouter')
     await flushPromises()
@@ -486,7 +489,9 @@ describe('component mount smoke', () => {
       insights_model: 'anthropic/claude-haiku-4.5',
     })
 
-    await tierSelects[1].setValue('opus')
+    const insightsTier = insightsControls.find('.routine-select--tier')
+    expect(insightsTier.exists()).toBe(true)
+    await insightsTier.setValue('opus')
     await flushPromises()
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
       insights_model: 'anthropic/claude-opus-4.8',

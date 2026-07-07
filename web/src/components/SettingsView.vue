@@ -265,7 +265,10 @@
                   </span>
                 </div>
               </div>
-              <div class="routine-model-controls">
+              <div
+                class="routine-model-controls"
+                :class="{ 'routine-model-controls--single': routineProviderValue('title_model') === 'apple' }"
+              >
                 <select
                   class="routine-select routine-select--provider"
                   :value="routineProviderValue('title_model')"
@@ -280,16 +283,22 @@
                   <option v-if="routineProviderValue('title_model') === 'custom'" value="custom">Custom model</option>
                 </select>
                 <select
+                  v-if="routineTierSelectable('title_model')"
                   class="routine-select routine-select--tier"
                   :value="routineTierValue('title_model')"
-                  :disabled="routinesSaving || !routineTierSelectable('title_model')"
+                  :disabled="routinesSaving"
                   @change="saveRoutineTier('title_model', ($event.target as HTMLSelectElement).value)"
                 >
                   <option v-for="tier in modelTiers" :key="`title-${tier.key}`" :value="tier.key">
                     {{ tier.label }}
                   </option>
                 </select>
-                <span class="routine-model-hint">{{ routineModelSummary('title_model') }}</span>
+                <span class="routine-model-hint">
+                  <template v-if="routineProviderValue('title_model') === 'apple'">
+                    Uses <a :href="APFEL_REPO_URL" target="_blank" rel="noopener">apfel</a> (Apple Intelligence CLI).
+                  </template>
+                  <template v-else>{{ routineModelSummary('title_model') }}</template>
+                </span>
               </div>
             </div>
 
@@ -391,7 +400,18 @@
             <div class="routine-row routine-row--flush">
               <div class="routine-info">
                 <span class="routine-name">Engine</span>
-                <span class="routine-detail">
+              </div>
+              <div class="routine-model-controls routine-model-controls--single">
+                <select
+                  class="routine-select"
+                  :value="routines.transcription.engine"
+                  :disabled="routinesSaving"
+                  @change="saveRoutines({ transcription_engine: ($event.target as HTMLSelectElement).value })"
+                >
+                  <option value="local">Local (free)</option>
+                  <option value="cloud" :disabled="!routines.transcription.cloud_available">Cloud (OpenAI)</option>
+                </select>
+                <span class="routine-model-hint">
                   <template v-if="routines.transcription.engine === 'local'">
                     Dictation runs on-device via mlx-whisper (<code>{{ routines.transcription.local_model }}</code>).
                     The first transcription downloads the model.
@@ -401,15 +421,6 @@
                   </template>
                 </span>
               </div>
-              <select
-                class="routine-select"
-                :value="routines.transcription.engine"
-                :disabled="routinesSaving"
-                @change="saveRoutines({ transcription_engine: ($event.target as HTMLSelectElement).value })"
-              >
-                <option value="local">Local (free)</option>
-                <option value="cloud" :disabled="!routines.transcription.cloud_available">Cloud (OpenAI)</option>
-              </select>
             </div>
             <p v-if="!routines.transcription.local_available" class="hint hint--warn voice-warning">
               <span v-if="routines.transcription.engine === 'local'">
@@ -1522,6 +1533,8 @@ type TierProviderKey = Exclude<AliasProviderKey, 'claude'>
 type TierKey = 'haiku' | 'sonnet' | 'opus'
 type RoutineModelKey = 'title_model' | 'insights_model'
 type RoutineProviderValue = 'automatic' | 'apple' | 'custom' | AliasProviderKey
+
+const APFEL_REPO_URL = 'https://github.com/Arthur-Ficial/apfel'
 type AliasProviderSection = {
   key: AliasProviderKey
   label: string
@@ -3562,6 +3575,9 @@ async function doPackageUpdate() {
   gap: 8px;
   align-items: start;
 }
+.routine-model-controls--single {
+  grid-template-columns: 1fr;
+}
 .routine-model-controls .routine-select {
   max-width: none;
   min-width: 0;
@@ -3574,6 +3590,20 @@ async function doPackageUpdate() {
   font-size: var(--text-xs);
   line-height: 1.35;
   overflow-wrap: anywhere;
+}
+.routine-model-hint code {
+  font-size: var(--text-xs);
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--fg);
+}
+.routine-model-hint a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.routine-model-hint a:hover {
+  color: var(--accent2);
 }
 .setting-row,
 .credential-row {
