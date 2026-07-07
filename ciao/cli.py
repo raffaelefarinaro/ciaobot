@@ -407,6 +407,20 @@ def setup_workspace(
     root.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     vault_value = str(vault_root) if vault_root is not None else "memory-vault"
+
+    env_path = root / ".env"
+    env_exists = env_path.exists()
+    if env_exists:
+        # An existing .env is the source of truth for where the vault lives.
+        # Re-running setup with a stale or blank vault_root argument must not
+        # relocate scaffolding away from the real vault (and thus re-scatter
+        # MEMORY.md/INDEX.md at a bogus location).
+        from dotenv import dotenv_values
+
+        existing_root = (dotenv_values(env_path).get("CIAO_VAULT_ROOT") or "").strip()
+        if existing_root:
+            vault_value = existing_root
+
     vault_path = Path(vault_value).expanduser()
     if vault_path.is_absolute():
         # Record the expanded path so .env stays unambiguous when the vault
@@ -415,8 +429,7 @@ def setup_workspace(
     else:
         vault_path = root / vault_path
 
-    env_path = root / ".env"
-    if not env_path.exists():
+    if not env_exists:
         token = auth_token or secrets.token_urlsafe(32)
         # Empty contact = Web Push disabled until configured in Settings;
         # never invent a fake default.
