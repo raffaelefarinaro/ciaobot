@@ -277,7 +277,7 @@ def test_provider_config_status_and_write_only_patch(tmp_path):
     assert data["keys"]["ANTHROPIC_API_KEY"]["configured"] is True
     assert data["keys"]["OPENAI_API_KEY"]["configured"] is True
     assert data["keys"]["CIAO_OLLAMA_API_KEY"]["configured"] is False
-    assert data["auto_update_github_skills"] is True
+    assert data["auto_update_github_skills"] is False
     assert "sk-anthropic" not in json.dumps(data)
     assert "OPENAI_API_KEY=old" not in json.dumps(data)
 

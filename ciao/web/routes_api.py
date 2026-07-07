@@ -938,7 +938,7 @@ def _provider_config_payload(config) -> dict:
         }
     return {
         "keys": keys,
-        "auto_update_github_skills": getattr(config, "auto_update_github_skills", True),
+        "auto_update_github_skills": getattr(config, "auto_update_github_skills", False),
         "requires_restart": True,
         "env_path": str(_env_path(config)),
         "connections": {},

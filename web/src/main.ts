@@ -5,7 +5,7 @@ import App from './App.vue'
 
 // Restore theme & font scale from localStorage as early as possible
 try {
-  const savedTheme = localStorage.getItem('ciao-theme') || 'dark'
+  const savedTheme = localStorage.getItem('ciao-theme') || 'system'
   if (savedTheme === 'light') {
     document.documentElement.classList.add('theme-light')
   } else if (savedTheme === 'system') {
@@ -19,7 +19,7 @@ try {
   const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
   const listener = (e: { matches: boolean }) => {
     try {
-      const currentTheme = localStorage.getItem('ciao-theme') || 'dark'
+      const currentTheme = localStorage.getItem('ciao-theme') || 'system'
       if (currentTheme === 'system') {
         if (e.matches) {
           document.documentElement.classList.remove('theme-light')
