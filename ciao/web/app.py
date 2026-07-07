@@ -10,6 +10,7 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.responses import FileResponse
 
+from ciao.package_version import make_cached_package_status
 from ciao.web.auth import AuthMiddleware, make_serializer
 from ciao.web.agent_assets import (
     agent_assets_endpoint,
@@ -257,5 +258,8 @@ def create_app(config, app_settings=None) -> Starlette:
     # Runtime-mutable settings store (Settings → Models tab). None in
     # tests that build the app without one; the route 503s in that case.
     app.state.app_settings = app_settings
+    # Cache the GitHub release lookup so opening Settings repeatedly does not
+    # exhaust the API rate limit (especially on shared/NAT egress IPs).
+    app.state.package_status_fetcher = make_cached_package_status()
 
     return app
