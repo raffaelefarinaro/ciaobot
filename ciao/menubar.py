@@ -160,38 +160,64 @@ def notify_command(title: str, body: str) -> list[str]:
 class OpenChat:
     chat_id: str
     title: str
-    last_activity_at: float
+    last_activity_at: str
+
+
+def _load_chats(workspace: Path) -> dict[str, dict]:
+    """Chats from the server's persisted PWA state (``.runtime/web_projects.json``)."""
+
+    state_path = workspace / ".runtime" / "web_projects.json"
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    chats = data.get("chats") if isinstance(data, dict) else None
+    if not isinstance(chats, dict):
+        return {}
+    return {str(chat_id): chat for chat_id, chat in chats.items() if isinstance(chat, dict)}
+
+
+def chat_is_unread(chat: dict) -> bool:
+    """Match the PWA bell: unread when ``last_activity_at > last_read_at``."""
+
+    if chat.get("archived"):
+        return False
+    activity = str(chat.get("last_activity_at") or "")
+    read = str(chat.get("last_read_at") or "")
+    return bool(activity) and activity > read
+
+
+def _open_chat_from_state(chat_id: str, chat: dict) -> OpenChat:
+    return OpenChat(
+        chat_id=chat_id,
+        title=str(chat.get("title") or "Untitled chat"),
+        last_activity_at=str(chat.get("last_activity_at") or ""),
+    )
 
 
 def read_open_chats(workspace: Path, *, limit: int = 10) -> list[OpenChat]:
     """Return non-archived chats from the server's persisted PWA state,
     most recently active first."""
 
-    state_path = workspace / ".runtime" / "web_projects.json"
-    try:
-        data = json.loads(state_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    chats = data.get("chats") if isinstance(data, dict) else None
-    if not isinstance(chats, dict):
-        return []
     open_chats: list[OpenChat] = []
-    for chat_id, chat in chats.items():
-        if not isinstance(chat, dict) or chat.get("archived"):
+    for chat_id, chat in _load_chats(workspace).items():
+        if chat.get("archived"):
             continue
-        try:
-            last_activity = float(chat.get("last_activity_at") or 0.0)
-        except (TypeError, ValueError):
-            last_activity = 0.0
-        open_chats.append(
-            OpenChat(
-                chat_id=str(chat_id),
-                title=str(chat.get("title") or "Untitled chat"),
-                last_activity_at=last_activity,
-            )
-        )
+        open_chats.append(_open_chat_from_state(chat_id, chat))
     open_chats.sort(key=lambda chat: chat.last_activity_at, reverse=True)
     return open_chats[:limit]
+
+
+def read_unread_chats(workspace: Path, *, limit: int = 10) -> list[OpenChat]:
+    """Unread non-archived chats, most recently active first — mirrors the PWA bell."""
+
+    unread: list[OpenChat] = []
+    for chat_id, chat in _load_chats(workspace).items():
+        if not chat_is_unread(chat):
+            continue
+        unread.append(_open_chat_from_state(chat_id, chat))
+    unread.sort(key=lambda chat: chat.last_activity_at, reverse=True)
+    return unread[:limit]
 
 
 _INET_RE = re.compile(r"^\s*inet (\d+\.\d+\.\d+\.\d+)", re.MULTILINE)
@@ -351,6 +377,7 @@ def run_menubar(workspace: Path, port: int) -> int:
             ),
             ok="Quit",
             cancel="Cancel",
+            icon_path=icon_path("Ciaobot.icns"),
         ):
             return
         subprocess.run(stop_server_command(), check=False)
@@ -359,18 +386,16 @@ def run_menubar(workspace: Path, port: int) -> int:
     def _rebuild_menu(
         status: ServerStatus,
         chats: list[OpenChat],
-        entries: list[Notification],
+        unread_chats: list[OpenChat],
         addresses: list[str],
     ) -> None:
         notifications_menu = rumps.MenuItem("Notifications")
-        if not entries:
-            notifications_menu.add(_disabled_item(rumps, "No notifications yet"))
-        for entry in entries:
+        if not unread_chats:
+            notifications_menu.add(_disabled_item(rumps, "No unread chats"))
+        for chat in unread_chats:
+            title = chat.title if len(chat.title) <= 60 else chat.title[:59] + "…"
             notifications_menu.add(
-                rumps.MenuItem(
-                    notification_menu_title(entry),
-                    callback=_open_chat_callback(entry.chat_id),
-                )
+                rumps.MenuItem(title, callback=_open_chat_callback(chat.chat_id))
             )
 
         addresses_menu = rumps.MenuItem("Addresses (click to copy)")
@@ -413,26 +438,36 @@ def run_menubar(workspace: Path, port: int) -> int:
         status = fetch_server_status(port)
         app.icon = face if status.reachable else face_scared
 
-        entries = read_notifications(workspace)
+        log_entries = read_notifications(workspace)
         chats = read_open_chats(workspace)
+        unread_chats = read_unread_chats(workspace)
+        chats_by_id = _load_chats(workspace)
         addresses = server_addresses(port)
 
         # Rebuild only when content changed so an open menu doesn't flicker.
         fingerprint = (
             status,
             tuple((c.chat_id, c.title) for c in chats),
-            tuple((e.ts, e.title, e.body) for e in entries),
+            tuple((c.chat_id, c.title) for c in unread_chats),
             tuple(addresses),
         )
         if fingerprint != state["fingerprint"]:
             state["fingerprint"] = fingerprint
-            _rebuild_menu(status, chats, entries, addresses)
+            _rebuild_menu(status, chats, unread_chats, addresses)
 
-        fresh = [e for e in entries if e.ts > state["last_seen_ts"]]
+        # Banner only for new log lines whose chat is still unread (same rule
+        # as the PWA bell). Reading a chat in the webapp clears it here too.
+        fresh = [
+            entry
+            for entry in log_entries
+            if entry.ts > state["last_seen_ts"]
+            and entry.chat_id
+            and chat_is_unread(chats_by_id.get(entry.chat_id, {}))
+        ]
         if fresh:
             # Advance the cursor even when muted so unmuting doesn't replay
-            # the backlog; the submenu still lists everything.
-            state["last_seen_ts"] = max(e.ts for e in fresh)
+            # the backlog; the submenu still lists unread chats only.
+            state["last_seen_ts"] = max(entry.ts for entry in fresh)
             if not state["banners_muted"]:
                 for entry in fresh[:3]:
                     subprocess.run(notify_command(entry.title, entry.body), check=False)
