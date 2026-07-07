@@ -77,7 +77,7 @@ Optional capabilities (Google Workspace, Apple Intelligence titles, MCP connecto
 | [SECURITY.md](SECURITY.md) | Security policy. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute. |
 
-Naming note: the user-facing product is **Ciaobot**. The Python package, import path, CLI command, and many environment variables are still named `ciao`/`CIAO_*` for compatibility.
+Naming note: the user-facing product is **Ciaobot**. The CLI is installed as both `ciaobot` and `ciao` (same command); the Python package, import path, and many environment variables are still named `ciao`/`CIAO_*` for compatibility.
 
 ## For coding agents
 

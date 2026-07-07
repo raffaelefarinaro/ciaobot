@@ -42,6 +42,7 @@ menubar = [
 
 [project.scripts]
 ciao = "ciao.cli:main"
+ciaobot = "ciao.cli:main"
 ciao-public-preflight = "ciao.public_release:main"
 ciao-package-smoke = "ciao.package_smoke:main"
 ciao-prepare-release = "ciao.release:main"
