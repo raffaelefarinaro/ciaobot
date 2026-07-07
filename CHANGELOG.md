@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.3.0 - 2026-07-07
+
+### Added
+- feat: wizard polish, macOS menubar by default, PyPI 'ciaobot' distribution (#20) (`183b8db`)
+
 ## v0.2.3 - 2026-07-07
 
 ### Added
