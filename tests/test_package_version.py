@@ -10,7 +10,8 @@ from starlette.testclient import TestClient
 from ciao.package_version import (
     DEFAULT_GITHUB_REPO,
     _github_request,
-    latest_release_url,
+    _tag_from_url,
+    latest_release_redirect_url,
     make_cached_package_status,
     package_changelog,
     package_status,
@@ -19,8 +20,9 @@ from ciao.web.routes_api import package_changelog_endpoint, package_status_endpo
 
 
 class _Response:
-    def __init__(self, payload: dict):
-        self._payload = payload
+    def __init__(self, payload: dict | None = None, *, url: str = ""):
+        self._payload = payload or {}
+        self._url = url
 
     def __enter__(self):
         return self
@@ -31,15 +33,27 @@ class _Response:
     def read(self) -> bytes:
         return json.dumps(self._payload).encode("utf-8")
 
+    def geturl(self) -> str:
+        return self._url
+
+
+def test_tag_from_url_strips_v_prefix() -> None:
+    base = f"https://github.com/{DEFAULT_GITHUB_REPO}/releases/tag"
+    assert _tag_from_url(f"{base}/v0.4.2") == "0.4.2"
+    assert _tag_from_url(f"{base}/0.4.2") == "0.4.2"
+    assert _tag_from_url("https://github.com/x/y/releases") == ""
+
 
 def test_package_status_reports_available_update() -> None:
     def opener(request, timeout: float):
+        # The recurring check uses the public web redirect, not the REST API.
         assert request.full_url == (
-            f"https://api.github.com/repos/{DEFAULT_GITHUB_REPO}/releases/latest"
+            f"https://github.com/{DEFAULT_GITHUB_REPO}/releases/latest"
         )
-        assert request.headers.get("Accept") == "application/vnd.github+json"
         assert timeout == 2.5
-        return _Response({"tag_name": "v0.3.0"})
+        return _Response(
+            url=f"https://github.com/{DEFAULT_GITHUB_REPO}/releases/tag/v0.3.0"
+        )
 
     data = package_status(current_version="0.2.0", opener=opener)
 
@@ -47,9 +61,20 @@ def test_package_status_reports_available_update() -> None:
         "current_version": "0.2.0",
         "latest_version": "0.3.0",
         "update_available": True,
-        "source": latest_release_url(),
+        "source": latest_release_redirect_url(),
         "error": "",
     }
+
+
+def test_package_status_no_tag_reports_error() -> None:
+    def opener(request, timeout: float):
+        return _Response(url=f"https://github.com/{DEFAULT_GITHUB_REPO}/releases")
+
+    data = package_status(current_version="0.2.0", opener=opener)
+
+    assert data["latest_version"] == ""
+    assert data["update_available"] is False
+    assert data["error"]
 
 
 def test_package_status_handles_unreachable_api() -> None:

@@ -23,9 +23,43 @@ def _github_repo() -> str:
 
 
 def latest_release_url(repo: str | None = None) -> str:
-    """Return the GitHub API URL for the latest release of the app repo."""
+    """Return the GitHub API URL for the latest release of the app repo.
+
+    Used where the JSON payload is needed (e.g. resolving the wheel asset to
+    download for an update). This hits ``api.github.com`` and is therefore
+    subject to the REST API rate limit, so it is only used on demand — never
+    for the recurring update check (see ``latest_release_redirect_url``).
+    """
     repo = (repo or _github_repo()).strip("/")
     return f"https://api.github.com/repos/{repo}/releases/latest"
+
+
+def latest_release_redirect_url(repo: str | None = None) -> str:
+    """Return the public github.com URL that redirects to the latest release.
+
+    Unlike the REST API, this is served by the github.com web host and is not
+    subject to the unauthenticated 60 req/hr per-IP rate limit that surfaced as
+    "Update check failed: HTTP Error 403: rate limit exceeded" on shared/NAT
+    egress IPs. Following the redirect lands on ``/releases/tag/<tag>``, and it
+    resolves the latest *stable* (non-prerelease) release, matching the REST
+    endpoint's semantics. No token is required.
+    """
+    repo = (repo or _github_repo()).strip("/")
+    return f"https://github.com/{repo}/releases/latest"
+
+
+def _release_page_request(url: str) -> urllib.request.Request:
+    return urllib.request.Request(
+        url, headers={"User-Agent": "ciaobot-package-updater"}
+    )
+
+
+def _tag_from_url(url: str) -> str:
+    """Extract the release version from a ``/releases/tag/<tag>`` URL."""
+    match = re.search(r"/releases/tag/([^/?#]+)", url or "")
+    if match:
+        return match.group(1).strip().removeprefix("v")
+    return ""
 
 
 def _github_token() -> str:
@@ -63,13 +97,6 @@ def _version_key(value: str) -> tuple:
     return tuple(parts)
 
 
-def _latest_from_payload(payload: dict[str, Any]) -> str:
-    tag = payload.get("tag_name")
-    if isinstance(tag, str):
-        return tag.strip().removeprefix("v")
-    return ""
-
-
 def package_status(
     *,
     current_version: str = __version__,
@@ -77,20 +104,30 @@ def package_status(
     opener: Callable[..., object] = urllib.request.urlopen,
     timeout: float = 2.5,
 ) -> dict[str, object]:
-    """Return installed and latest (GitHub release) package versions."""
-    source = latest_release_url(repo)
+    """Return installed and latest (GitHub release) package versions.
+
+    Resolves the latest version by following the public ``/releases/latest``
+    redirect on github.com rather than calling the REST API, so the recurring
+    update check is not subject to the API's unauthenticated rate limit.
+    """
+    source = latest_release_redirect_url(repo)
     latest = ""
     error = ""
     try:
-        with opener(_github_request(source), timeout=timeout) as response:
-            raw = response.read()
-        payload = json.loads(raw.decode("utf-8"))
-        if isinstance(payload, dict):
-            latest = _latest_from_payload(payload)
+        with opener(_release_page_request(source), timeout=timeout) as response:
+            # urlopen follows the 302 to /releases/tag/<tag>; the final URL
+            # carries the version, so the response body is never read.
+            if hasattr(response, "geturl"):
+                final_url = response.geturl()
+            else:
+                final_url = getattr(response, "url", "") or source
+        latest = _tag_from_url(final_url)
+        if not latest:
+            error = "Could not determine the latest release."
     except urllib.error.HTTPError as exc:
         # GitHub returns 403 (and sometimes 429) with a "rate limit exceeded"
-        # reason when the unauthenticated 60 req/hr per-IP quota is spent.
-        # Report it as a transient condition rather than a raw HTTP error.
+        # reason under heavy load. Report it as a transient condition rather
+        # than a raw HTTP error.
         if exc.code in (403, 429):
             error = "GitHub rate limit reached; the update check will retry later."
         else:
