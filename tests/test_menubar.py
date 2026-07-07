@@ -105,8 +105,16 @@ def test_view_logs_command_opens_stderr_log(tmp_path: Path) -> None:
 
 
 def test_icon_paths_resolve_to_packaged_faces() -> None:
-    assert Path(menubar.icon_path("face.png")).is_file()
-    assert Path(menubar.icon_path("face_scared.png")).is_file()
+    # The menu bar uses only the monochrome template icons, shipped in
+    # ciao.stock/deploy (never in web/static, which the PWA build empties).
+    assert Path(menubar.icon_path("face_template.png")).is_file()
+    assert Path(menubar.icon_path("face_scared_template.png")).is_file()
+
+
+def test_menubar_template_icons_are_packaged() -> None:
+    # The status bar uses monochrome template variants of the faces.
+    assert Path(menubar.icon_path("face_template.png")).is_file()
+    assert Path(menubar.icon_path("face_scared_template.png")).is_file()
 
 
 def _write_log(workspace: Path, entries: list[dict]) -> None:
@@ -241,10 +249,12 @@ def test_banners_muted_tolerates_corrupt_settings(tmp_path: Path) -> None:
     assert menubar.read_banners_muted(tmp_path) is False
 
 
-def test_run_menubar_without_rumps_explains_the_extra(
+def test_run_menubar_without_rumps_explains_the_dependency(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
     monkeypatch.setitem(sys.modules, "rumps", None)
 
     assert menubar.run_menubar(tmp_path, 8443) == 1
-    assert "ciao[menubar]" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "rumps" in err
+    assert "pip install rumps" in err

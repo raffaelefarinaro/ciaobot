@@ -1,9 +1,10 @@
-"""Tests for ciao/local_session.py: the per-device working-branch flow.
+"""Tests for ciao/local_session.py: the current-branch git sync flow.
 
-Every instance runs on its own ``dev/<device>`` branch cut from ``origin/main``
-and lands work on ``main`` via ``try_merge_to_main`` (clean merge -> direct
-push; conflict -> hand off to a chat). The safety rule the tests pin down:
-never discard unmerged work, and never push a conflicted merge.
+Ciaobot never creates or switches local branches: it works on whatever branch
+the workspace checkout is on and syncs it via ``sync_branch`` (commit + pull +
+push; conflict -> hand off to a chat). Non-git workspaces skip gracefully. The
+safety rule the tests pin down: never discard local work, never touch other
+branches.
 """
 
 from __future__ import annotations
@@ -11,13 +12,17 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from types import SimpleNamespace
+
 from ciao.local_session import (
     LocalSessionManager,
-    current_branch,
-    device_branch_name,
-    ensure_device_branch,
-    resync_to_main,
-    try_merge_to_main,
+    has_origin_remote,
+    is_git_repo,
+    repo_toplevel,
+    resync_branch,
+    sync_branch,
+    sync_root,
+    workspace_branch,
 )
 
 
@@ -44,8 +49,8 @@ def _identify(repo: Path) -> None:
     _git(repo, "config", "user.email", "t@e.com")
 
 
-def _make_world(tmp_path: Path) -> tuple[Path, Path]:
-    """Bare origin + a clone on main with one commit."""
+def _make_world(tmp_path: Path, *, branch: str = "main") -> tuple[Path, Path]:
+    """Bare origin + a clone checked out on ``branch`` with one commit."""
     origin = tmp_path / "origin.git"
     origin.mkdir()
     _git(origin, "init", "-q", "--bare", "-b", "main")
@@ -61,222 +66,299 @@ def _make_world(tmp_path: Path) -> tuple[Path, Path]:
     local = tmp_path / "local"
     _git(tmp_path, "clone", "-q", str(origin), str(local))
     _identify(local)
+    if branch != "main":
+        # The user's checkout may sit on any branch; Ciaobot works there as-is.
+        _git(local, "checkout", "-q", "-b", branch)
+        _git(local, "push", "-q", "-u", "origin", branch)
     return local, origin
 
 
-def test_device_branch_name() -> None:
-    assert device_branch_name("laptop") == "dev/laptop"
+def _branches(repo: Path) -> set[str]:
+    return set(_git(repo, "branch", "--format=%(refname:short)").split())
 
 
-# ── ensure_device_branch ───────────────────────────────────────────────────
-
-
-async def test_ensure_device_branch_creates_from_origin_main(tmp_path: Path) -> None:
-    local, _ = _make_world(tmp_path)
-    branch = await ensure_device_branch(local, device_name="mini")
-    assert branch == "dev/mini"
-    assert current_branch(local) == "dev/mini"
-    assert "main" in _git(local, "branch", "--format=%(refname:short)").split()
-
-
-async def test_ensure_device_branch_keeps_existing_unmerged_work(tmp_path: Path) -> None:
-    local, _ = _make_world(tmp_path)
-    await ensure_device_branch(local, device_name="mini")
-    _write(local / "wip.md", "work in progress\n")
-    _git(local, "add", "-A")
-    _git(local, "commit", "-q", "-m", "wip")
-    head_before = _git(local, "rev-parse", "HEAD")
-
-    # A second ensure (e.g. restart) must NOT discard the wip commit.
-    branch = await ensure_device_branch(local, device_name="mini")
-    assert branch == "dev/mini"
-    assert _git(local, "rev-parse", "HEAD") == head_before
-    assert (local / "wip.md").exists()
-
-
-# ── try_merge_to_main ────────────────────────────────────────────────────────
-
-
-async def test_try_merge_clean_pushes_main_without_deploy_flag(tmp_path: Path) -> None:
-    local, origin = _make_world(tmp_path)
-    await ensure_device_branch(local, device_name="mini")
-    # After the package/workspace split, even a path named like app code is
-    # just workspace content. App deploys are handled by package upgrades.
-    _write(local / "ciao" / "feature.py", "x = 1\n")
-
-    result = await try_merge_to_main(local, branch="dev/mini")
-    assert result["ok"] is True
-    assert result["merged"] is True
-    assert result["pushed"] is True
-    assert result["deploy_needed"] is False
-    # Continues on the device branch, now containing the merged work.
-    assert current_branch(local) == "dev/mini"
-    # origin/main advanced with the feature.
-    check = tmp_path / "check"
-    _git(tmp_path, "clone", "-q", str(origin), str(check))
-    assert (check / "ciao" / "feature.py").exists()
-
-
-async def test_try_merge_no_code_change_does_not_flag_deploy(tmp_path: Path) -> None:
-    local, _ = _make_world(tmp_path)
-    await ensure_device_branch(local, device_name="mini")
-    _write(local / "memory-vault" / "note.md", "a note\n")  # non-code path
-
-    result = await try_merge_to_main(local, branch="dev/mini")
-    assert result["merged"] is True
-    assert result["deploy_needed"] is False
-
-
-async def test_preflight_never_flags_workspace_changes_for_deploy(tmp_path: Path) -> None:
-    local, _ = _make_world(tmp_path)
-    await ensure_device_branch(local, device_name="mini")
-    _write(local / "ciao" / "feature.py", "x = 1\n")
-    mgr = LocalSessionManager(
-        workspace=local,
-        runtime_root=tmp_path / ".runtime",
-        device_name="mini",
-    )
-
-    result = await mgr.preflight()
-
-    assert result["dirty"] is True
-    assert result["deploy_needed"] is False
-    assert result["changed_files"]["code"] == ["ciao/feature.py"]
-
-
-async def test_try_merge_conflict_aborts_and_returns_to_branch(tmp_path: Path) -> None:
-    local, origin = _make_world(tmp_path)
-    await ensure_device_branch(local, device_name="mini")
-    # Device edits README.
-    _write(local / "README.md", "device version\n")
-    _git(local, "add", "-A")
-    _git(local, "commit", "-q", "-m", "device edit")
-    # Meanwhile main advances with a conflicting edit to the same file.
-    other = tmp_path / "other"
-    _git(tmp_path, "clone", "-q", str(origin), str(other))
-    _identify(other)
-    _write(other / "README.md", "main version\n")
-    _git(other, "add", "-A")
-    _git(other, "commit", "-q", "-m", "main edit")
-    _git(other, "push", "-q")
-
-    result = await try_merge_to_main(local, branch="dev/mini")
-    assert result["ok"] is True
-    assert result["merged"] is False
-    assert result["conflict"] is True
-    # Merge aborted, back on the device branch, no conflict markers left.
-    assert current_branch(local) == "dev/mini"
-    assert "<<<<<<<" not in (local / "README.md").read_text()
-    assert "MERGE_HEAD" not in _git(local, "status")
-
-
-# ── resync_to_main ─────────────────────────────────────────────────────────
-
-
-async def test_resync_to_main_repoints_device_branch(tmp_path: Path) -> None:
-    local, origin = _make_world(tmp_path)
-    await ensure_device_branch(local, device_name="mini")
-    # main advances elsewhere (e.g. the merge chat pushed it).
-    other = tmp_path / "other"
-    _git(tmp_path, "clone", "-q", str(origin), str(other))
-    _identify(other)
-    _write(other / "merged.md", "merged by chat\n")
-    _git(other, "add", "-A")
-    _git(other, "commit", "-q", "-m", "chat merge")
-    _git(other, "push", "-q")
-
-    ok, _ = await resync_to_main(local, branch="dev/mini")
-    assert ok is True
-    assert current_branch(local) == "dev/mini"
-    assert (local / "merged.md").exists()
-
-
-def _advance_main(tmp_path: Path, origin: Path, name: str) -> None:
-    """Push a new commit to origin/main from a throwaway clone."""
+def _advance_origin(tmp_path: Path, origin: Path, name: str, *, branch: str = "main") -> None:
+    """Push a new commit to origin/<branch> from a throwaway clone."""
     other = tmp_path / name
     _git(tmp_path, "clone", "-q", str(origin), str(other))
     _identify(other)
+    if branch != "main":
+        _git(other, "checkout", "-q", branch)
     _write(other / f"{name}.md", f"{name}\n")
     _git(other, "add", "-A")
     _git(other, "commit", "-q", "-m", name)
     _git(other, "push", "-q")
 
 
-async def test_resync_with_dirty_tree_still_brings_in_main(tmp_path: Path) -> None:
-    # The live PWA workspace is almost always dirty; resync must not abort on it.
+# ── workspace_branch / has_origin_remote ────────────────────────────────────
+
+
+def test_workspace_branch_none_when_not_a_git_repo(tmp_path: Path) -> None:
+    assert workspace_branch(tmp_path) is None
+    assert is_git_repo(tmp_path) is False
+    assert has_origin_remote(tmp_path) is False
+
+
+def test_workspace_branch_reports_current_branch(tmp_path: Path) -> None:
+    local, _ = _make_world(tmp_path)
+    assert workspace_branch(local) == "main"
+    assert is_git_repo(local) is True
+    assert has_origin_remote(local) is True
+
+
+def test_workspace_branch_none_on_detached_head(tmp_path: Path) -> None:
+    local, _ = _make_world(tmp_path)
+    _git(local, "checkout", "-q", "--detach", "HEAD")
+    assert workspace_branch(local) is None
+
+
+def test_has_origin_remote_false_without_origin(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    assert has_origin_remote(repo) is False
+
+
+# ── sync_root ────────────────────────────────────────────────────────────────
+
+
+def _config_stub(*, workspace: Path, vault: Path) -> SimpleNamespace:
+    return SimpleNamespace(workspace_root=workspace, vault_root=vault)
+
+
+def test_sync_root_picks_standalone_vault_repo(tmp_path: Path) -> None:
+    """Git follows the vault: a vault with its own repo wins over the workspace."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    vault = tmp_path / "brain"
+    vault.mkdir()
+    _git(vault, "init", "-q", "-b", "main")
+
+    root = sync_root(_config_stub(workspace=workspace, vault=vault))
+
+    assert root == repo_toplevel(vault) == vault.resolve()
+
+
+def test_sync_root_vault_inside_workspace_repo_targets_workspace(tmp_path: Path) -> None:
+    """Default layout: the vault lives inside the workspace repo, so sync
+    keeps targeting the workspace root (same repo either way)."""
+    workspace = tmp_path / "ws"
+    vault = workspace / "memory-vault"
+    vault.mkdir(parents=True)
+    _git(workspace, "init", "-q", "-b", "main")
+
+    root = sync_root(_config_stub(workspace=workspace, vault=vault))
+
+    assert root == workspace.resolve()
+
+
+def test_sync_root_falls_back_to_workspace_root(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    # Vault directory does not exist yet.
+    missing = _config_stub(workspace=workspace, vault=tmp_path / "nope")
+    assert sync_root(missing) == workspace
+
+    # Vault exists but is not (in) a git repository.
+    plain = tmp_path / "plain-vault"
+    plain.mkdir()
+    assert sync_root(_config_stub(workspace=workspace, vault=plain)) == workspace
+
+
+# ── sync_branch ──────────────────────────────────────────────────────────────
+
+
+async def test_sync_branch_commits_pulls_and_pushes(tmp_path: Path) -> None:
     local, origin = _make_world(tmp_path)
-    await ensure_device_branch(local, device_name="mini")
-    _advance_main(tmp_path, origin, "chatmerge")
-    _write(local / "README.md", "locally edited, uncommitted\n")  # dirty tracked file
+    _write(local / "memory-vault" / "note.md", "a note\n")
 
-    ok, _ = await resync_to_main(local, branch="dev/mini")
-    assert ok is True
-    assert current_branch(local) == "dev/mini"
-    assert (local / "chatmerge.md").exists()  # main's commit pulled in
+    result = await sync_branch(local, branch="main")
+    assert result["ok"] is True
+    assert result["merged"] is True
+    assert result["pushed"] is True
+    assert result["deploy_needed"] is False
+    # Still on the same branch; nothing else was created.
+    assert workspace_branch(local) == "main"
+    assert _branches(local) == {"main"}
+    # origin/main advanced with the note.
+    check = tmp_path / "check"
+    _git(tmp_path, "clone", "-q", str(origin), str(check))
+    assert (check / "memory-vault" / "note.md").exists()
 
 
-async def test_resync_preserves_unpushed_device_commit(tmp_path: Path) -> None:
-    # A snapshot committed after handback must not be discarded by resync.
+async def test_sync_branch_works_on_non_main_branch_as_is(tmp_path: Path) -> None:
+    local, origin = _make_world(tmp_path, branch="feature-x")
+    _write(local / "wip.md", "work in progress\n")
+
+    result = await sync_branch(local, branch="feature-x")
+    assert result["ok"] is True and result["merged"] is True
+    # Never checked out or created any other branch.
+    assert workspace_branch(local) == "feature-x"
+    assert _branches(local) == {"feature-x", "main"}
+    check = tmp_path / "check"
+    _git(tmp_path, "clone", "-q", "-b", "feature-x", str(origin), str(check))
+    assert (check / "wip.md").exists()
+
+
+async def test_sync_branch_pulls_remote_work_first(tmp_path: Path) -> None:
     local, origin = _make_world(tmp_path)
-    await ensure_device_branch(local, device_name="mini")
-    _write(local / "snapshot.md", "post-handback snapshot\n")
-    _git(local, "add", "-A")
-    _git(local, "commit", "-q", "-m", "snapshot")
-    _advance_main(tmp_path, origin, "chatmerge")
+    _advance_origin(tmp_path, origin, "elsewhere")
+    _write(local / "local.md", "local\n")
 
-    ok, _ = await resync_to_main(local, branch="dev/mini")
-    assert ok is True
-    assert (local / "snapshot.md").exists()  # local work kept
-    assert (local / "chatmerge.md").exists()  # main brought in
+    result = await sync_branch(local, branch="main")
+    assert result["ok"] is True and result["merged"] is True
+    assert (local / "elsewhere.md").exists()  # remote work merged in
+    assert (local / "local.md").exists()  # local work kept
 
 
-async def test_try_merge_push_failure(tmp_path: Path, monkeypatch) -> None:
+async def test_sync_branch_pushes_branch_missing_on_origin(tmp_path: Path) -> None:
+    # A branch that exists only locally has nothing to pull; sync just pushes it.
     local, origin = _make_world(tmp_path)
-    await ensure_device_branch(local, device_name="mini")
-    _write(local / "ciao" / "feature.py", "x = 1\n")
+    _git(local, "checkout", "-q", "-b", "only-local")
+    _write(local / "new.md", "new\n")
+
+    result = await sync_branch(local, branch="only-local")
+    assert result["ok"] is True and result["merged"] is True
+    assert workspace_branch(local) == "only-local"
+    check = tmp_path / "check"
+    _git(tmp_path, "clone", "-q", "-b", "only-local", str(origin), str(check))
+    assert (check / "new.md").exists()
+
+
+async def test_sync_branch_conflict_hands_off_without_switching(tmp_path: Path) -> None:
+    local, origin = _make_world(tmp_path)
+    _advance_origin(tmp_path, origin, "remote-edit")
+    # Make the remote edit conflict with a local one on the same file.
+    other = tmp_path / "conflicting"
+    _git(tmp_path, "clone", "-q", str(origin), str(other))
+    _identify(other)
+    _write(other / "README.md", "remote version\n")
+    _git(other, "add", "-A")
+    _git(other, "commit", "-q", "-m", "remote readme")
+    _git(other, "push", "-q")
+    _write(local / "README.md", "local version\n")
+
+    result = await sync_branch(local, branch="main")
+    assert result["ok"] is True
+    assert result["merged"] is False
+    assert result["conflict"] is True
+    assert result["branch"] == "main"
+    # Conflict left in place for the resolution chat; still on the same branch.
+    assert workspace_branch(local) == "main"
+    assert "<<<<<<<" in (local / "README.md").read_text()
+
+
+async def test_sync_branch_push_failure(tmp_path: Path, monkeypatch) -> None:
+    local, _ = _make_world(tmp_path)
+    _write(local / "note.md", "x\n")
 
     import ciao.local_session
     orig_git = ciao.local_session._git
 
     async def mock_git(workspace, *args, **kwargs):
-        if args[:3] == ("push", "origin", "main"):
+        if args[:2] == ("push", "-u"):
             return 1, "", "fatal: push rejected"
         return await orig_git(workspace, *args, **kwargs)
 
     monkeypatch.setattr(ciao.local_session, "_git", mock_git)
 
-    result = await try_merge_to_main(local, branch="dev/mini")
+    result = await sync_branch(local, branch="main")
     assert result["ok"] is False
-    assert result["step"] == "push main"
+    assert result["step"] == "push"
     assert "push rejected" in result["error"]
-
-    # Assert we are back on the device branch
-    assert current_branch(local) == "dev/mini"
-
-    # Assert local main is reset (does not contain the device commits)
-    _git(local, "checkout", "main")
-    assert not (local / "ciao" / "feature.py").exists()
+    assert workspace_branch(local) == "main"
 
 
-async def test_try_merge_pull_failure(tmp_path: Path, monkeypatch) -> None:
+# ── resync_branch ────────────────────────────────────────────────────────────
+
+
+async def test_resync_merges_origin_into_current_branch(tmp_path: Path) -> None:
     local, origin = _make_world(tmp_path)
-    await ensure_device_branch(local, device_name="mini")
-    _write(local / "ciao" / "feature.py", "x = 1\n")
+    _advance_origin(tmp_path, origin, "chatmerge")
+    _write(local / "README.md", "locally edited, uncommitted\n")  # dirty tree
 
-    import ciao.local_session
-    orig_git = ciao.local_session._git
+    ok, _ = await resync_branch(local, branch="main")
+    assert ok is True
+    assert workspace_branch(local) == "main"
+    assert (local / "chatmerge.md").exists()  # origin's commit pulled in
 
-    async def mock_git(workspace, *args, **kwargs):
-        if args[:1] == ("pull",):
-            return 1, "", "fatal: pull failed"
-        return await orig_git(workspace, *args, **kwargs)
 
-    monkeypatch.setattr(ciao.local_session, "_git", mock_git)
+async def test_resync_preserves_unpushed_local_commit(tmp_path: Path) -> None:
+    local, origin = _make_world(tmp_path)
+    _write(local / "snapshot.md", "post-sync snapshot\n")
+    _git(local, "add", "-A")
+    _git(local, "commit", "-q", "-m", "snapshot")
+    _advance_origin(tmp_path, origin, "chatmerge")
 
-    result = await try_merge_to_main(local, branch="dev/mini")
+    ok, _ = await resync_branch(local, branch="main")
+    assert ok is True
+    assert (local / "snapshot.md").exists()  # local work kept
+    assert (local / "chatmerge.md").exists()  # origin brought in
+
+
+async def test_resync_conflict_aborts_cleanly(tmp_path: Path) -> None:
+    local, origin = _make_world(tmp_path)
+    other = tmp_path / "other"
+    _git(tmp_path, "clone", "-q", str(origin), str(other))
+    _identify(other)
+    _write(other / "README.md", "remote version\n")
+    _git(other, "add", "-A")
+    _git(other, "commit", "-q", "-m", "remote readme")
+    _git(other, "push", "-q")
+    _write(local / "README.md", "local version\n")
+
+    ok, detail = await resync_branch(local, branch="main")
+    assert ok is False
+    assert "conflict" in detail
+    # Merge aborted: no conflict markers, no MERGE_HEAD, still on the branch.
+    assert workspace_branch(local) == "main"
+    assert "<<<<<<<" not in (local / "README.md").read_text()
+    assert "MERGE_HEAD" not in _git(local, "status")
+
+
+async def test_resync_ok_when_branch_missing_on_origin(tmp_path: Path) -> None:
+    local, _ = _make_world(tmp_path)
+    _git(local, "checkout", "-q", "-b", "only-local")
+
+    ok, detail = await resync_branch(local, branch="only-local")
+    assert ok is True
+    assert "no remote branch" in detail
+
+
+# ── LocalSessionManager ──────────────────────────────────────────────────────
+
+
+def test_manager_status_non_git_workspace(tmp_path: Path) -> None:
+    mgr = LocalSessionManager(workspace=tmp_path, runtime_root=tmp_path / "rt")
+    assert mgr.branch is None
+    assert mgr.status() == {
+        "git_repo": False,
+        "branch": None,
+        "dirty": False,
+        "dev_mode": False,
+    }
+
+
+def test_manager_status_reports_current_branch(tmp_path: Path) -> None:
+    local, _ = _make_world(tmp_path, branch="feature-x")
+    _write(local / "dirty.md", "dirty\n")
+    mgr = LocalSessionManager(workspace=local, runtime_root=tmp_path / "rt", dev_mode=True)
+    assert mgr.status() == {
+        "git_repo": True,
+        "branch": "feature-x",
+        "dirty": True,
+        "dev_mode": True,
+    }
+
+
+async def test_manager_sync_skips_non_git_workspace(tmp_path: Path) -> None:
+    mgr = LocalSessionManager(workspace=tmp_path, runtime_root=tmp_path / "rt")
+    result = await mgr.commit_and_sync()
     assert result["ok"] is False
-    assert result["step"] == "pull main"
-    assert "pull failed" in result["error"]
+    assert result["step"] == "branch"
+    assert "not a git repository" in result["error"]
 
-    # Assert we are back on the device branch
-    assert current_branch(local) == "dev/mini"
+    resync = await mgr.resync()
+    assert resync["ok"] is False
+    assert "not a git repository" in resync["detail"]

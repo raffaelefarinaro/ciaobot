@@ -1,0 +1,38 @@
+name: publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # PyPI trusted publishing
+      contents: write   # upload artifacts to the GitHub release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build PWA
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+      - name: Build wheel and sdist
+        run: |
+          python -m pip install --quiet build
+          python -m build
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Attach artifacts to the GitHub release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber

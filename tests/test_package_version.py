@@ -9,7 +9,7 @@ from starlette.testclient import TestClient
 
 from ciao.package_version import (
     DEFAULT_GITHUB_REPO,
-    DEFAULT_PACKAGE_INDEX_URL,
+    latest_release_url,
     package_changelog,
     package_status,
 )
@@ -31,10 +31,13 @@ class _Response:
 
 
 def test_package_status_reports_available_update() -> None:
-    def opener(url: str, timeout: float):
-        assert url == DEFAULT_PACKAGE_INDEX_URL
+    def opener(request, timeout: float):
+        assert request.full_url == (
+            f"https://api.github.com/repos/{DEFAULT_GITHUB_REPO}/releases/latest"
+        )
+        assert request.headers.get("Accept") == "application/vnd.github+json"
         assert timeout == 2.5
-        return _Response({"info": {"version": "0.3.0"}})
+        return _Response({"tag_name": "v0.3.0"})
 
     data = package_status(current_version="0.2.0", opener=opener)
 
@@ -42,13 +45,13 @@ def test_package_status_reports_available_update() -> None:
         "current_version": "0.2.0",
         "latest_version": "0.3.0",
         "update_available": True,
-        "source": DEFAULT_PACKAGE_INDEX_URL,
+        "source": latest_release_url(),
         "error": "",
     }
 
 
-def test_package_status_handles_unreachable_index() -> None:
-    def opener(url: str, timeout: float):
+def test_package_status_handles_unreachable_api() -> None:
+    def opener(request, timeout: float):
         raise URLError("offline")
 
     data = package_status(current_version="0.2.0", opener=opener)

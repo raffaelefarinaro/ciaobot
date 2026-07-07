@@ -157,6 +157,12 @@ class PushManager:
         self._log_notification(payload)
         if not self._subs:
             return
+        if not self._subject:
+            # No CIAO_PUSH_CONTACT configured: the Web Push standard requires
+            # a VAPID subject, so skip delivery (the notification log above
+            # still feeds local companions like the menu bar app).
+            logger.debug("CIAO_PUSH_CONTACT unset; skipping Web Push delivery")
+            return
         try:
             from pywebpush import WebPushException, webpush
         except Exception:

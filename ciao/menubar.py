@@ -2,9 +2,9 @@
 
 Puts the Ciaobot face in the status bar (the scared face when the local
 server is unreachable) with quick actions: open the PWA, restart the
-launchd-managed server, and view logs. The Cocoa dependency (rumps) is
-optional so the base package stays slim; install with
-``pip install 'ciao[menubar]'``.
+launchd-managed server, and view logs. The Cocoa dependency (rumps) installs
+automatically on macOS (platform marker in pyproject); on other platforms —
+or if the install is missing it — the command degrades gracefully.
 """
 
 from __future__ import annotations
@@ -81,7 +81,9 @@ def view_logs_command(workspace: Path) -> list[str]:
 
 
 def icon_path(name: str) -> str:
-    return str(resources.files("ciao.web").joinpath("static", name))
+    # Menu bar assets ship in ciao.stock/deploy: the PWA build empties
+    # ciao/web/static, so nothing committed may live there.
+    return str(resources.files("ciao.stock").joinpath("deploy", name))
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,8 +268,9 @@ def run_menubar(workspace: Path, port: int) -> int:
         import rumps
     except ImportError:
         print(
-            "The Ciaobot menu bar app needs the optional 'rumps' dependency.\n"
-            "Install it with: pip install 'ciao[menubar]'",
+            "The Ciaobot menu bar app needs the 'rumps' dependency (installed\n"
+            "automatically with ciao on macOS). Reinstall ciao or run:\n"
+            "pip install rumps",
             file=sys.stderr,
         )
         return 1
@@ -281,10 +284,13 @@ def run_menubar(workspace: Path, port: int) -> int:
     except Exception:
         pass
 
-    face = icon_path("face.png")
-    face_scared = icon_path("face_scared.png")
+    # Monochrome template images (black + alpha): macOS tints them to
+    # match the menu bar, like the built-in status icons. Regenerate
+    # with scripts/make_menubar_template_icons.py.
+    face = icon_path("face_template.png")
+    face_scared = icon_path("face_scared_template.png")
 
-    app = rumps.App("Ciaobot", icon=face, quit_button=None)
+    app = rumps.App("Ciaobot", icon=face, template=True, quit_button=None)
 
     # Only notify for entries newer than launch, not the whole backlog.
     state = {

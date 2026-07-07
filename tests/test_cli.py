@@ -17,6 +17,60 @@ def test_cli_run_dispatches_server(monkeypatch: pytest.MonkeyPatch) -> None:
     assert called == ["run"]
 
 
+def _raise_system_exit(code: int):
+    def _main() -> None:
+        raise SystemExit(code)
+
+    return _main
+
+
+def test_run_relaunches_on_restart_exit_code(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A foreground `ciao run` must survive the setup/update restart exit:
+    the CLI re-execs itself instead of dying."""
+    import ciao.main
+
+    execs: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(ciao.main, "main", _raise_system_exit(75))
+    monkeypatch.setattr(cli.os, "execv", lambda exe, argv: execs.append((exe, argv)))
+    monkeypatch.delenv("CIAO_RESTART_EXIT_CODE", raising=False)
+
+    assert cli._run_server() == 75
+
+    assert execs == [(cli.sys.executable, [cli.sys.executable, "-m", "ciao.cli", *cli.sys.argv[1:]])]
+    assert "Restart requested — relaunching Ciaobot" in capsys.readouterr().err
+
+
+def test_run_propagates_other_exit_codes_without_relaunch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ciao.main
+
+    def fail_execv(*args, **kwargs):  # pragma: no cover - must not be called
+        raise AssertionError("execv must not be called for non-restart exits")
+
+    monkeypatch.setattr(ciao.main, "main", _raise_system_exit(3))
+    monkeypatch.setattr(cli.os, "execv", fail_execv)
+
+    assert cli._run_server() == 3
+
+
+def test_run_restart_exit_code_honors_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ciao.main
+
+    execs: list[list[str]] = []
+    monkeypatch.setattr(ciao.main, "main", _raise_system_exit(42))
+    monkeypatch.setattr(cli.os, "execv", lambda exe, argv: execs.append(argv))
+    monkeypatch.setenv("CIAO_RESTART_EXIT_CODE", "42")
+
+    assert cli._run_server() == 42
+
+    assert len(execs) == 1
+
+
 def test_cli_public_preflight_dispatches_module(monkeypatch: pytest.MonkeyPatch) -> None:
     called = []
 
@@ -189,6 +243,9 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     assert "disallowed_tools" in customization.read_text(encoding="utf-8")
     assert (workspace / ".runtime" / "schedules.json").is_file()
     assert json.loads((workspace / ".runtime" / "schedules.json").read_text(encoding="utf-8")) == {"schedules": []}
+    # Canonical user-asset sources exist so Workspace Health starts warning-free.
+    assert (workspace / "subagents").is_dir()
+    assert (workspace / "commands").is_dir()
     assert (workspace / "memory-vault" / "MEMORY.md").is_file()
     plist = launch_agents / "com.ciao.server.plist"
     assert plist.is_file()
@@ -203,6 +260,11 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     menubar_plist = launch_agents / "com.ciao.menubar.plist"
     assert menubar_plist.is_file()
     menubar_text = menubar_plist.read_text(encoding="utf-8")
+    # Login Items groups both agents under Ciaobot.app instead of python3.13.
+    assert "<key>AssociatedBundleIdentifiers</key>" in plist_text
+    assert "<string>local.ciaobot.app</string>" in plist_text
+    assert "<key>AssociatedBundleIdentifiers</key>" in menubar_text
+    assert "<string>local.ciaobot.app</string>" in menubar_text
     assert "<string>com.ciao.menubar</string>" in menubar_text
     assert "<string>/opt/ciao/bin/python</string>" in menubar_text
     assert "<string>menubar</string>" in menubar_text
@@ -213,6 +275,9 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     assert app_exe.stat().st_mode & 0o111
     app_text = app_exe.read_text(encoding="utf-8")
     assert 'open "http://localhost:9443/?setup=' in app_text
+    # The launcher starts the server and menu bar agents when they're down.
+    assert 'launchctl kickstart "gui/$(id -u)/com.ciao.server"' in app_text
+    assert 'launchctl kickstart "gui/$(id -u)/com.ciao.menubar"' in app_text
     setup_token = (workspace / ".runtime" / "setup-token").read_text(encoding="utf-8").strip()
     assert setup_token
     assert setup_token in app_text

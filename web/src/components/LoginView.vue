@@ -17,7 +17,7 @@
           <span class="banner-meta">// ciaobot is loading config ...</span>
         </p>
         <p class="line line--sys">
-          Ciaobot is restarting. Reopen Ciaobot.app if this page does not reconnect.
+          Ciaobot is restarting — a terminal-run server relaunches itself and may take a few seconds to come back. Reopen Ciaobot.app if this page does not reconnect.
         </p>
         <div class="spinner-container">
           <span class="caret"></span>
@@ -54,36 +54,34 @@
               <strong>Archive into a second brain.</strong>
               <span>Archived chats produce session insights, trajectories, and memory proposals for review.</span>
             </li>
+            <li>
+              <strong>Files, with history.</strong>
+              <span>Create, preview, edit, and restore workspace files right from the UI.</span>
+            </li>
           </ul>
         </section>
 
         <div class="form-group">
           <label for="setup-workspace">Workspace Folder</label>
-          <input
-            id="setup-workspace"
-            v-model="workspace"
-            type="text"
-            class="form-input"
-            placeholder="~/ciaobot"
-            required
-            :disabled="loading"
-          />
+          <div class="input-row">
+            <input
+              id="setup-workspace"
+              v-model="workspace"
+              type="text"
+              class="form-input"
+              placeholder="~/ciaobot"
+              required
+              :disabled="loading"
+            />
+            <button
+              id="setup-workspace-browse"
+              type="button"
+              class="btn-small"
+              :disabled="loading"
+              @click="openPicker('workspace')"
+            >Browse…</button>
+          </div>
           <span class="hint">The local app workspace. It stores config, runtime state, generated assets, and chat metadata.</span>
-        </div>
-
-        <div class="form-group">
-          <label for="setup-vault">Second-brain Vault Folder</label>
-          <input
-            id="setup-vault"
-            v-model="vaultRoot"
-            type="text"
-            class="form-input"
-            placeholder="~/ciaobot/memory-vault"
-            required
-            :disabled="loading"
-            @input="userEditedVault = true"
-          />
-          <span class="hint">Durable markdown memory: projects, people, references, archived chats, and reviewed insights.</span>
         </div>
 
         <div class="form-group">
@@ -113,48 +111,100 @@
           <span class="hint">Starting fresh builds the scaffold; existing asks Ciaobot to adapt your notes into the project structure.</span>
         </div>
 
+        <div v-if="showVaultInput" class="form-group">
+          <label for="setup-vault">{{ vaultMode === 'existing' ? 'Existing Notes Folder' : 'Second-brain Vault Folder' }}</label>
+          <div class="input-row">
+            <input
+              id="setup-vault"
+              v-model="vaultRoot"
+              type="text"
+              class="form-input"
+              placeholder="~/ciaobot/memory-vault"
+              required
+              :disabled="loading"
+              @input="userEditedVault = true"
+            />
+            <button
+              id="setup-vault-browse"
+              type="button"
+              class="btn-small"
+              :disabled="loading"
+              @click="openPicker('vault')"
+            >Browse…</button>
+          </div>
+          <span class="hint">{{ vaultMode === 'existing'
+            ? 'Point this at the notes folder you already have; Ciaobot adapts it into the vault structure.'
+            : 'Durable markdown memory: projects, people, references, archived chats, and reviewed insights.' }}</span>
+        </div>
+        <div v-else class="form-group">
+          <span class="hint vault-derived-hint">
+            Your second-brain vault will be created at <code>{{ vaultRoot }}</code>
+            <button
+              id="setup-vault-change"
+              type="button"
+              class="link-btn"
+              :disabled="loading"
+              @click="vaultRevealed = true"
+            >change location</button>
+          </span>
+        </div>
+
         <div class="form-group">
-          <label for="setup-push">Push Contact</label>
+          <label for="setup-push">Notification Email (Optional)</label>
           <input
             id="setup-push"
             v-model="pushContact"
             type="text"
+            inputmode="email"
+            autocomplete="email"
             class="form-input"
-            placeholder="mailto:you@example.com"
-            required
+            placeholder="you@example.com"
             :disabled="loading"
           />
-          <span class="hint">Required. Used to register push notifications and security certificates.</span>
+          <span class="hint">Optional — enables push notifications. The Web Push standard requires an operator contact; nothing is ever emailed to you. You can set it later in Settings.</span>
         </div>
 
-        <div class="form-grid">
-          <div class="form-group">
-            <label for="setup-port">Port</label>
-            <input
-              id="setup-port"
-              v-model.number="port"
-              type="number"
-              class="form-input"
-              placeholder="8443"
-              required
-              :disabled="loading"
-            />
-          </div>
-          <div class="form-group">
-            <label for="setup-python">Python Path (Optional)</label>
-            <input
-              id="setup-python"
-              v-model="python"
-              type="text"
-              class="form-input"
-              placeholder="blank for default"
-              :disabled="loading"
-            />
+        <div class="advanced-section">
+          <button
+            id="setup-advanced-toggle"
+            type="button"
+            class="advanced-toggle"
+            :aria-expanded="advancedOpen"
+            :disabled="loading"
+            @click="advancedOpen = !advancedOpen"
+          >
+            <span class="advanced-caret">{{ advancedOpen ? '▾' : '▸' }}</span> Advanced
+          </button>
+          <div v-if="advancedOpen" class="form-grid">
+            <div class="form-group">
+              <label for="setup-port">Port</label>
+              <input
+                id="setup-port"
+                v-model.number="port"
+                type="number"
+                class="form-input"
+                placeholder="8443"
+                required
+                :disabled="loading"
+              />
+            </div>
+            <div class="form-group">
+              <label for="setup-python">Python Path (Optional)</label>
+              <input
+                id="setup-python"
+                v-model="python"
+                type="text"
+                class="form-input"
+                placeholder="blank for default"
+                :disabled="loading"
+              />
+            </div>
           </div>
         </div>
 
         <div class="form-group">
           <label>AI Provider Choice</label>
+          <span class="hint">Pick one to get started — you can add more providers later in Settings.</span>
           <div class="provider-choices">
             <label class="choice-label">
               <input type="radio" v-model="provider" value="claude" :disabled="loading" /> Claude Code
@@ -222,6 +272,73 @@
             <span class="prompt prompt--err">!</span>{{ error }}
           </p>
         </div>
+
+        <!-- FOLDER PICKER MODAL -->
+        <div v-if="pickerOpen" class="picker-overlay" @click.self="closePicker">
+          <div
+            class="picker-modal"
+            role="dialog"
+            :aria-label="pickerTarget === 'workspace' ? 'Choose workspace folder' : 'Choose vault folder'"
+          >
+            <div class="picker-head">
+              <span class="picker-title">{{ pickerTarget === 'workspace' ? 'Choose Workspace Folder' : 'Choose Vault Folder' }}</span>
+              <code class="picker-path">{{ pickerDisplayPath || '…' }}</code>
+            </div>
+            <div class="picker-toolbar">
+              <button
+                type="button"
+                class="btn-small"
+                :disabled="!pickerParent || pickerLoading"
+                @click="loadPickerDirs(pickerParent!)"
+              >↑ Up</button>
+              <button
+                type="button"
+                class="btn-small"
+                :disabled="pickerLoading"
+                @click="loadPickerDirs()"
+              >~ Home</button>
+            </div>
+            <ul class="picker-list">
+              <li v-for="dir in pickerDirs" :key="dir.path">
+                <button
+                  type="button"
+                  class="picker-dir"
+                  :disabled="pickerLoading"
+                  @click="loadPickerDirs(dir.path)"
+                >{{ dir.name }}/</button>
+              </li>
+              <li v-if="!pickerLoading && !pickerDirs.length" class="picker-empty">no subfolders</li>
+            </ul>
+            <div class="picker-new">
+              <input
+                v-model="newFolderName"
+                type="text"
+                class="form-input"
+                placeholder="new folder name"
+                :disabled="pickerLoading"
+                @keydown.enter.prevent="createPickerFolder"
+              />
+              <button
+                type="button"
+                class="btn-small"
+                :disabled="!newFolderName.trim() || pickerLoading"
+                @click="createPickerFolder"
+              >New folder</button>
+            </div>
+            <p v-if="pickerError" class="line line--error">
+              <span class="prompt prompt--err">!</span>{{ pickerError }}
+            </p>
+            <div class="picker-footer">
+              <button type="button" class="btn-small" @click="closePicker">Cancel</button>
+              <button
+                type="button"
+                class="prompt-submit picker-select"
+                :disabled="!pickerPath || pickerLoading"
+                @click="selectPickerFolder"
+              >Select this folder</button>
+            </div>
+          </div>
+        </div>
       </form>
 
       <!-- STANDARD LOGIN FORM -->
@@ -288,7 +405,121 @@ const authRequired = ref(true)
 const isRestarting = ref(false)
 const userEditedVault = ref(false)
 const vaultMode = ref('scratch')
+const vaultRevealed = ref(false)
 const copyStatus = ref('')
+const advancedOpen = ref(false)
+
+// The vault path stays hidden while it is just the derived default: only a
+// custom split ("change location") or pointing at existing notes shows it.
+const showVaultInput = computed(() => vaultMode.value === 'existing' || vaultRevealed.value)
+
+// Folder picker modal (server-backed: browsers cannot give absolute paths)
+interface DirListing {
+  path: string
+  display_path: string
+  parent: string | null
+  dirs: Array<{ name: string; path: string }>
+  home: string
+}
+const pickerOpen = ref(false)
+const pickerTarget = ref<'workspace' | 'vault'>('workspace')
+const pickerPath = ref('')
+const pickerDisplayPath = ref('')
+const pickerParent = ref<string | null>(null)
+const pickerDirs = ref<Array<{ name: string; path: string }>>([])
+const pickerError = ref('')
+const pickerLoading = ref(false)
+const newFolderName = ref('')
+
+function fetchListing(path?: string): Promise<DirListing> {
+  const query = path ? `?path=${encodeURIComponent(path)}` : ''
+  return api.get<DirListing>(`/api/setup/list-dirs${query}`)
+}
+
+function applyPickerListing(listing: DirListing) {
+  pickerPath.value = listing.path
+  pickerDisplayPath.value = listing.display_path
+  pickerParent.value = listing.parent
+  pickerDirs.value = listing.dirs || []
+}
+
+async function openPicker(target: 'workspace' | 'vault') {
+  pickerTarget.value = target
+  pickerOpen.value = true
+  pickerPath.value = ''
+  pickerDisplayPath.value = ''
+  pickerParent.value = null
+  pickerDirs.value = []
+  pickerError.value = ''
+  newFolderName.value = ''
+  pickerLoading.value = true
+  try {
+    const current = (target === 'workspace' ? workspace.value : vaultRoot.value).trim()
+    let listing: DirListing
+    if (current) {
+      try {
+        listing = await fetchListing(current)
+      } catch {
+        // field value is not an existing folder on the server: start at home
+        listing = await fetchListing()
+      }
+    } else {
+      listing = await fetchListing()
+    }
+    applyPickerListing(listing)
+  } catch (e: any) {
+    pickerError.value = e.message || 'failed to list folder'
+  } finally {
+    pickerLoading.value = false
+  }
+}
+
+async function loadPickerDirs(path?: string) {
+  pickerLoading.value = true
+  pickerError.value = ''
+  try {
+    applyPickerListing(await fetchListing(path))
+  } catch (e: any) {
+    pickerError.value = e.message || 'failed to list folder'
+  } finally {
+    pickerLoading.value = false
+  }
+}
+
+async function createPickerFolder() {
+  const name = newFolderName.value.trim()
+  if (!name || !pickerPath.value) return
+  pickerLoading.value = true
+  pickerError.value = ''
+  try {
+    const listing = await api.post<DirListing>('/api/setup/mkdir', {
+      path: pickerPath.value,
+      name,
+    })
+    applyPickerListing(listing)
+    newFolderName.value = ''
+  } catch (e: any) {
+    pickerError.value = e.message || 'failed to create folder'
+  } finally {
+    pickerLoading.value = false
+  }
+}
+
+function selectPickerFolder() {
+  if (!pickerPath.value) return
+  if (pickerTarget.value === 'workspace') {
+    // assignment triggers the workspace watcher, keeping the derived vault path in sync
+    workspace.value = pickerPath.value
+  } else {
+    vaultRoot.value = pickerPath.value
+    userEditedVault.value = true
+  }
+  pickerOpen.value = false
+}
+
+function closePicker() {
+  pickerOpen.value = false
+}
 
 const providerInstruction = computed(() => {
   if (provider.value === 'openrouter') {
@@ -319,6 +550,23 @@ async function fetchSetupStatus() {
   }
 }
 
+// The field reads as a plain email input: show "you@example.com" even when a
+// mailto: URI is pasted in (the prefix is re-added on submit). Full mailto:/
+// https: URIs typed by power users stay valid either way.
+watch(pushContact, (value) => {
+  if (value.toLowerCase().startsWith('mailto:')) {
+    pushContact.value = value.slice('mailto:'.length)
+  }
+})
+
+// Web Push VAPID subjects are mailto:/https: URIs: wrap a plain email on
+// submit, pass URIs through, and send '' to leave push unconfigured.
+function normalizedPushContact(): string {
+  const value = pushContact.value.trim()
+  if (!value || /^(mailto:|https:)/i.test(value)) return value
+  return `mailto:${value}`
+}
+
 // Watch workspace path changes to automatically update vault root if user hasn't touched it
 watch(workspace, (newVal) => {
   if (!userEditedVault.value) {
@@ -332,7 +580,7 @@ watch(workspace, (newVal) => {
 })
 
 const canFinish = computed(() => {
-  if (!workspace.value.trim() || !vaultRoot.value.trim() || !pushContact.value.trim()) {
+  if (!workspace.value.trim() || !vaultRoot.value.trim()) {
     return false
   }
   const currentProvider = provider.value
@@ -362,7 +610,7 @@ async function doFinish() {
       workspace: workspace.value,
       vault_root: vaultRoot.value,
       vault_mode: vaultMode.value,
-      push_contact: pushContact.value,
+      push_contact: normalizedPushContact(),
       port: Number(port.value),
       python: python.value || undefined,
       auth_required: authRequired.value,
@@ -648,10 +896,177 @@ onUnmounted(() => {
   line-height: 1.4;
 }
 
+.input-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+.input-row .form-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.vault-derived-hint code {
+  color: var(--fg2);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-family: inherit;
+  font-size: var(--text-xs);
+  word-break: break-all;
+}
+.link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  margin-left: 6px;
+  color: var(--accent);
+  font-family: inherit;
+  font-size: var(--text-xs);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.link-btn:disabled {
+  color: var(--fg3);
+  cursor: not-allowed;
+}
+
+/* Folder picker modal */
+.picker-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.55);
+}
+.picker-modal {
+  width: 100%;
+  max-width: 460px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px 16px;
+  background: var(--bg2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.45);
+}
+.picker-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.picker-title {
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.picker-path {
+  font-family: inherit;
+  font-size: var(--text-xs);
+  color: var(--accent);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 6px;
+  word-break: break-all;
+}
+.picker-toolbar {
+  display: flex;
+  gap: 6px;
+}
+.picker-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.picker-dir {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  padding: 5px 8px;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.picker-dir:hover:not(:disabled) {
+  background: var(--bg3);
+}
+.picker-dir:disabled {
+  color: var(--fg3);
+  cursor: not-allowed;
+}
+.picker-empty {
+  padding: 5px 8px;
+  color: var(--fg3);
+  font-size: var(--text-xs);
+}
+.picker-new {
+  display: flex;
+  gap: 6px;
+}
+.picker-new .form-input {
+  flex: 1;
+  min-width: 0;
+}
+.picker-footer {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+.picker-select {
+  font-size: var(--text-sm);
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
+}
+
+.advanced-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.advanced-toggle {
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--fg3);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+.advanced-toggle:hover:not(:disabled) {
+  color: var(--fg2);
+}
+.advanced-toggle:disabled {
+  cursor: not-allowed;
+}
+.advanced-caret {
+  color: var(--accent);
 }
 
 .provider-choices {

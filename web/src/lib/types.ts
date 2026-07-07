@@ -355,17 +355,13 @@ export interface AdminStatus {
   models: string[]
   default_model: string
   default_mode: string
-  device_name?: string
   dispatch_schedules?: boolean
 }
 
 export interface LocalStatus {
-  device_name: string
-  device_branch: string
-  branch: string
-  on_device_branch: boolean
+  git_repo: boolean
+  branch: string | null
   dirty: boolean
-  direct_main?: boolean
   dev_mode?: boolean
 }
 

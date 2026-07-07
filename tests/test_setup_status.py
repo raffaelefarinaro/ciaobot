@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from itsdangerous import URLSafeTimedSerializer
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -9,7 +11,12 @@ from starlette.testclient import TestClient
 from ciao.config import CiaoConfig
 from ciao.setup_status import setup_status
 from ciao.web.auth import AuthMiddleware
-from ciao.web.routes_api import setup_finish_endpoint, setup_status_endpoint
+from ciao.web.routes_api import (
+    setup_finish_endpoint,
+    setup_list_dirs_endpoint,
+    setup_mkdir_endpoint,
+    setup_status_endpoint,
+)
 
 
 def _config(tmp_path, env_extra: dict[str, str] | None = None) -> CiaoConfig:
@@ -48,6 +55,21 @@ def test_setup_status_reports_workspace_and_required_config(tmp_path) -> None:
     assert data["configured"] is True
 
 
+def test_setup_status_configured_without_push_contact(tmp_path) -> None:
+    """An empty CIAO_PUSH_CONTACT never blocks a configured workspace."""
+    config = _config(tmp_path, {"CIAO_PUSH_CONTACT": ""})
+    (tmp_path / "memory-vault").mkdir()
+
+    data = setup_status(
+        config,
+        env={"PWA_AUTH_TOKEN": "test-token", "ANTHROPIC_API_KEY": "sk-anthropic"},
+    )
+
+    checks = {row["id"]: row for row in data["checks"]}
+    assert checks["push_contact"]["ok"] is False
+    assert data["configured"] is True
+
+
 def test_setup_status_reports_missing_required_config(tmp_path) -> None:
     config = _config(tmp_path, {"CIAO_PUSH_CONTACT": ""})
 
@@ -56,7 +78,9 @@ def test_setup_status_reports_missing_required_config(tmp_path) -> None:
     checks = {row["id"]: row for row in data["checks"]}
     assert checks["vault"]["ok"] is False
     assert checks["pwa_auth_token"]["ok"] is True
+    # push contact is optional: reported as not ok, but never blocks setup
     assert checks["push_contact"]["ok"] is False
+    assert checks["push_contact"]["required"] is False
     assert data["configured"] is False
 
 
@@ -203,7 +227,120 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path) -> No
     assert (apps / "Ciaobot.app" / "Contents" / "MacOS" / "Ciaobot").is_file()
 
 
-def test_setup_finish_requires_bootstrap_mode_and_push_contact(tmp_path) -> None:
+def test_setup_finish_accepts_empty_push_contact(tmp_path) -> None:
+    """Push contact is optional: setup finishes and writes an empty value
+    (Web Push stays disabled until configured in Settings)."""
+    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.serializer = serializer
+
+    workspace = tmp_path / "workspace"
+    resp = TestClient(app, base_url="http://localhost:8443").post(
+        "/api/setup/finish",
+        json={
+            "workspace": str(workspace),
+            "push_contact": "",
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+            "restart": False,
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    env_lines = (workspace / ".env").read_text(encoding="utf-8").splitlines()
+    assert "CIAO_PUSH_CONTACT=" in env_lines
+    assert not any(
+        line.startswith("CIAO_PUSH_CONTACT=") and line != "CIAO_PUSH_CONTACT="
+        for line in env_lines
+    )
+
+
+def test_setup_finish_requires_workspace(tmp_path) -> None:
+    """The wizard's primary question is the workspace root: no folder, no finish."""
+    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.serializer = serializer
+
+    resp = TestClient(app, base_url="http://localhost:8443").post(
+        "/api/setup/finish",
+        json={"vault_root": str(tmp_path / "notes")},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "workspace is required"
+
+
+def test_setup_finish_defaults_vault_inside_workspace(tmp_path) -> None:
+    """Without an explicit vault_root the vault is created inside the
+    workspace as memory-vault/ and everything is one git repo at the root."""
+    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.serializer = serializer
+
+    workspace = tmp_path / "workspace"
+    resp = TestClient(app, base_url="http://localhost:8443").post(
+        "/api/setup/finish",
+        json={
+            "workspace": str(workspace),
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+            "restart": False,
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["workspace"] == str(workspace.resolve())
+    env_text = (workspace / ".env").read_text(encoding="utf-8")
+    assert "CIAO_VAULT_ROOT=memory-vault" in env_text
+    assert (workspace / "memory-vault" / "MEMORY.md").is_file()
+    # One repo at the workspace root; the nested vault is never double-inited.
+    assert (workspace / ".git").is_dir()
+    assert not (workspace / "memory-vault" / ".git").exists()
+
+
+def test_setup_finish_accepts_0000_host(tmp_path) -> None:
+    """0.0.0.0 counts as loopback: users copy it from the bind-address log."""
+    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.serializer = serializer
+
+    resp = TestClient(app, base_url="http://0.0.0.0:8443").post(
+        "/api/setup/finish",
+        json={
+            "workspace": str(tmp_path / "workspace"),
+            "vault_root": str(tmp_path / "brain"),
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+            "restart": False,
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+
+
+def test_setup_finish_requires_bootstrap_mode(tmp_path) -> None:
     config = _config(tmp_path)
     serializer = URLSafeTimedSerializer("test-secret")
     app = Starlette(
@@ -241,3 +378,111 @@ def test_setup_finish_is_localhost_only(tmp_path) -> None:
     )
 
     assert resp.status_code == 403
+    # The refusal tells the user where to go instead.
+    assert "open the wizard at http://localhost:8443" in resp.json()["error"]
+
+
+def _folder_picker_client(tmp_path, *, bootstrap: bool = True, base_url: str = "http://localhost:8443") -> TestClient:
+    if bootstrap:
+        config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+    else:
+        config = _config(tmp_path)
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[
+            Route("/api/setup/list-dirs", setup_list_dirs_endpoint, methods=["GET"]),
+            Route("/api/setup/mkdir", setup_mkdir_endpoint, methods=["POST"]),
+        ],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.serializer = serializer
+    return TestClient(app, base_url=base_url)
+
+
+def test_setup_list_dirs_requires_bootstrap_mode(tmp_path) -> None:
+    client = _folder_picker_client(tmp_path, bootstrap=False)
+
+    resp = client.get("/api/setup/list-dirs", params={"path": str(tmp_path)})
+
+    assert resp.status_code == 404
+
+
+def test_setup_list_dirs_is_localhost_only(tmp_path) -> None:
+    client = _folder_picker_client(tmp_path, base_url="https://ciao.example")
+
+    resp = client.get("/api/setup/list-dirs", params={"path": str(tmp_path)})
+
+    assert resp.status_code == 403
+    assert "open the wizard at http://localhost:8443" in resp.json()["error"]
+
+
+def test_setup_list_dirs_lists_visible_directories_only(tmp_path) -> None:
+    (tmp_path / "beta").mkdir()
+    (tmp_path / "Alpha").mkdir()
+    (tmp_path / ".hidden").mkdir()
+    (tmp_path / "notes.txt").write_text("nope", encoding="utf-8")
+    client = _folder_picker_client(tmp_path)
+
+    resp = client.get("/api/setup/list-dirs", params={"path": str(tmp_path)})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["path"] == str(tmp_path.resolve())
+    assert body["parent"] == str(tmp_path.resolve().parent)
+    assert [d["name"] for d in body["dirs"]] == ["Alpha", "beta", "boot"]
+    assert body["dirs"][0]["path"] == str(tmp_path.resolve() / "Alpha")
+    assert body["home"] == str(Path.home().resolve())
+
+
+def test_setup_list_dirs_defaults_to_home_and_abbreviates_display_path(tmp_path) -> None:
+    client = _folder_picker_client(tmp_path)
+
+    resp = client.get("/api/setup/list-dirs")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["path"] == str(Path.home().resolve())
+    assert body["display_path"] == "~"
+
+
+def test_setup_list_dirs_rejects_missing_or_file_path(tmp_path) -> None:
+    (tmp_path / "notes.txt").write_text("nope", encoding="utf-8")
+    client = _folder_picker_client(tmp_path)
+
+    assert client.get("/api/setup/list-dirs", params={"path": str(tmp_path / "nope")}).status_code == 400
+    assert client.get("/api/setup/list-dirs", params={"path": str(tmp_path / "notes.txt")}).status_code == 400
+
+
+def test_setup_mkdir_creates_folder_and_returns_parent_listing(tmp_path) -> None:
+    client = _folder_picker_client(tmp_path)
+
+    resp = client.post("/api/setup/mkdir", json={"path": str(tmp_path), "name": "workspace"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert (tmp_path / "workspace").is_dir()
+    assert body["path"] == str(tmp_path.resolve())
+    assert "workspace" in [d["name"] for d in body["dirs"]]
+
+
+def test_setup_mkdir_rejects_invalid_names_and_paths(tmp_path) -> None:
+    client = _folder_picker_client(tmp_path)
+
+    for name in ["", "a/b", "a\\b", ".hidden", "../escape"]:
+        resp = client.post("/api/setup/mkdir", json={"path": str(tmp_path), "name": name})
+        assert resp.status_code == 400, name
+    assert client.post("/api/setup/mkdir", json={"path": str(tmp_path / "nope"), "name": "ok"}).status_code == 400
+
+    (tmp_path / "taken").mkdir()
+    resp = client.post("/api/setup/mkdir", json={"path": str(tmp_path), "name": "taken"})
+    assert resp.status_code == 400
+
+
+def test_setup_mkdir_requires_bootstrap_mode(tmp_path) -> None:
+    client = _folder_picker_client(tmp_path, bootstrap=False)
+
+    resp = client.post("/api/setup/mkdir", json={"path": str(tmp_path), "name": "workspace"})
+
+    assert resp.status_code == 404
+    assert not (tmp_path / "workspace").exists()

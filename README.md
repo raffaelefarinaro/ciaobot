@@ -34,21 +34,19 @@ The model is project-first: a workspace represents a life area (personal, work, 
 
 ## Install
 
-Install from the [latest release](https://github.com/raffaelefarinaro/ciaobot/releases/latest) — the wheel ships with the pre-built PWA:
+Install from [PyPI](https://pypi.org/project/ciaobot/) — the wheel ships with the pre-built PWA (the same wheel is attached to each [GitHub release](https://github.com/raffaelefarinaro/ciaobot/releases/latest)):
+
+Requires Python 3.12 or newer (use whichever `python3.X` you have, e.g. `brew install python@3.13`):
 
 ```bash
-python3.12 -m venv ~/.ciaobot-venv
-~/.ciaobot-venv/bin/pip install https://github.com/raffaelefarinaro/ciaobot/releases/download/v0.2.0/ciao-0.2.0-py3-none-any.whl
-~/.ciaobot-venv/bin/ciao setup --workspace ~/ciao-workspace
+python3.13 -m venv ~/.ciaobot-venv
+~/.ciaobot-venv/bin/pip install ciaobot
 ~/.ciaobot-venv/bin/ciao run
 ```
 
-On macOS you can use the Homebrew formula instead:
+Then open `http://localhost:8443`: with no configured workspace the server starts in bootstrap mode and the setup wizard walks you through choosing the workspace folder (default `~/ciaobot`) — one root folder that holds your second brain (`memory-vault/`) alongside app data (config, `.env`, runtime state, chat metadata) — plus provider choice, before anything is created. Starting from scratch scaffolds the vault inside that folder; you can also point Ciaobot at an existing notes folder elsewhere and it adapts it into the vault structure. When you finish, it writes the config, scaffolds the vault, and (on macOS) renders the LaunchAgents and `Ciaobot.app`. Setup makes sure the workspace folder is one git repository (running `git init` with a `.gitignore` that keeps `.env` and runtime state out of commits) so snapshots and sync work from the start; an existing notes folder outside the workspace gets its own repo with a minimal `.gitignore` for OS/editor litter.
 
-```bash
-curl -fsSLO https://raw.githubusercontent.com/raffaelefarinaro/ciaobot/main/deploy/homebrew/ciao.rb
-brew install --formula ./ciao.rb
-```
+For scripted or headless setups, `ciao setup --workspace <dir>` pre-creates a workspace with defaults and skips the wizard.
 
 ## Quickstart (from source)
 
@@ -63,7 +61,7 @@ ciao setup --workspace ~/ciao-workspace
 ciao run
 ```
 
-`ciao setup` is idempotent: it writes the initial `.env`, seeds the workspace docs and vault, and (on macOS) renders LaunchAgents for the server and the menu bar companion plus a `Ciaobot.app` shortcut that opens the local PWA. The menu bar icon needs the optional extra (`pip install 'ciao[menubar]'` — the Homebrew install includes it). Full setup details, optional Node tooling, and the Homebrew formula: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+`ciao setup` is idempotent: it writes the initial `.env`, seeds the workspace docs and vault, and (on macOS) renders LaunchAgents for the server and the menu bar companion plus a `Ciaobot.app` shortcut that opens the local PWA. The menu bar companion is included automatically on macOS installs (no extra needed). Full setup details and optional Node tooling: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 Optional capabilities (Google Workspace, Apple Intelligence titles, MCP connectors) each have their own setup in [INTEGRATIONS.md](INTEGRATIONS.md).
 
@@ -79,7 +77,7 @@ Optional capabilities (Google Workspace, Apple Intelligence titles, MCP connecto
 | [SECURITY.md](SECURITY.md) | Security policy. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute. |
 
-Naming note: the user-facing product is **Ciaobot**. The Python package, import path, CLI command, and many environment variables are still named `ciao`/`CIAO_*` for compatibility.
+Naming note: the user-facing product is **Ciaobot**. The CLI is installed as both `ciaobot` and `ciao` (same command); the Python package, import path, and many environment variables are still named `ciao`/`CIAO_*` for compatibility.
 
 ## For coding agents
 

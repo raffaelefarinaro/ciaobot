@@ -65,10 +65,10 @@ async def sync_workspace(workspace: Path) -> str | None:
             logger.warning("Startup sync: auto-commit failed: %s", err)
             return f"Startup sync: failed to auto-commit local changes.\n{err}"
 
-    # A device branch freshly cut from a stale base may not have an upstream
-    # yet (the backup-push loop sets one with ``push -u`` once it succeeds). A
-    # bare ``git pull`` then hard-fails with "no tracking information"; skip it
-    # rather than surface that as a startup error.
+    # A fresh branch may not have an upstream yet (the backup-push loop sets
+    # one with ``push -u`` once it succeeds). A bare ``git pull`` then
+    # hard-fails with "no tracking information"; skip it rather than surface
+    # that as a startup error.
     rc, _, _ = await _git(workspace, "rev-parse", "--abbrev-ref", "@{u}")
     if rc != 0:
         logger.info("Startup sync: branch has no upstream yet; skipping pull.")

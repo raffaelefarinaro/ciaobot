@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -13,12 +14,33 @@ from ciao.package_version import detect_install_mode, update_package
 from ciao.web.routes_api import package_update_endpoint
 
 
+class _Response:
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self) -> bytes:
+        return json.dumps(self._payload).encode("utf-8")
+
+
+def _release_opener(payload: dict):
+    def opener(request, timeout: float):
+        return _Response(payload)
+
+    return opener
+
+
 def test_detect_install_mode(tmp_path, monkeypatch) -> None:
     # Disable editable check by mocking Path methods
     monkeypatch.setattr(Path, "is_file", lambda self: False)
     monkeypatch.setattr(Path, "is_dir", lambda self: False)
 
-    # Test venv check when not editable or homebrew
+    # Test venv check when not editable
     monkeypatch.setattr(sys, "prefix", "/foo/venv")
     monkeypatch.setattr(sys, "base_prefix", "/foo/python")
     assert detect_install_mode() == "pip_venv"
@@ -37,20 +59,68 @@ def test_update_package_editable(monkeypatch) -> None:
     assert "Editable checkouts must be updated manually" in res["error"]
 
 
-def test_update_package_pip_venv(monkeypatch) -> None:
+def test_update_package_pip_venv_installs_release_wheel(monkeypatch) -> None:
     monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "pip_venv")
-    
+
+    wheel_url = (
+        "https://github.com/raffaelefarinaro/ciaobot/releases/download/"
+        "v0.3.0/ciao-0.3.0-py3-none-any.whl"
+    )
+    opener = _release_opener({
+        "tag_name": "v0.3.0",
+        "assets": [
+            {"name": "ciao-0.3.0.tar.gz", "browser_download_url": wheel_url[:-4] + ".tar.gz"},
+            {"name": "ciao-0.3.0-py3-none-any.whl", "browser_download_url": wheel_url},
+        ],
+    })
+
     mock_run = MagicMock()
-    mock_run.return_code = 0
     mock_run.stdout = "Successfully installed ciao-0.3.0"
     mock_run.stderr = ""
     mock_run.returncode = 0
-    
-    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: mock_run)
-    res = update_package()
+
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return mock_run
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    res = update_package(opener=opener)
     assert res["ok"] is True
-    assert "pip install -U ciao" in res["command"]
+    assert captured["cmd"] == [sys.executable, "-m", "pip", "install", "-U", wheel_url]
+    assert wheel_url in res["command"]
+    assert "pip install -U ciao" not in res["command"].replace(wheel_url, "")
     assert "Successfully installed ciao-0.3.0" in res["output"]
+
+
+def test_update_package_pip_venv_without_wheel_asset(monkeypatch) -> None:
+    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "pip_venv")
+
+    def fail_run(*args, **kwargs):  # pragma: no cover - must not be called
+        raise AssertionError("pip must not run without a wheel asset")
+
+    monkeypatch.setattr("subprocess.run", fail_run)
+    opener = _release_opener({"tag_name": "v0.3.0", "assets": []})
+
+    res = update_package(opener=opener)
+    assert res["ok"] is False
+    assert "no .whl asset" in res["error"]
+    assert "releases/latest" in res["command"]
+
+
+def test_update_package_pip_venv_release_fetch_failure(monkeypatch) -> None:
+    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "pip_venv")
+
+    from urllib.error import URLError
+
+    def opener(request, timeout: float):
+        raise URLError("offline")
+
+    res = update_package(opener=opener)
+    assert res["ok"] is False
+    assert "Could not fetch the latest release" in res["error"]
+    assert "releases/latest" in res["command"]
 
 
 def test_package_update_endpoint_success() -> None:

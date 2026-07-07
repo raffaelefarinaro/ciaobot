@@ -20,11 +20,48 @@ import urllib.request
 from ciao import dev, package_smoke, public_release, release
 
 
+def _restart_exit_code() -> int:
+    """The exit code the server uses to request a restart (config default 75).
+
+    Read from the environment after the server ran: ``CiaoConfig.from_env``
+    loads the workspace ``.env`` into ``os.environ``, so an override set there
+    is visible here too.
+    """
+    raw = (
+        os.environ.get("CIAO_RESTART_EXIT_CODE", "").strip()
+        or os.environ.get("TELEGRAM_BRIDGE_RESTART_EXIT_CODE", "").strip()
+        or "75"
+    )
+    try:
+        return int(raw)
+    except ValueError:
+        return 75
+
+
+def _relaunch_argv() -> list[str]:
+    """argv for re-execing the CLI: a fresh interpreter picks up new code
+    after a package update."""
+    return [sys.executable, "-m", "ciao.cli", *sys.argv[1:]]
+
+
 def _run_server() -> int:
     from ciao.main import main as server_main
 
-    server_main()
-    return 0
+    try:
+        server_main()
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else 0
+    else:
+        code = 0
+    if code == _restart_exit_code():
+        # The setup wizard and package updates request a restart by exiting
+        # with this code. Under launchd KeepAlive relaunches us anyway, but a
+        # foreground `ciao run` would just die and leave the site unreachable.
+        # Re-exec (rather than loop) so the relaunch picks up new code.
+        print("Restart requested — relaunching Ciaobot…", file=sys.stderr)
+        sys.stderr.flush()
+        os.execv(sys.executable, _relaunch_argv())
+    return code
 
 
 def _copy_tree(src, dest: Path) -> None:
@@ -199,13 +236,158 @@ def _write_app_shortcut(
     )
     url = f"http://localhost:{port}/?setup={token}"
     executable = macos / "Ciaobot"
+    # Start the server via launchd when it isn't running, then open the PWA;
+    # otherwise clicking the app lands on "site can't be reached".
     executable.write_text(
         "#!/bin/sh\n"
+        f'if ! curl -s -o /dev/null --max-time 2 "http://localhost:{port}/"; then\n'
+        '  launchctl kickstart "gui/$(id -u)/com.ciao.server" 2>/dev/null \\\n'
+        '    || launchctl load -w "$HOME/Library/LaunchAgents/com.ciao.server.plist" 2>/dev/null\n'
+        "  i=0\n"
+        "  while [ $i -lt 20 ]; do\n"
+        f'    curl -s -o /dev/null --max-time 1 "http://localhost:{port}/" && break\n'
+        "    sleep 0.5\n"
+        "    i=$((i+1))\n"
+        "  done\n"
+        "fi\n"
+        'launchctl kickstart "gui/$(id -u)/com.ciao.menubar" 2>/dev/null \\\n'
+        '  || launchctl load -w "$HOME/Library/LaunchAgents/com.ciao.menubar.plist" 2>/dev/null\n'
         f'open "{url}"\n',
         encoding="utf-8",
     )
     executable.chmod(0o755)
     return app_root
+
+
+_WORKSPACE_GITIGNORE_ENTRIES = (".env", ".runtime/", ".claude/", "*.log")
+
+
+def _ensure_workspace_gitignore(root: Path) -> None:
+    """Make sure `git add -A` snapshots never pick up secrets or runtime state."""
+    gitignore = root / ".gitignore"
+    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+    present = {line.strip() for line in existing.splitlines()}
+    missing = [e for e in _WORKSPACE_GITIGNORE_ENTRIES if e not in present]
+    if not missing:
+        return
+    if existing:
+        text = existing if existing.endswith("\n") else existing + "\n"
+    else:
+        text = "# Ciaobot: keep secrets and runtime state out of git snapshots\n"
+    gitignore.write_text(text + "\n".join(missing) + "\n", encoding="utf-8")
+
+
+def ensure_workspace_git(root: Path) -> None:
+    """Make sure the workspace is a git repository with a protective .gitignore.
+
+    Snapshots and sync rely on git; a fresh workspace gets `git init` plus an
+    initial commit. An existing repo is left untouched apart from appending
+    missing .gitignore guards. Missing git binary is a non-fatal skip.
+    """
+    root = Path(root).expanduser().resolve()
+    if shutil.which("git") is None:
+        print("git not found; skipping workspace git init", file=sys.stderr)
+        return
+    _ensure_workspace_gitignore(root)
+    probe = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+        capture_output=True, text=True,
+    )
+    if probe.returncode == 0 and probe.stdout.strip() == "true":
+        return
+    init = subprocess.run(
+        ["git", "init", "-b", "main", str(root)],
+        capture_output=True, text=True,
+    )
+    if init.returncode != 0:
+        print(f"git init failed for {root}: {init.stderr.strip()}", file=sys.stderr)
+        return
+    subprocess.run(
+        ["git", "-C", str(root), "add", "-A"],
+        capture_output=True, text=True,
+    )
+    commit = subprocess.run(
+        [
+            "git", "-C", str(root),
+            "-c", "user.name=Ciaobot", "-c", "user.email=ciaobot@localhost",
+            "commit", "-m", "Initialize Ciaobot workspace",
+        ],
+        capture_output=True, text=True,
+    )
+    if commit.returncode != 0:
+        print(
+            f"initial workspace commit failed for {root}: {commit.stderr.strip()}",
+            file=sys.stderr,
+        )
+
+
+_VAULT_GITIGNORE_ENTRIES = (".DS_Store", ".obsidian/workspace*")
+
+
+def _ensure_vault_gitignore(root: Path) -> None:
+    """Keep OS litter and volatile Obsidian state out of vault snapshots."""
+    gitignore = root / ".gitignore"
+    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+    present = {line.strip() for line in existing.splitlines()}
+    missing = [e for e in _VAULT_GITIGNORE_ENTRIES if e not in present]
+    if not missing:
+        return
+    if existing:
+        text = existing if existing.endswith("\n") else existing + "\n"
+    else:
+        text = "# Ciaobot: keep OS and editor litter out of vault snapshots\n"
+    gitignore.write_text(text + "\n".join(missing) + "\n", encoding="utf-8")
+
+
+def ensure_vault_git(root: Path) -> None:
+    """Make sure the vault is (in) a git repository.
+
+    Matters when the vault lives outside the workspace (an existing notes
+    folder): a fresh vault gets `git init -b main`, a minimal .gitignore, and
+    an initial commit. A vault that is already inside a git work tree is not
+    re-initialized: when the work tree is rooted at the vault itself only
+    missing .gitignore entries are appended; when the vault sits deeper inside
+    another repo (the default vault-inside-workspace layout) nothing is
+    touched at all. Missing git binary is a non-fatal skip.
+    """
+    root = Path(root).expanduser().resolve()
+    if shutil.which("git") is None:
+        print("git not found; skipping vault git init", file=sys.stderr)
+        return
+    probe = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True,
+    )
+    if probe.returncode == 0:
+        toplevel = Path(probe.stdout.strip())
+        if toplevel == root:
+            _ensure_vault_gitignore(root)
+        return
+    _ensure_vault_gitignore(root)
+    init = subprocess.run(
+        ["git", "init", "-b", "main", str(root)],
+        capture_output=True, text=True,
+    )
+    if init.returncode != 0:
+        print(f"git init failed for {root}: {init.stderr.strip()}", file=sys.stderr)
+        return
+    subprocess.run(
+        ["git", "-C", str(root), "add", "-A"],
+        capture_output=True, text=True,
+    )
+    commit = subprocess.run(
+        [
+            "git", "-C", str(root),
+            "-c", "user.name=Ciaobot", "-c", "user.email=ciaobot@localhost",
+            "commit", "-m", "Initialize Ciaobot vault",
+        ],
+        capture_output=True, text=True,
+    )
+    if commit.returncode != 0:
+        print(
+            f"initial vault commit failed for {root}: {commit.stderr.strip()}",
+            file=sys.stderr,
+        )
 
 
 def setup_workspace(
@@ -225,14 +407,33 @@ def setup_workspace(
     root.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     vault_value = str(vault_root) if vault_root is not None else "memory-vault"
-    vault_path = Path(vault_value).expanduser()
-    if not vault_path.is_absolute():
-        vault_path = root / vault_path
 
     env_path = root / ".env"
-    if not env_path.exists():
+    env_exists = env_path.exists()
+    if env_exists:
+        # An existing .env is the source of truth for where the vault lives.
+        # Re-running setup with a stale or blank vault_root argument must not
+        # relocate scaffolding away from the real vault (and thus re-scatter
+        # MEMORY.md/INDEX.md at a bogus location).
+        from dotenv import dotenv_values
+
+        existing_root = (dotenv_values(env_path).get("CIAO_VAULT_ROOT") or "").strip()
+        if existing_root:
+            vault_value = existing_root
+
+    vault_path = Path(vault_value).expanduser()
+    if vault_path.is_absolute():
+        # Record the expanded path so .env stays unambiguous when the vault
+        # lives outside the workspace (e.g. "~/ciaobot-brain").
+        vault_value = str(vault_path)
+    else:
+        vault_path = root / vault_path
+
+    if not env_exists:
         token = auth_token or secrets.token_urlsafe(32)
-        contact = push_contact or "mailto:you@example.com"
+        # Empty contact = Web Push disabled until configured in Settings;
+        # never invent a fake default.
+        contact = (push_contact or "").strip()
         lines = [
             f"PWA_AUTH_TOKEN={token}",
         ]
@@ -260,6 +461,12 @@ def setup_workspace(
     _copy_tree(stock_commands, root / ".claude" / "commands")
     written.extend([root / ".claude" / "agents", root / ".claude" / "commands"])
     written.extend(_copy_tree_if_missing(stock_workspace, root))
+
+    # Canonical user-authored asset sources (mirrored into .claude/ by
+    # sync-skills). App plumbing, not vault content: pre-creating them keeps
+    # the Workspace Health checks warning-free on a fresh or adopted setup.
+    for asset_dir in ("subagents", "commands"):
+        (root / asset_dir).mkdir(parents=True, exist_ok=True)
 
     runtime_schedules = root / ".runtime" / "schedules.json"
     _write_if_missing(
@@ -299,6 +506,12 @@ def setup_workspace(
         app_dir=app_root_dir,
         port=port,
     ))
+
+    ensure_workspace_git(root)
+    # A vault outside the workspace (existing notes folder) gets its own
+    # repo. Runs after the workspace init so the default nested vault is
+    # never double-initialized.
+    ensure_vault_git(vault_path)
 
     return written
 
@@ -758,7 +971,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     menubar_parser = subparsers.add_parser(
         "menubar",
-        help="Run the macOS menu bar companion (requires `pip install 'ciao[menubar]'`).",
+        help="Run the macOS menu bar companion (installed automatically on macOS).",
     )
     menubar_parser.add_argument(
         "--workspace",

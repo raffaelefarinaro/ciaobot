@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from ciao.release import (
-    PLACEHOLDER_SHA256,
     CommitSummary,
     ReleaseError,
     apply_release_files,
@@ -19,7 +18,6 @@ from ciao.release import (
 def _write_release_tree(root: Path) -> None:
     (root / "ciao").mkdir()
     (root / "web").mkdir()
-    (root / "deploy" / "homebrew").mkdir(parents=True)
     (root / "pyproject.toml").write_text(
         '[project]\nname = "ciao"\nversion = "0.2.0"\n',
         encoding="utf-8",
@@ -43,13 +41,6 @@ def _write_release_tree(root: Path) -> None:
         '    }\n'
         '  }\n'
         '}\n',
-        encoding="utf-8",
-    )
-    (root / "deploy" / "homebrew" / "ciao.rb").write_text(
-        'class Ciao < Formula\n'
-        '  url "https://github.com/raffaelefarinaro/ciaobot/releases/download/v0.2.0/ciao-0.2.0.tar.gz"\n'
-        f'  sha256 "{PLACEHOLDER_SHA256}"\n'
-        'end\n',
         encoding="utf-8",
     )
 
@@ -82,7 +73,7 @@ def test_render_changelog_section_groups_commit_subjects() -> None:
     assert "### Maintenance\n- docs: explain release flow (`987abcd`)" in section
 
 
-def test_apply_release_files_updates_versions_formula_and_changelog(tmp_path: Path) -> None:
+def test_apply_release_files_updates_versions_and_changelog(tmp_path: Path) -> None:
     _write_release_tree(tmp_path)
     section = "## v0.3.0 - 2026-07-05\n\n### Added\n- feat: add release automation"
 
@@ -93,7 +84,6 @@ def test_apply_release_files_updates_versions_formula_and_changelog(tmp_path: Pa
     assert versions.package == "0.3.0"
     assert versions.pwa == "0.3.0"
     assert versions.package_lock == "0.3.0"
-    assert versions.formula == "0.3.0"
     assert (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8") == (
         "# Changelog\n\n"
         "## v0.3.0 - 2026-07-05\n\n"

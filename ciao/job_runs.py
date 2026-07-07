@@ -98,8 +98,6 @@ REGISTRY: tuple[JobSpec, ...] = (
             "Commits and pulls the workspace on server startup."),
     JobSpec("vault_index", "Vault index refresh", "system",
             "Regenerates memory-vault/INDEX.md from frontmatter."),
-    JobSpec("pwa_rebuild", "PWA rebuild", "system",
-            "Rebuilds the web frontend so served assets match source."),
     JobSpec("skills_update", "Skills update", "system",
             "Updates installed agent skills."),
     JobSpec("branch_backup", "Device-branch backup", "system",
@@ -111,7 +109,6 @@ REGISTRY: tuple[JobSpec, ...] = (
 STARTUP_PHASE_JOBS: dict[str, str] = {
     "sync_workspace": "startup_sync",
     "refresh_vault_index": "vault_index",
-    "rebuild_pwa": "pwa_rebuild",
     "update_skills": "skills_update",
 }
 

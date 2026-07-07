@@ -1,9 +1,10 @@
-"""Route-level tests for the per-device working-branch + handover flow:
-status reports the device branch, and the merge endpoint opens a chat with the
-merge prompt carrying the branch."""
+"""Route-level tests for the workspace git-sync flow: status reports the
+current branch (or that the workspace isn't a git repo), and the merge
+endpoint opens a chat with the conflict prompt carrying the branch."""
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,7 +39,29 @@ def _routes():
     ]
 
 
-def _client(*, pcm=None, tmp_path: Path | None = None, device_name="mini"):
+def _git_init(repo: Path, *, branch: str = "main") -> None:
+    """Turn ``repo`` into a git checkout on ``branch`` with one commit."""
+    env = {
+        "GIT_AUTHOR_NAME": "T", "GIT_AUTHOR_EMAIL": "t@e.com",
+        "GIT_COMMITTER_NAME": "T", "GIT_COMMITTER_EMAIL": "t@e.com",
+        "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+        "HOME": str(repo),
+    }
+
+    def run(*args: str) -> None:
+        subprocess.run(
+            ["git", *args], cwd=str(repo), check=True, capture_output=True, env=env
+        )
+
+    run("init", "-q", "-b", branch)
+    run("config", "user.name", "T")
+    run("config", "user.email", "t@e.com")
+    (repo / "README.md").write_text("seed\n", encoding="utf-8")
+    run("add", "-A")
+    run("commit", "-q", "-m", "seed")
+
+
+def _client(*, pcm=None, tmp_path: Path | None = None):
     serializer = URLSafeTimedSerializer("test-secret")
     app = Starlette(
         routes=_routes(),
@@ -46,7 +69,6 @@ def _client(*, pcm=None, tmp_path: Path | None = None, device_name="mini"):
     )
     app.state.serializer = serializer
     app.state.config = SimpleNamespace(
-        device_name=device_name,
         claude_default_model="opus",
         workspaces={
             "personal": SimpleNamespace(
@@ -71,25 +93,47 @@ def _client(*, pcm=None, tmp_path: Path | None = None, device_name="mini"):
     if tmp_path is not None:
         app.state.local_session_manager = LocalSessionManager(
             workspace=tmp_path / "ws", runtime_root=tmp_path / "rt",
-            device_name=device_name,
         )
     client = TestClient(app, base_url=_ORIGIN)
     return client, {SESSION_COOKIE: serializer.dumps({"user": "owner"})}
 
 
-def test_local_status_reports_device_branch(tmp_path: Path) -> None:
+def test_local_status_non_git_workspace(tmp_path: Path) -> None:
     (tmp_path / "ws").mkdir()
-    client, cookies = _client(tmp_path=tmp_path, device_name="mini")
+    client, cookies = _client(tmp_path=tmp_path)
     resp = client.get("/api/local/status", cookies=cookies)
     assert resp.status_code == 200
     data = resp.json()
-    assert data["device_name"] == "mini"
-    assert data["device_branch"] == "dev/mini"
+    assert data["git_repo"] is False
+    assert data["branch"] is None
+
+
+def test_local_status_reports_current_branch(tmp_path: Path) -> None:
+    (tmp_path / "ws").mkdir()
+    _git_init(tmp_path / "ws", branch="feature-x")
+    client, cookies = _client(tmp_path=tmp_path)
+    resp = client.get("/api/local/status", cookies=cookies)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["git_repo"] is True
+    assert data["branch"] == "feature-x"
+    assert data["dirty"] is False
+
+
+def test_local_handback_rejects_non_git_workspace(tmp_path: Path) -> None:
+    (tmp_path / "ws").mkdir()
+    client, cookies = _client(tmp_path=tmp_path)
+    resp = client.post("/api/local/handback", json={}, cookies=cookies)
+    assert resp.status_code == 400
+    data = resp.json()
+    assert data["ok"] is False
+    assert "not a git repository" in data["error"]
 
 
 def test_local_preflight_endpoint(tmp_path: Path) -> None:
     (tmp_path / "ws").mkdir()
-    client, cookies = _client(tmp_path=tmp_path, device_name="mini")
+    _git_init(tmp_path / "ws")
+    client, cookies = _client(tmp_path=tmp_path)
     resp = client.get("/api/local/preflight", cookies=cookies)
     assert resp.status_code == 200
     data = resp.json()
@@ -103,7 +147,7 @@ def test_local_preflight_endpoint(tmp_path: Path) -> None:
 
 def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None:
     (tmp_path / "ws").mkdir()
-    client, cookies = _client(tmp_path=tmp_path, device_name="mini")
+    client, cookies = _client(tmp_path=tmp_path)
 
     resp = client.get("/api/workspaces", cookies=cookies)
 
@@ -149,12 +193,13 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
 
 def test_handback_blocks_on_secrets(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "ws").mkdir()
-    client, cookies = _client(tmp_path=tmp_path, device_name="mini")
-    
+    _git_init(tmp_path / "ws")
+    client, cookies = _client(tmp_path=tmp_path)
+
     # Mock preflight to return blockers
     async def mock_preflight(self):
         return {
-            "branch": "dev/mini",
+            "branch": "main",
             "dirty": True,
             "changed_files": {},
             "deploy_needed": False,
@@ -162,7 +207,7 @@ def test_handback_blocks_on_secrets(tmp_path: Path, monkeypatch) -> None:
             "warnings": [],
         }
     monkeypatch.setattr(LocalSessionManager, "preflight", mock_preflight)
-    
+
     resp = client.post("/api/local/handback", json={}, cookies=cookies)
     assert resp.status_code == 400
     data = resp.json()
@@ -172,11 +217,12 @@ def test_handback_blocks_on_secrets(tmp_path: Path, monkeypatch) -> None:
 
 def test_handback_warns_on_suspicious_files(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "ws").mkdir()
-    client, cookies = _client(tmp_path=tmp_path, device_name="mini")
-    
+    _git_init(tmp_path / "ws")
+    client, cookies = _client(tmp_path=tmp_path)
+
     async def mock_preflight(self):
         return {
-            "branch": "dev/mini",
+            "branch": "main",
             "dirty": True,
             "changed_files": {},
             "deploy_needed": False,
@@ -184,18 +230,18 @@ def test_handback_warns_on_suspicious_files(tmp_path: Path, monkeypatch) -> None
             "warnings": ["File 'config.json' is suspicious."],
         }
     monkeypatch.setattr(LocalSessionManager, "preflight", mock_preflight)
-    
+
     # Try handback without confirmation -> should fail
     resp = client.post("/api/local/handback", json={}, cookies=cookies)
     assert resp.status_code == 400
     data = resp.json()
     assert data["error"] == "Warnings exist, require confirmation"
-    
-    # Mock commit_to_main so we can test confirmation bypass
-    async def mock_commit(self):
+
+    # Mock commit_and_sync so we can test confirmation bypass
+    async def mock_sync(self):
         return {"ok": True, "merged": True, "deploy_needed": False}
-    monkeypatch.setattr(LocalSessionManager, "commit_to_main", mock_commit)
-    
+    monkeypatch.setattr(LocalSessionManager, "commit_and_sync", mock_sync)
+
     # Try handback with confirmation -> should succeed
     resp = client.post("/api/local/handback", json={"confirm_warnings": True}, cookies=cookies)
     assert resp.status_code == 200
@@ -232,19 +278,31 @@ class _FakePCM:
         return SimpleNamespace()
 
 
-def test_handover_merge_opens_chat_with_merge_prompt() -> None:
+def test_handover_merge_opens_chat_with_conflict_prompt() -> None:
     pcm = _FakePCM()
     client, cookies = _client(pcm=pcm)
     resp = client.post(
         "/api/handover/merge",
-        json={"branch": "dev/mini"},
+        json={"branch": "feature-x"},
         cookies=cookies, headers={"Origin": _ORIGIN},
     )
     assert resp.status_code == 200
     data = resp.json()
     assert data["ok"] is True and data["chat_id"] == "chat-xyz"
-    # Hosted in the personal General project; prompt carries branch + merge intent.
+    # Hosted in the personal General project; prompt carries branch + resolve intent.
     assert pcm.created["project_id"] == "p-gen"
     assert pcm.streamed["chat_id"] == "chat-xyz"
-    assert "dev/mini" in pcm.streamed["prompt"]
-    assert "merge" in pcm.streamed["prompt"].lower()
+    assert "feature-x" in pcm.streamed["prompt"]
+    assert "resolve" in pcm.streamed["prompt"].lower()
+    # The prompt must never instruct a branch checkout or creation.
+    assert "checkout" not in pcm.streamed["prompt"].lower()
+
+
+def test_handover_merge_without_branch_or_repo_is_rejected() -> None:
+    pcm = _FakePCM()
+    client, cookies = _client(pcm=pcm)
+    resp = client.post(
+        "/api/handover/merge", json={}, cookies=cookies, headers={"Origin": _ORIGIN},
+    )
+    assert resp.status_code == 400
+    assert "not a git repository" in resp.json()["error"]

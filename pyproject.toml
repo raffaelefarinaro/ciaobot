@@ -3,8 +3,8 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ciao"
-version = "0.2.0"
+name = "ciaobot"
+version = "0.4.2"
 description = "Ciaobot personal assistant server."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -23,6 +23,9 @@ dependencies = [
   "python-pptx==1.0.2",
   "notebooklm-py==0.7.3",
   "playwright==1.61.0",
+  # macOS menu bar companion (`ciao menubar`): installed automatically on
+  # macOS so a plain wheel install includes the status-bar app.
+  "rumps==0.4.0; platform_system == 'Darwin'",
 ]
 
 [project.optional-dependencies]
@@ -35,13 +38,15 @@ test = [
 voice-local = [
   "mlx-whisper==0.4.3",
 ]
-# macOS menu bar companion (`ciao menubar`).
+# macOS menu bar companion (`ciao menubar`). Kept for compatibility: the same
+# pin ships in the main dependencies with a Darwin platform marker.
 menubar = [
   "rumps==0.4.0",
 ]
 
 [project.scripts]
 ciao = "ciao.cli:main"
+ciaobot = "ciao.cli:main"
 ciao-public-preflight = "ciao.public_release:main"
 ciao-package-smoke = "ciao.package_smoke:main"
 ciao-prepare-release = "ciao.release:main"
@@ -56,6 +61,7 @@ packages = ["ciao", "ciao.context", "ciao.observability", "ciao.providers", "cia
   "commands/*.md",
   "deploy/*.tmpl",
   "deploy/*.icns",
+  "deploy/*.png",
   "public/*.md",
   "workspace/*.md",
   "skills/.gitkeep",

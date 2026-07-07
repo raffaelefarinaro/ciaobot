@@ -12,8 +12,8 @@ Two hooks are wired today:
       can load the right note without guessing who "Emma" or "Ciaobot-
       Improvements" refers to.
 2. ``PostToolUse`` on the ``WebSearch`` tool backfills results on
-   Ollama-cloud-routed chats, where the Anthropic-compat layer doesn't
-   execute the server-side ``web_search`` tool. See
+   Ollama-cloud- and OpenRouter-routed chats, where the Anthropic-compat
+   layer doesn't execute the server-side ``web_search`` tool. See
    :func:`build_web_search_post_tooluse_hook`.
 
 Kept small and fail-open: any exception becomes a DEBUG log and the
@@ -124,21 +124,27 @@ def build_user_prompt_submit_hook(
     return on_user_prompt_submit
 
 
-# --- WebSearch backfill via Ollama -------------------------------------------
+# --- WebSearch backfill via Ollama / OpenRouter -------------------------------
 #
-# On chats routed to Ollama's Anthropic-compatible endpoint, Claude Code's
-# built-in WebSearch returns an empty boilerplate string instead of results.
-# The Anthropic server-side ``web_search`` tool is not executed by Ollama's
-# compat layer (only the ``ollama launch claude`` wrapper supplies that glue),
-# so the CLI's WebSearch "succeeds" with no sources. See the analysis in
+# On chats routed to an Anthropic-compatible endpoint (Ollama cloud,
+# OpenRouter), Claude Code's built-in WebSearch returns an empty boilerplate
+# string instead of results. The Anthropic server-side ``web_search`` tool is
+# not executed by those compat layers (only the ``ollama launch claude``
+# wrapper supplies that glue), so the CLI's WebSearch "succeeds" with no
+# sources. See the analysis in
 # memory-vault/personal/projects/active/ciao-improvements/README.md.
 #
-# This PostToolUse hook detects that empty result, runs Ollama's standalone
-# /api/web_search with the same query, and injects the real results as
-# additionalContext. No-op on the Anthropic path (where WebSearch works
-# natively) and on local-daemon Ollama routes (which don't expose the
-# standalone search API). Fail-open: any error returns {} so the model still
-# gets the original output.
+# This PostToolUse hook detects that empty result, reruns the query against
+# the backend's own search surface, and injects the real results as
+# additionalContext:
+#
+# * Ollama cloud: the standalone ``POST /api/web_search`` REST API.
+# * OpenRouter: a one-shot chat-completions call with the ``web`` plugin,
+#   whose ``url_citation`` annotations carry title/url/content per source.
+#
+# No-op on the Anthropic path (where WebSearch works natively) and on
+# local-daemon Ollama routes (which don't expose the standalone search API).
+# Fail-open: any error returns {} so the model still gets the original output.
 
 
 _WEBSEARCH_RESULT_BEARER_PREFIX = "Bearer "
@@ -196,6 +202,35 @@ def _ollama_cloud_route(
     return None
 
 
+def _openrouter_route(
+    extra_env: dict[str, str] | None = None,
+) -> tuple[str, str, str] | None:
+    """Return ``(base_url, api_key, search_model)`` for OpenRouter-routed chats.
+
+    OpenRouter has no standalone search REST API, but its chat-completions
+    endpoint accepts the ``web`` plugin on any model. The tier-remap env
+    injected on OpenRouter routes (see
+    ``ciao.providers.openrouter._tier_remap_env``) carries an
+    OpenRouter-served haiku-tier id in ``ANTHROPIC_DEFAULT_HAIKU_MODEL``,
+    which doubles as the cheap search model here.
+
+    Honours ``CIAO_OPENROUTER_WEBSEARCH_HOOK`` (default enabled) as a kill
+    switch, mirroring ``CIAO_OLLAMA_WEBSEARCH_HOOK``.
+    """
+    extra = extra_env or {}
+    flag = {**os.environ, **extra}.get("CIAO_OPENROUTER_WEBSEARCH_HOOK", "1")
+    if flag not in ("1", "true", "True"):
+        return None
+    # Same per-chat routing contract as _ollama_cloud_route: only extra_env
+    # carries ANTHROPIC_BASE_URL for rerouted chats.
+    base_url = extra.get("ANTHROPIC_BASE_URL", "")
+    api_key = extra.get("ANTHROPIC_AUTH_TOKEN", "")
+    if "openrouter.ai" not in base_url or not api_key:
+        return None
+    model = extra.get("ANTHROPIC_DEFAULT_HAIKU_MODEL", "") or "openai/gpt-4o-mini"
+    return base_url, api_key, model
+
+
 def _ollama_web_search(
     base_url: str, api_key: str, query: str, timeout_s: float = 10.0
 ) -> list[dict[str, str]]:
@@ -226,16 +261,84 @@ def _ollama_web_search(
     return [r for r in results if isinstance(r, dict)] if isinstance(results, list) else []
 
 
+def _openrouter_web_search(
+    base_url: str, api_key: str, model: str, query: str, timeout_s: float = 20.0
+) -> list[dict[str, str]]:
+    """Run a web search through OpenRouter's ``web`` plugin. ``[]`` on failure.
+
+    Endpoint: ``POST {base_url}/v1/chat/completions`` with the ``web`` plugin
+    attached, which works with any OpenRouter model. The plugin returns
+    ``url_citation`` annotations on the assistant message
+    (``{"type": "url_citation", "url_citation": {"url", "title", "content"}}``),
+    which map onto the ``{"title", "url", "content"}`` result shape shared
+    with :func:`_ollama_web_search`.
+    """
+    url = base_url.rstrip("/") + "/v1/chat/completions"
+    payload = json.dumps(
+        {
+            "model": model,
+            "plugins": [{"id": "web", "max_results": 5}],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": f"Web search: {query}\nSummarize the top results.",
+                }
+            ],
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={
+            "Authorization": _WEBSEARCH_RESULT_BEARER_PREFIX + api_key,
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, ValueError, TimeoutError) as exc:
+        logger.info("OpenRouter web search failed for %r: %s", query, exc)
+        return []
+    try:
+        message = data["choices"][0]["message"]
+    except (KeyError, IndexError, TypeError):
+        return []
+    annotations = message.get("annotations") if isinstance(message, dict) else None
+    if not isinstance(annotations, list):
+        return []
+    results: list[dict[str, str]] = []
+    for entry in annotations:
+        if not isinstance(entry, dict) or entry.get("type") != "url_citation":
+            continue
+        citation = entry.get("url_citation")
+        if not isinstance(citation, dict):
+            continue
+        results.append(
+            {
+                "title": str(citation.get("title", "")),
+                "url": str(citation.get("url", "")),
+                "content": str(citation.get("content", "")),
+            }
+        )
+    return results
+
+
 def _format_search_results(
-    query: str, results: list[dict[str, str]], max_results: int = 5, content_chars: int = 400
+    query: str,
+    results: list[dict[str, str]],
+    max_results: int = 5,
+    content_chars: int = 400,
+    source: str = "Ollama",
 ) -> str:
-    """Render Ollama search results as a single additionalContext string.
+    """Render backfilled search results as a single additionalContext string.
 
     Capped at ``max_results`` items with each ``content`` truncated to
     ``content_chars`` so the whole block stays well under the 10,000-char
     additionalContext limit.
     """
-    lines = [f'Web search results for "{query}" (via Ollama):', ""]
+    lines = [f'Web search results for "{query}" (via {source}):', ""]
     for i, r in enumerate(results[:max_results], 1):
         title = str(r.get("title", "")).strip()
         url = str(r.get("url", "")).strip()
@@ -252,12 +355,13 @@ def _format_search_results(
 
 
 def build_web_search_post_tooluse_hook(extra_env: dict[str, str] | None = None):
-    """Return a PostToolUse callback that backfills WebSearch via Ollama.
+    """Return a PostToolUse callback that backfills empty WebSearch results.
 
-    Fires after Claude Code's WebSearch tool runs. When the chat is
-    Ollama-cloud-routed and WebSearch returned an empty result, runs Ollama's
-    standalone ``/api/web_search`` with the same query and injects the real
-    results as ``additionalContext``. No-op otherwise.
+    Fires after Claude Code's WebSearch tool runs. When the chat is routed
+    to a backend whose Anthropic-compat layer doesn't execute the server-side
+    search (Ollama cloud, OpenRouter) and WebSearch returned an empty result,
+    reruns the query against that backend's own search surface and injects
+    the real results as ``additionalContext``. No-op otherwise.
     """
 
     async def on_post_tool_use(
@@ -271,17 +375,24 @@ def build_web_search_post_tooluse_hook(extra_env: dict[str, str] | None = None):
                 return {}
             if _websearch_response_has_results(input_data.get("tool_response")):
                 return {}  # native WebSearch worked (e.g. Anthropic path)
-            route = _ollama_cloud_route(extra_env)
-            if route is None:
-                return {}  # not Ollama-cloud-routed or kill switch off
-            base_url, api_key = route
             query = (input_data.get("tool_input") or {}).get("query", "")
             if not query:
                 return {}
-            results = _ollama_web_search(base_url, api_key, query)
+            ollama_route = _ollama_cloud_route(extra_env)
+            openrouter_route = _openrouter_route(extra_env)
+            if ollama_route is not None:
+                base_url, api_key = ollama_route
+                results = _ollama_web_search(base_url, api_key, query)
+                source = "Ollama"
+            elif openrouter_route is not None:
+                base_url, api_key, model = openrouter_route
+                results = _openrouter_web_search(base_url, api_key, model, query)
+                source = "OpenRouter"
+            else:
+                return {}  # not rerouted, or kill switch off
             if not results:
                 return {}
-            additional = _format_search_results(query, results)
+            additional = _format_search_results(query, results, source=source)
             return {
                 "hookSpecificOutput": {
                     "hookEventName": "PostToolUse",

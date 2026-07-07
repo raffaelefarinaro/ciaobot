@@ -122,6 +122,11 @@ def _refresh_vault_index(workspace: Path, vault_root: Path | None = None) -> boo
         from ciao import vault_index
 
         root = vault_root or (workspace / "memory-vault")
+        if not root.is_dir():
+            # Bootstrap mode has no vault yet (the setup wizard creates it);
+            # never scaffold one preemptively.
+            logger.info("Vault root %s does not exist yet; skipping index refresh", root)
+            return False
         entries = vault_index.scan_vault(root)
         vault_index.write_index_file(entries, root / "INDEX.md")
         logger.info("Vault index refreshed.")
@@ -131,31 +136,14 @@ def _refresh_vault_index(workspace: Path, vault_root: Path | None = None) -> boo
         return False
 
 
-def _rebuild_pwa(workspace: Path) -> bool:
-    """Rebuild PWA frontend if web/ source exists."""
-    web_dir = workspace / "web"
-    if not (web_dir / "package.json").exists():
-        return False
-    try:
-        subprocess.run(
-            ["npm", "run", "build"],
-            cwd=str(web_dir),
-            capture_output=True,
-            timeout=120,
-        )
-        logger.info("PWA frontend rebuilt.")
-        return True
-    except Exception:
-        logger.exception("PWA frontend rebuild failed")
-        return False
-
-
 def _push_subject_from_env(env: dict[str, str] | None = None) -> str:
+    """Web Push VAPID subject, or "" when CIAO_PUSH_CONTACT is unset.
+
+    An empty subject means Web Push delivery stays disabled until the
+    operator sets a contact in Settings; everything else keeps working.
+    """
     source = env if env is not None else os.environ
-    subject = source.get("CIAO_PUSH_CONTACT", "").strip()
-    if not subject:
-        raise ValueError("CIAO_PUSH_CONTACT is required for Web Push VAPID subject")
-    return subject
+    return source.get("CIAO_PUSH_CONTACT", "").strip()
 
 
 def _push_subject_for_config(config: CiaoConfig) -> str:
@@ -254,14 +242,8 @@ async def _async_main() -> int:
             tracker.fail("refresh_vault_index", "index refresh failed")
             logger.exception("Vault index refresh failed")
 
-    # Rebuild PWA frontend so served assets match latest source
-    tracker.start("rebuild_pwa")
-    try:
-        await asyncio.to_thread(_rebuild_pwa, config.workspace_root)
-        tracker.done("rebuild_pwa")
-    except Exception:
-        tracker.fail("rebuild_pwa", "npm build failed")
-        logger.exception("PWA rebuild failed")
+    # The PWA ships pre-built in the installed package; workspaces never
+    # contain app source, so there is no frontend rebuild at startup.
 
     # Update skills in the background, startup should not wait on npm.
     tracker.start("update_skills")
@@ -336,19 +318,26 @@ async def _async_main() -> int:
     app.state.transcript_store = transcripts
     app.state.project_chat_manager = pcm
 
-    # Per-device working-branch flow: every instance runs on its own
-    # `dev/<device>` branch and lands work on `main` via the Settings "commit"
-    # button (clean merge -> direct push; conflict -> interactive merge chat).
-    from ciao.local_session import LocalSessionManager
+    # Git sync operates on the repo containing the vault root: the workspace
+    # root for the default vault-inside-workspace layout (and as fallback),
+    # or the vault's own repo when it lives elsewhere. Every instance works
+    # on whatever branch that checkout is on and syncs it via the Settings
+    # button (clean pull -> direct push; conflict -> interactive resolution
+    # chat).
+    from ciao.local_session import LocalSessionManager, sync_root
 
+    git_sync_root = await asyncio.to_thread(sync_root, config)
     app.state.local_session_manager = LocalSessionManager(
-        workspace=config.workspace_root,
+        workspace=git_sync_root,
         runtime_root=config.state_path.parent,
-        device_name=config.device_name,
-        direct_main=config.git_direct_main,
         dev_mode=config.dev_mode,
     )
     push_subject = _push_subject_for_config(config)
+    if not push_subject:
+        logger.info(
+            "CIAO_PUSH_CONTACT is not set; Web Push notifications stay "
+            "disabled until a contact is configured in Settings."
+        )
     app.state.push_manager = PushManager(config.state_path.parent, subject=push_subject)
     app.state.focused_chats = {}
     pcm._push_manager = app.state.push_manager
@@ -466,33 +455,42 @@ async def _async_main() -> int:
 
     asyncio.create_task(_run_catch_up())
 
-    # ── Per-device working branch ────────────────────────────
-    # Every instance works on its own `dev/<device>` branch (cut from
-    # origin/main, reused across restarts) and lands work on `main` via the
-    # Settings "commit" button. A background loop pushes the branch for backup.
+    # ── Branch backup ────────────────────────────────────────
+    # Backs up the same repo the sync flow targets (the repo containing the
+    # vault root, falling back to the workspace root). Every instance works on
+    # whatever branch that checkout is on; Ciaobot never creates or switches
+    # branches. A background loop pushes the branch for backup. Non-git roots
+    # (fresh `ciao setup` without a remote) and repos without an `origin`
+    # remote skip this gracefully.
     from ciao.local_session import (
         BACKUP_PUSH_INTERVAL,
-        ensure_device_branch,
+        has_origin_remote,
         push_branch,
+        workspace_branch,
     )
 
-    async def _device_branch_loop() -> None:
-        try:
-            branch = await ensure_device_branch(
-                config.workspace_root, device_name=config.device_name, direct_main=config.git_direct_main
+    async def _branch_backup_loop() -> None:
+        branch = await asyncio.to_thread(workspace_branch, git_sync_root)
+        if branch is None:
+            logger.info(
+                "Sync root %s is not a git repository (or is on a detached HEAD); "
+                "skipping branch backup.", git_sync_root,
             )
-            logger.info("Working on device branch '%s'", branch)
-        except Exception:
-            logger.exception("Could not ensure device branch")
             return
+        if not await asyncio.to_thread(has_origin_remote, git_sync_root):
+            logger.info(
+                "Sync root has no 'origin' remote; skipping branch backup.",
+            )
+            return
+        logger.info("Working on branch '%s'", branch)
         while True:
             try:
                 await asyncio.sleep(BACKUP_PUSH_INTERVAL)
                 async with job_runs.track(
-                    "branch_backup", "Device-branch backup",
+                    "branch_backup", "Branch backup",
                     category="system", extra={"branch": branch},
                 ) as run:
-                    ok, detail = await push_branch(config.workspace_root, branch=branch)
+                    ok, detail = await push_branch(git_sync_root, branch=branch)
                     if not ok:
                         run.status = "error"
                         run.error = detail
@@ -502,7 +500,7 @@ async def _async_main() -> int:
             except Exception:
                 logger.exception("Branch backup push failed")
 
-    asyncio.create_task(_device_branch_loop())
+    asyncio.create_task(_branch_backup_loop())
 
 
     import uvicorn
@@ -516,6 +514,13 @@ async def _async_main() -> int:
     server = uvicorn.Server(uvi_config)
     tracker.start("server_starting")
     logger.info("Starting Ciaobot server on %s:%d", config.pwa_host, config.pwa_port)
+    if getattr(config, "bootstrap_mode", False):
+        # The setup wizard's finish step only accepts loopback hosts, so give
+        # users a URL that works instead of the 0.0.0.0 bind address above.
+        logger.info(
+            "First-run setup: open http://localhost:%d to complete the wizard.",
+            config.pwa_port,
+        )
     tracker.done("server_starting")
 
     restart_flag: list[int | None] = [None]

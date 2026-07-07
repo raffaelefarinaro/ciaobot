@@ -99,11 +99,9 @@ If a connector's tools don't show up, the fix is on the claude.ai side: toggle t
 
 Copy `.env.example` to `.env` and fill in the app-level settings first:
 
-**Required for a configured workspace:** `PWA_AUTH_TOKEN`, `CIAO_PUSH_CONTACT`
+**Required for a configured workspace:** `PWA_AUTH_TOKEN`. `CIAO_PUSH_CONTACT` is optional: leave it empty to run without Web Push notifications until you set a contact in Settings.
 
-`ciao setup` writes the initial `.env` into the selected workspace, seeds stock agents, commands, schedules, agent-readable workspace docs (`CLAUDE.md`, `CIAO_CUSTOMIZATION.md`), and the default vault, renders `~/Library/LaunchAgents/com.ciao.server.plist`, and creates `~/Applications/Ciaobot.app`. The app shortcut opens `http://localhost:<port>/?setup=<token>`; the server redeems `.runtime/setup-token` once on localhost, sets the signed session cookie, then deletes the token. By default setup prints the launchd load command without starting the service; use `--load-launchd` to run `launchctl`. `ciao auth <claude|ollama>` runs the provider login command in Terminal; `--print-only` shows the command for the setup wizard. `GET /api/setup-status` reports required local config plus Claude Code, Ollama, and OpenRouter readiness so the wizard can poll after terminal OAuth commands or `.env` edits. In bootstrap mode, `POST /api/setup/finish` accepts the wizard's final local choices, writes the real workspace `.env`, scaffolds the configured `CIAO_VAULT_ROOT`, refreshes the LaunchAgent and `Ciaobot.app` shortcut, and requests the restart exit for supervisor relaunch.
-
-The Homebrew formula scaffold is `deploy/homebrew/ciao.rb`. It depends on `python@3.12`, installs the package into a formula-local virtualenv, exposes `bin/ciao`, and calls `ciao setup --load-launchd` from `post_install` when a GUI launchd session exists. In CI, SSH, or `HOMEBREW_CIAO_SKIP_SETUP=1` mode, it exits successfully after printing the command the user should run in Terminal. It is currently HEAD-only; the stable `url` and `sha256` belong to the public release/tag step.
+`ciao setup` writes the initial `.env` into the selected workspace, seeds stock agents, commands, schedules, agent-readable workspace docs (`CLAUDE.md`, `CIAO_CUSTOMIZATION.md`), and the default vault, renders `~/Library/LaunchAgents/com.ciao.server.plist`, and creates `~/Applications/Ciaobot.app`. The app shortcut opens `http://localhost:<port>/?setup=<token>`; the server redeems `.runtime/setup-token` once on localhost, sets the signed session cookie, then deletes the token. By default setup prints the launchd load command without starting the service; use `--load-launchd` to run `launchctl`. `ciao auth <claude|ollama>` runs the provider login command in Terminal; `--print-only` shows the command for the setup wizard. `GET /api/setup-status` reports required local config plus Claude Code, Ollama, and OpenRouter readiness so the wizard can poll after terminal OAuth commands or `.env` edits. In bootstrap mode, `POST /api/setup/finish` accepts the wizard's final local choices (`workspace` is required; `vault_root` defaults to `memory-vault` inside it), writes the real workspace `.env`, scaffolds the configured `CIAO_VAULT_ROOT`, refreshes the LaunchAgent and `Ciaobot.app` shortcut, and requests the restart exit for supervisor relaunch (a foreground `ciao run` re-execs itself on that exit code).
 
 **Runtime:** `CIAO_WORKSPACE`, `CIAO_PORT`
 
@@ -147,7 +145,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 ### Required env vars
 
 - `PWA_AUTH_TOKEN` (required): pre-shared token for PWA auth.
-- `CIAO_PUSH_CONTACT` (required): push notification contact string for the Web Push VAPID subject, for example `mailto:you@example.com`.
+- `CIAO_PUSH_CONTACT` (optional): push notification contact string for the Web Push VAPID subject, for example `mailto:you@example.com`. Empty = Web Push disabled until set (in `.env` or Settings); nothing else breaks.
 - `PWA_PORT` (default `8443`), `PWA_HOST` (default `0.0.0.0`).
 - Session cookies are HttpOnly. Production/domain-scoped cookies are also Secure, and state-changing browser requests must come from the same host via `Origin` or `Referer`.
 - Ciaobot sends baseline security headers from the Starlette app, including CSP, `X-Content-Type-Options`, `Referrer-Policy`, and frame denial.
@@ -156,7 +154,6 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 
 - `CLAUDE_EXECUTION_MODE`: `normal`, `plan`, `auto`, `bypass`. Legacy `CLAUDE_PERMISSION_MODE` still accepted.
 - `PWA_AUTH_REQUIRED`: set to `false` to disable password protection for the PWA dashboard entirely.
-- `CIAO_GIT_DIRECT_MAIN`: set to `true` to work directly on the `main` branch of the vault repository, syncing via direct pull/push rather than per-device branches.
 - `CIAO_DEV_MODE`: set to `true` to enable developer mode controls in the PWA dashboard (like the Deploy button).
 - `CIAO_VAULT_MODE`: onboarding mode for memory-vault folders. Either `scratch` (create folders and documentation from scratch) or `existing` (connect and adapt existing markdown folders).
 - `CIAO_BOOTSTRAP_WORKSPACE`: temp workspace root used when `PWA_AUTH_TOKEN` is absent. Defaults to `~/.ciao/bootstrap`; Ciaobot persists the generated bootstrap auth token under its `.runtime/` so first-run setup survives a restart.
@@ -203,9 +200,9 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_OPENROUTER_BASE_URL`: base URL for OpenRouter's Anthropic-compatible endpoint. Default `https://openrouter.ai/api` (the SDK appends `/v1/messages`). Override only for a self-hosted relay.
 - `CIAO_OPENROUTER_HAIKU_MODEL` / `CIAO_OPENROUTER_SONNET_MODEL` / `CIAO_OPENROUTER_OPUS_MODEL`: per-tier OpenRouter model overrides (owner/model ids) for chats/automations that select the `haiku`/`sonnet`/`opus` aliases and route through OpenRouter. Defaults: `anthropic/claude-haiku-4.5`, `anthropic/claude-sonnet-4.5`, `anthropic/claude-opus-4.8`.
 - `CIAO_OPENROUTER_MODELS`: comma-separated allowlist of extra OpenRouter model IDs (owner/model) to surface in the picker on top of the tier defaults and the discovered anthropic-family catalogue. Leave empty to rely on dynamic discovery.
-- `CIAO_DEVICE_NAME`: names the device for the per-device working-branch flow. Every instance checks out `dev/<device_name>` (cut from `origin/main`, reused across restarts) and lands work on `main` via the Settings "commit to main" button. Defaults to a sanitized machine hostname. Set it explicitly (e.g. `laptop`) so the branch name is stable and recognizable.
+- `CIAO_OPENROUTER_WEBSEARCH_HOOK`: kill switch for the PostToolUse hook that backfills WebSearch on OpenRouter-routed chats, mirroring `CIAO_OLLAMA_WEBSEARCH_HOOK`. OpenRouter's Anthropic-compat endpoint doesn't execute the server-side `web_search` tool, so Claude Code's built-in WebSearch returns an empty boilerplate; the hook reruns the query as a one-shot chat-completions call with OpenRouter's `web` plugin (on the configured haiku-tier model) and injects the `url_citation` sources as `additionalContext`. Default `1` (enabled). Set `0` to disable. See `ciao/observability/hooks.py`.
 - `CIAO_DISPATCH_SCHEDULES`: `1`/`true`/`on` to make this instance dispatch scheduled automations. Off by default (opt-in), so an occasional dev box never double-fires schedules. Set it on only for the always-on "main" device.
-- `CIAO_PUSH_CONTACT`: push notification contact string. Required, no default. Used for VAPID subject.
+- `CIAO_PUSH_CONTACT`: push notification contact string. Optional, no default; empty disables Web Push delivery. Used for VAPID subject.
 - `CIAO_PUSH_DELAY_SECONDS`: delay before sending push notifications after a completed turn (default `30`). Rapid replies to the same chat cancel the previous timer and start a new one (coalesce into a single push). Permission requests and model questions push immediately (no delay). Unanswered permission requests re-fire every 30 seconds, up to 3 times, until the user approves/denies or the turn ends.
 - `CIAO_PYTHON`: path to a specific Python binary for `scripts/dev.sh` (e.g. when Homebrew breaks `ensurepip`).
 - `CIAO_PATH`: baked into the launchd plist's `EnvironmentVariables` at setup time so the server's subprocesses (npm, node, Homebrew git/pip) are found despite launchd's minimal default PATH. Not an operator env var; it's a `com.ciao.server.plist.tmpl` placeholder rendered from the user's shell PATH.

@@ -11,6 +11,7 @@ import re
 import hmac
 import shutil
 import subprocess
+import sys
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
@@ -937,7 +938,7 @@ def _provider_config_payload(config) -> dict:
         }
     return {
         "keys": keys,
-        "auto_update_github_skills": getattr(config, "auto_update_github_skills", True),
+        "auto_update_github_skills": getattr(config, "auto_update_github_skills", False),
         "requires_restart": True,
         "env_path": str(_env_path(config)),
         "connections": {},
@@ -2975,10 +2976,12 @@ async def status_endpoint(request: Request) -> JSONResponse:
 
 async def startup_status_endpoint(request: Request) -> JSONResponse:
     """Return startup phase progress."""
+    from ciao import __version__
+
     tracker = getattr(request.app.state, "startup_tracker", None)
     if tracker is None:
-        return JSONResponse({"phases": [], "overall_ready": True})
-    return JSONResponse(tracker.to_dict())
+        return JSONResponse({"phases": [], "overall_ready": True, "version": __version__})
+    return JSONResponse({**tracker.to_dict(), "version": __version__})
 
 
 async def setup_status_endpoint(request: Request) -> JSONResponse:
@@ -3087,7 +3090,9 @@ def _localhost_request(request: Request) -> bool:
     name = _host_name(request.headers.get("host", ""))
     if not name:
         name = (request.url.hostname or "").rstrip(".").lower()
-    return name in {"localhost", "127.0.0.1", "::1"}
+    # 0.0.0.0 counts as loopback: a browser pointed at it can only reach the
+    # viewer's own machine (users copy it from the uvicorn bind-address log).
+    return name in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
 
 def _same_host_header(request: Request, value: str) -> bool:
@@ -3119,7 +3124,13 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     if not getattr(config, "bootstrap_mode", False):
         return JSONResponse({"error": "setup finish is only available in bootstrap mode"}, status_code=409)
     if not _localhost_request(request) or not _setup_finish_origin_allowed(request):
-        return JSONResponse({"error": "setup finish is localhost-only"}, status_code=403)
+        return JSONResponse(
+            {
+                "error": "setup finish is localhost-only — open the wizard at "
+                f"http://localhost:{config.pwa_port}"
+            },
+            status_code=403,
+        )
     try:
         body = await request.json()
     except ValueError:
@@ -3127,12 +3138,16 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     if not isinstance(body, dict):
         return JSONResponse({"error": "json object is required"}, status_code=400)
 
+    # The wizard's primary question is the workspace: one root folder holding
+    # the vault (memory-vault/ by default) plus app data, all one git repo.
+    # vault_root is optional and only set when the second brain lives
+    # elsewhere (existing notes folder).
     workspace = str(body.get("workspace", "")).strip()
     if not workspace:
         return JSONResponse({"error": "workspace is required"}, status_code=400)
+    # Optional: an empty push contact leaves Web Push disabled until the
+    # operator configures one in Settings.
     push_contact = str(body.get("push_contact", "")).strip()
-    if not push_contact:
-        return JSONResponse({"error": "push_contact is required"}, status_code=400)
     try:
         port = int(body.get("port") or config.pwa_port)
     except (TypeError, ValueError):
@@ -3154,6 +3169,28 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         launch_agents_dir=str(body.get("launch_agents_dir", "")).strip() or None,
         app_dir=str(body.get("app_dir", "")).strip() or None,
     )
+    # Best-effort: bring the menu bar companion up right away so setup ends
+    # with the icon visible instead of waiting for the next login. Only for
+    # the real per-user LaunchAgents dir — scripted/test setups pass a custom
+    # dir and must not register anything with launchd. The server agent is
+    # intentionally NOT loaded here — a foreground `ciao run` relaunches
+    # itself, and a launchd copy would fight it for the port.
+    if sys.platform == "darwin" and not str(body.get("launch_agents_dir", "")).strip():
+        menubar_plist = Path.home() / "Library" / "LaunchAgents" / "com.ciao.menubar.plist"
+        if menubar_plist.exists():
+            try:
+                loaded = subprocess.run(
+                    ["launchctl", "kickstart", f"gui/{os.getuid()}/com.ciao.menubar"],
+                    capture_output=True, timeout=10,
+                )
+                if loaded.returncode != 0:
+                    subprocess.run(
+                        ["launchctl", "load", "-w", str(menubar_plist)],
+                        capture_output=True, timeout=10,
+                    )
+            except (OSError, subprocess.SubprocessError):
+                logger.info("Could not start the menu bar agent; it will load at next login.")
+
     restart = bool(body.get("restart", True))
     if restart:
         restart_fn = getattr(request.app.state, "request_restart", None)
@@ -3166,6 +3203,110 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         "workspace": str(Path(workspace).expanduser().resolve()),
         "written": [str(path) for path in written],
     })
+
+
+def _setup_fs_guard(request: Request) -> JSONResponse | None:
+    """Bootstrap-mode + localhost guard shared by the setup folder-picker routes."""
+    config = request.app.state.config
+    if not getattr(config, "bootstrap_mode", False):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if not _localhost_request(request) or not _setup_finish_origin_allowed(request):
+        return JSONResponse(
+            {
+                "error": "setup filesystem access is localhost-only — open the "
+                f"wizard at http://localhost:{config.pwa_port}"
+            },
+            status_code=403,
+        )
+    return None
+
+
+def _setup_dir_listing(target: Path) -> dict:
+    """Return the folder-picker listing payload for a resolved directory."""
+    home = Path.home().resolve()
+    dirs: list[dict[str, str]] = []
+    for entry in target.iterdir():
+        if entry.name.startswith("."):
+            continue
+        try:
+            if not entry.is_dir():
+                continue
+        except OSError:
+            continue
+        dirs.append({"name": entry.name, "path": str(entry)})
+    dirs.sort(key=lambda row: row["name"].lower())
+    display = str(target)
+    if target == home:
+        display = "~"
+    elif str(target).startswith(str(home) + os.sep):
+        display = "~" + str(target)[len(str(home)):]
+    parent = target.parent
+    return {
+        "path": str(target),
+        "display_path": display,
+        "parent": str(parent) if parent != target else None,
+        "dirs": dirs,
+        "home": str(home),
+    }
+
+
+def _resolve_setup_dir(raw: str) -> Path | None:
+    """Expand and resolve a picker path; None when it is not an existing directory."""
+    try:
+        target = Path(raw).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not target.is_dir():
+        return None
+    return target
+
+
+async def setup_list_dirs_endpoint(request: Request) -> JSONResponse:
+    """List local subdirectories for the first-run setup folder picker."""
+    guard = _setup_fs_guard(request)
+    if guard is not None:
+        return guard
+    raw = str(request.query_params.get("path") or "~").strip() or "~"
+    target = _resolve_setup_dir(raw)
+    if target is None:
+        return JSONResponse({"error": f"not a directory: {raw}"}, status_code=400)
+    try:
+        return JSONResponse(_setup_dir_listing(target))
+    except PermissionError:
+        return JSONResponse({"error": f"permission denied: {target}"}, status_code=400)
+    except OSError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def setup_mkdir_endpoint(request: Request) -> JSONResponse:
+    """Create a folder from the first-run setup folder picker and return the refreshed listing."""
+    guard = _setup_fs_guard(request)
+    if guard is not None:
+        return guard
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "json object is required"}, status_code=400)
+    name = str(body.get("name", "")).strip()
+    if not name:
+        return JSONResponse({"error": "name is required"}, status_code=400)
+    if "/" in name or "\\" in name or os.sep in name or name.startswith("."):
+        return JSONResponse({"error": "folder name must not contain path separators or start with a dot"}, status_code=400)
+    parent = _resolve_setup_dir(str(body.get("path", "")).strip())
+    if parent is None:
+        return JSONResponse({"error": "path must be an existing directory"}, status_code=400)
+    try:
+        (parent / name).mkdir()
+    except FileExistsError:
+        return JSONResponse({"error": f"already exists: {name}"}, status_code=400)
+    except OSError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    try:
+        return JSONResponse(_setup_dir_listing(parent))
+    except OSError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
 
 # ── Admin ────────────────────────────────────────────────────────────────
@@ -3466,14 +3607,11 @@ async def admin_status(request: Request) -> JSONResponse:
         "models": config.claude_models,
         "default_model": config.claude_default_model,
         "default_mode": config.claude_mode,
-        # Device identity for the Settings "commit to main" panel (always
-        # shown now: every instance works on its own dev/<device> branch).
-        "device_name": config.device_name,
         "dispatch_schedules": config.dispatch_schedules,
     })
 
 
-# ── Local session flow (per-device branch + direct/agent-merged handover) ──
+# ── Local session flow (current-branch sync + conflict-resolution chat) ──
 
 
 def _local_manager(request: Request):
@@ -3481,8 +3619,8 @@ def _local_manager(request: Request):
 
 
 def _open_merge_chat(request: Request, branch: str) -> dict:
-    """Open an interactive chat that merges ``branch`` into ``main``, resolving
-    conflicts with the user. Returns {ok, chat_id, project_id} or {error}."""
+    """Open an interactive chat that resolves sync conflicts on ``branch``
+    with the user. Returns {ok, chat_id, project_id} or {error}."""
     config = request.app.state.config
     pcm = request.app.state.project_chat_manager
     projects = pcm.list_projects("personal")
@@ -3491,14 +3629,10 @@ def _open_merge_chat(request: Request, branch: str) -> dict:
         return {"error": "no personal project to host the merge chat"}
 
     from datetime import UTC, datetime
-    from ciao.local_session import MERGE_PROMPT, MERGE_PROMPT_MAIN
+    from ciao.local_session import MERGE_PROMPT
 
-    if branch == "main":
-        title = f"Resolve sync conflicts: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M')}"
-        prompt = MERGE_PROMPT_MAIN
-    else:
-        title = f"Merge to main: {branch} {datetime.now(UTC).strftime('%Y-%m-%d %H:%M')}"
-        prompt = MERGE_PROMPT.replace("{branch}", str(branch))
+    title = f"Resolve sync conflicts: {branch} {datetime.now(UTC).strftime('%Y-%m-%d %H:%M')}"
+    prompt = MERGE_PROMPT.replace("{branch}", str(branch))
 
     chat = pcm.create_chat(
         project.project_id, title=title, model=config.claude_default_model
@@ -3518,7 +3652,7 @@ async def local_preflight(request: Request) -> JSONResponse:
 
 
 async def local_status(request: Request) -> JSONResponse:
-    """Current device-session state: device name, branch, dirty."""
+    """Current workspace git state: git_repo, branch (may be null), dirty."""
     mgr = _local_manager(request)
     if mgr is None:
         return JSONResponse(
@@ -3528,15 +3662,21 @@ async def local_status(request: Request) -> JSONResponse:
 
 
 async def local_handback(request: Request) -> JSONResponse:
-    """Commit the device session and land it on ``main``.
+    """Commit the session and sync the current branch with origin.
 
-    Clean merge -> pushed to main directly. Conflict -> an interactive merge
-    chat is opened in Ciaobot to resolve it.
+    Clean pull -> pushed directly. Conflict -> an interactive resolution chat
+    is opened in Ciaobot. Never creates or switches branches.
     """
     mgr = _local_manager(request)
     if mgr is None:
         return JSONResponse(
             {"error": "local session manager not initialised"}, status_code=500
+        )
+    branch = mgr.branch
+    if branch is None:
+        return JSONResponse(
+            {"ok": False, "error": "workspace is not a git repository (or is on a detached HEAD)"},
+            status_code=400,
         )
 
     confirm_warnings = False
@@ -3558,18 +3698,18 @@ async def local_handback(request: Request) -> JSONResponse:
             status_code=400
         )
 
-    result = await mgr.commit_to_main()
+    result = await mgr.commit_and_sync()
     if not result.get("ok"):
         return JSONResponse(result, status_code=400)
     if result.get("merged"):
         return JSONResponse(result)
-    # Conflict: hand off to an interactive merge chat.
-    merge = _open_merge_chat(request, result.get("branch") or mgr.branch)
+    # Conflict: hand off to an interactive resolution chat.
+    merge = _open_merge_chat(request, result.get("branch") or branch)
     return JSONResponse({**result, "merge": merge})
 
 
 async def local_resync(request: Request) -> JSONResponse:
-    """After the merge chat pushed main, re-point the device branch at it."""
+    """After the conflict chat pushed the branch, merge origin/<branch> in."""
     mgr = _local_manager(request)
     if mgr is None:
         return JSONResponse(
@@ -3580,8 +3720,8 @@ async def local_resync(request: Request) -> JSONResponse:
 
 
 async def handover_merge(request: Request) -> JSONResponse:
-    """Open an interactive chat that merges a branch into ``main``. Also used
-    by ``local_handback`` when the automatic merge conflicts."""
+    """Open an interactive chat that resolves sync conflicts on a branch. Also
+    used by ``local_handback`` when the automatic pull conflicts."""
     try:
         body = await request.json()
     except (json.JSONDecodeError, ValueError):
@@ -3589,7 +3729,12 @@ async def handover_merge(request: Request) -> JSONResponse:
     branch = (body.get("branch") if isinstance(body, dict) else None) or ""
     if not branch:
         mgr = _local_manager(request)
-        branch = mgr.branch if mgr else "main"
+        branch = (mgr.branch if mgr else None) or ""
+    if not branch:
+        return JSONResponse(
+            {"error": "workspace is not a git repository (or is on a detached HEAD)"},
+            status_code=400,
+        )
     merge = _open_merge_chat(request, branch)
     return JSONResponse(merge, status_code=200 if merge.get("ok") else 500)
 

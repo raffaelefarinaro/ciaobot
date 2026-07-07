@@ -169,6 +169,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/api/startup-status",
             "/api/setup-status",
             "/api/setup/finish",
+            "/api/setup/list-dirs",
+            "/api/setup/mkdir",
         }
         protected = (
             (path.startswith("/api/") and path not in public_api)

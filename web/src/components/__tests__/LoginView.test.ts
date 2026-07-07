@@ -97,12 +97,127 @@ describe('LoginView setup wizard tests', () => {
     const wrapper = await mountLoginView()
     expect(wrapper.find('input[type="password"]').exists()).toBe(false)
     expect(wrapper.find('#setup-workspace').exists()).toBe(true)
-    expect(wrapper.find('#setup-vault').exists()).toBe(true)
+    expect(wrapper.find('#setup-workspace-browse').exists()).toBe(true)
+    // scratch mode hides the vault input behind the derived-path hint
+    expect(wrapper.find('#setup-vault').exists()).toBe(false)
     expect(wrapper.find('#setup-push').exists()).toBe(true)
     expect(wrapper.text()).toContain('ciao auth claude')
+
+    // feature tour fills the 2-column grid: six tiles, no empty slot
+    const tourItems = wrapper.findAll('.tour-list li')
+    expect(tourItems.length).toBe(6)
+    expect(tourItems[5].text()).toContain('Files, with history.')
+    expect(tourItems[5].text()).toContain('Create, preview, edit, and restore workspace files right from the UI.')
   })
 
-  it('validates required fields and enables Finish on valid form', async () => {
+  it('hides port and python inputs behind the Advanced toggle', async () => {
+    mockApiGet.mockResolvedValue({
+      configured: false,
+      bootstrap: true,
+      mode: 'bootstrap',
+      providers: {}
+    })
+
+    const wrapper = await mountLoginView()
+    expect(wrapper.find('#setup-port').exists()).toBe(false)
+    expect(wrapper.find('#setup-python').exists()).toBe(false)
+
+    await wrapper.find('#setup-advanced-toggle').trigger('click')
+    await nextTick()
+    expect(wrapper.find('#setup-port').exists()).toBe(true)
+    expect(wrapper.find('#setup-python').exists()).toBe(true)
+    expect((wrapper.find('#setup-port').element as HTMLInputElement).value).toBe('8443')
+  })
+
+  it('shows a live derived vault hint in scratch mode and reveals the input via change location', async () => {
+    mockApiGet.mockResolvedValue({
+      configured: false,
+      bootstrap: true,
+      mode: 'bootstrap',
+      providers: {}
+    })
+
+    const wrapper = await mountLoginView()
+    // hidden by default, hint shows the derived path
+    expect(wrapper.find('#setup-vault').exists()).toBe(false)
+    expect(wrapper.text()).toContain('Your second-brain vault will be created at')
+    expect(wrapper.text()).toContain('~/ciaobot/memory-vault')
+
+    // hint live-updates when the workspace changes
+    await wrapper.find('#setup-workspace').setValue('/tmp/space')
+    await nextTick()
+    expect(wrapper.text()).toContain('/tmp/space/memory-vault')
+
+    // "change location" reveals the vault input with its Browse button
+    await wrapper.find('#setup-vault-change').trigger('click')
+    await nextTick()
+    const vaultInput = wrapper.find('#setup-vault')
+    expect(vaultInput.exists()).toBe(true)
+    expect(wrapper.find('#setup-vault-browse').exists()).toBe(true)
+    expect((vaultInput.element as HTMLInputElement).value).toBe('/tmp/space/memory-vault')
+  })
+
+  it('shows the vault input when vault mode is existing', async () => {
+    mockApiGet.mockResolvedValue({
+      configured: false,
+      bootstrap: true,
+      mode: 'bootstrap',
+      providers: {}
+    })
+
+    const wrapper = await mountLoginView()
+    expect(wrapper.find('#setup-vault').exists()).toBe(false)
+
+    await wrapper.find('input[type="radio"][value="existing"]').setValue()
+    await nextTick()
+    expect(wrapper.find('#setup-vault').exists()).toBe(true)
+    expect(wrapper.find('#setup-vault-browse').exists()).toBe(true)
+    expect(wrapper.text()).toContain('Existing Notes Folder')
+  })
+
+  it('opens the folder picker, lists directories, and writes the selection into the workspace field', async () => {
+    const listing = {
+      path: '/Users/me/ciaobot',
+      display_path: '~/ciaobot',
+      parent: '/Users/me',
+      dirs: [
+        { name: 'memory-vault', path: '/Users/me/ciaobot/memory-vault' },
+        { name: 'projects', path: '/Users/me/ciaobot/projects' },
+      ],
+      home: '/Users/me',
+    }
+    mockApiGet.mockImplementation((path: string) => {
+      if (path.startsWith('/api/setup/list-dirs')) return Promise.resolve(listing)
+      return Promise.resolve({
+        configured: false,
+        bootstrap: true,
+        mode: 'bootstrap',
+        providers: {}
+      })
+    })
+
+    const wrapper = await mountLoginView()
+    expect(wrapper.find('.picker-modal').exists()).toBe(false)
+
+    await wrapper.find('#setup-workspace-browse').trigger('click')
+    await flushPromises()
+    expect(mockApiGet).toHaveBeenCalledWith(
+      `/api/setup/list-dirs?path=${encodeURIComponent('~/ciaobot')}`
+    )
+    expect(wrapper.find('.picker-modal').exists()).toBe(true)
+    expect(wrapper.find('.picker-path').text()).toBe('~/ciaobot')
+    const dirButtons = wrapper.findAll('.picker-dir')
+    expect(dirButtons.map(b => b.text())).toEqual(['memory-vault/', 'projects/'])
+
+    await wrapper.find('.picker-select').trigger('click')
+    await nextTick()
+    expect(wrapper.find('.picker-modal').exists()).toBe(false)
+    expect((wrapper.find('#setup-workspace').element as HTMLInputElement).value).toBe('/Users/me/ciaobot')
+    // workspace selection re-derives the hidden vault suggestion
+    expect(wrapper.text()).toContain('/Users/me/ciaobot/memory-vault')
+  })
+
+  it('enables Finish without a push contact and wraps a plain email on submit', async () => {
     mockApiGet.mockResolvedValue({
       configured: false,
       bootstrap: true,
@@ -120,15 +235,13 @@ describe('LoginView setup wizard tests', () => {
 
     const wrapper = await mountLoginView()
     const submitBtn = wrapper.find('button[type="submit"]')
-    expect(submitBtn.element.hasAttribute('disabled')).toBe(true)
-
-    // fill push contact
-    const pushInput = wrapper.find('#setup-push')
-    await pushInput.setValue('mailto:owner@example.com')
-    await nextTick()
-
-    // should be enabled now since workspace & vault default are filled, provider is ok
+    // push contact is optional: workspace & vault defaults + ready provider suffice
     expect(submitBtn.element.hasAttribute('disabled')).toBe(false)
+
+    // a plain email is accepted and wrapped into a mailto: URI on submit
+    const pushInput = wrapper.find('#setup-push')
+    await pushInput.setValue('owner@example.com')
+    await nextTick()
 
     // submit the form
     mockApiPost.mockResolvedValue({ ok: true })
@@ -146,5 +259,36 @@ describe('LoginView setup wizard tests', () => {
       restart: true,
     })
     expect(wrapper.text()).toContain('restarting')
+  })
+
+  it('strips mailto: for display and submits an empty push contact untouched', async () => {
+    mockApiGet.mockResolvedValue({
+      configured: false,
+      bootstrap: true,
+      mode: 'bootstrap',
+      providers: {
+        claude: { name: 'claude', ok: true, auth: 'oauth', command: 'ciao auth claude', detail: 'Ready' }
+      }
+    })
+
+    const wrapper = await mountLoginView()
+
+    // pasting a mailto: URI shows as a plain email
+    const pushInput = wrapper.find('#setup-push')
+    await pushInput.setValue('mailto:owner@example.com')
+    await nextTick()
+    expect((pushInput.element as HTMLInputElement).value).toBe('owner@example.com')
+
+    // clearing it submits an empty contact (push disabled until Settings)
+    await pushInput.setValue('')
+    await nextTick()
+    mockApiPost.mockResolvedValue({ ok: true })
+    await wrapper.find('form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(mockApiPost).toHaveBeenCalledWith(
+      '/api/setup/finish',
+      expect.objectContaining({ push_contact: '' })
+    )
   })
 })

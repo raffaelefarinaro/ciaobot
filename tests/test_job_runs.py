@@ -166,16 +166,16 @@ class _Phase:
 
 def test_record_startup_phase_maps_and_skips(tmp_path: Path) -> None:
     jr.record_startup_phase(_Phase("sync_workspace", "done"))
-    jr.record_startup_phase(_Phase("rebuild_pwa", "failed", "npm build failed"))
+    jr.record_startup_phase(_Phase("refresh_vault_index", "failed", "index refresh failed"))
     jr.record_startup_phase(_Phase("connect_pi", "done"))  # not a tracked job
 
     rows = _read_lines(tmp_path)
     jobs = {r["job"]: r for r in rows}
-    assert set(jobs) == {"startup_sync", "pwa_rebuild"}
+    assert set(jobs) == {"startup_sync", "vault_index"}
     assert jobs["startup_sync"]["category"] == "system"
     assert jobs["startup_sync"]["duration_ms"] == 2000
-    assert jobs["pwa_rebuild"]["status"] == "error"
-    assert jobs["pwa_rebuild"]["error"] == "npm build failed"
+    assert jobs["vault_index"]["status"] == "error"
+    assert jobs["vault_index"]["error"] == "index refresh failed"
 
 
 # ── automation_summary ───────────────────────────────────────────────────

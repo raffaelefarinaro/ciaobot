@@ -10,8 +10,9 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 - `GET /?setup=<token>` is the local first-launch shortcut path. It is accepted only on `localhost`, `127.0.0.1`, or `::1`; when the token matches `.runtime/setup-token`, the server sets the same signed `ciao_session` cookie, deletes the token file, and redirects to `/`.
 - Production cookies are `Secure`, `SameSite=Lax`, and host-only (scoped to the exact host that served them).
 - `POST /api/auth/logout` clears the same host-only cookie.
-- All `/api/*` routes except `POST /api/auth`, `GET /api/startup-status`, `GET /api/setup-status`, and `POST /api/setup/finish` require the signed session cookie. All `/ws/*` routes require the signed session cookie.
-- `POST /api/setup/finish` is only accepted in bootstrap mode from localhost with a matching browser origin/referer. It writes the real workspace config, creates local launch artifacts, and asks the supervisor to restart into the configured workspace.
+- All `/api/*` routes except `POST /api/auth`, `GET /api/startup-status`, `GET /api/setup-status`, `POST /api/setup/finish`, `GET /api/setup/list-dirs`, and `POST /api/setup/mkdir` require the signed session cookie. All `/ws/*` routes require the signed session cookie.
+- `POST /api/setup/finish` is only accepted in bootstrap mode from localhost with a matching browser origin/referer (off-localhost requests get a 403 pointing at `http://localhost:<port>`). Body: `workspace` (required — the root folder holding the vault plus app data), `vault_root` (optional, default `<workspace>/memory-vault`; absolute or `~` paths are honored for an existing notes folder elsewhere), plus optional `vault_mode`, `push_contact`, `port`, `python`, `auth_required`, `launch_agents_dir`, `app_dir`, and `restart`. It writes the real workspace config, ensures workspace and vault are (in) git repos, creates local launch artifacts, and asks the supervisor to restart into the configured workspace.
+- `GET /api/setup/list-dirs` and `POST /api/setup/mkdir` back the setup wizard's folder picker. They are only accepted in bootstrap mode from localhost with a matching browser origin/referer (404 outside bootstrap mode, 403 off-localhost), list directories only, and never read file contents.
 - State-changing `/api/*` requests with an `Origin` or `Referer` header must match the request host. Missing headers are accepted for non-browser clients.
 - HTTP responses include baseline security headers, including CSP, `X-Content-Type-Options`, `Referrer-Policy`, and frame denial.
 
@@ -69,11 +70,13 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET, PATCH | `/api/status` | Read or update status |
 | GET | `/api/startup-status` | Read startup phase progress |
 | GET | `/api/setup-status` | Read first-run setup checks and provider readiness |
-| GET | `/api/package/status` | Read installed package version and best-effort latest-version status |
+| GET | `/api/package/status` | Read installed package version and best-effort latest GitHub release version |
 | GET | `/api/package/changelog` | List commits between the installed and latest release for the update prompt |
-| POST | `/api/package/update` | Upgrade ciao package and restart |
+| POST | `/api/package/update` | Upgrade ciao package from the latest GitHub release wheel and restart |
 | POST | `/api/voice/install-local` | Install local voice transcription dependencies and restart |
 | POST | `/api/setup/finish` | Finish first-run setup from bootstrap mode |
+| GET | `/api/setup/list-dirs` | List local subdirectories for the setup wizard folder picker (bootstrap mode, localhost only) |
+| POST | `/api/setup/mkdir` | Create a folder from the setup wizard folder picker (bootstrap mode, localhost only) |
 | GET | `/api/stats` | Read CLI stats |
 | GET | `/api/workspaces` | List configured logical workspaces |
 | POST | `/api/workspaces/{name}` | Add or update a logical workspace config |
@@ -89,11 +92,11 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/push/unsubscribe` | Remove push subscription |
 | GET | `/api/push/status` | Read push setup status |
 | GET | `/api/push/subscription` | Check one subscription |
-| GET | `/api/local/status` | Device-session state: device name, `dev/<device>` branch, dirty |
+| GET | `/api/local/status` | Workspace git state: `git_repo`, current `branch` (nullable), dirty |
 | GET | `/api/local/preflight` | Git preflight check for dirty files, categories, blockers/warnings |
-| POST | `/api/local/handback` | Commit + push the device branch and try to merge it into `main` |
-| POST | `/api/local/resync` | Re-point the device branch at the latest `main` |
-| POST | `/api/handover/merge` | Open an interactive chat that merges a branch into `main` |
+| POST | `/api/local/handback` | Commit pending work, pull from origin, push the current branch |
+| POST | `/api/local/resync` | Merge `origin/<branch>` back into the checkout |
+| POST | `/api/handover/merge` | Open an interactive chat that resolves sync conflicts on a branch |
 | POST | `/api/admin/snapshot` | Git add, commit, and push snapshot |
 | POST | `/api/admin/deploy` | Reinstall deps, rebuild frontend, and restart with latest code |
 | GET | `/api/admin/status` | Read admin/deploy status |
@@ -309,29 +312,31 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/setti
   -d '{"title_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","transcription_engine":"local"}'
 ```
 
-**Commit-to-main / handover flow** (`CIAO_DEVICE_NAME`)
+**Workspace git sync**
 
-Every instance works on its own `dev/<device_name>` branch cut from `origin/main`. Handback
-commits + pushes the branch, then tries to merge it into `main`: a clean merge is pushed
-directly (response: `{merged:true, deploy_needed:false, pushed}`); a conflict aborts the merge and
-opens an interactive chat (`{merged:false, conflict:true, merge:{chat_id,...}}`) that resolves
-it, asking you (push-notified) when ambiguous. After that chat lands `main`, resync re-points
-the device branch at it. Workspace handback never deploys app code; app updates happen through
-the package install/upgrade path.
+Ciaobot never creates or switches local branches: it works on whatever branch the workspace
+checkout is currently on. Handback commits pending work, pulls from origin (merge-based), and
+pushes the branch: a clean pull is pushed directly (response: `{merged:true,
+deploy_needed:false, pushed}`); a conflicting pull is left in the tree and opens an interactive
+chat (`{merged:false, conflict:true, merge:{chat_id,...}}`) that resolves it, asking you
+(push-notified) when ambiguous. After that chat lands the branch, resync merges
+`origin/<branch>` back into the checkout. Non-git workspaces (or detached HEAD) get
+`{ok:false, error}` with status 400. Workspace sync never deploys app code; app updates happen
+through the package install/upgrade path.
 
 ```bash
-# Current device-session state (device name, dev/<device> branch, dirty).
+# Current workspace git state: {git_repo, branch (null when not a repo / detached), dirty, dev_mode}.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/local/status"
 
-# Commit to main — commit + push the device branch and try to merge into main.
+# Sync with remote — commit pending work, pull from origin, push the current branch.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/local/handback"
 
-# After a conflict chat merged main, re-point the device branch at it.
+# After a conflict chat pushed the branch, merge origin/<branch> back into the checkout.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/local/resync"
 
-# Open an interactive merge chat for a branch by hand (also used on conflict).
+# Open an interactive conflict-resolution chat for a branch by hand (also used on conflict).
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/handover/merge" \
-  -H 'content-type: application/json' -d '{"branch":"dev/laptop"}'
+  -H 'content-type: application/json' -d '{"branch":"main"}'
 ```
 
 When adding a new state-changing route (`POST/PATCH/DELETE /api/...`), add an entry here or add the path to `BROWSER_OR_INTERNAL_ROUTES` in `tests/test_pwa_api_docs.py` with a one-line reason. The doc-sync test enforces this.

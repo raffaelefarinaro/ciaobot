@@ -5,9 +5,7 @@ from __future__ import annotations
 import logging
 import json
 import os
-import re
 import secrets
-import socket
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -206,21 +204,6 @@ def _env(source: dict[str, str], new_name: str, old_name: str, default: str = ""
     return source.get(new_name, "").strip() or source.get(old_name, "").strip() or default
 
 
-def _sanitize_device_name(raw: str) -> str:
-    """Make a string safe to use as a git branch segment.
-
-    Lowercases, collapses any run of non-alphanumeric chars to a single dash,
-    and trims leading/trailing dashes. Empty input returns "".
-    """
-    cleaned = re.sub(r"[^a-z0-9]+", "-", (raw or "").strip().lower()).strip("-")
-    return cleaned
-
-
-def _default_device_name() -> str:
-    """Sanitized machine hostname, used when CIAO_DEVICE_NAME is unset."""
-    return _sanitize_device_name(socket.gethostname().split(".")[0]) or "device"
-
-
 def _bootstrap_workspace(source: dict[str, str]) -> Path:
     raw = source.get("CIAO_BOOTSTRAP_WORKSPACE", "").strip()
     if raw:
@@ -252,7 +235,6 @@ class CiaoConfig:
     state_path: Path
     media_root: Path
     pwa_auth_required: bool = True
-    git_direct_main: bool = False
     dev_mode: bool = False
     vault_mode: str = "scratch"
     bootstrap_mode: bool = False
@@ -306,15 +288,10 @@ class CiaoConfig:
     restart_exit_code: int = 75
     auto_sync_on_start: bool = True
     auto_vault_index: bool = True
-    auto_update_github_skills: bool = True
+    auto_update_github_skills: bool = False
     pwa_port: int = 8443
     pwa_host: str = "0.0.0.0"
     gws_default_profile: str = "personal"
-    # Device identity for the per-device working-branch flow. Every instance
-    # works on its own ``dev/<device_name>`` branch (cut from origin/main) and
-    # hands work back to ``main`` via the Settings "commit" button. Set via
-    # ``CIAO_DEVICE_NAME``; defaults to a sanitized machine hostname.
-    device_name: str = "device"
     # Only the always-on "main" device dispatches scheduled automations, so
     # schedules never double-fire when an occasional dev box is also running.
     # Off by default (opt-in); the main device sets ``CIAO_DISPATCH_SCHEDULES=1``.
@@ -630,9 +607,6 @@ class CiaoConfig:
             gws_default_profile=gws_default_profile,
         )
 
-        git_direct_main_raw = source.get("CIAO_GIT_DIRECT_MAIN", "").strip().lower()
-        git_direct_main = git_direct_main_raw in {"true", "1", "yes", "y"}
-
         dev_mode_raw = source.get("CIAO_DEV_MODE", "").strip().lower()
         dev_mode = dev_mode_raw in {"true", "1", "yes", "y"}
 
@@ -646,7 +620,6 @@ class CiaoConfig:
             state_path=state_path,
             media_root=media_root,
             pwa_auth_required=pwa_auth_required,
-            git_direct_main=git_direct_main,
             dev_mode=dev_mode,
             vault_mode=vault_mode,
             bootstrap_mode=bootstrap_mode,
@@ -693,15 +666,11 @@ class CiaoConfig:
             ).lower() not in {"0", "false", "no", "off"},
             auto_vault_index=source.get("CIAO_AUTO_VAULT_INDEX", "true").strip().lower()
             not in {"0", "false", "no", "off"},
-            auto_update_github_skills=source.get("CIAO_AUTO_UPDATE_GITHUB_SKILLS", "true").strip().lower()
+            auto_update_github_skills=source.get("CIAO_AUTO_UPDATE_GITHUB_SKILLS", "false").strip().lower()
             not in {"0", "false", "no", "off"},
             pwa_port=int(source.get("PWA_PORT", "8443")),
             pwa_host=source.get("PWA_HOST", "0.0.0.0").strip(),
             gws_default_profile=gws_default_profile,
-            device_name=(
-                _sanitize_device_name(source.get("CIAO_DEVICE_NAME", ""))
-                or _default_device_name()
-            ),
             dispatch_schedules=source.get("CIAO_DISPATCH_SCHEDULES", "").strip().lower()
             in {"1", "true", "yes", "on"},
             ollama=ollama_settings,
