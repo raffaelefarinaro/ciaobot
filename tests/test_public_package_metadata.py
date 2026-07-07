@@ -47,7 +47,7 @@ def test_env_example_is_generic_public_app_config() -> None:
         assert marker not in env_example
 
 
-def test_push_contact_is_required_without_private_default() -> None:
+def test_push_contact_is_optional_without_private_default() -> None:
     from types import SimpleNamespace
 
     from ciao.main import _push_subject_for_config, _push_subject_from_env
@@ -58,9 +58,7 @@ def test_push_contact_is_required_without_private_default() -> None:
         == "mailto:bootstrap@localhost"
     )
 
-    try:
-        _push_subject_from_env({})
-    except ValueError as exc:
-        assert "CIAO_PUSH_CONTACT" in str(exc)
-    else:
-        raise AssertionError("missing CIAO_PUSH_CONTACT should fail")
+    # Missing contact yields an empty subject (Web Push disabled), never a
+    # private fallback and never an error.
+    assert _push_subject_from_env({}) == ""
+    assert _push_subject_from_env({"CIAO_PUSH_CONTACT": "  "}) == ""

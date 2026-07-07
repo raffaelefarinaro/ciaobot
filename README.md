@@ -34,13 +34,13 @@ The model is project-first: a workspace represents a life area (personal, work, 
 
 ## Install
 
-Install from the [latest release](https://github.com/raffaelefarinaro/ciaobot/releases/latest) — the wheel ships with the pre-built PWA:
+Install from [PyPI](https://pypi.org/project/ciaobot/) — the wheel ships with the pre-built PWA (the same wheel is attached to each [GitHub release](https://github.com/raffaelefarinaro/ciaobot/releases/latest)):
 
 Requires Python 3.12 or newer (use whichever `python3.X` you have, e.g. `brew install python@3.13`):
 
 ```bash
 python3.13 -m venv ~/.ciaobot-venv
-~/.ciaobot-venv/bin/pip install https://github.com/raffaelefarinaro/ciaobot/releases/download/v0.2.2/ciao-0.2.2-py3-none-any.whl
+~/.ciaobot-venv/bin/pip install ciaobot
 ~/.ciaobot-venv/bin/ciao run
 ```
 
@@ -61,7 +61,7 @@ ciao setup --workspace ~/ciao-workspace
 ciao run
 ```
 
-`ciao setup` is idempotent: it writes the initial `.env`, seeds the workspace docs and vault, and (on macOS) renders LaunchAgents for the server and the menu bar companion plus a `Ciaobot.app` shortcut that opens the local PWA. The menu bar icon needs the optional extra (`pip install 'ciao[menubar]'`). Full setup details and optional Node tooling: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+`ciao setup` is idempotent: it writes the initial `.env`, seeds the workspace docs and vault, and (on macOS) renders LaunchAgents for the server and the menu bar companion plus a `Ciaobot.app` shortcut that opens the local PWA. The menu bar companion is included automatically on macOS installs (no extra needed). Full setup details and optional Node tooling: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 Optional capabilities (Google Workspace, Apple Intelligence titles, MCP connectors) each have their own setup in [INTEGRATIONS.md](INTEGRATIONS.md).
 

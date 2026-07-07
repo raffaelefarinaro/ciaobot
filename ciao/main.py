@@ -156,11 +156,13 @@ def _rebuild_pwa(workspace: Path) -> bool:
 
 
 def _push_subject_from_env(env: dict[str, str] | None = None) -> str:
+    """Web Push VAPID subject, or "" when CIAO_PUSH_CONTACT is unset.
+
+    An empty subject means Web Push delivery stays disabled until the
+    operator sets a contact in Settings; everything else keeps working.
+    """
     source = env if env is not None else os.environ
-    subject = source.get("CIAO_PUSH_CONTACT", "").strip()
-    if not subject:
-        raise ValueError("CIAO_PUSH_CONTACT is required for Web Push VAPID subject")
-    return subject
+    return source.get("CIAO_PUSH_CONTACT", "").strip()
 
 
 def _push_subject_for_config(config: CiaoConfig) -> str:
@@ -352,6 +354,11 @@ async def _async_main() -> int:
         dev_mode=config.dev_mode,
     )
     push_subject = _push_subject_for_config(config)
+    if not push_subject:
+        logger.info(
+            "CIAO_PUSH_CONTACT is not set; Web Push notifications stay "
+            "disabled until a contact is configured in Settings."
+        )
     app.state.push_manager = PushManager(config.state_path.parent, subject=push_subject)
     app.state.focused_chats = {}
     pcm._push_manager = app.state.push_manager

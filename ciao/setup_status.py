@@ -237,7 +237,8 @@ def setup_status(
             check_id="push_contact",
             label="Push contact",
             ok=bool(source.get("CIAO_PUSH_CONTACT", "").strip()),
-            required=True,
+            # Optional: without it Web Push stays disabled, nothing else breaks.
+            required=False,
             detail="CIAO_PUSH_CONTACT",
         ),
     ]
@@ -246,7 +247,7 @@ def setup_status(
         "ollama": _ollama_status(config, source),
         "openrouter": _openrouter_status(source),
     }
-    configured = all(row["ok"] for row in checks)
+    configured = all(row["ok"] for row in checks if row["required"])
     provider_ready = any(row["ok"] for row in providers.values())
     bootstrap = bool(getattr(config, "bootstrap_mode", False))
     return {

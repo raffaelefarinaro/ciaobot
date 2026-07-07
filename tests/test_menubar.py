@@ -247,10 +247,12 @@ def test_banners_muted_tolerates_corrupt_settings(tmp_path: Path) -> None:
     assert menubar.read_banners_muted(tmp_path) is False
 
 
-def test_run_menubar_without_rumps_explains_the_extra(
+def test_run_menubar_without_rumps_explains_the_dependency(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
     monkeypatch.setitem(sys.modules, "rumps", None)
 
     assert menubar.run_menubar(tmp_path, 8443) == 1
-    assert "ciao[menubar]" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "rumps" in err
+    assert "pip install rumps" in err
