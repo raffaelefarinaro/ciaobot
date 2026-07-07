@@ -326,14 +326,15 @@ def _ensure_vault_gitignore(root: Path) -> None:
 
 
 def ensure_vault_git(root: Path) -> None:
-    """Make sure the vault is a git repository with a minimal .gitignore.
+    """Make sure the vault is (in) a git repository.
 
-    The vault is the user data worth versioning, so a fresh vault gets
-    `git init -b main` plus an initial commit. A vault that is already inside
-    a git work tree is not re-initialized: when the work tree is rooted at the
-    vault itself only missing .gitignore entries are appended; when the vault
-    sits deeper inside another repo (legacy vault-inside-workspace layouts)
-    nothing is touched at all. Missing git binary is a non-fatal skip.
+    Matters when the vault lives outside the workspace (an existing notes
+    folder): a fresh vault gets `git init -b main`, a minimal .gitignore, and
+    an initial commit. A vault that is already inside a git work tree is not
+    re-initialized: when the work tree is rooted at the vault itself only
+    missing .gitignore entries are appended; when the vault sits deeper inside
+    another repo (the default vault-inside-workspace layout) nothing is
+    touched at all. Missing git binary is a non-fatal skip.
     """
     root = Path(root).expanduser().resolve()
     if shutil.which("git") is None:
@@ -480,9 +481,9 @@ def setup_workspace(
     ))
 
     ensure_workspace_git(root)
-    # Git follows the vault: the second brain is the user data worth
-    # versioning. Runs after the workspace init so a vault nested inside the
-    # workspace repo (legacy layouts) is never double-initialized.
+    # A vault outside the workspace (existing notes folder) gets its own
+    # repo. Runs after the workspace init so the default nested vault is
+    # never double-initialized.
     ensure_vault_git(vault_path)
 
     return written

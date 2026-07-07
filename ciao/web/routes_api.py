@@ -3135,13 +3135,13 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     if not isinstance(body, dict):
         return JSONResponse({"error": "json object is required"}, status_code=400)
 
-    # The wizard asks one folder question: the vault (second brain). The app
-    # workspace is plumbing and defaults to ~/.ciaobot unless overridden in
-    # the Advanced section.
-    workspace = str(body.get("workspace", "")).strip() or "~/.ciaobot"
-    vault_root = str(body.get("vault_root", "")).strip()
-    if not vault_root:
-        return JSONResponse({"error": "vault_root is required"}, status_code=400)
+    # The wizard's primary question is the workspace: one root folder holding
+    # the vault (memory-vault/ by default) plus app data, all one git repo.
+    # vault_root is optional and only set when the second brain lives
+    # elsewhere (existing notes folder).
+    workspace = str(body.get("workspace", "")).strip()
+    if not workspace:
+        return JSONResponse({"error": "workspace is required"}, status_code=400)
     # Optional: an empty push contact leaves Web Push disabled until the
     # operator configures one in Settings.
     push_contact = str(body.get("push_contact", "")).strip()
@@ -3159,7 +3159,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         auth_token=str(body.get("auth_token", "")).strip() or config.pwa_auth_token,
         auth_required=bool(body.get("auth_required", True)),
         push_contact=push_contact,
-        vault_root=vault_root,
+        vault_root=str(body.get("vault_root", "")).strip() or None,
         vault_mode=str(body.get("vault_mode", "scratch")).strip().lower(),
         python_path=str(body.get("python", "")).strip() or None,
         port=port,

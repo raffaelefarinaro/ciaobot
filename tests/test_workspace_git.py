@@ -129,8 +129,8 @@ def test_ensure_vault_git_appends_gitignore_to_existing_vault_repo(tmp_path: Pat
     assert ".obsidian/workspace*" in lines
 
 
-def test_ensure_vault_git_leaves_nested_legacy_vault_untouched(tmp_path: Path) -> None:
-    """A vault inside the workspace repo (legacy layout) is never
+def test_ensure_vault_git_leaves_nested_vault_untouched(tmp_path: Path) -> None:
+    """A vault inside the workspace repo (the default layout) is never
     double-initialized and gets no nested .gitignore."""
     ws = tmp_path / "ws"
     vault = ws / "memory-vault"
@@ -185,7 +185,7 @@ def test_setup_workspace_creates_git_repo_without_committing_env(
     assert "CLAUDE.md" in tracked
     assert _git(ws, "status", "--porcelain").stdout.strip() == ""
 
-    # Legacy layout: the default vault lives inside the workspace repo and is
+    # Default layout: the vault lives inside the workspace repo and is
     # tracked there — no second repo is created.
     assert not (ws / "memory-vault" / ".git").exists()
     assert "memory-vault/MEMORY.md" in tracked

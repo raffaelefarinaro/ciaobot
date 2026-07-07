@@ -139,9 +139,9 @@ def test_sync_root_picks_standalone_vault_repo(tmp_path: Path) -> None:
     assert root == repo_toplevel(vault) == vault.resolve()
 
 
-def test_sync_root_legacy_vault_inside_workspace_repo_is_unchanged(tmp_path: Path) -> None:
-    """Legacy layout: the vault lives inside the workspace repo, so sync keeps
-    targeting the workspace root (same repo either way)."""
+def test_sync_root_vault_inside_workspace_repo_targets_workspace(tmp_path: Path) -> None:
+    """Default layout: the vault lives inside the workspace repo, so sync
+    keeps targeting the workspace root (same repo either way)."""
     workspace = tmp_path / "ws"
     vault = workspace / "memory-vault"
     vault.mkdir(parents=True)

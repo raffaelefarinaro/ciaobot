@@ -244,7 +244,6 @@ def test_setup_finish_accepts_empty_push_contact(tmp_path) -> None:
         "/api/setup/finish",
         json={
             "workspace": str(workspace),
-            "vault_root": str(tmp_path / "brain"),
             "push_contact": "",
             "launch_agents_dir": str(tmp_path / "LaunchAgents"),
             "app_dir": str(tmp_path / "Applications"),
@@ -262,8 +261,8 @@ def test_setup_finish_accepts_empty_push_contact(tmp_path) -> None:
     )
 
 
-def test_setup_finish_requires_vault_root(tmp_path) -> None:
-    """The wizard's one folder question is the second brain: no vault, no finish."""
+def test_setup_finish_requires_workspace(tmp_path) -> None:
+    """The wizard's primary question is the workspace root: no folder, no finish."""
     config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
     serializer = URLSafeTimedSerializer("test-secret")
     app = Starlette(
@@ -275,17 +274,16 @@ def test_setup_finish_requires_vault_root(tmp_path) -> None:
 
     resp = TestClient(app, base_url="http://localhost:8443").post(
         "/api/setup/finish",
-        json={"workspace": str(tmp_path / "workspace")},
+        json={"vault_root": str(tmp_path / "notes")},
     )
 
     assert resp.status_code == 400
-    assert resp.json()["error"] == "vault_root is required"
+    assert resp.json()["error"] == "workspace is required"
 
 
-def test_setup_finish_defaults_workspace_to_dot_ciaobot(tmp_path, monkeypatch) -> None:
-    """Without an explicit workspace the app data folder defaults to ~/.ciaobot."""
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    (tmp_path / "home").mkdir()
+def test_setup_finish_defaults_vault_inside_workspace(tmp_path) -> None:
+    """Without an explicit vault_root the vault is created inside the
+    workspace as memory-vault/ and everything is one git repo at the root."""
     config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
     serializer = URLSafeTimedSerializer("test-secret")
     app = Starlette(
@@ -295,11 +293,11 @@ def test_setup_finish_defaults_workspace_to_dot_ciaobot(tmp_path, monkeypatch) -
     app.state.config = config
     app.state.serializer = serializer
 
-    vault = tmp_path / "brain"
+    workspace = tmp_path / "workspace"
     resp = TestClient(app, base_url="http://localhost:8443").post(
         "/api/setup/finish",
         json={
-            "vault_root": str(vault),
+            "workspace": str(workspace),
             "launch_agents_dir": str(tmp_path / "LaunchAgents"),
             "app_dir": str(tmp_path / "Applications"),
             "restart": False,
@@ -307,12 +305,13 @@ def test_setup_finish_defaults_workspace_to_dot_ciaobot(tmp_path, monkeypatch) -
     )
 
     assert resp.status_code == 200
-    workspace = (tmp_path / "home" / ".ciaobot").resolve()
-    assert resp.json()["workspace"] == str(workspace)
+    assert resp.json()["workspace"] == str(workspace.resolve())
     env_text = (workspace / ".env").read_text(encoding="utf-8")
-    # The vault lives outside the workspace, so .env records the absolute path.
-    assert f"CIAO_VAULT_ROOT={vault}" in env_text
-    assert (vault / "MEMORY.md").is_file()
+    assert "CIAO_VAULT_ROOT=memory-vault" in env_text
+    assert (workspace / "memory-vault" / "MEMORY.md").is_file()
+    # One repo at the workspace root; the nested vault is never double-inited.
+    assert (workspace / ".git").is_dir()
+    assert not (workspace / "memory-vault" / ".git").exists()
 
 
 def test_setup_finish_accepts_0000_host(tmp_path) -> None:
@@ -374,7 +373,6 @@ def test_setup_finish_is_localhost_only(tmp_path) -> None:
         "/api/setup/finish",
         json={
             "workspace": str(tmp_path / "workspace"),
-            "vault_root": str(tmp_path / "brain"),
             "push_contact": "mailto:owner@example.com",
         },
     )

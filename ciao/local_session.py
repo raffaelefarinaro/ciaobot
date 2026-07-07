@@ -121,12 +121,10 @@ def repo_toplevel(path: Path) -> Path | None:
 def sync_root(config) -> Path:
     """The repo root that git sync and branch backup should operate on.
 
-    Git follows the vault: when the vault root exists and is (in) a git
-    repository, sync targets the repo containing it — the second brain is the
-    user data worth versioning. Legacy layouts where the vault lives inside
-    the workspace repo resolve to the workspace root either way (same repo),
-    so their behavior is unchanged. Everything else falls back to the
-    workspace root.
+    Sync targets the repo containing the vault root: with the default layout
+    (vault inside the workspace repo) that resolves to the workspace root,
+    while a vault living elsewhere in its own repo is synced there. A missing
+    or non-git vault falls back to the workspace root.
     """
     vault = getattr(config, "vault_root", None)
     if vault is not None:

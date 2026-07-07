@@ -343,12 +343,12 @@ async def _async_main() -> int:
     app.state.transcript_store = transcripts
     app.state.project_chat_manager = pcm
 
-    # Vault git sync: git follows the vault, so sync operates on the repo
-    # containing the vault root (the workspace root for legacy layouts where
-    # the vault lives inside the workspace repo, and as fallback). Every
-    # instance works on whatever branch that checkout is on and syncs it via
-    # the Settings button (clean pull -> direct push; conflict -> interactive
-    # resolution chat).
+    # Git sync operates on the repo containing the vault root: the workspace
+    # root for the default vault-inside-workspace layout (and as fallback),
+    # or the vault's own repo when it lives elsewhere. Every instance works
+    # on whatever branch that checkout is on and syncs it via the Settings
+    # button (clean pull -> direct push; conflict -> interactive resolution
+    # chat).
     from ciao.local_session import LocalSessionManager, sync_root
 
     git_sync_root = await asyncio.to_thread(sync_root, config)

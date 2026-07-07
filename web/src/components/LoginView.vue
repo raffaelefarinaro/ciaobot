@@ -62,6 +62,29 @@
         </section>
 
         <div class="form-group">
+          <label for="setup-workspace">Workspace Folder</label>
+          <div class="input-row">
+            <input
+              id="setup-workspace"
+              v-model="workspace"
+              type="text"
+              class="form-input"
+              placeholder="~/ciaobot"
+              required
+              :disabled="loading"
+            />
+            <button
+              id="setup-workspace-browse"
+              type="button"
+              class="btn-small"
+              :disabled="loading"
+              @click="openPicker('workspace')"
+            >Browse…</button>
+          </div>
+          <span class="hint">The local app workspace. It stores config, runtime state, generated assets, and chat metadata.</span>
+        </div>
+
+        <div class="form-group">
           <label>Vault Content Mode</label>
           <div class="radio-group" style="display: flex; gap: 20px; margin-top: 6px;">
             <label class="checkbox-label" style="font-weight: normal; cursor: pointer;">
@@ -88,17 +111,18 @@
           <span class="hint">Starting fresh builds the scaffold; existing asks Ciaobot to adapt your notes into the project structure.</span>
         </div>
 
-        <div class="form-group">
-          <label for="setup-vault">Second-Brain Folder</label>
+        <div v-if="showVaultInput" class="form-group">
+          <label for="setup-vault">{{ vaultMode === 'existing' ? 'Existing Notes Folder' : 'Second-brain Vault Folder' }}</label>
           <div class="input-row">
             <input
               id="setup-vault"
               v-model="vaultRoot"
               type="text"
               class="form-input"
-              placeholder="~/ciaobot-brain"
+              placeholder="~/ciaobot/memory-vault"
               required
               :disabled="loading"
+              @input="userEditedVault = true"
             />
             <button
               id="setup-vault-browse"
@@ -109,8 +133,20 @@
             >Browse…</button>
           </div>
           <span class="hint">{{ vaultMode === 'existing'
-            ? 'Point at the notes folder you already have; Ciaobot adapts it into the vault structure.'
-            : "We'll create your vault here: durable markdown memory for projects, people, references, and archived chats." }}</span>
+            ? 'Point this at the notes folder you already have; Ciaobot adapts it into the vault structure.'
+            : 'Durable markdown memory: projects, people, references, archived chats, and reviewed insights.' }}</span>
+        </div>
+        <div v-else class="form-group">
+          <span class="hint vault-derived-hint">
+            Your second-brain vault will be created at <code>{{ vaultRoot }}</code>
+            <button
+              id="setup-vault-change"
+              type="button"
+              class="link-btn"
+              :disabled="loading"
+              @click="vaultRevealed = true"
+            >change location</button>
+          </span>
         </div>
 
         <div class="form-group">
@@ -139,28 +175,6 @@
           >
             <span class="advanced-caret">{{ advancedOpen ? '▾' : '▸' }}</span> Advanced
           </button>
-          <div v-if="advancedOpen" class="form-group">
-            <label for="setup-workspace">App Data Folder</label>
-            <div class="input-row">
-              <input
-                id="setup-workspace"
-                v-model="workspace"
-                type="text"
-                class="form-input"
-                placeholder="~/.ciaobot"
-                required
-                :disabled="loading"
-              />
-              <button
-                id="setup-workspace-browse"
-                type="button"
-                class="btn-small"
-                :disabled="loading"
-                @click="openPicker('workspace')"
-              >Browse…</button>
-            </div>
-            <span class="hint">App data folder — config, runtime state, chat metadata. Default: ~/.ciaobot</span>
-          </div>
           <div v-if="advancedOpen" class="form-grid">
             <div class="form-group">
               <label for="setup-port">Port</label>
@@ -264,10 +278,10 @@
           <div
             class="picker-modal"
             role="dialog"
-            :aria-label="pickerTarget === 'workspace' ? 'Choose app data folder' : 'Choose second-brain folder'"
+            :aria-label="pickerTarget === 'workspace' ? 'Choose workspace folder' : 'Choose vault folder'"
           >
             <div class="picker-head">
-              <span class="picker-title">{{ pickerTarget === 'workspace' ? 'Choose App Data Folder' : 'Choose Second-Brain Folder' }}</span>
+              <span class="picker-title">{{ pickerTarget === 'workspace' ? 'Choose Workspace Folder' : 'Choose Vault Folder' }}</span>
               <code class="picker-path">{{ pickerDisplayPath || '…' }}</code>
             </div>
             <div class="picker-toolbar">
@@ -380,10 +394,8 @@ const loading = ref(false)
 const isBootstrap = ref(false)
 const bootstrapLoading = ref(true)
 const setupStatus = ref<any>(null)
-// The wizard asks one folder question: the second brain (vault). The app
-// workspace is plumbing and lives in the Advanced disclosure.
-const workspace = ref('~/.ciaobot')
-const vaultRoot = ref('~/ciaobot-brain')
+const workspace = ref('~/ciaobot')
+const vaultRoot = ref('~/ciaobot/memory-vault')
 const pushContact = ref('')
 const port = ref(8443)
 const python = ref('')
@@ -391,9 +403,15 @@ const provider = ref('claude')
 const apiFallback = ref(false)
 const authRequired = ref(true)
 const isRestarting = ref(false)
+const userEditedVault = ref(false)
 const vaultMode = ref('scratch')
+const vaultRevealed = ref(false)
 const copyStatus = ref('')
 const advancedOpen = ref(false)
+
+// The vault path stays hidden while it is just the derived default: only a
+// custom split ("change location") or pointing at existing notes shows it.
+const showVaultInput = computed(() => vaultMode.value === 'existing' || vaultRevealed.value)
 
 // Folder picker modal (server-backed: browsers cannot give absolute paths)
 interface DirListing {
@@ -490,9 +508,11 @@ async function createPickerFolder() {
 function selectPickerFolder() {
   if (!pickerPath.value) return
   if (pickerTarget.value === 'workspace') {
+    // assignment triggers the workspace watcher, keeping the derived vault path in sync
     workspace.value = pickerPath.value
   } else {
     vaultRoot.value = pickerPath.value
+    userEditedVault.value = true
   }
   pickerOpen.value = false
 }
@@ -546,6 +566,18 @@ function normalizedPushContact(): string {
   if (!value || /^(mailto:|https:)/i.test(value)) return value
   return `mailto:${value}`
 }
+
+// Watch workspace path changes to automatically update vault root if user hasn't touched it
+watch(workspace, (newVal) => {
+  if (!userEditedVault.value) {
+    const ws = newVal.trim()
+    if (ws) {
+      vaultRoot.value = ws.endsWith('/') ? `${ws}memory-vault` : `${ws}/memory-vault`
+    } else {
+      vaultRoot.value = ''
+    }
+  }
+})
 
 const canFinish = computed(() => {
   if (!workspace.value.trim() || !vaultRoot.value.trim()) {
@@ -872,6 +904,32 @@ onUnmounted(() => {
 .input-row .form-input {
   flex: 1;
   min-width: 0;
+}
+
+.vault-derived-hint code {
+  color: var(--fg2);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-family: inherit;
+  font-size: var(--text-xs);
+  word-break: break-all;
+}
+.link-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  margin-left: 6px;
+  color: var(--accent);
+  font-family: inherit;
+  font-size: var(--text-xs);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.link-btn:disabled {
+  color: var(--fg3);
+  cursor: not-allowed;
 }
 
 /* Folder picker modal */
