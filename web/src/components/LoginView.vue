@@ -17,7 +17,7 @@
           <span class="banner-meta">// ciaobot is loading config ...</span>
         </p>
         <p class="line line--sys">
-          Ciaobot is restarting. Reopen Ciaobot.app if this page does not reconnect.
+          Ciaobot is restarting — a terminal-run server relaunches itself and may take a few seconds to come back. Reopen Ciaobot.app if this page does not reconnect.
         </p>
         <div class="spinner-container">
           <span class="caret"></span>

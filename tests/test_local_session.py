@@ -12,12 +12,16 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from types import SimpleNamespace
+
 from ciao.local_session import (
     LocalSessionManager,
     has_origin_remote,
     is_git_repo,
+    repo_toplevel,
     resync_branch,
     sync_branch,
+    sync_root,
     workspace_branch,
 )
 
@@ -113,6 +117,53 @@ def test_has_origin_remote_false_without_origin(tmp_path: Path) -> None:
     repo.mkdir()
     _git(repo, "init", "-q", "-b", "main")
     assert has_origin_remote(repo) is False
+
+
+# ── sync_root ────────────────────────────────────────────────────────────────
+
+
+def _config_stub(*, workspace: Path, vault: Path) -> SimpleNamespace:
+    return SimpleNamespace(workspace_root=workspace, vault_root=vault)
+
+
+def test_sync_root_picks_standalone_vault_repo(tmp_path: Path) -> None:
+    """Git follows the vault: a vault with its own repo wins over the workspace."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    vault = tmp_path / "brain"
+    vault.mkdir()
+    _git(vault, "init", "-q", "-b", "main")
+
+    root = sync_root(_config_stub(workspace=workspace, vault=vault))
+
+    assert root == repo_toplevel(vault) == vault.resolve()
+
+
+def test_sync_root_vault_inside_workspace_repo_targets_workspace(tmp_path: Path) -> None:
+    """Default layout: the vault lives inside the workspace repo, so sync
+    keeps targeting the workspace root (same repo either way)."""
+    workspace = tmp_path / "ws"
+    vault = workspace / "memory-vault"
+    vault.mkdir(parents=True)
+    _git(workspace, "init", "-q", "-b", "main")
+
+    root = sync_root(_config_stub(workspace=workspace, vault=vault))
+
+    assert root == workspace.resolve()
+
+
+def test_sync_root_falls_back_to_workspace_root(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    # Vault directory does not exist yet.
+    missing = _config_stub(workspace=workspace, vault=tmp_path / "nope")
+    assert sync_root(missing) == workspace
+
+    # Vault exists but is not (in) a git repository.
+    plain = tmp_path / "plain-vault"
+    plain.mkdir()
+    assert sync_root(_config_stub(workspace=workspace, vault=plain)) == workspace
 
 
 # ── sync_branch ──────────────────────────────────────────────────────────────

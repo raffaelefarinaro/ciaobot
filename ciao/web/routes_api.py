@@ -3087,7 +3087,9 @@ def _localhost_request(request: Request) -> bool:
     name = _host_name(request.headers.get("host", ""))
     if not name:
         name = (request.url.hostname or "").rstrip(".").lower()
-    return name in {"localhost", "127.0.0.1", "::1"}
+    # 0.0.0.0 counts as loopback: a browser pointed at it can only reach the
+    # viewer's own machine (users copy it from the uvicorn bind-address log).
+    return name in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
 
 def _same_host_header(request: Request, value: str) -> bool:
@@ -3119,7 +3121,13 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     if not getattr(config, "bootstrap_mode", False):
         return JSONResponse({"error": "setup finish is only available in bootstrap mode"}, status_code=409)
     if not _localhost_request(request) or not _setup_finish_origin_allowed(request):
-        return JSONResponse({"error": "setup finish is localhost-only"}, status_code=403)
+        return JSONResponse(
+            {
+                "error": "setup finish is localhost-only — open the wizard at "
+                f"http://localhost:{config.pwa_port}"
+            },
+            status_code=403,
+        )
     try:
         body = await request.json()
     except ValueError:
@@ -3127,6 +3135,10 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     if not isinstance(body, dict):
         return JSONResponse({"error": "json object is required"}, status_code=400)
 
+    # The wizard's primary question is the workspace: one root folder holding
+    # the vault (memory-vault/ by default) plus app data, all one git repo.
+    # vault_root is optional and only set when the second brain lives
+    # elsewhere (existing notes folder).
     workspace = str(body.get("workspace", "")).strip()
     if not workspace:
         return JSONResponse({"error": "workspace is required"}, status_code=400)
@@ -3174,7 +3186,13 @@ def _setup_fs_guard(request: Request) -> JSONResponse | None:
     if not getattr(config, "bootstrap_mode", False):
         return JSONResponse({"error": "not found"}, status_code=404)
     if not _localhost_request(request) or not _setup_finish_origin_allowed(request):
-        return JSONResponse({"error": "setup filesystem access is localhost-only"}, status_code=403)
+        return JSONResponse(
+            {
+                "error": "setup filesystem access is localhost-only — open the "
+                f"wizard at http://localhost:{config.pwa_port}"
+            },
+            status_code=403,
+        )
     return None
 
 

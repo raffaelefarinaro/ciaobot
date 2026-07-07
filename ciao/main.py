@@ -343,13 +343,17 @@ async def _async_main() -> int:
     app.state.transcript_store = transcripts
     app.state.project_chat_manager = pcm
 
-    # Workspace git sync: every instance works on whatever branch the
-    # workspace checkout is on and syncs it via the Settings button (clean
-    # pull -> direct push; conflict -> interactive resolution chat).
-    from ciao.local_session import LocalSessionManager
+    # Git sync operates on the repo containing the vault root: the workspace
+    # root for the default vault-inside-workspace layout (and as fallback),
+    # or the vault's own repo when it lives elsewhere. Every instance works
+    # on whatever branch that checkout is on and syncs it via the Settings
+    # button (clean pull -> direct push; conflict -> interactive resolution
+    # chat).
+    from ciao.local_session import LocalSessionManager, sync_root
 
+    git_sync_root = await asyncio.to_thread(sync_root, config)
     app.state.local_session_manager = LocalSessionManager(
-        workspace=config.workspace_root,
+        workspace=git_sync_root,
         runtime_root=config.state_path.parent,
         dev_mode=config.dev_mode,
     )
@@ -476,11 +480,13 @@ async def _async_main() -> int:
 
     asyncio.create_task(_run_catch_up())
 
-    # ── Workspace branch backup ──────────────────────────────
-    # Every instance works on whatever branch the workspace checkout is on;
-    # Ciaobot never creates or switches branches. A background loop pushes the
-    # branch for backup. Non-git workspaces (fresh `ciao setup`) and repos
-    # without an `origin` remote skip this gracefully.
+    # ── Branch backup ────────────────────────────────────────
+    # Backs up the same repo the sync flow targets (the repo containing the
+    # vault root, falling back to the workspace root). Every instance works on
+    # whatever branch that checkout is on; Ciaobot never creates or switches
+    # branches. A background loop pushes the branch for backup. Non-git roots
+    # (fresh `ciao setup` without a remote) and repos without an `origin`
+    # remote skip this gracefully.
     from ciao.local_session import (
         BACKUP_PUSH_INTERVAL,
         has_origin_remote,
@@ -489,16 +495,16 @@ async def _async_main() -> int:
     )
 
     async def _branch_backup_loop() -> None:
-        branch = await asyncio.to_thread(workspace_branch, config.workspace_root)
+        branch = await asyncio.to_thread(workspace_branch, git_sync_root)
         if branch is None:
             logger.info(
-                "Workspace %s is not a git repository (or is on a detached HEAD); "
-                "skipping branch backup.", config.workspace_root,
+                "Sync root %s is not a git repository (or is on a detached HEAD); "
+                "skipping branch backup.", git_sync_root,
             )
             return
-        if not await asyncio.to_thread(has_origin_remote, config.workspace_root):
+        if not await asyncio.to_thread(has_origin_remote, git_sync_root):
             logger.info(
-                "Workspace has no 'origin' remote; skipping branch backup.",
+                "Sync root has no 'origin' remote; skipping branch backup.",
             )
             return
         logger.info("Working on branch '%s'", branch)
@@ -509,7 +515,7 @@ async def _async_main() -> int:
                     "branch_backup", "Branch backup",
                     category="system", extra={"branch": branch},
                 ) as run:
-                    ok, detail = await push_branch(config.workspace_root, branch=branch)
+                    ok, detail = await push_branch(git_sync_root, branch=branch)
                     if not ok:
                         run.status = "error"
                         run.error = detail
@@ -533,6 +539,13 @@ async def _async_main() -> int:
     server = uvicorn.Server(uvi_config)
     tracker.start("server_starting")
     logger.info("Starting Ciaobot server on %s:%d", config.pwa_host, config.pwa_port)
+    if getattr(config, "bootstrap_mode", False):
+        # The setup wizard's finish step only accepts loopback hosts, so give
+        # users a URL that works instead of the 0.0.0.0 bind address above.
+        logger.info(
+            "First-run setup: open http://localhost:%d to complete the wizard.",
+            config.pwa_port,
+        )
     tracker.done("server_starting")
 
     restart_flag: list[int | None] = [None]
