@@ -109,6 +109,12 @@ def test_icon_paths_resolve_to_packaged_faces() -> None:
     assert Path(menubar.icon_path("face_scared.png")).is_file()
 
 
+def test_menubar_template_icons_are_packaged() -> None:
+    # The status bar uses monochrome template variants of the faces.
+    assert Path(menubar.icon_path("face_template.png")).is_file()
+    assert Path(menubar.icon_path("face_scared_template.png")).is_file()
+
+
 def _write_log(workspace: Path, entries: list[dict]) -> None:
     log = workspace / ".runtime" / "notifications.jsonl"
     log.parent.mkdir(parents=True, exist_ok=True)
