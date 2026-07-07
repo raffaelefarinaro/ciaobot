@@ -91,7 +91,7 @@ def _refresh_upstream_skills(
 ) -> tuple[int, int]:
     lockfile = workspace / "skills-lock.json"
     claude_skills = workspace / ".claude" / "skills"
-    if os.environ.get("CIAO_AUTO_UPDATE_GITHUB_SKILLS", "true").strip().lower() in {"0", "false", "no", "off"}:
+    if os.environ.get("CIAO_AUTO_UPDATE_GITHUB_SKILLS", "false").strip().lower() in {"0", "false", "no", "off"}:
         print("Skills: automatic GitHub updates disabled, skipping refresh.")
         return 0, 0
     if not lockfile.is_file():

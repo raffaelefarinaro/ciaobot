@@ -1384,12 +1384,12 @@ const expandedSubagents = ref<Record<string, boolean>>({})
 const expandedInstructions = ref<Record<string, boolean>>({})
 
 // ── Appearance settings ────────────────────────────────────────────────────
-const activeTheme = ref('dark')
+const activeTheme = ref('system')
 const fontScale = ref(1.0)
 
 function loadAppearanceSettings() {
   try {
-    activeTheme.value = localStorage.getItem('ciao-theme') || 'dark'
+    activeTheme.value = localStorage.getItem('ciao-theme') || 'system'
     const savedScale = localStorage.getItem('ciao-font-scale')
     if (savedScale) {
       fontScale.value = parseFloat(savedScale) || 1.0
@@ -1857,7 +1857,7 @@ const providerKeysError = ref('')
 const providerKeysSaving = ref(false)
 const providerKeysResult = ref('')
 const providerKeyInputs = ref<Record<string, string>>({})
-const autoUpdateGithubSkills = ref(true)
+const autoUpdateGithubSkills = ref(false)
 const autoUpdateSaving = ref(false)
 const autoUpdateResult = ref('')
 const gwsIntegration = ref<GwsIntegrationSettings | null>(null)
