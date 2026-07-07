@@ -219,3 +219,36 @@ def test_setup_workspace_git_inits_external_vault(tmp_path: Path) -> None:
     # The workspace repo neither tracks nor contains the external vault.
     ws_tracked = _git(ws, "ls-files").stdout.splitlines()
     assert not any(path.startswith("memory-vault/") for path in ws_tracked)
+
+
+def test_setup_workspace_rerun_honors_existing_env_vault_root(
+    tmp_path: Path,
+) -> None:
+    """Re-running setup with a wrong/blank vault_root must not relocate the
+    vault: the existing .env's CIAO_VAULT_ROOT wins, so scaffolding is not
+    re-scattered at the argument's location."""
+    ws = tmp_path / "workspace"
+    setup_workspace(
+        ws,
+        vault_root="brain-a",
+        launch_agents_dir=tmp_path / "LaunchAgents",
+        app_dir=tmp_path / "Applications",
+    )
+    assert (ws / "brain-a" / "MEMORY.md").is_file()
+    env_before = (ws / ".env").read_text(encoding="utf-8")
+
+    # Re-run with a bogus vault_root; .env already exists so it is the source
+    # of truth for where the vault lives.
+    setup_workspace(
+        ws,
+        vault_root="wrong-b",
+        launch_agents_dir=tmp_path / "LaunchAgents",
+        app_dir=tmp_path / "Applications",
+    )
+
+    # Scaffolding stays in the real vault and is not re-scattered under wrong-b.
+    assert (ws / "brain-a" / "MEMORY.md").is_file()
+    assert not (ws / "wrong-b").exists()
+    # .env is left untouched and still points at the original vault.
+    assert (ws / ".env").read_text(encoding="utf-8") == env_before
+    assert "CIAO_VAULT_ROOT=brain-a" in env_before
