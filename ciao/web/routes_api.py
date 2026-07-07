@@ -3087,7 +3087,9 @@ def _localhost_request(request: Request) -> bool:
     name = _host_name(request.headers.get("host", ""))
     if not name:
         name = (request.url.hostname or "").rstrip(".").lower()
-    return name in {"localhost", "127.0.0.1", "::1"}
+    # 0.0.0.0 counts as loopback: a browser pointed at it can only reach the
+    # viewer's own machine (users copy it from the uvicorn bind-address log).
+    return name in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
 
 def _same_host_header(request: Request, value: str) -> bool:
@@ -3119,7 +3121,13 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     if not getattr(config, "bootstrap_mode", False):
         return JSONResponse({"error": "setup finish is only available in bootstrap mode"}, status_code=409)
     if not _localhost_request(request) or not _setup_finish_origin_allowed(request):
-        return JSONResponse({"error": "setup finish is localhost-only"}, status_code=403)
+        return JSONResponse(
+            {
+                "error": "setup finish is localhost-only — open the wizard at "
+                f"http://localhost:{config.pwa_port}"
+            },
+            status_code=403,
+        )
     try:
         body = await request.json()
     except ValueError:
@@ -3127,9 +3135,13 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     if not isinstance(body, dict):
         return JSONResponse({"error": "json object is required"}, status_code=400)
 
-    workspace = str(body.get("workspace", "")).strip()
-    if not workspace:
-        return JSONResponse({"error": "workspace is required"}, status_code=400)
+    # The wizard asks one folder question: the vault (second brain). The app
+    # workspace is plumbing and defaults to ~/.ciaobot unless overridden in
+    # the Advanced section.
+    workspace = str(body.get("workspace", "")).strip() or "~/.ciaobot"
+    vault_root = str(body.get("vault_root", "")).strip()
+    if not vault_root:
+        return JSONResponse({"error": "vault_root is required"}, status_code=400)
     # Optional: an empty push contact leaves Web Push disabled until the
     # operator configures one in Settings.
     push_contact = str(body.get("push_contact", "")).strip()
@@ -3147,7 +3159,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         auth_token=str(body.get("auth_token", "")).strip() or config.pwa_auth_token,
         auth_required=bool(body.get("auth_required", True)),
         push_contact=push_contact,
-        vault_root=str(body.get("vault_root", "")).strip() or None,
+        vault_root=vault_root,
         vault_mode=str(body.get("vault_mode", "scratch")).strip().lower(),
         python_path=str(body.get("python", "")).strip() or None,
         port=port,
@@ -3174,7 +3186,13 @@ def _setup_fs_guard(request: Request) -> JSONResponse | None:
     if not getattr(config, "bootstrap_mode", False):
         return JSONResponse({"error": "not found"}, status_code=404)
     if not _localhost_request(request) or not _setup_finish_origin_allowed(request):
-        return JSONResponse({"error": "setup filesystem access is localhost-only"}, status_code=403)
+        return JSONResponse(
+            {
+                "error": "setup filesystem access is localhost-only — open the "
+                f"wizard at http://localhost:{config.pwa_port}"
+            },
+            status_code=403,
+        )
     return None
 
 

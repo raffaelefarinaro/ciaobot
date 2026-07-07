@@ -244,6 +244,7 @@ def test_setup_finish_accepts_empty_push_contact(tmp_path) -> None:
         "/api/setup/finish",
         json={
             "workspace": str(workspace),
+            "vault_root": str(tmp_path / "brain"),
             "push_contact": "",
             "launch_agents_dir": str(tmp_path / "LaunchAgents"),
             "app_dir": str(tmp_path / "Applications"),
@@ -259,6 +260,85 @@ def test_setup_finish_accepts_empty_push_contact(tmp_path) -> None:
         line.startswith("CIAO_PUSH_CONTACT=") and line != "CIAO_PUSH_CONTACT="
         for line in env_lines
     )
+
+
+def test_setup_finish_requires_vault_root(tmp_path) -> None:
+    """The wizard's one folder question is the second brain: no vault, no finish."""
+    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.serializer = serializer
+
+    resp = TestClient(app, base_url="http://localhost:8443").post(
+        "/api/setup/finish",
+        json={"workspace": str(tmp_path / "workspace")},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "vault_root is required"
+
+
+def test_setup_finish_defaults_workspace_to_dot_ciaobot(tmp_path, monkeypatch) -> None:
+    """Without an explicit workspace the app data folder defaults to ~/.ciaobot."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.serializer = serializer
+
+    vault = tmp_path / "brain"
+    resp = TestClient(app, base_url="http://localhost:8443").post(
+        "/api/setup/finish",
+        json={
+            "vault_root": str(vault),
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+            "restart": False,
+        },
+    )
+
+    assert resp.status_code == 200
+    workspace = (tmp_path / "home" / ".ciaobot").resolve()
+    assert resp.json()["workspace"] == str(workspace)
+    env_text = (workspace / ".env").read_text(encoding="utf-8")
+    # The vault lives outside the workspace, so .env records the absolute path.
+    assert f"CIAO_VAULT_ROOT={vault}" in env_text
+    assert (vault / "MEMORY.md").is_file()
+
+
+def test_setup_finish_accepts_0000_host(tmp_path) -> None:
+    """0.0.0.0 counts as loopback: users copy it from the bind-address log."""
+    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.serializer = serializer
+
+    resp = TestClient(app, base_url="http://0.0.0.0:8443").post(
+        "/api/setup/finish",
+        json={
+            "workspace": str(tmp_path / "workspace"),
+            "vault_root": str(tmp_path / "brain"),
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+            "restart": False,
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
 
 
 def test_setup_finish_requires_bootstrap_mode(tmp_path) -> None:
@@ -294,11 +374,14 @@ def test_setup_finish_is_localhost_only(tmp_path) -> None:
         "/api/setup/finish",
         json={
             "workspace": str(tmp_path / "workspace"),
+            "vault_root": str(tmp_path / "brain"),
             "push_contact": "mailto:owner@example.com",
         },
     )
 
     assert resp.status_code == 403
+    # The refusal tells the user where to go instead.
+    assert "open the wizard at http://localhost:8443" in resp.json()["error"]
 
 
 def _folder_picker_client(tmp_path, *, bootstrap: bool = True, base_url: str = "http://localhost:8443") -> TestClient:
@@ -333,6 +416,7 @@ def test_setup_list_dirs_is_localhost_only(tmp_path) -> None:
     resp = client.get("/api/setup/list-dirs", params={"path": str(tmp_path)})
 
     assert resp.status_code == 403
+    assert "open the wizard at http://localhost:8443" in resp.json()["error"]
 
 
 def test_setup_list_dirs_lists_visible_directories_only(tmp_path) -> None:

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from ciao.cli import ensure_workspace_git, setup_workspace
+from ciao.cli import ensure_vault_git, ensure_workspace_git, setup_workspace
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
@@ -88,6 +88,81 @@ def test_ensure_workspace_git_skips_without_git_binary(
     assert "skipping workspace git init" in capsys.readouterr().err
 
 
+def test_ensure_vault_git_initializes_fresh_vault(tmp_path: Path) -> None:
+    vault = tmp_path / "brain"
+    vault.mkdir()
+    (vault / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+
+    ensure_vault_git(vault)
+
+    assert _git(vault, "rev-parse", "--is-inside-work-tree").stdout.strip() == "true"
+    assert _git(vault, "branch", "--show-current").stdout.strip() == "main"
+
+    log = _git(vault, "log", "--oneline")
+    assert "Initialize Ciaobot vault" in log.stdout
+    assert len(log.stdout.strip().splitlines()) == 1
+
+    gitignore = (vault / ".gitignore").read_text(encoding="utf-8")
+    for entry in (".DS_Store", ".obsidian/workspace*"):
+        assert entry in gitignore.splitlines()
+
+    tracked = _git(vault, "ls-files").stdout.splitlines()
+    assert "MEMORY.md" in tracked
+    assert ".gitignore" in tracked
+
+
+def test_ensure_vault_git_appends_gitignore_to_existing_vault_repo(tmp_path: Path) -> None:
+    vault = tmp_path / "notes"
+    vault.mkdir()
+    assert _git(vault.parent, "init", "-b", "trunk", str(vault)).returncode == 0
+    (vault / ".gitignore").write_text("# mine\n.DS_Store\n", encoding="utf-8")
+
+    ensure_vault_git(vault)
+
+    # No commit was created and the branch is untouched.
+    assert _git(vault, "rev-parse", "HEAD").returncode != 0
+    assert _git(vault, "branch", "--show-current").stdout.strip() == "trunk"
+
+    lines = (vault / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert lines[:2] == ["# mine", ".DS_Store"]
+    assert lines.count(".DS_Store") == 1
+    assert ".obsidian/workspace*" in lines
+
+
+def test_ensure_vault_git_leaves_nested_legacy_vault_untouched(tmp_path: Path) -> None:
+    """A vault inside the workspace repo (legacy layout) is never
+    double-initialized and gets no nested .gitignore."""
+    ws = tmp_path / "ws"
+    vault = ws / "memory-vault"
+    vault.mkdir(parents=True)
+    (vault / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+    ensure_workspace_git(ws)
+
+    ensure_vault_git(vault)
+
+    assert not (vault / ".git").exists()
+    assert not (vault / ".gitignore").exists()
+    assert _git(ws, "status", "--porcelain").stdout.strip() == ""
+
+
+def test_ensure_vault_git_skips_without_git_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    vault = tmp_path / "brain"
+    vault.mkdir()
+    monkeypatch.setattr("ciao.cli.shutil.which", lambda name: None)
+
+    def fail_run(*args, **kwargs):  # pragma: no cover - must not be called
+        raise AssertionError("git must not be invoked when the binary is missing")
+
+    monkeypatch.setattr("ciao.cli.subprocess.run", fail_run)
+
+    ensure_vault_git(vault)
+
+    assert not (vault / ".git").exists()
+    assert "skipping vault git init" in capsys.readouterr().err
+
+
 def test_setup_workspace_creates_git_repo_without_committing_env(
     tmp_path: Path,
 ) -> None:
@@ -109,3 +184,38 @@ def test_setup_workspace_creates_git_repo_without_committing_env(
     assert not any(path.startswith(".claude/") for path in tracked)
     assert "CLAUDE.md" in tracked
     assert _git(ws, "status", "--porcelain").stdout.strip() == ""
+
+    # Legacy layout: the default vault lives inside the workspace repo and is
+    # tracked there — no second repo is created.
+    assert not (ws / "memory-vault" / ".git").exists()
+    assert "memory-vault/MEMORY.md" in tracked
+
+
+def test_setup_workspace_git_inits_external_vault(tmp_path: Path) -> None:
+    """A vault outside the workspace gets its own repo with the vault
+    .gitignore, and .env records the absolute vault path."""
+    ws = tmp_path / "workspace"
+    vault = tmp_path / "brain"
+    setup_workspace(
+        ws,
+        vault_root=vault,
+        launch_agents_dir=tmp_path / "LaunchAgents",
+        app_dir=tmp_path / "Applications",
+    )
+
+    assert _git(vault, "branch", "--show-current").stdout.strip() == "main"
+    log = _git(vault, "log", "--oneline")
+    assert "Initialize Ciaobot vault" in log.stdout
+
+    gitignore = (vault / ".gitignore").read_text(encoding="utf-8")
+    for entry in (".DS_Store", ".obsidian/workspace*"):
+        assert entry in gitignore.splitlines()
+
+    tracked = _git(vault, "ls-files").stdout.splitlines()
+    assert "MEMORY.md" in tracked
+
+    env_text = (ws / ".env").read_text(encoding="utf-8")
+    assert f"CIAO_VAULT_ROOT={vault}" in env_text
+    # The workspace repo neither tracks nor contains the external vault.
+    ws_tracked = _git(ws, "ls-files").stdout.splitlines()
+    assert not any(path.startswith("memory-vault/") for path in ws_tracked)

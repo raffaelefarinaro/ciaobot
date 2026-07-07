@@ -110,6 +110,34 @@ def has_origin_remote(workspace: Path) -> bool:
     return rc == 0
 
 
+def repo_toplevel(path: Path) -> Path | None:
+    """Root of the git work tree containing ``path``, or None outside git."""
+    rc, out = _git_sync(Path(path), "rev-parse", "--show-toplevel")
+    if rc != 0 or not out:
+        return None
+    return Path(out)
+
+
+def sync_root(config) -> Path:
+    """The repo root that git sync and branch backup should operate on.
+
+    Git follows the vault: when the vault root exists and is (in) a git
+    repository, sync targets the repo containing it — the second brain is the
+    user data worth versioning. Legacy layouts where the vault lives inside
+    the workspace repo resolve to the workspace root either way (same repo),
+    so their behavior is unchanged. Everything else falls back to the
+    workspace root.
+    """
+    vault = getattr(config, "vault_root", None)
+    if vault is not None:
+        vault = Path(vault)
+        if vault.is_dir():
+            toplevel = repo_toplevel(vault)
+            if toplevel is not None:
+                return toplevel
+    return Path(config.workspace_root)
+
+
 # ── sync flow ────────────────────────────────────────────────────────────────
 
 
