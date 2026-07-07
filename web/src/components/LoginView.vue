@@ -54,6 +54,10 @@
               <strong>Archive into a second brain.</strong>
               <span>Archived chats produce session insights, trajectories, and memory proposals for review.</span>
             </li>
+            <li>
+              <strong>Files, with history.</strong>
+              <span>Create, preview, edit, and restore workspace files right from the UI.</span>
+            </li>
           </ul>
         </section>
 
@@ -146,47 +150,61 @@
         </div>
 
         <div class="form-group">
-          <label for="setup-push">Push Contact</label>
+          <label for="setup-push">Notification Email (Optional)</label>
           <input
             id="setup-push"
             v-model="pushContact"
             type="text"
+            inputmode="email"
+            autocomplete="email"
             class="form-input"
-            placeholder="mailto:you@example.com"
-            required
+            placeholder="you@example.com"
             :disabled="loading"
           />
-          <span class="hint">Required. Used to register push notifications and security certificates.</span>
+          <span class="hint">Optional — enables push notifications. The Web Push standard requires an operator contact; nothing is ever emailed to you. You can set it later in Settings.</span>
         </div>
 
-        <div class="form-grid">
-          <div class="form-group">
-            <label for="setup-port">Port</label>
-            <input
-              id="setup-port"
-              v-model.number="port"
-              type="number"
-              class="form-input"
-              placeholder="8443"
-              required
-              :disabled="loading"
-            />
-          </div>
-          <div class="form-group">
-            <label for="setup-python">Python Path (Optional)</label>
-            <input
-              id="setup-python"
-              v-model="python"
-              type="text"
-              class="form-input"
-              placeholder="blank for default"
-              :disabled="loading"
-            />
+        <div class="advanced-section">
+          <button
+            id="setup-advanced-toggle"
+            type="button"
+            class="advanced-toggle"
+            :aria-expanded="advancedOpen"
+            :disabled="loading"
+            @click="advancedOpen = !advancedOpen"
+          >
+            <span class="advanced-caret">{{ advancedOpen ? '▾' : '▸' }}</span> Advanced
+          </button>
+          <div v-if="advancedOpen" class="form-grid">
+            <div class="form-group">
+              <label for="setup-port">Port</label>
+              <input
+                id="setup-port"
+                v-model.number="port"
+                type="number"
+                class="form-input"
+                placeholder="8443"
+                required
+                :disabled="loading"
+              />
+            </div>
+            <div class="form-group">
+              <label for="setup-python">Python Path (Optional)</label>
+              <input
+                id="setup-python"
+                v-model="python"
+                type="text"
+                class="form-input"
+                placeholder="blank for default"
+                :disabled="loading"
+              />
+            </div>
           </div>
         </div>
 
         <div class="form-group">
           <label>AI Provider Choice</label>
+          <span class="hint">Pick one to get started — you can add more providers later in Settings.</span>
           <div class="provider-choices">
             <label class="choice-label">
               <input type="radio" v-model="provider" value="claude" :disabled="loading" /> Claude Code
@@ -389,6 +407,7 @@ const userEditedVault = ref(false)
 const vaultMode = ref('scratch')
 const vaultRevealed = ref(false)
 const copyStatus = ref('')
+const advancedOpen = ref(false)
 
 // The vault path stays hidden while it is just the derived default: only a
 // custom split ("change location") or pointing at existing notes shows it.
@@ -531,6 +550,23 @@ async function fetchSetupStatus() {
   }
 }
 
+// The field reads as a plain email input: show "you@example.com" even when a
+// mailto: URI is pasted in (the prefix is re-added on submit). Full mailto:/
+// https: URIs typed by power users stay valid either way.
+watch(pushContact, (value) => {
+  if (value.toLowerCase().startsWith('mailto:')) {
+    pushContact.value = value.slice('mailto:'.length)
+  }
+})
+
+// Web Push VAPID subjects are mailto:/https: URIs: wrap a plain email on
+// submit, pass URIs through, and send '' to leave push unconfigured.
+function normalizedPushContact(): string {
+  const value = pushContact.value.trim()
+  if (!value || /^(mailto:|https:)/i.test(value)) return value
+  return `mailto:${value}`
+}
+
 // Watch workspace path changes to automatically update vault root if user hasn't touched it
 watch(workspace, (newVal) => {
   if (!userEditedVault.value) {
@@ -544,7 +580,7 @@ watch(workspace, (newVal) => {
 })
 
 const canFinish = computed(() => {
-  if (!workspace.value.trim() || !vaultRoot.value.trim() || !pushContact.value.trim()) {
+  if (!workspace.value.trim() || !vaultRoot.value.trim()) {
     return false
   }
   const currentProvider = provider.value
@@ -574,7 +610,7 @@ async function doFinish() {
       workspace: workspace.value,
       vault_root: vaultRoot.value,
       vault_mode: vaultMode.value,
-      push_contact: pushContact.value,
+      push_contact: normalizedPushContact(),
       port: Number(port.value),
       python: python.value || undefined,
       auth_required: authRequired.value,
@@ -1002,6 +1038,35 @@ onUnmounted(() => {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
+}
+
+.advanced-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.advanced-toggle {
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--fg3);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+.advanced-toggle:hover:not(:disabled) {
+  color: var(--fg2);
+}
+.advanced-toggle:disabled {
+  cursor: not-allowed;
+}
+.advanced-caret {
+  color: var(--accent);
 }
 
 .provider-choices {

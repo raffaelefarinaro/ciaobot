@@ -3130,9 +3130,9 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     workspace = str(body.get("workspace", "")).strip()
     if not workspace:
         return JSONResponse({"error": "workspace is required"}, status_code=400)
+    # Optional: an empty push contact leaves Web Push disabled until the
+    # operator configures one in Settings.
     push_contact = str(body.get("push_contact", "")).strip()
-    if not push_contact:
-        return JSONResponse({"error": "push_contact is required"}, status_code=400)
     try:
         port = int(body.get("port") or config.pwa_port)
     except (TypeError, ValueError):

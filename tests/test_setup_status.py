@@ -55,6 +55,21 @@ def test_setup_status_reports_workspace_and_required_config(tmp_path) -> None:
     assert data["configured"] is True
 
 
+def test_setup_status_configured_without_push_contact(tmp_path) -> None:
+    """An empty CIAO_PUSH_CONTACT never blocks a configured workspace."""
+    config = _config(tmp_path, {"CIAO_PUSH_CONTACT": ""})
+    (tmp_path / "memory-vault").mkdir()
+
+    data = setup_status(
+        config,
+        env={"PWA_AUTH_TOKEN": "test-token", "ANTHROPIC_API_KEY": "sk-anthropic"},
+    )
+
+    checks = {row["id"]: row for row in data["checks"]}
+    assert checks["push_contact"]["ok"] is False
+    assert data["configured"] is True
+
+
 def test_setup_status_reports_missing_required_config(tmp_path) -> None:
     config = _config(tmp_path, {"CIAO_PUSH_CONTACT": ""})
 
@@ -63,7 +78,9 @@ def test_setup_status_reports_missing_required_config(tmp_path) -> None:
     checks = {row["id"]: row for row in data["checks"]}
     assert checks["vault"]["ok"] is False
     assert checks["pwa_auth_token"]["ok"] is True
+    # push contact is optional: reported as not ok, but never blocks setup
     assert checks["push_contact"]["ok"] is False
+    assert checks["push_contact"]["required"] is False
     assert data["configured"] is False
 
 
@@ -210,7 +227,41 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path) -> No
     assert (apps / "Ciaobot.app" / "Contents" / "MacOS" / "Ciaobot").is_file()
 
 
-def test_setup_finish_requires_bootstrap_mode_and_push_contact(tmp_path) -> None:
+def test_setup_finish_accepts_empty_push_contact(tmp_path) -> None:
+    """Push contact is optional: setup finishes and writes an empty value
+    (Web Push stays disabled until configured in Settings)."""
+    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.serializer = serializer
+
+    workspace = tmp_path / "workspace"
+    resp = TestClient(app, base_url="http://localhost:8443").post(
+        "/api/setup/finish",
+        json={
+            "workspace": str(workspace),
+            "push_contact": "",
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+            "restart": False,
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    env_lines = (workspace / ".env").read_text(encoding="utf-8").splitlines()
+    assert "CIAO_PUSH_CONTACT=" in env_lines
+    assert not any(
+        line.startswith("CIAO_PUSH_CONTACT=") and line != "CIAO_PUSH_CONTACT="
+        for line in env_lines
+    )
+
+
+def test_setup_finish_requires_bootstrap_mode(tmp_path) -> None:
     config = _config(tmp_path)
     serializer = URLSafeTimedSerializer("test-secret")
     app = Starlette(

@@ -294,7 +294,9 @@ def setup_workspace(
     env_path = root / ".env"
     if not env_path.exists():
         token = auth_token or secrets.token_urlsafe(32)
-        contact = push_contact or "mailto:you@example.com"
+        # Empty contact = Web Push disabled until configured in Settings;
+        # never invent a fake default.
+        contact = (push_contact or "").strip()
         lines = [
             f"PWA_AUTH_TOKEN={token}",
         ]
@@ -822,7 +824,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     menubar_parser = subparsers.add_parser(
         "menubar",
-        help="Run the macOS menu bar companion (requires `pip install 'ciao[menubar]'`).",
+        help="Run the macOS menu bar companion (installed automatically on macOS).",
     )
     menubar_parser.add_argument(
         "--workspace",
