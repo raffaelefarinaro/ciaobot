@@ -2695,6 +2695,11 @@ async def run_schedule_now(request: Request) -> JSONResponse:
         result = await sm.dispatch_now(schedule_id)
     except ValueError:
         return JSONResponse({"error": "not found"}, status_code=404)
+    except RuntimeError as exc:
+        # dispatch_now raises RuntimeError when the instance is paused. That's
+        # a client-visible conflict, not a server fault, so return 409 with the
+        # message instead of leaking an unhandled 500 ("Internal Server Error").
+        return JSONResponse({"error": str(exc)}, status_code=409)
     return JSONResponse(result, status_code=201)
 
 

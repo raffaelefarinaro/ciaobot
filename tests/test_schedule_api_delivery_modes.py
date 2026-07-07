@@ -8,7 +8,7 @@ from starlette.testclient import TestClient
 
 from ciao.schedules import ScheduleManager, ScheduleStore
 from ciao.sessions import StateStore
-from ciao.web.routes_api import create_schedule, schedule_detail
+from ciao.web.routes_api import create_schedule, run_schedule_now, schedule_detail
 
 
 class _Config:
@@ -51,6 +51,47 @@ def _make_client(
     app.state.state_store = state
     app.state.project_chat_manager = _ProjectChats(workspaces)
     return TestClient(app)
+
+
+def _make_run_now_client(
+    tmp_path: Path, *, paused: bool
+) -> tuple[TestClient, str]:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    store = ScheduleStore(runtime)
+    manager = ScheduleManager(store=store, is_paused=lambda: paused)
+    entry = manager.create(
+        daily_time_utc="01:00",
+        prompt="curate",
+        model="sonnet",
+        mode="print",
+        chat_id=0,
+        frequency="manual",
+    )
+    app = Starlette(
+        routes=[
+            Route(
+                "/api/schedule-run/{schedule_id}",
+                run_schedule_now,
+                methods=["POST"],
+            ),
+        ]
+    )
+    app.state.schedule_manager = manager
+    return TestClient(app), entry.schedule_id
+
+
+def test_run_schedule_now_while_paused_returns_409(tmp_path: Path) -> None:
+    client, schedule_id = _make_run_now_client(tmp_path, paused=True)
+    response = client.post(f"/api/schedule-run/{schedule_id}")
+    assert response.status_code == 409, response.text
+    assert "paused" in response.json()["error"].lower()
+
+
+def test_run_schedule_now_missing_schedule_returns_404(tmp_path: Path) -> None:
+    client, _ = _make_run_now_client(tmp_path, paused=False)
+    response = client.post("/api/schedule-run/does-not-exist")
+    assert response.status_code == 404, response.text
 
 
 def test_create_schedule_rejects_unknown_archive_policy(tmp_path: Path) -> None:
