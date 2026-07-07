@@ -58,8 +58,9 @@ def to_template(source: Path, destination: Path) -> None:
 
 
 def main() -> None:
-    to_template(STATIC / "face.png", STATIC / "face_template.png")
-    to_template(STATIC / "face_scared.png", STATIC / "face_scared_template.png")
+    deploy = STATIC.parents[1] / "stock" / "deploy"
+    to_template(STATIC / "face.png", deploy / "face_template.png")
+    to_template(STATIC / "face_scared.png", deploy / "face_scared_template.png")
 
 
 if __name__ == "__main__":

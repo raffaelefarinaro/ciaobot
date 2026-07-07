@@ -105,8 +105,10 @@ def test_view_logs_command_opens_stderr_log(tmp_path: Path) -> None:
 
 
 def test_icon_paths_resolve_to_packaged_faces() -> None:
-    assert Path(menubar.icon_path("face.png")).is_file()
-    assert Path(menubar.icon_path("face_scared.png")).is_file()
+    # The menu bar uses only the monochrome template icons, shipped in
+    # ciao.stock/deploy (never in web/static, which the PWA build empties).
+    assert Path(menubar.icon_path("face_template.png")).is_file()
+    assert Path(menubar.icon_path("face_scared_template.png")).is_file()
 
 
 def test_menubar_template_icons_are_packaged() -> None:
