@@ -3601,6 +3601,17 @@ class ProjectChatManager:
             return
 
         last_count = len(current_ids)
+        # Announce the initial running count right away so the PWA can show a
+        # persistent "N background agents running" indicator the moment the
+        # parent turn ends, instead of only once one finishes. Clients treat a
+        # non-decreasing count as a silent badge update (no unread/toast); only
+        # drops (emitted in the loop below) mean an agent finished.
+        self._events.publish({
+            "type": "chat_subagents_ready",
+            "chat_id": chat_id,
+            "project_id": project_id,
+            "remaining": last_count,
+        })
         deadline = time.perf_counter() + 600  # 10 minutes is plenty
         while time.perf_counter() < deadline:
             await asyncio.sleep(3)

@@ -565,6 +565,20 @@
       </button>
     </div>
 
+    <!-- Background agents still running after the parent turn finished. -->
+    <div
+      v-if="store.activeBackgroundAgents > 0 && !chat.archived"
+      class="bg-agents-bar"
+      role="status"
+      aria-live="polite"
+    >
+      <span class="bg-agents-dot" aria-hidden="true"></span>
+      <span class="bg-agents-label">
+        {{ store.activeBackgroundAgents }}
+        background {{ store.activeBackgroundAgents === 1 ? 'agent' : 'agents' }} running…
+      </span>
+    </div>
+
     <!-- Slash-command picker (shown when the input starts with "/") -->
     <div v-if="showCommandsPicker" class="commands-picker" role="listbox" aria-label="Slash commands">
       <div
@@ -3150,6 +3164,38 @@ details[open] > .activity-summary::before {
   font-size: var(--text-sm);
   color: var(--fg2);
   margin-right: auto;
+}
+
+/* Background agents running after the parent turn finished. */
+.bg-agents-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  padding-left: calc(12px + var(--safe-left));
+  padding-right: calc(12px + var(--safe-right));
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  flex-shrink: 0;
+}
+
+.bg-agents-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+  animation: bg-agents-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes bg-agents-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+.bg-agents-label {
+  font-size: var(--text-sm);
+  color: var(--fg2);
 }
 
 /* Voice transcribing spinner */

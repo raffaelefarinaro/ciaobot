@@ -161,6 +161,52 @@ describe('latest status sync', () => {
   })
 })
 
+describe('background agents indicator', () => {
+  test('tracks the running count and only reconciles on a drop', () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    // /messages returns a settled assistant turn so the reconcile fired on a
+    // drop resolves on its first pass (no lingering timers after teardown).
+    apiGet.mockImplementation((path: string) =>
+      path.endsWith('/messages')
+        ? Promise.resolve([{ role: 'assistant', content: 'ok', sent_at: '' }])
+        : Promise.resolve([]),
+    )
+    const store = useProjectStore()
+    const chatId = 'c-bg'
+    store.activeChatId = chatId
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    const fire = (remaining: number) =>
+      sock.onmessage?.({
+        data: JSON.stringify({ type: 'chat_subagents_ready', chat_id: chatId, project_id: 'p1', remaining }),
+      })
+
+    fire(2) // initial announcement
+    expect(store.backgroundAgents[chatId]).toBe(2)
+    fire(3) // a subagent spawned children — still just a badge update
+    expect(store.backgroundAgents[chatId]).toBe(3)
+    fire(2) // one finished (drop)
+    expect(store.backgroundAgents[chatId]).toBe(2)
+    fire(0) // all finished
+    expect(store.backgroundAgents[chatId]).toBeUndefined()
+    expect(store.activeBackgroundAgents).toBe(0)
+  })
+
+  test('a new turn clears a stale background-agents count', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'c-bg2'
+    store.activeChatId = chatId
+    store.backgroundAgents[chatId] = 4
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({ type: 'chat_streaming_started', chat_id: chatId, project_id: 'p1' }),
+    })
+    expect(store.backgroundAgents[chatId]).toBeUndefined()
+  })
+})
+
 describe('workspace and chat transitions', () => {
   beforeEach(() => {
     routerPush.mockReset()

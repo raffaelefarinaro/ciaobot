@@ -125,6 +125,12 @@ export const useProjectStore = defineStore('projects', () => {
   // WS is open). projectStreaming is what powers sidebar dots on inactive
   // chats and projects.
   const projectStreaming = ref<Record<string, boolean>>({})
+  // Per-chat count of background subagents still running *after* the parent
+  // turn's result landed. Driven by `chat_subagents_ready` over /ws/events
+  // (the server's subagent watcher). Powers a persistent "N background agents
+  // running" indicator so the user can see work is ongoing during the quiet
+  // gap between the turn ending and the agents reporting back.
+  const backgroundAgents = ref<Record<string, number>>({})
   // Locally-tracked queued user messages (sent while a response was already
   // streaming). Cleared when the server echoes them back as a user_echo at
   // flush time, or on result when the queue ends up empty.
@@ -201,6 +207,21 @@ export const useProjectStore = defineStore('projects', () => {
   )
   let latestSyncInFlight = false
 
+  // ── WebSocket liveness ──────────────────────────────────────────────
+  // The server sends a `keepalive` frame on both /ws/chat and /ws/events
+  // every STREAM_KEEPALIVE_SECONDS (15s, see ciao/web/chat_broker.py). We use
+  // those frames purely as a liveness signal: a socket that reports
+  // readyState OPEN but has received nothing for well over the keepalive
+  // cadence is half-open (common after iOS/WKWebView suspend or a flaky
+  // network) and will never fire `onclose`, so results/subagent events
+  // published server-side never arrive and the UI looks hung until the user
+  // sends a message. The watchdog below force-reconnects such sockets.
+  const WS_STALE_MS = 45000 // ~3 missed keepalives
+  const WS_LIVENESS_CHECK_MS = 10000
+  let lastEventsFrameAt = 0
+  const lastChatFrameAt: Record<string, number> = {}
+  const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now())
+
   // ── Computed ─────────────────────────────────────────────────────────
 
   const workspaceProjects = computed(() =>
@@ -260,6 +281,10 @@ export const useProjectStore = defineStore('projects', () => {
 
   const currentQueued = computed(() =>
     queuedMessages.value[activeChatId.value || ''] || []
+  )
+
+  const activeBackgroundAgents = computed(() =>
+    backgroundAgents.value[activeChatId.value || ''] || 0
   )
 
   function projectChats(projectId: string): ChatInfo[] {
@@ -1334,18 +1359,23 @@ export const useProjectStore = defineStore('projects', () => {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(`${proto}//${location.host}/ws/chat/${chatId}`)
     sockets.value[chatId] = ws
+    lastChatFrameAt[chatId] = nowMs()
 
     ws.onopen = () => {
+      lastChatFrameAt[chatId] = nowMs()
       sendFocus(chatId)
     }
 
     ws.onmessage = (ev) => {
+      // Any frame (including the server keepalive) proves the socket is live.
+      lastChatFrameAt[chatId] = nowMs()
       const event: WsEvent = JSON.parse(ev.data)
       handleEvent(chatId, event)
     }
 
     ws.onclose = () => {
       delete sockets.value[chatId]
+      delete lastChatFrameAt[chatId]
       // Clear local streaming state; the server broker keeps the SDK call
       // running, and any reconnect will replay buffered events so the UI
       // picks up right where it left off.
@@ -1365,6 +1395,42 @@ export const useProjectStore = defineStore('projects', () => {
     } catch { /* ignore */ }
   }
 
+  // Re-pull authoritative history then reconnect the per-chat WS. Used on
+  // resume-from-background and by the liveness watchdog: a bare reconnect can
+  // miss events the broker already flushed, so loadMessages first, then let
+  // connectWs replay whatever the broker still buffers on top.
+  async function reloadAndReconnectChat(chatId: string) {
+    disconnectWs(chatId)
+    await loadMessages(chatId)
+    void loadSubagents(chatId)
+    connectWs(chatId)
+    void markRead(chatId)
+  }
+
+  // Detect and recover half-open sockets (readyState OPEN, no keepalive for
+  // WS_STALE_MS). Closing the events socket triggers its onclose→reconnect,
+  // whose `snapshot` reconciles any missed turn/subagent state; the per-chat
+  // socket is reloaded+reconnected so a result delivered during the dead
+  // window shows up without the user having to send a message.
+  function checkWsLiveness() {
+    if (typeof WebSocket === 'undefined') return
+    const now = nowMs()
+    const ews = eventsSocket.value
+    if (ews && ews.readyState === WebSocket.OPEN && lastEventsFrameAt && now - lastEventsFrameAt > WS_STALE_MS) {
+      lastEventsFrameAt = now // don't re-fire before the reconnect lands
+      try { ews.close() } catch { /* ignore */ }
+    }
+    const chatId = activeChatId.value
+    if (chatId) {
+      const cws = sockets.value[chatId]
+      const seen = lastChatFrameAt[chatId]
+      if (cws && cws.readyState === WebSocket.OPEN && seen && now - seen > WS_STALE_MS) {
+        lastChatFrameAt[chatId] = now
+        void reloadAndReconnectChat(chatId)
+      }
+    }
+  }
+
   if (typeof document !== 'undefined') {
     // On resume from background we must both reconnect sockets AND re-pull
     // the persisted history: if the assistant reply landed while the PWA
@@ -1376,11 +1442,7 @@ export const useProjectStore = defineStore('projects', () => {
     async function resumeActiveChat() {
       const chatId = activeChatId.value
       if (chatId) {
-        disconnectWs(chatId)
-        await loadMessages(chatId)
-        void loadSubagents(chatId)
-        connectWs(chatId)
-        void markRead(chatId)
+        await reloadAndReconnectChat(chatId)
       }
       const ews = eventsSocket.value
       if (ews && ews.readyState === WebSocket.OPEN) {
@@ -1389,6 +1451,9 @@ export const useProjectStore = defineStore('projects', () => {
         connectEventsWs()
       }
     }
+
+    // Liveness watchdog: cheap timer, only acts on genuinely stale sockets.
+    window.setInterval(checkWsLiveness, WS_LIVENESS_CHECK_MS)
 
     document.addEventListener('visibilitychange', () => {
       documentVisible.value = document.visibilityState === 'visible'
@@ -1442,8 +1507,13 @@ export const useProjectStore = defineStore('projects', () => {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(`${proto}//${location.host}/ws/events`)
     eventsSocket.value = ws
+    lastEventsFrameAt = nowMs()
+
+    ws.onopen = () => { lastEventsFrameAt = nowMs() }
 
     ws.onmessage = (ev) => {
+      // Any frame (including the server keepalive) proves the socket is live.
+      lastEventsFrameAt = nowMs()
       let msg: EventsWsMessage
       try { msg = JSON.parse(ev.data) } catch { return }
       handleEventsMessage(msg)
@@ -1484,6 +1554,9 @@ export const useProjectStore = defineStore('projects', () => {
       }
       case 'chat_streaming_started':
         projectStreaming.value[msg.chat_id] = true
+        // A fresh turn supersedes the prior turn's background-agent display
+        // (and self-heals a count left stale by a missed drop during a WS gap).
+        delete backgroundAgents.value[msg.chat_id]
         if (
           msg.chat_id === activeChatId.value &&
           shouldReconnectActiveChatOnStreamingStarted(sockets.value[msg.chat_id])
@@ -1538,6 +1611,17 @@ export const useProjectStore = defineStore('projects', () => {
         break
       }
       case 'chat_subagents_ready': {
+        const prevAgents = backgroundAgents.value[msg.chat_id] || 0
+        if (msg.remaining > 0) {
+          backgroundAgents.value[msg.chat_id] = msg.remaining
+        } else {
+          delete backgroundAgents.value[msg.chat_id]
+        }
+        // A non-decreasing positive count is the initial "N running"
+        // announcement (or a subagent spawning children): just update the
+        // badge silently. Only a drop means an agent finished and produced
+        // output worth surfacing.
+        if (msg.remaining >= prevAgents && msg.remaining > 0) break
         const isFocused = activeChatId.value === msg.chat_id &&
           (typeof document === 'undefined' || document.visibilityState === 'visible')
         if (isFocused) {
@@ -2577,10 +2661,10 @@ export const useProjectStore = defineStore('projects', () => {
     // State
     projects, chats, workspaces, workspaceProviderOptions, workspaceClaudeAiConnectors, workspaceAppDefaultModel, activeWorkspace, activeChatId, messages, subagents, unread,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
-    projectStreaming, toasts, pendingPermissions, activeQuestions, creatingChatProjectIds,
+    projectStreaming, backgroundAgents, toasts, pendingPermissions, activeQuestions, creatingChatProjectIds,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
-    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, currentActivity, currentTimeline, projectChats,
+    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, projectChats,
     chatUnread, projectUnread, workspaceUnread, clearUnread, markRead, markAllRead,
     recentChats, projectIsStreaming, isChatStreaming, workspaceIsStreaming, projectFor,
     // Actions
