@@ -702,8 +702,8 @@
                     :model-value="tierOverrideValue(selectedTierProviderSection.key as TierProviderKey, tier.key)"
                     :sections="tierModelSections"
                     :disabled="routinesSaving || !selectedTierProviderSection.available"
-                    placeholder="Default ({{ tierEffectiveValue(selectedTierProviderSection.key as TierProviderKey, tier.key) || 'automatic' }})"
-                    empty-placeholder="Default ({{ tierEffectiveValue(selectedTierProviderSection.key as TierProviderKey, tier.key) || 'automatic' }})"
+                    :placeholder="`Default (${tierEffectiveValue(selectedTierProviderSection.key as TierProviderKey, tier.key) || 'automatic'})`"
+                    :empty-placeholder="`Default (${tierEffectiveValue(selectedTierProviderSection.key as TierProviderKey, tier.key) || 'automatic'})`"
                     @update:model-value="saveTierModel(selectedTierProviderSection.key as TierProviderKey, tier.key, $event)"
                   />
                   <input
