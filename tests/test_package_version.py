@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -9,7 +9,9 @@ from starlette.testclient import TestClient
 
 from ciao.package_version import (
     DEFAULT_GITHUB_REPO,
+    _github_request,
     latest_release_url,
+    make_cached_package_status,
     package_changelog,
     package_status,
 )
@@ -60,6 +62,90 @@ def test_package_status_handles_unreachable_api() -> None:
     assert data["latest_version"] == ""
     assert data["update_available"] is False
     assert "offline" in data["error"]
+
+
+def test_package_status_rate_limit_is_reported_as_transient() -> None:
+    def opener(request, timeout: float):
+        raise HTTPError(request.full_url, 403, "rate limit exceeded", {}, None)
+
+    data = package_status(current_version="0.2.0", opener=opener)
+
+    assert data["latest_version"] == ""
+    assert data["update_available"] is False
+    assert "rate limit" in str(data["error"]).lower()
+    # The raw "HTTP Error 403" string is not surfaced to the user.
+    assert "403" not in str(data["error"])
+
+
+def test_package_status_non_ratelimit_http_error_keeps_code() -> None:
+    def opener(request, timeout: float):
+        raise HTTPError(request.full_url, 500, "Server Error", {}, None)
+
+    data = package_status(current_version="0.2.0", opener=opener)
+
+    assert "500" in str(data["error"])
+
+
+def test_github_request_adds_auth_header_when_token_present(monkeypatch) -> None:
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setenv("CIAO_GITHUB_TOKEN", "secret-token")
+
+    request = _github_request("https://api.github.com/x")
+
+    assert request.headers.get("Authorization") == "Bearer secret-token"
+
+
+def test_github_request_omits_auth_header_without_token(monkeypatch) -> None:
+    for name in ("CIAO_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+
+    request = _github_request("https://api.github.com/x")
+
+    assert request.headers.get("Authorization") is None
+
+
+def test_cached_package_status_serves_fresh_within_ttl() -> None:
+    now = {"t": 0.0}
+    calls = {"n": 0}
+
+    def fetch():
+        calls["n"] += 1
+        return {"latest_version": "0.3.0", "error": ""}
+
+    cached = make_cached_package_status(
+        fetch=fetch, ttl_ok=100.0, clock=lambda: now["t"]
+    )
+
+    assert cached()["latest_version"] == "0.3.0"
+    now["t"] = 50.0
+    assert cached()["latest_version"] == "0.3.0"
+    assert calls["n"] == 1  # served from cache, no second fetch
+
+    now["t"] = 150.0  # past ttl_ok
+    cached()
+    assert calls["n"] == 2  # expired, refetched
+
+
+def test_cached_package_status_serves_last_good_on_error() -> None:
+    now = {"t": 0.0}
+    results = [
+        {"latest_version": "0.3.0", "error": ""},
+        {"latest_version": "", "error": "GitHub rate limit reached; retry later."},
+    ]
+
+    def fetch():
+        return results.pop(0)
+
+    cached = make_cached_package_status(
+        fetch=fetch, ttl_ok=100.0, ttl_error=10.0, clock=lambda: now["t"]
+    )
+
+    assert cached()["latest_version"] == "0.3.0"
+    now["t"] = 200.0  # expire the good value; next fetch returns an error
+    served = cached()
+    assert served["latest_version"] == "0.3.0"  # last good served through the error
+    assert served["error"] == ""
 
 
 def test_package_changelog_lists_commits_newest_first() -> None:

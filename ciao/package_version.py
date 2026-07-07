@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -27,14 +28,29 @@ def latest_release_url(repo: str | None = None) -> str:
     return f"https://api.github.com/repos/{repo}/releases/latest"
 
 
+def _github_token() -> str:
+    """Return a GitHub API token from the environment, if any.
+
+    Authenticated requests raise GitHub's rate limit from 60 to 5000 req/hr,
+    which matters on shared/NAT egress IPs where the unauthenticated pool is
+    easily exhausted by other clients.
+    """
+    for name in ("CIAO_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"):
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def _github_request(url: str) -> urllib.request.Request:
-    return urllib.request.Request(
-        url,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "ciaobot-package-updater",
-        },
-    )
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "ciaobot-package-updater",
+    }
+    token = _github_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return urllib.request.Request(url, headers=headers)
 
 
 def _version_key(value: str) -> tuple:
@@ -71,6 +87,14 @@ def package_status(
         payload = json.loads(raw.decode("utf-8"))
         if isinstance(payload, dict):
             latest = _latest_from_payload(payload)
+    except urllib.error.HTTPError as exc:
+        # GitHub returns 403 (and sometimes 429) with a "rate limit exceeded"
+        # reason when the unauthenticated 60 req/hr per-IP quota is spent.
+        # Report it as a transient condition rather than a raw HTTP error.
+        if exc.code in (403, 429):
+            error = "GitHub rate limit reached; the update check will retry later."
+        else:
+            error = f"HTTP {exc.code}: {exc.reason}"
     except (OSError, urllib.error.URLError, ValueError, json.JSONDecodeError) as exc:
         error = str(exc)
 
@@ -84,6 +108,47 @@ def package_status(
         "source": source,
         "error": error,
     }
+
+
+def make_cached_package_status(
+    *,
+    fetch: Callable[[], dict[str, object]] = package_status,
+    ttl_ok: float = 6 * 3600.0,
+    ttl_error: float = 300.0,
+    clock: Callable[[], float] = time.monotonic,
+) -> Callable[[], dict[str, object]]:
+    """Return a zero-arg callable that caches ``fetch`` results in-process.
+
+    Successful lookups are cached for ``ttl_ok`` seconds so the update check
+    contacts GitHub only a few times a day instead of on every Settings open —
+    the main reason the shared-IP rate limit gets hit at all. When a refresh
+    fails (e.g. a transient ``403 rate limit exceeded``), the last known-good
+    result is served instead and a fresh attempt is retried after
+    ``ttl_error`` seconds, so an intermittent rate limit never surfaces as an
+    "Update check failed" banner once a good version has been seen.
+    """
+    state: dict[str, Any] = {"value": None, "good": None, "expires": 0.0}
+
+    def cached() -> dict[str, object]:
+        now = clock()
+        current = state["value"]
+        if current is not None and now < state["expires"]:
+            return current
+
+        result = fetch()
+        if result.get("error") and state["good"] is not None:
+            # Serve the last successful answer; retry again soon.
+            state["value"] = state["good"]
+            state["expires"] = now + ttl_error
+            return state["good"]
+
+        state["value"] = result
+        state["expires"] = now + (ttl_ok if not result.get("error") else ttl_error)
+        if not result.get("error"):
+            state["good"] = result
+        return result
+
+    return cached
 
 
 def package_changelog(
