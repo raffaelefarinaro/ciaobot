@@ -28,6 +28,7 @@ import logging
 import os
 import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,12 @@ from ciao.dag import Edge, Node, NodeResult, run as run_dag
 logger = logging.getLogger(__name__)
 
 _DEFAULT_BASELINE = Path(".runtime/dependency_baseline.json")
+
+# Dependencies that should be bumped to the latest release during release prep
+# without agent deliberation: the Claude Code / agent SDK tracks the CLI we ship
+# against, so keeping it current is routine housekeeping rather than a judgement
+# call. Everything else is surfaced for review but left to the operator/model.
+AUTO_UPDATE_KEYS = ("claude-agent-sdk",)
 
 # Known repository URLs for direct dependencies to avoid lookup overhead
 KNOWN_REPOS = {
@@ -336,6 +343,121 @@ def install_updated_packages(updated_python: bool, updated_npm: bool, workspace_
             logger.info("NPM dependencies updated successfully.")
         except Exception as e:
             logger.error("Failed to run npm install: %s", e)
+
+
+def get_latest_pypi_version(package_name: str) -> str | None:
+    """Return the latest released version on PyPI, or None on any failure."""
+    try:
+        r = httpx.get(f"https://pypi.org/pypi/{package_name}/json", timeout=10.0)
+        if r.status_code == 200:
+            info = r.json().get("info") or {}
+            return info.get("version") or None
+    except Exception:
+        pass
+    return None
+
+
+def get_latest_npm_version(package_name: str) -> str | None:
+    """Return the latest released version on the npm registry, or None."""
+    try:
+        r = httpx.get(f"https://registry.npmjs.org/{package_name}/latest", timeout=10.0)
+        if r.status_code == 200:
+            return r.json().get("version") or None
+    except Exception:
+        pass
+    return None
+
+
+def _pinned_version(spec: str) -> str | None:
+    """Extract a concrete version from a dependency spec.
+
+    Handles Python pins (``==1.2.3``) and npm ranges (``^1.2.3``, ``~1.2.3``).
+    Returns None for open specs like ``*`` where no version is declared.
+    """
+    m = re.search(r"[0-9]+(?:\.[0-9]+)*[0-9a-zA-Z.\-]*", spec or "")
+    return m.group(0) if m else None
+
+
+@dataclass(frozen=True, slots=True)
+class AvailableUpdate:
+    key: str
+    ecosystem: str  # "python" | "npm"
+    current: str
+    latest: str
+    is_safe: bool  # same-major (minor/patch) bump, safe to take automatically
+    auto: bool  # in AUTO_UPDATE_KEYS: bump without deliberation
+
+
+def check_available_updates(workspace_root: Path) -> list[AvailableUpdate]:
+    """Compare declared dependencies against the latest published versions.
+
+    Queries PyPI / the npm registry for every directly-declared dependency and
+    returns the ones with a newer release available, flagging same-major
+    ("safe") bumps and the auto-update packages so the release flow can present
+    them for review.
+    """
+    pyproject_path = workspace_root / "pyproject.toml"
+    package_json_path = workspace_root / "web" / "package.json"
+    python_deps = parse_pyproject_dependencies(pyproject_path)
+    npm_deps = parse_npm_dependencies(package_json_path)
+
+    updates: list[AvailableUpdate] = []
+
+    def _consider(name: str, spec: str, ecosystem: str, latest: str | None) -> None:
+        current = _pinned_version(spec)
+        if not current or not latest:
+            return
+        if parse_semver(latest) <= parse_semver(current):
+            return
+        updates.append(
+            AvailableUpdate(
+                key=name,
+                ecosystem=ecosystem,
+                current=current,
+                latest=latest,
+                is_safe=is_newer_and_safe_update(current, latest),
+                auto=name in AUTO_UPDATE_KEYS,
+            )
+        )
+
+    for name, spec in sorted(python_deps.items()):
+        _consider(name, spec, "python", get_latest_pypi_version(name))
+    for name, spec in sorted(npm_deps.items()):
+        _consider(name, spec, "npm", get_latest_npm_version(name))
+
+    return updates
+
+
+def apply_auto_updates(
+    workspace_root: Path, updates: list[AvailableUpdate], *, reinstall: bool = True
+) -> list[str]:
+    """Bump the auto-update dependencies (Claude SDK) to their latest release.
+
+    Rewrites ``pyproject.toml`` / ``web/package.json`` in place and optionally
+    reinstalls so checks run against the new version. Returns human-readable
+    labels for the changes applied.
+    """
+    pyproject_path = workspace_root / "pyproject.toml"
+    package_json_path = workspace_root / "web" / "package.json"
+
+    applied: list[str] = []
+    updated_python = False
+    updated_npm = False
+    for u in updates:
+        if not u.auto:
+            continue
+        if u.ecosystem == "python":
+            if update_pyproject_toml_dependency(pyproject_path, u.key, u.latest):
+                updated_python = True
+                applied.append(f"{u.key} (Python: {u.current} -> {u.latest})")
+        elif u.ecosystem == "npm":
+            if update_npm_dependency(package_json_path, u.key, u.latest):
+                updated_npm = True
+                applied.append(f"{u.key} (NPM: {u.current} -> {u.latest})")
+
+    if reinstall and (updated_python or updated_npm):
+        install_updated_packages(updated_python, updated_npm, workspace_root)
+    return applied
 
 
 def _resolve_model(requested: str) -> str:

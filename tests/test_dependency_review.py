@@ -6,12 +6,17 @@ import json
 from pathlib import Path
 
 from ciao.dag import NodeResult, _start_node, _validate
+import ciao.dependency_review as depreview
 from ciao.dependency_review import (
+    AUTO_UPDATE_KEYS,
     TRACKED_TOOLS,
     _extract_json_block,
+    _pinned_version,
     _read_baseline,
     _resolve_model,
+    apply_auto_updates,
     build_review_dag,
+    check_available_updates,
 )
 
 
@@ -140,3 +145,75 @@ def test_every_tracked_tool_has_repo() -> None:
     for t in TRACKED_TOOLS:
         assert t["repo"].startswith("https://github.com/")
         assert t["key"]
+
+
+def test_pinned_version_extracts_from_python_and_npm_specs() -> None:
+    assert _pinned_version("==0.2.111") == "0.2.111"
+    assert _pinned_version("^5.0.0") == "5.0.0"
+    assert _pinned_version("~1.2.3") == "1.2.3"
+    assert _pinned_version("==0.4.0; platform_system == 'Darwin'") == "0.4.0"
+    assert _pinned_version("*") is None
+
+
+def _write_update_tree(root: Path) -> None:
+    (root / "web").mkdir()
+    (root / "pyproject.toml").write_text(
+        "[project]\n"
+        'name = "ciao"\n'
+        'version = "0.4.5"\n'
+        "dependencies = [\n"
+        '  "claude-agent-sdk==0.2.111",\n'
+        '  "openai==2.44.0",\n'
+        "]\n",
+        encoding="utf-8",
+    )
+    (root / "web" / "package.json").write_text(
+        json.dumps(
+            {"name": "pwa", "version": "0.1.0", "dependencies": {"vue": "^3.5.0"}},
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_check_available_updates_flags_newer_and_auto(tmp_path: Path, monkeypatch) -> None:
+    _write_update_tree(tmp_path)
+    pypi = {"claude-agent-sdk": "0.2.200", "openai": "2.44.0"}
+    npm = {"vue": "4.0.0"}
+    monkeypatch.setattr(depreview, "get_latest_pypi_version", lambda n: pypi.get(n))
+    monkeypatch.setattr(depreview, "get_latest_npm_version", lambda n: npm.get(n))
+
+    updates = check_available_updates(tmp_path)
+    by_key = {u.key: u for u in updates}
+
+    # openai has no newer release, so it is omitted.
+    assert "openai" not in by_key
+    # claude-agent-sdk got a same-major bump and is flagged auto + safe.
+    sdk = by_key["claude-agent-sdk"]
+    assert (sdk.current, sdk.latest) == ("0.2.111", "0.2.200")
+    assert sdk.auto is True and sdk.is_safe is True
+    # vue jumped a major version: surfaced but not safe, not auto.
+    vue = by_key["vue"]
+    assert vue.auto is False and vue.is_safe is False
+
+
+def test_apply_auto_updates_only_touches_auto_keys(tmp_path: Path, monkeypatch) -> None:
+    _write_update_tree(tmp_path)
+    pypi = {"claude-agent-sdk": "0.2.200", "openai": "3.0.0"}
+    npm = {"vue": "4.0.0"}
+    monkeypatch.setattr(depreview, "get_latest_pypi_version", lambda n: pypi.get(n))
+    monkeypatch.setattr(depreview, "get_latest_npm_version", lambda n: npm.get(n))
+
+    updates = check_available_updates(tmp_path)
+    applied = apply_auto_updates(tmp_path, updates, reinstall=False)
+
+    assert "claude-agent-sdk" in AUTO_UPDATE_KEYS
+    assert applied == ["claude-agent-sdk (Python: 0.2.111 -> 0.2.200)"]
+    pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'claude-agent-sdk==0.2.200' in pyproject
+    # Non-auto deps are left untouched even though newer versions exist.
+    assert 'openai==2.44.0' in pyproject
+    assert '"vue": "^3.5.0"' in (tmp_path / "web" / "package.json").read_text(
+        encoding="utf-8"
+    )
