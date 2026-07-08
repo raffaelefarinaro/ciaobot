@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.9 - 2026-07-08
+
+### Fixed
+- fix(setup): pin LaunchAgents to the opt interpreter, not the Cellar keg (`16b97e6`)
+
 ## v0.4.8 - 2026-07-08
 
 ### Added
