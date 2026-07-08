@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 from itsdangerous import URLSafeTimedSerializer
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -234,6 +237,73 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     assert not (workspace / "memory-vault" / "MEMORY.md").exists()
     assert (launch_agents / "com.ciao.server.plist").is_file()
     assert (apps / "Ciaobot.app" / "Contents" / "MacOS" / "Ciaobot").is_file()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="launchd handoff is macOS-only")
+def test_setup_finish_foreground_handoff_to_launchd(tmp_path, monkeypatch) -> None:
+    """An interactive foreground `ciao run` hands the server to launchd:
+    finish schedules the detached agent loader and requests a clean exit
+    (code 0, no re-exec) so the user can close the terminal."""
+    import ciao.web.routes_api as routes_api
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CIAO_WORKSPACE", "")
+    monkeypatch.setenv("PWA_PORT", "")
+    monkeypatch.setattr(routes_api, "_interactive_foreground_run", lambda: True)
+    # Intercept only the handoff shell and launchctl; setup_workspace's git
+    # calls (run → Popen) must stay real.
+    real_popen = routes_api.subprocess.Popen
+    popen_calls: list[list[str]] = []
+
+    def fake_popen(cmd, *a, **k):
+        if cmd and cmd[0] == "/bin/sh":
+            popen_calls.append(list(cmd))
+            return SimpleNamespace(pid=1)
+        return real_popen(cmd, *a, **k)
+
+    monkeypatch.setattr(routes_api.subprocess, "Popen", fake_popen)
+    real_run = routes_api.subprocess.run
+    run_calls: list[list[str]] = []
+
+    def fake_run(cmd, *a, **k):
+        if cmd and cmd[0] == "launchctl":
+            run_calls.append(list(cmd))
+            return SimpleNamespace(returncode=0)
+        return real_run(cmd, *a, **k)
+
+    monkeypatch.setattr(routes_api.subprocess, "run", fake_run)
+
+    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+    serializer = URLSafeTimedSerializer("test-secret")
+    restarts: list[int] = []
+    app = Starlette(
+        routes=[Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.serializer = serializer
+    app.state.request_restart = restarts.append
+
+    resp = TestClient(app, base_url="http://localhost:8443").post(
+        "/api/setup/finish",
+        json={
+            "workspace": str(tmp_path / "workspace"),
+            "app_dir": str(tmp_path / "Applications"),
+        },
+    )
+
+    assert resp.status_code == 200
+    # No launch_agents_dir override: plists land in the (faked) per-user dir.
+    assert (home / "Library" / "LaunchAgents" / "com.ciao.server.plist").is_file()
+    # Clean exit instead of the re-exec restart code.
+    assert restarts == [0]
+    # The detached helper loads the server agent after this process exits.
+    assert popen_calls, "launchd loader was not scheduled"
+    script = " ".join(popen_calls[0])
+    assert "com.ciao.server.plist" in script
+    assert "launchctl" in script
 
 
 def test_setup_finish_accepts_empty_push_contact(tmp_path) -> None:

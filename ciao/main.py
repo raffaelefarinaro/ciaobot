@@ -152,6 +152,44 @@ def _push_subject_for_config(config: CiaoConfig) -> str:
     return _push_subject_from_env()
 
 
+def _open_browser_when_ready(url: str) -> None:
+    """Open the first-run setup wizard in the default browser.
+
+    Waits (in a daemon thread) until the server answers so the tab never
+    lands on a connection error. Interactive first runs only: skipped when
+    stderr is not a TTY (launchd, CI, redirected logs) or when
+    CIAO_NO_BROWSER is set.
+    """
+    if os.environ.get("CIAO_NO_BROWSER"):
+        return
+    try:
+        if not sys.stderr.isatty():
+            return
+    except (AttributeError, ValueError):
+        return
+
+    def _wait_and_open() -> None:
+        import urllib.error
+        import urllib.request
+        import webbrowser
+
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            try:
+                urllib.request.urlopen(url, timeout=1)
+            except urllib.error.HTTPError:
+                pass  # any HTTP response means the server is up
+            except OSError:
+                time.sleep(0.5)
+                continue
+            webbrowser.open(url)
+            return
+
+    threading.Thread(
+        target=_wait_and_open, daemon=True, name="ciao-open-wizard"
+    ).start()
+
+
 async def _async_main() -> int:
     _ensure_homebrew_on_path()
     os.environ.setdefault("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "file")
@@ -513,10 +551,17 @@ async def _async_main() -> int:
     if getattr(config, "bootstrap_mode", False):
         # The setup wizard's finish step only accepts loopback hosts, so give
         # users a URL that works instead of the 0.0.0.0 bind address above.
-        logger.info(
-            "First-run setup: open http://localhost:%d to complete the wizard.",
-            config.pwa_port,
+        setup_url = f"http://localhost:{config.pwa_port}"
+        print(
+            "\n"
+            "  ──────────────────────────────────────────────────────\n"
+            f"   First-run setup — open  {setup_url}\n"
+            "   in your browser and follow the wizard.\n"
+            "  ──────────────────────────────────────────────────────\n",
+            file=sys.stderr,
+            flush=True,
         )
+        _open_browser_when_ready(setup_url)
     tracker.done("server_starting")
 
     restart_flag: list[int | None] = [None]
@@ -538,6 +583,10 @@ async def _async_main() -> int:
         # handoff written by the setup wizard's finish step).
         def _force_exit() -> None:
             time.sleep(15)
+            if code == 0:
+                # A clean-exit request (setup wizard handing the server over
+                # to launchd): dying is the point, don't relaunch.
+                os._exit(0)
             logger.info("Cleanup did not finish; re-execing for the requested restart")
             try:
                 os.execv(sys.executable, [sys.executable, "-m", "ciao.cli", *sys.argv[1:]])

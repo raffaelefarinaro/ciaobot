@@ -252,3 +252,49 @@ def test_setup_workspace_rerun_honors_existing_env_vault_root(
     # .env is left untouched and still points at the original vault.
     assert (ws / ".env").read_text(encoding="utf-8") == env_before
     assert "CIAO_VAULT_ROOT=brain-a" in env_before
+
+
+def test_setup_workspace_existing_mode_adopts_folder_as_vault(
+    tmp_path: Path,
+) -> None:
+    """Single-folder setup: with vault_mode=existing and no vault_root, the
+    chosen folder itself is the vault, so the user's notes stay in place and
+    the onboarding agent adapts them there."""
+    ws = tmp_path / "notes"
+    ws.mkdir()
+    (ws / "ideas.md").write_text("# Ideas\n", encoding="utf-8")
+
+    setup_workspace(
+        ws,
+        vault_mode="existing",
+        launch_agents_dir=tmp_path / "LaunchAgents",
+        app_dir=tmp_path / "Applications",
+    )
+
+    # The vault is the folder root: scaffold lands next to the user's notes,
+    # no memory-vault/ subfolder is created.
+    assert "CIAO_VAULT_ROOT=." in (ws / ".env").read_text(encoding="utf-8")
+    assert (ws / "MEMORY.md").is_file()
+    assert (ws / "ideas.md").is_file()
+    assert not (ws / "memory-vault").exists()
+
+
+def test_setup_workspace_existing_mode_keeps_scaffolded_vault(
+    tmp_path: Path,
+) -> None:
+    """A folder that already has a memory-vault/ (right shape) is adopted
+    as-is: the vault stays at memory-vault, not the folder root."""
+    ws = tmp_path / "prior-workspace"
+    (ws / "memory-vault").mkdir(parents=True)
+
+    setup_workspace(
+        ws,
+        vault_mode="existing",
+        launch_agents_dir=tmp_path / "LaunchAgents",
+        app_dir=tmp_path / "Applications",
+    )
+
+    assert "CIAO_VAULT_ROOT=memory-vault" in (ws / ".env").read_text(encoding="utf-8")
+    assert (ws / "memory-vault" / "MEMORY.md").is_file()
+    # No adapt-in-place scaffold at the folder root.
+    assert not (ws / "MEMORY.md").exists()

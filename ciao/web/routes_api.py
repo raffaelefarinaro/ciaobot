@@ -2992,10 +2992,8 @@ def _routines_payload(config, app_settings) -> dict:
         title_effective = config.title_model_override
     elif shutil.which("apfel") is not None:
         title_effective = "apfel"
-    elif ollama.models:
-        title_effective = ollama.title_model
     else:
-        title_effective = config.title_model
+        title_effective = config.haiku_model_for_workspace("personal")
     if config.critique_models:
         critique_effective = config.critique_models
     elif config.openrouter.available:
@@ -3004,6 +3002,10 @@ def _routines_payload(config, app_settings) -> dict:
         critique_effective = f"{config.ollama.sonnet_model},{config.ollama.haiku_model},{config.ollama.opus_model}"
     else:
         critique_effective = "sonnet,haiku,opus"
+    if config.insights_model_override:
+        insights_effective = config.insights_model_override
+    else:
+        insights_effective = config.sonnet_model_for_workspace("personal")
 
     return {
         # Overrides as stored ("" = automatic default).
@@ -3019,7 +3021,7 @@ def _routines_payload(config, app_settings) -> dict:
         "openrouter_opus_model": s.openrouter_opus_model,
         # What actually runs right now, after defaults.
         "title_model_effective": title_effective,
-        "insights_model_effective": config.insights_model,
+        "insights_model_effective": insights_effective,
 
         "critique_models_effective": critique_effective,
         "alias_tiers": {
@@ -3281,6 +3283,51 @@ def _setup_finish_origin_allowed(request: Request) -> bool:
     return True
 
 
+def _interactive_foreground_run() -> bool:
+    """True when this server was started from an interactive terminal."""
+    try:
+        return sys.stderr.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _schedule_launchd_server_handoff() -> bool:
+    """Spawn a detached helper that starts the launchd server agent.
+
+    The helper runs after this process exits (a foreground `ciao run` still
+    holds the port), so the wizard's finish can hand the server to launchd
+    and the user can close the terminal. The agent's RunAtLoad + KeepAlive
+    cover the race: if the port is still held on first launch, launchd
+    retries. Returns False when the plist is missing or the spawn fails, in
+    which case the caller falls back to the in-place re-exec restart.
+    """
+    plist = Path.home() / "Library" / "LaunchAgents" / "com.ciao.server.plist"
+    if not plist.exists():
+        return False
+    script = (
+        "sleep 3; "
+        f"/bin/launchctl load -w '{plist}' 2>/dev/null; "
+        f"/bin/launchctl kickstart gui/{os.getuid()}/com.ciao.server 2>/dev/null; "
+        "exit 0"
+    )
+    try:
+        subprocess.Popen(
+            ["/bin/sh", "-c", script],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    print(
+        "\nSetup complete — Ciaobot is moving to the background service.\n"
+        "You can close this terminal; the server now starts automatically at login.\n",
+        file=sys.stderr,
+        flush=True,
+    )
+    return True
+
+
 async def setup_finish_endpoint(request: Request) -> JSONResponse:
     """Write real setup config from bootstrap mode and request supervisor restart."""
     config = request.app.state.config
@@ -3341,10 +3388,12 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     # Best-effort: bring the menu bar companion up right away so setup ends
     # with the icon visible instead of waiting for the next login. Only for
     # the real per-user LaunchAgents dir — scripted/test setups pass a custom
-    # dir and must not register anything with launchd. The server agent is
-    # intentionally NOT loaded here — a foreground `ciao run` relaunches
-    # itself, and a launchd copy would fight it for the port.
-    if sys.platform == "darwin" and not str(body.get("launch_agents_dir", "")).strip():
+    # dir and must not register anything with launchd.
+    real_launch_agents = (
+        sys.platform == "darwin"
+        and not str(body.get("launch_agents_dir", "")).strip()
+    )
+    if real_launch_agents:
         menubar_plist = Path.home() / "Library" / "LaunchAgents" / "com.ciao.menubar.plist"
         if menubar_plist.exists():
             try:
@@ -3361,10 +3410,22 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
                 logger.info("Could not start the menu bar agent; it will load at next login.")
 
     restart = bool(body.get("restart", True))
+    # An interactive foreground `ciao run` (the documented install flow) hands
+    # the server over to launchd instead of re-execing: a detached helper
+    # loads the server agent once this process has exited and released the
+    # port, and the wizard requests a clean exit (code 0, no relaunch). The
+    # user can then close the terminal. Under launchd stderr is a log file,
+    # not a TTY, so a supervised server keeps the plain re-exec restart.
+    handoff = (
+        restart
+        and real_launch_agents
+        and _interactive_foreground_run()
+        and _schedule_launchd_server_handoff()
+    )
     if restart:
         restart_fn = getattr(request.app.state, "request_restart", None)
         if callable(restart_fn):
-            restart_fn(config.restart_exit_code)
+            restart_fn(0 if handoff else config.restart_exit_code)
 
     return JSONResponse({
         "ok": True,
