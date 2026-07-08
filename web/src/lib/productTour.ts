@@ -8,10 +8,32 @@ export interface ProductTourStep {
   id: string
   title: string
   body: string
+  /** Shown when the UI for this step is not available yet (no chat open, empty list, etc.). */
+  missingHint?: string
   /** Matches a `data-tour` attribute on a visible element. Omit for centered cards. */
   target?: string
   placement?: TourPlacement
   beforeEnter?: TourBeforeEnter[]
+}
+
+export type TourAvailabilityContext = {
+  hasActiveChat: boolean
+  projectCount: number
+}
+
+export function shouldShowMissingHint(
+  step: ProductTourStep,
+  ctx: TourAvailabilityContext,
+  targetFound: boolean,
+): boolean {
+  if (!step.missingHint) return false
+  if (step.target) {
+    if (!targetFound) return true
+    if (step.id === 'projects' && ctx.projectCount === 0) return true
+    return false
+  }
+  if (step.beforeEnter?.includes('welcomeChat') && !ctx.hasActiveChat) return true
+  return false
 }
 
 export const PRODUCT_TOUR_STEPS: ProductTourStep[] = [
@@ -30,6 +52,8 @@ export const PRODUCT_TOUR_STEPS: ProductTourStep[] = [
     target: 'sidebar-workspaces',
     placement: 'right',
     beforeEnter: ['openSidebar', 'chatRoute'],
+    missingHint:
+      'You will see workspace tabs in the sidebar once the main view is open. A default personal/work split is created on first launch.',
   },
   {
     id: 'projects',
@@ -39,6 +63,8 @@ export const PRODUCT_TOUR_STEPS: ProductTourStep[] = [
     target: 'sidebar-projects',
     placement: 'right',
     beforeEnter: ['openSidebar', 'chatRoute'],
+    missingHint:
+      'You will see projects listed here after setup — a General project is created automatically for each workspace.',
   },
   {
     id: 'schedules',
@@ -48,6 +74,7 @@ export const PRODUCT_TOUR_STEPS: ProductTourStep[] = [
     target: 'nav-schedules',
     placement: 'bottom',
     beforeEnter: ['openSidebar', 'chatRoute'],
+    missingHint: 'You will find the Schedules shortcut in the sidebar header once the sidebar is open.',
   },
   {
     id: 'model',
@@ -57,6 +84,7 @@ export const PRODUCT_TOUR_STEPS: ProductTourStep[] = [
     target: 'model-picker',
     placement: 'bottom',
     beforeEnter: ['welcomeChat', 'chatRoute'],
+    missingHint: 'Open a chat from the sidebar — the model picker appears in the chat header.',
   },
   {
     id: 'chat-comments',
@@ -66,6 +94,7 @@ export const PRODUCT_TOUR_STEPS: ProductTourStep[] = [
     target: 'chat-messages',
     placement: 'top',
     beforeEnter: ['welcomeChat', 'chatRoute'],
+    missingHint: 'Open a chat to see messages here, then select text to add a comment.',
   },
   {
     id: 'chat-input',
@@ -75,6 +104,7 @@ export const PRODUCT_TOUR_STEPS: ProductTourStep[] = [
     target: 'chat-input',
     placement: 'top',
     beforeEnter: ['welcomeChat', 'chatRoute'],
+    missingHint: 'Open a chat from the sidebar — the message box sits at the bottom of the chat view.',
   },
   {
     id: 'file-cards',
@@ -83,6 +113,8 @@ export const PRODUCT_TOUR_STEPS: ProductTourStep[] = [
       'When the agent reads or edits a file, an inline card appears in the thread. Click it to open a preview with history, diff, and restore.',
     placement: 'center',
     beforeEnter: ['welcomeChat', 'chatRoute'],
+    missingHint:
+      'You will see inline file cards in the chat thread once the agent reads or edits a file.',
   },
   {
     id: 'pin-preview',
@@ -91,6 +123,8 @@ export const PRODUCT_TOUR_STEPS: ProductTourStep[] = [
       'From the file viewer, pin a document to keep it open beside the chat. Select text in the preview to add line-level comments — they are attached to your next message, same as chat comments.',
     placement: 'center',
     beforeEnter: ['welcomeChat', 'chatRoute'],
+    missingHint:
+      'Open a file from a chat card, then use Pin in the viewer to keep it open beside the conversation.',
   },
   {
     id: 'rich-preview',
@@ -99,6 +133,8 @@ export const PRODUCT_TOUR_STEPS: ProductTourStep[] = [
       'Images render inline in chat and in the viewer. PDFs open in a built-in preview. PowerPoint (.pptx) files are converted to PDF for viewing (requires LibreOffice on the server).',
     placement: 'center',
     beforeEnter: ['welcomeChat', 'chatRoute'],
+    missingHint:
+      'You will see image and PDF previews once files show up in a chat or the file viewer.',
   },
   {
     id: 'done',

@@ -4,9 +4,14 @@
       v-for="t in store.toasts"
       :key="t.id"
       class="toast"
-      :class="{ 'toast-error': t.variant === 'error' }"
+      :class="{ 'toast-error': t.variant === 'error', 'toast-swiping': swipeId === t.id }"
+      :style="swipeId === t.id ? swipeStyle : undefined"
       role="status"
       @click="onClick(t)"
+      @pointerdown="onPointerDown(t, $event)"
+      @pointermove="onPointerMove($event)"
+      @pointerup="onPointerUp(t)"
+      @pointercancel="onPointerUp(t)"
     >
       <div class="toast-title">{{ t.title }}</div>
       <div class="toast-body">{{ t.body }}</div>
@@ -25,12 +30,56 @@
 </template>
 
 <script setup lang="ts">
+import { computed, ref } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import type { InAppToast } from '../lib/types'
 
 const store = useProjectStore()
 
+// ── Swipe-to-dismiss ────────────────────────────────────────────────────────
+// Horizontal drag past a threshold dismisses the toast. Tracked per-toast so
+// only the one under the finger moves. A movement threshold before we treat a
+// gesture as a swipe keeps plain taps (which open the linked chat) working.
+const SWIPE_DISMISS_PX = 80
+const swipeId = ref<number | null>(null)
+const swipeStartX = ref(0)
+const swipeDX = ref(0)
+const swiping = ref(false)
+
+const swipeStyle = computed(() => ({
+  transform: `translateX(${swipeDX.value}px)`,
+  opacity: String(Math.max(0, 1 - Math.abs(swipeDX.value) / (SWIPE_DISMISS_PX * 2))),
+}))
+
+function onPointerDown(toast: InAppToast, e: PointerEvent) {
+  if (e.pointerType === 'mouse' && e.button !== 0) return
+  swipeId.value = toast.id
+  swipeStartX.value = e.clientX
+  swipeDX.value = 0
+  swiping.value = false
+  ;(e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId)
+}
+
+function onPointerMove(e: PointerEvent) {
+  if (swipeId.value === null) return
+  swipeDX.value = e.clientX - swipeStartX.value
+  if (Math.abs(swipeDX.value) > 6) swiping.value = true
+}
+
+function onPointerUp(toast: InAppToast) {
+  if (swipeId.value === null) return
+  const dismissed = Math.abs(swipeDX.value) >= SWIPE_DISMISS_PX
+  swipeId.value = null
+  swipeDX.value = 0
+  if (dismissed) store.dismissToast(toast.id)
+}
+
 async function onClick(toast: InAppToast) {
+  // Ignore the click that fires at the end of a swipe gesture.
+  if (swiping.value) {
+    swiping.value = false
+    return
+  }
   // Global error toasts aren't tied to a chat — clicking the body is a no-op
   // (use the Fix / dismiss buttons instead).
   if (!toast.chat_id) return
@@ -74,6 +123,16 @@ async function onFix(toast: InAppToast) {
   position: relative;
   pointer-events: auto;
   animation: toast-in 180ms var(--ease);
+  /* Horizontal swipe-to-dismiss; keep vertical scroll gestures to the page. */
+  touch-action: pan-y;
+  transition: transform 200ms var(--ease), opacity 200ms var(--ease);
+}
+
+/* While the finger is down the transform tracks the pointer directly. */
+.toast-swiping {
+  transition: none;
+  cursor: grabbing;
+  user-select: none;
 }
 
 .toast:hover { background: var(--bg3); }

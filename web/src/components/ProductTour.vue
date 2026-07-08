@@ -25,6 +25,7 @@
         <div class="product-tour-progress">{{ tour.progressLabel }}</div>
         <h2 class="product-tour-title">{{ tour.currentStep.title }}</h2>
         <p class="product-tour-body">{{ tour.currentStep.body }}</p>
+        <p v-if="showMissingHint" class="product-tour-missing">{{ tour.currentStep.missingHint }}</p>
         <div class="product-tour-actions">
           <button type="button" class="product-tour-skip" @click="tour.skip()">Skip tour</button>
           <div class="product-tour-nav">
@@ -50,11 +51,32 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useProductTourStore } from '../stores/productTour'
-import { tourTargetSelector } from '../lib/productTour'
+import { useProjectStore } from '../stores/projects'
+import { shouldShowMissingHint, tourTargetSelector } from '../lib/productTour'
 
 const tour = useProductTourStore()
+const projectStore = useProjectStore()
 
 const targetRect = ref<DOMRect | null>(null)
+
+const targetFound = computed(() => {
+  const step = tour.currentStep
+  if (!step?.target || step.placement === 'center') return true
+  return targetRect.value !== null
+})
+
+const showMissingHint = computed(() => {
+  const step = tour.currentStep
+  if (!step) return false
+  return shouldShowMissingHint(
+    step,
+    {
+      hasActiveChat: !!projectStore.activeChat,
+      projectCount: projectStore.workspaceProjects.length,
+    },
+    targetFound.value,
+  )
+})
 
 const isCentered = computed(() => {
   const step = tour.currentStep
@@ -228,6 +250,18 @@ onBeforeUnmount(() => {
   font-size: var(--text-sm);
   color: var(--fg2);
   line-height: 1.45;
+}
+
+.product-tour-missing {
+  margin: -6px 0 14px;
+  padding: 8px 10px;
+  font-size: var(--text-sm);
+  color: var(--fg2);
+  line-height: 1.45;
+  background: color-mix(in srgb, var(--accent2) 8%, var(--bg-elev));
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent2);
+  border-radius: var(--radius-sm);
 }
 
 .product-tour-actions {
