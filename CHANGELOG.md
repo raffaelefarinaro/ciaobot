@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.4.10 - 2026-07-08
+
+### Changed
+- Merge pull request #48 from raffaelefarinaro/fix/brew-install-command (`61d0357`)
+
+### Fixed
+- fix(setup): route fresh installs to the first-run wizard again (`7d3d7cf`)
+
+### Maintenance
+- docs: use the full brew install path raffaelefarinaro/ciaobot/ciaobot (`adc6c76`)
+
 ## v0.4.9 - 2026-07-08
 
 ### Fixed
