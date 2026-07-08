@@ -534,6 +534,10 @@ class ScheduleRunOutcome:
     retry_pending: bool = False
     final_text: str = ""
     archived_to: str = ""
+    # True when the run dispatched background subagents that had not finished
+    # by the time we stopped waiting. Such a run is not "done" yet, so it must
+    # stay visible rather than auto-archive on a half-complete result.
+    subagents_pending: bool = False
 
 
 def _schedule_run_clean(outcome: ScheduleRunOutcome) -> bool:
@@ -543,6 +547,7 @@ def _schedule_run_clean(outcome: ScheduleRunOutcome) -> bool:
         and not outcome.permission_requested
         and not outcome.stream_error
         and not outcome.retry_pending
+        and not outcome.subagents_pending
     )
 
 
@@ -620,6 +625,12 @@ class ProjectChatManager:
         # the /ws/events connect snapshot so a fresh client can paint the
         # "N agents running" indicator without waiting for the next change.
         self._background_agents_last: dict[str, int] = {}
+        # Latest result (text, is_error) captured by the between-turns drain
+        # for a chat, i.e. the CLI's post-subagent synthesis turn. The
+        # schedule pipeline reads this after background subagents settle so
+        # the auto-archive classifier judges the real summary instead of the
+        # interim "dispatched, will report" parent message.
+        self._last_drain_result: dict[str, tuple[str, bool]] = {}
         # Per-chat deferred quota retry loops. Each loop sleeps until the
         # chat's retry_next_at, tries the saved prompt if idle, then repeats
         # hourly until success/stop/archive/delete.
@@ -2107,6 +2118,7 @@ class ProjectChatManager:
         if task is not None and not task.done():
             task.cancel()
         self._cancel_between_turns_drain(chat_id)
+        self._last_drain_result.pop(chat_id, None)
         provider = self._providers.pop(chat_id, None)
         if provider:
             asyncio.ensure_future(provider.disconnect())
@@ -3768,6 +3780,10 @@ class ProjectChatManager:
                 if isinstance(event, ResultEvent):
                     text = event.result or ""
                     is_error = bool(event.is_error)
+                    # Record the synthesis result so the schedule pipeline can
+                    # feed it to the auto-archive classifier once subagents
+                    # settle (see _await_schedule_subagents / dispatch_schedule).
+                    self._last_drain_result[chat_id] = (text, is_error)
                     close_stream(is_error)
                     if not is_error and text:
                         chat_now = self._chats.get(chat_id)
@@ -3971,6 +3987,91 @@ class ProjectChatManager:
 
     # ── Schedule dispatch ────────────────────────────────────────────────
 
+    async def _await_schedule_subagents(
+        self, chat_id: str, *, timeout_s: float = 900.0
+    ) -> tuple[bool, bool]:
+        """Block until the schedule chat's background subagents finish.
+
+        A schedule turn can delegate to background subagents (e.g. memory
+        curation dispatches the memory agent) and return before they finish.
+        The archive decision must not run against that half-complete state, so
+        we poll the parent session JSONL — the reliable running-count signal
+        (see ciao/subagent_tracking.py) — until it drains.
+
+        Returns ``(settled, had_async)``: ``settled`` is True when no
+        subagents remain running (or none were ever tracked), False when the
+        timeout elapses with agents still running; ``had_async`` is True when
+        the session ever dispatched a background subagent. Errors resolve to
+        ``(True, False)`` so a tracking failure never blocks the pipeline.
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None or not chat.session_id:
+            return True, False
+        try:
+            path = subagent_tracking.find_parent_session_file(
+                chat.session_id, self._config.workspace_root
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Subagent wait: session file lookup failed for %s", chat_id)
+            return True, False
+        if path is None:
+            return True, False
+
+        deadline = time.perf_counter() + timeout_s
+        last_size = -1
+        running = 0
+        had_async = False
+        while time.perf_counter() < deadline:
+            try:
+                size = path.stat().st_size
+            except OSError:
+                return True, had_async
+            if size != last_size:
+                last_size = size
+                try:
+                    state = subagent_tracking.parse_session_subagents(path)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "Subagent wait: parse failed for %s", chat_id
+                    )
+                    return True, had_async
+                running = state.running_background
+                if not had_async:
+                    had_async = any(
+                        info.is_async for info in state.subagents.values()
+                    )
+                if running == 0:
+                    return True, had_async
+            await asyncio.sleep(3)
+        if running:
+            logger.warning(
+                "Schedule chat %s still has %d background subagent(s) after %.0fs; "
+                "keeping chat visible",
+                chat_id,
+                running,
+                timeout_s,
+            )
+        return running == 0, had_async
+
+    async def _wait_for_drain_result(
+        self, chat_id: str, *, timeout_s: float = 180.0
+    ) -> tuple[str, bool] | None:
+        """Wait for the between-turns drain to record a post-subagent result.
+
+        Returns ``(text, is_error)`` from the CLI's synthesis turn, or None if
+        none arrived within ``timeout_s``. Callers pop the slot beforehand so a
+        stale result from an earlier turn is never returned. Exits early as
+        soon as a result lands; the timeout only bounds the rare case where the
+        CLI never emits a synthesis turn after the subagent completes.
+        """
+        deadline = time.perf_counter() + timeout_s
+        while time.perf_counter() < deadline:
+            result = self._last_drain_result.get(chat_id)
+            if result is not None:
+                return result
+            await asyncio.sleep(1)
+        return None
+
     async def _schedule_run_needs_user(self, entry: object, outcome: ScheduleRunOutcome) -> bool:
         """Return True when an auto-archive schedule result deserves attention.
 
@@ -3995,13 +4096,25 @@ class ProjectChatManager:
         user_prompt = json.dumps(payload, ensure_ascii=False)
         try:
             from ciao.providers.oneshot import run_oneshot
-            from ciao.insights import _ollama_env
+            from ciao.providers.routing import resolve_with_fallback
 
-            env = _ollama_env(self._config.insights_model, self._config.ollama)
+            # Route through the shared resolver (same as ciao/insights.py) so
+            # the classifier lands on an available backend. The raw
+            # ``_ollama_env`` path had no fallback: when the intended backend
+            # was unreachable it passed an id the Anthropic subscription can't
+            # serve (e.g. ``claude-opus-4-8[1m]``), the one-shot raised, and
+            # the run was kept visible instead of auto-archived.
+            model, env, note = resolve_with_fallback(
+                self._config.insights_model,
+                self._config,
+                default_model=self._config.insights_model,
+            )
+            if note:
+                logger.info("Schedule attention classifier %s", note)
             text = await run_oneshot(
                 user_prompt,
                 system_prompt=system_prompt,
-                model=self._config.insights_model,
+                model=model,
                 env=env,
                 timeout_s=60.0,
             )
@@ -4188,6 +4301,33 @@ class ProjectChatManager:
         chat_state = self._chats.get(target_id)
         if chat_state and chat_state.retry_status == "pending":
             outcome.retry_pending = True
+
+        # A clean parent turn may still have live background subagents (e.g.
+        # curation delegating to the memory agent). Wait for them to finish
+        # before the archive decision so the classifier judges the completed
+        # result — not an interim "dispatched, will report later" message. If
+        # they don't settle in time, mark the run pending so it stays visible.
+        if _schedule_run_clean(outcome):
+            # Drop any stale synthesis result before waiting so we only pick up
+            # the turn that runs when *these* subagents finish. The drain that
+            # captures it was started by start_stream's completion handler.
+            self._last_drain_result.pop(target_id, None)
+            settled, had_async = await self._await_schedule_subagents(target_id)
+            if not settled:
+                outcome.subagents_pending = True
+            elif had_async:
+                # Background subagents finished: the CLI runs a synthesis turn
+                # whose result the between-turns drain records. Feed that real
+                # summary to the archive classifier instead of the interim
+                # parent message. Bounded; exits as soon as the result lands.
+                synth = await self._wait_for_drain_result(target_id)
+                if synth is not None:
+                    synth_text, synth_error = synth
+                    if synth_text:
+                        outcome.final_text = synth_text
+                    if synth_error:
+                        outcome.is_error = True
+            self._last_drain_result.pop(target_id, None)
 
         needs_user = False
         if getattr(entry, "archive_policy", "manual") == "auto" and _schedule_run_clean(outcome):

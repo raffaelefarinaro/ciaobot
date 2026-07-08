@@ -78,3 +78,29 @@ def test_failed_run_is_not_clean_so_error_log_survives() -> None:
     assert _schedule_run_clean(ScheduleRunOutcome(completed=True, is_error=True)) is False
     assert _schedule_run_clean(ScheduleRunOutcome(completed=True, retry_pending=True)) is False
     assert _schedule_run_clean(ScheduleRunOutcome(completed=False)) is False
+
+
+def test_pending_background_subagents_keep_run_unclean() -> None:
+    # A parent turn that finished cleanly but left background subagents
+    # running is not "done": it must not count as clean (so it stays visible
+    # and is not auto-archived on a half-complete result).
+    from ciao.web.project_chats import _schedule_run_clean
+
+    assert (
+        _schedule_run_clean(
+            ScheduleRunOutcome(completed=True, is_error=False, subagents_pending=True)
+        )
+        is False
+    )
+
+
+def test_auto_policy_does_not_archive_while_subagents_pending() -> None:
+    outcome = ScheduleRunOutcome(
+        completed=True, is_error=False, subagents_pending=True
+    )
+    # Even if the classifier would say no attention needed, an unsettled run
+    # must stay visible.
+    assert (
+        _should_auto_archive_schedule_run(_entry(), outcome, needs_user=False)
+        is False
+    )
