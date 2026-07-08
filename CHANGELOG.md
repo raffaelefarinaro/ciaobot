@@ -13,6 +13,8 @@
 
 ### Fixed
 - fix(setup): route fresh installs to the first-run wizard again (`7d3d7cf`)
+- fix(menubar): self-heal when Homebrew swaps the install out from under a running process (#52)
+- fix(push): drop dead placeholder default in PushManager (#51)
 
 ### Maintenance
 - docs: use the full brew install path raffaelefarinaro/ciaobot/ciaobot (`adc6c76`)
