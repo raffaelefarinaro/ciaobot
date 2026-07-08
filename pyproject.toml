@@ -59,6 +59,7 @@ ciao-prepare-release = "ciao.release:main"
 packages = ["ciao", "ciao.context", "ciao.observability", "ciao.providers", "ciao.stock", "ciao.web"]
 
 [tool.setuptools.package-data]
+"ciao" = ["system_prompt.md"]
 "ciao.web" = ["static/**/*"]
 "ciao.stock" = [
   "agents/*.md",
