@@ -3332,6 +3332,12 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         launch_agents_dir=str(body.get("launch_agents_dir", "")).strip() or None,
         app_dir=str(body.get("app_dir", "")).strip() or None,
     )
+    # Hand the chosen workspace to the relaunched process. A foreground
+    # `ciao run` restarts by re-execing itself with the current environment,
+    # and nothing else tells the fresh process where setup landed — without
+    # this it boots straight back into the bootstrap wizard.
+    os.environ["CIAO_WORKSPACE"] = str(Path(workspace).expanduser().resolve())
+    os.environ["PWA_PORT"] = str(port)
     # Best-effort: bring the menu bar companion up right away so setup ends
     # with the icon visible instead of waiting for the next login. Only for
     # the real per-user LaunchAgents dir — scripted/test setups pass a custom

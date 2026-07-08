@@ -527,13 +527,22 @@ async def _async_main() -> int:
         # asyncio.run's cleanup phase (cancel tasks, shut down the default
         # executor) can wedge after uvicorn drains: leaked Claude SDK
         # subprocess transports and synchronous urllib calls in the
-        # heartbeat thread both hold the loop open indefinitely. The bash
-        # wrapper then sits in `wait` forever and the service appears alive
-        # but is unreachable. If we haven't exited cleanly within the grace
-        # window, force it so the wrapper sees the exit code and restarts.
+        # heartbeat thread both hold the loop open indefinitely. The service
+        # then appears alive but is unreachable. If we haven't exited cleanly
+        # within the grace window, force the restart ourselves: a plain
+        # os._exit would leave a foreground `ciao run` dead right after the
+        # setup wizard or a package update (only launchd's KeepAlive would
+        # bring the server back). Exec a fresh interpreter instead — the pid
+        # is unchanged, so launchd keeps tracking it, and the relaunch picks
+        # up new code and the current environment (e.g. the CIAO_WORKSPACE
+        # handoff written by the setup wizard's finish step).
         def _force_exit() -> None:
             time.sleep(15)
-            os._exit(code)
+            logger.info("Cleanup did not finish; re-execing for the requested restart")
+            try:
+                os.execv(sys.executable, [sys.executable, "-m", "ciao.cli", *sys.argv[1:]])
+            except OSError:
+                os._exit(code)
         threading.Thread(
             target=_force_exit, daemon=True, name="ciao-restart-watchdog"
         ).start()

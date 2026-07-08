@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from itsdangerous import URLSafeTimedSerializer
@@ -183,7 +184,11 @@ def test_setup_status_route_is_public_before_login(tmp_path) -> None:
     assert resp.json()["checks"][0]["id"] == "workspace"
 
 
-def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path) -> None:
+def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monkeypatch) -> None:
+    # Guard the env handoff assertions below: monkeypatch restores these
+    # after the endpoint mutates os.environ directly.
+    monkeypatch.setenv("CIAO_WORKSPACE", "")
+    monkeypatch.setenv("PWA_PORT", "")
     config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
     serializer = URLSafeTimedSerializer("test-secret")
     restarts: list[int] = []
@@ -217,6 +222,10 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path) -> No
     assert body["ok"] is True
     assert body["restart_requested"] is True
     assert restarts == [config.restart_exit_code]
+    # The env handoff for the re-exec'd foreground `ciao run`: without it the
+    # relaunched process boots back into bootstrap mode.
+    assert os.environ["CIAO_WORKSPACE"] == str(workspace.resolve())
+    assert os.environ["PWA_PORT"] == "9443"
     env_text = (workspace / ".env").read_text(encoding="utf-8")
     assert f"PWA_AUTH_TOKEN={config.pwa_auth_token}" in env_text
     assert "CIAO_PUSH_CONTACT=mailto:owner@example.com" in env_text
