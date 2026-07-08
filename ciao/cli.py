@@ -1011,9 +1011,14 @@ def _create_chat_command(args: argparse.Namespace) -> int:
     workspace_root = Path(args.workspace_root).expanduser().resolve()
     _load_env_file(workspace_root / ".env")
 
-    host = os.environ.get("PWA_HOST", "127.0.0.1")
-    if host == "0.0.0.0":
-        host = "127.0.0.1"
+    # PWA_HOST is the server's *bind* address. For a loopback/wildcard bind we
+    # emit "localhost" so the printed chat link matches the host the browser is
+    # authenticated on (the menu bar, setup, and login URLs all use localhost).
+    # The session cookie is host-only, so a "127.0.0.1" link would not carry the
+    # "localhost" cookie and every /ws and authed /api request would be rejected.
+    host = os.environ.get("PWA_HOST", "localhost")
+    if host in ("0.0.0.0", "127.0.0.1", "::", "::1", ""):
+        host = "localhost"
     port = os.environ.get("PWA_PORT", "8443")
     base_url = args.base_url or f"http://{host}:{port}"
     auth_token = os.environ.get("PWA_AUTH_TOKEN", "")

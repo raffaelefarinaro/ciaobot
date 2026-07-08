@@ -53,6 +53,6 @@ On success, the command outputs the created chat ID, settings applied, and the d
 Success: Created chat 'API Research' (chat-e3a5f28b)
 Workspace: work | Project: proj-72081e2d
 Model: sonnet (claude)
-PWA URL: http://127.0.0.1:8443/chat/chat-e3a5f28b
+PWA URL: http://localhost:8443/chat/chat-e3a5f28b
 ```
 Report the created chat details and link back to the user so they can follow up or check on the progress!
