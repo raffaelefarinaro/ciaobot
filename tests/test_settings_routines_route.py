@@ -62,8 +62,8 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     data = client.get("/api/settings/routines").json()
     assert data["title_model"] == ""  # no override stored
     # Ollama configured → free-tier title model is the effective default.
-    assert data["title_model_effective"] == config.ollama.title_model
-    assert data["insights_model_effective"] == "deepseek-v4-flash:cloud"
+    assert data["title_model_effective"] == config.haiku_model_for_workspace("personal")
+    assert data["insights_model_effective"] == config.sonnet_model_for_workspace("personal")
     assert data["alias_tiers"]["ollama"]["sonnet"] == config.ollama.sonnet_model
     assert data["model_options"]["ollama_cloud"] == [
         "kimi-k2.7-code:cloud",
@@ -104,7 +104,7 @@ def test_patch_applies_to_live_config_and_persists(tmp_path):
     assert data["insights_model_effective"] == "haiku"
     # Live config updated, no restart needed.
     assert config.title_model_override == "gemma4:12b-it-qat"
-    assert config.insights_model == "haiku"
+    assert config.insights_model_override == "haiku"
     # Persisted: a fresh store sees the values.
     fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
     assert fresh.settings.title_model == "gemma4:12b-it-qat"
@@ -134,7 +134,7 @@ def test_patch_clearing_restores_defaults(tmp_path):
     client, config = _make_client(tmp_path)
     client.patch("/api/settings/routines", json={"insights_model": "haiku"})
     client.patch("/api/settings/routines", json={"insights_model": ""})
-    assert config.insights_model == "deepseek-v4-flash:cloud"
+    assert config.insights_model_override == ""
 
 
 def test_patch_rejects_bad_engine(tmp_path):

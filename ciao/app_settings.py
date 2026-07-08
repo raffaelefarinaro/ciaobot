@@ -114,7 +114,7 @@ class AppSettingsStore:
         if self._defaults is None:
             self._defaults = {
                 "title_model_override": config.title_model_override,
-                "insights_model": config.insights_model,
+                "insights_model_override": config.insights_model_override,
 
                 "transcription_engine": config.transcription_engine,
                 "transcription_local_model": config.transcription_local_model,
@@ -132,7 +132,7 @@ class AppSettingsStore:
         d = self._defaults
         s = self.settings
         config.title_model_override = s.title_model or d["title_model_override"]
-        config.insights_model = s.insights_model or d["insights_model"]
+        config.insights_model_override = s.insights_model or d["insights_model_override"]
 
         config.transcription_engine = (
             s.transcription_engine or d["transcription_engine"]

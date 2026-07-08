@@ -516,7 +516,7 @@ def setup_workspace(
     workspace: Path | str,
     *,
     auth_token: str | None = None,
-    auth_required: bool = True,
+    auth_required: bool = False,
     push_contact: str | None = None,
     vault_root: Path | str | None = None,
     vault_mode: str = "scratch",
@@ -566,8 +566,8 @@ def setup_workspace(
         lines = [
             f"PWA_AUTH_TOKEN={token}",
         ]
-        if not auth_required:
-            lines.append("PWA_AUTH_REQUIRED=false")
+        if auth_required:
+            lines.append("PWA_AUTH_REQUIRED=true")
         lines.extend([
             f"CIAO_PUSH_CONTACT={contact}",
             "CIAO_WORKSPACE=.",

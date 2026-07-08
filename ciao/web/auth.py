@@ -152,7 +152,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         app,
         *,
         serializer: URLSafeTimedSerializer,
-        auth_required: bool = True,
+        auth_required: bool = False,
     ) -> None:
         super().__init__(app)
         self._serializer = serializer
@@ -167,6 +167,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         public_api = {
             "/api/auth",
             "/api/startup-status",
+            "/api/active-chats",
             "/api/setup-status",
             "/api/setup/finish",
             "/api/setup/list-dirs",

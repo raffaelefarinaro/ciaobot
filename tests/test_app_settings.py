@@ -16,6 +16,7 @@ class FakeConfig:
 
     def __init__(self) -> None:
         self.title_model_override = ""
+        self.insights_model_override = ""
         self.insights_model = "deepseek-v4-flash:cloud"
 
         self.transcription_engine = "cloud"
@@ -89,13 +90,13 @@ def test_apply_overlays_and_clear_restores_defaults(tmp_path):
 
     store.update({"insights_model": "gemma4:12b-it-qat", "transcription_engine": "local"})
     store.apply_to_config(config)
-    assert config.insights_model == "gemma4:12b-it-qat"
+    assert config.insights_model_override == "gemma4:12b-it-qat"
     assert config.transcription_engine == "local"
 
     # Clearing restores the env-backed default captured on first apply.
     store.update({"insights_model": "", "transcription_engine": ""})
     store.apply_to_config(config)
-    assert config.insights_model == "deepseek-v4-flash:cloud"
+    assert config.insights_model_override == ""
     assert config.transcription_engine == "cloud"
 
 

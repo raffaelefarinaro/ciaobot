@@ -3134,6 +3134,22 @@ async def startup_status_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({**tracker.to_dict(), "version": __version__})
 
 
+async def active_chats_endpoint(request: Request) -> JSONResponse:
+    """Return chat IDs with in-flight work (streaming or background subagents).
+
+    Drives the macOS menu bar: it spins the icon while anything is working and
+    marks those chats in the open-chats list. Unauthenticated like the
+    startup-status endpoint, since the local menu bar process has no session;
+    it only leaks opaque chat IDs, not their contents.
+    """
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    if pcm is None:
+        return JSONResponse({"active_chat_ids": []})
+    ids = set(pcm.active_stream_chat_ids())
+    ids.update(pcm.background_agent_counts)
+    return JSONResponse({"active_chat_ids": sorted(ids)})
+
+
 async def setup_status_endpoint(request: Request) -> JSONResponse:
     """Return first-run setup readiness for the onboarding wizard."""
     return JSONResponse(setup_status(request.app.state.config))
@@ -3365,7 +3381,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     written = setup_workspace(
         workspace,
         auth_token=str(body.get("auth_token", "")).strip() or config.pwa_auth_token,
-        auth_required=bool(body.get("auth_required", True)),
+        auth_required=bool(body.get("auth_required", False)),
         push_contact=push_contact,
         vault_root=str(body.get("vault_root", "")).strip() or None,
         vault_mode=str(body.get("vault_mode", "scratch")).strip().lower(),

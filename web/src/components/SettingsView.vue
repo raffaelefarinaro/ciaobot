@@ -1,5 +1,6 @@
 <template>
   <div class="settings-pane">
+    <RestartOverlay v-if="restarting" :message="restartMessage" />
     <PaneHeader title="Settings" @open-sidebar="emit('open-sidebar')" />
     <div class="pane-body">
 
@@ -1500,6 +1501,7 @@ import { useProjectStore } from '../stores/projects'
 import { useProductTourStore } from '../stores/productTour'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
+import RestartOverlay from './RestartOverlay.vue'
 import { providerModelBadges, sectionsFromModelOptions, type ModelSection } from '../lib/modelSections'
 
 const emit = defineEmits<{ 'open-sidebar': [] }>()
@@ -1694,7 +1696,7 @@ const routineEffectiveKeys: Record<RoutineModelKey, keyof RoutineSettings> = {
 
 const routineDefaultTiers: Record<RoutineModelKey, TierKey> = {
   title_model: 'haiku',
-  insights_model: 'haiku',
+  insights_model: 'sonnet',
 }
 
 async function fetchRoutines() {
@@ -2230,11 +2232,8 @@ async function saveProviderKeys() {
     if (res.auto_update_github_skills !== undefined) {
       autoUpdateGithubSkills.value = res.auto_update_github_skills
     }
-    providerKeysResult.value = 'Saved configuration. Restarting server to apply...'
-    setTimeout(() => {
-      providerKeysResult.value = ''
-      window.location.reload()
-    }, 2500)
+    providerKeysResult.value = ''
+    await restartAndReload('Configuration saved. Restarting Ciaobot to apply…')
   } catch (e: any) {
     providerKeysResult.value = `Error: ${e?.message || e}`
   } finally {
@@ -2251,11 +2250,8 @@ async function installLocalVoice() {
   try {
     const res = await api.post<{ ok: boolean; output?: string }>('/api/voice/install-local', {})
     if (res.ok) {
-      routinesResult.value = 'Local whisper engine installed successfully! Restarting server...'
-      setTimeout(async () => {
-        routinesResult.value = ''
-        await fetchRoutines()
-      }, 5000)
+      routinesResult.value = ''
+      await restartAndReload('Local whisper engine installed. Restarting Ciaobot to load the model…')
     } else {
       routinesResult.value = 'Installation failed.'
     }
@@ -2274,11 +2270,8 @@ async function installLocalTts() {
   try {
     const res = await api.post<{ ok: boolean; output?: string }>('/api/tts/install-local', {})
     if (res.ok) {
-      routinesResult.value = 'Local Kokoro engine installed successfully! Restarting server...'
-      setTimeout(async () => {
-        routinesResult.value = ''
-        await fetchRoutines()
-      }, 5000)
+      routinesResult.value = ''
+      await restartAndReload('Local Kokoro engine installed. Restarting Ciaobot to load the model…')
     } else {
       routinesResult.value = 'Installation failed.'
     }
@@ -3044,6 +3037,19 @@ async function doSnapshot(confirmWarnings = false) {
   actionPending.value = null
 }
 
+const restarting = ref(false)
+const restartMessage = ref('')
+
+// Show the full-screen restart overlay, then wait for the server to come back
+// before reloading. Used by any action that triggers a server restart (model
+// installs, provider key changes) so the UI never lands on a half-booted
+// server and shows a "Failed to fetch" error.
+async function restartAndReload(message: string) {
+  restartMessage.value = message
+  restarting.value = true
+  await reloadWhenServerReady()
+}
+
 async function reloadWhenServerReady(timeoutMs = 120000) {
   // The deploy endpoint returns ok immediately while the restart is only
   // scheduled (~2s later). Reloading on a fixed timer races the server
@@ -3301,16 +3307,17 @@ async function doPackageUpdate() {
     const res = await api.post<any>('/api/package/update')
     if (res.ok) {
       showUpdatePanel.value = false
-      packageResult.value = 'Update complete. Page will reload shortly...'
-      setTimeout(() => location.reload(), 10000)
+      packageResult.value = ''
+      await restartAndReload('Update complete. Restarting Ciaobot with the latest version…')
     } else {
       packageResult.value = `Update failed: ${res.error || 'unknown error'}`
+      await fetchPackageStatus()
     }
   } catch (e: any) {
     packageResult.value = `Update failed: ${e.message || 'unknown error'}`
+    await fetchPackageStatus()
   } finally {
     packageUpdating.value = false
-    await fetchPackageStatus()
   }
 }
 
