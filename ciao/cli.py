@@ -347,7 +347,38 @@ def _write_app_shortcut(
         encoding="utf-8",
     )
     executable.chmod(0o755)
+    _register_app_with_launchservices(app_root)
     return app_root
+
+
+_LSREGISTER = (
+    "/System/Library/Frameworks/CoreServices.framework/Frameworks/"
+    "LaunchServices.framework/Support/lsregister"
+)
+
+
+def _register_app_with_launchservices(app_root: Path) -> None:
+    """Register the launcher bundle with LaunchServices.
+
+    macOS attributes a LaunchAgent's "App Background Activity" entry to the
+    app named by the plist's ``AssociatedBundleIdentifiers``. That mapping is
+    resolved through LaunchServices, which does not always index a freshly
+    written bundle before the agent loads — so the background item shows the
+    raw executable name ("python") instead of "Ciaobot". Registering the
+    bundle up front makes the association resolve immediately. Best-effort:
+    non-macOS or a missing lsregister is a silent skip.
+    """
+
+    if sys.platform != "darwin" or not os.path.exists(_LSREGISTER):
+        return
+    try:
+        subprocess.run(
+            [_LSREGISTER, "-f", str(app_root)],
+            check=False,
+            capture_output=True,
+        )
+    except OSError:
+        pass
 
 
 _WORKSPACE_GITIGNORE_ENTRIES = (".env", ".runtime/", ".claude/", "*.log")

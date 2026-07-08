@@ -1,21 +1,25 @@
-require "language/python/virtualenv"
-
 class Ciaobot < Formula
   include Language::Python::Virtualenv
 
   desc "Local-first personal assistant server"
   homepage "https://github.com/raffaelefarinaro/ciaobot"
-  url "https://github.com/raffaelefarinaro/ciaobot/releases/download/v0.4.5/ciaobot-0.4.5-py3-none-any.whl"
-  version "0.4.5"
-  sha256 "33efb3656d245e76866022def0283dc8eba52f204b5c0fc3028f2c4bd9aaa0ee"
+  url "https://github.com/raffaelefarinaro/ciaobot/releases/download/v0.4.7/ciaobot-0.4.7-py3-none-any.whl"
+  version "0.4.7"
+  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   license "Apache-2.0"
 
   depends_on "python@3.12"
 
   def install
     python = Formula["python@3.12"].opt_bin/"python3.12"
-    venv = virtualenv_create(libexec, python)
-    venv.pip_install buildpath.glob("ciaobot-*.whl").first
+    virtualenv_create(libexec, python)
+    # Install the wheel *with* its dependency tree. Homebrew's
+    # `virtualenv` `pip_install` helpers pass --no-deps (they expect every
+    # dependency vendored as a `resource`); this app has none, so use pip
+    # directly and let it resolve the pinned deps from PyPI at install time.
+    system libexec/"bin/python", "-m", "pip", "install",
+           buildpath.glob("ciaobot-*.whl").first
+    bin.install_symlink Dir[libexec/"bin/ciao*"]
   end
 
   def post_install

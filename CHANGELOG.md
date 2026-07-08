@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.7 - 2026-07-08
+
+### Fixed
+- fix(homebrew): install the wheel with its full dependency tree so `brew install` pulls claude-agent-sdk, starlette, uvicorn, and the rest of the pinned deps from PyPI
+- fix(homebrew): drop the broken `require "language/python/virtualenv"` and symlink console scripts into the Homebrew prefix `bin`
+- fix(deps): declare `python-dotenv` in package dependencies (used by `ciao setup` and config loading)
+- fix(setup): register `Ciaobot.app` with LaunchServices before loading LaunchAgents so macOS shows "Ciaobot" instead of "python" in background-activity prompts
+
 ## v0.4.6 - 2026-07-08
 
 ### Added

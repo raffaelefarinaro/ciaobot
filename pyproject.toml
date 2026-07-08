@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ciaobot"
-version = "0.4.6"
+version = "0.4.7"
 description = "Ciaobot personal assistant server."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -15,6 +15,7 @@ dependencies = [
   "starlette==0.52.1",
   "uvicorn[standard]==0.50.2",
   "itsdangerous==2.2.0",
+  "python-dotenv==1.2.2",
   "pyyaml==6.0.3",
   "pywebpush==2.3.0",
   "cryptography==49.0.0",
