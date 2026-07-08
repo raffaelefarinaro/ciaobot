@@ -239,6 +239,32 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     assert (apps / "Ciaobot.app" / "Contents" / "MacOS" / "Ciaobot").is_file()
 
 
+def test_auth_check_reports_unauthenticated_in_bootstrap(tmp_path) -> None:
+    """Bootstrap mode returns 401 from /api/auth/check so the SPA routes to
+    the login view, where the first-run wizard renders. With auth off by
+    default nothing else ever routes there — a fresh install would open
+    straight into the app on the throwaway bootstrap workspace."""
+    from ciao.web.routes_api import auth_check
+
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/auth/check", auth_check, methods=["GET"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.serializer = serializer
+    client = TestClient(app, base_url="http://localhost:8443")
+
+    app.state.config = CiaoConfig.from_env(
+        {"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")}
+    )
+    assert client.get("/api/auth/check").status_code == 401
+
+    app.state.config = CiaoConfig.from_env(
+        {"PWA_AUTH_TOKEN": "tok", "CIAO_WORKSPACE": str(tmp_path / "ws")}
+    )
+    assert client.get("/api/auth/check").status_code == 200
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="launchd handoff is macOS-only")
 def test_setup_finish_foreground_handoff_to_launchd(tmp_path, monkeypatch) -> None:
     """An interactive foreground `ciao run` hands the server to launchd:

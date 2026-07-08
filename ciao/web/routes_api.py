@@ -684,6 +684,14 @@ async def auth_logout(request: Request) -> JSONResponse:
 
 
 async def auth_check(request: Request) -> JSONResponse:
+    # Bootstrap mode must land the browser on the setup wizard. The wizard
+    # lives in the login view, and with auth off by default nothing would
+    # ever route there — the SPA would open straight into the app on the
+    # throwaway bootstrap workspace. Report unauthenticated until setup
+    # finishes so the router redirects to /login → first-run wizard.
+    config = getattr(request.app.state, "config", None)
+    if getattr(config, "bootstrap_mode", False):
+        return JSONResponse({"error": "setup required"}, status_code=401)
     return JSONResponse({"ok": True})
 
 
