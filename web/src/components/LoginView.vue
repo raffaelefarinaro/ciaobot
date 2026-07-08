@@ -78,10 +78,12 @@
               type="button"
               class="btn-small"
               :disabled="loading"
-              @click="openPicker('workspace')"
+              @click="openPicker()"
             >Browse…</button>
           </div>
-          <span class="hint">The local app workspace. It stores config, runtime state, generated assets, and chat metadata.</span>
+          <span class="hint">{{ vaultMode === 'existing'
+            ? 'Pick the notes folder you already have. It becomes the app workspace; config and runtime state live alongside your notes.'
+            : 'The local app workspace. It stores config, runtime state, generated assets, and chat metadata.' }}</span>
         </div>
 
         <div class="form-group">
@@ -108,44 +110,14 @@
               Use existing notes folder
             </label>
           </div>
-          <span class="hint">Starting fresh builds the scaffold; existing asks Ciaobot to adapt your notes into the project structure.</span>
+          <span class="hint">{{ vaultMode === 'existing'
+            ? 'Ciaobot checks the folder above and, where needed, adapts your notes into its workspace and project structure.'
+            : 'Starting fresh scaffolds a new second brain inside the workspace folder.' }}</span>
         </div>
 
-        <div v-if="showVaultInput" class="form-group">
-          <label for="setup-vault">{{ vaultMode === 'existing' ? 'Existing Notes Folder' : 'Second-brain Vault Folder' }}</label>
-          <div class="input-row">
-            <input
-              id="setup-vault"
-              v-model="vaultRoot"
-              type="text"
-              class="form-input"
-              placeholder="~/ciaobot/memory-vault"
-              required
-              :disabled="loading"
-              @input="userEditedVault = true"
-            />
-            <button
-              id="setup-vault-browse"
-              type="button"
-              class="btn-small"
-              :disabled="loading"
-              @click="openPicker('vault')"
-            >Browse…</button>
-          </div>
-          <span class="hint">{{ vaultMode === 'existing'
-            ? 'Point this at the notes folder you already have; Ciaobot adapts it into the vault structure.'
-            : 'Durable markdown memory: projects, people, references, archived chats, and reviewed insights.' }}</span>
-        </div>
-        <div v-else class="form-group">
+        <div v-if="vaultMode === 'scratch'" class="form-group">
           <span class="hint vault-derived-hint">
-            Your second-brain vault will be created at <code>{{ vaultRoot }}</code>
-            <button
-              id="setup-vault-change"
-              type="button"
-              class="link-btn"
-              :disabled="loading"
-              @click="vaultRevealed = true"
-            >change location</button>
+            Your second-brain vault will be created at <code>{{ derivedVaultRoot }}</code>
           </span>
         </div>
 
@@ -278,10 +250,10 @@
           <div
             class="picker-modal"
             role="dialog"
-            :aria-label="pickerTarget === 'workspace' ? 'Choose workspace folder' : 'Choose vault folder'"
+            aria-label="Choose workspace folder"
           >
             <div class="picker-head">
-              <span class="picker-title">{{ pickerTarget === 'workspace' ? 'Choose Workspace Folder' : 'Choose Vault Folder' }}</span>
+              <span class="picker-title">Choose Workspace Folder</span>
               <code class="picker-path">{{ pickerDisplayPath || '…' }}</code>
             </div>
             <div class="picker-toolbar">
@@ -395,7 +367,6 @@ const isBootstrap = ref(false)
 const bootstrapLoading = ref(true)
 const setupStatus = ref<any>(null)
 const workspace = ref('~/ciaobot')
-const vaultRoot = ref('~/ciaobot/memory-vault')
 const pushContact = ref('')
 const port = ref(8443)
 const python = ref('')
@@ -403,15 +374,18 @@ const provider = ref('claude')
 const apiFallback = ref(false)
 const authRequired = ref(true)
 const isRestarting = ref(false)
-const userEditedVault = ref(false)
 const vaultMode = ref('scratch')
-const vaultRevealed = ref(false)
 const copyStatus = ref('')
 const advancedOpen = ref(false)
 
-// The vault path stays hidden while it is just the derived default: only a
-// custom split ("change location") or pointing at existing notes shows it.
-const showVaultInput = computed(() => vaultMode.value === 'existing' || vaultRevealed.value)
+// Single-folder setup: the vault always lives inside the workspace folder
+// ("scratch" scaffolds it at memory-vault/; "existing" lets the server and
+// onboarding agent adapt the chosen folder itself). Shown for scratch only.
+const derivedVaultRoot = computed(() => {
+  const ws = workspace.value.trim()
+  if (!ws) return ''
+  return ws.endsWith('/') ? `${ws}memory-vault` : `${ws}/memory-vault`
+})
 
 // Folder picker modal (server-backed: browsers cannot give absolute paths)
 interface DirListing {
@@ -422,7 +396,6 @@ interface DirListing {
   home: string
 }
 const pickerOpen = ref(false)
-const pickerTarget = ref<'workspace' | 'vault'>('workspace')
 const pickerPath = ref('')
 const pickerDisplayPath = ref('')
 const pickerParent = ref<string | null>(null)
@@ -443,8 +416,7 @@ function applyPickerListing(listing: DirListing) {
   pickerDirs.value = listing.dirs || []
 }
 
-async function openPicker(target: 'workspace' | 'vault') {
-  pickerTarget.value = target
+async function openPicker() {
   pickerOpen.value = true
   pickerPath.value = ''
   pickerDisplayPath.value = ''
@@ -454,7 +426,7 @@ async function openPicker(target: 'workspace' | 'vault') {
   newFolderName.value = ''
   pickerLoading.value = true
   try {
-    const current = (target === 'workspace' ? workspace.value : vaultRoot.value).trim()
+    const current = workspace.value.trim()
     let listing: DirListing
     if (current) {
       try {
@@ -507,13 +479,7 @@ async function createPickerFolder() {
 
 function selectPickerFolder() {
   if (!pickerPath.value) return
-  if (pickerTarget.value === 'workspace') {
-    // assignment triggers the workspace watcher, keeping the derived vault path in sync
-    workspace.value = pickerPath.value
-  } else {
-    vaultRoot.value = pickerPath.value
-    userEditedVault.value = true
-  }
+  workspace.value = pickerPath.value
   pickerOpen.value = false
 }
 
@@ -567,20 +533,8 @@ function normalizedPushContact(): string {
   return `mailto:${value}`
 }
 
-// Watch workspace path changes to automatically update vault root if user hasn't touched it
-watch(workspace, (newVal) => {
-  if (!userEditedVault.value) {
-    const ws = newVal.trim()
-    if (ws) {
-      vaultRoot.value = ws.endsWith('/') ? `${ws}memory-vault` : `${ws}/memory-vault`
-    } else {
-      vaultRoot.value = ''
-    }
-  }
-})
-
 const canFinish = computed(() => {
-  if (!workspace.value.trim() || !vaultRoot.value.trim()) {
+  if (!workspace.value.trim()) {
     return false
   }
   const currentProvider = provider.value
@@ -608,7 +562,9 @@ async function doFinish() {
   try {
     await api.post('/api/setup/finish', {
       workspace: workspace.value,
-      vault_root: vaultRoot.value,
+      // vault_root is intentionally omitted: the server derives it from the
+      // workspace folder ("memory-vault" for scratch; for existing mode the
+      // folder itself, unless a scaffolded memory-vault/ is already there).
       vault_mode: vaultMode.value,
       push_contact: normalizedPushContact(),
       port: Number(port.value),
