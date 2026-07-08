@@ -92,6 +92,24 @@ def _write_if_missing(path: Path, text: str) -> None:
         path.write_text(text, encoding="utf-8")
 
 
+def _stable_python_path(python_path: str) -> str:
+    """Map a Homebrew Cellar interpreter to its upgrade-stable opt path.
+
+    `brew upgrade` deletes the old keg, so a LaunchAgent pinned to
+    .../Cellar/<pkg>/<version>/... dies with it (the running server loses
+    its site-packages and every request 500s until the agents are
+    re-rendered). The <prefix>/opt/<pkg> symlink always points at the
+    currently installed keg, so plists must record that instead.
+    """
+    import re
+
+    m = re.match(r"(.*)/Cellar/([^/]+)/[^/]+/(.*)$", python_path)
+    if not m:
+        return python_path
+    stable = Path(f"{m.group(1)}/opt/{m.group(2)}/{m.group(3)}")
+    return str(stable) if stable.exists() else python_path
+
+
 def _render_launchd_plist(
     *,
     workspace: Path,
@@ -100,6 +118,7 @@ def _render_launchd_plist(
     path: str = "",
     template_name: str = "com.ciao.server.plist.tmpl",
 ) -> str:
+    python_path = _stable_python_path(python_path)
     template = resources.files("ciao.stock").joinpath(
         "deploy", template_name
     ).read_text(encoding="utf-8")

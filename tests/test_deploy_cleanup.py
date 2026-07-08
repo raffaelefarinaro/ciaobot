@@ -57,6 +57,51 @@ def test_render_launchd_plist_substitutes_path() -> None:
     assert "/opt/homebrew/bin:/usr/bin:/bin" in out
 
 
+def test_render_launchd_plist_maps_cellar_python_to_opt(tmp_path: Path) -> None:
+    """A Homebrew Cellar interpreter is recorded via the upgrade-stable
+    opt symlink: `brew upgrade` deletes the versioned keg, which killed the
+    LaunchAgents (and the running server) pinned to it."""
+    from ciao.cli import _render_launchd_plist
+
+    cellar_python = tmp_path / "Cellar" / "ciaobot" / "0.4.8" / "libexec" / "bin" / "python"
+    opt_python = tmp_path / "opt" / "ciaobot" / "libexec" / "bin" / "python"
+    for p in (cellar_python, opt_python):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("", encoding="utf-8")
+
+    out = _render_launchd_plist(
+        workspace=Path("/tmp/ciao-ws"),
+        python_path=str(cellar_python),
+        port=8443,
+    )
+    assert str(opt_python) in out
+    assert "/Cellar/" not in out
+
+
+def test_render_launchd_plist_keeps_non_cellar_python(tmp_path: Path) -> None:
+    """Non-Homebrew interpreters (and Cellar paths without an opt mirror)
+    are recorded as given."""
+    from ciao.cli import _render_launchd_plist
+
+    out = _render_launchd_plist(
+        workspace=Path("/tmp/ciao-ws"),
+        python_path="/Users/me/.ciaobot-venv/bin/python",
+        port=8443,
+    )
+    assert "/Users/me/.ciaobot-venv/bin/python" in out
+
+    orphan = tmp_path / "Cellar" / "ciaobot" / "9.9.9" / "bin" / "python"
+    orphan.parent.mkdir(parents=True, exist_ok=True)
+    orphan.write_text("", encoding="utf-8")
+    out = _render_launchd_plist(
+        workspace=Path("/tmp/ciao-ws"),
+        python_path=str(orphan),
+        port=8443,
+    )
+    # No opt mirror exists for this keg: the path is left untouched.
+    assert str(orphan) in out
+
+
 def test_run_step_reports_missing_binary_as_failed_step() -> None:
     from ciao.web.routes_api import _run_step
 
