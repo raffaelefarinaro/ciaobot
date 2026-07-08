@@ -1006,6 +1006,7 @@ function checkScroll() {
   if (!el) return
   const threshold = 4
   isNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight <= threshold
+  onChatScrollReanchor()
 }
 
 function scrollToBottom() {
@@ -1189,6 +1190,7 @@ const editingChatCommentText = ref('')
 const commentDraftImages = ref<string[]>([])
 const editingChatCommentImages = ref<string[]>([])
 let lastChatSelectionText = ''
+let lastChatSelectionRange: Range | null = null
 // Bubble element the current selection originated in. Captured at selection
 // time so applyHighlights() can re-wrap only the right bubble (otherwise a
 // short selection like "OK" could wrongly highlight in any other message).
@@ -1208,44 +1210,25 @@ function truncate(s: string, n: number): string {
   return s.length > n ? s.slice(0, n - 1) + '…' : s
 }
 
-function onChatSelectionChange(): void {
-  if (commentDraft.value) return
-  const sel = window.getSelection()
-  if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
-    selectionAnchor.value = null
-    return
-  }
-  const range = sel.getRangeAt(0)
-  // Only react to selections inside message bubbles
+function updateChatSelectionAnchorFromRange(range: Range): void {
   const msgs = messagesEl.value
-  if (!msgs || !msgs.contains(range.startContainer) || !msgs.contains(range.endContainer)) {
+  if (!msgs) {
     selectionAnchor.value = null
     return
   }
-  // Skip if the selection is inside an input/textarea
-  const startEl = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement
-  const endEl = range.endContainer instanceof Element ? range.endContainer : range.endContainer.parentElement
-  if (startEl?.closest('textarea, input') || endEl?.closest('textarea, input')) {
-    selectionAnchor.value = null
-    return
-  }
-  // Find the bubble this selection lives in. Required so applyHighlights()
-  // only wraps the matching text in the originating bubble, not every bubble
-  // that happens to contain the same string.
-  const bubble = startEl?.closest('.message') as HTMLElement | null
-  if (!bubble) { selectionAnchor.value = null; return }
-  const text = sel.toString().trim()
-  if (!text) { selectionAnchor.value = null; return }
-  lastChatSelectionText = text
-  lastChatSelectionBubble = bubble
 
-  // Anchor at the END of the selection (last client rect), not the bounding
-  // box of the whole range — multi-line selections otherwise push the pill
-  // far below the visible end of the highlight.
   const rects = range.getClientRects()
   const endRect = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect()
-  // Viewport-relative coordinates because the trigger/popover are teleported
-  // to body with position: fixed.
+  const msgsRect = msgs.getBoundingClientRect()
+  const visible = endRect.bottom > msgsRect.top
+    && endRect.top < msgsRect.bottom
+    && endRect.right > msgsRect.left
+    && endRect.left < msgsRect.right
+  if (!visible) {
+    selectionAnchor.value = null
+    return
+  }
+
   const popoverW = Math.min(420, window.innerWidth * 0.9)
   const top = endRect.bottom + 2
   const left = Math.min(
@@ -1253,6 +1236,66 @@ function onChatSelectionChange(): void {
     Math.max(8, window.innerWidth - popoverW - 8)
   )
   selectionAnchor.value = { top, left }
+}
+
+function onChatScrollReanchor(): void {
+  if (commentDraft.value || !lastChatSelectionRange) return
+  try {
+    if (!lastChatSelectionRange.startContainer.isConnected) {
+      lastChatSelectionRange = null
+      selectionAnchor.value = null
+      return
+    }
+    updateChatSelectionAnchorFromRange(lastChatSelectionRange)
+  } catch {
+    lastChatSelectionRange = null
+    selectionAnchor.value = null
+  }
+}
+
+function onChatSelectionChange(): void {
+  if (commentDraft.value) return
+  const sel = window.getSelection()
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+    lastChatSelectionRange = null
+    selectionAnchor.value = null
+    return
+  }
+  const range = sel.getRangeAt(0)
+  // Only react to selections inside message bubbles
+  const msgs = messagesEl.value
+  if (!msgs || !msgs.contains(range.startContainer) || !msgs.contains(range.endContainer)) {
+    lastChatSelectionRange = null
+    selectionAnchor.value = null
+    return
+  }
+  // Skip if the selection is inside an input/textarea
+  const startEl = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement
+  const endEl = range.endContainer instanceof Element ? range.endContainer : range.endContainer.parentElement
+  if (startEl?.closest('textarea, input') || endEl?.closest('textarea, input')) {
+    lastChatSelectionRange = null
+    selectionAnchor.value = null
+    return
+  }
+  // Find the bubble this selection lives in. Required so applyHighlights()
+  // only wraps the matching text in the originating bubble, not every bubble
+  // that happens to contain the same string.
+  const bubble = startEl?.closest('.message') as HTMLElement | null
+  if (!bubble) {
+    lastChatSelectionRange = null
+    selectionAnchor.value = null
+    return
+  }
+  const text = sel.toString().trim()
+  if (!text) {
+    lastChatSelectionRange = null
+    selectionAnchor.value = null
+    return
+  }
+  lastChatSelectionText = text
+  lastChatSelectionBubble = bubble
+  lastChatSelectionRange = range.cloneRange()
+  updateChatSelectionAnchorFromRange(range)
 }
 
 function openCommentForSelection(): void {
@@ -1263,6 +1306,7 @@ function openCommentForSelection(): void {
     text: '',
   }
   selectionAnchor.value = null
+  lastChatSelectionRange = null
   window.getSelection()?.removeAllRanges()
   nextTick(() => {
     chatCommentInputEl.value?.focus()
@@ -1276,6 +1320,7 @@ function cancelChatComment(): void {
   draftBubbleEl = null
   lastChatSelectionText = ''
   lastChatSelectionBubble = null
+  lastChatSelectionRange = null
   nextTick(() => applyHighlights())
 }
 
@@ -1291,6 +1336,7 @@ function saveChatComment(): void {
   commentDraftImages.value = []
   lastChatSelectionText = ''
   lastChatSelectionBubble = null
+  lastChatSelectionRange = null
   nextTick(() => applyHighlights())
 }
 
