@@ -2,14 +2,21 @@
 
 ## v0.4.10 - 2026-07-08
 
+### Added
+- feat(settings): one-click Fix for workspace-health issues (`12a27af`)
+- feat(wizard): drop the scratch/existing choice — autodetect the folder (`8fff3fd`)
+- feat(wizard): name the first workspace instead of auto personal+work (`4fcb2b3`)
+
 ### Changed
 - Merge pull request #48 from raffaelefarinaro/fix/brew-install-command (`61d0357`)
+- Simplify the macOS menu bar by removing dead notification controls. (`b522174`)
 
 ### Fixed
 - fix(setup): route fresh installs to the first-run wizard again (`7d3d7cf`)
 
 ### Maintenance
 - docs: use the full brew install path raffaelefarinaro/ciaobot/ciaobot (`adc6c76`)
+- chore: gitignore .claude/ session tooling
 
 ## v0.4.9 - 2026-07-08
 
