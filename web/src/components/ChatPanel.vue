@@ -1613,6 +1613,14 @@ async function copyMessageText(text: string, key: string): Promise<void> {
   }
 }
 
+// System bubbles produced by _summarize_task_notification (routes_api.py)
+// announce a subagent completion ("🤖 Subagent completed: ..." / "🤖 Agent
+// \"X\" completed"). renderItems uses them as the chronological anchor for
+// the dispatching turn's SubagentPanel.
+function isSubagentCompletionNotice(content: string): boolean {
+  return /^\u{1F916} (Subagent|Agent\b)/u.test(content.trim())
+}
+
 // Subagent activity lines are tagged with the leading turnstile arrow by the
 // store's tool_use handler when an event arrives with parent_tool_use_id set.
 // Used to indent and de-emphasize them so the trace reads "parent → subagent
@@ -1821,6 +1829,12 @@ const renderItems = computed<RenderItem[]>(() => {
       && msg.tool_name !== '_filecard'
     ) {
       flushTurn()
+      // A subagent-completion notice marks where the background work ended:
+      // flush the dispatching turn's activity panel just before it so the
+      // chat reads chronologically (dispatch reply → subagent activity →
+      // completion notice → report) instead of dumping the panel after the
+      // report at the end of the turn.
+      if (isSubagentCompletionNotice(msg.content)) flushSubagents()
       items.push({ kind: 'system', msg })
     } else {
       // assistant text, _activity tool block, _thinking note, or _filecard:
