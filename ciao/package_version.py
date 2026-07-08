@@ -250,17 +250,45 @@ def package_changelog(
     }
 
 
+def _resolve_brew() -> str | None:
+    import shutil
+    from pathlib import Path
+
+    brew = shutil.which("brew")
+    if brew:
+        return brew
+    for path in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew"):
+        if Path(path).is_file():
+            return path
+    return None
+
+
+def _is_homebrew_cellar_path(path: Path) -> bool:
+    text = str(path)
+    return "Cellar/ciaobot" in text or "Cellar/ciao/" in text
+
+
 def detect_install_mode() -> str:
-    """Return "pip_venv", "editable", or "unknown"."""
+    """Return "homebrew", "pip_venv", "editable", or "unknown"."""
     import sys
     from pathlib import Path
 
     try:
         import ciao
+
         ciao_file = Path(ciao.__file__).resolve()
         project_root = ciao_file.parent.parent
         if (project_root / "pyproject.toml").is_file() and (project_root / ".git").is_dir():
             return "editable"
+    except Exception:
+        ciao_file = None
+
+    try:
+        executable = Path(sys.executable).resolve()
+        if _is_homebrew_cellar_path(executable):
+            return "homebrew"
+        if ciao_file is not None and _is_homebrew_cellar_path(ciao_file):
+            return "homebrew"
     except Exception:
         pass
 
@@ -322,7 +350,17 @@ def update_package(
             "command": "git pull",
         }
 
-    if mode == "pip_venv":
+    if mode == "homebrew":
+        brew = _resolve_brew()
+        if not brew:
+            return {
+                "ok": False,
+                "mode": mode,
+                "error": "Homebrew 'brew' command not found in PATH.",
+                "command": "brew upgrade ciaobot",
+            }
+        cmd = [brew, "upgrade", "ciaobot"]
+    elif mode == "pip_venv":
         wheel_url, error = _latest_wheel_url(opener=opener, timeout=timeout)
         if not wheel_url:
             return {

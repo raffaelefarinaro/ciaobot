@@ -110,7 +110,7 @@ def test_export_public_tree_copies_only_allowlisted_paths(tmp_path: Path) -> Non
     _write(source / ".env", "TOKEN=secret\n")
     _write(source / ".runtime" / "state.json", "{}\n")
     _write(source / "deploy" / "com.ciao.server.plist", "private paths\n")
-    _write(source / "deploy" / "homebrew" / "ciao.rb", "class Ciao < Formula\nend\n")
+    _write(source / "deploy" / "homebrew" / "ciaobot.rb", "class Ciaobot < Formula\nend\n")
 
     copied = export_public_tree(source, dest)
 

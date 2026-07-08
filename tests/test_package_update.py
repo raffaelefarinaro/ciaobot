@@ -35,6 +35,22 @@ def _release_opener(payload: dict):
     return opener
 
 
+def test_detect_install_mode_homebrew(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(Path, "is_file", lambda self: False)
+    monkeypatch.setattr(Path, "is_dir", lambda self: False)
+
+    cellar = tmp_path / "opt" / "homebrew" / "Cellar" / "ciaobot" / "0.4.5" / "libexec"
+    cellar.mkdir(parents=True)
+    python = cellar / "bin" / "python3.12"
+    python.parent.mkdir(parents=True)
+    python.touch()
+
+    monkeypatch.setattr(sys, "executable", str(python))
+    monkeypatch.setattr(sys, "prefix", str(cellar))
+    monkeypatch.setattr(sys, "base_prefix", "/opt/homebrew/opt/python@3.12/Frameworks/Python.framework/Versions/3.12")
+    assert detect_install_mode() == "homebrew"
+
+
 def test_detect_install_mode(tmp_path, monkeypatch) -> None:
     # Disable editable check by mocking Path methods
     monkeypatch.setattr(Path, "is_file", lambda self: False)
@@ -49,6 +65,36 @@ def test_detect_install_mode(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(sys, "prefix", "/foo/python")
     monkeypatch.setattr(sys, "base_prefix", "/foo/python")
     assert detect_install_mode() == "unknown"
+
+
+def test_update_package_homebrew_upgrade(monkeypatch) -> None:
+    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "homebrew")
+    monkeypatch.setattr("ciao.package_version._resolve_brew", lambda: "/opt/homebrew/bin/brew")
+
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        result = MagicMock()
+        result.stdout = "ciaobot 0.4.6"
+        result.stderr = ""
+        result.returncode = 0
+        return result
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    res = update_package()
+    assert res["ok"] is True
+    assert captured["cmd"] == ["/opt/homebrew/bin/brew", "upgrade", "ciaobot"]
+
+
+def test_update_package_homebrew_without_brew(monkeypatch) -> None:
+    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "homebrew")
+    monkeypatch.setattr("ciao.package_version._resolve_brew", lambda: None)
+
+    res = update_package()
+    assert res["ok"] is False
+    assert res["mode"] == "homebrew"
+    assert "brew upgrade ciaobot" in res["command"]
 
 
 def test_update_package_editable(monkeypatch) -> None:

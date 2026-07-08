@@ -36,3 +36,45 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber
+
+  update-homebrew-tap:
+    runs-on: ubuntu-latest
+    needs: build-and-publish
+    if: github.event_name == 'release'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compute wheel checksum
+        id: wheel
+        env:
+          VERSION: ${{ github.event.release.tag_name }}
+        run: |
+          version="${VERSION#v}"
+          wheel_url="https://github.com/raffaelefarinaro/ciaobot/releases/download/v${version}/ciaobot-${version}-py3-none-any.whl"
+          sha256="$(curl -fsSL "$wheel_url" | sha256sum | awk '{print $1}')"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: raffaelefarinaro/homebrew-ciaobot
+          token: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          path: homebrew-ciaobot
+      - name: Update formula
+        run: |
+          ./scripts/update-homebrew-tap.sh \
+            "${{ steps.wheel.outputs.version }}" \
+            "${{ steps.wheel.outputs.sha256 }}" \
+            homebrew-ciaobot
+      - name: Commit and push tap update
+        working-directory: homebrew-ciaobot
+        env:
+          RELEASE_VERSION: ${{ steps.wheel.outputs.version }}
+        run: |
+          if git diff --quiet; then
+            echo "Formula already up to date."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/ciaobot.rb
+          git commit -m "ciaobot ${RELEASE_VERSION}"
+          git push
