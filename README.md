@@ -34,6 +34,20 @@ I'm sharing it because the patterns may be useful to you, and because I'm happy 
 - **Pin documents** — keep a file open beside the chat; add line-level comments in the preview (attached to your next message, like chat comments).
 - **Rich previews** — images inline; PDFs in a built-in viewer; PowerPoint (`.pptx`) converted to PDF for display (requires LibreOffice on the machine running Ciaobot).
 
+Select text in any message to drop a comment, which collects in a side panel:
+
+![Selecting text in a chat message shows a Comment action](docs/images/chat-comment-select.png)
+
+![A pending comment in the Comments side panel](docs/images/chat-comment-sidebar.png)
+
+The comment travels with your next message, so the agent has the exact context:
+
+![The comment is attached to the follow-up message](docs/images/chat-comment-attached.png)
+
+Pin a document beside the chat and annotate it the same way:
+
+![A document pinned in a split view next to the chat](docs/images/pinned-file.png)
+
 On first launch, an in-app product tour walks through these flows. Replay it anytime from **Settings → Home → Product tour**.
 
 What it does **not** do automatically: it never promotes memory proposals into your long-term memory files without review, never discards or rewrites an existing notes folder during onboarding, and never locks you into one provider; chats and routines can route through any configured backend.
