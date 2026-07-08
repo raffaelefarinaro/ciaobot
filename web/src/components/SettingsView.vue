@@ -67,6 +67,15 @@
                 <p v-if="check.action" class="hint hint--compact hint--warn">{{ check.action }}</p>
               </div>
             </div>
+            <div v-if="workspaceHealth.status !== 'ok'" class="action-row">
+              <button
+                id="workspace-health-fix"
+                class="btn-primary"
+                :disabled="healthFixPending"
+                @click="fixWorkspaceHealth"
+              >{{ healthFixPending ? 'Fixing…' : 'Fix issues' }}</button>
+              <span v-if="healthFixError" class="hint hint--warn">{{ healthFixError }}</span>
+            </div>
           </div>
         </div>
 
@@ -133,7 +142,7 @@
           <div class="settings-card-header">
             <p class="section-title">Notifications</p>
             <p class="hint">
-              Get a phone notification when a chat replies and the app is not focused.
+              Get a notification when a chat replies and the app is not focused.
             </p>
           </div>
           <div v-if="needsIosInstall" class="hint hint--warn">
@@ -2312,6 +2321,25 @@ async function fetchAgentAssets() {
     agentAssetsError.value = `Failed to load agent assets: ${e?.message || e}`
   } finally {
     agentAssetsLoaded.value = true
+  }
+}
+
+const healthFixPending = ref(false)
+const healthFixError = ref('')
+
+async function fixWorkspaceHealth() {
+  healthFixPending.value = true
+  healthFixError.value = ''
+  try {
+    // Applies the checks' automatic remedies server-side (create missing
+    // scaffold files, re-link skills), then refresh so the card reflects
+    // the fresh report.
+    await api.post('/api/workspace-health/fix', {})
+    await fetchAgentAssets()
+  } catch (e: any) {
+    healthFixError.value = e?.message || 'fix failed'
+  } finally {
+    healthFixPending.value = false
   }
 }
 

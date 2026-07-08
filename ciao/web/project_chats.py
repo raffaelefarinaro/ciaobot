@@ -925,11 +925,16 @@ class ProjectChatManager:
                 self._events.publish({"type": "project_deleted", "project_id": pid})
 
         if not self._chats:
+            # The onboarding chat lands in the first configured workspace —
+            # single-workspace registries from the wizard carry the name the
+            # user chose; the legacy fallback keeps this on "personal".
+            ws_names = self._workspace_names()
+            first_ws = ws_names[0] if ws_names else "personal"
             general = next(
                 (
                     p
                     for p in self._projects.values()
-                    if p.workspace == "personal" and p.name == "General"
+                    if p.workspace == first_ws and p.name == "General"
                 ),
                 None,
             )

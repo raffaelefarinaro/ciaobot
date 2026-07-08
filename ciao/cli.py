@@ -70,7 +70,15 @@ def _copy_tree(src, dest: Path) -> None:
         if item.is_dir():
             _copy_tree(item, dest / item.name)
         else:
-            (dest / item.name).write_bytes(item.read_bytes())
+            target = dest / item.name
+            # sync-skills turns stock .claude/agents|commands entries into
+            # symlinks once a workspace promotes one to a custom copy
+            # (subagents/ or commands/). write_bytes() follows symlinks, so
+            # without this a setup re-run would silently overwrite the
+            # user's custom file through the link instead of the stock copy.
+            if target.is_symlink():
+                target.unlink()
+            target.write_bytes(item.read_bytes())
 
 
 def _copy_tree_if_missing(src, dest: Path) -> list[Path]:
@@ -531,6 +539,23 @@ def ensure_vault_git(root: Path) -> None:
         )
 
 
+def detect_vault_mode(workspace: Path | str) -> str:
+    """Infer the vault content mode from what the chosen folder holds.
+
+    Empty (or missing) folder -> "scratch": scaffold a fresh vault at
+    memory-vault/. Anything with visible content -> "existing": the folder is
+    the user's notes, the vault lives in place, and the onboarding agent
+    adapts the contents. Dotfiles don't count as content, so a folder that
+    only carries e.g. .DS_Store or .obsidian still starts from scratch.
+    """
+    root = Path(workspace).expanduser()
+    try:
+        entries = [p for p in root.iterdir() if not p.name.startswith(".")]
+    except OSError:
+        return "scratch"
+    return "existing" if entries else "scratch"
+
+
 def setup_workspace(
     workspace: Path | str,
     *,
@@ -539,6 +564,7 @@ def setup_workspace(
     push_contact: str | None = None,
     vault_root: Path | str | None = None,
     vault_mode: str = "scratch",
+    workspace_name: str | None = None,
     python_path: str | None = None,
     port: int = 8443,
     launch_agents_dir: Path | str | None = None,
@@ -622,6 +648,31 @@ def setup_workspace(
         json.dumps({"schedules": []}, indent=2) + "\n",
     )
     written.append(runtime_schedules)
+
+    # First-run wizard names the user's first logical workspace. Writing a
+    # real registry (instead of relying on the legacy personal+work fallback)
+    # means new installs start with exactly one workspace; more are added in
+    # Settings → Workspaces. The explicit vault_root also keeps the legacy
+    # personal/work nested-vault special case from ever triggering.
+    name = (workspace_name or "").strip()
+    if name:
+        workspaces_registry = root / ".runtime" / "workspaces.json"
+        _write_if_missing(
+            workspaces_registry,
+            json.dumps(
+                [
+                    {
+                        "name": name,
+                        "vault_root": vault_value,
+                        "gws_profile": name,
+                        "model_bucket": "anthropic",
+                    }
+                ],
+                indent=2,
+            )
+            + "\n",
+        )
+        written.append(workspaces_registry)
 
     _write_if_missing(
         vault_path / "MEMORY.md",

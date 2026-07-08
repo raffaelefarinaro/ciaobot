@@ -684,6 +684,14 @@ async def auth_logout(request: Request) -> JSONResponse:
 
 
 async def auth_check(request: Request) -> JSONResponse:
+    # Bootstrap mode must land the browser on the setup wizard. The wizard
+    # lives in the login view, and with auth off by default nothing would
+    # ever route there — the SPA would open straight into the app on the
+    # throwaway bootstrap workspace. Report unauthenticated until setup
+    # finishes so the router redirects to /login → first-run wizard.
+    config = getattr(request.app.state, "config", None)
+    if getattr(config, "bootstrap_mode", False):
+        return JSONResponse({"error": "setup required"}, status_code=401)
     return JSONResponse({"ok": True})
 
 
@@ -1014,7 +1022,12 @@ def _gws_profile_config_dir(config, profile: str) -> Path | None:
         return root / "secrets" / "gws-personal"
     if profile == "work":
         return root / "secrets" / "gws"
-    return None
+    # Wizard-named workspaces carry their own profile names; each gets its
+    # own credentials directory alongside the legacy two.
+    safe = re.sub(r"[^a-z0-9_-]+", "-", profile.strip().lower()).strip("-")
+    if not safe:
+        return None
+    return root / "secrets" / f"gws-{safe}"
 
 
 def _gws_file_present(config_dir: Path | None, names: tuple[str, ...]) -> bool:
@@ -3376,7 +3389,13 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     if port < 1 or port > 65535:
         return JSONResponse({"error": "port must be between 1 and 65535"}, status_code=400)
 
-    from ciao.cli import setup_workspace
+    from ciao.cli import detect_vault_mode, setup_workspace
+
+    # The wizard no longer asks scratch-vs-existing: when the request does
+    # not pin a mode, inspect the folder — empty starts from scratch, one
+    # with visible content is an existing notes folder the onboarding agent
+    # adapts in place.
+    vault_mode = str(body.get("vault_mode", "")).strip().lower() or detect_vault_mode(workspace)
 
     written = setup_workspace(
         workspace,
@@ -3384,7 +3403,8 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         auth_required=bool(body.get("auth_required", False)),
         push_contact=push_contact,
         vault_root=str(body.get("vault_root", "")).strip() or None,
-        vault_mode=str(body.get("vault_mode", "scratch")).strip().lower(),
+        vault_mode=vault_mode,
+        workspace_name=str(body.get("workspace_name", "")).strip() or "personal",
         python_path=str(body.get("python", "")).strip() or None,
         port=port,
         launch_agents_dir=str(body.get("launch_agents_dir", "")).strip() or None,

@@ -239,6 +239,95 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     assert (apps / "Ciaobot.app" / "Contents" / "MacOS" / "Ciaobot").is_file()
 
 
+def _finish_client(tmp_path) -> TestClient:
+    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.serializer = serializer
+    app.state.request_restart = lambda code: None
+    return TestClient(app, base_url="http://localhost:8443")
+
+
+def test_setup_finish_autodetects_scratch_for_empty_folder(tmp_path) -> None:
+    """Without an explicit vault_mode, an empty workspace folder starts from
+    scratch: fresh vault at memory-vault/."""
+    ws = tmp_path / "fresh"
+    ws.mkdir()
+    resp = _finish_client(tmp_path).post(
+        "/api/setup/finish",
+        json={
+            "workspace": str(ws),
+            "workspace_name": "life",
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+        },
+    )
+    assert resp.status_code == 200
+    env_text = (ws / ".env").read_text(encoding="utf-8")
+    assert "CIAO_VAULT_MODE=scratch" in env_text
+    assert (ws / "memory-vault" / "MEMORY.md").is_file()
+    # The wizard's first workspace replaces the legacy personal+work
+    # fallback: a one-entry registry with the chosen name.
+    import json as _json
+
+    registry = _json.loads((ws / ".runtime" / "workspaces.json").read_text(encoding="utf-8"))
+    assert [w["name"] for w in registry] == ["life"]
+    assert registry[0]["vault_root"] == "memory-vault"
+    assert registry[0]["gws_profile"] == "life"
+
+
+def test_setup_finish_autodetects_existing_notes_folder(tmp_path) -> None:
+    """A folder with visible content is treated as existing notes: the vault
+    lives in place and the onboarding agent adapts it."""
+    ws = tmp_path / "notes"
+    ws.mkdir()
+    (ws / "ideas.md").write_text("# Ideas\n", encoding="utf-8")
+    resp = _finish_client(tmp_path).post(
+        "/api/setup/finish",
+        json={
+            "workspace": str(ws),
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+        },
+    )
+    assert resp.status_code == 200
+    env_text = (ws / ".env").read_text(encoding="utf-8")
+    assert "CIAO_VAULT_MODE=existing" in env_text
+    assert "CIAO_VAULT_ROOT=." in env_text
+    assert (ws / "MEMORY.md").is_file()
+    assert not (ws / "memory-vault").exists()
+
+
+def test_auth_check_reports_unauthenticated_in_bootstrap(tmp_path) -> None:
+    """Bootstrap mode returns 401 from /api/auth/check so the SPA routes to
+    the login view, where the first-run wizard renders. With auth off by
+    default nothing else ever routes there — a fresh install would open
+    straight into the app on the throwaway bootstrap workspace."""
+    from ciao.web.routes_api import auth_check
+
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/auth/check", auth_check, methods=["GET"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.serializer = serializer
+    client = TestClient(app, base_url="http://localhost:8443")
+
+    app.state.config = CiaoConfig.from_env(
+        {"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")}
+    )
+    assert client.get("/api/auth/check").status_code == 401
+
+    app.state.config = CiaoConfig.from_env(
+        {"PWA_AUTH_TOKEN": "tok", "CIAO_WORKSPACE": str(tmp_path / "ws")}
+    )
+    assert client.get("/api/auth/check").status_code == 200
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="launchd handoff is macOS-only")
 def test_setup_finish_foreground_handoff_to_launchd(tmp_path, monkeypatch) -> None:
     """An interactive foreground `ciao run` hands the server to launchd:
