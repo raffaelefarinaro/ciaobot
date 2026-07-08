@@ -129,7 +129,7 @@ describe('LoginView setup wizard tests', () => {
     expect((wrapper.find('#setup-port').element as HTMLInputElement).value).toBe('8443')
   })
 
-  it('shows a live derived vault hint in scratch mode with no separate vault input', async () => {
+  it('asks only for the workspace folder and explains the auto-adjust behavior', async () => {
     mockApiGet.mockResolvedValue({
       configured: false,
       bootstrap: true,
@@ -138,36 +138,12 @@ describe('LoginView setup wizard tests', () => {
     })
 
     const wrapper = await mountLoginView()
-    // single-folder setup: there is never a second path input
+    // single-folder setup: one path input, no vault input, no mode radio —
+    // the server detects empty vs existing-notes folders on finish.
     expect(wrapper.find('#setup-vault').exists()).toBe(false)
-    expect(wrapper.find('#setup-vault-change').exists()).toBe(false)
-    expect(wrapper.text()).toContain('Your second-brain vault will be created at')
-    expect(wrapper.text()).toContain('~/ciaobot/memory-vault')
-
-    // hint live-updates when the workspace changes
-    await wrapper.find('#setup-workspace').setValue('/tmp/space')
-    await nextTick()
-    expect(wrapper.text()).toContain('/tmp/space/memory-vault')
-  })
-
-  it('switches to adapt-in-place copy when vault mode is existing', async () => {
-    mockApiGet.mockResolvedValue({
-      configured: false,
-      bootstrap: true,
-      mode: 'bootstrap',
-      providers: {}
-    })
-
-    const wrapper = await mountLoginView()
-
-    await wrapper.find('input[type="radio"][value="existing"]').setValue()
-    await nextTick()
-    // still no second path input: the workspace folder IS the notes folder
-    expect(wrapper.find('#setup-vault').exists()).toBe(false)
-    expect(wrapper.text()).toContain('Pick the notes folder you already have')
-    expect(wrapper.text()).toContain('adapts your notes')
-    // the scratch-only derived hint disappears
-    expect(wrapper.text()).not.toContain('Your second-brain vault will be created at')
+    expect(wrapper.find('input[type="radio"][value="existing"]').exists()).toBe(false)
+    expect(wrapper.find('input[type="radio"][value="scratch"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain("detects what's inside and adjusts automatically")
   })
 
   it('opens the folder picker, lists directories, and writes the selection into the workspace field', async () => {
@@ -208,8 +184,6 @@ describe('LoginView setup wizard tests', () => {
     await nextTick()
     expect(wrapper.find('.picker-modal').exists()).toBe(false)
     expect((wrapper.find('#setup-workspace').element as HTMLInputElement).value).toBe('/Users/me/ciaobot')
-    // workspace selection re-derives the hidden vault suggestion
-    expect(wrapper.text()).toContain('/Users/me/ciaobot/memory-vault')
   })
 
   it('enables Finish without a push contact and wraps a plain email on submit', async () => {
@@ -245,7 +219,6 @@ describe('LoginView setup wizard tests', () => {
 
     expect(mockApiPost).toHaveBeenCalledWith('/api/setup/finish', {
       workspace: '~/ciaobot',
-      vault_mode: 'scratch',
       push_contact: 'mailto:owner@example.com',
       port: 8443,
       python: undefined,

@@ -81,44 +81,9 @@
               @click="openPicker()"
             >Browse…</button>
           </div>
-          <span class="hint">{{ vaultMode === 'existing'
-            ? 'Pick the notes folder you already have. It becomes the app workspace; config and runtime state live alongside your notes.'
-            : 'The local app workspace. It stores config, runtime state, generated assets, and chat metadata.' }}</span>
-        </div>
-
-        <div class="form-group">
-          <label>Vault Content Mode</label>
-          <div class="radio-group" style="display: flex; gap: 20px; margin-top: 6px;">
-            <label class="checkbox-label" style="font-weight: normal; cursor: pointer;">
-              <input
-                type="radio"
-                value="scratch"
-                v-model="vaultMode"
-                :disabled="loading"
-                style="margin-right: 6px;"
-              />
-              Create from scratch
-            </label>
-            <label class="checkbox-label" style="font-weight: normal; cursor: pointer;">
-              <input
-                type="radio"
-                value="existing"
-                v-model="vaultMode"
-                :disabled="loading"
-                style="margin-right: 6px;"
-              />
-              Use existing notes folder
-            </label>
-          </div>
-          <span class="hint">{{ vaultMode === 'existing'
-            ? 'Ciaobot checks the folder above and, where needed, adapts your notes into its workspace and project structure.'
-            : 'Starting fresh scaffolds a new second brain inside the workspace folder.' }}</span>
-        </div>
-
-        <div v-if="vaultMode === 'scratch'" class="form-group">
-          <span class="hint vault-derived-hint">
-            Your second-brain vault will be created at <code>{{ derivedVaultRoot }}</code>
-          </span>
+          <span class="hint">Pick a brand-new folder or the notes folder you already have — Ciaobot
+            detects what's inside and adjusts automatically: an empty folder gets a fresh
+            second brain; existing notes are adapted in place into its structure.</span>
         </div>
 
         <div class="form-group">
@@ -374,18 +339,8 @@ const provider = ref('claude')
 const apiFallback = ref(false)
 const authRequired = ref(false)
 const isRestarting = ref(false)
-const vaultMode = ref('scratch')
 const copyStatus = ref('')
 const advancedOpen = ref(false)
-
-// Single-folder setup: the vault always lives inside the workspace folder
-// ("scratch" scaffolds it at memory-vault/; "existing" lets the server and
-// onboarding agent adapt the chosen folder itself). Shown for scratch only.
-const derivedVaultRoot = computed(() => {
-  const ws = workspace.value.trim()
-  if (!ws) return ''
-  return ws.endsWith('/') ? `${ws}memory-vault` : `${ws}/memory-vault`
-})
 
 // Folder picker modal (server-backed: browsers cannot give absolute paths)
 interface DirListing {
@@ -562,10 +517,10 @@ async function doFinish() {
   try {
     await api.post('/api/setup/finish', {
       workspace: workspace.value,
-      // vault_root is intentionally omitted: the server derives it from the
-      // workspace folder ("memory-vault" for scratch; for existing mode the
-      // folder itself, unless a scaffolded memory-vault/ is already there).
-      vault_mode: vaultMode.value,
+      // vault_root and vault_mode are intentionally omitted: the server
+      // inspects the chosen folder — empty scaffolds a fresh vault at
+      // memory-vault/, existing notes are adapted in place by the
+      // onboarding agent.
       push_contact: normalizedPushContact(),
       port: Number(port.value),
       python: python.value || undefined,

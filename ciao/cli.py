@@ -531,6 +531,23 @@ def ensure_vault_git(root: Path) -> None:
         )
 
 
+def detect_vault_mode(workspace: Path | str) -> str:
+    """Infer the vault content mode from what the chosen folder holds.
+
+    Empty (or missing) folder -> "scratch": scaffold a fresh vault at
+    memory-vault/. Anything with visible content -> "existing": the folder is
+    the user's notes, the vault lives in place, and the onboarding agent
+    adapts the contents. Dotfiles don't count as content, so a folder that
+    only carries e.g. .DS_Store or .obsidian still starts from scratch.
+    """
+    root = Path(workspace).expanduser()
+    try:
+        entries = [p for p in root.iterdir() if not p.name.startswith(".")]
+    except OSError:
+        return "scratch"
+    return "existing" if entries else "scratch"
+
+
 def setup_workspace(
     workspace: Path | str,
     *,

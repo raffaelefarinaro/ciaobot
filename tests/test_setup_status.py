@@ -239,6 +239,60 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     assert (apps / "Ciaobot.app" / "Contents" / "MacOS" / "Ciaobot").is_file()
 
 
+def _finish_client(tmp_path) -> TestClient:
+    config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.config = config
+    app.state.serializer = serializer
+    app.state.request_restart = lambda code: None
+    return TestClient(app, base_url="http://localhost:8443")
+
+
+def test_setup_finish_autodetects_scratch_for_empty_folder(tmp_path) -> None:
+    """Without an explicit vault_mode, an empty workspace folder starts from
+    scratch: fresh vault at memory-vault/."""
+    ws = tmp_path / "fresh"
+    ws.mkdir()
+    resp = _finish_client(tmp_path).post(
+        "/api/setup/finish",
+        json={
+            "workspace": str(ws),
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+        },
+    )
+    assert resp.status_code == 200
+    env_text = (ws / ".env").read_text(encoding="utf-8")
+    assert "CIAO_VAULT_MODE=scratch" in env_text
+    assert (ws / "memory-vault" / "MEMORY.md").is_file()
+
+
+def test_setup_finish_autodetects_existing_notes_folder(tmp_path) -> None:
+    """A folder with visible content is treated as existing notes: the vault
+    lives in place and the onboarding agent adapts it."""
+    ws = tmp_path / "notes"
+    ws.mkdir()
+    (ws / "ideas.md").write_text("# Ideas\n", encoding="utf-8")
+    resp = _finish_client(tmp_path).post(
+        "/api/setup/finish",
+        json={
+            "workspace": str(ws),
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+        },
+    )
+    assert resp.status_code == 200
+    env_text = (ws / ".env").read_text(encoding="utf-8")
+    assert "CIAO_VAULT_MODE=existing" in env_text
+    assert "CIAO_VAULT_ROOT=." in env_text
+    assert (ws / "MEMORY.md").is_file()
+    assert not (ws / "memory-vault").exists()
+
+
 def test_auth_check_reports_unauthenticated_in_bootstrap(tmp_path) -> None:
     """Bootstrap mode returns 401 from /api/auth/check so the SPA routes to
     the login view, where the first-run wizard renders. With auth off by

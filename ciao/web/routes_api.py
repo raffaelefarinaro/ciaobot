@@ -3384,7 +3384,13 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     if port < 1 or port > 65535:
         return JSONResponse({"error": "port must be between 1 and 65535"}, status_code=400)
 
-    from ciao.cli import setup_workspace
+    from ciao.cli import detect_vault_mode, setup_workspace
+
+    # The wizard no longer asks scratch-vs-existing: when the request does
+    # not pin a mode, inspect the folder — empty starts from scratch, one
+    # with visible content is an existing notes folder the onboarding agent
+    # adapts in place.
+    vault_mode = str(body.get("vault_mode", "")).strip().lower() or detect_vault_mode(workspace)
 
     written = setup_workspace(
         workspace,
@@ -3392,7 +3398,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         auth_required=bool(body.get("auth_required", False)),
         push_contact=push_contact,
         vault_root=str(body.get("vault_root", "")).strip() or None,
-        vault_mode=str(body.get("vault_mode", "scratch")).strip().lower(),
+        vault_mode=vault_mode,
         python_path=str(body.get("python", "")).strip() or None,
         port=port,
         launch_agents_dir=str(body.get("launch_agents_dir", "")).strip() or None,
