@@ -310,7 +310,7 @@
                   @change="saveRoutineProvider('title_model', ($event.target as HTMLSelectElement).value)"
                 >
                   <option value="automatic">Automatic</option>
-                  <option value="apple">Apple Intelligence</option>
+                  <option value="apple">Local (free)</option>
                   <option v-for="provider in aliasProviderSections" :key="provider.key" :value="provider.key">
                     {{ provider.label }}
                   </option>
@@ -329,7 +329,7 @@
                 </select>
                 <span class="routine-model-hint">
                   <template v-if="routineProviderValue('title_model') === 'apple'">
-                    Uses <a :href="APFEL_REPO_URL" target="_blank" rel="noopener">apfel</a> (Apple Intelligence CLI).
+                    Runs on-device for free via <a :href="APFEL_REPO_URL" target="_blank" rel="noopener">apfel</a> (Apple Intelligence CLI).
                   </template>
                   <template v-else>{{ routineModelSummary('title_model') }}</template>
                 </span>
@@ -1619,7 +1619,8 @@ const hasDeployError = computed(() => {
     'complete',
     'waiting',
     'reloading',
-    'cancelled by user'
+    'cancelled by user',
+    'synced with remote'
   ]
   const val = actionResult.value.toLowerCase()
   return !successOrPending.some(str => val.includes(str))
@@ -1711,8 +1712,7 @@ async function saveRoutines(patch: Record<string, string>) {
   routinesResult.value = ''
   try {
     routines.value = await api.patch<RoutineSettings>('/api/settings/routines', patch)
-    routinesResult.value = 'Saved.'
-    setTimeout(() => { routinesResult.value = '' }, 2000)
+    notifySaved('Model settings saved.')
   } catch (e: any) {
     routinesResult.value = `Error: ${e?.message || e}`
   } finally {
@@ -1982,7 +1982,7 @@ function routineModelSummary(key: RoutineModelKey): string {
   if (provider === 'automatic') {
     return `Automatic: ${routineEffectiveModel(key) || 'default'}`
   }
-  if (provider === 'apple') return 'Apple Intelligence'
+  if (provider === 'apple') return 'Local (free)'
   if (provider === 'custom') return `Custom: ${routineCustomModel(key)}`
   const tier = routineTierValue(key)
   const model = tierModelForProvider(provider, tier)
@@ -2171,8 +2171,7 @@ async function saveAutoUpdateGithubSkills() {
     if (providerKeys.value) {
       providerKeys.value = res
     }
-    autoUpdateResult.value = 'Saved.'
-    setTimeout(() => { autoUpdateResult.value = '' }, 2000)
+    notifySaved('Saved.')
   } catch (e: any) {
     autoUpdateResult.value = `Error: ${e?.message || e}`
     autoUpdateGithubSkills.value = !autoUpdateGithubSkills.value
@@ -2497,7 +2496,8 @@ async function saveSubagent(agent: SubagentAsset) {
       description: editSubagentDescription.value.trim(),
       content: editSubagentContent.value.trim(),
     })
-    assetLifecycleResult.value = `Saved ${agent.name}. Restart or sync Claude Code sessions to pick it up.`
+    assetLifecycleResult.value = ''
+    notifySaved(`Saved ${agent.name}. Restart or sync Claude Code sessions to pick it up.`, 'Subagent')
     cancelEditSubagent()
     await fetchAgentAssets()
   } catch (e: any) {
@@ -2516,7 +2516,8 @@ async function deleteSubagent(agent: SubagentAsset) {
   assetLifecycleError.value = false
   try {
     await api.del(`/api/agent-assets/subagents/${encodeURIComponent(agent.name)}`)
-    assetLifecycleResult.value = `Deleted ${agent.name}. Restart or sync Claude Code sessions to pick it up.`
+    assetLifecycleResult.value = ''
+    notifySaved(`Deleted ${agent.name}. Restart or sync Claude Code sessions to pick it up.`, 'Subagent')
     if (editingSubagent.value === agent.name) cancelEditSubagent()
     await fetchAgentAssets()
   } catch (e: any) {
@@ -2555,7 +2556,8 @@ async function saveCommand(command: CommandAsset) {
       argument_hint: editCommandArgumentHint.value.trim(),
       content: editCommandContent.value.trim(),
     })
-    assetLifecycleResult.value = `Saved /${command.name}. Restart or sync Claude Code sessions to pick it up.`
+    assetLifecycleResult.value = ''
+    notifySaved(`Saved /${command.name}. Restart or sync Claude Code sessions to pick it up.`, 'Command')
     cancelEditCommand()
     await Promise.all([fetchAgentAssets(), fetchCommands()])
   } catch (e: any) {
@@ -2574,7 +2576,8 @@ async function deleteCommand(command: CommandAsset) {
   assetLifecycleError.value = false
   try {
     await api.del(`/api/agent-assets/commands/${encodeURIComponent(command.name)}`)
-    assetLifecycleResult.value = `Deleted /${command.name}. Restart or sync Claude Code sessions to pick it up.`
+    assetLifecycleResult.value = ''
+    notifySaved(`Deleted /${command.name}. Restart or sync Claude Code sessions to pick it up.`, 'Command')
     if (editingCommand.value === command.name) cancelEditCommand()
     await Promise.all([fetchAgentAssets(), fetchCommands()])
   } catch (e: any) {
@@ -2734,6 +2737,13 @@ function isStandalone(): boolean {
 
 // ── Workspaces settings (Workspaces tab) ───────────────────────────────────
 const projectStore = useProjectStore()
+
+// Transient success feedback. Routes through the app-wide in-app toast (the
+// same auto-dismissing popup used for routine/chat notifications) instead of
+// leaving persistent inline text under the form.
+function notifySaved(body: string, title = 'Settings') {
+  projectStore.pushToast({ chat_id: '', title, body })
+}
 const workspacesLoaded = ref(false)
 const workspacesError = ref('')
 const workspacesSaving = ref<string | null>(null)
@@ -2900,13 +2910,12 @@ async function saveWorkspace(name: string) {
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
       claude_ai_mcps: claudeAiMcpsPayload(form.claude_ai_mcps),
     })
-    workspacesResult.value = `Workspace "${name}" saved.`
+    notifySaved(`Workspace "${name}" saved.`, 'Workspaces')
     await fetchWorkspacesList()
   } catch (e: any) {
     workspacesResult.value = `Error: ${e?.message || e}`
   } finally {
     workspacesSaving.value = null
-    setTimeout(() => { if (workspacesResult.value.startsWith('Workspace')) workspacesResult.value = '' }, 3000)
   }
 }
 
@@ -2929,7 +2938,7 @@ async function createNewWorkspace() {
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
       claude_ai_mcps: claudeAiMcpsPayload(form.claude_ai_mcps),
     })
-    workspacesResult.value = `Workspace "${form.name.trim()}" created.`
+    notifySaved(`Workspace "${form.name.trim()}" created.`, 'Workspaces')
     showNewWorkspace.value = false
     newWorkspaceForm.value = blankWorkspaceForm()
     await fetchWorkspacesList()
@@ -2937,7 +2946,6 @@ async function createNewWorkspace() {
     workspacesResult.value = `Error: ${e?.message || e}`
   } finally {
     workspacesSaving.value = null
-    setTimeout(() => { if (workspacesResult.value.startsWith('Workspace')) workspacesResult.value = '' }, 3000)
   }
 }
 
@@ -3679,6 +3687,19 @@ async function doPackageUpdate() {
 }
 .routine-input::placeholder {
   color: var(--fg3);
+}
+.routine-select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  padding-right: 30px;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M2.5 4.5L6 8l3.5-3.5' fill='none' stroke='%23888' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 12px 12px;
+}
+.routine-select::-ms-expand {
+  display: none;
 }
 .routine-context {
   display: flex;
