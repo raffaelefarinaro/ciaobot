@@ -239,14 +239,6 @@ class CiaoConfig:
     vault_mode: str = "scratch"
     bootstrap_mode: bool = False
     vault_root: Path = Path("memory-vault")
-    extra_workspace_roots: list[Path] = field(default_factory=list)
-    # When true, the PWA workspace-file/image/binary viewers drop the
-    # "path must land under an allowed root" sandbox and serve any
-    # allowlisted-extension file on the system. Relative paths still
-    # anchor to ``workspace_root``. The extension allowlist (no .env,
-    # no key files) and the size caps still apply. Opt-in via
-    # ``CIAO_WORKSPACE_UNRESTRICTED_FILE_VIEWER=1``.
-    unrestricted_file_viewer: bool = False
     max_image_size_bytes: int = 10 * 1024 * 1024
     max_voice_size_bytes: int = 25 * 1024 * 1024
     media_ttl_hours: int = 72
@@ -569,22 +561,6 @@ class CiaoConfig:
             models=tuple(_split_csv(source.get("CIAO_OPENROUTER_MODELS", ""))),
         )
 
-        # Extra read-only roots the workspace-file/image/binary viewers may
-        # serve. Accepts a CSV override for additional paths (e.g. `~/.claude`
-        # if you want to inspect it from the PWA).
-        extra_workspace_roots: list[Path] = []
-        for raw in _split_csv(source.get("CIAO_WORKSPACE_EXTRA_ROOTS", "")):
-            try:
-                p = Path(raw).expanduser().resolve()
-            except (OSError, ValueError):
-                continue
-            if p != workspace_root and p.exists() and p not in extra_workspace_roots:
-                extra_workspace_roots.append(p)
-
-        unrestricted_file_viewer = (
-            source.get("CIAO_WORKSPACE_UNRESTRICTED_FILE_VIEWER", "").strip() == "1"
-        )
-
         default_model_personal = source.get("CLAUDE_DEFAULT_MODEL_PERSONAL", "").strip()
         default_model_work = source.get("CLAUDE_DEFAULT_MODEL_WORK", "").strip()
         disallowed_tools_personal = _parse_disallowed_tools(
@@ -627,8 +603,6 @@ class CiaoConfig:
             vault_mode=vault_mode,
             bootstrap_mode=bootstrap_mode,
             vault_root=vault_root,
-            extra_workspace_roots=extra_workspace_roots,
-            unrestricted_file_viewer=unrestricted_file_viewer,
             max_image_size_bytes=int(
                 _env(source, "CIAO_MAX_IMAGE_BYTES", "TELEGRAM_BRIDGE_MAX_IMAGE_BYTES", str(10 * 1024 * 1024))
             ),

@@ -12,19 +12,17 @@ _LINE_SUFFIX_RE = re.compile(r":\d+$")
 
 
 def _allowed_roots(config, for_write: bool = False) -> list[Path]:
-    """Resolve the union of roots the viewer endpoints may serve from.
+    """Resolve the anchor/search roots for the viewer endpoints.
 
-    The primary workspace root always comes first (relative paths anchor
-    here, preserving the historical "the workspace is your project" mental
-    model). Extra roots come from ``config.extra_workspace_roots`` and let
-    the viewer reach files outside the project tree, e.g. repos under
-    ``~/repos`` linked into projects via the repo-link feature.
+    The primary workspace root always comes first: relative paths anchor
+    here (preserving the "the workspace is your project" mental model) and
+    it is the root a fuzzy filename lookup walks. The vault root is added so
+    fuzzy lookups can also reach vault files.
 
-    ``for_write`` controls the unrestricted-viewer escape hatch: when the
-    config opts in (``unrestricted_file_viewer``), read-only endpoints get
-    a catch-all ``/`` root so any absolute path serves. Writes never get
-    ``/`` — the editor stays sandboxed to the real roots regardless, so a
-    loosened read policy can't be turned into arbitrary file creation.
+    These roots are NO LONGER a security boundary — the viewer serves any
+    file on disk regardless of where it lives (see ``_resolve_workspace_path``).
+    They only control relative-path anchoring and fuzzy-match search scope.
+    ``for_write`` is retained for call-site compatibility and has no effect.
     """
     roots: list[Path] = [config.workspace_root.resolve()]
     vault_root = getattr(config, "vault_root", None)
@@ -35,21 +33,6 @@ def _allowed_roots(config, for_write: bool = False) -> list[Path]:
             r = None
         if r is not None and r not in roots:
             roots.append(r)
-    for extra in getattr(config, "extra_workspace_roots", None) or []:
-        try:
-            r = Path(extra).expanduser().resolve()
-        except (OSError, ValueError):
-            continue
-        if r not in roots:
-            roots.append(r)
-    # Unrestricted mode: accept any absolute path. We model this as a
-    # catch-all root of ``/`` so the existing ``is_relative_to`` checks in
-    # the resolver pass for every absolute path. Relative paths still
-    # anchor to ``roots[0]`` (the workspace), so workspace semantics are
-    # unchanged. ``_find_fuzzy_match`` prunes ``/`` from its walk list so
-    # a missing path never triggers a full-filesystem walk.
-    if getattr(config, "unrestricted_file_viewer", False) and not for_write:
-        roots.append(Path("/"))
     return roots
 
 
@@ -103,10 +86,6 @@ def _find_fuzzy_match(roots: list[Path], candidate: Path) -> Path | None:
                 try:
                     resolved_fpath = fpath.resolve()
                 except (OSError, ValueError):
-                    continue
-
-                # Security boundary: ensure the resolved path actually resides under an allowed root
-                if not any(resolved_fpath.is_relative_to(r) for r in roots):
                     continue
 
                 try:
@@ -174,15 +153,13 @@ def _resolve_workspace_path(roots: list[Path], raw: str, allow_fuzzy: bool = Fal
     """Shared path resolver for the workspace-file/binary/image endpoints.
 
     Returns the canonicalised ``Path`` on success, or a ``Response`` carrying
-    the appropriate HTTP error (400 bad request, 403 forbidden, 404 missing).
-    Extension and size checks live in the callers since they differ per
-    endpoint.
+    the appropriate HTTP error (400 bad request, 404 missing). Extension and
+    size checks live in the callers since they differ per endpoint.
 
     Relative paths anchor against the first root (the primary workspace).
-    Absolute paths are accepted if they canonicalise under any root in the
-    list. This keeps the common case (clicking a workspace-relative path in
-    a chat bubble) unchanged while letting the PWA open files in linked
-    repos and any other admin-configured extra roots.
+    Absolute paths are served from anywhere on disk — there is no workspace
+    sandbox. This keeps the common case (clicking a workspace-relative path
+    in a chat bubble) unchanged while letting the PWA open any file.
     """
     if not raw:
         return JSONResponse({"error": "missing path"}, status_code=400)
@@ -206,16 +183,14 @@ def _resolve_workspace_path(roots: list[Path], raw: str, allow_fuzzy: bool = Fal
     except (OSError, ValueError):
         return JSONResponse({"error": "bad path"}, status_code=400)
 
-    if resolved.is_file() and any(resolved.is_relative_to(root) for root in roots):
+    if resolved.is_file():
         return resolved
 
     if allow_fuzzy:
         fuzzy_resolved = _find_fuzzy_match(roots, candidate)
-        if fuzzy_resolved and fuzzy_resolved.is_file() and any(fuzzy_resolved.is_relative_to(root) for root in roots):
+        if fuzzy_resolved and fuzzy_resolved.is_file():
             return fuzzy_resolved
 
-    if not any(resolved.is_relative_to(root) for root in roots):
-        return JSONResponse({"error": "forbidden"}, status_code=403)
     if not resolved.is_file():
         return JSONResponse({"error": "not found"}, status_code=404)
     return resolved

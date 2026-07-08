@@ -2277,9 +2277,9 @@ async def workspace_file(request: Request) -> Response:
 
     Path is provided as a query string (`?path=...`). The path may be
     workspace-relative or absolute, with an optional `:line` suffix that is
-    stripped. All results canonicalise via ``Path.resolve()`` and must land
-    under ``config.workspace_root`` or one of ``config.extra_workspace_roots``
-    (e.g. ``~/repos`` for project-linked repos) — anything else returns 403.
+    stripped. All results canonicalise via ``Path.resolve()``. There is no
+    workspace sandbox: any allowlisted-extension file on disk is served.
+    Relative paths anchor to ``config.workspace_root``.
     """
     config = request.app.state.config
     raw = request.query_params.get("path", "").strip()
@@ -2311,9 +2311,9 @@ async def workspace_file(request: Request) -> Response:
 
 
 # Binary downloads (PDFs, ZIPs, office docs) live under their own endpoint so
-# the text and image viewers stay strictly typed. Same sandbox contract as
-# ``workspace_file``/``workspace_image``: path lands under
-# ``config.workspace_root`` after canonicalisation or we refuse. The browser
+# the text and image viewers stay strictly typed. Same (unrestricted) path
+# contract as ``workspace_file``/``workspace_image``: any allowlisted-extension
+# file on disk is served, relative paths anchoring to the workspace. The browser
 # decides whether to render inline (PDF) or save (everything else) based on
 # the inferred MIME type; we set ``Content-Disposition: inline`` with the
 # original filename so downloads keep a sensible name either way.
@@ -2450,10 +2450,10 @@ async def workspace_binary(request: Request) -> Response:
 
 
 async def workspace_image(request: Request) -> Response:
-    """Serve a read-only image from inside the workspace.
+    """Serve a read-only image from disk.
 
-    Same sandbox contract as ``workspace_file``: path lands under
-    ``config.workspace_root`` after canonicalisation or we refuse. Extension
+    Same (unrestricted) path contract as ``workspace_file``: any file on disk
+    is served, relative paths anchoring to ``config.workspace_root``. Extension
     must be in ``_WORKSPACE_IMAGE_EXTS``; the correct media type is inferred
     from the extension so browsers render it in ``<img>`` tags.
 
@@ -2583,10 +2583,9 @@ async def file_restore(request: Request) -> Response:
     if pcm.get_chat(chat_id) is None:
         return JSONResponse({"error": "chat not found"}, status_code=404)
 
-    # Sandbox the write: the path the agent gave us at edit time may have
-    # been absolute or relative, but restoration MUST land inside an allowed
-    # root. Anything else (e.g. /etc/passwd if the agent claimed to write
-    # there during a malicious turn) refuses.
+    # Resolve the write target. There is no workspace sandbox: restoration
+    # writes wherever the snapshot's recorded path points. Relative paths
+    # anchor to the primary workspace root.
     config = request.app.state.config
     roots = _allowed_roots(config)
     try:
@@ -2594,8 +2593,6 @@ async def file_restore(request: Request) -> Response:
         resolved = candidate.resolve() if candidate.is_absolute() else (roots[0] / candidate).resolve()
     except (OSError, ValueError):
         return JSONResponse({"error": "bad path"}, status_code=400)
-    if not any(resolved.is_relative_to(root) for root in roots):
-        return JSONResponse({"error": "forbidden"}, status_code=403)
 
     snap = pcm.snapshots.read_snapshot(chat_id=chat_id, file_path=file_path, seq=seq)
     if snap is None:
@@ -2641,19 +2638,17 @@ async def workspace_file_write(request: Request) -> Response:
     if len(content.encode("utf-8")) > _WORKSPACE_FILE_MAX_BYTES:
         return JSONResponse({"error": "content too large"}, status_code=413)
 
-    roots = _allowed_roots(config, for_write=True)
+    roots = _allowed_roots(config)
     result = _resolve_workspace_path(roots, raw_path, allow_fuzzy=False)
     if isinstance(result, Response):
         # Resolver returns 404 for missing files. For an edit-and-save flow
-        # we want to allow creating new files inside the sandbox too, but
-        # only if the path canonicalises under a root. Recheck explicitly.
+        # we allow creating new files anywhere; relative paths still anchor
+        # to the primary workspace root.
         try:
             candidate = Path(raw_path).expanduser()
             resolved = candidate.resolve() if candidate.is_absolute() else (roots[0] / candidate).resolve()
         except (OSError, ValueError):
             return JSONResponse({"error": "bad path"}, status_code=400)
-        if not any(resolved.is_relative_to(root) for root in roots):
-            return JSONResponse({"error": "forbidden"}, status_code=403)
     else:
         resolved = result
     if resolved.suffix.lower() not in _WORKSPACE_FILE_EXTS:

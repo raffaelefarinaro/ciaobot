@@ -85,11 +85,10 @@ def extract_file_touch(tool_name: str, tool_input: object) -> dict | None:
       itself, so the value passes through unchanged.
 
     The classification is advisory: it tells the PWA "render an inline card
-    for this write" but is NOT a security boundary. The actual read goes
-    through ``/api/workspace-file`` which sandboxes against
-    ``config.workspace_root`` + ``extra_workspace_roots``. If the agent
-    claims to have written to ``/etc/passwd`` the card appears and the
-    viewer refuses with a 403.
+    for this write". The actual read goes through ``/api/workspace-file``.
+    That endpoint has no workspace sandbox — it serves any allowlisted file
+    on disk — so a card pointing at ``/etc/passwd`` would render but the
+    extension allowlist still refuses to return its contents.
     """
     if tool_name not in _FILE_TOUCH_TOOLS:
         return None

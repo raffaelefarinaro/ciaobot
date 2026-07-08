@@ -1,9 +1,9 @@
 """Tests for the /api/workspace-image endpoint.
 
-Mirror of ``test_workspace_file`` for the image variant: same sandbox
-contract, but the allowed extensions are image types and the media type
-is derived from the filename. These tests spin up a minimal Starlette
-app around the handler with a tmp workspace to exercise each guard.
+Mirror of ``test_workspace_file`` for the image variant: no workspace
+sandbox (any file on disk is served), the allowed extensions are image
+types, and the media type is derived from the filename. These tests spin up
+a minimal Starlette app around the handler with a tmp workspace.
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ def test_svg_returns_svg_mime(workspace: Path) -> None:
 
 def test_markdown_is_rejected(workspace: Path) -> None:
     # The image endpoint must not accidentally serve text files, even though
-    # they sit under the workspace and would pass the sandbox check.
+    # they sit under the workspace.
     client = _make_client(workspace)
     resp = client.get("/api/workspace-image", params={"path": "docs/readme.md"})
     assert resp.status_code == 415
@@ -80,30 +80,33 @@ def test_missing_path_returns_400(workspace: Path) -> None:
     assert resp.status_code == 400
 
 
-def test_traversal_returns_403(workspace: Path, tmp_path: Path) -> None:
+def test_traversal_relative_escape_is_served(workspace: Path, tmp_path: Path) -> None:
     outside = tmp_path / "secret.png"
     outside.write_bytes(_PNG_BYTES)
     client = _make_client(workspace)
     resp = client.get("/api/workspace-image", params={"path": "../secret.png"})
-    assert resp.status_code == 403
+    assert resp.status_code == 200
+    assert resp.content == _PNG_BYTES
 
 
-def test_absolute_path_outside_workspace_returns_403(workspace: Path, tmp_path: Path) -> None:
+def test_absolute_path_outside_workspace_is_served(workspace: Path, tmp_path: Path) -> None:
     outside = tmp_path / "other.png"
     outside.write_bytes(_PNG_BYTES)
     client = _make_client(workspace)
     resp = client.get("/api/workspace-image", params={"path": str(outside)})
-    assert resp.status_code == 403
+    assert resp.status_code == 200
+    assert resp.content == _PNG_BYTES
 
 
-def test_symlink_escape_returns_403(workspace: Path, tmp_path: Path) -> None:
+def test_symlink_escape_is_served(workspace: Path, tmp_path: Path) -> None:
     outside = tmp_path / "outside.png"
     outside.write_bytes(_PNG_BYTES)
     link = workspace / "escape.png"
     link.symlink_to(outside)
     client = _make_client(workspace)
     resp = client.get("/api/workspace-image", params={"path": "escape.png"})
-    assert resp.status_code == 403
+    assert resp.status_code == 200
+    assert resp.content == _PNG_BYTES
 
 
 def test_missing_file_returns_404(workspace: Path) -> None:

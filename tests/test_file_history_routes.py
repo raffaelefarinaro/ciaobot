@@ -160,32 +160,28 @@ def test_restore_writes_back_and_appends_new_snapshot(tmp_path: Path) -> None:
     assert snapshots[-1]["action"] == "restored"
 
 
-def test_restore_rejects_path_outside_sandbox(tmp_path: Path) -> None:
+def test_restore_without_snapshot_for_path_is_404(tmp_path: Path) -> None:
     pcm, config = _make_manager(tmp_path)
     client = _make_client(pcm, config)
     chat_id = _make_chat(pcm)
 
-    # Create a snapshot for a path the agent claimed but that's outside
-    # the workspace root: the store records it, the route refuses to write.
+    # A restore request for a path that has no captured snapshot must 404 and
+    # must not write anything, even though the viewer no longer sandboxes
+    # writes to the workspace root.
     outside = Path("/tmp/should-not-be-touched.md").resolve()
     pcm.snapshots._base.joinpath(chat_id).mkdir(parents=True, exist_ok=True)
-    # Inject a fake snapshot using the store API on a content we never wrote
-    # to disk. Use a path that survives sandbox check (use tmp_path) but
-    # then forge a request targeting `outside`.
     inside = tmp_path / "inside.md"
     inside.write_text("safe")
     import asyncio
     asyncio.run(pcm.snapshots.capture(chat_id=chat_id, file_path=str(inside), action="written", tool="Write"))
 
-    # Route refuses an absolute path outside the workspace root.
     r = client.post(
         "/api/file-restore",
         json={"chat_id": chat_id, "file_path": str(outside), "seq": 1},
     )
-    # Either 403 (sandbox) or 404 (no snapshot under that path) is acceptable
-    # — both indicate the write did not happen. Asserting the disk path
-    # remains absent is the real safety check.
-    assert r.status_code in (403, 404), r.text
+    # No snapshot exists under that path, so the route 404s and nothing is
+    # written to disk.
+    assert r.status_code == 404, r.text
     assert not outside.exists()
 
 
@@ -205,15 +201,35 @@ def test_pwa_edit_writes_back_and_snapshots(tmp_path: Path) -> None:
     assert snap["tool"] == "PWAEdit"
 
 
-def test_pwa_edit_rejects_outside_sandbox(tmp_path: Path) -> None:
+def test_pwa_edit_writes_outside_workspace(tmp_path: Path) -> None:
+    # The in-PWA editor is no longer sandboxed to the workspace: an absolute
+    # path outside workspace_root is written (subject to OS permissions and
+    # the extension allowlist).
+    pcm, config = _make_manager(tmp_path)
+    client = _make_client(pcm, config)
+    chat_id = _make_chat(pcm)
+    outside = tmp_path.parent / "ciao_outside_edit.txt"
+    try:
+        r = client.post(
+            "/api/workspace-file",
+            json={"chat_id": chat_id, "path": str(outside), "content": "x"},
+        )
+        assert r.status_code == 200, r.text
+        assert outside.read_text() == "x"
+    finally:
+        outside.unlink(missing_ok=True)
+
+
+def test_pwa_edit_rejects_disallowed_extension(tmp_path: Path) -> None:
+    # The extension allowlist is still enforced regardless of path.
     pcm, config = _make_manager(tmp_path)
     client = _make_client(pcm, config)
     chat_id = _make_chat(pcm)
     r = client.post(
         "/api/workspace-file",
-        json={"chat_id": chat_id, "path": "/etc/should-not-be-written.txt", "content": "x"},
+        json={"chat_id": chat_id, "path": str(tmp_path / "secret.env"), "content": "x"},
     )
-    assert r.status_code in (403, 415), r.text
+    assert r.status_code == 415, r.text
 
 
 def test_pwa_edit_rejects_fuzzy_match_on_write(tmp_path: Path) -> None:
