@@ -70,7 +70,15 @@ def _copy_tree(src, dest: Path) -> None:
         if item.is_dir():
             _copy_tree(item, dest / item.name)
         else:
-            (dest / item.name).write_bytes(item.read_bytes())
+            target = dest / item.name
+            # sync-skills turns stock .claude/agents|commands entries into
+            # symlinks once a workspace promotes one to a custom copy
+            # (subagents/ or commands/). write_bytes() follows symlinks, so
+            # without this a setup re-run would silently overwrite the
+            # user's custom file through the link instead of the stock copy.
+            if target.is_symlink():
+                target.unlink()
+            target.write_bytes(item.read_bytes())
 
 
 def _copy_tree_if_missing(src, dest: Path) -> list[Path]:

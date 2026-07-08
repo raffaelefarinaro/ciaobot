@@ -254,6 +254,38 @@ def test_setup_workspace_rerun_honors_existing_env_vault_root(
     assert "CIAO_VAULT_ROOT=brain-a" in env_before
 
 
+def test_setup_workspace_rerun_does_not_clobber_custom_agent_through_symlink(
+    tmp_path: Path,
+) -> None:
+    """sync-skills turns a stock .claude/agents/<name>.md entry into a
+    symlink once a workspace promotes it to a custom copy under
+    subagents/<name>.md. A setup re-run must not write the packaged stock
+    bytes through that symlink and silently overwrite the custom content."""
+    ws = tmp_path / "workspace"
+    setup_workspace(
+        ws,
+        launch_agents_dir=tmp_path / "LaunchAgents",
+        app_dir=tmp_path / "Applications",
+    )
+    installed = sorted(p.name for p in (ws / ".claude" / "agents").glob("*.md"))
+    assert installed, "setup_workspace should seed at least one stock agent"
+    name = installed[0]
+
+    custom = ws / "subagents" / name
+    custom.write_text("# custom override\n", encoding="utf-8")
+    link = ws / ".claude" / "agents" / name
+    link.unlink()
+    link.symlink_to(custom)
+
+    setup_workspace(
+        ws,
+        launch_agents_dir=tmp_path / "LaunchAgents",
+        app_dir=tmp_path / "Applications",
+    )
+
+    assert custom.read_text(encoding="utf-8") == "# custom override\n"
+
+
 def test_setup_workspace_existing_mode_adopts_folder_as_vault(
     tmp_path: Path,
 ) -> None:
