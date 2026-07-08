@@ -4010,7 +4010,7 @@ details[open] > .activity-summary::before {
      tap targets, not inline grouped actions. */
   .input-bar { padding-top: 5px; padding-bottom: 5px; }
   .chat-input { min-height: 36px; }
-  .stop-btn, .send-btn {
+  .stop-btn, .input-actions .send-btn {
     min-width: 36px;
     min-height: 36px;
     width: 36px;
