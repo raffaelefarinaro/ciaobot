@@ -286,7 +286,7 @@
           <span v-if="liveTraceMeta" class="trace-meta">{{ liveTraceMeta }}</span>
         </div>
         <div
-          v-if="liveTraceOpen && (store.currentTimeline.length || store.currentStreamingText || store.currentStreamingThinking)"
+          v-if="liveTraceOpen && (store.currentTimeline.length || store.currentStreamingText || store.currentStreamingThinking || liveSubagents.length)"
           class="trace-body"
         >
           <template v-for="(entry, j) in store.currentTimeline" :key="j">
@@ -329,6 +329,10 @@
             v-html="renderMarkdown(store.currentStreamingThinking)"
           ></div>
           <div v-if="store.currentStreamingText" class="trace-text trace-streaming" v-html="renderMarkdown(store.currentStreamingText)"></div>
+          <!-- Agents dispatched by the in-flight turn: their full transcripts
+               nest here while streaming; on result they re-anchor into the
+               timeline (renderItems handles the completed-turn placement). -->
+          <SubagentPanel v-if="liveSubagents.length" :subagents="liveSubagents" />
         </div>
         </div>
 
@@ -1731,7 +1735,7 @@ function fileCardIcon(filePath: string): string {
   return '\u{1F4C4}'  // 📄
 }
 
-const renderItems = computed<RenderItem[]>(() => {
+const renderData = computed<{ items: RenderItem[]; liveSubs: SubagentTranscript[] }>(() => {
   const items: RenderItem[] = []
   let buffer: ChatMessage[] = []
 
@@ -1843,6 +1847,13 @@ const renderItems = computed<RenderItem[]>(() => {
     }
   }
   flushTurn(true)
+  // While streaming, the in-flight turn's panels (plus anything unanchored)
+  // nest inside the live "Working..." trace instead of floating as timeline
+  // items; they re-anchor via the completed-turn path once the result lands.
+  if (store.isStreaming) {
+    const liveSubs = [...subsByTurn.values()].flat().concat(unanchoredSubs)
+    return { items, liveSubs }
+  }
   flushSubagents()
   // Anything still unplaced (turn not in history yet, or no turn info):
   // show after the last turn rather than dropping it.
@@ -1850,8 +1861,11 @@ const renderItems = computed<RenderItem[]>(() => {
   if (leftovers.length) {
     items.push({ kind: 'subagents', subs: leftovers })
   }
-  return items
+  return { items, liveSubs: [] }
 })
+
+const renderItems = computed<RenderItem[]>(() => renderData.value.items)
+const liveSubagents = computed<SubagentTranscript[]>(() => renderData.value.liveSubs)
 
 // Watcher: keep highlights in sync with the pending list and message DOM.
 watch(

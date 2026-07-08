@@ -287,20 +287,21 @@ export const useProjectStore = defineStore('projects', () => {
     backgroundAgents.value[activeChatId.value || ''] || 0
   )
 
-  // Live view while background subagents run: refresh the active chat's
-  // subagent transcripts on a short interval so the panel updates as the
-  // agents work. The CLI appends to the transcript files continuously, so
-  // polling the REST endpoint is enough for a near-live feed. The interval
-  // only exists while the active chat has running agents.
+  // Live view while subagents run: refresh the active chat's subagent
+  // transcripts on a short interval so the panel updates as the agents
+  // work. The CLI appends to the transcript files continuously, so polling
+  // the REST endpoint is enough for a near-live feed. Runs while the active
+  // chat has running background agents OR is streaming a turn (agents
+  // dispatched mid-turn nest live inside the Working trace).
   let subagentPollTimer: ReturnType<typeof setInterval> | null = null
   watch(
-    () => [activeChatId.value, activeBackgroundAgents.value] as const,
-    ([chatId, count]) => {
+    () => [activeChatId.value, activeBackgroundAgents.value, isStreaming.value] as const,
+    ([chatId, count, streamingNow]) => {
       if (subagentPollTimer !== null) {
         clearInterval(subagentPollTimer)
         subagentPollTimer = null
       }
-      if (!chatId || count <= 0) return
+      if (!chatId || (count <= 0 && !streamingNow)) return
       subagentPollTimer = setInterval(() => {
         void loadSubagents(chatId)
       }, 4000)
