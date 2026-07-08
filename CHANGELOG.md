@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.4.8 - 2026-07-08
+
+### Added
+- feat(setup): auto-open wizard, launchd handoff, single-folder vault adoption (`82e56c0`)
+- feat(wizard): single folder — drop the separate vault/notes path input (`ad16878`)
+- feat(chat): highlight selection while drafting a comment (`1e3b52a`)
+- feat(viewer): remove workspace sandbox from file viewer/editor (`c5aed6c`)
+- feat(menubar): animated spinner icon while the assistant is working (`c3a89f7`)
+- feat(models): route title and insights calls per workspace bucket (`d58f8ec`)
+- feat(web): auth off by default, active-chats endpoint, restart overlay (`4a9a6bb`)
+
+### Changed
+- homebrew,docs: slim caveats, real 0.4.7 sha, README install cleanup (`4ef2d27`)
+- polish(subagents): harden synthesis nudge, reconcile drain docstrings (`cbb58c2`)
+
+### Fixed
+- fix(subagents): synthesize parent report when background agents finish (`ba6b923`)
+- fix(tour): keep cards on-screen, fix spotlight, and refresh step content (`173190a`)
+- fix(chat): equalize composer button sizes on narrow layouts (`c7a02b9`)
+- fix(comments): keep selection Comment pill anchored while scrolling (`864034a`)
+
+### Maintenance
+- docs(prompt): drop the per-device branch steering bullet (`40e8131`)
+
 ## v0.4.7 - 2026-07-08
 
 ### Fixed
