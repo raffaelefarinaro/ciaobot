@@ -1022,7 +1022,12 @@ def _gws_profile_config_dir(config, profile: str) -> Path | None:
         return root / "secrets" / "gws-personal"
     if profile == "work":
         return root / "secrets" / "gws"
-    return None
+    # Wizard-named workspaces carry their own profile names; each gets its
+    # own credentials directory alongside the legacy two.
+    safe = re.sub(r"[^a-z0-9_-]+", "-", profile.strip().lower()).strip("-")
+    if not safe:
+        return None
+    return root / "secrets" / f"gws-{safe}"
 
 
 def _gws_file_present(config_dir: Path | None, names: tuple[str, ...]) -> bool:
@@ -3399,6 +3404,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         push_contact=push_contact,
         vault_root=str(body.get("vault_root", "")).strip() or None,
         vault_mode=vault_mode,
+        workspace_name=str(body.get("workspace_name", "")).strip() or "personal",
         python_path=str(body.get("python", "")).strip() or None,
         port=port,
         launch_agents_dir=str(body.get("launch_agents_dir", "")).strip() or None,

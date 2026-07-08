@@ -556,6 +556,7 @@ def setup_workspace(
     push_contact: str | None = None,
     vault_root: Path | str | None = None,
     vault_mode: str = "scratch",
+    workspace_name: str | None = None,
     python_path: str | None = None,
     port: int = 8443,
     launch_agents_dir: Path | str | None = None,
@@ -639,6 +640,31 @@ def setup_workspace(
         json.dumps({"schedules": []}, indent=2) + "\n",
     )
     written.append(runtime_schedules)
+
+    # First-run wizard names the user's first logical workspace. Writing a
+    # real registry (instead of relying on the legacy personal+work fallback)
+    # means new installs start with exactly one workspace; more are added in
+    # Settings → Workspaces. The explicit vault_root also keeps the legacy
+    # personal/work nested-vault special case from ever triggering.
+    name = (workspace_name or "").strip()
+    if name:
+        workspaces_registry = root / ".runtime" / "workspaces.json"
+        _write_if_missing(
+            workspaces_registry,
+            json.dumps(
+                [
+                    {
+                        "name": name,
+                        "vault_root": vault_value,
+                        "gws_profile": name,
+                        "model_bucket": "anthropic",
+                    }
+                ],
+                indent=2,
+            )
+            + "\n",
+        )
+        written.append(workspaces_registry)
 
     _write_if_missing(
         vault_path / "MEMORY.md",

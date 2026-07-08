@@ -87,6 +87,20 @@
         </div>
 
         <div class="form-group">
+          <label for="setup-workspace-name">First Workspace</label>
+          <input
+            id="setup-workspace-name"
+            v-model="workspaceName"
+            type="text"
+            class="form-input"
+            placeholder="personal"
+            :disabled="loading"
+          />
+          <span class="hint">A workspace is a life area — personal, work, a client. You start with
+            one and can add more later in Settings → Workspaces.</span>
+        </div>
+
+        <div class="form-group">
           <label for="setup-push">Notification Email (Optional)</label>
           <input
             id="setup-push"
@@ -339,6 +353,7 @@ const provider = ref('claude')
 const apiFallback = ref(false)
 const authRequired = ref(false)
 const isRestarting = ref(false)
+const workspaceName = ref('personal')
 const copyStatus = ref('')
 const advancedOpen = ref(false)
 
@@ -517,6 +532,7 @@ async function doFinish() {
   try {
     await api.post('/api/setup/finish', {
       workspace: workspace.value,
+      workspace_name: workspaceName.value.trim() || 'personal',
       // vault_root and vault_mode are intentionally omitted: the server
       // inspects the chosen folder — empty scaffolds a fresh vault at
       // memory-vault/, existing notes are adapted in place by the

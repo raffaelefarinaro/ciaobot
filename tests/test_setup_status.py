@@ -261,6 +261,7 @@ def test_setup_finish_autodetects_scratch_for_empty_folder(tmp_path) -> None:
         "/api/setup/finish",
         json={
             "workspace": str(ws),
+            "workspace_name": "life",
             "launch_agents_dir": str(tmp_path / "LaunchAgents"),
             "app_dir": str(tmp_path / "Applications"),
         },
@@ -269,6 +270,14 @@ def test_setup_finish_autodetects_scratch_for_empty_folder(tmp_path) -> None:
     env_text = (ws / ".env").read_text(encoding="utf-8")
     assert "CIAO_VAULT_MODE=scratch" in env_text
     assert (ws / "memory-vault" / "MEMORY.md").is_file()
+    # The wizard's first workspace replaces the legacy personal+work
+    # fallback: a one-entry registry with the chosen name.
+    import json as _json
+
+    registry = _json.loads((ws / ".runtime" / "workspaces.json").read_text(encoding="utf-8"))
+    assert [w["name"] for w in registry] == ["life"]
+    assert registry[0]["vault_root"] == "memory-vault"
+    assert registry[0]["gws_profile"] == "life"
 
 
 def test_setup_finish_autodetects_existing_notes_folder(tmp_path) -> None:

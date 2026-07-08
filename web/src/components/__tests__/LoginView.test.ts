@@ -144,6 +144,10 @@ describe('LoginView setup wizard tests', () => {
     expect(wrapper.find('input[type="radio"][value="existing"]').exists()).toBe(false)
     expect(wrapper.find('input[type="radio"][value="scratch"]').exists()).toBe(false)
     expect(wrapper.text()).toContain("detects what's inside and adjusts automatically")
+    // the first logical workspace is named here, defaulting to "personal"
+    const nameInput = wrapper.find('#setup-workspace-name')
+    expect(nameInput.exists()).toBe(true)
+    expect((nameInput.element as HTMLInputElement).value).toBe('personal')
   })
 
   it('opens the folder picker, lists directories, and writes the selection into the workspace field', async () => {
@@ -219,6 +223,7 @@ describe('LoginView setup wizard tests', () => {
 
     expect(mockApiPost).toHaveBeenCalledWith('/api/setup/finish', {
       workspace: '~/ciaobot',
+      workspace_name: 'personal',
       push_contact: 'mailto:owner@example.com',
       port: 8443,
       python: undefined,
