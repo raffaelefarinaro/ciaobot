@@ -2,6 +2,14 @@
 
 Ciaobot is an opinionated UI and UX layer for using Claude Code as a personal assistant and second brain. It is a local web app around agentic work: chats, projects, files, schedules, memory, and archived knowledge all live in one interface instead of being scattered across terminal sessions.
 
+## Who it's for
+
+Ciaobot is built for **knowledge work, not software development**. It's where you brainstorm, research, draft, plan, and work through documents with an agent that already knows your context — the day-to-day thinking and writing that normally ends up scattered across chat windows, notes apps, and browser tabs.
+
+- **Built for**: brainstorming, research, writing and editing, planning, and document work — typically drafted as plain markdown in a local vault, then published to Google (Docs, Drive, Sheets) once it's ready to leave your machine.
+- **Not built for**: day-to-day coding. There is no code editor, terminal, or repo tooling in the UI — keep using your IDE for that. Ciaobot *runs on* Claude Code, but it points that engine at your knowledge and documents, not your codebase.
+- **Native Google Workspace**: Gmail, Calendar, Drive, Docs, Sheets, Slides, and Tasks through Google's official [`gws` CLI](https://github.com/googleworkspace/cli), connected with browser-based OAuth from Settings — no terminal required.
+
 ## A personal project, shared
 
 Ciaobot is my personal idea of how an AI assistant should work day to day. I built it for my own use, run it on my own machines, and the defaults reflect that: project-first navigation, a plain-markdown vault as memory, explicit model routing, and self-improvement loops that propose changes instead of applying them blindly.
@@ -15,8 +23,18 @@ I'm sharing it because the patterns may be useful to you, and because I'm happy 
 - Lets you schedule project or workspace routines to run when you choose.
 - Archives chats into a markdown vault, then extracts session insights and drafts memory proposals for review.
 - Keeps durable project context separate from short-lived chat state.
+- Connects to Google Workspace — Gmail, Calendar, Drive, Docs, Sheets, Slides, and Tasks — through Google's [`gws` CLI](https://github.com/googleworkspace/cli), with browser-based OAuth from Settings (no terminal required).
 - Supports voice transcription, push notifications, model/provider settings, and local package updates from the UI.
 - Shows a macOS menu bar icon (`ciao menubar`) with server status and open/restart/logs actions — the Ciaobot face turns scared when the server is down.
+
+### Working in chat
+
+- **Comment on text** — select any passage in a message, add a sidebar comment, and send it with your next prompt so the agent knows exactly what you mean.
+- **Inline file previews** — when the agent reads or edits a file, a card appears in the thread; click to open a viewer with history, diff, and restore.
+- **Pin documents** — keep a file open beside the chat; add line-level comments in the preview (attached to your next message, like chat comments).
+- **Rich previews** — images inline; PDFs in a built-in viewer; PowerPoint (`.pptx`) converted to PDF for display (requires LibreOffice on the machine running Ciaobot).
+
+On first launch, an in-app product tour walks through these flows. Replay it anytime from **Settings → Home → Product tour**.
 
 What it does **not** do automatically: it never promotes memory proposals into your long-term memory files without review, never discards or rewrites an existing notes folder during onboarding, and never locks you into one provider; chats and routines can route through any configured backend.
 
@@ -36,7 +54,13 @@ The model is project-first: a workspace represents a life area (personal, work, 
 
 Install from [PyPI](https://pypi.org/project/ciaobot/) — the wheel ships with the pre-built PWA (the same wheel is attached to each [GitHub release](https://github.com/raffaelefarinaro/ciaobot/releases/latest)):
 
-Requires Python 3.12 or newer (use whichever `python3.X` you have, e.g. `brew install python@3.13`):
+**macOS (Homebrew)** — one command, includes the menu bar companion:
+
+```bash
+brew install raffaelefarinaro/ciaobot/ciaobot
+```
+
+**Any platform (pip)** — requires Python 3.12 or newer (use whichever `python3.X` you have, e.g. `brew install python@3.13`):
 
 ```bash
 python3.13 -m venv ~/.ciaobot-venv
@@ -90,3 +114,30 @@ Naming note: the user-facing product is **Ciaobot**. The CLI is installed as bot
 ## For coding agents
 
 `CLAUDE.md` (loaded every prompt) is the contributor guide; `docs/ARCHITECTURE.md` is the canonical orientation doc, read on demand. After changes that affect layout, capabilities, env vars, endpoints, or commands, dispatch the `doc-updater` agent to keep the docs truthful.
+
+## Built on
+
+Ciaobot is glue around a lot of excellent open tools. It wouldn't exist without them:
+
+**Agent engine & models**
+
+- [Claude Code](https://github.com/anthropics/claude-code) and the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-python) — the agent runtime every chat and routine runs on.
+- [Ollama](https://ollama.com) — cloud and local model routing.
+- [OpenRouter](https://openrouter.ai) — additional model backends via an Anthropic-compatible endpoint.
+- [OpenAI](https://openai.com) — cloud voice transcription.
+- [`mlx-whisper`](https://pypi.org/project/mlx-whisper/) — on-device voice transcription on Apple Silicon (free, offline).
+
+**Integrations & CLIs**
+
+- [Google Workspace CLI (`gws`)](https://github.com/googleworkspace/cli) — Gmail, Calendar, Drive, Docs, Sheets, Slides, and Tasks.
+- [NotebookLM CLI (`notebooklm-py`)](https://pypi.org/project/notebooklm-py/) — Google NotebookLM automation.
+- [`opencli`](https://www.npmjs.com/package/@jackwener/opencli) — 50+ website adapters (YouTube, LinkedIn, GitHub, …).
+- [`apfel`](https://github.com/Arthur-Ficial/apfel) — local-first chat titles via macOS on-device Apple Intelligence.
+- [LibreOffice](https://www.libreoffice.org) — `.pptx` slide rendering.
+
+**Frameworks & libraries**
+
+- [Starlette](https://www.starlette.io) + [Uvicorn](https://www.uvicorn.org) — the server.
+- [Vue](https://vuejs.org), [Vite](https://vite.dev), and [Pinia](https://pinia.vuejs.org) — the PWA.
+- [Excalidraw](https://excalidraw.com) — in-app diagram previews.
+- [Playwright](https://playwright.dev) — headless browser automation.
