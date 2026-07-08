@@ -554,11 +554,11 @@ class CiaoConfig:
             base_url=source.get("CIAO_OPENROUTER_BASE_URL", "").strip()
             or "https://openrouter.ai/api",
             haiku_model=source.get("CIAO_OPENROUTER_HAIKU_MODEL", "").strip()
-            or "anthropic/claude-haiku-4.5",
+            or "anthropic/claude-haiku-latest",
             sonnet_model=source.get("CIAO_OPENROUTER_SONNET_MODEL", "").strip()
-            or "anthropic/claude-sonnet-4.5",
+            or "anthropic/claude-sonnet-latest",
             opus_model=source.get("CIAO_OPENROUTER_OPUS_MODEL", "").strip()
-            or "anthropic/claude-opus-4.8",
+            or "anthropic/claude-opus-latest",
             models=tuple(_split_csv(source.get("CIAO_OPENROUTER_MODELS", ""))),
         )
 
