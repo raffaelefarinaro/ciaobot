@@ -407,3 +407,25 @@ def test_run_oneshot_error_handling(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("ciao.providers.oneshot.TextBlock", DummyTextBlock)
     with pytest.raises(RuntimeError, match="Failed to authenticate"):
         asyncio.run(run_oneshot("prompt", system_prompt="sys", model="m"))
+
+
+# ── resolve_insights_model ───────────────────────────────────────────────
+
+
+def test_resolve_insights_model_uses_override() -> None:
+    config = _config()
+    config.insights_model_override = "anthropic/claude-haiku-4.5"
+    assert insights.resolve_insights_model(config, "personal") == "anthropic/claude-haiku-4.5"
+
+
+def test_resolve_insights_model_uses_workspace_sonnet_when_automatic() -> None:
+    config = _config()
+    config.insights_model_override = ""
+    assert insights.resolve_insights_model(config, "personal") == config.ollama.sonnet_model
+    assert insights.resolve_insights_model(config, "work") == "sonnet"
+
+
+def test_resolve_insights_model_falls_back_without_workspace() -> None:
+    config = _config()
+    config.insights_model_override = ""
+    assert insights.resolve_insights_model(config) == config.insights_model

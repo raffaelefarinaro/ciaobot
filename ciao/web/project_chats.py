@@ -285,6 +285,21 @@ def _clean_title(raw: str, user_snippet: str) -> str | None:
     return title or _fallback_title(user_snippet)
 
 
+def resolve_title_model(config, workspace: str | None = None) -> str:
+    """Pick the model for chat title generation.
+
+    When the operator has not set an explicit override (Settings → Models →
+    Chat titles = Automatic), use the haiku-tier model for the chat's
+    workspace routing bucket. Callers without workspace context fall back to
+    ``config.title_model``.
+    """
+    if config.title_model_override:
+        return config.title_model_override
+    if workspace is not None:
+        return config.haiku_model_for_workspace(workspace)
+    return config.title_model
+
+
 async def _generate_chat_title(
     user_text: str,
     assistant_text: str = "",
@@ -2249,14 +2264,16 @@ class ProjectChatManager:
             and outcome.turn_count >= getattr(config, "insights_size_gate_turns", 0)
         )
         if run_insights:
-            from ciao.insights import extract_and_append
+            from ciao.insights import extract_and_append, resolve_insights_model
 
+            workspace = project_meta.workspace if project_meta else None
+            insights_model = resolve_insights_model(config, workspace)
             asyncio.create_task(
                 extract_and_append(
                     archive_path=outcome.path,
                     filtered_jsonl=outcome.filtered_jsonl,
                     config=config,
-                    model=config.insights_model,
+                    model=insights_model,
                     session_id=outcome.session_id,
                     trajectory_meta=trajectory_meta,
                     trajectories_enabled=trajectories_enabled,
@@ -4007,36 +4024,32 @@ class ProjectChatManager:
         if chat is None or chat.title != "New Chat":
             return None
 
-        # Title-call routing. Titles are short, cheap, and don't need the
-        # chat's own (potentially subscription-gated) model. An operator
-        # override (Settings → Models tab, or CIAO_TITLE_MODEL_OVERRIDE)
-        # wins and is routed per model: local Ollama daemon, Ollama cloud,
-        # or Anthropic alias. Otherwise, when Ollama is configured at all
-        # we always send the title call there using the dedicated free-tier
-        # ``OllamaSettings.title_model`` — that keeps titling off the
-        # Anthropic subscription rate-limit budget entirely. When Ollama
-        # isn't configured (empty allowlist) we fall back to the
-        # Haiku-via-subscription path so the feature still works out of
-        # the box.
-        from ciao.providers.ollama import routine_env_for_model
+        project = self._projects.get(chat.project_id)
+        workspace = project.workspace if project else None
+        from ciao.providers.ollama import is_local_ollama_model
+        from ciao.providers.routing import resolve_with_fallback
 
-        ollama = self._config.ollama
+        requested = resolve_title_model(self._config, workspace)
         if self._config.title_model_override:
-            title_model = self._config.title_model_override
-            title_env = routine_env_for_model(title_model, ollama)
-        elif ollama.models:
-            title_model = ollama.title_model
-            title_env = routine_env_for_model(title_model, ollama)
+            title_model = requested
+            from ciao.providers.routing import routing_routine_env_for_model
+
+            title_env = routing_routine_env_for_model(requested, self._config)
         else:
-            title_model = self._config.title_model
-            title_env = {}
+            title_model, title_env, note = resolve_with_fallback(
+                requested,
+                self._config,
+                default_model="haiku",
+            )
+            if note:
+                logger.info("Title generation %s", note)
 
         # Local-daemon models may need to cold-load weights (Ollama unloads
         # after ~5 min idle) and may spend tokens thinking before the title,
         # so they get a much longer leash than the 15s cloud default. The
         # call is fire-and-forget, so a slow title doesn't block anything.
         title_timeout = (
-            90.0 if is_local_ollama_model(title_model, ollama) else 15.0
+            90.0 if is_local_ollama_model(title_model, self._config.ollama) else 15.0
         )
 
         async with job_runs.track(
@@ -4178,6 +4191,7 @@ class ProjectChatManager:
         try:
             from ciao.providers.oneshot import run_oneshot
             from ciao.providers.routing import resolve_with_fallback
+            from ciao.insights import resolve_insights_model
 
             # Route through the shared resolver (same as ciao/insights.py) so
             # the classifier lands on an available backend. The raw
@@ -4185,10 +4199,14 @@ class ProjectChatManager:
             # was unreachable it passed an id the Anthropic subscription can't
             # serve (e.g. ``claude-opus-4-8[1m]``), the one-shot raised, and
             # the run was kept visible instead of auto-archived.
+            project_id = getattr(entry, "web_project_id", None)
+            project = self._projects.get(project_id) if project_id else None
+            workspace = project.workspace if project else None
+            insights_model = resolve_insights_model(self._config, workspace)
             model, env, note = resolve_with_fallback(
-                self._config.insights_model,
+                insights_model,
                 self._config,
-                default_model=self._config.insights_model,
+                default_model=insights_model,
             )
             if note:
                 logger.info("Schedule attention classifier %s", note)
