@@ -81,17 +81,12 @@ class Ciaobot < Formula
 
   def caveats
     <<~CAVEATS
-      To finish setting up Ciaobot, run:
+      Finish setup with \`ciao run\`, then open http://localhost:8443 and
+      follow the wizard: it asks for a workspace folder and a model
+      provider, then installs the menu bar app and background server.
+      Afterwards, open Ciaobot from the menu bar icon or Ciaobot.app.
 
-        ciao run
-
-      and open http://localhost:8443 in your browser. The setup wizard asks
-      for a workspace folder (default ~/ciaobot) and a model provider, then
-      writes the config and installs the Ciaobot menu bar app and background
-      server. Afterwards, open Ciaobot anytime from the menu bar icon or
-      /Applications/Ciaobot.app.
-
-      For scripted or headless setups, skip the wizard with:
+      Scripted or headless setups can skip the wizard:
 
         ciao setup --workspace <dir>
     CAVEATS

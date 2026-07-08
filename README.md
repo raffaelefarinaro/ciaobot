@@ -66,8 +66,6 @@ The model is project-first: a workspace represents a life area (personal, work, 
 
 ## Install
 
-Install from [PyPI](https://pypi.org/project/ciaobot/) — the wheel ships with the pre-built PWA (the same wheel is attached to each [GitHub release](https://github.com/raffaelefarinaro/ciaobot/releases/latest)):
-
 **macOS (Homebrew)** — includes the menu bar companion:
 
 ```bash
@@ -75,7 +73,7 @@ brew install raffaelefarinaro/ciaobot
 ciao run
 ```
 
-**Any platform (pip)** — requires Python 3.12 or newer (use whichever `python3.X` you have, e.g. `brew install python@3.13`):
+**Any platform ([PyPI](https://pypi.org/project/ciaobot/))** — requires Python 3.12 or newer (use whichever `python3.X` you have, e.g. `brew install python@3.13`):
 
 ```bash
 python3.13 -m venv ~/.ciaobot-venv
