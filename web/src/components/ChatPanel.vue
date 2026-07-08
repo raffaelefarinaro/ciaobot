@@ -169,8 +169,8 @@
           </div>
         </div>
         <!-- User message -->
-        <div v-else-if="item.kind === 'user'" class="message-wrap user">
-          <div class="message-row">
+        <div v-else-if="item.kind === 'user'" class="message-wrap user" :class="{ 'actions-tapped': tappedMessageKey === `user-${i}` }">
+          <div class="message-row" @mousemove="onMessageRowMove" @click="toggleMessageActions(`user-${i}`, $event)">
             <div class="message user">
               <div class="message-content">
                 <div v-if="item.msg.images?.length" class="message-images">
@@ -206,8 +206,8 @@
           </div>
         </div>
         <!-- Final assistant message -->
-        <div v-else-if="item.kind === 'assistant'" class="message-wrap assistant">
-          <div class="message-row">
+        <div v-else-if="item.kind === 'assistant'" class="message-wrap assistant" :class="{ 'actions-tapped': tappedMessageKey === `assistant-${i}` }">
+          <div class="message-row" @mousemove="onMessageRowMove" @click="toggleMessageActions(`assistant-${i}`, $event)">
             <div class="message assistant" :class="{ error: item.msg.is_error }">
               <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
               <div v-if="item.msg.timestamp || item.msg.effective_model" class="message-meta">
@@ -811,6 +811,33 @@ const thinkingLevels = ref<Record<string, string[]>>({})
 const openTraces = ref<Record<number, boolean>>({})
 const liveTraceOpen = ref(false)
 const copiedMessageKey = ref<string | null>(null)
+// On touch devices there is no hover, so a tap on the bubble reveals the
+// per-message action icons. Holds the key of the message whose actions are open.
+const tappedMessageKey = ref<string | null>(null)
+
+// Keep the action toolbar aligned with the pointer's vertical position within
+// the row. Written straight to a CSS variable to avoid per-message reactivity.
+function onMessageRowMove(e: MouseEvent): void {
+  const row = e.currentTarget as HTMLElement
+  const actions = row.querySelector('.message-actions') as HTMLElement | null
+  if (!actions) return
+  const rect = row.getBoundingClientRect()
+  const h = actions.offsetHeight
+  const max = Math.max(0, rect.height - h)
+  const y = Math.min(Math.max(e.clientY - rect.top - h / 2, 0), max)
+  row.style.setProperty('--actions-y', `${y}px`)
+}
+
+// Touch: tap a message to toggle its action icons. Ignored on hover-capable
+// devices (they use hover) and when the tap targets a link/button or a text
+// selection is in progress.
+function toggleMessageActions(key: string, e: MouseEvent): void {
+  if (!window.matchMedia('(hover: none)').matches) return
+  const target = e.target as HTMLElement | null
+  if (target?.closest('a, button, input, textarea')) return
+  if (window.getSelection()?.toString()) return
+  tappedMessageKey.value = tappedMessageKey.value === key ? null : key
+}
 const transcribing = ref(false)
 const isNearBottom = ref(true)
 let messagesResizeObserver: ResizeObserver | null = null
@@ -1168,6 +1195,9 @@ let lastChatSelectionText = ''
 let lastChatSelectionBubble: HTMLElement | null = null
 let draftBubbleEl: HTMLElement | null = null
 const commentBubbleById = new Map<string, HTMLElement>()
+// Highlight id used for the in-progress draft selection so it shows in the
+// bubble while the user is still typing the comment (before it's saved).
+const DRAFT_COMMENT_ID = '__draft__'
 
 const commentSidebarVisible = computed(
   () => store.pendingChatComments.length > 0 || commentDraft.value !== null
@@ -1234,7 +1264,10 @@ function openCommentForSelection(): void {
   }
   selectionAnchor.value = null
   window.getSelection()?.removeAllRanges()
-  nextTick(() => chatCommentInputEl.value?.focus())
+  nextTick(() => {
+    chatCommentInputEl.value?.focus()
+    applyHighlights()
+  })
 }
 
 function cancelChatComment(): void {
@@ -1243,6 +1276,7 @@ function cancelChatComment(): void {
   draftBubbleEl = null
   lastChatSelectionText = ''
   lastChatSelectionBubble = null
+  nextTick(() => applyHighlights())
 }
 
 function saveChatComment(): void {
@@ -1504,6 +1538,13 @@ function applyHighlights(): void {
     } else {
       console.warn('Bubble not found for comment', c.id, c.selection.slice(0, 80))
     }
+  }
+
+  // Also highlight the in-progress draft selection so the user sees what
+  // they're commenting on while they type, not only after saving.
+  const draft = commentDraft.value
+  if (draft && draftBubbleEl && root.contains(draftBubbleEl)) {
+    highlightInElement(draftBubbleEl, draft.selection, DRAFT_COMMENT_ID)
   }
 }
 
@@ -2662,6 +2703,7 @@ function insertImageRef(n: number) {
   gap: 2px;
   min-width: 0;
   max-width: 100%;
+  position: relative;
 }
 
 .message-wrap.user .message-row {
@@ -2691,17 +2733,27 @@ function insertImageRef(n: number) {
 .message-actions {
   display: flex;
   flex-shrink: 0;
-  align-self: center;
+  align-self: flex-start;
   gap: 4px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s;
+  /* Follow the pointer's vertical position within the row; --actions-y is
+     updated on mousemove and clamped to the row height. Defaults to the top. */
+  transform: translateY(var(--actions-y, 0px));
 }
 
-.message-wrap:hover .message-actions,
-.message-wrap:focus-within .message-actions {
+.message-wrap:focus-within .message-actions,
+.message-wrap.actions-tapped .message-actions {
   opacity: 1;
   pointer-events: auto;
+}
+
+@media (hover: hover) {
+  .message-wrap:hover .message-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 .message-action-btn {
@@ -4335,6 +4387,11 @@ details[open] > .activity-summary::before {
 }
 :deep(.comment-highlight:hover) {
   background: rgba(234, 179, 8, 0.4);
+}
+/* In-progress draft selection: brighter so it stands out while typing. */
+:deep(.comment-highlight[data-comment-id="__draft__"]) {
+  background: rgba(234, 179, 8, 0.45);
+  border-bottom-color: rgba(234, 179, 8, 0.9);
 }
 /* Brief flash when navigated to from a pending-comment chip. */
 :deep(.comment-highlight--pulse) {
