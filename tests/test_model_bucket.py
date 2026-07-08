@@ -173,7 +173,7 @@ def test_configured_workspace_provider_preselects_openrouter_bucket(tmp_path):
 
     assert chat.provider == "claude"
     assert chat.model_bucket == "openrouter"
-    assert chat.model == "anthropic/claude-opus-4.8"
+    assert chat.model == "anthropic/claude-opus-latest"
     env = pcm._build_extra_env(chat)
     assert env["ANTHROPIC_BASE_URL"] == "https://openrouter.ai/api"
     assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-or"
