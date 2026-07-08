@@ -29,9 +29,9 @@ from ciao.providers.oneshot import run_oneshot
 from ciao.providers.routing import routing_routine_env_for_model
 
 DEFAULT_PANEL = [
-    "anthropic/claude-sonnet-4.5",
-    "anthropic/claude-haiku-4.5",
-    "anthropic/claude-opus-4.8",
+    "anthropic/claude-sonnet-latest",
+    "anthropic/claude-haiku-latest",
+    "anthropic/claude-opus-latest",
 ]
 DEFAULT_TIMEOUT = 120  # seconds per model
 

@@ -31,9 +31,9 @@ _ANTHROPIC_ALIASES = frozenset({"opus", "sonnet", "haiku"})
 # the per-tier CIAO_OPENROUTER_HAIKU_MODEL, _SONNET_MODEL, _OPUS_MODEL env vars.
 # These double as the picker entries when the
 # OpenRouter backend is available.
-_DEFAULT_HAIKU = "anthropic/claude-haiku-4.5"
-_DEFAULT_SONNET = "anthropic/claude-sonnet-4.5"
-_DEFAULT_OPUS = "anthropic/claude-opus-4.8"
+_DEFAULT_HAIKU = "anthropic/claude-haiku-latest"
+_DEFAULT_SONNET = "anthropic/claude-sonnet-latest"
+_DEFAULT_OPUS = "anthropic/claude-opus-latest"
 
 
 @dataclass(frozen=True, slots=True)

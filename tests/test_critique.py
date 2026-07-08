@@ -105,4 +105,4 @@ def test_print_panel_uses_openrouter_default_when_key_set() -> None:
         os.environ.clear()
         os.environ.update(old)
     assert rc == 0
-    assert "anthropic/claude-sonnet-4.5" in buf.getvalue()
+    assert "anthropic/claude-sonnet-latest" in buf.getvalue()

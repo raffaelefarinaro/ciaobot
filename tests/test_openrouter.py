@@ -39,15 +39,15 @@ def test_env_includes_tier_remaps() -> None:
     """OpenRouter-routed CLIs get tier-alias + control-plane remaps so
     subagents and the auto-mode classifier resolve to OpenRouter-served
     ids instead of claude-* ids OpenRouter doesn't serve in that form."""
-    env = openrouter_env_for_model("anthropic/claude-haiku-4.5", _settings())
-    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "anthropic/claude-haiku-4.5"
-    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "anthropic/claude-sonnet-4.5"
-    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "anthropic/claude-opus-4.8"
-    assert env["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "anthropic/claude-opus-4.8"
-    assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "anthropic/claude-haiku-4.5"
-    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "anthropic/claude-sonnet-4.5"
-    assert env["CLAUDE_CODE_AUTO_MODE_MODEL"] == "anthropic/claude-haiku-4.5"
-    assert env["CLAUDE_CODE_BG_CLASSIFIER_MODEL"] == "anthropic/claude-haiku-4.5"
+    env = openrouter_env_for_model("anthropic/claude-haiku-latest", _settings())
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "anthropic/claude-haiku-latest"
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "anthropic/claude-sonnet-latest"
+    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "anthropic/claude-opus-latest"
+    assert env["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "anthropic/claude-opus-latest"
+    assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "anthropic/claude-haiku-latest"
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "anthropic/claude-sonnet-latest"
+    assert env["CLAUDE_CODE_AUTO_MODE_MODEL"] == "anthropic/claude-haiku-latest"
+    assert env["CLAUDE_CODE_BG_CLASSIFIER_MODEL"] == "anthropic/claude-haiku-latest"
 
 
 def test_env_empty_when_no_api_key() -> None:
@@ -69,9 +69,9 @@ def test_routine_env_not_gated_on_allowlist() -> None:
 
 def test_alias_resolves_to_tier_default() -> None:
     s = _settings()
-    assert alias_model("haiku", s) == "anthropic/claude-haiku-4.5"
-    assert alias_model("sonnet", s) == "anthropic/claude-sonnet-4.5"
-    assert alias_model("opus", s) == "anthropic/claude-opus-4.8"
+    assert alias_model("haiku", s) == "anthropic/claude-haiku-latest"
+    assert alias_model("sonnet", s) == "anthropic/claude-sonnet-latest"
+    assert alias_model("opus", s) == "anthropic/claude-opus-latest"
     # unknown alias passes through unchanged
     assert alias_model("weird", s) == "weird"
 
@@ -107,7 +107,7 @@ def test_config_loads_openrouter_env() -> None:
     assert config.openrouter.sonnet_model == "openai/gpt-5"
     assert config.openrouter.base_url == "https://relay.example/api"
     # haiku/opus keep shipped defaults
-    assert config.openrouter.haiku_model == "anthropic/claude-haiku-4.5"
+    assert config.openrouter.haiku_model == "anthropic/claude-haiku-latest"
 
 
 def test_list_models_exposes_openrouter_backend() -> None:
@@ -127,7 +127,7 @@ def test_list_models_exposes_openrouter_backend() -> None:
     data = json.loads(asyncio.run(list_models(Request(scope))).body)
     assert data["backends"]["openrouter"] is True
     assert "openrouter" in data["provider_models"]
-    assert data["alias_tiers"]["openrouter"]["sonnet"] == "anthropic/claude-sonnet-4.5"
+    assert data["alias_tiers"]["openrouter"]["sonnet"] == "anthropic/claude-sonnet-latest"
 
 
 import json  # noqa: E402  (used by test_list_models above)
