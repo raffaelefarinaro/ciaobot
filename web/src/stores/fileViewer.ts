@@ -3,7 +3,7 @@ import { ref } from 'vue'
 
 // File viewer for workspace files. Opened by clicking a linkified file path
 // in a chat or by tapping an inline file-card. Backed by /api/workspace-file
-// (sandboxed to config.workspace_root + extra_workspace_roots).
+// (no workspace sandbox; relative paths anchor to config.workspace_root).
 //
 // Three "tabs" the modal exposes:
 //   - preview: current on-disk content (current contract; default)

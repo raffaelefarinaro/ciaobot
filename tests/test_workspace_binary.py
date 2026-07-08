@@ -1,10 +1,10 @@
 """Tests for the /api/workspace-binary endpoint.
 
-Mirror of ``test_workspace_image`` for the binary download variant: same
-sandbox contract (path must canonicalise under workspace_root, no symlink
-escape), but the allowlist covers PDFs/ZIPs/office docs and the response
-sets ``Content-Disposition: inline`` with the original filename so PDFs
-preview in a tab and other types download with a sensible name.
+Mirror of ``test_workspace_image`` for the binary download variant: no
+workspace sandbox (any file on disk is served), the allowlist covers
+PDFs/ZIPs/office docs, and the response sets ``Content-Disposition: inline``
+with the original filename so PDFs preview in a tab and other types download
+with a sensible name.
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ def test_zip_returns_zip_mime(workspace: Path) -> None:
 
 def test_markdown_is_rejected(workspace: Path) -> None:
     # The binary endpoint must not accidentally serve text files even though
-    # they're under the workspace and pass the sandbox check.
+    # they're under the workspace.
     client = _make_client(workspace)
     resp = client.get("/api/workspace-binary", params={"path": "docs/readme.md"})
     assert resp.status_code == 415
@@ -93,30 +93,33 @@ def test_missing_path_returns_400(workspace: Path) -> None:
     assert resp.status_code == 400
 
 
-def test_traversal_returns_403(workspace: Path, tmp_path: Path) -> None:
+def test_traversal_relative_escape_is_served(workspace: Path, tmp_path: Path) -> None:
     outside = tmp_path / "secret.pdf"
     outside.write_bytes(_PDF_BYTES)
     client = _make_client(workspace)
     resp = client.get("/api/workspace-binary", params={"path": "../secret.pdf"})
-    assert resp.status_code == 403
+    assert resp.status_code == 200
+    assert resp.content == _PDF_BYTES
 
 
-def test_absolute_path_outside_workspace_returns_403(workspace: Path, tmp_path: Path) -> None:
+def test_absolute_path_outside_workspace_is_served(workspace: Path, tmp_path: Path) -> None:
     outside = tmp_path / "other.pdf"
     outside.write_bytes(_PDF_BYTES)
     client = _make_client(workspace)
     resp = client.get("/api/workspace-binary", params={"path": str(outside)})
-    assert resp.status_code == 403
+    assert resp.status_code == 200
+    assert resp.content == _PDF_BYTES
 
 
-def test_symlink_escape_returns_403(workspace: Path, tmp_path: Path) -> None:
+def test_symlink_escape_is_served(workspace: Path, tmp_path: Path) -> None:
     outside = tmp_path / "outside.pdf"
     outside.write_bytes(_PDF_BYTES)
     link = workspace / "escape.pdf"
     link.symlink_to(outside)
     client = _make_client(workspace)
     resp = client.get("/api/workspace-binary", params={"path": "escape.pdf"})
-    assert resp.status_code == 403
+    assert resp.status_code == 200
+    assert resp.content == _PDF_BYTES
 
 
 def test_missing_file_returns_404(workspace: Path) -> None:

@@ -169,8 +169,8 @@
           </div>
         </div>
         <!-- User message -->
-        <div v-else-if="item.kind === 'user'" class="message-wrap user">
-          <div class="message-row">
+        <div v-else-if="item.kind === 'user'" class="message-wrap user" :class="{ 'actions-tapped': tappedMessageKey === `user-${i}` }">
+          <div class="message-row" @mousemove="onMessageRowMove" @click="toggleMessageActions(`user-${i}`, $event)">
             <div class="message user">
               <div class="message-content">
                 <div v-if="item.msg.images?.length" class="message-images">
@@ -206,8 +206,8 @@
           </div>
         </div>
         <!-- Final assistant message -->
-        <div v-else-if="item.kind === 'assistant'" class="message-wrap assistant">
-          <div class="message-row">
+        <div v-else-if="item.kind === 'assistant'" class="message-wrap assistant" :class="{ 'actions-tapped': tappedMessageKey === `assistant-${i}` }">
+          <div class="message-row" @mousemove="onMessageRowMove" @click="toggleMessageActions(`assistant-${i}`, $event)">
             <div class="message assistant" :class="{ error: item.msg.is_error }">
               <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
               <div v-if="item.msg.timestamp || item.msg.effective_model" class="message-meta">
@@ -811,6 +811,33 @@ const thinkingLevels = ref<Record<string, string[]>>({})
 const openTraces = ref<Record<number, boolean>>({})
 const liveTraceOpen = ref(false)
 const copiedMessageKey = ref<string | null>(null)
+// On touch devices there is no hover, so a tap on the bubble reveals the
+// per-message action icons. Holds the key of the message whose actions are open.
+const tappedMessageKey = ref<string | null>(null)
+
+// Keep the action toolbar aligned with the pointer's vertical position within
+// the row. Written straight to a CSS variable to avoid per-message reactivity.
+function onMessageRowMove(e: MouseEvent): void {
+  const row = e.currentTarget as HTMLElement
+  const actions = row.querySelector('.message-actions') as HTMLElement | null
+  if (!actions) return
+  const rect = row.getBoundingClientRect()
+  const h = actions.offsetHeight
+  const max = Math.max(0, rect.height - h)
+  const y = Math.min(Math.max(e.clientY - rect.top - h / 2, 0), max)
+  row.style.setProperty('--actions-y', `${y}px`)
+}
+
+// Touch: tap a message to toggle its action icons. Ignored on hover-capable
+// devices (they use hover) and when the tap targets a link/button or a text
+// selection is in progress.
+function toggleMessageActions(key: string, e: MouseEvent): void {
+  if (!window.matchMedia('(hover: none)').matches) return
+  const target = e.target as HTMLElement | null
+  if (target?.closest('a, button, input, textarea')) return
+  if (window.getSelection()?.toString()) return
+  tappedMessageKey.value = tappedMessageKey.value === key ? null : key
+}
 const transcribing = ref(false)
 const isNearBottom = ref(true)
 let messagesResizeObserver: ResizeObserver | null = null
@@ -979,6 +1006,7 @@ function checkScroll() {
   if (!el) return
   const threshold = 4
   isNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight <= threshold
+  onChatScrollReanchor()
 }
 
 function scrollToBottom() {
@@ -1162,12 +1190,16 @@ const editingChatCommentText = ref('')
 const commentDraftImages = ref<string[]>([])
 const editingChatCommentImages = ref<string[]>([])
 let lastChatSelectionText = ''
+let lastChatSelectionRange: Range | null = null
 // Bubble element the current selection originated in. Captured at selection
 // time so applyHighlights() can re-wrap only the right bubble (otherwise a
 // short selection like "OK" could wrongly highlight in any other message).
 let lastChatSelectionBubble: HTMLElement | null = null
 let draftBubbleEl: HTMLElement | null = null
 const commentBubbleById = new Map<string, HTMLElement>()
+// Highlight id used for the in-progress draft selection so it shows in the
+// bubble while the user is still typing the comment (before it's saved).
+const DRAFT_COMMENT_ID = '__draft__'
 
 const commentSidebarVisible = computed(
   () => store.pendingChatComments.length > 0 || commentDraft.value !== null
@@ -1178,44 +1210,25 @@ function truncate(s: string, n: number): string {
   return s.length > n ? s.slice(0, n - 1) + '…' : s
 }
 
-function onChatSelectionChange(): void {
-  if (commentDraft.value) return
-  const sel = window.getSelection()
-  if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
-    selectionAnchor.value = null
-    return
-  }
-  const range = sel.getRangeAt(0)
-  // Only react to selections inside message bubbles
+function updateChatSelectionAnchorFromRange(range: Range): void {
   const msgs = messagesEl.value
-  if (!msgs || !msgs.contains(range.startContainer) || !msgs.contains(range.endContainer)) {
+  if (!msgs) {
     selectionAnchor.value = null
     return
   }
-  // Skip if the selection is inside an input/textarea
-  const startEl = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement
-  const endEl = range.endContainer instanceof Element ? range.endContainer : range.endContainer.parentElement
-  if (startEl?.closest('textarea, input') || endEl?.closest('textarea, input')) {
-    selectionAnchor.value = null
-    return
-  }
-  // Find the bubble this selection lives in. Required so applyHighlights()
-  // only wraps the matching text in the originating bubble, not every bubble
-  // that happens to contain the same string.
-  const bubble = startEl?.closest('.message') as HTMLElement | null
-  if (!bubble) { selectionAnchor.value = null; return }
-  const text = sel.toString().trim()
-  if (!text) { selectionAnchor.value = null; return }
-  lastChatSelectionText = text
-  lastChatSelectionBubble = bubble
 
-  // Anchor at the END of the selection (last client rect), not the bounding
-  // box of the whole range — multi-line selections otherwise push the pill
-  // far below the visible end of the highlight.
   const rects = range.getClientRects()
   const endRect = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect()
-  // Viewport-relative coordinates because the trigger/popover are teleported
-  // to body with position: fixed.
+  const msgsRect = msgs.getBoundingClientRect()
+  const visible = endRect.bottom > msgsRect.top
+    && endRect.top < msgsRect.bottom
+    && endRect.right > msgsRect.left
+    && endRect.left < msgsRect.right
+  if (!visible) {
+    selectionAnchor.value = null
+    return
+  }
+
   const popoverW = Math.min(420, window.innerWidth * 0.9)
   const top = endRect.bottom + 2
   const left = Math.min(
@@ -1223,6 +1236,66 @@ function onChatSelectionChange(): void {
     Math.max(8, window.innerWidth - popoverW - 8)
   )
   selectionAnchor.value = { top, left }
+}
+
+function onChatScrollReanchor(): void {
+  if (commentDraft.value || !lastChatSelectionRange) return
+  try {
+    if (!lastChatSelectionRange.startContainer.isConnected) {
+      lastChatSelectionRange = null
+      selectionAnchor.value = null
+      return
+    }
+    updateChatSelectionAnchorFromRange(lastChatSelectionRange)
+  } catch {
+    lastChatSelectionRange = null
+    selectionAnchor.value = null
+  }
+}
+
+function onChatSelectionChange(): void {
+  if (commentDraft.value) return
+  const sel = window.getSelection()
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+    lastChatSelectionRange = null
+    selectionAnchor.value = null
+    return
+  }
+  const range = sel.getRangeAt(0)
+  // Only react to selections inside message bubbles
+  const msgs = messagesEl.value
+  if (!msgs || !msgs.contains(range.startContainer) || !msgs.contains(range.endContainer)) {
+    lastChatSelectionRange = null
+    selectionAnchor.value = null
+    return
+  }
+  // Skip if the selection is inside an input/textarea
+  const startEl = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement
+  const endEl = range.endContainer instanceof Element ? range.endContainer : range.endContainer.parentElement
+  if (startEl?.closest('textarea, input') || endEl?.closest('textarea, input')) {
+    lastChatSelectionRange = null
+    selectionAnchor.value = null
+    return
+  }
+  // Find the bubble this selection lives in. Required so applyHighlights()
+  // only wraps the matching text in the originating bubble, not every bubble
+  // that happens to contain the same string.
+  const bubble = startEl?.closest('.message') as HTMLElement | null
+  if (!bubble) {
+    lastChatSelectionRange = null
+    selectionAnchor.value = null
+    return
+  }
+  const text = sel.toString().trim()
+  if (!text) {
+    lastChatSelectionRange = null
+    selectionAnchor.value = null
+    return
+  }
+  lastChatSelectionText = text
+  lastChatSelectionBubble = bubble
+  lastChatSelectionRange = range.cloneRange()
+  updateChatSelectionAnchorFromRange(range)
 }
 
 function openCommentForSelection(): void {
@@ -1233,8 +1306,12 @@ function openCommentForSelection(): void {
     text: '',
   }
   selectionAnchor.value = null
+  lastChatSelectionRange = null
   window.getSelection()?.removeAllRanges()
-  nextTick(() => chatCommentInputEl.value?.focus())
+  nextTick(() => {
+    chatCommentInputEl.value?.focus()
+    applyHighlights()
+  })
 }
 
 function cancelChatComment(): void {
@@ -1243,6 +1320,8 @@ function cancelChatComment(): void {
   draftBubbleEl = null
   lastChatSelectionText = ''
   lastChatSelectionBubble = null
+  lastChatSelectionRange = null
+  nextTick(() => applyHighlights())
 }
 
 function saveChatComment(): void {
@@ -1257,6 +1336,7 @@ function saveChatComment(): void {
   commentDraftImages.value = []
   lastChatSelectionText = ''
   lastChatSelectionBubble = null
+  lastChatSelectionRange = null
   nextTick(() => applyHighlights())
 }
 
@@ -1504,6 +1584,13 @@ function applyHighlights(): void {
     } else {
       console.warn('Bubble not found for comment', c.id, c.selection.slice(0, 80))
     }
+  }
+
+  // Also highlight the in-progress draft selection so the user sees what
+  // they're commenting on while they type, not only after saving.
+  const draft = commentDraft.value
+  if (draft && draftBubbleEl && root.contains(draftBubbleEl)) {
+    highlightInElement(draftBubbleEl, draft.selection, DRAFT_COMMENT_ID)
   }
 }
 
@@ -2662,6 +2749,7 @@ function insertImageRef(n: number) {
   gap: 2px;
   min-width: 0;
   max-width: 100%;
+  position: relative;
 }
 
 .message-wrap.user .message-row {
@@ -2691,17 +2779,27 @@ function insertImageRef(n: number) {
 .message-actions {
   display: flex;
   flex-shrink: 0;
-  align-self: center;
+  align-self: flex-start;
   gap: 4px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s;
+  /* Follow the pointer's vertical position within the row; --actions-y is
+     updated on mousemove and clamped to the row height. Defaults to the top. */
+  transform: translateY(var(--actions-y, 0px));
 }
 
-.message-wrap:hover .message-actions,
-.message-wrap:focus-within .message-actions {
+.message-wrap:focus-within .message-actions,
+.message-wrap.actions-tapped .message-actions {
   opacity: 1;
   pointer-events: auto;
+}
+
+@media (hover: hover) {
+  .message-wrap:hover .message-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 .message-action-btn {
@@ -4010,7 +4108,7 @@ details[open] > .activity-summary::before {
      tap targets, not inline grouped actions. */
   .input-bar { padding-top: 5px; padding-bottom: 5px; }
   .chat-input { min-height: 36px; }
-  .stop-btn, .send-btn {
+  .stop-btn, .input-actions .send-btn {
     min-width: 36px;
     min-height: 36px;
     width: 36px;
@@ -4335,6 +4433,11 @@ details[open] > .activity-summary::before {
 }
 :deep(.comment-highlight:hover) {
   background: rgba(234, 179, 8, 0.4);
+}
+/* In-progress draft selection: brighter so it stands out while typing. */
+:deep(.comment-highlight[data-comment-id="__draft__"]) {
+  background: rgba(234, 179, 8, 0.45);
+  border-bottom-color: rgba(234, 179, 8, 0.9);
 }
 /* Brief flash when navigated to from a pending-comment chip. */
 :deep(.comment-highlight--pulse) {

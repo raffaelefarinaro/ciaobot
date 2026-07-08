@@ -279,17 +279,10 @@ def test_build_extra_env_leaves_anthropic_chat_alone(tmp_path: Path) -> None:
     assert env["GWS_PROFILE"] == "personal"
 
 
-async def test_auto_title_uses_dedicated_ollama_title_model(
+async def test_auto_title_uses_workspace_haiku_model(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """When the chat is on an Ollama model, the title call uses the
-    cheap dedicated ``OllamaSettings.title_model`` (free-tier-friendly,
-    e.g. ``gemma4:e2b-it-qat``) instead of the chat's own model — which
-    may be subscription-gated and is overkill for 50-token titles.
-
-    The env injection still happens so the call hits Ollama, not
-    Anthropic.
-    """
+    """When automatic, the title call uses the workspace haiku-tier model."""
     pcm = _make_manager(tmp_path, ollama_models=("kimi-k2.7-code:cloud",))
     project = pcm.create_project("ollama-title", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="New Chat")
@@ -310,8 +303,7 @@ async def test_auto_title_uses_dedicated_ollama_title_model(
         chat.chat_id, "what's the weather", "sunny"
     )
     assert new_title == "ollama-titled"
-    # Dedicated cheap title model, not the chat's own (potentially gated) one.
-    assert captured["model"] == "gemma4:e2b-it-qat"
+    assert captured["model"] == pcm._config.ollama.haiku_model
     assert captured["env"] is not None
     assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://ollama.com"
     assert captured["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-cloud"
@@ -765,10 +757,10 @@ def test_schedule_default_model_falls_back_for_unknown_project(
     assert pcm.schedule_default_model("does-not-exist") == config.claude_default_model
 
 
-async def test_auto_title_honours_custom_ollama_title_model(
+async def test_auto_title_honours_title_model_override(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """``CIAO_OLLAMA_TITLE_MODEL`` overrides the default title model."""
+    """``title_model_override`` wins over the workspace haiku tier."""
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     config = CiaoConfig(
@@ -776,10 +768,12 @@ async def test_auto_title_honours_custom_ollama_title_model(
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
+        title_model_override="qwen3:8b",
         ollama=OllamaSettings(
             models=("kimi-k2.7-code:cloud",),
             base_url="http://localhost:11434",
-            title_model="qwen3:8b",
+            api_key="sk-cloud",
+            title_model="gemma4:e2b-it-qat",
         ),
     )
     state = StateStore(config.state_path, tmp_path, config.media_root)
@@ -806,16 +800,14 @@ async def test_auto_title_honours_custom_ollama_title_model(
     assert captured["model"] == "qwen3:8b"
 
 
-async def test_auto_title_routes_anthropic_chats_through_ollama_when_enabled(
+async def test_auto_title_uses_workspace_haiku_for_anthropic_bucket(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """When Ollama is configured, *every* chat's title call goes through
-    the cheap free-tier Ollama title model — including Anthropic chats.
-    Titles are short and frequent; this keeps them off the Anthropic
-    subscription rate-limit budget entirely.
+    """Work/Anthropic workspaces use the haiku alias even when Ollama is
+    configured globally.
     """
     pcm = _make_manager(tmp_path, ollama_models=("kimi-k2.7-code:cloud",))
-    project = pcm.create_project("anthropic-title", workspace="personal")
+    project = pcm.create_project("anthropic-title", workspace="work")
     chat = pcm.create_chat(project.project_id, title="New Chat")
     chat.model = "opus"
 
@@ -824,17 +816,15 @@ async def test_auto_title_routes_anthropic_chats_through_ollama_when_enabled(
     async def fake_generate(user, assistant, *, model, cwd, env=None, pi_settings=None, timeout_s=15.0):
         captured["model"] = model
         captured["env"] = env
-        return "ollama-titled"
+        return "haiku-titled"
 
     monkeypatch.setattr(
         "ciao.web.project_chats._generate_chat_title", fake_generate
     )
 
     await pcm.auto_title_if_default(chat.chat_id, "hello", "hi")
-    assert captured["model"] == "gemma4:e2b-it-qat"  # Ollama default title model
-    assert captured["env"] is not None
-    assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://ollama.com"
-    assert captured["env"]["ANTHROPIC_AUTH_TOKEN"] == "sk-cloud"
+    assert captured["model"] == "haiku"
+    assert captured["env"] == {}
 
 
 async def test_auto_title_falls_back_to_haiku_when_ollama_disabled(

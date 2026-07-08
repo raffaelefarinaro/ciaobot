@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import shutil
 
-from ciao.web.project_chats import _generate_chat_title
+from ciao.web.project_chats import _generate_chat_title, resolve_title_model
 
 
 class FakeProcess:
@@ -69,3 +69,28 @@ async def test_generate_chat_title_via_apfel_exception_fallback(monkeypatch: pyt
 
     title = await _generate_chat_title("How do I write Python unit tests?", assistant_text="")
     assert title == "How do I write Python unit"
+
+
+def test_resolve_title_model_uses_override() -> None:
+    from ciao.config import CiaoConfig
+
+    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t", "CIAO_OLLAMA_API_KEY": "sk-cloud"})
+    config.title_model_override = "anthropic/claude-haiku-4.5"
+    assert resolve_title_model(config, "personal") == "anthropic/claude-haiku-4.5"
+
+
+def test_resolve_title_model_uses_workspace_haiku_when_automatic() -> None:
+    from ciao.config import CiaoConfig
+
+    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t", "CIAO_OLLAMA_API_KEY": "sk-cloud"})
+    config.title_model_override = ""
+    assert resolve_title_model(config, "personal") == config.ollama.haiku_model
+    assert resolve_title_model(config, "work") == "haiku"
+
+
+def test_resolve_title_model_falls_back_without_workspace() -> None:
+    from ciao.config import CiaoConfig
+
+    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
+    config.title_model_override = ""
+    assert resolve_title_model(config) == config.title_model

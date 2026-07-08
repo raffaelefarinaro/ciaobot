@@ -519,8 +519,11 @@ class ClaudeProvider(BaseSDKProvider):
         """Yield SDK events arriving *between* turns until cancelled.
 
         Background subagents outlive the parent turn: when one completes, the
-        CLI injects a task-notification and runs a fresh parent turn whose
-        messages land on stdout with nobody consuming them. Left unread they
+        CLI injects a task-notification, and a fresh parent turn follows —
+        run by the CLI on its own (CLI-version dependent, observed not to
+        happen reliably) or requested via ``steer()`` by the completion
+        watcher's synthesis nudge. Its messages land on stdout with nobody
+        consuming them. Left unread they
         sit in the transport buffer and the stale ResultMessage would
         terminate the *next* ``receive_response()`` immediately, bleeding one
         turn's output into the next. This generator keeps the pipe drained

@@ -72,6 +72,20 @@ _PROJECT_UPLOAD_EXTS = _PROJECT_TEXT_EXTS | _PROJECT_IMAGE_EXTS | _PROJECT_BINAR
 _PROJECT_UPLOAD_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 _RETRY_INTERVAL_SECONDS = 60 * 60
 _RETRY_STATUSES = {"pending", "stopped", ""}
+
+# Injected into the parent turn when its background subagents all finish. The
+# CLI does not auto-continue a parent turn after a background `Agent` dispatch
+# completes (see ciao/system_prompt.md), so without this nudge the chat stays
+# stuck on the interim "I'll report back when they finish" message. The nudge
+# is delivered on the persistent client so the already-running between-turns
+# drain captures and publishes the synthesis turn like a normal reply.
+_SUBAGENT_SYNTHESIS_NUDGE = (
+    "The background agent(s) you dispatched have now finished. Review their "
+    "results (read their transcripts or output as needed) and post your "
+    "consolidated final report for this task now. Do not dispatch new "
+    "background agents to answer this. If you already posted the final "
+    "report, reply with a brief confirmation instead of repeating it."
+)
 _HANDOVER_ROLES = {"user", "assistant", "system"}
 _HANDOVER_MAX_MESSAGES = 80
 _HANDOVER_MAX_CHARS = 60_000
@@ -269,6 +283,21 @@ def _clean_title(raw: str, user_snippet: str) -> str | None:
     if len(title) > 60:
         title = title[:57].rstrip() + "..."
     return title or _fallback_title(user_snippet)
+
+
+def resolve_title_model(config, workspace: str | None = None) -> str:
+    """Pick the model for chat title generation.
+
+    When the operator has not set an explicit override (Settings → Models →
+    Chat titles = Automatic), use the haiku-tier model for the chat's
+    workspace routing bucket. Callers without workspace context fall back to
+    ``config.title_model``.
+    """
+    if config.title_model_override:
+        return config.title_model_override
+    if workspace is not None:
+        return config.haiku_model_for_workspace(workspace)
+    return config.title_model
 
 
 async def _generate_chat_title(
@@ -2235,14 +2264,16 @@ class ProjectChatManager:
             and outcome.turn_count >= getattr(config, "insights_size_gate_turns", 0)
         )
         if run_insights:
-            from ciao.insights import extract_and_append
+            from ciao.insights import extract_and_append, resolve_insights_model
 
+            workspace = project_meta.workspace if project_meta else None
+            insights_model = resolve_insights_model(config, workspace)
             asyncio.create_task(
                 extract_and_append(
                     archive_path=outcome.path,
                     filtered_jsonl=outcome.filtered_jsonl,
                     config=config,
-                    model=config.insights_model,
+                    model=insights_model,
                     session_id=outcome.session_id,
                     trajectory_meta=trajectory_meta,
                     trajectories_enabled=trajectories_enabled,
@@ -3687,10 +3718,22 @@ class ProjectChatManager:
                             if chat_now is not None:
                                 chat_now.last_activity_at = _now_iso()
                                 self._save()
-                            title = chat_now.title if chat_now else "Ciaobot"
-                            self._schedule_push(
-                                chat_id, title, "Background agents finished"
+                            # Poke the parent to synthesize a final report. The
+                            # CLI won't auto-continue the turn on its own, so
+                            # without this the chat sits on the interim
+                            # "I'll report back" message forever. When the
+                            # nudge lands on the live client the between-turns
+                            # drain publishes the reply (and its own push); we
+                            # only fall back to a bare push if the nudge could
+                            # not be delivered.
+                            nudged = await self._nudge_synthesis_after_subagents(
+                                chat_id
                             )
+                            if not nudged:
+                                title = chat_now.title if chat_now else "Ciaobot"
+                                self._schedule_push(
+                                    chat_id, title, "Background agents finished"
+                                )
                         last_count = count
                     if count == 0:
                         break
@@ -3701,6 +3744,56 @@ class ProjectChatManager:
             current = self._pending_subagent_watchers.get(chat_id)
             if current is not None and current.done():
                 self._pending_subagent_watchers.pop(chat_id, None)
+
+    async def _nudge_synthesis_after_subagents(self, chat_id: str) -> bool:
+        """Ask the parent to post a final report once its subagents finish.
+
+        A background ``Agent`` dispatch ends the parent turn immediately and
+        the CLI does not resume it when the subagent completes, so the chat
+        would otherwise stay on the interim "I'll report back" message. We
+        inject a synthesis prompt on the persistent client; the between-turns
+        drain (started alongside this watcher) consumes the resulting turn and
+        publishes it like any other reply. Returns True when the nudge reached
+        a live client, False otherwise (caller falls back to a plain push).
+        """
+        provider = self._providers.get(chat_id)
+        if provider is None or not provider.can_drain:
+            return False
+        # A user send since the turn ended cancels the drain; don't inject into
+        # a live user turn or a chat with no drain to capture the reply.
+        drain = self._between_turn_drains.get(chat_id)
+        if drain is None or drain.done():
+            return False
+        existing = self._broker.get(chat_id)
+        if existing is not None and not existing.background:
+            return False
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return False
+        prefix = self._build_prompt_prefix(chat)
+        full_prompt = (
+            prefix + _SUBAGENT_SYNTHESIS_NUDGE
+            if prefix
+            else _SUBAGENT_SYNTHESIS_NUDGE
+        )
+        request = AgentRequest(
+            prompt=full_prompt,
+            model=self._runtime_model_for_chat(chat),
+            provider=chat.provider,
+            mode=self._effective_mode_for_chat(chat),
+            resume_session=chat.session_id or None,
+            images=[],
+            extra_env=self._build_extra_env(chat),
+            disallowed_tools=self.disallowed_tools_for_chat(chat),
+            thinking_level=self._thinking_level_for_chat(chat),
+        )
+        try:
+            return await provider.steer(request)
+        except Exception:  # noqa: BLE001 — a failed nudge must not kill the watcher
+            logger.exception(
+                "Subagent synthesis nudge failed for chat %s", chat_id
+            )
+            return False
 
     # ── Between-turns SDK drain ──────────────────────────────────────────
 
@@ -3734,11 +3827,14 @@ class ProjectChatManager:
         """Consume and publish SDK events that arrive with no turn active.
 
         When a background subagent completes, the CLI injects a
-        task-notification and runs a parent follow-up turn on its own. This
-        loop forwards those events to a broker stream (so open chat sockets
-        render them live) and announces the follow-up's result like a normal
-        turn (unread badge, toast, delayed push). Each CLI-initiated turn
-        gets its own background ChatStream so replay stays turn-shaped.
+        task-notification; a follow-up parent turn then arrives either run by
+        the CLI on its own (CLI-version dependent — observed not to happen
+        reliably) or requested by the completion watcher's synthesis nudge
+        (``_nudge_synthesis_after_subagents``). This loop forwards those
+        events to a broker stream (so open chat sockets render them live) and
+        announces the follow-up's result like a normal turn (unread badge,
+        toast, delayed push). Each such turn gets its own background
+        ChatStream so replay stays turn-shaped.
         """
         from ciao.web.chat_broker import event_to_json
 
@@ -3928,36 +4024,32 @@ class ProjectChatManager:
         if chat is None or chat.title != "New Chat":
             return None
 
-        # Title-call routing. Titles are short, cheap, and don't need the
-        # chat's own (potentially subscription-gated) model. An operator
-        # override (Settings → Models tab, or CIAO_TITLE_MODEL_OVERRIDE)
-        # wins and is routed per model: local Ollama daemon, Ollama cloud,
-        # or Anthropic alias. Otherwise, when Ollama is configured at all
-        # we always send the title call there using the dedicated free-tier
-        # ``OllamaSettings.title_model`` — that keeps titling off the
-        # Anthropic subscription rate-limit budget entirely. When Ollama
-        # isn't configured (empty allowlist) we fall back to the
-        # Haiku-via-subscription path so the feature still works out of
-        # the box.
-        from ciao.providers.ollama import routine_env_for_model
+        project = self._projects.get(chat.project_id)
+        workspace = project.workspace if project else None
+        from ciao.providers.ollama import is_local_ollama_model
+        from ciao.providers.routing import resolve_with_fallback
 
-        ollama = self._config.ollama
+        requested = resolve_title_model(self._config, workspace)
         if self._config.title_model_override:
-            title_model = self._config.title_model_override
-            title_env = routine_env_for_model(title_model, ollama)
-        elif ollama.models:
-            title_model = ollama.title_model
-            title_env = routine_env_for_model(title_model, ollama)
+            title_model = requested
+            from ciao.providers.routing import routing_routine_env_for_model
+
+            title_env = routing_routine_env_for_model(requested, self._config)
         else:
-            title_model = self._config.title_model
-            title_env = {}
+            title_model, title_env, note = resolve_with_fallback(
+                requested,
+                self._config,
+                default_model="haiku",
+            )
+            if note:
+                logger.info("Title generation %s", note)
 
         # Local-daemon models may need to cold-load weights (Ollama unloads
         # after ~5 min idle) and may spend tokens thinking before the title,
         # so they get a much longer leash than the 15s cloud default. The
         # call is fire-and-forget, so a slow title doesn't block anything.
         title_timeout = (
-            90.0 if is_local_ollama_model(title_model, ollama) else 15.0
+            90.0 if is_local_ollama_model(title_model, self._config.ollama) else 15.0
         )
 
         async with job_runs.track(
@@ -4099,6 +4191,7 @@ class ProjectChatManager:
         try:
             from ciao.providers.oneshot import run_oneshot
             from ciao.providers.routing import resolve_with_fallback
+            from ciao.insights import resolve_insights_model
 
             # Route through the shared resolver (same as ciao/insights.py) so
             # the classifier lands on an available backend. The raw
@@ -4106,10 +4199,14 @@ class ProjectChatManager:
             # was unreachable it passed an id the Anthropic subscription can't
             # serve (e.g. ``claude-opus-4-8[1m]``), the one-shot raised, and
             # the run was kept visible instead of auto-archived.
+            project_id = getattr(entry, "web_project_id", None)
+            project = self._projects.get(project_id) if project_id else None
+            workspace = project.workspace if project else None
+            insights_model = resolve_insights_model(self._config, workspace)
             model, env, note = resolve_with_fallback(
-                self._config.insights_model,
+                insights_model,
                 self._config,
-                default_model=self._config.insights_model,
+                default_model=insights_model,
             )
             if note:
                 logger.info("Schedule attention classifier %s", note)

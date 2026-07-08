@@ -621,16 +621,20 @@ function syncSidebarToBody(): void {
   requestAnimationFrame(() => { isSyncing = false })
 }
 
+function onBodyScroll(): void {
+  onScrollReanchor()
+  syncBodyToSidebar()
+}
+
 function attachScrollSync(): void {
-  if (!bodyEl.value || !sidebarListEl.value) return
+  if (!bodyEl.value) return
   detachScrollSync()
-  bodyEl.value.addEventListener('scroll', syncBodyToSidebar, { passive: true })
-  sidebarListEl.value.addEventListener('scroll', syncSidebarToBody, { passive: true })
+  bodyEl.value.addEventListener('scroll', onBodyScroll, { passive: true })
+  sidebarListEl.value?.addEventListener('scroll', syncSidebarToBody, { passive: true })
 }
 function detachScrollSync(): void {
-  if (!bodyEl.value || !sidebarListEl.value) return
-  bodyEl.value.removeEventListener('scroll', syncBodyToSidebar)
-  sidebarListEl.value.removeEventListener('scroll', syncSidebarToBody)
+  bodyEl.value?.removeEventListener('scroll', onBodyScroll)
+  sidebarListEl.value?.removeEventListener('scroll', syncSidebarToBody)
 }
 
 // ── Mobile popup for reading a comment on tap ───────────────────────
@@ -835,6 +839,7 @@ const selectionAnchor = ref<Anchor | null>(null)
 const commentDraft = ref<CommentDraft | null>(null)
 let lastSelectionText = ''
 let lastSelectionLines: LineRange = null
+let lastSelectionRange: Range | null = null
 
 // Anything we render as text is fair game for commenting — the floating
 // trigger should appear in both the markdown branch and the <pre> branch.
@@ -1034,8 +1039,50 @@ function computeSelectionLines(range: Range, selectionText: string): LineRange {
   return { start, end: start }
 }
 
+function updateSelectionAnchorFromRange(range: Range): void {
+  const modal = modalEl.value
+  const body = bodyEl.value
+  if (!modal || !body) {
+    selectionAnchor.value = null
+    return
+  }
+
+  const rects = range.getClientRects()
+  const endRect = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect()
+  const bodyRect = body.getBoundingClientRect()
+  const visible = endRect.bottom > bodyRect.top
+    && endRect.top < bodyRect.bottom
+    && endRect.right > bodyRect.left
+    && endRect.left < bodyRect.right
+  if (!visible) {
+    selectionAnchor.value = null
+    return
+  }
+
+  const modalRect = modal.getBoundingClientRect()
+  const top = endRect.bottom - modalRect.top + 2
+  const left = Math.max(8, endRect.right - modalRect.left + 6)
+  selectionAnchor.value = { top, left }
+}
+
+function onScrollReanchor(): void {
+  if (commentDraft.value || !lastSelectionRange) return
+  try {
+    if (!lastSelectionRange.startContainer.isConnected) {
+      lastSelectionRange = null
+      selectionAnchor.value = null
+      return
+    }
+    updateSelectionAnchorFromRange(lastSelectionRange)
+  } catch {
+    lastSelectionRange = null
+    selectionAnchor.value = null
+  }
+}
+
 function onSelectionChange(): void {
   if (!isCommentable.value) {
+    lastSelectionRange = null
     selectionAnchor.value = null
     return
   }
@@ -1044,6 +1091,7 @@ function onSelectionChange(): void {
   if (commentDraft.value) return
   const sel = window.getSelection()
   if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+    lastSelectionRange = null
     selectionAnchor.value = null
     return
   }
@@ -1055,27 +1103,21 @@ function onSelectionChange(): void {
   const inside = targets.some(
     el => el && el.contains(range.startContainer) && el.contains(range.endContainer)
   )
-  if (!inside) { selectionAnchor.value = null; return }
+  if (!inside) {
+    lastSelectionRange = null
+    selectionAnchor.value = null
+    return
+  }
   const text = sel.toString().trim()
-  if (!text) { selectionAnchor.value = null; return }
+  if (!text) {
+    lastSelectionRange = null
+    selectionAnchor.value = null
+    return
+  }
   lastSelectionText = text
   lastSelectionLines = computeSelectionLines(range, text)
-
-  // Anchor at the END of the selection. range.getBoundingClientRect() is the
-  // bounding box of the *whole* range, which for multi-line selections puts
-  // the pill way below the visible end. Using the last client rect pins it
-  // right next to the cursor.
-  const rects = range.getClientRects()
-  const endRect = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect()
-  const modal = modalEl.value
-  if (!modal) { selectionAnchor.value = null; return }
-  const modalRect = modal.getBoundingClientRect()
-  // Anchor coordinates are relative to .fv-modal (position: relative).
-  // Position the trigger just below the selection's bottom-right edge so
-  // it doesn't cover what was just highlighted.
-  const top = endRect.bottom - modalRect.top + 2
-  const left = Math.max(8, endRect.right - modalRect.left + 6)
-  selectionAnchor.value = { top, left }
+  lastSelectionRange = range.cloneRange()
+  updateSelectionAnchorFromRange(range)
 }
 
 const commentDraftImages = ref<string[]>([])
@@ -1091,6 +1133,7 @@ function openCommentForSelection(): void {
   }
   commentDraftImages.value = []
   selectionAnchor.value = null
+  lastSelectionRange = null
   // Clear the native selection — the sidebar now "owns" the highlighted
   // text, and leaving it selected makes the page look noisy.
   window.getSelection()?.removeAllRanges()
@@ -1102,6 +1145,7 @@ function cancelComment(): void {
   commentDraftImages.value = []
   lastSelectionText = ''
   lastSelectionLines = null
+  lastSelectionRange = null
 }
 
 function saveComment(): void {
@@ -1121,6 +1165,7 @@ function saveComment(): void {
   commentDraftImages.value = []
   lastSelectionText = ''
   lastSelectionLines = null
+  lastSelectionRange = null
 }
 
 async function handleDraftImageUpload(e: Event): Promise<void> {
@@ -1257,6 +1302,7 @@ watch(
     commentDraft.value = null
     lastSelectionText = ''
     lastSelectionLines = null
+    lastSelectionRange = null
   },
 )
 watch(
@@ -1265,6 +1311,7 @@ watch(
     if (!open) {
       selectionAnchor.value = null
       commentDraft.value = null
+      lastSelectionRange = null
       activePopupId.value = null
       detachScrollSync()
     } else {

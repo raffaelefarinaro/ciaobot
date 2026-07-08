@@ -38,6 +38,21 @@ from ciao.transcripts import _claude_projects_dir
 logger = logging.getLogger(__name__)
 
 
+def resolve_insights_model(config, workspace: str | None = None) -> str:
+    """Pick the model for session-insights extraction.
+
+    When the operator has not set an explicit override (Settings → Models →
+    Session insights = Automatic), use the sonnet-tier model for the chat's
+    workspace routing bucket. Scripts without workspace context fall back to
+    ``config.insights_model``.
+    """
+    if config.insights_model_override:
+        return config.insights_model_override
+    if workspace is not None:
+        return config.sonnet_model_for_workspace(workspace)
+    return config.insights_model
+
+
 _INSIGHTS_HEADER = "## Session insights"
 _RETRY_DELAY_S = 30
 _READ_TOOL_TRUNCATE_CHARS = 200

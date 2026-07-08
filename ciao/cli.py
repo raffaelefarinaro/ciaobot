@@ -516,7 +516,7 @@ def setup_workspace(
     workspace: Path | str,
     *,
     auth_token: str | None = None,
-    auth_required: bool = True,
+    auth_required: bool = False,
     push_contact: str | None = None,
     vault_root: Path | str | None = None,
     vault_mode: str = "scratch",
@@ -529,6 +529,13 @@ def setup_workspace(
     root.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     vault_value = str(vault_root) if vault_root is not None else "memory-vault"
+    if vault_root is None and vault_mode == "existing":
+        # Single-folder setup: the chosen workspace IS the user's existing
+        # notes folder. A previously scaffolded vault keeps its place;
+        # otherwise the folder itself is the vault and the onboarding agent
+        # adapts its contents into the Ciaobot structure.
+        if not (root / "memory-vault").is_dir():
+            vault_value = "."
 
     env_path = root / ".env"
     env_exists = env_path.exists()
@@ -559,8 +566,8 @@ def setup_workspace(
         lines = [
             f"PWA_AUTH_TOKEN={token}",
         ]
-        if not auth_required:
-            lines.append("PWA_AUTH_REQUIRED=false")
+        if auth_required:
+            lines.append("PWA_AUTH_REQUIRED=true")
         lines.extend([
             f"CIAO_PUSH_CONTACT={contact}",
             "CIAO_WORKSPACE=.",

@@ -43,7 +43,7 @@
         </button>
       </template>
     </PaneHeader>
-    <div class="pfp-main">
+    <div class="pfp-main" ref="mainEl">
       <div class="pfp-body" :class="{ 'pfp-body-excalidraw': kind === 'excalidraw' }" ref="bodyEl">
         <div v-if="loading" class="pfp-loading">Loading…</div>
         <div v-else-if="error" class="pfp-error">{{ error }}</div>
@@ -228,7 +228,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { parseFrontmatter, type FrontmatterValue } from '../lib/markdownFrontmatter'
 import { renderFileMarkdown } from '../lib/safeMarkdown'
@@ -250,6 +250,7 @@ const isEditingExcalidraw = ref(false)
 const imageTimestamp = ref(Date.now())
 
 const rootEl = ref<HTMLElement>()
+const mainEl = ref<HTMLElement>()
 const bodyEl = ref<HTMLElement>()
 const mdEl = ref<HTMLElement>()
 const preEl = ref<HTMLElement>()
@@ -637,6 +638,7 @@ const selectionAnchor = ref<Anchor | null>(null)
 const commentDraft = ref<CommentDraft | null>(null)
 let lastSelectionText = ''
 let lastSelectionLines: LineRange = null
+let lastSelectionRange: Range | null = null
 
 const isCommentable = computed(() => !loading.value && !error.value && kind.value !== 'image' && kind.value !== 'pdf' && !projectsStore.isStreaming)
 
@@ -697,14 +699,63 @@ function computeSelectionLines(range: Range, selectionText: string): LineRange {
   return { start, end: start }
 }
 
+function updateSelectionAnchorFromRange(range: Range): void {
+  const main = mainEl.value
+  const body = bodyEl.value
+  if (!main || !body) {
+    selectionAnchor.value = null
+    return
+  }
+
+  // Anchor the trigger at the END of the selection (where the cursor lands
+  // after a drag-select), not at the bounding box of the whole range.
+  const rects = range.getClientRects()
+  const endRect = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect()
+  const bodyRect = body.getBoundingClientRect()
+  const visible = endRect.bottom > bodyRect.top
+    && endRect.top < bodyRect.bottom
+    && endRect.right > bodyRect.left
+    && endRect.left < bodyRect.right
+  if (!visible) {
+    selectionAnchor.value = null
+    return
+  }
+
+  const mainRect = main.getBoundingClientRect()
+  const triggerWidth = 110  // approximate; matches the rendered "💬 Comment" pill
+  const panelPad = 8
+  const top = endRect.bottom - mainRect.top + 2
+  const idealLeft = endRect.right - mainRect.left + 6
+  const maxLeft = main.clientWidth - triggerWidth - panelPad
+  const left = Math.max(panelPad, Math.min(idealLeft, maxLeft))
+  selectionAnchor.value = { top, left }
+}
+
+function onScrollReanchor(): void {
+  if (commentDraft.value || !lastSelectionRange) return
+  try {
+    if (!lastSelectionRange.startContainer.isConnected) {
+      lastSelectionRange = null
+      selectionAnchor.value = null
+      return
+    }
+    updateSelectionAnchorFromRange(lastSelectionRange)
+  } catch {
+    lastSelectionRange = null
+    selectionAnchor.value = null
+  }
+}
+
 function onSelectionChange(): void {
   if (!isCommentable.value) {
+    lastSelectionRange = null
     selectionAnchor.value = null
     return
   }
   if (commentDraft.value) return
   const sel = window.getSelection()
   if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+    lastSelectionRange = null
     selectionAnchor.value = null
     return
   }
@@ -713,32 +764,21 @@ function onSelectionChange(): void {
   const inside = targets.some(
     el => el && el.contains(range.startContainer) && el.contains(range.endContainer)
   )
-  if (!inside) { selectionAnchor.value = null; return }
+  if (!inside) {
+    lastSelectionRange = null
+    selectionAnchor.value = null
+    return
+  }
   const text = sel.toString().trim()
-  if (!text) { selectionAnchor.value = null; return }
+  if (!text) {
+    lastSelectionRange = null
+    selectionAnchor.value = null
+    return
+  }
   lastSelectionText = text
   lastSelectionLines = computeSelectionLines(range, text)
-
-  // Anchor the trigger at the END of the selection (where the cursor lands
-  // after a drag-select), not at the bounding box of the whole range.
-  // `range.getBoundingClientRect()` returns the union of every line in the
-  // selection, so for a multi-line selection its `.bottom` sits at the bottom
-  // of the *last* line and its `.right` is the rightmost pixel across *all*
-  // lines — which is why the pill ended up several lines below the visible
-  // selection. Using the last client rect always pins the pill next to where
-  // the user's cursor finished.
-  const rects = range.getClientRects()
-  const endRect = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect()
-  const root = rootEl.value
-  if (!root) { selectionAnchor.value = null; return }
-  const rootRect = root.getBoundingClientRect()
-  const triggerWidth = 110  // approximate; matches the rendered "💬 Comment" pill
-  const panelPad = 8
-  const top = endRect.bottom - rootRect.top + 2
-  const idealLeft = endRect.right - rootRect.left + 6
-  const maxLeft = root.clientWidth - triggerWidth - panelPad
-  const left = Math.max(panelPad, Math.min(idealLeft, maxLeft))
-  selectionAnchor.value = { top, left }
+  lastSelectionRange = range.cloneRange()
+  updateSelectionAnchorFromRange(range)
 }
 
 const commentDraftImages = ref<string[]>([])
@@ -753,6 +793,7 @@ function openCommentForSelection(): void {
   }
   commentDraftImages.value = []
   selectionAnchor.value = null
+  lastSelectionRange = null
   window.getSelection()?.removeAllRanges()
   nextTick(() => commentInputEl.value?.focus())
 }
@@ -762,6 +803,7 @@ function cancelComment(): void {
   commentDraftImages.value = []
   lastSelectionText = ''
   lastSelectionLines = null
+  lastSelectionRange = null
 }
 
 function saveComment(): void {
@@ -891,10 +933,14 @@ function onEditKeydown(e: KeyboardEvent): void {
 if (typeof document !== 'undefined') {
   document.addEventListener('selectionchange', onSelectionChange)
 }
+onMounted(() => {
+  bodyEl.value?.addEventListener('scroll', onScrollReanchor, { passive: true })
+})
 onBeforeUnmount(() => {
   if (typeof document !== 'undefined') {
     document.removeEventListener('selectionchange', onSelectionChange)
   }
+  bodyEl.value?.removeEventListener('scroll', onScrollReanchor)
 })
 
 function pathsMatch(pathA: string, pathB: string): boolean {
@@ -965,6 +1011,7 @@ watch(() => props.filePath, () => {
   commentDraft.value = null
   lastSelectionText = ''
   lastSelectionLines = null
+  lastSelectionRange = null
 })
 </script>
 

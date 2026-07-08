@@ -234,19 +234,11 @@ class CiaoConfig:
     workspace_root: Path
     state_path: Path
     media_root: Path
-    pwa_auth_required: bool = True
+    pwa_auth_required: bool = False
     dev_mode: bool = False
     vault_mode: str = "scratch"
     bootstrap_mode: bool = False
     vault_root: Path = Path("memory-vault")
-    extra_workspace_roots: list[Path] = field(default_factory=list)
-    # When true, the PWA workspace-file/image/binary viewers drop the
-    # "path must land under an allowed root" sandbox and serve any
-    # allowlisted-extension file on the system. Relative paths still
-    # anchor to ``workspace_root``. The extension allowlist (no .env,
-    # no key files) and the size caps still apply. Opt-in via
-    # ``CIAO_WORKSPACE_UNRESTRICTED_FILE_VIEWER=1``.
-    unrestricted_file_viewer: bool = False
     max_image_size_bytes: int = 10 * 1024 * 1024
     max_voice_size_bytes: int = 25 * 1024 * 1024
     media_ttl_hours: int = 72
@@ -255,8 +247,7 @@ class CiaoConfig:
     title_model: str = "haiku"
     # Operator override for the titling model, set from the PWA Settings →
     # Models tab (runtime settings store) or ``CIAO_TITLE_MODEL_OVERRIDE``.
-    # Empty = automatic routing (Ollama title_model when Ollama is
-    # configured, else ``title_model``).
+    # Empty = automatic routing: the workspace's haiku-tier model.
     title_model_override: str = ""
     # Voice transcription engine: ``cloud`` (OpenAI API, needs
     # OPENAI_API_KEY) or ``local`` (mlx-whisper on Apple Silicon).
@@ -311,7 +302,14 @@ class CiaoConfig:
     # `## Session insights` section to the archived markdown.
     insights_enabled: bool = True
     insights_size_gate_turns: int = 5
+    # Fallback when session insights run without workspace context (e.g.
+    # ``scripts/backfill_insights.py``). Live archives use
+    # :func:`ciao.insights.resolve_insights_model` instead.
     insights_model: str = "deepseek-v4-flash:cloud"
+    # Operator override for the insights model, set from the PWA Settings →
+    # Models tab (runtime settings store) or ``CIAO_INSIGHTS_MODEL``.
+    # Empty = automatic routing: the workspace's sonnet-tier model.
+    insights_model_override: str = ""
     # Trajectory capture: when a chat is archived, also write a structured
     # JSON record of skills loaded, tools used, errors, decisions, and the
     # outcome to ``~/.ciao/trajectories/YYYY-MM/<session-id>.json``. The
@@ -376,6 +374,41 @@ class CiaoConfig:
         if workspace_config and workspace_config.default_model:
             return workspace_config.default_model
         return self.claude_default_model
+
+    def model_bucket_for_workspace(self, workspace: str | None) -> str:
+        """Resolve the model-routing bucket for a workspace."""
+        workspace_config = self.workspace(workspace)
+        if workspace_config and workspace_config.model_bucket:
+            return workspace_config.model_bucket
+        if workspace_config:
+            provider = workspace_config.default_provider
+            if provider == "openrouter":
+                return "openrouter"
+            if provider == "ollama":
+                return "ollama"
+            if provider == "claude":
+                return "work"
+        if workspace == "work":
+            return "work"
+        return "personal"
+
+    def sonnet_model_for_workspace(self, workspace: str | None) -> str:
+        """Return the sonnet-tier model id for a workspace's routing bucket."""
+        bucket = self.model_bucket_for_workspace(workspace)
+        if bucket == "openrouter":
+            return self.openrouter.sonnet_model
+        if bucket in {"personal", "ollama"}:
+            return self.ollama.sonnet_model
+        return "sonnet"
+
+    def haiku_model_for_workspace(self, workspace: str | None) -> str:
+        """Return the haiku-tier model id for a workspace's routing bucket."""
+        bucket = self.model_bucket_for_workspace(workspace)
+        if bucket == "openrouter":
+            return self.openrouter.haiku_model
+        if bucket in {"personal", "ollama"}:
+            return self.ollama.haiku_model
+        return "haiku"
 
     def default_provider_for_workspace(self, workspace: str | None) -> str:
         workspace_config = self.workspace(workspace)
@@ -449,7 +482,7 @@ class CiaoConfig:
         source = env if env is not None else os.environ
 
         pwa_auth_required_raw = source.get("PWA_AUTH_REQUIRED", "").strip().lower()
-        pwa_auth_required = pwa_auth_required_raw not in {"false", "0", "no", "n"}
+        pwa_auth_required = pwa_auth_required_raw in {"true", "1", "yes", "y"}
 
         pwa_auth_token = source.get("PWA_AUTH_TOKEN", "").strip()
         bootstrap_mode = not (
@@ -569,22 +602,6 @@ class CiaoConfig:
             models=tuple(_split_csv(source.get("CIAO_OPENROUTER_MODELS", ""))),
         )
 
-        # Extra read-only roots the workspace-file/image/binary viewers may
-        # serve. Accepts a CSV override for additional paths (e.g. `~/.claude`
-        # if you want to inspect it from the PWA).
-        extra_workspace_roots: list[Path] = []
-        for raw in _split_csv(source.get("CIAO_WORKSPACE_EXTRA_ROOTS", "")):
-            try:
-                p = Path(raw).expanduser().resolve()
-            except (OSError, ValueError):
-                continue
-            if p != workspace_root and p.exists() and p not in extra_workspace_roots:
-                extra_workspace_roots.append(p)
-
-        unrestricted_file_viewer = (
-            source.get("CIAO_WORKSPACE_UNRESTRICTED_FILE_VIEWER", "").strip() == "1"
-        )
-
         default_model_personal = source.get("CLAUDE_DEFAULT_MODEL_PERSONAL", "").strip()
         default_model_work = source.get("CLAUDE_DEFAULT_MODEL_WORK", "").strip()
         disallowed_tools_personal = _parse_disallowed_tools(
@@ -627,8 +644,6 @@ class CiaoConfig:
             vault_mode=vault_mode,
             bootstrap_mode=bootstrap_mode,
             vault_root=vault_root,
-            extra_workspace_roots=extra_workspace_roots,
-            unrestricted_file_viewer=unrestricted_file_viewer,
             max_image_size_bytes=int(
                 _env(source, "CIAO_MAX_IMAGE_BYTES", "TELEGRAM_BRIDGE_MAX_IMAGE_BYTES", str(10 * 1024 * 1024))
             ),
@@ -697,8 +712,7 @@ class CiaoConfig:
             insights_size_gate_turns=int(
                 source.get("CIAO_INSIGHTS_MIN_TURNS", "5") or "5"
             ),
-            insights_model=source.get("CIAO_INSIGHTS_MODEL", "").strip()
-            or "deepseek-v4-flash:cloud",
+            insights_model_override=source.get("CIAO_INSIGHTS_MODEL", "").strip(),
             trajectories_enabled=source.get(
                 "CIAO_TRAJECTORIES_DISABLED", ""
             ).strip().lower()

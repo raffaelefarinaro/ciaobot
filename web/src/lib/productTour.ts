@@ -14,6 +14,9 @@ export interface ProductTourStep {
   target?: string
   placement?: TourPlacement
   beforeEnter?: TourBeforeEnter[]
+  /** Illustrative screenshot shown in the card for features that may not be visible live. */
+  image?: string
+  imageAlt?: string
 }
 
 export type TourAvailabilityContext = {
@@ -78,9 +81,9 @@ export const PRODUCT_TOUR_STEPS: ProductTourStep[] = [
   },
   {
     id: 'model',
-    title: 'Model and voice',
+    title: 'Model',
     body:
-      'Pick the model for this chat. Use the mic to dictate — your transcript is sent like typed text. Attach images with the paperclip.',
+      'Pick the model for this chat from the header. Each workspace has a default, and you can switch it per chat whenever you need more or less power.',
     target: 'model-picker',
     placement: 'bottom',
     beforeEnter: ['welcomeChat', 'chatRoute'],
@@ -88,23 +91,25 @@ export const PRODUCT_TOUR_STEPS: ProductTourStep[] = [
   },
   {
     id: 'chat-comments',
-    title: 'Comment on chat text',
+    title: 'Comment, copy, or listen',
     body:
-      'Select any passage in a message, then tap the comment button. Your note stays in the sidebar and is sent with your next message so the agent knows exactly what you mean.',
+      'Select any passage in a message, then tap the comment button — your note stays in the sidebar and rides along with your next message. Hover any message to copy it, and hover a reply to have it read aloud.',
     target: 'chat-messages',
     placement: 'top',
     beforeEnter: ['welcomeChat', 'chatRoute'],
-    missingHint: 'Open a chat to see messages here, then select text to add a comment.',
+    missingHint: 'Open a chat to see messages here, then select text to comment or hover a message to copy or listen.',
+    image: '/tour/chat-comment.png',
+    imageAlt: 'Selecting text in a message reveals a Comment action',
   },
   {
     id: 'chat-input',
-    title: 'Send with context',
+    title: 'Type, dictate, or attach',
     body:
-      'Type here, paste images, or queue a follow-up while the agent is still working. Pending chat comments ride along on the next send.',
+      'Type here, or tap the mic to dictate — your transcript is sent like typed text. Attach images with the paperclip, and queue a follow-up while the agent is still working. Pending chat comments ride along on the next send.',
     target: 'chat-input',
     placement: 'top',
     beforeEnter: ['welcomeChat', 'chatRoute'],
-    missingHint: 'Open a chat from the sidebar — the message box sits at the bottom of the chat view.',
+    missingHint: 'Open a chat from the sidebar — the message box, mic, and paperclip sit at the bottom of the chat view.',
   },
   {
     id: 'file-cards',
@@ -125,12 +130,14 @@ export const PRODUCT_TOUR_STEPS: ProductTourStep[] = [
     beforeEnter: ['welcomeChat', 'chatRoute'],
     missingHint:
       'Open a file from a chat card, then use Pin in the viewer to keep it open beside the conversation.',
+    image: '/tour/pin-annotate.png',
+    imageAlt: 'A document pinned in a split view beside the chat',
   },
   {
     id: 'rich-preview',
     title: 'Images, PDFs, and slides',
     body:
-      'Images render inline in chat and in the viewer. PDFs open in a built-in preview. PowerPoint (.pptx) files are converted to PDF for viewing (requires LibreOffice on the server).',
+      'See images inline in chat, and open images, PDFs, and PowerPoint (.pptx) files directly in the viewer without leaving Ciaobot — you can also pin them on the side.',
     placement: 'center',
     beforeEnter: ['welcomeChat', 'chatRoute'],
     missingHint:
