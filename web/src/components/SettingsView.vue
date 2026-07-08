@@ -205,6 +205,17 @@
           </div>
         </div>
 
+        <!-- Product tour -->
+        <div class="card">
+          <div class="settings-card-header">
+            <p class="section-title">Product tour</p>
+            <p class="hint">Walk through workspaces, chat comments, inline file previews, pinning, and rich document viewing.</p>
+          </div>
+          <div class="action-row action-row--spaced">
+            <button type="button" class="btn-primary" @click="replayProductTour">Replay tour</button>
+          </div>
+        </div>
+
         <!-- Debug (dev mode only) -->
         <div v-if="localStatus?.dev_mode" class="card">
           <div class="settings-card-header">
@@ -1423,6 +1434,7 @@ import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSuppor
 import { useAuthStore } from '../stores/auth'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
+import { useProductTourStore } from '../stores/productTour'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import { providerModelBadges, sectionsFromModelOptions, type ModelSection } from '../lib/modelSections'
@@ -1431,6 +1443,7 @@ const emit = defineEmits<{ 'open-sidebar': [] }>()
 
 const route = useRoute()
 const fileViewer = useFileViewerStore()
+const productTour = useProductTourStore()
 const currentTab = computed(() => (route.params.tab as string) || 'home')
 
 const expandedSkills = ref<Record<string, boolean>>({})
@@ -1441,6 +1454,12 @@ const expandedInstructions = ref<Record<string, boolean>>({})
 // ── Appearance settings ────────────────────────────────────────────────────
 const activeTheme = ref('system')
 const fontScale = ref(1.0)
+
+async function replayProductTour() {
+  const { router } = await import('../router')
+  await router.push('/')
+  await productTour.replay()
+}
 
 function loadAppearanceSettings() {
   try {

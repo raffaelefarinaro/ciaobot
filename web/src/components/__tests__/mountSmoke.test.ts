@@ -276,6 +276,23 @@ describe('component mount smoke', () => {
     expect(errors).toEqual([])
   })
 
+  it('ProductTour mounts without throwing', async () => {
+    const router = makeRouter()
+    await router.push('/')
+    await router.isReady()
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const mod = await import('../ProductTour.vue')
+    const wrapper = mount(mod.default as never, {
+      global: {
+        plugins: [pinia, router],
+        stubs: { Teleport: true },
+      },
+    })
+    await flushPromises()
+    wrapper.unmount()
+  })
+
   it('ChatLayout empty chat view still renders the pane header controls', async () => {
     const router = makeRouter()
     await router.push('/')

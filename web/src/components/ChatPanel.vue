@@ -92,7 +92,7 @@
           <span class="bg-agents-dot" aria-hidden="true"></span>
           {{ store.activeBackgroundAgents }} agent{{ store.activeBackgroundAgents === 1 ? '' : 's' }}
         </span>
-        <div class="model-picker-wrap" ref="modelPickerRef">
+        <div class="model-picker-wrap" ref="modelPickerRef" data-tour="model-picker">
           <button
             class="model-picker-btn btn-icon"
             :title="chat.model + (chat.thinking_level ? ' · ' + chat.thinking_level : '')"
@@ -121,7 +121,7 @@
 
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
-    <div class="messages" ref="messagesEl" @click="handleHighlightClick">
+    <div class="messages" ref="messagesEl" data-tour="chat-messages" @click="handleHighlightClick">
       <template v-for="(item, i) in renderItems" :key="i">
         <!-- Reasoning trace: intermediate assistant text + tool calls grouped -->
         <div v-if="item.kind === 'trace'" class="trace-block" :class="{ open: openTraces[i] }">
@@ -628,7 +628,7 @@
       </div>
     </div>
 
-    <div class="input-bar" :class="{ disabled: chat.archived, 'has-streaming-bar': store.isStreaming && !chat.archived }">
+    <div class="input-bar" data-tour="chat-input" :class="{ disabled: chat.archived, 'has-streaming-bar': store.isStreaming && !chat.archived }">
       <template v-if="chat.archived">
         <div class="archived-notice">
           <span>This chat is archived.</span>

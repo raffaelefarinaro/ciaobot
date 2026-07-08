@@ -1,6 +1,6 @@
 ---
 name: ciao-capabilities
-description: Authoritative catalog of what Ciaobot can do, for capability questions and feature tours. Use whenever the user asks what Ciaobot is, what it can do, what features are available, whether it can do something specific, or how one of its features works (memory, vault, archiving, schedules, routines, workspaces, projects, skills, voice, models, providers, notifications, menu bar, files) — and when onboarding or giving a tour or walkthrough to a new user. Trigger on phrasings like "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "can you remind me / remember / schedule", even when the word "Ciaobot" is not mentioned.
+description: Authoritative catalog of what Ciaobot can do, for capability questions and feature tours. Use whenever the user asks what Ciaobot is, what it can do, what features are available, whether it can do something specific, or how one of its features works (memory, vault, archiving, schedules, routines, workspaces, projects, skills, voice, models, providers, notifications, menu bar, files, chat comments, pinned files, document previews) — and when onboarding or giving a tour or walkthrough to a new user. Trigger on phrasings like "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "can you remind me / remember / schedule", even when the word "Ciaobot" is not mentioned.
 ---
 
 # Ciaobot Capabilities
@@ -42,6 +42,9 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 ### 4. Files
 
 - Create, preview, edit, and **restore** workspace and vault files from the PWA, with history — no terminal needed.
+- **In chat**: agent file touches surface as inline cards; open the viewer, pin beside the chat, and add line comments on selections.
+- **Chat annotations**: select text in any message and attach a comment that rides on your next send.
+- **Rich previews**: images inline; PDFs in the viewer; `.pptx` slides rendered as PDF (LibreOffice on the server).
 
 ### 5. Skills, subagents, and commands (extensibility)
 
@@ -74,14 +77,17 @@ Local-first: the server, vault, and runtime state live on the user's machine; tr
 
 ## Guided tour (new users)
 
-When onboarding someone, walk these in order, hands-on rather than as a lecture — one short step at a time, checking in between:
+When onboarding someone, walk these in order, hands-on rather than as a lecture — one short step at a time, checking in between. **Point out the in-app product tour** (auto-starts on first launch; replay from Settings → Home) for the chat-comment, file-card, pin, and preview flows — then reinforce them live in chat:
 
 1. **Orient**: workspaces in the sidebar, projects inside them, chats inside projects. Create or rename a project for something they're actually working on.
 2. **Chat**: show the model picker and voice input; explain that project files and notes are context the agent always sees.
-3. **Files**: open the Files surface, create or edit a note, show restore/history.
-4. **Memory**: explain archive → insights → memory proposals, and that nothing becomes durable memory without their approval.
-5. **Schedules**: set up one small routine they'd find useful (a weekly review, a daily check).
-6. **Settings & extras**: providers and models, package updates, and on macOS the menu bar companion.
+3. **Annotate**: demonstrate selecting text in a message → comment sidebar → send with the next prompt.
+4. **Files in chat**: when the agent touches a file, show the inline card → viewer → pin beside chat → line comments on a selection.
+5. **Rich previews**: open an image or PDF (and mention `.pptx` → PDF when LibreOffice is installed).
+6. **Files surface**: open the Files page, create or edit a note, show restore/history.
+7. **Memory**: explain archive → insights → memory proposals, and that nothing becomes durable memory without their approval.
+8. **Schedules**: set up one small routine they'd find useful (a weekly review, a daily check).
+9. **Settings & extras**: providers and models, package updates, replay product tour, and on macOS the menu bar companion.
 
 Close with: they can ask "what can Ciaobot do?" (or about any specific feature) in any chat, anytime.
 

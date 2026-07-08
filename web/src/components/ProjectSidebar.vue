@@ -43,7 +43,7 @@
               <polyline points="8 18 8 21 11 18" />
             </svg>
           </router-link>
-          <router-link to="/schedules" class="nav-item" active-class="nav-item--active" title="Schedules" aria-label="Schedules">
+          <router-link to="/schedules" class="nav-item" active-class="nav-item--active" title="Schedules" aria-label="Schedules" data-tour="nav-schedules">
             <!-- Clock face with hour markers: more diagrammatic than calendar grid -->
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
@@ -203,7 +203,7 @@
 
     <template v-if="!collapsed && (!mode || mode === 'chat' || mode === 'project')">
       <!-- Workspace toggle -->
-      <div class="workspace-toggle">
+      <div class="workspace-toggle" data-tour="sidebar-workspaces">
         <button
           v-for="workspace in store.workspaceOptions"
           :key="workspace.name"
@@ -249,7 +249,7 @@
         </div>
 
         <!-- Project list -->
-        <div class="project-list">
+        <div class="project-list" data-tour="sidebar-projects">
           <div
             v-for="project in store.workspaceProjects"
             :key="project.project_id"
