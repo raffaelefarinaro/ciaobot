@@ -7,7 +7,7 @@
       aria-modal="true"
       :aria-label="tour.currentStep.title"
     >
-      <div class="product-tour-backdrop" @click.stop />
+      <div v-if="!spotlightStyle" class="product-tour-backdrop" @click.stop />
 
       <div
         v-if="spotlightStyle"
@@ -17,6 +17,7 @@
       />
 
       <div
+        ref="cardEl"
         class="product-tour-card"
         :class="{ 'product-tour-card--center': isCentered }"
         :style="cardStyle"
@@ -24,6 +25,13 @@
       >
         <div class="product-tour-progress">{{ tour.progressLabel }}</div>
         <h2 class="product-tour-title">{{ tour.currentStep.title }}</h2>
+        <img
+          v-if="tour.currentStep.image"
+          class="product-tour-image"
+          :src="tour.currentStep.image"
+          :alt="tour.currentStep.imageAlt || ''"
+          @load="measureCard"
+        />
         <p class="product-tour-body">{{ tour.currentStep.body }}</p>
         <p v-if="showMissingHint" class="product-tour-missing">{{ tour.currentStep.missingHint }}</p>
         <div class="product-tour-actions">
@@ -58,6 +66,8 @@ const tour = useProductTourStore()
 const projectStore = useProjectStore()
 
 const targetRect = ref<DOMRect | null>(null)
+const cardEl = ref<HTMLElement | null>(null)
+const cardSize = ref({ width: 360, height: 200 })
 
 const targetFound = computed(() => {
   const step = tour.currentStep
@@ -108,42 +118,52 @@ const cardStyle = computed(() => {
   const r = targetRect.value
   const placement = tour.currentStep?.placement || 'bottom'
   const margin = 14
-  const cardWidth = 360
+  const edge = 12
   const vw = window.innerWidth
   const vh = window.innerHeight
 
-  let top = r.bottom + margin
-  let left = r.left + r.width / 2 - cardWidth / 2
+  const cardWidth = Math.min(360, vw - edge * 2)
+  // Never let the assumed height exceed the viewport, so clamping stays valid.
+  const cardHeight = Math.min(cardSize.value.height, vh - edge * 2)
 
-  if (placement === 'top') {
-    top = r.top - margin
-    return {
-      top: `${top}px`,
-      left: `${Math.max(12, Math.min(left, vw - cardWidth - 12))}px`,
-      transform: 'translateY(-100%)',
-      maxWidth: `${cardWidth}px`,
-    }
-  }
-  if (placement === 'left') {
-    return {
-      top: `${Math.max(12, r.top)}px`,
-      left: `${Math.max(12, r.left - cardWidth - margin)}px`,
-      maxWidth: `${cardWidth}px`,
-    }
-  }
-  if (placement === 'right') {
-    return {
-      top: `${Math.max(12, r.top)}px`,
-      left: `${Math.min(vw - cardWidth - 12, r.right + margin)}px`,
-      maxWidth: `${cardWidth}px`,
-    }
+  // Clamp helpers keep the whole card inside the viewport on small screens.
+  const clampLeft = (value: number) =>
+    Math.max(edge, Math.min(value, vw - cardWidth - edge))
+  const clampTop = (value: number) =>
+    Math.max(edge, Math.min(value, vh - cardHeight - edge))
+
+  // Room available on each side of the target.
+  const spaceAbove = r.top - margin - edge
+  const spaceBelow = vh - r.bottom - margin - edge
+  const spaceLeft = r.left - margin - edge
+  const spaceRight = vw - r.right - margin - edge
+
+  let top: number
+  let left: number
+
+  if (placement === 'left' || placement === 'right') {
+    // Flip horizontally to whichever side actually fits the card.
+    const wantLeft = placement === 'left'
+    const useLeft = wantLeft
+      ? spaceLeft >= cardWidth || spaceLeft >= spaceRight
+      : !(spaceRight >= cardWidth || spaceRight >= spaceLeft)
+    left = useLeft ? r.left - cardWidth - margin : r.right + margin
+    top = r.top
+  } else {
+    // Vertical placement: flip to the side with more room when the
+    // preferred side can't fit the whole card (e.g. a full-height target).
+    const wantTop = placement === 'top'
+    const useTop = wantTop
+      ? spaceAbove >= cardHeight || spaceAbove >= spaceBelow
+      : !(spaceBelow >= cardHeight || spaceBelow >= spaceAbove)
+    top = useTop ? r.top - margin - cardHeight : r.bottom + margin
+    left = r.left + r.width / 2 - cardWidth / 2
   }
 
-  // bottom (default)
-  top = Math.min(vh - 180, r.bottom + margin)
   return {
-    top: `${top}px`,
-    left: `${Math.max(12, Math.min(left, vw - cardWidth - 12))}px`,
+    top: `${clampTop(top)}px`,
+    left: `${clampLeft(left)}px`,
+    width: `${cardWidth}px`,
     maxWidth: `${cardWidth}px`,
   }
 })
@@ -160,6 +180,14 @@ function measureTarget() {
     return
   }
   targetRect.value = el.getBoundingClientRect()
+  measureCard()
+}
+
+function measureCard() {
+  const el = cardEl.value
+  if (!el) return
+  const rect = el.getBoundingClientRect()
+  if (rect.height > 0) cardSize.value = { width: rect.width, height: rect.height }
 }
 
 function scheduleMeasure() {
@@ -226,6 +254,8 @@ onBeforeUnmount(() => {
   padding: 16px 16px 14px;
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
   pointer-events: auto;
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
 }
 
 .product-tour-card--center {
@@ -243,6 +273,16 @@ onBeforeUnmount(() => {
   font-size: var(--text-lg);
   font-weight: 600;
   line-height: 1.25;
+}
+
+.product-tour-image {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 0 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
 }
 
 .product-tour-body {
