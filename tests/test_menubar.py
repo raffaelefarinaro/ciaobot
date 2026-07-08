@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import plistlib
 import sys
 import urllib.error
 from pathlib import Path
@@ -102,7 +103,8 @@ def test_status_labels() -> None:
     )
 
 
-def test_open_app_command_uses_setup_token(tmp_path: Path) -> None:
+def test_open_app_command_uses_setup_token(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(menubar, "find_installed_webapp", lambda: None)
     token_path = tmp_path / ".runtime" / "setup-token"
     token_path.parent.mkdir(parents=True)
     token_path.write_text("tok123\n", encoding="utf-8")
@@ -113,11 +115,61 @@ def test_open_app_command_uses_setup_token(tmp_path: Path) -> None:
     ]
 
 
-def test_open_app_command_without_token_falls_back_to_plain_url(tmp_path: Path) -> None:
+def test_open_app_command_without_token_falls_back_to_plain_url(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(menubar, "find_installed_webapp", lambda: None)
+
     assert menubar.open_app_command(tmp_path, 8443) == [
         "open",
         "http://localhost:8443/",
     ]
+
+
+def test_open_app_command_prefers_installed_webapp(tmp_path: Path, monkeypatch) -> None:
+    webapp = tmp_path / "Ciaobot.app"
+    monkeypatch.setattr(menubar, "find_installed_webapp", lambda: webapp)
+
+    assert menubar.open_app_command(tmp_path, 8443) == [
+        "open",
+        "-a",
+        str(webapp),
+        "http://localhost:8443/",
+    ]
+
+
+def _write_bundle(path: Path, *, bundle_id: str) -> None:
+    contents = path / "Contents"
+    contents.mkdir(parents=True)
+    (contents / "Info.plist").write_bytes(
+        plistlib.dumps({"CFBundleIdentifier": bundle_id})
+    )
+
+
+def test_find_installed_webapp_finds_browser_installed_pwa(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(menubar.Path, "home", lambda: tmp_path)
+    webapp = tmp_path / "Applications" / "Ciaobot.app"
+    _write_bundle(webapp, bundle_id="org.chromium.Chromium.app.abc123")
+
+    assert menubar.find_installed_webapp() == webapp
+
+
+def test_find_installed_webapp_skips_our_own_launcher_bundle(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(menubar.Path, "home", lambda: tmp_path)
+    launcher = tmp_path / "Applications" / "Ciaobot.app"
+    _write_bundle(launcher, bundle_id="local.ciaobot.app")
+
+    assert menubar.find_installed_webapp() is None
+
+
+def test_find_installed_webapp_absent_returns_none(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(menubar.Path, "home", lambda: tmp_path)
+
+    assert menubar.find_installed_webapp() is None
 
 
 def test_restart_server_command_targets_launchd_label() -> None:

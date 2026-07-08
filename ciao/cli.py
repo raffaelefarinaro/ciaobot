@@ -351,6 +351,12 @@ def _write_app_shortcut(
     # token" error page on every launch after the first. Once the token file
     # is gone we open the plain URL and rely on the session cookie -- matching
     # how the menu bar builds its "Open Ciaobot" URL (menubar.open_url).
+    #
+    # Before falling back to the default browser, look for a browser-installed
+    # PWA bundle (Chrome/Edge "Install Ciaobot", Safari's "Add to Dock") and
+    # open the URL in that instead -- excluding our own launcher bundle by its
+    # CFBundleIdentifier so this doesn't just relaunch itself. Mirrors
+    # menubar.find_installed_webapp / menubar.open_command.
     executable.write_text(
         "#!/bin/sh\n"
         f'if ! curl -s -o /dev/null --max-time 2 "http://localhost:{port}/"; then\n'
@@ -367,9 +373,30 @@ def _write_app_shortcut(
         '  || launchctl load -w "$HOME/Library/LaunchAgents/com.ciao.menubar.plist" 2>/dev/null\n'
         f'token=$(tr -d "[:space:]" < "{token_file}" 2>/dev/null)\n'
         "if [ -n \"$token\" ]; then\n"
-        f'  open "http://localhost:{port}/?setup=$token"\n'
+        f'  url="http://localhost:{port}/?setup=$token"\n'
         "else\n"
-        f'  open "http://localhost:{port}/"\n'
+        f'  url="http://localhost:{port}/"\n'
+        "fi\n"
+        'webapp=""\n'
+        "for candidate in \\\n"
+        '  "$HOME/Applications/Ciaobot.app" \\\n'
+        '  "$HOME/Applications/Chrome Apps.localized/Ciaobot.app" \\\n'
+        '  "/Applications/Ciaobot.app" \\\n'
+        '  "/Applications/Chrome Apps.localized/Ciaobot.app"\n'
+        "do\n"
+        '  if [ -d "$candidate" ]; then\n'
+        '    bundle_id=$(defaults read "$candidate/Contents/Info" CFBundleIdentifier 2>/dev/null)\n'
+        '    case "$bundle_id" in\n'
+        "      local.ciao.app|local.ciaobot.app) continue ;;\n"
+        "    esac\n"
+        '    webapp="$candidate"\n'
+        "    break\n"
+        "  fi\n"
+        "done\n"
+        'if [ -n "$webapp" ]; then\n'
+        '  open -a "$webapp" "$url"\n'
+        "else\n"
+        '  open "$url"\n'
         "fi\n",
         encoding="utf-8",
     )
