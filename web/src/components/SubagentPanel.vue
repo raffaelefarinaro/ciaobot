@@ -132,16 +132,20 @@ function renderMarkdown(text: string): string {
 .label { color: var(--fg2); }
 
 .running-spinner {
-  width: 10px;
-  height: 10px;
-  border: 2px solid var(--border);
-  border-top-color: var(--accent2);
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
-  animation: subagent-spin 0.9s linear infinite;
+  background: var(--accent2);
+  animation: subagent-pulse 1.1s ease-in-out infinite;
 }
 
-@keyframes subagent-spin {
-  to { transform: rotate(360deg); }
+@keyframes subagent-pulse {
+  0%, 100% { transform: scale(0.55); opacity: 0.35; }
+  50% { transform: scale(1); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .running-spinner { animation-duration: 2.2s; }
 }
 
 .status-chip {

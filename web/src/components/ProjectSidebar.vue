@@ -814,30 +814,35 @@ async function confirmDeleteChat(chatId: string) {
 .brand:active { opacity: 0.7; }
 .brand--refreshing { opacity: 0.6; }
 
-/* Tiny spinning dot used inline next to project / chat names. */
+/* Pulsing dot used inline next to project / chat names to signal activity.
+   A breathing scale+opacity pulse reads as "alive" at a glance, unlike a
+   thin two-tone ring spin which is too subtle at this size to notice. */
 .spinner-dot {
   display: inline-block;
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   margin-left: 6px;
-  border: 2px solid var(--accent2);
-  border-top-color: var(--accent);
   border-radius: 50%;
-  animation: ciao-spin 0.8s linear infinite;
+  background: var(--accent);
+  animation: ciao-pulse 1.1s ease-in-out infinite;
   vertical-align: middle;
   flex-shrink: 0;
 }
 
-@keyframes ciao-spin {
-  to { transform: rotate(360deg); }
+@keyframes ciao-pulse {
+  0%, 100% { transform: scale(0.55); opacity: 0.35; }
+  50% { transform: scale(1); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner-dot { animation-duration: 2.2s; }
 }
 
 /* Slower, dimmer variant: background subagents still working after the
    parent turn ended (no turn is streaming, but the chat isn't idle). */
 .spinner-dot.bg-agents {
-  border-color: var(--border);
-  border-top-color: var(--accent2);
-  animation-duration: 1.6s;
+  background: var(--accent2);
+  animation-duration: 1.8s;
 }
 
 .retry-dot {
