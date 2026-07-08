@@ -1,5 +1,42 @@
 # Changelog
 
+## v0.4.6 - 2026-07-08
+
+### Added
+- feat(skills): add GWS workflow, persona, and recipe skill library (`1eef488`)
+- feat(deps): surface available dependency updates from PyPI and npm (`c4e6062`)
+- feat(release): update the Homebrew tap formula on publish (`1d1b7b9`)
+- feat(chat): live token count and elapsed time in the Working trace (`4e09d5b`)
+- feat(web): first-run product tour overlay (`f257f41`)
+- feat(voice): read messages aloud with cloud (OpenAI) or local (Kokoro) TTS (`44e26b7`)
+- feat(settings): add open-source card linking to the GitHub repo (`6b12104`)
+
+### Changed
+- Anchor the SubagentPanel before the completion notice, not after the report. (`18bb2ef`)
+- Merge pull request #42 from raffaelefarinaro/subagent-panel-placement (`fe99de0`)
+- Emit localhost chat links so live updates work. (`563f3e1`)
+- Nest the live SubagentPanel inside the Working trace while streaming. (`4cfce88`)
+- Nest the live SubagentPanel inside the Working trace while streaming. (`9e4c3b6`)
+- Merge pull request #43 from raffaelefarinaro/subagent-live-nesting (`de8d699`)
+- Merge remote-tracking branch 'origin/main' into subagent-panel-live-nesting (`fd8bb91`)
+- release: regenerate gws-* stock skills from the gws CLI (`1fa2fef`)
+- polish(settings): tidy routine-context layout, drop redundant hint (`455ac28`)
+- polish(settings): explain how to change the main workspace path (`18359e4`)
+- refactor(prompt): move Ciaobot system instructions into system_prompt.md (`828ea3d`)
+
+### Fixed
+- fix(dag,skillevo): record non-OK node status + write stubs for under-cap no-proposal skills (`bc01710`)
+- fix(schedules): wait for background subagents before auto-archive + robust classifier routing (`ec86289`)
+- fix(settings): keep instruction expand chevron off the left edge (`c394a42`)
+
+### Maintenance
+- docs(readme): position Ciaobot for knowledge work and credit upstream tools (`d02bff7`)
+- chore(models): default OpenRouter tiers to anthropic -latest aliases (`2bb4b38`)
+- chore(models): move remaining OpenRouter defaults to -latest aliases (`c01b3cd`)
+- docs(readme): illustrate chat annotations and pinned files with screenshots (`863990b`)
+- test(models): align model-bucket expectation with -latest alias defaults (`72094d7`)
+- chore(web): refresh bundled index.html from the latest PWA build (`e5eb2cf`)
+
 ## v0.4.5 - 2026-07-08
 
 ### Added
