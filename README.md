@@ -82,17 +82,14 @@ python3.13 -m venv ~/.ciaobot-venv
 ~/.ciaobot-venv/bin/ciao run
 ```
 
-Then open `http://localhost:8443`: with no configured workspace the server starts in bootstrap mode and the setup wizard walks you through choosing the workspace folder (default `~/ciaobot`) — one root folder that holds your second brain (`memory-vault/`) alongside app data (config, `.env`, runtime state, chat metadata) — plus provider choice, before anything is created. Starting from scratch scaffolds the vault inside that folder; you can also point Ciaobot at an existing notes folder elsewhere and it adapts it into the vault structure. When you finish, it writes the config, scaffolds the vault, and (on macOS) renders the LaunchAgents and `Ciaobot.app`. Setup makes sure the workspace folder is one git repository (running `git init` with a `.gitignore` that keeps `.env` and runtime state out of commits) so snapshots and sync work from the start; an existing notes folder outside the workspace gets its own repo with a minimal `.gitignore` for OS/editor litter.
+Then open `http://localhost:8443` and follow the setup wizard. It asks for two things before creating anything:
 
-For scripted or headless setups, `ciao setup --workspace <dir>` pre-creates a workspace with defaults and skips the wizard. It prints the resolved workspace, the localhost login URL to open, and — since the CLI lives in a venv that is not on your `PATH` — an `export PATH=…` hint if you want to type `ciao` instead of the full `~/.ciaobot-venv/bin/ciao` path.
+- **Workspace folder** (default `~/ciaobot`) — one root folder holding your second brain (`memory-vault/`) plus app config and runtime state. Start from scratch and it scaffolds the vault, or point it at an existing notes folder and it adapts it.
+- **Model provider** — which of the supported providers to use.
 
-If the app or menu bar ever opens an `?setup=…` URL that returns `invalid setup token` (the token is one-time-use and deleted on first login), mint a fresh one and print the URL to open:
+The wizard then writes the config, initializes the workspace as a git repository (with a `.gitignore` that keeps `.env` and runtime state out of commits, so snapshots and sync work from day one), and on macOS installs the LaunchAgents and `Ciaobot.app`.
 
-```bash
-~/.ciaobot-venv/bin/ciao setup-url --workspace <dir>
-```
-
-Pass `--no-rotate` to print the existing token's URL instead of minting a new one. The `Workspace:` line it prints is the workspace whose token the running server validates against — if it does not match the folder holding your data, the server is serving a different workspace.
+For scripted or headless setups, `ciao setup --workspace <dir>` skips the wizard and prints the login URL to open. If a setup link ever returns `invalid setup token` (tokens are one-time-use), print a fresh one with `~/.ciaobot-venv/bin/ciao setup-url --workspace <dir>`.
 
 ## Quickstart (from source)
 
