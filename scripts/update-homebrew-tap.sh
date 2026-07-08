@@ -55,10 +55,10 @@ class Ciaobot < Formula
 
   def post_install
     workspace = ENV.fetch("CIAO_WORKSPACE", File.expand_path("~/ciaobot"))
-    setup_command = "#{bin}/ciao setup --workspace #{workspace}"
+    setup_command = "ciao setup --workspace #{workspace}"
 
     unless ciao_gui_session?
-      ohai "Ciaobot installed. Open Terminal and run \`#{setup_command}\` to finish."
+      ohai "Next step: run \`#{setup_command}\` to finish setup (see \`brew info ciaobot\`)."
       return
     end
 
@@ -68,8 +68,8 @@ class Ciaobot < Formula
            "--python", "#{libexec}/bin/python",
            "--load-launchd"
   rescue StandardError => e
-    opoo "Ciaobot installed, but automatic setup did not complete: #{e.message}"
-    opoo "Open Terminal and run \`#{setup_command}\` to finish."
+    opoo "Automatic setup did not complete: #{e.message}"
+    opoo "Run \`#{setup_command}\` to finish setup."
   end
 
   def ciao_gui_session?
@@ -80,6 +80,22 @@ class Ciaobot < Formula
     system "/bin/launchctl", "print", "gui/#{Process.uid}",
            out: File::NULL,
            err: File::NULL
+  end
+
+  def caveats
+    <<~CAVEATS
+      To finish setting up Ciaobot, run:
+
+        ciao setup --workspace ~/ciaobot
+
+      This scaffolds the workspace, installs the Ciaobot menu bar app and
+      background server, starts it, and prints a link to open Ciaobot at
+      http://localhost:8443 (macOS may run this automatically on install).
+
+      Afterwards, open Ciaobot anytime from the menu bar icon or
+      /Applications/Ciaobot.app. To use a different folder (for example an
+      existing notes folder), change the --workspace path above.
+    CAVEATS
   end
 
   test do
