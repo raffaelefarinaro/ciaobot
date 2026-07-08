@@ -46,7 +46,7 @@ No manual step is needed; `ensure-deps.sh` handles both. If you set up the venv 
 macOS users can install from the [homebrew-ciaobot](https://github.com/raffaelefarinaro/homebrew-ciaobot) tap:
 
 ```bash
-brew install raffaelefarinaro/ciaobot/ciaobot
+brew install raffaelefarinaro/ciaobot
 ```
 
 The formula template lives in `deploy/homebrew/ciaobot.rb`. Regenerate it with:

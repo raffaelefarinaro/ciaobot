@@ -71,7 +71,7 @@ Install from [PyPI](https://pypi.org/project/ciaobot/) — the wheel ships with 
 **macOS (Homebrew)** — one command, includes the menu bar companion:
 
 ```bash
-brew install raffaelefarinaro/ciaobot/ciaobot
+brew install raffaelefarinaro/ciaobot
 ```
 
 **Any platform (pip)** — requires Python 3.12 or newer (use whichever `python3.X` you have, e.g. `brew install python@3.13`):
