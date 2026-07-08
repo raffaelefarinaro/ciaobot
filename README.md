@@ -69,7 +69,7 @@ The model is project-first: a workspace represents a life area (personal, work, 
 **macOS (Homebrew)** — includes the menu bar companion:
 
 ```bash
-brew install raffaelefarinaro/ciaobot
+brew install raffaelefarinaro/ciaobot/ciaobot
 ciao run
 ```
 
