@@ -152,6 +152,10 @@ export type WsEvent =
     }
   | { type: 'thinking'; text: string; parent_tool_use_id?: string }
   | { type: 'status'; message: string }
+  // Running token totals for the in-flight turn (cumulative, monotonic).
+  // Emitted from partial stream events so the live trace can show a token
+  // count as the model works; the authoritative totals still land on `result`.
+  | { type: 'token_usage'; input_tokens: number; output_tokens: number }
   | { type: 'result'; text: string; is_error: boolean; effective_model: string; usage: Record<string, string>; session_id: string; sent_at?: string; completed_at?: string; duration_ms?: number }
   | { type: 'permission_request'; tool_name: string; tool_input?: string; message: string; request_id: string }
   | { type: 'chat_title'; chat_id: string; title: string }

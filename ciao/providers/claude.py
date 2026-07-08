@@ -61,6 +61,7 @@ from ciao.models import (
     StreamEvent,
     SystemStatusEvent,
     ThinkingEvent,
+    TokenUsageEvent,
     ToolUseEvent,
 )
 from ciao.memory_injector import build_memory_block, system_prompt_payload
@@ -270,6 +271,14 @@ class ClaudeProvider(BaseSDKProvider):
         self._connected = False
         self._session_id: str | None = None
         self._pending_quota: dict[str, str] = {}
+        # Running token counters for the in-flight turn, fed by partial
+        # stream events. ``_turn_input_tokens`` and ``_turn_output_committed``
+        # accumulate across assistant messages in a tool loop; ``_cur_msg_output``
+        # holds the current message's cumulative output so the live total is
+        # committed + current. Reset at the start of each streaming turn.
+        self._turn_input_tokens = 0
+        self._turn_output_committed = 0
+        self._cur_msg_output = 0
         # Set by the stderr handler when the CLI refuses to resume because
         # the session is held by a background agent. The next connect
         # attempt re-resumes with ``--fork-session`` to branch a copy.
@@ -640,6 +649,12 @@ class ClaudeProvider(BaseSDKProvider):
         client = await self._ensure_connected(request)
         payload = self._prompt_payload(request)
 
+        # Fresh turn: zero the live token counters so the running total we
+        # emit over the wire starts from this turn, not the previous one.
+        self._turn_input_tokens = 0
+        self._turn_output_committed = 0
+        self._cur_msg_output = 0
+
         # Register handle *before* connect/query so /stop can interrupt a
         # hanging SDK call — otherwise the bot locks up with "No active run".
         register_handle(SDKHandle(client=client))
@@ -852,7 +867,44 @@ class ClaudeProvider(BaseSDKProvider):
                     parent_tool_use_id=parent_id,
                 )]
 
+        # Running token usage. Only the top-level turn is counted (subagents
+        # run their own sessions and aren't rolled into the parent's usage),
+        # so live numbers track the parent turn's own totals. A tool loop emits
+        # one message_start / …message_delta pair per assistant message; we
+        # commit the finished message's output before starting the next.
+        if parent_id is None and event_type in ("message_start", "message_delta"):
+            usage_ev = self._track_stream_usage(event_type, raw)
+            if usage_ev is not None:
+                return [usage_ev]
+
         return []
+
+    def _track_stream_usage(
+        self, event_type: str, raw: dict
+    ) -> TokenUsageEvent | None:
+        """Accumulate partial-message usage into a cumulative turn total."""
+        if event_type == "message_start":
+            usage = (raw.get("message") or {}).get("usage") or {}
+            # A new assistant message began: fold the previous message's
+            # output into the committed total before it gets overwritten.
+            self._turn_output_committed += self._cur_msg_output
+            self._cur_msg_output = 0
+            input_tokens = usage.get("input_tokens")
+            if isinstance(input_tokens, int):
+                self._turn_input_tokens += input_tokens
+            out = usage.get("output_tokens")
+            if isinstance(out, int):
+                self._cur_msg_output = out
+        else:  # message_delta
+            usage = raw.get("usage") or {}
+            out = usage.get("output_tokens")
+            if isinstance(out, int):
+                self._cur_msg_output = out
+        return TokenUsageEvent(
+            type="assistant",
+            input_tokens=self._turn_input_tokens,
+            output_tokens=self._turn_output_committed + self._cur_msg_output,
+        )
 
     def _convert_system_message(self, msg: SystemMessage) -> list[StreamEvent]:
         subtype = msg.subtype

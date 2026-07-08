@@ -57,6 +57,13 @@ export const useProjectStore = defineStore('projects', () => {
   // buffer, intermediate thinking blocks emitted by Ollama models would
   // disappear entirely (they used to be silently dropped at end-of-stream).
   const streamingThinking = ref<Record<string, string>>({})
+  // Per-chat live token totals for the in-flight turn, fed by `token_usage`
+  // WS events. Cleared on turn start and result. Drives the running token
+  // count in the "Working..." trace meta.
+  const liveUsage = ref<Record<string, { input: number; output: number }>>({})
+  // Per-chat epoch millis when the current turn started streaming. Powers the
+  // live elapsed timer in the "Working..." trace meta. Cleared on result.
+  const streamStartedAt = ref<Record<string, number>>({})
   const pendingImagesByChat = ref<Record<string, string[]>>({})
   const pendingImages = computed<string[]>({
     get: () => getPendingBucket(pendingImagesByChat.value, activeChatId.value),
@@ -838,6 +845,8 @@ export const useProjectStore = defineStore('projects', () => {
     streamingText.value[chatId] = ''
     streamingThinking.value[chatId] = ''
     streamingTimeline.value[chatId] = []
+    delete liveUsage.value[chatId]
+    delete streamStartedAt.value[chatId]
     delete projectStreaming.value[chatId]
   }
 
@@ -1905,6 +1914,8 @@ export const useProjectStore = defineStore('projects', () => {
     streaming.value[chatId] = true
     streamingText.value[chatId] = ''
     streamingThinking.value[chatId] = ''
+    streamStartedAt.value[chatId] = Date.now()
+    delete liveUsage.value[chatId]
 
     const payload: Record<string, unknown> = { type: 'message', text: composed }
     if (imageRefs) payload.images = imageRefs
@@ -2208,6 +2219,14 @@ export const useProjectStore = defineStore('projects', () => {
 
   /** Currently accumulated timeline entries for the active turn (tools + intermediate text). */
   const currentTimeline = computed<StreamEntry[]>(() => streamingTimeline.value[activeChatId.value || ''] || [])
+  /** Live token totals for the active turn, or null when none reported yet. */
+  const currentLiveUsage = computed<{ input: number; output: number } | null>(
+    () => liveUsage.value[activeChatId.value || ''] || null
+  )
+  /** Epoch millis when the active turn started streaming, or 0 if unknown. */
+  const currentStreamStartedAt = computed<number>(
+    () => streamStartedAt.value[activeChatId.value || ''] || 0
+  )
   /** Legacy: flat list of just the tool lines (for callers that only care about tool activity). */
   const currentActivity = computed(() => {
     const lines: string[] = []
@@ -2281,11 +2300,18 @@ export const useProjectStore = defineStore('projects', () => {
     // renders as "streaming" without the client having called sendMessage.
     // `user_echo` is included so a fresh subscribe that only has the echo
     // buffered (turn just started, no deltas yet) still shows the indicator.
-    const streamingEventTypes = new Set(['text_delta', 'tool_use', 'thinking', 'status', 'user_echo'])
+    const streamingEventTypes = new Set(['text_delta', 'tool_use', 'thinking', 'status', 'user_echo', 'token_usage'])
     if (streamingEventTypes.has(event.type) && !streaming.value[chatId]) {
       streaming.value[chatId] = true
       if (streamingText.value[chatId] === undefined) streamingText.value[chatId] = ''
       if (streamingThinking.value[chatId] === undefined) streamingThinking.value[chatId] = ''
+    }
+    // Anchor the live elapsed timer the first time we see this turn stream.
+    // On a WS reconnect mid-turn we don't know the true start, so this is a
+    // lower bound (timer resumes from now); the final duration on the result
+    // bubble remains authoritative.
+    if (streamingEventTypes.has(event.type) && !streamStartedAt.value[chatId]) {
+      streamStartedAt.value[chatId] = Date.now()
     }
 
     switch (event.type) {
@@ -2498,6 +2524,15 @@ export const useProjectStore = defineStore('projects', () => {
       case 'status':
         break
 
+      case 'token_usage':
+        // Cumulative, monotonic totals for the turn. Store the latest snapshot
+        // so the live trace meta can show a running token count.
+        liveUsage.value[chatId] = {
+          input: event.input_tokens || 0,
+          output: event.output_tokens || 0,
+        }
+        break
+
       case 'result': {
         // Final flush before the result event is materialized: lock any
         // trailing thinking/text deltas into the timeline so they render
@@ -2584,6 +2619,8 @@ export const useProjectStore = defineStore('projects', () => {
         streaming.value[chatId] = false
         streamingText.value[chatId] = ''
         streamingThinking.value[chatId] = ''
+        delete liveUsage.value[chatId]
+        delete streamStartedAt.value[chatId]
         // Turn ended: the server has already resolved any still-pending gate
         // futures as deny via cancel_all(). Drop the bubbles on our side too
         // so a late click can't race a brand-new turn.
@@ -2626,6 +2663,8 @@ export const useProjectStore = defineStore('projects', () => {
         streaming.value[chatId] = false
         streamingText.value[chatId] = ''
         streamingThinking.value[chatId] = ''
+        delete liveUsage.value[chatId]
+        delete streamStartedAt.value[chatId]
         delete pendingPermissions.value[chatId]
         persistMessages()
         break
@@ -2697,7 +2736,7 @@ export const useProjectStore = defineStore('projects', () => {
     projectStreaming, backgroundAgents, toasts, pendingPermissions, activeQuestions, creatingChatProjectIds,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
-    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, projectChats,
+    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
     chatUnread, projectUnread, workspaceUnread, clearUnread, markRead, markAllRead,
     recentChats, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
     // Actions

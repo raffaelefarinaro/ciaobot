@@ -19,6 +19,7 @@ from ciao.models import (
     StreamEvent,
     SystemStatusEvent,
     ThinkingEvent,
+    TokenUsageEvent,
     ToolUseEvent,
 )
 
@@ -134,6 +135,12 @@ def event_to_json(event: StreamEvent) -> dict | None:
         return payload
     if isinstance(event, SystemStatusEvent):
         return {"type": "status", "message": event.status or ""}
+    if isinstance(event, TokenUsageEvent):
+        return {
+            "type": "token_usage",
+            "input_tokens": event.input_tokens,
+            "output_tokens": event.output_tokens,
+        }
     if isinstance(event, ResultEvent):
         return {
             "type": "result",

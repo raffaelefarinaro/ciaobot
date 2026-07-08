@@ -721,6 +721,11 @@ const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', 
 const spinnerIdx = ref(0)
 const spinnerFrame = computed(() => SPINNER_FRAMES[spinnerIdx.value])
 let spinnerTimer: ReturnType<typeof setInterval> | null = null
+// Ticks once a second while streaming so the live elapsed-time label in the
+// "Working..." trace meta advances. Kept separate from the 90ms spinner so we
+// don't recompute the meta string ten times a second.
+const nowTs = ref(Date.now())
+let clockTimer: ReturnType<typeof setInterval> | null = null
 watch(() => store.isStreaming, (streaming) => {
   if (streaming && !spinnerTimer) {
     spinnerTimer = setInterval(() => {
@@ -729,6 +734,13 @@ watch(() => store.isStreaming, (streaming) => {
   } else if (!streaming && spinnerTimer) {
     clearInterval(spinnerTimer)
     spinnerTimer = null
+  }
+  if (streaming && !clockTimer) {
+    nowTs.value = Date.now()
+    clockTimer = setInterval(() => { nowTs.value = Date.now() }, 1000)
+  } else if (!streaming && clockTimer) {
+    clearInterval(clockTimer)
+    clockTimer = null
   }
 }, { immediate: true })
 
@@ -1579,6 +1591,7 @@ onBeforeUnmount(() => {
   messagesResizeObserver?.disconnect()
   messagesResizeObserver = null
   if (spinnerTimer) { clearInterval(spinnerTimer); spinnerTimer = null }
+  if (clockTimer) { clearInterval(clockTimer); clockTimer = null }
 })
 
 // Tell the service worker which chat is in focus so it can clear the badge
@@ -1669,8 +1682,31 @@ const liveTraceMeta = computed(() => {
   if (textCount) parts.push(`${textCount} note${textCount === 1 ? '' : 's'}`)
   if (toolCount) parts.push(`${toolCount} tool call${toolCount === 1 ? '' : 's'}`)
   if (fileCount) parts.push(`${fileCount} file${fileCount === 1 ? '' : 's'}`)
+  // Live elapsed time: reads nowTs (ticks every second) against the turn's
+  // start so the label counts up while the model works.
+  const startedAt = store.currentStreamStartedAt
+  if (startedAt) {
+    const elapsed = nowTs.value - startedAt
+    if (elapsed >= 0) parts.push(formatDuration(elapsed))
+  }
+  // Live token count: cumulative output tokens reported so far this turn.
+  const usage = store.currentLiveUsage
+  if (usage && usage.output > 0) parts.push(`${formatTokens(usage.output)} tok`)
   return parts.join(' · ')
 })
+
+// Compact token label: 1234 -> "1.2k", 1_200_000 -> "1.2M". Keeps the live
+// trace meta short while the count grows.
+function formatTokens(n: number): string {
+  if (!isFinite(n) || n <= 0) return '0'
+  if (n < 1000) return String(Math.round(n))
+  if (n < 1_000_000) {
+    const k = n / 1000
+    return `${k < 10 ? k.toFixed(1) : Math.round(k)}k`
+  }
+  const m = n / 1_000_000
+  return `${m < 10 ? m.toFixed(1) : Math.round(m)}M`
+}
 
 function traceSummaryMeta(steps: ChatMessage[]): string {
   let toolCount = 0

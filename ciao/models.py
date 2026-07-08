@@ -169,6 +169,21 @@ class SystemStatusEvent(StreamEvent):
 
 
 @dataclass(slots=True)
+class TokenUsageEvent(StreamEvent):
+    """Running token usage for the in-flight turn.
+
+    Emitted from partial stream events (``message_start`` / ``message_delta``)
+    so the UI can show a live token count while the model works. Counts are
+    cumulative across the whole turn (all assistant messages in a tool loop),
+    so they only ever grow. The authoritative per-turn totals still arrive on
+    the terminal :class:`ResultEvent`.
+    """
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+@dataclass(slots=True)
 class ResultEvent(StreamEvent):
     """Terminal stream event."""
 
