@@ -83,7 +83,8 @@ _SUBAGENT_SYNTHESIS_NUDGE = (
     "The background agent(s) you dispatched have now finished. Review their "
     "results (read their transcripts or output as needed) and post your "
     "consolidated final report for this task now. Do not dispatch new "
-    "background agents to answer this."
+    "background agents to answer this. If you already posted the final "
+    "report, reply with a brief confirmation instead of repeating it."
 )
 _HANDOVER_ROLES = {"user", "assistant", "system"}
 _HANDOVER_MAX_MESSAGES = 80
@@ -3709,7 +3710,7 @@ class ProjectChatManager:
                             # only fall back to a bare push if the nudge could
                             # not be delivered.
                             nudged = await self._nudge_synthesis_after_subagents(
-                                chat_id, project_id
+                                chat_id
                             )
                             if not nudged:
                                 title = chat_now.title if chat_now else "Ciaobot"
@@ -3727,9 +3728,7 @@ class ProjectChatManager:
             if current is not None and current.done():
                 self._pending_subagent_watchers.pop(chat_id, None)
 
-    async def _nudge_synthesis_after_subagents(
-        self, chat_id: str, project_id: str
-    ) -> bool:
+    async def _nudge_synthesis_after_subagents(self, chat_id: str) -> bool:
         """Ask the parent to post a final report once its subagents finish.
 
         A background ``Agent`` dispatch ends the parent turn immediately and
@@ -3811,11 +3810,14 @@ class ProjectChatManager:
         """Consume and publish SDK events that arrive with no turn active.
 
         When a background subagent completes, the CLI injects a
-        task-notification and runs a parent follow-up turn on its own. This
-        loop forwards those events to a broker stream (so open chat sockets
-        render them live) and announces the follow-up's result like a normal
-        turn (unread badge, toast, delayed push). Each CLI-initiated turn
-        gets its own background ChatStream so replay stays turn-shaped.
+        task-notification; a follow-up parent turn then arrives either run by
+        the CLI on its own (CLI-version dependent — observed not to happen
+        reliably) or requested by the completion watcher's synthesis nudge
+        (``_nudge_synthesis_after_subagents``). This loop forwards those
+        events to a broker stream (so open chat sockets render them live) and
+        announces the follow-up's result like a normal turn (unread badge,
+        toast, delayed push). Each such turn gets its own background
+        ChatStream so replay stays turn-shaped.
         """
         from ciao.web.chat_broker import event_to_json
 
