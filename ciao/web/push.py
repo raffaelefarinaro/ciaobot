@@ -26,7 +26,7 @@ def _b64url(data: bytes) -> str:
 class PushManager:
     """Persist VAPID keys + subscriptions, send Web Push notifications."""
 
-    def __init__(self, runtime_root: Path, subject: str = "mailto:admin@ciao.local") -> None:
+    def __init__(self, runtime_root: Path, subject: str = "") -> None:
         self._runtime = runtime_root
         self._runtime.mkdir(parents=True, exist_ok=True)
         self._vapid_path = runtime_root / "vapid.json"
