@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from ciao import job_runs as jr
+from ciao import dag as dag_mod
 from ciao.dag import Edge, Node, NodeResult, run
 
 
@@ -275,17 +276,43 @@ def test_retention_failure_does_not_propagate(monkeypatch, tmp_path) -> None:
 
 def test_bash_timeout_marks_node_failed(tmp_path: Path) -> None:
     """A bash timeout yields ``ok=False`` (does not raise). The run is
-    still recorded in job_runs with the timeout error."""
+    recorded in job_runs with status ``error`` and the timeout message
+    propagated into the row's ``error`` field, so the Automation page
+    shows a red row instead of a silent green one."""
     dag = [Node(id="slow", kind="bash", payload={"cmd": "sleep 5"}, timeout_s=0.2)]
     ctx = run(dag, [], job="unit", label="timeout")
     assert ctx["slow"].ok is False
     assert "timeout" in (ctx["slow"].error or "").lower()
     rows = _job_runs(tmp_path)
     slow = next(r for r in rows if r["extra"]["node_id"] == "slow")
-    # job_runs only marks "error" if track_sync's exception branch fires;
-    # our runner sets ok=False via NodeResult instead. So the row is "ok"
-    # but the ctx carries the failure.
-    assert slow["extra"]["node_id"] == "slow"
+    # The runner must flip handle.status to "error" when a node returns
+    # NodeResult(ok=False) without raising. Regression for the
+    # dag-subagent-status silent-success bug.
+    assert slow["status"] == "error"
+    assert "timeout" in (slow.get("error") or "").lower()
+
+
+def test_non_raising_failed_noderesult_marks_job_run_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A node that returns ``NodeResult(ok=False, ...)`` without raising
+    (the subagent executor's silent-failure path) must still record a
+    ``status="error"`` row in job_runs with the error message propagated.
+    Regression for dag-subagent-status: previously the row stayed green
+    while the node had actually failed."""
+
+    def fail_silently(node, ctx):
+        return NodeResult(ok=False, error="subagent exit 1: drift detected")
+
+    monkeypatch.setitem(dag_mod._EXECUTORS, "fake-fail", fail_silently)
+    dag = [Node(id="gate", kind="fake-fail")]
+    ctx = run(dag, [], job="unit", label="silent-fail")
+    assert ctx["gate"].ok is False
+    assert ctx["gate"].error == "subagent exit 1: drift detected"
+    rows = _job_runs(tmp_path)
+    gate = next(r for r in rows if r["extra"]["node_id"] == "gate")
+    assert gate["status"] == "error"
+    assert "drift detected" in (gate.get("error") or "")
 
 
 def test_bash_missing_cmd_raises() -> None:

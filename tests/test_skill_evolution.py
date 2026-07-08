@@ -287,6 +287,46 @@ def test_run_evolution_pass_writes_trim_proposal_for_oversized_skill(
     assert "No clear improvement found" in body
 
 
+def test_run_evolution_pass_writes_stub_for_undercap_no_proposal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An under-cap skill whose model pass returns 'no improvement' must
+    still get a stub proposal so it doesn't vanish from the audit trail.
+    Regression for skill-evolution-audit-gap: previously only over-cap
+    no-proposal skills got a stub, so under-cap no-proposal skills had no
+    comparable record for next week's pass."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    tb.write_trajectory(_t("small-skill", corrections=1) | {
+        "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+    })
+    skills_root = tmp_path / "skills"
+    (skills_root / "small-skill").mkdir(parents=True)
+    # Under the size cap, so this is NOT a trim-mode pass.
+    (skills_root / "small-skill" / "SKILL.md").write_text("# Small skill\n\nshort body\n")
+
+    pi_mock = AsyncMock(return_value="No clear improvement found.")
+    monkeypatch.setattr("ciao.skill_evolution.run_oneshot", pi_mock)
+
+    paths = asyncio.run(
+        se.run_evolution_pass(
+            since_days=7,
+            skills_root=skills_root,
+            output_dir=tmp_path / "out",
+            retention_months=None,
+        )
+    )
+    # The model was called in normal (non-trim) mode and returned no proposal.
+    pi_mock.assert_called_once()
+    system_prompt = pi_mock.call_args.kwargs["system_prompt"]
+    assert "trim" not in system_prompt.lower()
+    # A stub proposal must still land so the audit trail has an entry.
+    assert len(paths) == 1
+    body = paths[0].read_text(encoding="utf-8")
+    assert "No clear improvement found" in body
+    # The stub records the trajectory refs so next week's pass is comparable.
+    assert "trajectories: 1" in body
+
+
 # ── semantic-drift gate ─────────────────────────────────────────────────
 
 
