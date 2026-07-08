@@ -142,49 +142,6 @@ def spin_icon_paths() -> list[str]:
     return [path for path in paths if os.path.isfile(path)]
 
 
-@dataclass(frozen=True, slots=True)
-class Notification:
-    ts: float
-    title: str
-    body: str
-    chat_id: str
-
-
-def read_notifications(workspace: Path, *, limit: int = 10) -> list[Notification]:
-    """Read the newest entries of the server's notification log, newest first."""
-
-    log_path = workspace / ".runtime" / "notifications.jsonl"
-    try:
-        lines = log_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
-    entries: list[Notification] = []
-    for line in lines[-limit * 2 :]:
-        try:
-            data = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(data, dict):
-            continue
-        entries.append(
-            Notification(
-                ts=float(data.get("ts", 0.0)),
-                title=str(data.get("title", "Ciaobot")),
-                body=str(data.get("body", "")),
-                chat_id=str(data.get("chat_id", "")),
-            )
-        )
-    entries.sort(key=lambda entry: entry.ts, reverse=True)
-    return entries[:limit]
-
-
-def notification_menu_title(notification: Notification, *, max_length: int = 60) -> str:
-    text = f"{notification.title}: {notification.body}".strip().rstrip(":")
-    if len(text) > max_length:
-        text = text[: max_length - 1] + "…"
-    return text
-
-
 def workspace_menu_label(name: str) -> str:
     """Human-readable workspace name for menu labels (matches the PWA sidebar)."""
 
@@ -237,16 +194,6 @@ def chat_url(workspace: Path, port: int, chat_id: str) -> str:
     return f"{base}/chat/{chat_id}" if chat_id else open_url(workspace, port)
 
 
-def notify_command(title: str, body: str) -> list[str]:
-    """Native macOS notification via osascript (no app signing required)."""
-
-    script = (
-        f"display notification {json.dumps(body)} "
-        f"with title {json.dumps(title)}"
-    )
-    return ["osascript", "-e", script]
-
-
 @dataclass(frozen=True, slots=True)
 class OpenChat:
     chat_id: str
@@ -278,10 +225,6 @@ def _load_web_state(workspace: Path) -> tuple[dict[str, dict], dict[str, dict]]:
         else {}
     )
     return projects, chats
-
-
-def _load_chats(workspace: Path) -> dict[str, dict]:
-    return _load_web_state(workspace)[1]
 
 
 def _chat_workspace(chat: dict, projects: dict[str, dict]) -> str:
@@ -393,24 +336,6 @@ def copy_to_clipboard(text: str) -> None:
     subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=False)
 
 
-def _settings_path(workspace: Path) -> Path:
-    return workspace / ".runtime" / "menubar_settings.json"
-
-
-def read_banners_muted(workspace: Path) -> bool:
-    try:
-        data = json.loads(_settings_path(workspace).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    return bool(data.get("banners_muted")) if isinstance(data, dict) else False
-
-
-def write_banners_muted(workspace: Path, muted: bool) -> None:
-    path = _settings_path(workspace)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"banners_muted": muted}) + "\n", encoding="utf-8")
-
-
 def _disabled_item(rumps, title: str):
     item = rumps.MenuItem(title)
     item.set_callback(None)
@@ -464,9 +389,7 @@ def run_menubar(workspace: Path, port: int) -> int:
     # Only notify for entries newer than launch, not the whole backlog.
     status_fetcher = make_cached_package_status()
     state = {
-        "last_seen_ts": time.time(),
         "fingerprint": None,
-        "banners_muted": read_banners_muted(workspace),
         "package_status": status_fetcher(),
         "updating": False,
         # Live work state, kept fresh by a background poller so the icon can
@@ -484,12 +407,6 @@ def run_menubar(workspace: Path, port: int) -> int:
             state["current_icon"] = path
             app.icon = path
 
-    def on_toggle_mute(sender) -> None:
-        muted = not state["banners_muted"]
-        state["banners_muted"] = muted
-        write_banners_muted(workspace, muted)
-        sender.state = 1 if muted else 0
-
     def _open_chat_callback(chat_id: str):
         def _callback(_sender) -> None:
             subprocess.run(["open", chat_url(workspace, port, chat_id)], check=False)
@@ -504,10 +421,6 @@ def run_menubar(workspace: Path, port: int) -> int:
 
     def on_open(_sender) -> None:
         subprocess.run(open_app_command(workspace, port), check=False)
-
-    def on_restart(_sender) -> None:
-        subprocess.run(restart_server_command(), check=False)
-        refresh()
 
     def on_logs(_sender) -> None:
         subprocess.run(view_logs_command(workspace), check=False)
@@ -537,13 +450,6 @@ def run_menubar(workspace: Path, port: int) -> int:
                 res = update_package()
                 if res.get("ok"):
                     subprocess.run(restart_server_command(), check=False)
-                    subprocess.run(
-                        notify_command(
-                            "Ciaobot updated",
-                            f"Version {latest} is installed.",
-                        ),
-                        check=False,
-                    )
                     # Relaunch via launchd so this process loads the new wheel.
                     subprocess.run(restart_menubar_command(), check=False)
                     return
@@ -603,9 +509,7 @@ def run_menubar(workspace: Path, port: int) -> int:
             )
             for chat in chats
         ]
-        chat_section = [*chat_items, None] if chat_items else []
-
-        update_section: list[object] = []
+        update_items: list[object] = []
         if pkg.get("update_available"):
             label = (
                 "Updating…"
@@ -613,32 +517,31 @@ def run_menubar(workspace: Path, port: int) -> int:
                 else update_menu_label(str(pkg.get("latest_version") or ""))
             )
             if state["updating"]:
-                update_section = [_disabled_item(rumps, label), None]
+                update_items = [_disabled_item(rumps, label)]
             else:
-                update_section = [rumps.MenuItem(label, callback=on_update), None]
-        elif not chat_section:
-            update_section = [None]
+                update_items = [rumps.MenuItem(label, callback=on_update)]
 
-        app.menu.clear()
-        app.menu = [
-            rumps.MenuItem("Open Ciaobot", callback=on_open),
-            _disabled_item(rumps, status_label(status)),
-            *update_section,
-            *chat_section,
-            addresses_menu,
-            None,
-            _mute_item(),
-            None,
-            rumps.MenuItem("Restart Server", callback=on_restart),
-            rumps.MenuItem("View Logs", callback=on_logs),
-            None,
-            rumps.MenuItem("Quit Ciaobot", callback=on_quit),
+        # Each group is rendered as its own section; separators are inserted
+        # between non-empty groups so there are never doubled or trailing lines.
+        groups = [
+            [rumps.MenuItem("Open Ciaobot", callback=on_open),
+             _disabled_item(rumps, status_label(status))],
+            update_items,
+            chat_items,
+            [rumps.MenuItem("View Logs", callback=on_logs), addresses_menu],
+            [rumps.MenuItem("Quit Ciaobot", callback=on_quit)],
         ]
 
-    def _mute_item():
-        item = rumps.MenuItem("Mute Banners", callback=on_toggle_mute)
-        item.state = 1 if state["banners_muted"] else 0
-        return item
+        menu: list[object] = []
+        for group in groups:
+            if not group:
+                continue
+            if menu:
+                menu.append(None)
+            menu.extend(group)
+
+        app.menu.clear()
+        app.menu = menu
 
     def animate_icon(_timer=None) -> None:
         # Owns the status bar icon: spins the head while a chat is working,
@@ -663,12 +566,10 @@ def run_menubar(workspace: Path, port: int) -> int:
         status = fetch_server_status(port)
         state["reachable"] = status.reachable
 
-        log_entries = read_notifications(workspace)
         chats = read_open_chats(workspace)
         unread_chats = read_unread_chats(workspace)
         unread_ids = {chat.chat_id for chat in unread_chats}
         working_ids = set(state["working_ids"])
-        chats_by_id = _load_chats(workspace)
         addresses = server_addresses(port)
         pkg = status_fetcher()
         state["package_status"] = pkg
@@ -697,23 +598,6 @@ def run_menubar(workspace: Path, port: int) -> int:
         if fingerprint != state["fingerprint"]:
             state["fingerprint"] = fingerprint
             _rebuild_menu(status, chats, unread_ids, working_ids, addresses, pkg)
-
-        # Banner only for new log lines whose chat is still unread (same rule
-        # as the PWA bell). Reading a chat in the webapp clears it here too.
-        fresh = [
-            entry
-            for entry in log_entries
-            if entry.ts > state["last_seen_ts"]
-            and entry.chat_id
-            and chat_is_unread(chats_by_id.get(entry.chat_id, {}))
-        ]
-        if fresh:
-            # Advance the cursor even when muted so unmuting doesn't replay
-            # the backlog; unread chats show a dot in the open-chat list.
-            state["last_seen_ts"] = max(entry.ts for entry in fresh)
-            if not state["banners_muted"]:
-                for entry in fresh[:3]:
-                    subprocess.run(notify_command(entry.title, entry.body), check=False)
 
     threading.Thread(target=poll_working, daemon=True).start()
     rumps.Timer(refresh, POLL_SECONDS).start()
