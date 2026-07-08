@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.4.11 - 2026-07-08
+
+### Added
+- feat(tray): open links in an installed PWA when available (`3ce183a`)
+
+### Fixed
+- fix(menubar): treat a no-op Homebrew/pip upgrade as a failed update (#58)
+
+### Maintenance
+- docs(readme): explain the etymology behind the "Ciaobot" name (`86f016b`)
+- build(web): refresh bundled PWA assets for release/v0.4.11 (`9cd2b37`)
+
 ## v0.4.10 - 2026-07-08
 
 ### Added

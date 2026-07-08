@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import plistlib
 import re
 import subprocess
 import sys
@@ -95,8 +96,58 @@ def open_url(workspace: Path, port: int) -> str:
     return f"{base}?setup={token}" if token else base
 
 
+# Bundle IDs of the native launcher this project installs itself (see
+# cli.py's _write_app_shortcut / _OUR_BUNDLE_IDS). A browser-installed PWA
+# can share the launcher's "Ciaobot.app" name, so find_installed_webapp()
+# excludes these IDs to avoid just relaunching the same shell-script wrapper.
+_OUR_LAUNCHER_BUNDLE_IDS = frozenset({"local.ciao.app", "local.ciaobot.app"})
+
+
+def _bundle_identifier(app_bundle: Path) -> str:
+    try:
+        with (app_bundle / "Contents" / "Info.plist").open("rb") as handle:
+            plist = plistlib.load(handle)
+    except (OSError, ValueError):
+        return ""
+    return str(plist.get("CFBundleIdentifier") or "")
+
+
+def find_installed_webapp(app_name: str = "Ciaobot") -> Path | None:
+    """Locate a browser-installed PWA bundle for ``app_name``, if any.
+
+    Chrome/Edge's "Install <app>" and Safari's "Add to Dock" each drop a real
+    .app bundle under one of a few well-known folders when the PWA is
+    installed. Opening links through that bundle (via ``open -a``) puts them
+    in the installed app's own window instead of a browser tab.
+    """
+
+    home = Path.home()
+    candidates = [
+        home / "Applications" / f"{app_name}.app",
+        home / "Applications" / "Chrome Apps.localized" / f"{app_name}.app",
+        Path("/Applications") / f"{app_name}.app",
+        Path("/Applications") / "Chrome Apps.localized" / f"{app_name}.app",
+    ]
+    for candidate in candidates:
+        if not candidate.is_dir():
+            continue
+        if _bundle_identifier(candidate) in _OUR_LAUNCHER_BUNDLE_IDS:
+            continue
+        return candidate
+    return None
+
+
+def open_command(url: str) -> list[str]:
+    """``open`` invocation for a URL, preferring an installed PWA when found."""
+
+    webapp = find_installed_webapp()
+    if webapp is not None:
+        return ["open", "-a", str(webapp), url]
+    return ["open", url]
+
+
 def open_app_command(workspace: Path, port: int) -> list[str]:
-    return ["open", open_url(workspace, port)]
+    return open_command(open_url(workspace, port))
 
 
 def restart_server_command(uid: int | None = None) -> list[str]:
@@ -434,7 +485,7 @@ def run_menubar(workspace: Path, port: int) -> int:
 
     def _open_chat_callback(chat_id: str):
         def _callback(_sender) -> None:
-            subprocess.run(["open", chat_url(workspace, port, chat_id)], check=False)
+            subprocess.run(open_command(chat_url(workspace, port, chat_id)), check=False)
 
         return _callback
 

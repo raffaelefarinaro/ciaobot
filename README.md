@@ -2,6 +2,10 @@
 
 Ciaobot is an opinionated UI and UX layer for using Claude Code as a personal assistant and second brain. It is a local web app around agentic work: chats, projects, files, schedules, memory, and archived knowledge all live in one interface instead of being scattered across terminal sessions.
 
+## Why "Ciao"?
+
+*Ciao* isn't just Italian for "hi" and "bye" — it comes from the Venetian phrase *s-ciào vostro* ("[I am] your slave"), a servile greeting that shed its literal meaning over the centuries and became the everyday word Italians use today. Fitting for an assistant: yours to command. See the [etymology on Wikipedia](https://en.wikipedia.org/wiki/Ciao#Etymology) for the full history.
+
 ## Who it's for
 
 Ciaobot is built for **knowledge work, not software development**. It's where you brainstorm, research, draft, plan, and work through documents with an agent that already knows your context — the day-to-day thinking and writing that normally ends up scattered across chat windows, notes apps, and browser tabs.

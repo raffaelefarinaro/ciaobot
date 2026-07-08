@@ -71,20 +71,45 @@ def test_update_package_homebrew_upgrade(monkeypatch) -> None:
     monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "homebrew")
     monkeypatch.setattr("ciao.package_version._resolve_brew", lambda: "/opt/homebrew/bin/brew")
 
-    captured: dict[str, list[str]] = {}
+    calls: list[list[str]] = []
 
     def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
+        calls.append(cmd)
         result = MagicMock()
-        result.stdout = "ciaobot 0.4.6"
         result.stderr = ""
         result.returncode = 0
+        if cmd[1:] == ["upgrade", "ciaobot"]:
+            result.stdout = "==> Upgrading ciaobot"
+        else:
+            upgraded = any(c[1:] == ["upgrade", "ciaobot"] for c in calls[:-1])
+            result.stdout = "ciaobot 0.4.7" if upgraded else "ciaobot 0.4.6"
         return result
 
     monkeypatch.setattr("subprocess.run", fake_run)
     res = update_package()
     assert res["ok"] is True
-    assert captured["cmd"] == ["/opt/homebrew/bin/brew", "upgrade", "ciaobot"]
+    assert ["/opt/homebrew/bin/brew", "upgrade", "ciaobot"] in calls
+
+
+def test_update_package_homebrew_noop_reports_failure(monkeypatch) -> None:
+    # brew upgrade can exit 0 without installing anything when the tap
+    # formula hasn't caught up with the GitHub release yet — that must not
+    # be reported as a successful update (it would restart the app for
+    # nothing and leave the "update available" banner stuck forever).
+    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "homebrew")
+    monkeypatch.setattr("ciao.package_version._resolve_brew", lambda: "/opt/homebrew/bin/brew")
+
+    def fake_run(cmd, **kwargs):
+        result = MagicMock()
+        result.stderr = ""
+        result.returncode = 0
+        result.stdout = "Warning: ciaobot 0.4.6 already installed" if cmd[1:] == ["upgrade", "ciaobot"] else "ciaobot 0.4.6"
+        return result
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    res = update_package()
+    assert res["ok"] is False
+    assert "0.4.6" in res["error"]
 
 
 def test_update_package_homebrew_without_brew(monkeypatch) -> None:
@@ -120,24 +145,59 @@ def test_update_package_pip_venv_installs_release_wheel(monkeypatch) -> None:
         ],
     })
 
-    mock_run = MagicMock()
-    mock_run.stdout = "Successfully installed ciao-0.3.0"
-    mock_run.stderr = ""
-    mock_run.returncode = 0
-
-    captured: dict[str, list[str]] = {}
+    install_cmd = [sys.executable, "-m", "pip", "install", "-U", wheel_url]
+    calls: list[list[str]] = []
 
     def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        return mock_run
+        calls.append(cmd)
+        result = MagicMock()
+        result.stderr = ""
+        result.returncode = 0
+        if cmd == install_cmd:
+            result.stdout = "Successfully installed ciao-0.3.0"
+        else:
+            upgraded = any(c == install_cmd for c in calls[:-1])
+            result.stdout = "Version: 0.3.0" if upgraded else "Version: 0.2.0"
+        return result
 
     monkeypatch.setattr("subprocess.run", fake_run)
     res = update_package(opener=opener)
     assert res["ok"] is True
-    assert captured["cmd"] == [sys.executable, "-m", "pip", "install", "-U", wheel_url]
+    assert install_cmd in calls
     assert wheel_url in res["command"]
     assert "pip install -U ciao" not in res["command"].replace(wheel_url, "")
     assert "Successfully installed ciao-0.3.0" in res["output"]
+
+
+def test_update_package_pip_venv_noop_reports_failure(monkeypatch) -> None:
+    # `pip install -U <wheel>` exits 0 without reinstalling when the same
+    # version is already present — that must surface as a failed update
+    # rather than a restart that leaves the banner stuck.
+    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "pip_venv")
+
+    wheel_url = (
+        "https://github.com/raffaelefarinaro/ciaobot/releases/download/"
+        "v0.3.0/ciao-0.3.0-py3-none-any.whl"
+    )
+    opener = _release_opener({
+        "tag_name": "v0.3.0",
+        "assets": [{"name": "ciao-0.3.0-py3-none-any.whl", "browser_download_url": wheel_url}],
+    })
+
+    def fake_run(cmd, **kwargs):
+        result = MagicMock()
+        result.stderr = ""
+        result.returncode = 0
+        if cmd[-2:] == ["show", "ciaobot"]:
+            result.stdout = "Version: 0.3.0"
+        else:
+            result.stdout = "Requirement already satisfied"
+        return result
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    res = update_package(opener=opener)
+    assert res["ok"] is False
+    assert "0.3.0" in res["error"]
 
 
 def test_update_package_pip_venv_without_wheel_asset(monkeypatch) -> None:
