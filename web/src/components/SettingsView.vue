@@ -252,7 +252,21 @@
             </div>
             <div v-if="routines.workspace_context" class="routine-context">
               <div>
-                <span class="dev-label">Main workspace</span>
+                <div class="settings-label-row">
+                  <span class="dev-label">Main workspace</span>
+                  <details class="field-info">
+                    <summary aria-label="How to change the main workspace" title="How to change the main workspace">i</summary>
+                    <div class="field-info-panel">
+                      <p>
+                        This is the server filesystem root for routines, skills, scripts, and runtime state.
+                        Set <code>CIAO_WORKSPACE</code> in your <code>.env</code> file, then restart Ciaobot.
+                      </p>
+                      <p>
+                        Logical chat workspaces (sidebar switcher) are managed separately under Settings &rarr; Workspaces.
+                      </p>
+                    </div>
+                  </details>
+                </div>
                 <code>{{ routines.workspace_context.workspace_root }}</code>
               </div>
             </div>
@@ -3667,9 +3681,9 @@ async function doPackageUpdate() {
 }
 .routine-context > div {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 0.35em;
-  align-items: baseline;
+  align-items: flex-start;
 }
 .routine-context code {
   overflow-wrap: anywhere;
