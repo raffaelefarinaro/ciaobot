@@ -255,9 +255,6 @@
                 <span class="dev-label">Main workspace</span>
                 <code>{{ routines.workspace_context.workspace_root }}</code>
               </div>
-              <p class="hint hint--info">
-                Server routines start here. Chat-scoped work still writes to that chat's workspace and vault.
-              </p>
             </div>
 
             <div class="routine-row">
@@ -3667,6 +3664,12 @@ async function doPackageUpdate() {
   border-radius: var(--radius-sm, 4px);
   background: color-mix(in srgb, var(--bg) 76%, transparent);
   font-size: var(--text-sm);
+}
+.routine-context > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35em;
+  align-items: baseline;
 }
 .routine-context code {
   overflow-wrap: anywhere;
