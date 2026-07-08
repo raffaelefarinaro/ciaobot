@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.11 - 2026-07-08
+
+### Maintenance
+- docs(readme): explain the etymology behind the "Ciaobot" name (`86f016b`)
+
 ## v0.4.10 - 2026-07-08
 
 ### Added
