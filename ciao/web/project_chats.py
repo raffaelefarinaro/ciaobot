@@ -72,6 +72,19 @@ _PROJECT_UPLOAD_EXTS = _PROJECT_TEXT_EXTS | _PROJECT_IMAGE_EXTS | _PROJECT_BINAR
 _PROJECT_UPLOAD_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 _RETRY_INTERVAL_SECONDS = 60 * 60
 _RETRY_STATUSES = {"pending", "stopped", ""}
+
+# Injected into the parent turn when its background subagents all finish. The
+# CLI does not auto-continue a parent turn after a background `Agent` dispatch
+# completes (see ciao/system_prompt.md), so without this nudge the chat stays
+# stuck on the interim "I'll report back when they finish" message. The nudge
+# is delivered on the persistent client so the already-running between-turns
+# drain captures and publishes the synthesis turn like a normal reply.
+_SUBAGENT_SYNTHESIS_NUDGE = (
+    "The background agent(s) you dispatched have now finished. Review their "
+    "results (read their transcripts or output as needed) and post your "
+    "consolidated final report for this task now. Do not dispatch new "
+    "background agents to answer this."
+)
 _HANDOVER_ROLES = {"user", "assistant", "system"}
 _HANDOVER_MAX_MESSAGES = 80
 _HANDOVER_MAX_CHARS = 60_000
@@ -3687,10 +3700,22 @@ class ProjectChatManager:
                             if chat_now is not None:
                                 chat_now.last_activity_at = _now_iso()
                                 self._save()
-                            title = chat_now.title if chat_now else "Ciaobot"
-                            self._schedule_push(
-                                chat_id, title, "Background agents finished"
+                            # Poke the parent to synthesize a final report. The
+                            # CLI won't auto-continue the turn on its own, so
+                            # without this the chat sits on the interim
+                            # "I'll report back" message forever. When the
+                            # nudge lands on the live client the between-turns
+                            # drain publishes the reply (and its own push); we
+                            # only fall back to a bare push if the nudge could
+                            # not be delivered.
+                            nudged = await self._nudge_synthesis_after_subagents(
+                                chat_id, project_id
                             )
+                            if not nudged:
+                                title = chat_now.title if chat_now else "Ciaobot"
+                                self._schedule_push(
+                                    chat_id, title, "Background agents finished"
+                                )
                         last_count = count
                     if count == 0:
                         break
@@ -3701,6 +3726,58 @@ class ProjectChatManager:
             current = self._pending_subagent_watchers.get(chat_id)
             if current is not None and current.done():
                 self._pending_subagent_watchers.pop(chat_id, None)
+
+    async def _nudge_synthesis_after_subagents(
+        self, chat_id: str, project_id: str
+    ) -> bool:
+        """Ask the parent to post a final report once its subagents finish.
+
+        A background ``Agent`` dispatch ends the parent turn immediately and
+        the CLI does not resume it when the subagent completes, so the chat
+        would otherwise stay on the interim "I'll report back" message. We
+        inject a synthesis prompt on the persistent client; the between-turns
+        drain (started alongside this watcher) consumes the resulting turn and
+        publishes it like any other reply. Returns True when the nudge reached
+        a live client, False otherwise (caller falls back to a plain push).
+        """
+        provider = self._providers.get(chat_id)
+        if provider is None or not provider.can_drain:
+            return False
+        # A user send since the turn ended cancels the drain; don't inject into
+        # a live user turn or a chat with no drain to capture the reply.
+        drain = self._between_turn_drains.get(chat_id)
+        if drain is None or drain.done():
+            return False
+        existing = self._broker.get(chat_id)
+        if existing is not None and not existing.background:
+            return False
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            return False
+        prefix = self._build_prompt_prefix(chat)
+        full_prompt = (
+            prefix + _SUBAGENT_SYNTHESIS_NUDGE
+            if prefix
+            else _SUBAGENT_SYNTHESIS_NUDGE
+        )
+        request = AgentRequest(
+            prompt=full_prompt,
+            model=self._runtime_model_for_chat(chat),
+            provider=chat.provider,
+            mode=self._effective_mode_for_chat(chat),
+            resume_session=chat.session_id or None,
+            images=[],
+            extra_env=self._build_extra_env(chat),
+            disallowed_tools=self.disallowed_tools_for_chat(chat),
+            thinking_level=self._thinking_level_for_chat(chat),
+        )
+        try:
+            return await provider.steer(request)
+        except Exception:  # noqa: BLE001 — a failed nudge must not kill the watcher
+            logger.exception(
+                "Subagent synthesis nudge failed for chat %s", chat_id
+            )
+            return False
 
     # ── Between-turns SDK drain ──────────────────────────────────────────
 

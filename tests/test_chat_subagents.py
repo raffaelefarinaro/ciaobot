@@ -166,6 +166,76 @@ async def test_watch_subagent_completion_emits_ready_events(
     assert pcm.background_agent_counts == {}
 
 
+async def test_watch_subagent_completion_nudges_parent_synthesis(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When the last background subagent finishes, the watcher pokes the parent
+    to synthesize a final report (the CLI won't auto-continue on its own)."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("subagent-nudge", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="subagent-nudge-test")
+    chat.session_id = "sess-nudge-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-nudge-1.jsonl"
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "kick off work"}},
+        *_dispatch_records("toolu_1", "agent-a"),
+    ]
+    completions = iter([_completion_record("agent-a")])
+
+    def flush() -> None:
+        session_path.write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+        )
+
+    flush()
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root: session_path,
+    )
+
+    async def fake_sleep(seconds: float) -> None:
+        record = next(completions, None)
+        if record is not None:
+            records.append(record)
+            flush()
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    steer_calls: list = []
+
+    class FakeProvider:
+        can_drain = True
+
+        async def steer(self, request) -> bool:
+            steer_calls.append(request)
+            return True
+
+    pcm._providers[chat.chat_id] = FakeProvider()  # type: ignore[assignment]
+    # A live between-turns drain must exist for the nudge to be delivered.
+    running_drain = asyncio.get_running_loop().create_future()
+    pcm._between_turn_drains[chat.chat_id] = running_drain  # type: ignore[assignment]
+
+    pushes: list = []
+    monkeypatch.setattr(
+        pcm, "_schedule_push", lambda *a, **k: pushes.append(a)
+    )
+
+    try:
+        await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+    finally:
+        running_drain.cancel()
+
+    assert len(steer_calls) == 1
+    # The synthesis nudge replaces the bare "finished" push when delivered.
+    assert pushes == []
+
+
 def test_chat_subagents_falls_back_to_nested_jsonl_and_progress_entries(
     tmp_path: Path,
     monkeypatch,
