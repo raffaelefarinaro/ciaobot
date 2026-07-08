@@ -61,6 +61,38 @@ def test_fetch_server_status_unreachable(monkeypatch) -> None:
     )
 
 
+def test_fetch_active_chat_ids_parses_list(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_urlopen(url: str, timeout: float):
+        calls["url"] = url
+        return _FakeResponse({"active_chat_ids": ["a", "b", "b"]})
+
+    monkeypatch.setattr(menubar.urllib.request, "urlopen", fake_urlopen)
+
+    assert menubar.fetch_active_chat_ids(9443) == {"a", "b"}
+    assert calls["url"] == "http://localhost:9443/api/active-chats"
+
+
+def test_fetch_active_chat_ids_handles_unreachable(monkeypatch) -> None:
+    def fake_urlopen(url: str, timeout: float):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(menubar.urllib.request, "urlopen", fake_urlopen)
+
+    assert menubar.fetch_active_chat_ids(8443) == set()
+
+
+def test_fetch_active_chat_ids_ignores_malformed_payload(monkeypatch) -> None:
+    monkeypatch.setattr(
+        menubar.urllib.request,
+        "urlopen",
+        lambda url, timeout: _FakeResponse({"active_chat_ids": "nope"}),
+    )
+
+    assert menubar.fetch_active_chat_ids(8443) == set()
+
+
 def test_status_labels() -> None:
     assert menubar.status_label(menubar.ServerStatus(True, True)) == "Server: running"
     assert menubar.status_label(menubar.ServerStatus(True, False)) == "Server: starting…"
@@ -137,6 +169,14 @@ def test_menubar_template_icons_are_packaged() -> None:
     assert Path(menubar.icon_path("face_scared_template.png")).is_file()
 
 
+def test_spin_icon_frames_are_packaged() -> None:
+    # The spinning-head animation frames must ship so the icon can spin while
+    # a chat is working.
+    frames = menubar.spin_icon_paths()
+    assert len(frames) == menubar.SPIN_FRAME_COUNT
+    assert all(Path(frame).is_file() for frame in frames)
+
+
 def _write_log(workspace: Path, entries: list[dict]) -> None:
     log = workspace / ".runtime" / "notifications.jsonl"
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -192,6 +232,12 @@ def test_chat_menu_title_marks_unread_with_dot() -> None:
     assert menubar.chat_menu_title("Test", unread=False) == "Test"
     assert menubar.chat_menu_title("x" * 80, unread=True, max_length=10).endswith("…")
     assert menubar.chat_menu_title("x" * 80, unread=True, max_length=10).startswith("● ")
+
+
+def test_chat_menu_title_marks_working_and_takes_precedence() -> None:
+    assert menubar.chat_menu_title("Test", unread=False, working=True) == "◌ Test"
+    # A working chat is usually also unread; the spinner wins over the dot.
+    assert menubar.chat_menu_title("Test", unread=True, working=True) == "◌ Test"
 
 
 def test_workspace_menu_label_formats_names() -> None:

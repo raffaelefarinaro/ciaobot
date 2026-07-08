@@ -29,6 +29,15 @@ SERVER_LAUNCHD_LABEL = "com.ciao.server"
 MENUBAR_LAUNCHD_LABEL = "com.ciao.menubar"
 POLL_SECONDS = 10.0
 
+# Spinning-head animation played while a chat is working. Frame count matches
+# the PNGs emitted by scripts/make_menubar_template_icons.py.
+SPIN_FRAME_COUNT = 12
+SPIN_INTERVAL_SECONDS = 0.12
+# How often the background poller asks the server which chats are working.
+# Decoupled from POLL_SECONDS so the icon reacts quickly without doing HTTP on
+# the main run loop (which would stutter the animation).
+WORKING_POLL_SECONDS = 2.0
+
 
 @dataclass(frozen=True, slots=True)
 class ServerStatus:
@@ -48,6 +57,21 @@ def fetch_server_status(port: int, *, timeout: float = 2.0) -> ServerStatus:
     if not isinstance(payload, dict):
         return ServerStatus(reachable=True, ready=False)
     return ServerStatus(reachable=True, ready=bool(payload.get("overall_ready", True)))
+
+
+def fetch_active_chat_ids(port: int, *, timeout: float = 2.0) -> set[str]:
+    """Chat IDs the server reports as working (streaming or running subagents)."""
+
+    url = f"http://localhost:{port}/api/active-chats"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return set()
+    if not isinstance(payload, dict):
+        return set()
+    ids = payload.get("active_chat_ids")
+    return {str(chat_id) for chat_id in ids} if isinstance(ids, list) else set()
 
 
 def status_label(status: ServerStatus) -> str:
@@ -107,6 +131,17 @@ def icon_path(name: str) -> str:
     return str(resources.files("ciao.stock").joinpath("deploy", name))
 
 
+def spin_icon_paths() -> list[str]:
+    """Ordered spinning-head frame paths that actually exist on disk.
+
+    Returns an empty list on installs predating the spin frames so the menu
+    bar falls back to the static icon instead of crashing.
+    """
+
+    paths = [icon_path(f"face_spin_{index:02d}.png") for index in range(SPIN_FRAME_COUNT)]
+    return [path for path in paths if os.path.isfile(path)]
+
+
 @dataclass(frozen=True, slots=True)
 class Notification:
     ts: float
@@ -164,14 +199,20 @@ def chat_menu_title(
     title: str,
     *,
     unread: bool,
+    working: bool = False,
     workspace: str = "",
     show_workspace: bool = False,
     max_length: int = 58,
 ) -> str:
-    """Menu label for an open chat; prefix with a dot when it has unread activity."""
+    """Menu label for an open chat.
+
+    A working chat is prefixed with a spinner glyph; otherwise an unread chat
+    gets the activity dot. Working takes precedence — the icon already spins,
+    and "still running" is the more useful signal than "unread" in that case.
+    """
 
     text = title.strip() or "Untitled chat"
-    prefix = "● " if unread else ""
+    prefix = "◌ " if working else ("● " if unread else "")
     suffix = ""
     if show_workspace and workspace.strip():
         suffix = f" [{workspace_menu_label(workspace)}]"
@@ -416,6 +457,7 @@ def run_menubar(workspace: Path, port: int) -> int:
     # with scripts/make_menubar_template_icons.py.
     face = icon_path("face_template.png")
     face_scared = icon_path("face_scared_template.png")
+    spin_frames = spin_icon_paths()
 
     app = rumps.App("Ciaobot", icon=face, template=True, quit_button=None)
 
@@ -427,7 +469,20 @@ def run_menubar(workspace: Path, port: int) -> int:
         "banners_muted": read_banners_muted(workspace),
         "package_status": status_fetcher(),
         "updating": False,
+        # Live work state, kept fresh by a background poller so the icon can
+        # spin without blocking the run loop on HTTP.
+        "reachable": False,
+        "working_ids": set(),
+        "spin_index": 0,
+        "current_icon": None,
     }
+
+    def _set_icon(path: str) -> None:
+        # Avoid reassigning the same icon 8x/second when idle; only the spin
+        # frames actually change frame-to-frame.
+        if state["current_icon"] != path:
+            state["current_icon"] = path
+            app.icon = path
 
     def on_toggle_mute(sender) -> None:
         muted = not state["banners_muted"]
@@ -525,6 +580,7 @@ def run_menubar(workspace: Path, port: int) -> int:
         status: ServerStatus,
         chats: list[OpenChat],
         unread_ids: set[str],
+        working_ids: set[str],
         addresses: list[str],
         pkg: dict[str, object],
     ) -> None:
@@ -539,6 +595,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                 chat_menu_title(
                     chat.title,
                     unread=chat.chat_id in unread_ids,
+                    working=chat.chat_id in working_ids,
                     workspace=chat.workspace,
                     show_workspace=show_workspace,
                 ),
@@ -583,14 +640,34 @@ def run_menubar(workspace: Path, port: int) -> int:
         item.state = 1 if state["banners_muted"] else 0
         return item
 
+    def animate_icon(_timer=None) -> None:
+        # Owns the status bar icon: spins the head while a chat is working,
+        # otherwise shows the resting face (or the scared face when the server
+        # is unreachable). Pure state read — no HTTP — so it stays smooth.
+        if not state["reachable"]:
+            _set_icon(face_scared)
+            return
+        if state["working_ids"] and spin_frames:
+            state["spin_index"] = (state["spin_index"] + 1) % len(spin_frames)
+            _set_icon(spin_frames[state["spin_index"]])
+        else:
+            _set_icon(face)
+
+    def poll_working() -> None:
+        # Background loop so the working HTTP probe never blocks the run loop.
+        while True:
+            state["working_ids"] = fetch_active_chat_ids(port)
+            time.sleep(WORKING_POLL_SECONDS)
+
     def refresh(_timer=None) -> None:
         status = fetch_server_status(port)
-        app.icon = face if status.reachable else face_scared
+        state["reachable"] = status.reachable
 
         log_entries = read_notifications(workspace)
         chats = read_open_chats(workspace)
         unread_chats = read_unread_chats(workspace)
         unread_ids = {chat.chat_id for chat in unread_chats}
+        working_ids = set(state["working_ids"])
         chats_by_id = _load_chats(workspace)
         addresses = server_addresses(port)
         pkg = status_fetcher()
@@ -602,7 +679,14 @@ def run_menubar(workspace: Path, port: int) -> int:
         fingerprint = (
             status,
             tuple(
-                (c.chat_id, c.title, c.workspace, c.chat_id in unread_ids, show_workspace)
+                (
+                    c.chat_id,
+                    c.title,
+                    c.workspace,
+                    c.chat_id in unread_ids,
+                    c.chat_id in working_ids,
+                    show_workspace,
+                )
                 for c in chats
             ),
             len(unread_ids),
@@ -612,7 +696,7 @@ def run_menubar(workspace: Path, port: int) -> int:
         )
         if fingerprint != state["fingerprint"]:
             state["fingerprint"] = fingerprint
-            _rebuild_menu(status, chats, unread_ids, addresses, pkg)
+            _rebuild_menu(status, chats, unread_ids, working_ids, addresses, pkg)
 
         # Banner only for new log lines whose chat is still unread (same rule
         # as the PWA bell). Reading a chat in the webapp clears it here too.
@@ -631,7 +715,10 @@ def run_menubar(workspace: Path, port: int) -> int:
                 for entry in fresh[:3]:
                     subprocess.run(notify_command(entry.title, entry.body), check=False)
 
+    threading.Thread(target=poll_working, daemon=True).start()
     rumps.Timer(refresh, POLL_SECONDS).start()
+    rumps.Timer(animate_icon, SPIN_INTERVAL_SECONDS).start()
     refresh()
+    animate_icon()
     app.run()
     return 0
