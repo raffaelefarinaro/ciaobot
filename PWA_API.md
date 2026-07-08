@@ -62,6 +62,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/commands` | List slash commands |
 | GET | `/api/agent-assets` | List instruction sources, subagents, slash commands, and workspace health for Settings |
 | GET | `/api/workspace-health` | Scan workspace/vault/discovery-file health |
+| POST | `/api/workspace-health/fix` | Apply the automatic remedies (create missing scaffold files, re-link skills); returns the fresh report |
 | POST | `/api/agent-assets/subagents` | Create a workspace-owned subagent and vault mirror |
 | PATCH, DELETE | `/api/agent-assets/subagents/{name}` | Update or delete a custom workspace-owned subagent |
 | POST | `/api/agent-assets/commands` | Create a workspace-owned slash command and vault mirror |

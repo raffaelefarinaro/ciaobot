@@ -16,6 +16,7 @@ from ciao.web.agent_assets import (
     update_command_endpoint,
     update_subagent_endpoint,
     workspace_health_endpoint,
+    workspace_health_fix_endpoint,
 )
 
 
@@ -36,6 +37,7 @@ def _client(root: Path) -> TestClient:
         routes=[
             Route("/api/agent-assets", agent_assets_endpoint, methods=["GET"]),
             Route("/api/workspace-health", workspace_health_endpoint, methods=["GET"]),
+            Route("/api/workspace-health/fix", workspace_health_fix_endpoint, methods=["POST"]),
             Route("/api/agent-assets/subagents", create_subagent_endpoint, methods=["POST"]),
             Route("/api/agent-assets/subagents/{name}", update_subagent_endpoint, methods=["PATCH"]),
             Route("/api/agent-assets/subagents/{name}", delete_subagent_endpoint, methods=["DELETE"]),
@@ -240,3 +242,26 @@ def test_workspace_health_reports_unsynced_custom_assets(tmp_path: Path) -> None
     data = resp.json()
     assert data["status"] in {"warn", "error"}
     assert any(check["id"] == "unsynced-subagent-orphan" for check in data["checks"])
+
+
+def test_workspace_health_fix_applies_the_suggested_remedies(tmp_path: Path) -> None:
+    """The Fix button covers what the checks suggest in prose: missing
+    scaffold files are created and custom assets get linked into .claude."""
+    (tmp_path / "subagents").mkdir()
+    (tmp_path / "subagents" / "orphan.md").write_text("# Orphan\n", encoding="utf-8")
+    client = _client(tmp_path)
+
+    before = client.get("/api/workspace-health").json()
+    assert before["status"] in {"warn", "error"}
+
+    resp = client.post("/api/workspace-health/fix")
+    assert resp.status_code == 200
+    after = resp.json()
+
+    # The remedies were applied...
+    assert (tmp_path / "CLAUDE.md").is_file()
+    assert (tmp_path / "memory-vault" / "MEMORY.md").is_file()
+    assert (tmp_path / ".claude" / "agents" / "orphan.md").is_symlink()
+    # ...and the endpoint returns the fresh (now clean) report.
+    assert after["status"] == "ok"
+    assert not any(c["status"] != "ok" for c in after["checks"])

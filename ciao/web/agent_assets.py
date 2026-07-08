@@ -7,6 +7,7 @@ import logging
 import os
 import re
 from dataclasses import asdict, dataclass, field
+from importlib import resources
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -364,6 +365,31 @@ def _collect_import_assets(
     return out
 
 
+def _workspace_memory_paths(config: Any, root: Path, vault: Path) -> list[tuple[Path, str]]:
+    """MEMORY.md locations per configured workspace (shared by the health
+    check and the fix endpoint so they cannot drift)."""
+    memory_paths: list[tuple[Path, str]] = []
+    ws_names = []
+    if hasattr(config, "workspace_names") and callable(config.workspace_names):
+        ws_names = config.workspace_names()
+
+    if not ws_names:
+        memory_paths.append((vault / "MEMORY.md", "Workspace MEMORY.md"))
+    else:
+        for name in ws_names:
+            ws_config = config.workspace(name)
+            raw_root = ws_config.vault_root if ws_config else name
+            ws_vault_root = Path(raw_root).expanduser()
+            if not ws_vault_root.is_absolute():
+                if name in {"personal", "work"} and raw_root == name:
+                    ws_vault_root = (vault / name).resolve()
+                else:
+                    ws_vault_root = (root / ws_vault_root).resolve()
+            title = f"Workspace MEMORY.md ({name})" if len(ws_names) > 1 else "Workspace MEMORY.md"
+            memory_paths.append((ws_vault_root / "MEMORY.md", title))
+    return memory_paths
+
+
 def workspace_health(config: Any) -> dict:
     root = Path(config.workspace_root)
     vault = Path(config.vault_root)
@@ -384,25 +410,7 @@ def workspace_health(config: Any) -> dict:
     add("vault-root", "Vault root", "ok" if vault.is_dir() else "error", "Vault root exists." if vault.is_dir() else "Vault root is missing.", vault)
     add("vault-writable", "Vault writable", "ok" if os.access(vault, os.W_OK) else "error", "Vault is writable." if os.access(vault, os.W_OK) else "Vault is not writable.", vault)
 
-    memory_paths = []
-    ws_names = []
-    if hasattr(config, "workspace_names") and callable(config.workspace_names):
-        ws_names = config.workspace_names()
-
-    if not ws_names:
-        memory_paths.append((vault / "MEMORY.md", "Workspace MEMORY.md"))
-    else:
-        for name in ws_names:
-            ws_config = config.workspace(name)
-            raw_root = ws_config.vault_root if ws_config else name
-            ws_vault_root = Path(raw_root).expanduser()
-            if not ws_vault_root.is_absolute():
-                if name in {"personal", "work"} and raw_root == name:
-                    ws_vault_root = (vault / name).resolve()
-                else:
-                    ws_vault_root = (root / ws_vault_root).resolve()
-            title = f"Workspace MEMORY.md ({name})" if len(ws_names) > 1 else "Workspace MEMORY.md"
-            memory_paths.append((ws_vault_root / "MEMORY.md", title))
+    memory_paths = _workspace_memory_paths(config, root, vault)
 
     check_paths = [(root / "CLAUDE.md", "Project CLAUDE.md")]
     check_paths.extend(memory_paths)
@@ -855,3 +863,40 @@ async def workspace_health_endpoint(request: Request) -> JSONResponse:
     except Exception:  # noqa: BLE001
         logger.exception("workspace health failed")
         return JSONResponse({"error": "failed to scan workspace"}, status_code=500)
+
+
+def repair_workspace_health(config: Any) -> dict:
+    """Apply the automatic remedies for every fixable health check.
+
+    Covers exactly the actions the checks suggest in prose: create the
+    missing scaffold files/directories, then rebuild the Claude Code
+    discovery links (sync-skills, without the network-touching upstream
+    refresh). Returns the fresh health report.
+    """
+    from ciao.cli import _copy_tree_if_missing, _write_if_missing
+
+    root = Path(config.workspace_root)
+    vault = Path(config.vault_root)
+
+    # Workspace docs (CLAUDE.md and friends) come from the packaged stock
+    # seeds — the same source `ciao setup` uses.
+    stock_workspace = resources.files("ciao.stock").joinpath("workspace")
+    _copy_tree_if_missing(stock_workspace, root)
+    for memory_path, _title in _workspace_memory_paths(config, root, vault):
+        _write_if_missing(
+            memory_path, "# Memory\n\nDurable workspace memory lives here.\n"
+        )
+    for asset_dir in ("subagents", "commands"):
+        (root / asset_dir).mkdir(parents=True, exist_ok=True)
+
+    sync_workspace_skills(root, refresh_upstream=False)
+    return workspace_health(config)
+
+
+async def workspace_health_fix_endpoint(request: Request) -> JSONResponse:
+    """One-click remedy behind the Settings 'Fix issues' button."""
+    try:
+        return JSONResponse(repair_workspace_health(request.app.state.config))
+    except Exception:  # noqa: BLE001
+        logger.exception("workspace health fix failed")
+        return JSONResponse({"error": "failed to repair workspace"}, status_code=500)

@@ -26,6 +26,7 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/admin/snapshot": "admin internal; deploy is the agent-callable wrapper",
     "/api/package/update": "browser package update; upgrades ciao package and restarts",
     "/api/voice/install-local": "browser voice local engine installation; installs mlx-whisper and restarts",
+    "/api/workspace-health/fix": "browser Settings health Fix button; creates missing scaffold files and re-links skills",
     "/api/tts/install-local": "browser speech local engine installation; installs kokoro-onnx and restarts",
     "/api/workspaces": "browser workspaces list config",
     "/api/workspaces/{name}": "browser workspaces management endpoint",

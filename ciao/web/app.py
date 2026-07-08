@@ -21,6 +21,7 @@ from ciao.web.agent_assets import (
     update_command_endpoint,
     update_subagent_endpoint,
     workspace_health_endpoint,
+    workspace_health_fix_endpoint,
 )
 from ciao.web.commands import list_commands_endpoint, rate_limits_endpoint
 from ciao.web.routes_api import (
@@ -194,6 +195,7 @@ def create_app(config, app_settings=None) -> Starlette:
         # Agent-facing instruction, subagent, and command assets.
         Route("/api/agent-assets", agent_assets_endpoint, methods=["GET"]),
         Route("/api/workspace-health", workspace_health_endpoint, methods=["GET"]),
+        Route("/api/workspace-health/fix", workspace_health_fix_endpoint, methods=["POST"]),
         Route("/api/agent-assets/subagents", create_subagent_endpoint, methods=["POST"]),
         Route("/api/agent-assets/subagents/{name}", update_subagent_endpoint, methods=["PATCH"]),
         Route("/api/agent-assets/subagents/{name}", delete_subagent_endpoint, methods=["DELETE"]),
