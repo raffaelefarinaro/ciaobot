@@ -78,6 +78,10 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     }
     assert data["transcription"]["engine"] == "cloud"
     assert data["transcription"]["cloud_available"] is True
+    assert data["speech"]["engine"] == "cloud"
+    assert data["speech"]["cloud_available"] is True
+    assert data["speech"]["cloud_voice"] == "nova"
+    assert data["speech"]["local_voice"] == "af_heart"
 
 
 def test_get_returns_apfel_effective_when_installed(monkeypatch, tmp_path):
@@ -150,6 +154,21 @@ def test_patch_engine_local(tmp_path):
     assert resp.status_code == 200
     assert config.transcription_engine == "local"
     assert resp.json()["transcription"]["engine"] == "local"
+
+
+def test_patch_tts_engine_local(tmp_path):
+    client, config = _make_client(tmp_path)
+    resp = client.patch("/api/settings/routines", json={"tts_engine": "local"})
+    assert resp.status_code == 200
+    assert config.tts_engine == "local"
+    assert resp.json()["speech"]["engine"] == "local"
+
+
+def test_patch_rejects_bad_tts_engine(tmp_path):
+    client, config = _make_client(tmp_path)
+    resp = client.patch("/api/settings/routines", json={"tts_engine": "megaphone"})
+    assert resp.status_code == 400
+    assert config.tts_engine == "cloud"
 
 
 def test_route_503s_without_store(tmp_path):

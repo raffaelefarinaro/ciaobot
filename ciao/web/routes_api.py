@@ -2170,6 +2170,36 @@ async def chat_voice(request: Request) -> JSONResponse:
     })
 
 
+async def chat_speak(request: Request) -> Response:
+    """Synthesize speech for a message; returns the audio bytes directly."""
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    chat = pcm.get_chat(chat_id)
+    if chat is None:
+        return JSONResponse({"error": "chat not found"}, status_code=404)
+
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    text = (body.get("text") or "").strip() if isinstance(body, dict) else ""
+    if not text:
+        return JSONResponse({"error": "no text to speak"}, status_code=400)
+
+    try:
+        audio, mime, cost = await pcm.synthesize_speech(text)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"error": f"Speech synthesis failed: {exc}"}, status_code=500)
+
+    return Response(
+        audio,
+        media_type=mime,
+        headers={"X-TTS-Cost": f"{cost:.6f}", "Cache-Control": "no-store"},
+    )
+
+
 # ── Images ───────────────────────────────────────────────────────────────
 
 async def chat_images(request: Request) -> JSONResponse:
@@ -2954,7 +2984,7 @@ async def list_models(request: Request) -> JSONResponse:
 def _routines_payload(config, app_settings) -> dict:
     """Shared GET/PATCH response: overrides, effective values, options."""
     import shutil
-    from ciao.voice import mlx_whisper_available
+    from ciao.voice import kokoro_available, mlx_whisper_available
 
     s = app_settings.settings
     ollama = config.ollama
@@ -2969,7 +2999,7 @@ def _routines_payload(config, app_settings) -> dict:
     if config.critique_models:
         critique_effective = config.critique_models
     elif config.openrouter.available:
-        critique_effective = "anthropic/claude-sonnet-4.5,anthropic/claude-haiku-4.5,anthropic/claude-opus-4.8"
+        critique_effective = "anthropic/claude-sonnet-latest,anthropic/claude-haiku-latest,anthropic/claude-opus-latest"
     elif config.ollama.api_key and config.ollama.api_key != "ollama":
         critique_effective = f"{config.ollama.sonnet_model},{config.ollama.haiku_model},{config.ollama.opus_model}"
     else:
@@ -3008,6 +3038,13 @@ def _routines_payload(config, app_settings) -> dict:
             "engine": config.transcription_engine,
             "local_model": config.transcription_local_model,
             "local_available": mlx_whisper_available(),
+            "cloud_available": bool(config.openai_api_key),
+        },
+        "speech": {
+            "engine": config.tts_engine,
+            "cloud_voice": config.tts_cloud_voice,
+            "local_voice": config.tts_local_voice,
+            "local_available": kokoro_available(),
             "cloud_available": bool(config.openai_api_key),
         },
         # Grouped options for the routine model selectors.
@@ -3157,10 +3194,20 @@ async def package_update_endpoint(request: Request) -> JSONResponse:
 
 async def voice_install_local_endpoint(request: Request) -> JSONResponse:
     """Install local voice transcription dependencies (mlx-whisper)."""
+    return await _pip_install_and_restart(request, "mlx-whisper>=0.4.0")
+
+
+async def tts_install_local_endpoint(request: Request) -> JSONResponse:
+    """Install local speech synthesis dependencies (kokoro-onnx)."""
+    return await _pip_install_and_restart(request, "kokoro-onnx>=0.5.0")
+
+
+async def _pip_install_and_restart(request: Request, requirement: str) -> JSONResponse:
+    """pip-install one requirement into the running env, then restart."""
     import sys
     import subprocess
 
-    cmd = [sys.executable, "-m", "pip", "install", "mlx-whisper>=0.4.0"]
+    cmd = [sys.executable, "-m", "pip", "install", requirement]
     try:
         result = await asyncio.to_thread(
             subprocess.run,

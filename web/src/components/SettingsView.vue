@@ -402,15 +402,15 @@
             </div>
           </div>
 
-          <!-- Voice transcription -->
+          <!-- Voice: hear (dictation) and speak (read aloud) -->
           <div class="card">
             <div class="settings-card-header">
-              <p class="section-title">Voice transcription</p>
-              <p class="hint">Choose whether dictation uses the local engine or OpenAI transcription.</p>
+              <p class="section-title">Voice</p>
+              <p class="hint">Choose the engines used to hear you (dictation) and to speak messages aloud.</p>
             </div>
             <div class="routine-row routine-row--flush">
               <div class="routine-info">
-                <span class="routine-name">Engine</span>
+                <span class="routine-name">Hear</span>
               </div>
               <div class="routine-model-controls routine-model-controls--single">
                 <select
@@ -446,6 +446,46 @@
                 @click="installLocalVoice"
               >
                 {{ voiceInstalling ? 'Installing...' : 'Install engine' }}
+              </button>
+            </p>
+            <div class="routine-row routine-row--flush">
+              <div class="routine-info">
+                <span class="routine-name">Speak</span>
+              </div>
+              <div class="routine-model-controls routine-model-controls--single">
+                <select
+                  class="routine-select"
+                  :value="routines.speech.engine"
+                  :disabled="routinesSaving"
+                  @change="saveRoutines({ tts_engine: ($event.target as HTMLSelectElement).value })"
+                >
+                  <option value="local">Local (free)</option>
+                  <option value="cloud" :disabled="!routines.speech.cloud_available">Cloud (OpenAI)</option>
+                </select>
+                <span class="routine-model-hint">
+                  <template v-if="routines.speech.engine === 'local'">
+                    Read-aloud runs on-device via Kokoro (voice <code>{{ routines.speech.local_voice }}</code>).
+                    The first playback downloads the model (~340 MB).
+                  </template>
+                  <template v-else>
+                    Read-aloud uses the OpenAI speech API (needs <code>OPENAI_API_KEY</code>, voice <code>{{ routines.speech.cloud_voice }}</code>, ~$0.015/min).
+                  </template>
+                </span>
+              </div>
+            </div>
+            <p v-if="!routines.speech.local_available" class="hint hint--warn voice-warning">
+              <span v-if="routines.speech.engine === 'local'">
+                <strong>Local Kokoro engine is selected but not installed.</strong> Run <code>pip install 'ciao[tts-local]'</code> or install now:
+              </span>
+              <span v-else>
+                Local speech engine is available (requires installing <code>kokoro-onnx</code>).
+              </span>
+              <button
+                class="btn-primary btn-small voice-install-btn"
+                :disabled="ttsInstalling"
+                @click="installLocalTts"
+              >
+                {{ ttsInstalling ? 'Installing...' : 'Install engine' }}
               </button>
             </p>
           </div>
@@ -2201,6 +2241,29 @@ async function installLocalVoice() {
     routinesResult.value = `Error installing engine: ${e?.message || e}`
   } finally {
     voiceInstalling.value = false
+  }
+}
+
+const ttsInstalling = ref(false)
+
+async function installLocalTts() {
+  ttsInstalling.value = true
+  routinesResult.value = 'Installing local Kokoro engine...'
+  try {
+    const res = await api.post<{ ok: boolean; output?: string }>('/api/tts/install-local', {})
+    if (res.ok) {
+      routinesResult.value = 'Local Kokoro engine installed successfully! Restarting server...'
+      setTimeout(async () => {
+        routinesResult.value = ''
+        await fetchRoutines()
+      }, 5000)
+    } else {
+      routinesResult.value = 'Installation failed.'
+    }
+  } catch (e: any) {
+    routinesResult.value = `Error installing engine: ${e?.message || e}`
+  } finally {
+    ttsInstalling.value = false
   }
 }
 

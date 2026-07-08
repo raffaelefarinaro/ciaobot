@@ -20,6 +20,9 @@ class FakeConfig:
 
         self.transcription_engine = "cloud"
         self.transcription_local_model = "mlx-community/whisper-large-v3-turbo"
+        self.tts_engine = "cloud"
+        self.tts_cloud_voice = "nova"
+        self.tts_local_voice = "af_heart"
         self.critique_models = ""
         self.ollama = OllamaSettings(
             haiku_model="deepseek-v4-flash:cloud",
@@ -75,6 +78,8 @@ def test_update_rejects_bad_engine(tmp_path):
     with pytest.raises(ValueError):
         store.update({"transcription_engine": "telepathy"})
     with pytest.raises(ValueError):
+        store.update({"tts_engine": "telepathy"})
+    with pytest.raises(ValueError):
         store.update({"title_model": 3})
 
 
@@ -92,6 +97,21 @@ def test_apply_overlays_and_clear_restores_defaults(tmp_path):
     store.apply_to_config(config)
     assert config.insights_model == "deepseek-v4-flash:cloud"
     assert config.transcription_engine == "cloud"
+
+
+def test_tts_overrides_apply_and_clear(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    config = FakeConfig()
+
+    store.update({"tts_engine": "local", "tts_local_voice": "im_nicola"})
+    store.apply_to_config(config)
+    assert config.tts_engine == "local"
+    assert config.tts_local_voice == "im_nicola"
+
+    store.update({"tts_engine": "", "tts_local_voice": ""})
+    store.apply_to_config(config)
+    assert config.tts_engine == "cloud"
+    assert config.tts_local_voice == "af_heart"
 
 
 def test_title_override_applies(tmp_path):

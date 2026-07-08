@@ -2006,6 +2006,20 @@ export const useProjectStore = defineStore('projects', () => {
     return data.text
   }
 
+  async function speakMessage(chatId: string, text: string): Promise<Blob> {
+    const res = await fetch(`/api/chats/${chatId}/speak`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+      credentials: 'same-origin',
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText }))
+      throw new Error(err.error || `Speech failed: ${res.status}`)
+    }
+    return res.blob()
+  }
+
   // ── Images ──────────────────────────────────────────────────────────
 
   async function uploadImages(chatId: string, files: File[]): Promise<string[]> {
@@ -2747,7 +2761,7 @@ export const useProjectStore = defineStore('projects', () => {
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, switchWorkspace,
     syncLatest,
-    sendMessage, stopChat, respondPermission, transcribeVoice, uploadImages, uploadImageRefs, removePendingImage, clearPendingImages,
+    sendMessage, stopChat, respondPermission, transcribeVoice, speakMessage, uploadImages, uploadImageRefs, removePendingImage, clearPendingImages,
     addPendingComment, removePendingComment, clearPendingComments,
     addPendingChatComment, removePendingChatComment, clearPendingChatComments, updatePendingChatComment,
     addPendingChatCommentImage, removePendingChatCommentImage,

@@ -44,6 +44,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/chats/{chat_id}/messages` | Load persisted chat messages |
 | GET | `/api/chats/{chat_id}/subagents` | Load subagent transcripts |
 | POST | `/api/chats/{chat_id}/voice` | Upload voice for transcription |
+| POST | `/api/chats/{chat_id}/speak` | Synthesize speech for a message; returns audio bytes |
 | POST | `/api/chats/{chat_id}/images` | Upload chat images |
 | GET | `/api/images/{ref}` | Read uploaded image blob |
 | GET | `/api/workspace-file` | Read allowed text file |
@@ -72,8 +73,9 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/setup-status` | Read first-run setup checks and provider readiness |
 | GET | `/api/package/status` | Read installed package version and best-effort latest GitHub release version |
 | GET | `/api/package/changelog` | List commits between the installed and latest release for the update prompt |
-| POST | `/api/package/update` | Upgrade ciao package from the latest GitHub release wheel and restart |
+| POST | `/api/package/update` | Upgrade ciaobot (`brew upgrade ciaobot` or latest release wheel) and restart |
 | POST | `/api/voice/install-local` | Install local voice transcription dependencies and restart |
+| POST | `/api/tts/install-local` | Install local speech synthesis dependencies (kokoro-onnx) and restart |
 | POST | `/api/setup/finish` | Finish first-run setup from bootstrap mode |
 | GET | `/api/setup/list-dirs` | List local subdirectories for the setup wizard folder picker (bootstrap mode, localhost only) |
 | POST | `/api/setup/mkdir` | Create a folder from the setup wizard folder picker (bootstrap mode, localhost only) |

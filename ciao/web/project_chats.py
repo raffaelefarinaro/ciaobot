@@ -4469,6 +4469,50 @@ class ProjectChatManager:
         cost = duration_sec / 60 * 0.003
         return text, cost
 
+    async def synthesize_speech(self, text: str) -> tuple[bytes, str, float]:
+        """Read a message aloud. Returns (audio_bytes, mime_type, cost_usd).
+
+        Engine selection follows ``config.tts_engine``: ``local`` runs
+        Kokoro on-device via kokoro-onnx (free); anything else uses the
+        OpenAI cloud API. Markdown is reduced to speakable text first.
+        """
+        from ciao.voice import (
+            KokoroSpeaker,
+            OpenAISpeaker,
+            kokoro_available,
+            speech_text,
+        )
+
+        spoken = speech_text(text)
+        if not spoken:
+            raise ValueError("Nothing to read aloud in this message")
+
+        if self._config.tts_engine == "local":
+            if kokoro_available():
+                try:
+                    speaker = KokoroSpeaker(self._config.tts_local_voice)
+                    audio = await speaker.speak(spoken)
+                    return audio, speaker.mime_type, 0.0
+                except Exception as exc:
+                    raise ValueError(
+                        f"Local speech synthesis failed: {exc}. "
+                        "Ensure kokoro-onnx is properly configured or change the engine in Settings → Models."
+                    ) from exc
+            else:
+                raise ValueError(
+                    "Local speech synthesis is selected but kokoro-onnx is not installed. "
+                    "Install the dependency or change the engine to Cloud in Settings → Models."
+                )
+
+        if not self._config.openai_api_key:
+            raise ValueError("OPENAI_API_KEY is required for speech synthesis")
+        speaker = OpenAISpeaker(self._config)
+        audio = await speaker.speak(spoken)
+        # Estimate cost from text length (rough: ~1000 chars per spoken
+        # minute at ~$0.015/min for gpt-4o-mini-tts).
+        cost = len(spoken) / 1000 * 0.015
+        return audio, speaker.mime_type, cost
+
     def save_voice_upload(self, data: bytes, filename: str) -> Path:
         """Save an uploaded voice file and return its path."""
         ext = Path(filename).suffix.lower() or ".webm"

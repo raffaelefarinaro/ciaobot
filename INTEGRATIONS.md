@@ -213,6 +213,9 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_TITLE_MODEL_OVERRIDE`: env-level default for the title-model override normally set from the PWA (Settings → Models tab, persisted in `.runtime/app_settings.json`). When set (either way), it wins over both `CIAO_OLLAMA_TITLE_MODEL` and `CIAO_TITLE_MODEL` and is routed per model: local daemon, Ollama cloud, or Anthropic alias. Empty = automatic routing.
 - `CIAO_TRANSCRIPTION_ENGINE`: voice dictation engine, `cloud` (default; OpenAI API, needs `OPENAI_API_KEY`) or `local` (mlx-whisper on-device, free, Apple Silicon only; bundled in the default bootstrap, this repo now targets macOS only). Runtime-overridable from Settings → Models.
 - `CIAO_TRANSCRIPTION_LOCAL_MODEL`: Hugging Face repo of the mlx-whisper checkpoint for the local engine. Default `mlx-community/whisper-large-v3-turbo` (downloaded on first use).
+- `CIAO_TTS_ENGINE`: read-aloud (speech synthesis) engine, `cloud` (default; OpenAI `gpt-4o-mini-tts`, needs `OPENAI_API_KEY`) or `local` (Kokoro via kokoro-onnx, free, on-device; install with `pip install 'ciao[tts-local]'`, the first playback downloads ~340 MB of model files). Runtime-overridable from Settings → Models.
+- `CIAO_TTS_CLOUD_VOICE`: OpenAI voice preset for the cloud engine. Default `nova`.
+- `CIAO_TTS_LOCAL_VOICE`: Kokoro voice id for the local engine; the first letter picks the language (`af_heart` American English, `im_nicola` Italian, …). Default `af_heart`.
 - `CIAO_MAX_IMAGE_BYTES` / `CIAO_MAX_VOICE_BYTES`: upload size caps. Defaults 10 MB / 25 MB.
 - `CIAO_MEDIA_TTL_HOURS`: auto-cleanup age for uploaded media. Default `72`.
 - `CIAO_PUBLIC_PRIVATE_PATTERNS`: comma-separated private string patterns used by `ciao public-preflight scan` when a `--private-patterns` file is not supplied. Intended for public extraction checks, not normal runtime.

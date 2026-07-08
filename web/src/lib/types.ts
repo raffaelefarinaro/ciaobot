@@ -303,6 +303,13 @@ export interface RoutineSettings {
     local_available: boolean
     cloud_available: boolean
   }
+  speech: {
+    engine: 'cloud' | 'local'
+    cloud_voice: string
+    local_voice: string
+    local_available: boolean
+    cloud_available: boolean
+  }
   model_options: {
     anthropic: string[]
     ollama_cloud: string[]

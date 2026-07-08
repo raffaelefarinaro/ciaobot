@@ -263,6 +263,13 @@ class CiaoConfig:
     # Runtime-overridable from the PWA Settings → Models tab.
     transcription_engine: str = "cloud"
     transcription_local_model: str = "mlx-community/whisper-large-v3-turbo"
+    # Speech synthesis (read a message aloud): ``cloud`` (OpenAI
+    # ``gpt-4o-mini-tts``, needs OPENAI_API_KEY) or ``local`` (Kokoro via
+    # kokoro-onnx, free/offline). Runtime-overridable from the PWA
+    # Settings → Models tab.
+    tts_engine: str = "cloud"
+    tts_cloud_voice: str = "nova"
+    tts_local_voice: str = "af_heart"
     claude_models: list[str] = field(default_factory=lambda: ["opus", "sonnet", "haiku"])
     claude_default_model: str = "opus"
     # Per-workspace default models. Empty string falls back to
@@ -644,6 +651,15 @@ class CiaoConfig:
                 "CIAO_TRANSCRIPTION_LOCAL_MODEL", ""
             ).strip()
             or "mlx-community/whisper-large-v3-turbo",
+            tts_engine=(
+                source.get("CIAO_TTS_ENGINE", "").strip().lower()
+                if source.get("CIAO_TTS_ENGINE", "").strip().lower()
+                in {"cloud", "local"}
+                else "cloud"
+            ),
+            tts_cloud_voice=source.get("CIAO_TTS_CLOUD_VOICE", "").strip() or "nova",
+            tts_local_voice=source.get("CIAO_TTS_LOCAL_VOICE", "").strip()
+            or "af_heart",
             ollama_local_discovery=source.get(
                 "CIAO_OLLAMA_LOCAL_DISCOVERY", ""
             ).strip().lower()

@@ -50,6 +50,13 @@ vi.mock('../../lib/api', () => {
       local_available: true,
       cloud_available: true,
     },
+    speech: {
+      engine: 'cloud',
+      cloud_voice: 'nova',
+      local_voice: 'af_heart',
+      local_available: false,
+      cloud_available: true,
+    },
     model_options: {
       anthropic: ['anthropic/claude-sonnet-4.5', 'anthropic/claude-haiku-4.5'],
       ollama_cloud: ['kimi-k2.7-code:cloud'],

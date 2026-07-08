@@ -38,6 +38,10 @@ test = [
 voice-local = [
   "mlx-whisper==0.4.3",
 ]
+# Local on-device speech synthesis (Kokoro on ONNX Runtime; any platform).
+tts-local = [
+  "kokoro-onnx==0.5.0",
+]
 # macOS menu bar companion (`ciao menubar`). Kept for compatibility: the same
 # pin ships in the main dependencies with a Darwin platform marker.
 menubar = [

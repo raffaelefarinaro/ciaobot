@@ -35,6 +35,11 @@ class AppSettings:
     transcription_engine: str = ""
     # Whisper checkpoint for the local engine (HF repo id).
     transcription_local_model: str = ""
+    # Speech synthesis engine: "cloud" (OpenAI) or "local" (Kokoro).
+    tts_engine: str = ""
+    # Voice preset per engine (OpenAI voice name / Kokoro voice id).
+    tts_cloud_voice: str = ""
+    tts_local_voice: str = ""
     # Comma-separated list of models for the critique / adversarial-review skill.
     critique_models: str = ""
     # Per-backend tier aliases used when a chat asks for haiku/sonnet/opus
@@ -93,8 +98,8 @@ class AppSettingsStore:
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
             value = value.strip()
-            if key == "transcription_engine" and value not in _VALID_ENGINES:
-                raise ValueError("transcription_engine must be 'cloud' or 'local'")
+            if key in {"transcription_engine", "tts_engine"} and value not in _VALID_ENGINES:
+                raise ValueError(f"{key} must be 'cloud' or 'local'")
             setattr(self.settings, key, value)
         self._save()
         return self.settings
@@ -113,6 +118,9 @@ class AppSettingsStore:
 
                 "transcription_engine": config.transcription_engine,
                 "transcription_local_model": config.transcription_local_model,
+                "tts_engine": config.tts_engine,
+                "tts_cloud_voice": config.tts_cloud_voice,
+                "tts_local_voice": config.tts_local_voice,
                 "critique_models": config.critique_models,
                 "ollama_haiku_model": config.ollama.haiku_model,
                 "ollama_sonnet_model": config.ollama.sonnet_model,
@@ -132,6 +140,9 @@ class AppSettingsStore:
         config.transcription_local_model = (
             s.transcription_local_model or d["transcription_local_model"]
         )
+        config.tts_engine = s.tts_engine or d["tts_engine"]
+        config.tts_cloud_voice = s.tts_cloud_voice or d["tts_cloud_voice"]
+        config.tts_local_voice = s.tts_local_voice or d["tts_local_voice"]
         config.critique_models = s.critique_models or d["critique_models"]
         config.ollama = replace(
             config.ollama,

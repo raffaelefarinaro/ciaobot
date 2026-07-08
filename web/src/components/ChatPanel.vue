@@ -228,8 +228,21 @@
                 <svg v-if="copiedMessageKey === `assistant-${i}`" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
                 <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
               </button>
+              <button
+                type="button"
+                class="message-action-btn"
+                :class="{ 'message-action-btn--busy': speakLoadingKey === `assistant-${i}` }"
+                :title="speakingMessageKey === `assistant-${i}` ? 'Stop' : 'Read aloud'"
+                :aria-label="speakingMessageKey === `assistant-${i}` ? 'Stop reading' : 'Read message aloud'"
+                :disabled="speakLoadingKey !== null && speakLoadingKey !== `assistant-${i}`"
+                @click="speakMessage(item.msg.content, `assistant-${i}`)"
+              >
+                <svg v-if="speakingMessageKey === `assistant-${i}`" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+                <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+              </button>
             </div>
           </div>
+          <p v-if="speakError?.key === `assistant-${i}`" class="speak-error">{{ speakError.message }}</p>
           <button
             v-if="item.msg.is_error"
             class="retry-btn fix-btn"
@@ -1630,6 +1643,55 @@ async function copyMessageText(text: string, key: string): Promise<void> {
   }
 }
 
+// ── Read aloud ─────────────────────────────────────────────────────────
+const speakingMessageKey = ref<string | null>(null)
+const speakLoadingKey = ref<string | null>(null)
+const speakError = ref<{ key: string; message: string } | null>(null)
+let speakAudio: HTMLAudioElement | null = null
+
+function stopSpeaking(): void {
+  if (speakAudio) {
+    speakAudio.pause()
+    if (speakAudio.src.startsWith('blob:')) URL.revokeObjectURL(speakAudio.src)
+    speakAudio = null
+  }
+  speakingMessageKey.value = null
+}
+
+async function speakMessage(text: string, key: string): Promise<void> {
+  if (speakingMessageKey.value === key) {
+    stopSpeaking()
+    return
+  }
+  stopSpeaking()
+  const chatId = store.activeChatId
+  if (!chatId || !text.trim() || speakLoadingKey.value) return
+  speakLoadingKey.value = key
+  speakError.value = null
+  try {
+    const blob = await store.speakMessage(chatId, text)
+    // The user may have started another playback while this one synthesized.
+    stopSpeaking()
+    const audio = new Audio(URL.createObjectURL(blob))
+    speakAudio = audio
+    speakingMessageKey.value = key
+    audio.onended = audio.onerror = () => {
+      if (speakAudio === audio) stopSpeaking()
+    }
+    await audio.play()
+  } catch (e) {
+    stopSpeaking()
+    speakError.value = { key, message: e instanceof Error ? e.message : 'Speech failed' }
+    setTimeout(() => {
+      if (speakError.value?.key === key) speakError.value = null
+    }, 6000)
+  } finally {
+    if (speakLoadingKey.value === key) speakLoadingKey.value = null
+  }
+}
+
+onBeforeUnmount(stopSpeaking)
+
 // System bubbles produced by _summarize_task_notification (routes_api.py)
 // announce a subagent completion ("🤖 Subagent completed: ..." / "🤖 Agent
 // \"X\" completed"). renderItems uses them as the chronological anchor for
@@ -2665,6 +2727,20 @@ function insertImageRef(n: number) {
 
 .message-action-btn:active {
   transform: scale(0.95);
+}
+
+.message-action-btn--busy {
+  animation: speak-pulse 1s ease-in-out infinite;
+}
+
+@keyframes speak-pulse {
+  50% { opacity: 0.35; }
+}
+
+.speak-error {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--error);
 }
 
 .message.assistant.error {
