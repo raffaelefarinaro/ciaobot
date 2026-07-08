@@ -142,7 +142,7 @@
           <div class="settings-card-header">
             <p class="section-title">Notifications</p>
             <p class="hint">
-              Get a phone notification when a chat replies and the app is not focused.
+              Get a notification when a chat replies and the app is not focused.
             </p>
           </div>
           <div v-if="needsIosInstall" class="hint hint--warn">
