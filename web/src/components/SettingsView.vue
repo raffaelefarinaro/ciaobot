@@ -1007,7 +1007,7 @@
                 :key="item.id"
                 class="skill-row instruction-row"
                 :class="{ expanded: isInstructionExpanded(item) }"
-                :style="{ paddingLeft: `${Math.min(item.level || 0, 4) * 18}px` }"
+                :style="{ paddingLeft: `${10 + Math.min(item.level || 0, 4) * 18}px` }"
                 @click="toggleInstruction(item)"
               >
                 <div class="skill-main">
