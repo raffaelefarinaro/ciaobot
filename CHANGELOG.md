@@ -10,6 +10,7 @@
 - feat(web): first-run product tour overlay (`f257f41`)
 - feat(voice): read messages aloud with cloud (OpenAI) or local (Kokoro) TTS (`44e26b7`)
 - feat(settings): add open-source card linking to the GitHub repo (`6b12104`)
+- feat(web): product tour missing-state hints and toast UX polish (`245ad2d`)
 
 ### Changed
 - Anchor the SubagentPanel before the completion notice, not after the report. (`18bb2ef`)
@@ -23,6 +24,7 @@
 - polish(settings): tidy routine-context layout, drop redundant hint (`455ac28`)
 - polish(settings): explain how to change the main workspace path (`18359e4`)
 - refactor(prompt): move Ciaobot system instructions into system_prompt.md (`828ea3d`)
+- polish(settings): label local title engine, fix select chevron spacing (`6b200b3`)
 
 ### Fixed
 - fix(dag,skillevo): record non-OK node status + write stubs for under-cap no-proposal skills (`bc01710`)
@@ -36,6 +38,7 @@
 - docs(readme): illustrate chat annotations and pinned files with screenshots (`863990b`)
 - test(models): align model-bucket expectation with -latest alias defaults (`72094d7`)
 - chore(web): refresh bundled index.html from the latest PWA build (`e5eb2cf`)
+- docs(readme): condense the install/setup-wizard walkthrough (`3b42be5`)
 
 ## v0.4.5 - 2026-07-08
 
