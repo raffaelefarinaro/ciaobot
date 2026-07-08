@@ -29,8 +29,6 @@ fi
 WHEEL_URL="https://github.com/raffaelefarinaro/ciaobot/releases/download/v${VERSION}/ciaobot-${VERSION}-py3-none-any.whl"
 
 cat >"$FORMULA_PATH" <<EOF
-require "language/python/virtualenv"
-
 class Ciaobot < Formula
   include Language::Python::Virtualenv
 
@@ -45,37 +43,58 @@ class Ciaobot < Formula
 
   def install
     python = Formula["python@3.12"].opt_bin/"python3.12"
-    venv = virtualenv_create(libexec, python)
-    venv.pip_install buildpath.glob("ciaobot-*.whl").first
+    virtualenv_create(libexec, python)
+    # Install only the app wheel here; it is pure Python, so Homebrew's
+    # install-linkage step finds no Mach-O files to rewrite. The dependency
+    # tree is installed in post_install: prebuilt wheels such as jiter ship
+    # dylibs with @rpath install names and no Mach-O header padding, and the
+    # linkage fixer aborts on them ("Failed to fix install linkage").
+    system libexec/"bin/python", "-m", "pip", "install", "--no-deps",
+           buildpath.glob("ciaobot-*.whl").first
+    bin.install_symlink Dir[libexec/"bin/ciao*"]
   end
 
   def post_install
-    workspace = ENV.fetch("CIAO_WORKSPACE", File.expand_path("~/ciaobot"))
-    setup_command = "#{bin}/ciao setup --workspace #{workspace}"
+    # Resolve the app's pinned dependency tree from PyPI now, after the
+    # install-linkage step has run, so dependency wheels keep their dylib
+    # install names as built (wheels are self-contained and need no rewrite).
+    # The app itself is already installed, so pip only adds what is missing.
+    system libexec/"bin/python", "-m", "pip", "install", "ciaobot==#{version}"
 
-    unless ciao_gui_session?
-      ohai "Ciaobot installed. Open Terminal and run \`#{setup_command}\` to finish."
-      return
-    end
+    # Setup cannot run here: Homebrew's post-install sandbox blocks launchctl
+    # and fakes HOME. Point the user at the browser setup wizard instead.
+    puts <<~BANNER
 
-    system bin/"ciao",
-           "setup",
-           "--workspace", workspace,
-           "--python", "#{libexec}/bin/python",
-           "--load-launchd"
-  rescue StandardError => e
-    opoo "Ciaobot installed, but automatic setup did not complete: #{e.message}"
-    opoo "Open Terminal and run \`#{setup_command}\` to finish."
+      ##############################################################
+      #                                                            #
+      #   Ciaobot is installed! To finish setup, run:              #
+      #                                                            #
+      #       ciao run                                             #
+      #                                                            #
+      #   then open http://localhost:8443 in your browser and      #
+      #   follow the setup wizard.                                 #
+      #                                                            #
+      ##############################################################
+
+    BANNER
   end
 
-  def ciao_gui_session?
-    return false if ENV["CI"]
-    return false if ENV["SSH_CONNECTION"] || ENV["SSH_TTY"]
-    return false if ENV["HOMEBREW_CIAOBOT_SKIP_SETUP"]
+  def caveats
+    <<~CAVEATS
+      To finish setting up Ciaobot, run:
 
-    system "/bin/launchctl", "print", "gui/#{Process.uid}",
-           out: File::NULL,
-           err: File::NULL
+        ciao run
+
+      and open http://localhost:8443 in your browser. The setup wizard asks
+      for a workspace folder (default ~/ciaobot) and a model provider, then
+      writes the config and installs the Ciaobot menu bar app and background
+      server. Afterwards, open Ciaobot anytime from the menu bar icon or
+      /Applications/Ciaobot.app.
+
+      For scripted or headless setups, skip the wizard with:
+
+        ciao setup --workspace <dir>
+    CAVEATS
   end
 
   test do
