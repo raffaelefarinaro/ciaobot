@@ -268,6 +268,38 @@ def _is_homebrew_cellar_path(path: Path) -> bool:
     return "Cellar/ciaobot" in text or "Cellar/ciao/" in text
 
 
+def _brew_installed_version(brew: str) -> str:
+    """Return the Cellar version of ``ciaobot`` per Homebrew, or "" if unknown."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            [brew, "list", "--versions", "ciaobot"],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+    except Exception:
+        return ""
+    parts = result.stdout.strip().split()
+    return parts[-1] if len(parts) >= 2 else ""
+
+
+def _pip_show_version(python_exe: str) -> str:
+    """Return the installed ``ciaobot`` version per ``pip show``, or "" if unknown."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            [python_exe, "-m", "pip", "show", "ciaobot"],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+    except Exception:
+        return ""
+    for line in result.stdout.splitlines():
+        if line.startswith("Version:"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
 def detect_install_mode() -> str:
     """Return "homebrew", "pip_venv", "editable", or "unknown"."""
     import sys
@@ -350,6 +382,8 @@ def update_package(
             "command": "git pull",
         }
 
+    before_version = ""
+    check_version: Callable[[], str] = lambda: ""
     if mode == "homebrew":
         brew = _resolve_brew()
         if not brew:
@@ -360,6 +394,8 @@ def update_package(
                 "command": "brew upgrade ciaobot",
             }
         cmd = [brew, "upgrade", "ciaobot"]
+        check_version = lambda: _brew_installed_version(brew)
+        before_version = check_version()
     elif mode == "pip_venv":
         wheel_url, error = _latest_wheel_url(opener=opener, timeout=timeout)
         if not wheel_url:
@@ -370,6 +406,8 @@ def update_package(
                 "command": manual_command,
             }
         cmd = [sys.executable, "-m", "pip", "install", "-U", wheel_url]
+        check_version = lambda: _pip_show_version(sys.executable)
+        before_version = check_version()
     else:
         return {
             "ok": False,
@@ -382,6 +420,24 @@ def update_package(
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         output = (result.stdout.strip() + "\n" + result.stderr.strip()).strip()
         if result.returncode == 0:
+            after_version = check_version()
+            if before_version and after_version and before_version == after_version:
+                # Exit 0 doesn't mean an upgrade happened: e.g. Homebrew reports
+                # success and no-ops when the tap formula hasn't caught up yet
+                # with the GitHub release the update banner is checking against,
+                # so the version never advances and the banner never clears.
+                return {
+                    "ok": False,
+                    "mode": mode,
+                    "error": (
+                        f"Still on {after_version} after running the upgrade — the "
+                        "package source has no newer version available yet. If "
+                        "this keeps happening, the release may not have "
+                        "propagated to it; try again shortly."
+                    ),
+                    "output": output,
+                    "command": " ".join(cmd),
+                }
             return {
                 "ok": True,
                 "mode": mode,
