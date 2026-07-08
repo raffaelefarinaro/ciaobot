@@ -138,6 +138,15 @@ def test_restart_menubar_command_targets_launchd_label() -> None:
     ]
 
 
+def test_relaunch_stale_process_kicks_launchd(monkeypatch) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        menubar.subprocess, "run", lambda cmd, **kwargs: calls.append(cmd)
+    )
+    menubar.relaunch_stale_process(uid=501)
+    assert calls == [["launchctl", "kickstart", "-k", "gui/501/com.ciao.menubar"]]
+
+
 def test_stop_server_command_boots_out_launchd_label() -> None:
     # bootout (not kill) because the server plist is KeepAlive=true, so a
     # plain kill would be relaunched; bootout takes it out of the domain.

@@ -109,6 +109,24 @@ def restart_menubar_command(uid: int | None = None) -> list[str]:
     return ["launchctl", "kickstart", "-k", f"gui/{resolved}/{MENUBAR_LAUNCHD_LABEL}"]
 
 
+def relaunch_stale_process(uid: int | None = None) -> None:
+    """Ask launchd to restart this menu bar process onto the current install.
+
+    A bundled resource (e.g. the status icon) going missing at runtime means
+    Homebrew swapped the installed version out from under this already-running
+    process — for example a bare `brew upgrade ciaobot` outside the app's own
+    Update button, followed by `brew cleanup` removing the old keg. The
+    process's already-imported ``ciao`` module keeps resolving resource paths
+    into that now-deleted directory for the rest of its life, so retrying
+    in-process can never succeed. `launchctl kickstart -k` re-resolves the
+    launchd plist's `/opt/homebrew/opt/ciaobot/...` symlink, which always
+    points at the current keg, so the relaunched process picks up the
+    current install.
+    """
+
+    subprocess.run(restart_menubar_command(uid), check=False)
+
+
 def stop_server_command(uid: int | None = None) -> list[str]:
     """Fully stop the server agent when quitting the menu bar.
 
@@ -482,7 +500,14 @@ def run_menubar(workspace: Path, port: int) -> int:
         # frames actually change frame-to-frame.
         if state["current_icon"] != path:
             state["current_icon"] = path
-            app.icon = path
+            try:
+                app.icon = path
+            except OSError:
+                # The icon file is gone from disk: see relaunch_stale_process.
+                # Fix it by relaunching rather than crash-looping on every
+                # animation frame for the rest of this process's life.
+                relaunch_stale_process()
+                os._exit(1)
 
     def on_toggle_mute(sender) -> None:
         muted = not state["banners_muted"]
