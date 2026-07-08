@@ -3138,15 +3138,22 @@ details[open] > .activity-summary::before {
 .activity-icon { font-size: var(--text-base); }
 
 .activity-spinner {
-  width: 10px;
-  height: 10px;
-  border: 2px solid var(--accent2);
-  border-top-color: var(--accent);
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
-  animation: spin 0.8s linear infinite;
+  background: var(--accent);
+  animation: activity-pulse 1.1s ease-in-out infinite;
 }
 
-@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes activity-pulse {
+  0%, 100% { transform: scale(0.55); opacity: 0.35; }
+  50% { transform: scale(1); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .activity-spinner { animation-duration: 2.2s; }
+}
+
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
 .activity-lines {
