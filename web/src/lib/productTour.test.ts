@@ -7,6 +7,7 @@ import {
   clearTourCompleted,
   isTourCompleted,
   markTourCompleted,
+  shouldShowMissingHint,
   tourTargetSelector,
 } from './productTour'
 
@@ -35,5 +36,18 @@ describe('productTour', () => {
 
   it('builds data-tour selectors', () => {
     expect(tourTargetSelector('chat-input')).toBe('[data-tour="chat-input"]')
+  })
+
+  it('shows missing hints when chat UI or projects are unavailable', () => {
+    const modelStep = PRODUCT_TOUR_STEPS.find(s => s.id === 'model')!
+    const fileStep = PRODUCT_TOUR_STEPS.find(s => s.id === 'file-cards')!
+    const projectsStep = PRODUCT_TOUR_STEPS.find(s => s.id === 'projects')!
+
+    expect(shouldShowMissingHint(modelStep, { hasActiveChat: false, projectCount: 1 }, false)).toBe(true)
+    expect(shouldShowMissingHint(modelStep, { hasActiveChat: true, projectCount: 1 }, true)).toBe(false)
+    expect(shouldShowMissingHint(fileStep, { hasActiveChat: false, projectCount: 1 }, true)).toBe(true)
+    expect(shouldShowMissingHint(fileStep, { hasActiveChat: true, projectCount: 1 }, true)).toBe(false)
+    expect(shouldShowMissingHint(projectsStep, { hasActiveChat: true, projectCount: 0 }, true)).toBe(true)
+    expect(shouldShowMissingHint(projectsStep, { hasActiveChat: true, projectCount: 2 }, true)).toBe(false)
   })
 })

@@ -2429,13 +2429,11 @@ async function addSubagent() {
       description: newSubagentDescription.value.trim(),
       prompt: newSubagentPrompt.value.trim(),
     })
-    addSubagentResult.value = `Created ${res.path}`
+    addSubagentResult.value = ''
+    notifySaved(`Created ${res.path}`, 'Subagent')
     resetSubagentForm(false)
+    showAddSubagent.value = false
     await fetchAgentAssets()
-    setTimeout(() => {
-      showAddSubagent.value = false
-      addSubagentResult.value = ''
-    }, 2000)
   } catch (e: any) {
     addSubagentError.value = true
     addSubagentResult.value = `Error: ${e?.message || e}`
@@ -2456,13 +2454,11 @@ async function addCommand() {
       argument_hint: newCommandArgumentHint.value.trim(),
       prompt: newCommandPrompt.value.trim(),
     })
-    addCommandResult.value = `Created ${res.path}`
+    addCommandResult.value = ''
+    notifySaved(`Created ${res.path}`, 'Command')
     resetCommandForm(false)
+    showAddCommand.value = false
     await Promise.all([fetchAgentAssets(), fetchCommands()])
-    setTimeout(() => {
-      showAddCommand.value = false
-      addCommandResult.value = ''
-    }, 2000)
   } catch (e: any) {
     addCommandError.value = true
     addCommandResult.value = `Error: ${e?.message || e}`
@@ -2614,14 +2610,12 @@ async function addGithubSkill() {
       skill: githubSkillName.value.trim() || undefined,
     })
     if (res.ok) {
-      addGithubSkillResult.value = res.message || 'Skill added successfully.'
+      addGithubSkillResult.value = ''
+      notifySaved(res.message || 'Skill added successfully.', 'Skills')
       githubSource.value = ''
       githubSkillName.value = ''
+      showAddGithubSkill.value = false
       await fetchSkills()
-      setTimeout(() => {
-        showAddGithubSkill.value = false
-        addGithubSkillResult.value = ''
-      }, 2000)
     } else {
       addGithubSkillError.value = true
       addGithubSkillResult.value = res.error || 'Failed to add skill.'
@@ -2955,13 +2949,12 @@ async function removeWorkspace(name: string) {
   workspacesResult.value = ''
   try {
     await projectStore.deleteWorkspace(name)
-    workspacesResult.value = `Workspace "${name}" deleted.`
+    notifySaved(`Workspace "${name}" deleted.`, 'Workspaces')
     await fetchWorkspacesList()
   } catch (e: any) {
     workspacesResult.value = `Error: ${e?.message || e}`
   } finally {
     workspacesSaving.value = null
-    setTimeout(() => { if (workspacesResult.value.startsWith('Workspace')) workspacesResult.value = '' }, 3000)
   }
 }
 
