@@ -114,6 +114,13 @@ _CIAOBOT_SYSTEM_INSTRUCTIONS = """\
 ## Custom Commands, Agents, and Skills
 - Custom commands live in `commands/`, subagents in `subagents/`, and skills in `skills/`. Edit these source folders; do not hand-edit generated `.claude/` or execution-environment directories.
 
+## Google Workspace (gws)
+- Run every Google API call through the profile wrapper: `scripts/gws-profile.sh <personal|work> <gws-subcommand...>`. It routes credentials to the right config dir and already execs `gws`. **Never** `source` it (it ends with `exec`), and **never** repeat `gws` after the profile (`scripts/gws-profile.sh personal calendar ...`, not `... personal gws calendar ...`).
+- The active profile for a chat is the `gws_profile` value in the runtime context (env `GWS_PROFILE`); use it unless the user asks otherwise. Config dirs: personal → `<workspace>/secrets/gws-personal/`, work → `<workspace>/secrets/gws/`.
+- `gws` stdout may start with a non-JSON banner line (e.g. `Using keyring backend: file`). Strip it before parsing JSON.
+- Put request bodies in `--json` and URL/query parameters in `--params`. For shared-drive files add `"supportsAllDrives": true` to `--params`.
+- Auth/scope gotchas: use `gws auth login --full` for complete scopes (partial `--services` logins can miss the calendar scope); do **not** substitute `gcloud auth print-access-token` for Drive/Docs (insufficient scopes). Operators set up OAuth from Settings → Integrations. Per-service command detail lives in the stock `gws-*` skills.
+
 ## Entity Detection
 - Passively notice mentions of people, places, projects, or concepts. Check if a vault page already exists. If already in the vault, use that context silently. If new and durable, ask 1-3 targeted clarifying questions (or run the `/interrogation` flow) and save it. Ephemeral references should be skipped.
 """

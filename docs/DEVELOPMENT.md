@@ -41,6 +41,22 @@ On recent macOS, `scripts/run-ciao.sh` and the `scripts/dev.sh` wrapper source `
 
 No manual step is needed; `ensure-deps.sh` handles both. If you set up the venv by hand and hit either error, run `scripts/ensure-deps.sh` once to repair `activate`.
 
+### Homebrew distribution
+
+macOS users can install from the [homebrew-ciaobot](https://github.com/raffaelefarinaro/homebrew-ciaobot) tap:
+
+```bash
+brew install raffaelefarinaro/ciaobot/ciaobot
+```
+
+The formula template lives in `deploy/homebrew/ciaobot.rb`. Regenerate it with:
+
+```bash
+./scripts/update-homebrew-tap.sh <version> <wheel-sha256>
+```
+
+On each GitHub release, `publish.yml` updates the tap automatically. Add a repo-scoped `HOMEBREW_TAP_GITHUB_TOKEN` secret to this repository so the workflow can push to `homebrew-ciaobot` (the default `GITHUB_TOKEN` cannot write across repos).
+
 ## Frontend build
 
 ```bash
@@ -80,9 +96,11 @@ cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 
 ## Skills, subagents, and slash commands
 
-Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `ciao-schedules`, `vault-read`, …) and the upstream **`gws-*` skills** for Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). The packaged `gws-shared` skill documents Ciaobot profile/auth conventions (`scripts/gws-profile.sh`, PWA OAuth upload). In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories. A workspace skill with the same name as a packaged one overrides it.
+Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `ciao-schedules`, `vault-read`, …) and the upstream **`gws-*` skills** for Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories. A workspace skill with the same name as a packaged one overrides it.
 
-Edit canonical sources, not the generated `.claude/` dirs. Do not run `npx skills update` or `gws generate-skills` ad-hoc; both re-expand the lockfile and repopulate bloat.
+The `gws-*` stock skills are kept byte-for-byte upstream: `python -m ciao.release --apply` regenerates them from the installed `gws` CLI via `ciao/gws_skills.py` (which strips only the generator's "Community & Feedback Etiquette" bloat from `gws-shared`). Ciaobot-specific gws conventions (the `scripts/gws-profile.sh` wrapper, profile config dirs, JSON banner stripping, `--json` vs `--params`, `supportsAllDrives`) are **not** in the skill anymore — they live in the system prompt (`ciao/memory_injector.py`), so the agent gets them every turn and the skills stay regeneratable. OAuth/setup walkthroughs live in `ciao-capabilities` and the Integrations page.
+
+Edit canonical sources, not the generated `.claude/` dirs. Do not run `npx skills update` ad-hoc (it re-expands the lockfile and repopulates bloat); regenerate the `gws-*` skills through `ciao/release.py` rather than calling `gws generate-skills` by hand.
 
 ## Change guidelines
 

@@ -368,6 +368,108 @@ def _pr_body(version: str, changelog_section: str, checks: list[str]) -> str:
 """
 
 
+def _check_dependency_updates(root: Path) -> list:
+    """Return available dependency updates, or [] if the check cannot run."""
+    try:
+        from ciao.dependency_review import check_available_updates
+
+        return check_available_updates(root)
+    except Exception as exc:  # noqa: BLE001 - never block a release on this
+        print(f"Dependency update check skipped: {exc}")
+        return []
+
+
+def _print_dependency_updates(updates: list) -> None:
+    print()
+    if not updates:
+        print("Dependency updates: none available.")
+        return
+    print("Dependency updates available (review whether to adopt):")
+    for u in updates:
+        flags = []
+        if u.auto:
+            flags.append("auto")
+        flags.append("safe" if u.is_safe else "major")
+        print(
+            f"  - {u.key} [{u.ecosystem}] {u.current} -> {u.latest} ({', '.join(flags)})"
+        )
+    auto = [u.key for u in updates if u.auto]
+    if auto:
+        print(
+            f"  (auto: {', '.join(auto)} will be bumped on --apply; "
+            "review the rest and update manually if it makes sense)"
+        )
+
+
+def _apply_auto_dependency_updates(root: Path, updates: list, *, reinstall: bool) -> None:
+    if not any(getattr(u, "auto", False) for u in updates):
+        return
+    try:
+        from ciao.dependency_review import apply_auto_updates
+
+        applied = apply_auto_updates(root, updates, reinstall=reinstall)
+    except Exception as exc:  # noqa: BLE001 - never block a release on this
+        print(f"Auto dependency update skipped: {exc}")
+        return
+    if applied:
+        print(f"Auto-updated dependencies: {', '.join(applied)}")
+
+
+def _stock_skills_dir(root: Path) -> Path:
+    return root / "ciao" / "stock" / "skills"
+
+
+def _gws_skills_versions(root: Path) -> tuple[str | None, str | None]:
+    """Return ``(installed_gws_cli_version, pinned_stock_version)``."""
+    try:
+        from ciao.gws_skills import installed_gws_version, pinned_gws_version
+
+        return installed_gws_version(), pinned_gws_version(_stock_skills_dir(root))
+    except Exception as exc:  # noqa: BLE001 - never block a release on this
+        print(f"gws skills version check skipped: {exc}")
+        return None, None
+
+
+def _print_gws_skills_status(installed: str | None, pinned: str | None) -> None:
+    print()
+    if installed is None:
+        print("Stock gws skills: `gws` CLI not found; packaged skills left as-is.")
+        return
+    if pinned and installed != pinned:
+        print(
+            f"Stock gws skills: gws CLI {installed} != pinned {pinned}; "
+            "will regenerate from the CLI on --apply."
+        )
+    else:
+        print(
+            f"Stock gws skills: pinned at {pinned or 'unknown'} (gws CLI {installed}); "
+            "--apply still refreshes any upstream doc drift."
+        )
+
+
+def _refresh_stock_gws_skills(root: Path) -> list[Path]:
+    """Regenerate the packaged ``gws-*`` skills from the CLI.
+
+    Returns the list of ``SKILL.md`` paths that changed so the caller can add
+    them to the release commit. Never raises: a missing/failed ``gws`` CLI just
+    leaves the packaged skills untouched.
+    """
+    try:
+        from ciao.gws_skills import regenerate_stock_gws_skills
+
+        result = regenerate_stock_gws_skills(_stock_skills_dir(root), write=True)
+    except Exception as exc:  # noqa: BLE001 - never block a release on this
+        print(f"Stock gws skills refresh skipped: {exc}")
+        return []
+    if result.missing:
+        print(f"WARN: gws CLI no longer generates: {', '.join(result.missing)}")
+    if result.updated:
+        print(f"Regenerated stock gws skills: {', '.join(result.updated)}")
+    else:
+        print("Stock gws skills already current.")
+    return [_stock_skills_dir(root) / name / "SKILL.md" for name in result.updated]
+
+
 def _print_plan(
     *,
     root: Path,
@@ -455,6 +557,22 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Skip frontend test/build checks; package smoke still runs.",
     )
+    parser.add_argument(
+        "--skip-dep-check",
+        action="store_true",
+        help=(
+            "Do not check PyPI/npm for newer dependency versions or "
+            "auto-bump the Claude SDK."
+        ),
+    )
+    parser.add_argument(
+        "--skip-gws-skills",
+        action="store_true",
+        help=(
+            "Do not regenerate the packaged gws-* stock skills from the "
+            "installed gws CLI."
+        ),
+    )
 
     args = parser.parse_args(argv)
     root = Path(args.repo_root).expanduser().resolve()
@@ -496,6 +614,15 @@ def main(argv: list[str] | None = None) -> int:
         create_pr=args.create_pr,
     )
 
+    dep_updates: list = []
+    if not args.skip_dep_check:
+        dep_updates = _check_dependency_updates(root)
+        _print_dependency_updates(dep_updates)
+
+    if not args.skip_gws_skills:
+        gws_installed, gws_pinned = _gws_skills_versions(root)
+        _print_gws_skills_status(gws_installed, gws_pinned)
+
     if not args.apply:
         return 0
 
@@ -510,6 +637,14 @@ def main(argv: list[str] | None = None) -> int:
         version=version,
         changelog_section=changelog_section,
     )
+
+    if not args.skip_dep_check:
+        _apply_auto_dependency_updates(
+            root, dep_updates, reinstall=not args.skip_checks
+        )
+
+    if not args.skip_gws_skills:
+        touched = [*touched, *_refresh_stock_gws_skills(root)]
 
     checks = [] if args.skip_checks else _run_checks(root, skip_frontend=args.skip_frontend)
 

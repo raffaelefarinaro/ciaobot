@@ -52,6 +52,19 @@ def test_system_prompt_payload_returns_instructions_for_empty() -> None:
     assert "Ciaobot System Instructions" in payload["append"]
 
 
+def test_system_prompt_includes_gws_operational_notes() -> None:
+    """The gws integration notes moved out of the gws-shared skill and must
+    live in the system prompt so the agent gets them every turn."""
+    payload = mi.system_prompt_payload("")
+    assert payload is not None
+    append = payload["append"]
+    assert "Google Workspace (gws)" in append
+    assert "scripts/gws-profile.sh" in append
+    # Key operational gotchas that used to live in gws-shared.
+    assert "GWS_PROFILE" in append
+    assert "supportsAllDrives" in append
+
+
 def test_system_prompt_payload_appends_to_claude_code_preset() -> None:
     payload = mi.system_prompt_payload("hello memory")
     assert payload is not None
