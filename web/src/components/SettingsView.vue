@@ -230,6 +230,18 @@
           </div>
           <div v-if="debugSummary" class="action-result">{{ debugSummary }}</div>
         </div>
+
+        <!-- Open source -->
+        <div class="card">
+          <div class="settings-card-header">
+            <p class="section-title">Open source</p>
+            <p class="hint">
+              Ciaobot is an open-source project. Support and contributions are welcome:
+              report issues, suggest features, or open a pull request on
+              <a href="https://github.com/raffaelefarinaro/ciaobot" target="_blank" rel="noopener">GitHub</a>.
+            </p>
+          </div>
+        </div>
       </template>
 
 
