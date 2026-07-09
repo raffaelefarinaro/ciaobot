@@ -35,6 +35,9 @@ POLL_SECONDS = 10.0
 # the PNGs emitted by scripts/make_menubar_template_icons.py.
 SPIN_FRAME_COUNT = 12
 SPIN_INTERVAL_SECONDS = 0.12
+# Pulsing dot icon beside working chats in the dropdown menu.
+DOT_PULSE_FRAME_COUNT = 8
+CHAT_ACTIVITY_ICON_SIZE = (14, 14)
 # How often the background poller asks the server which chats are working.
 # Decoupled from POLL_SECONDS so the icon reacts quickly without doing HTTP on
 # the main run loop (which would stutter the animation).
@@ -320,6 +323,13 @@ def spin_icon_paths() -> list[str]:
     return [path for path in paths if os.path.isfile(path)]
 
 
+def dot_pulse_icon_paths() -> list[str]:
+    """Ordered pulsing-dot frame paths for working chats in the dropdown menu."""
+
+    paths = [icon_path(f"dot_pulse_{index:02d}.png") for index in range(DOT_PULSE_FRAME_COUNT)]
+    return [path for path in paths if os.path.isfile(path)]
+
+
 def workspace_menu_label(name: str) -> str:
     """Human-readable workspace name for menu labels (matches the PWA sidebar)."""
 
@@ -335,19 +345,25 @@ def chat_menu_title(
     *,
     unread: bool,
     working: bool = False,
+    working_has_icon: bool = False,
     workspace: str = "",
     show_workspace: bool = False,
     max_length: int = 58,
 ) -> str:
     """Menu label for an open chat.
 
-    A working chat is prefixed with a spinner glyph; otherwise an unread chat
-    gets the activity dot. Working takes precedence — the icon already spins,
-    and "still running" is the more useful signal than "unread" in that case.
+    Working chats get a pulsing template icon when frames are packaged;
+    otherwise a static ◌ prefix. Unread chats get a ● prefix and can show
+    both signals when a working chat is also unread (matching the PWA).
     """
 
     text = title.strip() or "Untitled chat"
-    prefix = "◌ " if working else ("● " if unread else "")
+    if working and not working_has_icon:
+        prefix = "◌ "
+    elif unread:
+        prefix = "● "
+    else:
+        prefix = ""
     suffix = ""
     if show_workspace and workspace.strip():
         suffix = f" [{workspace_menu_label(workspace)}]"
@@ -561,6 +577,7 @@ def run_menubar(workspace: Path, port: int) -> int:
     face = icon_path("face_template.png")
     face_scared = icon_path("face_scared_template.png")
     spin_frames = spin_icon_paths()
+    dot_frames = dot_pulse_icon_paths()
 
     app = rumps.App("Ciaobot", icon=face, template=True, quit_button=None)
 
@@ -575,7 +592,9 @@ def run_menubar(workspace: Path, port: int) -> int:
         "reachable": False,
         "working_ids": set(),
         "spin_index": 0,
+        "pulse_index": 0,
         "current_icon": None,
+        "chat_items": {},
     }
 
     def _set_icon(path: str) -> None:
@@ -721,19 +740,29 @@ def run_menubar(workspace: Path, port: int) -> int:
 
         # Open chats live directly in the menu, no header — just the list.
         show_workspace = len({chat.workspace for chat in chats if chat.workspace}) > 1
-        chat_items = [
-            rumps.MenuItem(
+        chat_items_by_id: dict[str, object] = {}
+        chat_items = []
+        for chat in chats:
+            working = chat.chat_id in working_ids
+            unread = chat.chat_id in unread_ids
+            working_has_icon = working and bool(dot_frames)
+            item = rumps.MenuItem(
                 chat_menu_title(
                     chat.title,
-                    unread=chat.chat_id in unread_ids,
-                    working=chat.chat_id in working_ids,
+                    unread=unread,
+                    working=working,
+                    working_has_icon=working_has_icon,
                     workspace=chat.workspace,
                     show_workspace=show_workspace,
                 ),
                 callback=_open_chat_callback(chat.chat_id),
+                icon=dot_frames[0] if working_has_icon else None,
+                dimensions=CHAT_ACTIVITY_ICON_SIZE,
+                template=True if working_has_icon else None,
             )
-            for chat in chats
-        ]
+            chat_items.append(item)
+            chat_items_by_id[chat.chat_id] = item
+        state["chat_items"] = chat_items_by_id
         update_items: list[object] = []
         if pkg.get("update_available"):
             label = (
@@ -781,6 +810,16 @@ def run_menubar(workspace: Path, port: int) -> int:
         app.menu.clear()
         app.menu = menu
 
+    def _animate_working_chat_icons() -> None:
+        if not dot_frames or not state["working_ids"]:
+            return
+        frame = dot_frames[state["pulse_index"] % len(dot_frames)]
+        for chat_id in state["working_ids"]:
+            item = state["chat_items"].get(chat_id)
+            if item is not None:
+                item.set_icon(frame, dimensions=CHAT_ACTIVITY_ICON_SIZE, template=True)
+        state["pulse_index"] = (state["pulse_index"] + 1) % len(dot_frames)
+
     def animate_icon(_timer=None) -> None:
         # Owns the status bar icon: spins the head while a chat is working or
         # a self-update is in flight, otherwise shows the resting face (or the
@@ -794,6 +833,7 @@ def run_menubar(workspace: Path, port: int) -> int:
             _set_icon(spin_frames[state["spin_index"]])
         else:
             _set_icon(face)
+        _animate_working_chat_icons()
 
     def poll_working() -> None:
         # Background loop so the working HTTP probe never blocks the run loop.

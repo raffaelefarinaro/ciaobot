@@ -342,6 +342,12 @@ def test_spin_icon_frames_are_packaged() -> None:
     assert all(Path(frame).is_file() for frame in frames)
 
 
+def test_dot_pulse_frames_are_packaged() -> None:
+    frames = menubar.dot_pulse_icon_paths()
+    assert len(frames) == menubar.DOT_PULSE_FRAME_COUNT
+    assert all(Path(frame).is_file() for frame in frames)
+
+
 def test_chat_menu_title_marks_unread_with_dot() -> None:
     assert menubar.chat_menu_title("Test", unread=True) == "● Test"
     assert menubar.chat_menu_title("Test", unread=False) == "Test"
@@ -351,8 +357,9 @@ def test_chat_menu_title_marks_unread_with_dot() -> None:
 
 def test_chat_menu_title_marks_working_and_takes_precedence() -> None:
     assert menubar.chat_menu_title("Test", unread=False, working=True) == "◌ Test"
-    # A working chat is usually also unread; the spinner wins over the dot.
     assert menubar.chat_menu_title("Test", unread=True, working=True) == "◌ Test"
+    assert menubar.chat_menu_title("Test", unread=True, working=True, working_has_icon=True) == "● Test"
+    assert menubar.chat_menu_title("Test", unread=False, working=True, working_has_icon=True) == "Test"
 
 
 def test_workspace_menu_label_formats_names() -> None:
