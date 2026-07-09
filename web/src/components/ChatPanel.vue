@@ -1798,6 +1798,20 @@ function isSubagentCompletionNotice(content: string): boolean {
   return /^\u{1F916} (Subagent|Agent\b)/u.test(content.trim())
 }
 
+// Pull the dispatched agent's own description out of a completion-notice
+// bubble (e.g. 'Agent "Curate recent chats and proposals" finished') so the
+// notice can be tied to its exact SubagentTranscript by name. turn_index
+// can't be used for this: it only increments on a message that ships to the
+// server as a fresh prompt, but a chat can advance server-side turns purely
+// via internal continuations (auto-drained queued follow-ups) with no
+// corresponding visible `role: 'user'` bubble — so the render walk's turn
+// counter can be several turns behind the async subagent's real turn_index
+// by the time its notice appears.
+function noticeSubagentName(content: string): string | null {
+  const m = content.match(/Agent "([^"]+)"/)
+  return m ? m[1] : null
+}
+
 // Subagent activity lines are tagged with the leading turnstile arrow by the
 // store's tool_use handler when an event arrives with parent_tool_use_id set.
 // Used to indent and de-emphasize them so the trace reads "parent → subagent
@@ -2000,6 +2014,22 @@ const renderData = computed<{
     else subsByTurn.delete(currentTurnIndex)
   }
 
+  // Place exactly the subagent a completion notice names, searching every
+  // turn bucket rather than just currentTurnIndex (see noticeSubagentName).
+  // Returns false if no match was found so the caller can fall back.
+  const flushStandaloneSubagentByName = (name: string): boolean => {
+    for (const [idx, subs] of subsByTurn.entries()) {
+      const match = subs.find(s => isBackgroundSubagent(s) && s.description === name)
+      if (!match) continue
+      items.push({ kind: 'subagents', subs: [match] })
+      const remaining = subs.filter(s => s !== match)
+      if (remaining.length) subsByTurn.set(idx, remaining)
+      else subsByTurn.delete(idx)
+      return true
+    }
+    return false
+  }
+
   const flushTurn = (isFinal = false) => {
     if (!buffer.length) return
     // Find index of the LAST assistant text message (the final answer).
@@ -2082,11 +2112,17 @@ const renderData = computed<{
     ) {
       flushTurn()
       // A subagent-completion notice marks where the background work ended:
-      // flush the dispatching turn's standalone panel just before it so the
-      // chat reads chronologically (dispatch reply → background agents →
+      // flush that exact subagent's standalone panel just before it so the
+      // chat reads chronologically (dispatch reply → background agent →
       // completion notice → report) instead of dumping the panel after the
-      // report at the end of the turn.
-      if (isSubagentCompletionNotice(msg.content)) flushStandaloneSubagents()
+      // report at the end of the turn. Match by name, not currentTurnIndex —
+      // a chat can advance several server-side turns via auto-drained queued
+      // follow-ups with no new `role: 'user'` bubble, leaving the render
+      // walk's turn counter behind the async subagent's real turn_index.
+      if (isSubagentCompletionNotice(msg.content)) {
+        const name = noticeSubagentName(msg.content)
+        if (!name || !flushStandaloneSubagentByName(name)) flushStandaloneSubagents()
+      }
       items.push({ kind: 'system', msg })
     } else {
       // assistant text, _activity tool block, _thinking note, or _filecard:
