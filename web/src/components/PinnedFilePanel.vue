@@ -41,6 +41,16 @@
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
         </button>
+        <button
+          class="btn-icon"
+          :class="{ ok: openExternalState === 'ok' }"
+          @click="openExternally"
+          title="Open in default app"
+          aria-label="Open in default app"
+          :disabled="loading || !!error || openExternalState === 'loading'"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+        </button>
       </template>
     </PaneHeader>
     <div class="pfp-main" ref="mainEl">
@@ -53,6 +63,15 @@
           :src="`/api/workspace-image?path=${encodeURIComponent(cleanPath)}&t=${imageTimestamp}`"
           :alt="basename"
         />
+        <div v-else-if="kind === 'pdf' && pptxNeedsLibreoffice" class="pfp-libreoffice-notice hint hint--warn">
+          <strong>LibreOffice is required to preview PowerPoint files.</strong>
+          <span v-if="libreofficeInstallError"> {{ libreofficeInstallError }}</span>
+          <button
+            class="btn-primary btn-small"
+            :disabled="libreofficeInstalling"
+            @click="installLibreoffice"
+          >{{ libreofficeInstalling ? 'Installing…' : 'Install LibreOffice' }}</button>
+        </div>
         <iframe
           v-else-if="kind === 'pdf'"
           class="pfp-pdf-iframe"
@@ -236,6 +255,8 @@ import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, r
 import { useProjectStore } from '../stores/projects'
 import { parseFrontmatter, type FrontmatterValue } from '../lib/markdownFrontmatter'
 import { renderFileMarkdown } from '../lib/safeMarkdown'
+import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
+import { api } from '../lib/api'
 import PaneHeader from './PaneHeader.vue'
 const ExcalidrawViewer = defineAsyncComponent(() => import('./ExcalidrawViewer.vue'))
 
@@ -250,8 +271,45 @@ const error = ref('')
 const content = ref('')
 const kind = ref<'text' | 'image' | 'excalidraw' | 'pdf'>('text')
 const refreshed = ref(false)
+const openExternalState = ref<'' | 'loading' | 'ok'>('')
 const isEditingExcalidraw = ref(false)
 const imageTimestamp = ref(Date.now())
+
+// .pptx preview needs LibreOffice (soffice) server-side to convert to PDF.
+// Checked proactively so a missing install shows a real "Install" button
+// instead of the iframe silently failing to load with a browser-level error.
+const pptxNeedsLibreoffice = ref(false)
+const libreofficeInstalling = ref(false)
+const libreofficeInstallError = ref('')
+
+async function checkLibreofficeStatus(): Promise<void> {
+  try {
+    const res = await api.get<{ available: boolean }>('/api/libreoffice-status')
+    pptxNeedsLibreoffice.value = !res.available
+  } catch {
+    // Best-effort: if the check itself fails, fall through to the iframe
+    // and let it show whatever error the browser gives.
+    pptxNeedsLibreoffice.value = false
+  }
+}
+
+async function installLibreoffice(): Promise<void> {
+  libreofficeInstalling.value = true
+  libreofficeInstallError.value = ''
+  try {
+    const res = await api.post<{ ok: boolean; error?: string }>('/api/libreoffice-install', {})
+    if (res.ok) {
+      await checkLibreofficeStatus()
+      if (!pptxNeedsLibreoffice.value) imageTimestamp.value = Date.now()
+    } else {
+      libreofficeInstallError.value = res.error || 'Installation failed.'
+    }
+  } catch (e) {
+    libreofficeInstallError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    libreofficeInstalling.value = false
+  }
+}
 
 const rootEl = ref<HTMLElement>()
 const mainEl = ref<HTMLElement>()
@@ -394,6 +452,9 @@ async function load(): Promise<void> {
     error.value = ''
     content.value = ''
     imageTimestamp.value = Date.now()
+    pptxNeedsLibreoffice.value = false
+    libreofficeInstallError.value = ''
+    if (/\.pptx$/i.test(cleanPath.value)) void checkLibreofficeStatus()
     return
   }
   const isExcalidraw = /\.excalidraw$/i.test(cleanPath.value)
@@ -452,6 +513,19 @@ function downloadFile(): void {
   document.body.appendChild(a)
   a.click()
   a.remove()
+}
+
+async function openExternally(): Promise<void> {
+  if (loading.value || error.value || openExternalState.value === 'loading') return
+  openExternalState.value = 'loading'
+  const result = await openWorkspaceFileExternally(cleanPath.value)
+  if (result.ok) {
+    openExternalState.value = 'ok'
+    setTimeout(() => { openExternalState.value = '' }, 1200)
+    return
+  }
+  openExternalState.value = ''
+  projectsStore.pushErrorToast('Could not open file', result.error)
 }
 
 watch(() => props.filePath, () => load(), { immediate: true })
@@ -1122,6 +1196,13 @@ watch(() => props.filePath, () => {
 }
 .pfp-error {
   color: var(--error, #f87171);
+}
+.pfp-libreoffice-notice {
+  margin: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
 }
 .pfp-img {
   max-width: 100%;

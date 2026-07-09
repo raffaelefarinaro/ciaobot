@@ -21,6 +21,15 @@
             ↓
           </button>
           <button
+            class="fv-btn"
+            :class="{ ok: openExternalState === 'ok' }"
+            @click="openExternally"
+            title="Open in default app"
+            :disabled="store.loading || !!store.error || openExternalState === 'loading'"
+          >
+            {{ openExternalState === 'loading' ? '…' : '↗' }}
+          </button>
+          <button
             v-if="canPin"
             class="fv-btn"
             :class="{ active: isPinned }"
@@ -173,6 +182,15 @@
               :chat-id="store.chatId"
               :read-only="true"
             />
+            <div v-else-if="store.kind === 'pdf' && store.pptxNeedsLibreoffice" class="fv-libreoffice-notice hint hint--warn">
+              <strong>LibreOffice is required to preview PowerPoint files.</strong>
+              <span v-if="store.libreofficeInstallError"> {{ store.libreofficeInstallError }}</span>
+              <button
+                class="btn-primary btn-small"
+                :disabled="store.libreofficeInstalling"
+                @click="store.installLibreoffice"
+              >{{ store.libreofficeInstalling ? 'Installing…' : 'Install LibreOffice' }}</button>
+            </div>
             <iframe
               v-else-if="store.kind === 'pdf'"
               class="fv-pdf-iframe"
@@ -358,6 +376,7 @@ import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
 import { parseFrontmatter } from '../lib/markdownFrontmatter'
 import { renderFileMarkdown } from '../lib/safeMarkdown'
+import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { createTerminalDiffLines, terminalDiffPrefix, type TerminalDiffKind } from '../lib/terminalDiff'
 const ExcalidrawViewer = defineAsyncComponent(() => import('./ExcalidrawViewer.vue'))
 
@@ -829,6 +848,7 @@ const preEl = ref<HTMLElement>()
 const preCodeEl = ref<HTMLElement>()
 const sidebarDraftInputEl = ref<HTMLTextAreaElement>()
 const copyState = ref<'' | 'ok'>('')
+const openExternalState = ref<'' | 'loading' | 'ok'>('')
 
 const activePinKey = computed(() => {
   return projectsStore.activeChatId || projectsStore.activeChat?.project_id || ''
@@ -1356,6 +1376,19 @@ async function copyPath(): Promise<void> {
   } catch { /* clipboard may be unavailable; silently ignore */ }
 }
 
+async function openExternally(): Promise<void> {
+  if (store.loading || store.error || openExternalState.value === 'loading') return
+  openExternalState.value = 'loading'
+  const result = await openWorkspaceFileExternally(store.path)
+  if (result.ok) {
+    openExternalState.value = 'ok'
+    setTimeout(() => { openExternalState.value = '' }, 1200)
+    return
+  }
+  openExternalState.value = ''
+  projectsStore.pushErrorToast('Could not open file', result.error)
+}
+
 // Download the currently-open file. For images we hand the browser the
 // workspace-image URL and let it stream the bytes directly; for text we
 // already have the content in memory so a Blob is the simplest path.
@@ -1504,6 +1537,13 @@ if (typeof window !== 'undefined') {
 }
 .fv-error {
   color: var(--error, #f87171);
+}
+.fv-libreoffice-notice {
+  margin: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
 }
 .fv-pre {
   margin: 0;

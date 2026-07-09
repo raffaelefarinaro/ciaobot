@@ -53,6 +53,11 @@ const swipeStyle = computed(() => ({
 
 function onPointerDown(toast: InAppToast, e: PointerEvent) {
   if (e.pointerType === 'mouse' && e.button !== 0) return
+  // Capturing the pointer on the toast div also redirects the compatibility
+  // `click` event to it, so a press starting on a button (Fix/Close) would
+  // never reach the button's own handler. Skip swipe tracking entirely when
+  // the gesture starts on a button and let the click behave normally.
+  if ((e.target as HTMLElement | null)?.closest('button')) return
   swipeId.value = toast.id
   swipeStartX.value = e.clientX
   swipeDX.value = 0
@@ -94,7 +99,11 @@ async function onClick(toast: InAppToast) {
 
 async function onFix(toast: InAppToast) {
   store.dismissToast(toast.id)
-  await store.fixError({ errorText: toast.errorText || toast.body, title: 'Fix error' })
+  try {
+    await store.fixError({ errorText: toast.errorText || toast.body, title: 'Fix error' })
+  } catch (e) {
+    store.pushErrorToast('Could not open fix chat', `${(e as Error)?.message || e}`)
+  }
 }
 </script>
 

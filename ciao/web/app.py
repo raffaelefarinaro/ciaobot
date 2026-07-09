@@ -89,6 +89,8 @@ from ciao.web.routes_api import (
     package_update_endpoint,
     tts_install_local_endpoint,
     voice_install_local_endpoint,
+    libreoffice_status_endpoint,
+    libreoffice_install_endpoint,
     project_restore,
     project_files_list,
     project_files_upload,
@@ -102,6 +104,7 @@ from ciao.web.routes_api import (
     workspace_file,
     workspace_file_write,
     workspace_image,
+    workspace_open,
 )
 from ciao.web.routes_chat import ws_chat, ws_events
 from ciao.web.routes_push import (
@@ -177,6 +180,9 @@ def create_app(config, app_settings=None) -> Starlette:
         Route("/api/workspace-file", workspace_file_write, methods=["POST"]),
         Route("/api/workspace-image", workspace_image, methods=["GET"]),
         Route("/api/workspace-binary", workspace_binary, methods=["GET"]),
+        Route("/api/workspace-open", workspace_open, methods=["POST"]),
+        Route("/api/libreoffice-status", libreoffice_status_endpoint, methods=["GET"]),
+        Route("/api/libreoffice-install", libreoffice_install_endpoint, methods=["POST"]),
         # File snapshots — History and Diff tabs in the file viewer.
         Route("/api/file-history", file_history, methods=["GET"]),
         Route("/api/file-content", file_content, methods=["GET"]),

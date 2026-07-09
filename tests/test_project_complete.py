@@ -579,8 +579,14 @@ def test_list_completed_projects_scans_both_workspaces(tmp_path: Path) -> None:
     by_stem = {c["stem"]: c for c in all_completed}
     assert by_stem["2026-q2-foo"]["workspace"] == "work"
     assert by_stem["2026-q2-foo"]["name"] == "Q2 Foo"
+    assert by_stem["2026-q2-foo"]["vault_doc_path"] == (
+        "memory-vault/work/projects/completed/2026-q2-foo/README.md"
+    )
     assert by_stem["Upwordo"]["workspace"] == "personal"
     assert by_stem["Upwordo"]["context"] == "App"
+    assert by_stem["Upwordo"]["vault_doc_path"] == (
+        "memory-vault/personal/projects/completed/Upwordo/README.md"
+    )
 
     # Workspace filter scopes the scan.
     work_only = pcm.list_completed_projects("work")
@@ -611,6 +617,7 @@ def test_list_completed_projects_scans_configured_workspace(tmp_path: Path) -> N
             "name": "Done",
             "context": "Finished client work",
             "workspace": "client",
+            "vault_doc_path": "vaults/client/projects/completed/done/README.md",
         }
     ]
 

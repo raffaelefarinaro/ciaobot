@@ -28,6 +28,8 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/voice/install-local": "browser voice local engine installation; installs mlx-whisper and restarts",
     "/api/workspace-health/fix": "browser Settings health Fix button; creates missing scaffold files and re-links skills",
     "/api/tts/install-local": "browser speech local engine installation; installs kokoro-onnx and restarts",
+    "/api/libreoffice-install": "browser file-viewer Install LibreOffice button; runs brew install --cask libreoffice, no restart needed",
+    "/api/workspace-open": "browser file-viewer Open-in-default-app button; only meaningful when the PWA talks to a local Ciao instance",
     "/api/workspaces": "browser workspaces list config",
     "/api/workspaces/{name}": "browser workspaces management endpoint",
     "/api/settings/providers": "browser LLM providers configuration settings",

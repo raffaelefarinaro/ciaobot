@@ -422,6 +422,16 @@ _TASK_NOTIFICATION_RE = re.compile(
 # summary, plus an optional task-type).
 _INNER_TAG_RE = re.compile(r"<([a-z-]+)>(.*?)</\1>", re.DOTALL)
 
+# The subagent's own final message often self-reports its sign-off ("Agent
+# "X" completed", "...finished", "...done", ...) rather than a fixed CLI
+# string, so the "already shaped, pass through as-is" check has to tolerate
+# whatever terminal-status verb the model picked instead of matching only
+# "completed" — otherwise it doubles up with the generic wrapper below (e.g.
+# "Subagent completed: Agent "X" finished").
+_AGENT_SELF_STATUS_RE = re.compile(
+    r'^Agent "[^"]+" (?:completed|finished|done|succeeded|failed)\b', re.IGNORECASE
+)
+
 
 def _is_cli_internal_envelope(content: str) -> bool:
     """True if `content` starts with a CLI-synthesized user-message wrapper."""
@@ -444,7 +454,7 @@ def _summarize_task_notification(content: str) -> str | None:
     summary = fields.get("summary", "")
     first_line = summary.splitlines()[0].strip() if summary else ""
     icon = "\U0001F916"  # 🤖
-    if first_line.startswith("Agent ") and " completed" in first_line:
+    if _AGENT_SELF_STATUS_RE.match(first_line):
         # Already shaped like 'Agent "X" completed'; pass it through.
         return f"{icon} {first_line}"
     if first_line:
@@ -2344,6 +2354,23 @@ def _find_soffice() -> str | None:
     return None
 
 
+async def libreoffice_status_endpoint(request: Request) -> JSONResponse:
+    """Whether LibreOffice (soffice) is available to render .pptx previews."""
+    return JSONResponse({"available": _find_soffice() is not None})
+
+
+async def libreoffice_install_endpoint(request: Request) -> JSONResponse:
+    """Install LibreOffice via Homebrew Cask. No server restart needed —
+    workspace_binary probes for soffice fresh on every request."""
+    from ciao.upgrade import upgrade_libreoffice
+
+    result = await upgrade_libreoffice()
+    if not result.success:
+        error = result.stderr.strip() or "Install failed."
+        return JSONResponse({"ok": False, "error": error}, status_code=500)
+    return JSONResponse({"ok": True, "output": result.stdout})
+
+
 async def workspace_binary(request: Request) -> Response:
     """Serve a read-only binary file (PDF, ZIP, office doc) from the workspace."""
     config = request.app.state.config
@@ -2497,6 +2524,58 @@ async def workspace_image(request: Request) -> Response:
         }
         media_type = _FALLBACK_MIMES.get(resolved.suffix.lower(), "application/octet-stream")
     return FileResponse(resolved, media_type=media_type)
+
+
+def _open_path_with_default_app(path: Path) -> None:
+    """Open *path* with the OS default application on the machine running Ciao."""
+    if sys.platform == "darwin":
+        subprocess.run(["open", str(path)], check=True, timeout=30)
+        return
+    if sys.platform == "win32":
+        os.startfile(str(path))  # type: ignore[attr-defined]
+        return
+    opener = shutil.which("xdg-open")
+    if not opener:
+        raise OSError("xdg-open is not available on this platform")
+    subprocess.run([opener, str(path)], check=True, timeout=30)
+
+
+async def workspace_open(request: Request) -> Response:
+    """Open a file with the OS default application on the machine running Ciao.
+
+    Body: ``{"path": str}``. Uses the same path resolver as the workspace
+    viewers (relative paths anchor to workspace_root; fuzzy basename lookup
+    is allowed). The open happens server-side, so this only works when the
+    PWA is talking to a local Ciao instance.
+    """
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "bad json"}, status_code=400)
+    raw = str(body.get("path", "")).strip()
+    if not raw:
+        return JSONResponse({"error": "missing path"}, status_code=400)
+
+    config = request.app.state.config
+    roots = _allowed_roots(config)
+    result = _resolve_workspace_path(roots, raw, allow_fuzzy=True)
+    if isinstance(result, Response):
+        return result
+    resolved = result
+
+    try:
+        await asyncio.to_thread(_open_path_with_default_app, resolved)
+    except FileNotFoundError:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    except subprocess.CalledProcessError as exc:
+        return JSONResponse(
+            {"error": f"failed to open file (exit {exc.returncode})"},
+            status_code=500,
+        )
+    except OSError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    return JSONResponse({"ok": True, "path": str(resolved)})
 
 
 # ── File snapshots / history ─────────────────────────────────────────────

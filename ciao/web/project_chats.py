@@ -366,18 +366,24 @@ async def _generate_chat_title(
         except Exception as exc:
             logger.info("apfel title spawn failed (%s); falling back", exc)
 
+    # "apfel" is a routing sentinel meaning "use the on-device CLI above",
+    # not a real Claude/Ollama model id. If the binary is missing or its
+    # subprocess didn't produce a title, run_oneshot must never see it
+    # literally — that always fails ("There's an issue with the selected
+    # model (apfel)"). Substitute the standard fallback model instead.
+    fallback_model = model if model != "apfel" else "haiku"
     try:
         text = await run_oneshot(
             user_prompt,
             system_prompt=_TITLE_SYSTEM_PROMPT,
-            model=model,
+            model=fallback_model,
             env=env,
             timeout_s=timeout_s,
         )
         if text:
             return _clean_title(text, user_snippet)
     except Exception as exc:
-        logger.info("Title generation via Claude %s failed: %s", model, exc)
+        logger.info("Title generation via Claude %s failed: %s", fallback_model, exc)
         return _fallback_title(user_snippet)
 
     return _fallback_title(user_snippet)
@@ -1627,7 +1633,7 @@ class ProjectChatManager:
         restore UI needs. Pass ``workspace`` to scope to one workspace; omit
         to list both.
 
-        Each entry is ``{stem, name, context, workspace}``.
+        Each entry is ``{stem, name, context, workspace, vault_doc_path}``.
         """
         workspaces = self._workspace_names() if workspace is None else (workspace,)
         out: list[dict] = []
@@ -1642,6 +1648,7 @@ class ProjectChatManager:
                     "name": name,
                     "context": context,
                     "workspace": ws,
+                    "vault_doc_path": self._display_path(readme) if readme is not None else "",
                 })
         out.sort(key=lambda d: (d["workspace"], d["name"].lower()))
         return out

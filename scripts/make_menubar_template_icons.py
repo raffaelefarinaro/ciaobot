@@ -12,6 +12,7 @@ Usage: python3 scripts/make_menubar_template_icons.py
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from PIL import Image
@@ -29,6 +30,12 @@ OUTPUT_SIZE = 40
 # Number of frames in the "spinning head" animation the menu bar plays while
 # a chat is working. Kept in sync with menubar.SPIN_FRAME_COUNT.
 SPIN_FRAME_COUNT = 12
+
+# Pulsing dot beside working chats in the open-chats menu. Matches the PWA
+# sidebar's ciao-pulse keyframes; kept in sync with menubar.DOT_PULSE_FRAME_COUNT.
+DOT_PULSE_FRAME_COUNT = 8
+DOT_GRID_SIZE = 8
+DOT_OUTPUT_SIZE = 16
 
 
 def _face_mask(source: Path) -> Image.Image:
@@ -98,11 +105,46 @@ def to_spin_frames(source: Path, deploy: Path, *, frames: int = SPIN_FRAME_COUNT
         print(f"{source.name} -> {name}")
 
 
+def _dot_pulse_frame(scale: float, opacity: float) -> Image.Image:
+    """One frame of the chunky activity dot shown beside working chats."""
+
+    mask = Image.new("L", (DOT_GRID_SIZE, DOT_GRID_SIZE), 0)
+    pixels = mask.load()
+    center = (DOT_GRID_SIZE - 1) / 2.0
+    radius = (DOT_GRID_SIZE / 2 - 0.6) * scale
+    alpha = max(0, min(255, int(255 * opacity)))
+    for y in range(DOT_GRID_SIZE):
+        for x in range(DOT_GRID_SIZE):
+            distance = math.hypot(x - center, y - center)
+            if distance <= radius:
+                pixels[x, y] = alpha
+    # Nearest-neighbor upscale keeps the dot visibly pixelated at menu size.
+    return mask.resize((DOT_OUTPUT_SIZE, DOT_OUTPUT_SIZE), Image.NEAREST)
+
+
+def to_dot_pulse_frames(deploy: Path, *, frames: int = DOT_PULSE_FRAME_COUNT) -> None:
+    """Render the pulsing activity-dot animation for menu item icons."""
+
+    for index in range(frames):
+        # Same breathing curve as ProjectSidebar.vue's ciao-pulse keyframes.
+        phase = index / frames
+        wave = 0.5 - 0.5 * math.cos(2 * math.pi * phase)
+        scale = 0.55 + 0.45 * wave
+        opacity = 0.35 + 0.65 * wave
+        frame = _dot_pulse_frame(scale, opacity)
+        template = Image.new("RGBA", frame.size, (0, 0, 0, 0))
+        template.putalpha(frame)
+        name = f"dot_pulse_{index:02d}.png"
+        template.save(deploy / name)
+        print(f"dot_pulse -> {name}")
+
+
 def main() -> None:
     deploy = STATIC.parents[1] / "stock" / "deploy"
     to_template(STATIC / "face.png", deploy / "face_template.png")
     to_template(STATIC / "face_scared.png", deploy / "face_scared_template.png")
     to_spin_frames(STATIC / "face.png", deploy)
+    to_dot_pulse_frames(deploy)
 
 
 if __name__ == "__main__":

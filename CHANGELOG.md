@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.4.13 - 2026-07-09
+
+### Added
+- feat(tray): spin the icon while a self-update is in progress (`1443731`)
+- feat(tray): animate a pixel pulsing dot beside working chats (`0512094`)
+- feat(tray): move rarely-touched items into an Advanced submenu (`c44d2ee`)
+- feat(web): improve completed-projects modal and fix archive button sizing (`a67b4b8`)
+- feat(web): linkify chat file paths and open files in the OS default app (`045b234`)
+
+### Fixed
+- fix(web): make the Fix/Close buttons on error toasts actually respond (`fd15515`)
+- fix(web): top-align the voice-engine install banner with its text (`812d89a`)
+- fix(routes_api): tolerate more than "completed" in a subagent's self-reported sign-off (`892a1a1`)
+- fix(web): anchor the standalone subagent panel to its own completion notice (`f34bb26`)
+- fix(project_chats): don't pass the "apfel" routing sentinel as a literal model id (`37c9cfa`)
+
+### Maintenance
+- build(web): refresh bundled PWA assets (`64f6f64`)
+
 ## v0.4.12 - 2026-07-09
 
 ### Added
