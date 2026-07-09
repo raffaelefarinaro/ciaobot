@@ -133,6 +133,27 @@ def test_summarize_task_notification_extracts_completion_line() -> None:
     assert _summarize_task_notification("hello world") is None
 
 
+def test_summarize_task_notification_passes_through_finished_phrasing() -> None:
+    """The subagent's own sign-off text varies ("completed", "finished", ...)
+    since it's the model's own final message, not a fixed CLI string. Any of
+    them must pass through as-is instead of doubling up with the generic
+    "Subagent {status}: ..." wrapper (e.g. "Subagent completed: Agent "X"
+    finished").
+    """
+    from ciao.web.routes_api import _summarize_task_notification
+
+    envelope = (
+        "<task-notification>\n"
+        "<task-id>a7b9ecacf3a281869</task-id>\n"
+        "<status>completed</status>\n"
+        '<summary>Agent "Curate recent chats and proposals" finished</summary>\n'
+        "</task-notification>"
+    )
+    summary = _summarize_task_notification(envelope)
+    assert summary == '\U0001F916 Agent "Curate recent chats and proposals" finished'
+    assert "Subagent completed:" not in summary
+
+
 def test_is_cli_internal_envelope_matches_known_wrappers() -> None:
     """Bash output, command echoes, and other CLI-synthesized user-role
     messages should be recognized so chat_messages can drop them on replay.

@@ -422,6 +422,16 @@ _TASK_NOTIFICATION_RE = re.compile(
 # summary, plus an optional task-type).
 _INNER_TAG_RE = re.compile(r"<([a-z-]+)>(.*?)</\1>", re.DOTALL)
 
+# The subagent's own final message often self-reports its sign-off ("Agent
+# "X" completed", "...finished", "...done", ...) rather than a fixed CLI
+# string, so the "already shaped, pass through as-is" check has to tolerate
+# whatever terminal-status verb the model picked instead of matching only
+# "completed" — otherwise it doubles up with the generic wrapper below (e.g.
+# "Subagent completed: Agent "X" finished").
+_AGENT_SELF_STATUS_RE = re.compile(
+    r'^Agent "[^"]+" (?:completed|finished|done|succeeded|failed)\b', re.IGNORECASE
+)
+
 
 def _is_cli_internal_envelope(content: str) -> bool:
     """True if `content` starts with a CLI-synthesized user-message wrapper."""
@@ -444,7 +454,7 @@ def _summarize_task_notification(content: str) -> str | None:
     summary = fields.get("summary", "")
     first_line = summary.splitlines()[0].strip() if summary else ""
     icon = "\U0001F916"  # 🤖
-    if first_line.startswith("Agent ") and " completed" in first_line:
+    if _AGENT_SELF_STATUS_RE.match(first_line):
         # Already shaped like 'Agent "X" completed'; pass it through.
         return f"{icon} {first_line}"
     if first_line:
