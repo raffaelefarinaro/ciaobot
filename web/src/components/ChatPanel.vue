@@ -94,7 +94,7 @@
         </span>
         <div class="model-picker-wrap" ref="modelPickerRef" data-tour="model-picker">
           <button
-            class="model-picker-btn btn-icon"
+            class="model-picker-btn touch-hit"
             :title="chat.model + (chat.thinking_level ? ' · ' + chat.thinking_level : '')"
             @click.stop="toggleModelPicker"
             aria-label="Model"
@@ -3982,6 +3982,9 @@ details[open] > .activity-summary::before {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  box-sizing: content-box;
+  width: 30px;
+  height: 30px;
   min-width: 30px;
   min-height: 30px;
   border-radius: 6px;
@@ -4088,11 +4091,6 @@ details[open] > .activity-summary::before {
   :deep(.header-actions) {
     flex-shrink: 0;
     gap: 6px;
-  }
-  .model-picker-btn {
-    min-width: var(--touch);
-    min-height: var(--touch);
-    border-radius: var(--radius);
   }
   .model-picker-dropdown {
     right: 0;

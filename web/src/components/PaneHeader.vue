@@ -1,6 +1,6 @@
 <template>
   <header class="pane-header">
-    <button class="header-hamburger" aria-label="Open sidebar" @click="$emit('open-sidebar')">
+    <button class="header-hamburger touch-hit" aria-label="Open sidebar" @click="$emit('open-sidebar')">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
         <line x1="4" y1="7" x2="20" y2="7"/>
         <line x1="4" y1="12" x2="20" y2="12"/>
@@ -80,8 +80,8 @@ defineEmits<{ 'open-sidebar': [] }>()
   display: none;
   align-items: center;
   justify-content: center;
-  width: var(--touch);
-  height: var(--touch);
+  width: 30px;
+  height: 30px;
   background: none;
   border: none;
   color: var(--fg);
@@ -97,14 +97,21 @@ defineEmits<{ 'open-sidebar': [] }>()
 /* Unify header icon sizes with the sidebar (30px containers, 18px content). */
 :deep(.btn-icon),
 :deep(.model-picker-btn) {
+  box-sizing: content-box;
+  width: 30px;
+  height: 30px;
   min-width: 30px;
   min-height: 30px;
-  padding: 5px;
+  padding: calc((var(--touch) - 30px) / 2);
+  margin: calc((30px - var(--touch)) / 2);
   border-radius: 6px;
 }
 :deep(.bell-btn) {
+  box-sizing: content-box;
   width: 30px;
   height: 30px;
+  padding: calc((var(--touch) - 30px) / 2);
+  margin: calc((30px - var(--touch)) / 2);
 }
 :deep(.bell-btn) svg {
   width: 18px;
@@ -139,21 +146,6 @@ defineEmits<{ 'open-sidebar': [] }>()
     font-size: 12px;
     line-height: 1.2;
     white-space: normal;
-  }
-  :deep(.btn-icon),
-  :deep(.model-picker-btn) {
-    min-width: var(--touch);
-    min-height: var(--touch);
-    padding: 8px;
-    border-radius: var(--radius);
-  }
-  :deep(.bell-btn) {
-    width: var(--touch);
-    height: var(--touch);
-  }
-  :deep(.bell-btn) svg {
-    width: 20px;
-    height: 20px;
   }
 }
 </style>
