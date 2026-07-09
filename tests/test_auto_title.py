@@ -71,6 +71,31 @@ async def test_generate_chat_title_via_apfel_exception_fallback(monkeypatch: pyt
     assert title == "How do I write Python unit"
 
 
+@pytest.mark.asyncio
+async def test_generate_chat_title_apfel_selected_but_not_installed_falls_back_to_haiku(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """"apfel" is a routing sentinel from the Settings picker (provider=apple),
+    not a real Claude/Ollama model id. When the binary isn't actually
+    installed, run_oneshot must never receive "apfel" literally — that always
+    fails with "There's an issue with the selected model (apfel)" and drops
+    straight to the raw-text truncated fallback title.
+    """
+    monkeypatch.setattr(shutil, "which", lambda cmd: None)
+
+    captured_model: list[str] = []
+
+    async def fake_oneshot(*args, **kwargs):
+        captured_model.append(kwargs.get("model", ""))
+        return "Generated Title"
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+
+    title = await _generate_chat_title("hello world", assistant_text="", model="apfel")
+    assert captured_model == ["haiku"]
+    assert title == "Generated Title"
+
+
 def test_resolve_title_model_uses_override() -> None:
     from ciao.config import CiaoConfig
 
