@@ -1627,7 +1627,7 @@ class ProjectChatManager:
         restore UI needs. Pass ``workspace`` to scope to one workspace; omit
         to list both.
 
-        Each entry is ``{stem, name, context, workspace}``.
+        Each entry is ``{stem, name, context, workspace, vault_doc_path}``.
         """
         workspaces = self._workspace_names() if workspace is None else (workspace,)
         out: list[dict] = []
@@ -1642,6 +1642,7 @@ class ProjectChatManager:
                     "name": name,
                     "context": context,
                     "workspace": ws,
+                    "vault_doc_path": self._display_path(readme) if readme is not None else "",
                 })
         out.sort(key=lambda d: (d["workspace"], d["name"].lower()))
         return out

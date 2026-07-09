@@ -387,7 +387,7 @@
       <div class="sidebar-footer">
         <button class="add-project-btn" @click="addProject">+ New Project</button>
         <button
-          class="archive-btn touch-hit"
+          class="archive-btn"
           @click="openArchive"
           title="Completed projects"
           aria-label="Completed projects"
@@ -409,7 +409,7 @@
     <div class="modal modal--archive">
       <h3>Completed projects</h3>
       <p class="archive-hint">
-        Restoring moves the project back to active. Its old chats stay archived.
+        Click a project to open its canonical doc. Restoring moves it back to active; old chats stay archived.
       </p>
       <div v-if="loadingCompleted" class="archive-empty">Loading...</div>
       <div v-else-if="!completedProjects.length" class="archive-empty">
@@ -417,7 +417,14 @@
       </div>
       <div v-else class="archive-list">
         <div v-for="cp in completedProjects" :key="cp.stem" class="archive-item">
-          <span class="archive-name" :title="cp.context || cp.name">{{ cp.name }}</span>
+          <button
+            type="button"
+            class="archive-name"
+            :class="{ 'archive-name--clickable': cp.vault_doc_path }"
+            :title="cp.vault_doc_path ? 'Open canonical doc' : (cp.context || cp.name)"
+            :disabled="!cp.vault_doc_path"
+            @click="openCompletedDoc(cp)"
+          >{{ cp.name }}</button>
           <button
             class="btn-small archive-restore"
             :disabled="restoringStem === cp.stem"
@@ -449,6 +456,7 @@ import { ref, reactive, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
+import { useFileViewerStore } from '../stores/fileViewer'
 import NotificationBell from './NotificationBell.vue'
 
 defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' }>()
@@ -456,6 +464,7 @@ const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }
 
 const store = useProjectStore()
 const taskStore = useTaskStore()
+const fileViewer = useFileViewerStore()
 const route = useRoute()
 const router = useRouter()
 
@@ -641,7 +650,7 @@ function workspaceLabel(name: string): string {
 }
 
 // ── Completed (archived) projects ──────────────────────────────────────
-type CompletedProject = { stem: string; name: string; context: string; workspace: string }
+type CompletedProject = { stem: string; name: string; context: string; workspace: string; vault_doc_path?: string }
 const archiveOpen = ref(false)
 const loadingCompleted = ref(false)
 const completedProjects = ref<CompletedProject[]>([])
@@ -658,6 +667,11 @@ async function openArchive() {
   } finally {
     loadingCompleted.value = false
   }
+}
+
+function openCompletedDoc(cp: CompletedProject) {
+  if (!cp.vault_doc_path) return
+  void fileViewer.open(cp.vault_doc_path)
 }
 
 async function doRestore(cp: CompletedProject) {
@@ -1287,7 +1301,7 @@ async function confirmDeleteChat(chatId: string) {
   border-top: 1px solid var(--border);
   display: flex;
   gap: 6px;
-  align-items: stretch;
+  align-items: center;
 }
 
 .add-project-btn {
@@ -1316,8 +1330,9 @@ async function confirmDeleteChat(chatId: string) {
 
 .archive-btn {
   flex-shrink: 0;
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1336,8 +1351,8 @@ async function confirmDeleteChat(chatId: string) {
 
 /* Completed-projects dialog */
 .modal--archive {
-  width: 360px;
-  max-width: calc(100vw - 32px);
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
 }
 .archive-hint {
   margin: 0;
@@ -1355,7 +1370,7 @@ async function confirmDeleteChat(chatId: string) {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  max-height: 50vh;
+  max-height: min(65vh, calc(100vh - 220px));
   overflow-y: auto;
 }
 .archive-item {
@@ -1374,6 +1389,22 @@ async function confirmDeleteChat(chatId: string) {
   white-space: nowrap;
   font-size: var(--text-sm);
   color: var(--fg);
+  border: none;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  font-family: inherit;
+}
+.archive-name--clickable {
+  cursor: pointer;
+}
+.archive-name--clickable:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.archive-name:disabled {
+  cursor: default;
+  opacity: 1;
 }
 .archive-restore { flex-shrink: 0; }
 

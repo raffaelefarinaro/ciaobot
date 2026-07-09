@@ -1079,7 +1079,7 @@ export const useProjectStore = defineStore('projects', () => {
   // Completed (archived) projects live only as vault folders under
   // projects/completed/; they are not in `projects.value`. Fetched on demand
   // by the sidebar archive modal.
-  type CompletedProject = { stem: string; name: string; context: string; workspace: WorkspaceName }
+  type CompletedProject = { stem: string; name: string; context: string; workspace: WorkspaceName; vault_doc_path?: string }
 
   async function fetchCompletedProjects(workspace?: WorkspaceName): Promise<CompletedProject[]> {
     const ws = workspace ?? activeWorkspace.value
