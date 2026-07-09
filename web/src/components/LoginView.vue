@@ -17,7 +17,7 @@
           <span class="banner-meta">// ciaobot is loading config ...</span>
         </p>
         <p class="line line--sys">
-          Ciaobot is restarting — a terminal-run server relaunches itself and may take a few seconds to come back. Reopen Ciaobot.app if this page does not reconnect.
+          Ciaobot is finishing setup. If you started it with ciao run, keep that terminal open until it says setup is complete and Ciaobot is moving to the background service. Then close the terminal and open Ciaobot.app.
         </p>
         <div class="spinner-container">
           <span class="caret"></span>
@@ -30,6 +30,13 @@
           <span class="wordmark wordmark--md">ciaobot setup</span>
           <span class="banner-meta">// tour + local setup</span>
         </p>
+
+        <section class="setup-run-note" aria-label="First launch instructions">
+          <span class="run-note-kicker">First launch from Terminal</span>
+          <p>
+            Keep the terminal running ciao run open while you finish this setup. When setup completes, Ciaobot moves to the background service, then you can close the terminal and open Ciaobot.app.
+          </p>
+        </section>
 
         <section class="setup-tour" aria-label="Ciaobot setup tour">
           <p class="tour-title">Claude Code, with a real interface and memory.</p>
@@ -653,6 +660,30 @@ onUnmounted(() => {
 
 .setup-wizard {
   gap: 12px;
+}
+
+.setup-run-note {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+}
+.setup-run-note p {
+  margin: 0;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+}
+.run-note-kicker {
+  color: var(--accent);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
 }
 
 .setup-tour {

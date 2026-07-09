@@ -102,6 +102,8 @@ describe('LoginView setup wizard tests', () => {
     expect(wrapper.find('#setup-vault').exists()).toBe(false)
     expect(wrapper.find('#setup-push').exists()).toBe(true)
     expect(wrapper.text()).toContain('ciao auth claude')
+    expect(wrapper.text()).toContain('Keep the terminal running ciao run open while you finish this setup')
+    expect(wrapper.text()).toContain('close the terminal and open Ciaobot.app')
 
     // feature tour fills the 2-column grid: six tiles, no empty slot
     const tourItems = wrapper.findAll('.tour-list li')
@@ -231,6 +233,8 @@ describe('LoginView setup wizard tests', () => {
       restart: true,
     })
     expect(wrapper.text()).toContain('restarting')
+    expect(wrapper.text()).toContain('keep that terminal open until it says setup is complete and Ciaobot is moving to the background service')
+    expect(wrapper.text()).toContain('close the terminal and open Ciaobot.app')
   })
 
   it('strips mailto: for display and submits an empty push contact untouched', async () => {
