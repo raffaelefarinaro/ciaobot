@@ -52,8 +52,8 @@ class Ciaobot < Formula
     <<~CAVEATS
       Finish setup with `ciao run`, then open http://localhost:8443 and
       follow the wizard: it asks for a workspace folder and a model
-      provider, then installs the menu bar app and background server.
-      Afterwards, open Ciaobot from the menu bar icon or Ciaobot.app.
+      provider, then installs Ciaobot.app and the background server.
+      Afterwards, open Ciaobot.app.
 
       Scripted or headless setups can skip the wizard:
 

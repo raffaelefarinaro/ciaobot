@@ -331,6 +331,15 @@ a:hover {
 .btn-primary:active { transform: scale(0.98); }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
+/* Compact control (30×30 layout) with a full --touch hit area. Padding expands
+   the border-box for taps; negative margin keeps flex/grid spacing tight. */
+.touch-hit {
+  box-sizing: content-box;
+  --touch-hit-visual: 30px;
+  padding: calc((var(--touch) - var(--touch-hit-visual)) / 2);
+  margin: calc((var(--touch-hit-visual) - var(--touch)) / 2);
+}
+
 /* Icon-only / round buttons need full touch targets */
 .btn-icon {
   display: inline-flex;

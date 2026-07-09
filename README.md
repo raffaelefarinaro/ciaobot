@@ -1,6 +1,44 @@
 # Ciaobot
 
-Ciaobot is an opinionated UI and UX layer for using Claude Code as a personal assistant and second brain. It is a local web app around agentic work: chats, projects, files, schedules, memory, and archived knowledge all live in one interface instead of being scattered across terminal sessions.
+Ciaobot is an opinionated interface for using Claude Code as a personal assistant and second brain. It is a local web app around agentic work: chats, projects, files, schedules, memory, and archived knowledge all live in one interface instead of being scattered across terminal sessions.
+
+## Install
+
+**macOS ([Homebrew](https://brew.sh))** — recommended; includes `Ciaobot.app` and the background service:
+
+```bash
+brew install raffaelefarinaro/ciaobot/ciaobot
+ciao run
+```
+
+**Any platform ([PyPI](https://pypi.org/project/ciaobot/))** — or macOS without Homebrew; requires Python 3.12 or newer (use whichever `python3.X` you have, e.g. `brew install python@3.13`):
+
+```bash
+python3.13 -m venv ~/.ciaobot-venv
+~/.ciaobot-venv/bin/pip install ciaobot
+~/.ciaobot-venv/bin/ciao run
+```
+
+Then open `http://localhost:8443` and follow the setup wizard. It asks for two things before creating anything:
+
+- **Workspace folder** (default `~/ciaobot`) — one root folder holding your second brain (`memory-vault/`) plus app config and runtime state. Point it wherever you want your data to live; syncing that folder (GitHub, Drive, iCloud, …) is recommended so your vault follows you across machines. Start from scratch and it scaffolds the vault, or point it at an existing notes folder and it adapts it.
+- **Model provider** — which of the supported providers to use.
+
+The wizard then writes the config, initializes the workspace as a git repository (with a `.gitignore` that keeps `.env` and runtime state out of commits, so snapshots and sync work from day one), and on macOS installs the LaunchAgents and `Ciaobot.app`.
+
+For scripted or headless setups, `ciao setup --workspace <dir>` skips the wizard and prints the login URL to open. If a setup link ever returns `invalid setup token` (tokens are one-time-use), print a fresh one with `~/.ciaobot-venv/bin/ciao setup-url --workspace <dir>`.
+
+## The idea
+
+Ciaobot does not reinvent how you talk to agents. It runs [Claude Code](https://github.com/anthropics/claude-code) in the background and focuses on what surrounds it: a decent local UI, structured workspaces, and a memory system that compounds as chats are archived.
+
+- **Workspaces and projects** — split life areas (personal, work, a client, …) into separate workspaces, then organize work inside projects. Ciaobot injects the right files, notes, and decisions into every turn so the agent is not rediscovering context each session.
+- **Learning from archived chats** — when a chat ends, Ciaobot archives the transcript, extracts session insights, and drafts memory proposals for you to review before anything lands in long-term memory.
+- **An Obsidian-style vault you own** — point setup at any folder for your data (sync it via GitHub, Drive, or similar so it travels with you). Durable knowledge lives as plain markdown with wikilinks and an `INDEX.md`, inspired by [Andrej Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f): browse it in [Obsidian](https://obsidian.md/) today, or open the same files with any agentic system tomorrow — you are not tied to Claude Code or a specific provider.
+- **Skills, subagents, and commands** — packaged defaults for vault work, schedules, Google Workspace, research, and more, plus subagents and slash commands that help with day-to-day knowledge work. Extend them from the Settings UI or by adding files to the workspace; Ciaobot picks up workspace-owned skills, subagents, and commands without a rebuild.
+- **Provider choice, local where it fits** — route chats through **Anthropic** (Claude subscription or API key), **Ollama** (cloud or local daemon), or **OpenRouter**, and prefer on-device models for lightweight tasks when available: chat titles via [apfel](https://github.com/Arthur-Ficial/apfel) on macOS, speech-to-text via [mlx-whisper](https://pypi.org/project/mlx-whisper/), read-aloud via Kokoro, and similar local paths elsewhere in the stack.
+
+Pick a workspace folder, choose a provider, and work — Ciaobot is the interface on top; the vault is yours to keep.
 
 ## Why "Ciao"?
 
@@ -29,7 +67,7 @@ I'm sharing it because the patterns may be useful to you, and because I'm happy 
 - Keeps durable project context separate from short-lived chat state.
 - Connects to Google Workspace — Gmail, Calendar, Drive, Docs, Sheets, Slides, and Tasks — through Google's [`gws` CLI](https://github.com/googleworkspace/cli), with browser-based OAuth from Settings (no terminal required).
 - Supports voice transcription, push notifications, model/provider settings, and local package updates from the UI.
-- Shows a macOS menu bar icon (`ciao menubar`) with server status and open/restart/logs actions — the Ciaobot face turns scared when the server is down.
+- Installs a macOS app launcher and background service so Ciaobot can start automatically after setup.
 
 ### Working in chat
 
@@ -56,8 +94,6 @@ On first launch, an in-app product tour walks through these flows. Replay it any
 
 What it does **not** do automatically: it never promotes memory proposals into your long-term memory files without review, never discards or rewrites an existing notes folder during onboarding, and never locks you into one provider; chats and routines can route through any configured backend.
 
-**Agent-agnostic, standalone vault.** The vault structure, project folders, markdown notes, and configuration files (such as `CLAUDE.md` and `MEMORY.md`) created in your workspace are standard, open files. They work with any other AI agent, IDE assistant, or bare terminal tool even if Ciaobot is not running. Ciaobot is the opinionated local web interface on top.
-
 ## Providers
 
 Use the access you already have:
@@ -66,33 +102,7 @@ Use the access you already have:
 - Ollama Cloud, a local Ollama daemon, or compatible Ollama model routing.
 - OpenRouter through an `OPENROUTER_API_KEY`.
 
-The model is project-first: a workspace represents a life area (personal, work, a client), each workspace contains projects, and each project carries files, notes, decisions, and context that Ciaobot injects when you work inside it, so the agent does not rediscover what you are talking about every time.
-
-## Install
-
-**macOS (Homebrew)** — includes the menu bar companion:
-
-```bash
-brew install raffaelefarinaro/ciaobot/ciaobot
-ciao run
-```
-
-**Any platform ([PyPI](https://pypi.org/project/ciaobot/))** — requires Python 3.12 or newer (use whichever `python3.X` you have, e.g. `brew install python@3.13`):
-
-```bash
-python3.13 -m venv ~/.ciaobot-venv
-~/.ciaobot-venv/bin/pip install ciaobot
-~/.ciaobot-venv/bin/ciao run
-```
-
-Then open `http://localhost:8443` and follow the setup wizard. It asks for two things before creating anything:
-
-- **Workspace folder** (default `~/ciaobot`) — one root folder holding your second brain (`memory-vault/`) plus app config and runtime state. Start from scratch and it scaffolds the vault, or point it at an existing notes folder and it adapts it.
-- **Model provider** — which of the supported providers to use.
-
-The wizard then writes the config, initializes the workspace as a git repository (with a `.gitignore` that keeps `.env` and runtime state out of commits, so snapshots and sync work from day one), and on macOS installs the LaunchAgents and `Ciaobot.app`.
-
-For scripted or headless setups, `ciao setup --workspace <dir>` skips the wizard and prints the login URL to open. If a setup link ever returns `invalid setup token` (tokens are one-time-use), print a fresh one with `~/.ciaobot-venv/bin/ciao setup-url --workspace <dir>`.
+See [INTEGRATIONS.md](INTEGRATIONS.md) for env vars, OAuth, and per-task model routing (titles, insights, voice).
 
 ## Quickstart (from source)
 
@@ -107,7 +117,7 @@ ciao setup --workspace ~/ciao-workspace
 ciao run
 ```
 
-`ciao setup` is idempotent: it writes the initial `.env`, seeds the workspace docs and vault, and (on macOS) renders LaunchAgents for the server and the menu bar companion plus a `Ciaobot.app` shortcut that opens the local PWA. The menu bar companion is included automatically on macOS installs (no extra needed). Full setup details and optional Node tooling: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+`ciao setup` is idempotent: it writes the initial `.env`, seeds the workspace docs and vault, and (on macOS) renders the server LaunchAgent plus a `Ciaobot.app` shortcut that opens the local PWA. Full setup details and optional Node tooling: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 Optional capabilities (Google Workspace, Apple Intelligence titles, MCP connectors) each have their own setup in [INTEGRATIONS.md](INTEGRATIONS.md).
 

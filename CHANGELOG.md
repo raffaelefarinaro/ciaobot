@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.4.12 - 2026-07-09
+
+### Added
+- feat(tray): add a Start Ciao at Login toggle (`1b19698`)
+- feat(system-prompt): teach the agent to check runtime logs before filing issues (`938031f`)
+- feat(web): clarify first-launch terminal instructions in the setup wizard (`0ae3951`)
+- feat(web): make the empty-state mascot greet you in a random language (`85c8e3c`)
+- feat(web): render background subagents in a standalone panel (`4a2b8bc`)
+- feat(web): add a Retry button for mid-turn API errors (`efcc6bd`)
+- feat(schedules): track the attention classifier as a job run (`b1e75dd`)
+- feat(tray): show the Ciaobot face on the update-complete notification (`da4c6c4`)
+
+### Changed
+- refactor(web): render frontmatter prose and lists inline instead of a collapsible "more" section (`28df9f6`)
+- refactor(web): add a shared .touch-hit utility for compact icon buttons (`dde711a`)
+
+### Fixed
+- fix(package-version): refresh the Homebrew tap before upgrading (`dc15f11`)
+- fix(main): stop repeat-logging identical branch-backup failures (`e37fb4c`)
+- fix(routes_api): return 409 instead of raising when a schedule's instance is paused (`f8251b1`)
+- fix(web): load subagents even when a chat's final message is already a resolved turn (`0932dc6`)
+- fix(web): shrink split-pane minimums so pinned-file view fits narrower windows (`4a1d10c`)
+
+### Maintenance
+- docs(readme): rewrite around install-first workflow and workspace-first model (`f6d2b0d`)
+- build(web): refresh bundled PWA assets for release/v0.4.12 (`7099cda`)
+
 ## v0.4.11 - 2026-07-08
 
 ### Added

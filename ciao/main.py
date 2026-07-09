@@ -517,6 +517,8 @@ async def _async_main() -> int:
             )
             return
         logger.info("Working on branch '%s'", branch)
+        last_failure_detail: str | None = None
+        repeated_failures = 0
         while True:
             try:
                 await asyncio.sleep(BACKUP_PUSH_INTERVAL)
@@ -525,10 +527,23 @@ async def _async_main() -> int:
                     category="system", extra={"branch": branch},
                 ) as run:
                     ok, detail = await push_branch(git_sync_root, branch=branch)
-                    if not ok:
-                        run.status = "error"
-                        run.error = detail
-                        logger.warning("Branch backup push failed: %s", detail)
+                    if ok:
+                        if last_failure_detail is not None:
+                            logger.info("Branch backup push recovered.")
+                        last_failure_detail = None
+                        repeated_failures = 0
+                        continue
+                    if detail == last_failure_detail:
+                        repeated_failures += 1
+                        run.skip("same failure as previous backup attempt")
+                        run.extra["repeat_count"] = repeated_failures
+                        logger.debug("Branch backup push still failing: %s", detail)
+                        continue
+                    last_failure_detail = detail
+                    repeated_failures = 1
+                    run.status = "error"
+                    run.error = detail
+                    logger.warning("Branch backup push failed: %s", detail)
             except asyncio.CancelledError:
                 break
             except Exception:

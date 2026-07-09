@@ -12,7 +12,7 @@ ciao setup --workspace /tmp/ciao-workspace
 ciao run
 ```
 
-`ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies agent-readable workspace docs (`CLAUDE.md`, `CIAO_CUSTOMIZATION.md`), renders `~/Library/LaunchAgents/com.ciao.server.plist`, and creates `~/Applications/Ciaobot.app`, which opens the local PWA. By default it does not load launchd; add `--load-launchd` when you want setup to run `launchctl`.
+`ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies agent-readable workspace docs (`CLAUDE.md`, `CIAO_CUSTOMIZATION.md`), renders the server and menu bar plists under `~/Library/LaunchAgents/`, and creates `~/Applications/Ciaobot.app`, which opens the local PWA. By default it does not load launchd; add `--load-launchd` when you want setup to run `launchctl`.
 
 Common package CLI entry points:
 

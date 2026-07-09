@@ -42,15 +42,24 @@
             <PaneHeader title="Ciaobot" @open-sidebar="sidebarCollapsed = false" />
             <div class="empty-state">
               <div class="empty-mark">
-                <img
-                  class="empty-face"
-                  :src="faceSrc"
-                  alt="ciaobot"
-                  draggable="false"
-                  @click="faceToggled = !faceToggled"
-                  @mouseenter="faceHover = true"
-                  @mouseleave="faceHover = false"
-                />
+                <button
+                  type="button"
+                  class="empty-face-btn"
+                  aria-label="Say hello"
+                  @click="onFaceClick"
+                >
+                  <Transition name="face-bubble">
+                    <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
+                      {{ speechGreeting }}
+                    </div>
+                  </Transition>
+                  <img
+                    class="empty-face"
+                    :src="faceSrc"
+                    alt=""
+                    draggable="false"
+                  />
+                </button>
               </div>
               <p class="empty-hint">// select a chat from the sidebar, or start a new one.</p>
               <div class="empty-actions">
@@ -104,15 +113,24 @@
           <PaneHeader title="Ciaobot" @open-sidebar="sidebarCollapsed = false" />
           <div class="empty-state">
             <div class="empty-mark">
-              <img
-                class="empty-face"
-                :src="faceSrc"
-                alt="ciaobot"
-                draggable="false"
-                @click="faceToggled = !faceToggled"
-                @mouseenter="faceHover = true"
-                @mouseleave="faceHover = false"
-              />
+              <button
+                type="button"
+                class="empty-face-btn"
+                aria-label="Say hello"
+                @click="onFaceClick"
+              >
+                <Transition name="face-bubble">
+                  <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
+                    {{ speechGreeting }}
+                  </div>
+                </Transition>
+                <img
+                  class="empty-face"
+                  :src="faceSrc"
+                  alt=""
+                  draggable="false"
+                />
+              </button>
             </div>
             <p class="empty-hint">// select a chat from the sidebar, or start a new one.</p>
             <div class="empty-actions">
@@ -159,11 +177,9 @@ const MIN_SIDEBAR_WIDTH = 180
 const MAX_SIDEBAR_WIDTH = 500
 const SIDEBAR_SNAP_THRESHOLD = 15 // px
 
-// Chat gets a larger guaranteed floor than the pinned-file side: it's the
-// primary reading surface, while the side panel is more often skimmed.
-const DEFAULT_SPLIT_RATIO = 0.55
-const MIN_CHAT_PANE_WIDTH = 480
-const MIN_SIDE_PANE_WIDTH = 360
+const DEFAULT_SPLIT_RATIO = 0.5
+const MIN_CHAT_PANE_WIDTH = 240
+const MIN_SIDE_PANE_WIDTH = 240
 const SPLIT_SNAP_THRESHOLD = 15 // px
 const LATEST_STATUS_SYNC_MS = 15000
 
@@ -294,11 +310,43 @@ function stopSplitDrag() {
   }
 }
 
-// Welcome-screen mascot. Hover or click swaps between the two faces:
-// hover XOR the persistent click-toggle picks the scared face.
-const faceHover = ref(false)
-const faceToggled = ref(false)
-const faceSrc = computed(() => (faceHover.value !== faceToggled.value ? '/face_scared.png' : '/face.png'))
+// Welcome-screen mascot. Click opens the mouth and shows a comic bubble
+// with "hello" in a different language each time.
+const FACE_GREETINGS = [
+  'Ciao!', '¡Hola!', 'Salut!', 'Hallo!', 'Olá!', 'Hello!',
+  'こんにちは!', '안녕!', '你好!', 'مرحبا!', 'Привет!', 'नमस्ते!',
+  'Merhaba!', 'Γειά σου!', 'Hej!', 'Cześć!', 'สวัสดี!', 'Xin chào!',
+  'שלום!', 'Halo!', 'Ahoj!', 'Szia!', 'Dia dhuit!', 'Sawubona!',
+] as const
+
+const speechGreeting = ref<string | null>(null)
+let greetingQueue: string[] = []
+let speechHideTimer: ReturnType<typeof window.setTimeout> | null = null
+
+function shuffleGreetings(): string[] {
+  const next = [...FACE_GREETINGS]
+  for (let i = next.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[next[i], next[j]] = [next[j], next[i]]
+  }
+  return next
+}
+
+function nextGreeting(): string {
+  if (greetingQueue.length === 0) greetingQueue = shuffleGreetings()
+  return greetingQueue.pop()!
+}
+
+function onFaceClick() {
+  speechGreeting.value = nextGreeting()
+  if (speechHideTimer) window.clearTimeout(speechHideTimer)
+  speechHideTimer = window.setTimeout(() => {
+    speechGreeting.value = null
+    speechHideTimer = null
+  }, 2600)
+}
+
+const faceSrc = computed(() => (speechGreeting.value ? '/face_scared.png' : '/face.png'))
 const taskStore = useTaskStore()
 const route = useRoute()
 const router = useRouter()
@@ -546,6 +594,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  if (speechHideTimer) window.clearTimeout(speechHideTimer)
   stopLatestStatusSync()
   window.removeEventListener('resize', onResize)
   window.removeEventListener('touchstart', onTouchStart)
@@ -605,17 +654,80 @@ onBeforeUnmount(() => {
   gap: 10px;
   opacity: 0.85;
 }
+.empty-state .empty-face-btn {
+  position: relative;
+  display: inline-flex;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  user-select: none;
+  transition: transform 120ms var(--ease);
+}
+.empty-state .empty-face-btn:hover { transform: scale(1.08); }
+.empty-state .empty-face-btn:active { transform: scale(0.94); }
 .empty-state .empty-face {
+  display: block;
   width: 120px;
   height: 120px;
   image-rendering: pixelated;
-  cursor: pointer;
-  user-select: none;
   -webkit-user-drag: none;
-  transition: transform 120ms var(--ease);
+  pointer-events: none;
 }
-.empty-state .empty-face:hover { transform: scale(1.08); }
-.empty-state .empty-face:active { transform: scale(0.94); }
+.face-speech-bubble {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 14px;
+  background: #fff;
+  color: #111;
+  border: 3px solid #111;
+  border-radius: 14px 14px 14px 4px;
+  box-shadow: 4px 4px 0 #111;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+  z-index: 1;
+}
+.face-speech-bubble::after {
+  content: '';
+  position: absolute;
+  left: 18px;
+  bottom: -12px;
+  width: 0;
+  height: 0;
+  border: 6px solid transparent;
+  border-top-color: #111;
+}
+.face-speech-bubble::before {
+  content: '';
+  position: absolute;
+  left: 20px;
+  bottom: -6px;
+  width: 0;
+  height: 0;
+  border: 4px solid transparent;
+  border-top-color: #fff;
+  z-index: 1;
+}
+.face-bubble-enter-active {
+  animation: face-bubble-pop 220ms var(--ease);
+}
+.face-bubble-leave-active {
+  animation: face-bubble-pop 160ms var(--ease) reverse;
+}
+@keyframes face-bubble-pop {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(6px) scale(0.82);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0) scale(1);
+  }
+}
 .empty-state .empty-hint {
   color: var(--fg3);
   font-size: var(--text-sm);
@@ -639,29 +751,27 @@ onBeforeUnmount(() => {
 
 @keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
 
-/* Split-screen layout for pinned file viewer.
-   Chat defaults to a larger share (55/45) and has a taller min-width floor
-   than the side panel, since the chat column is where sustained reading
-   happens; the pinned file is more often skimmed. min-width acts as a
-   hard floor so a narrow ratio persisted from a wider viewport (or a
-   drag near the limit) can never squeeze either pane below a readable
-   width. */
+/* Split-screen layout for pinned file viewer. Both panes share width 50/50
+   by default; min-width is a soft floor during drag so a compressed window
+   can still show chat and the pinned document side by side. */
 .chat-split {
   flex-direction: row;
 }
 .chat-split-main {
-  width: 55%;
+  width: 50%;
   flex: 1 1 0;
-  min-width: 480px;
+  min-width: 240px;
+  container-type: inline-size;
+  container-name: chat-split;
   display: flex;
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
 }
 .chat-split-side {
-  width: 45%;
+  width: 50%;
   flex: 1 1 0;
-  min-width: 360px;
+  min-width: 240px;
   border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;

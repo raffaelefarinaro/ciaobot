@@ -65,6 +65,18 @@ def test_system_prompt_includes_gws_operational_notes() -> None:
     assert "supportsAllDrives" in append
 
 
+def test_system_prompt_includes_ciaobot_diagnostics_notes() -> None:
+    """Installed agents should know which local logs to inspect for support."""
+    payload = mi.system_prompt_payload("")
+    assert payload is not None
+    append = payload["append"]
+    assert "Ciaobot Diagnostics and Issue Reports" in append
+    assert ".runtime/server_errors.log" in append
+    assert ".runtime/job_runs.jsonl" in append
+    assert ".runtime/ciao.stderr.log" in append
+    assert "GitHub issue" in append
+
+
 def test_system_prompt_payload_appends_to_claude_code_preset() -> None:
     payload = mi.system_prompt_payload("hello memory")
     assert payload is not None

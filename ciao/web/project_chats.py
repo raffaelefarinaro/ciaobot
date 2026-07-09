@@ -4194,16 +4194,15 @@ class ProjectChatManager:
         )
         user_prompt = json.dumps(payload, ensure_ascii=False)
         try:
-            from ciao.providers.oneshot import run_oneshot
-            from ciao.providers.routing import resolve_with_fallback
             from ciao.insights import resolve_insights_model
+            from ciao.providers.routing import resolve_with_fallback
 
             # Route through the shared resolver (same as ciao/insights.py) so
             # the classifier lands on an available backend. The raw
             # ``_ollama_env`` path had no fallback: when the intended backend
             # was unreachable it passed an id the Anthropic subscription can't
-            # serve (e.g. ``claude-opus-4-8[1m]``), the one-shot raised, and
-            # the run was kept visible instead of auto-archived.
+            # serve, the one-shot raised, and the run was kept visible instead
+            # of auto-archived.
             project_id = getattr(entry, "web_project_id", None)
             project = self._projects.get(project_id) if project_id else None
             workspace = project.workspace if project else None
@@ -4213,24 +4212,52 @@ class ProjectChatManager:
                 self._config,
                 default_model=insights_model,
             )
-            if note:
-                logger.info("Schedule attention classifier %s", note)
-            text = await run_oneshot(
-                user_prompt,
-                system_prompt=system_prompt,
-                model=model,
-                env=env,
-                timeout_s=60.0,
-            )
-            raw = text.strip()
-            if raw.startswith("```"):
-                raw = re.sub(r"^```(?:json)?\s*", "", raw)
-                raw = re.sub(r"\s*```$", "", raw)
-            verdict = json.loads(raw)
-            return bool(verdict.get("needs_user", True))
         except Exception:  # noqa: BLE001
-            logger.exception("Schedule attention classifier failed; keeping chat visible")
+            logger.exception("Schedule attention classifier setup failed; keeping chat visible")
             return True
+        provider = "routed" if env else "claude"
+        async with job_runs.track(
+            "schedule_attention_classifier",
+            "Schedule attention classifier",
+            model=model,
+            provider=provider,
+            extra={
+                "schedule_id": payload["schedule_id"],
+                "workspace": workspace or "",
+            },
+        ) as run:
+            if note:
+                run.extra["fallback_note"] = note
+                logger.info("Schedule attention classifier %s", note)
+            try:
+                from ciao.providers.oneshot import run_oneshot
+
+                text = await run_oneshot(
+                    user_prompt,
+                    system_prompt=system_prompt,
+                    model=model,
+                    env=env,
+                    timeout_s=60.0,
+                )
+                raw = text.strip()
+                if raw.startswith("```"):
+                    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+                    raw = re.sub(r"\s*```$", "", raw)
+                verdict = json.loads(raw)
+                needs_user = bool(verdict.get("needs_user", True))
+                run.extra["needs_user"] = needs_user
+                reason = str(verdict.get("reason", "")).strip()
+                if reason:
+                    run.extra["reason"] = reason[:500]
+                return needs_user
+            except Exception as exc:  # noqa: BLE001
+                run.status = "error"
+                run.error = str(exc)[:1000]
+                logger.exception(
+                    "Schedule attention classifier failed with model %s; keeping chat visible",
+                    model,
+                )
+                return True
 
     def prepare_schedule_chat(
         self,

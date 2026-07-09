@@ -2849,6 +2849,10 @@ async def run_schedule_now(request: Request) -> JSONResponse:
         result = await sm.dispatch_now(schedule_id)
     except ValueError:
         return JSONResponse({"error": "not found"}, status_code=404)
+    except RuntimeError as exc:
+        if "paused" in str(exc).lower():
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        raise
     return JSONResponse(result, status_code=201)
 
 

@@ -1325,11 +1325,15 @@ export const useProjectStore = defineStore('projects', () => {
       // explicit error/system note — anything that isn't a trailing user msg
       // or tool-activity entry means the final state is rendered.
       if (!last) continue
-      if (last.role === 'assistant' && !last.is_error) return
-      if (last.role === 'system' && last.tool_name !== '_activity') return
+      if (last.role === 'assistant' && !last.is_error) {
+        void loadSubagents(chatId)
+        return
+      }
+      if (last.role === 'system' && last.tool_name !== '_activity') {
+        void loadSubagents(chatId)
+        return
+      }
     }
-    // Subagent messages land after the parent session writes its final turn,
-    // so pull them once at the end instead of on every loadMessages retry.
     void loadSubagents(chatId)
   }
 

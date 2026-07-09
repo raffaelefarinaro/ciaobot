@@ -2,7 +2,7 @@
   <aside class="sidebar" :class="{ collapsed }" v-bind="$attrs">
     <div class="sidebar-header">
       <button
-        class="toggle-btn"
+        class="toggle-btn touch-hit"
         :class="{ 'toggle-btn--collapsed': collapsed }"
         @click="$emit('toggle')"
         :title="collapsed ? 'Open sidebar' : 'Collapse sidebar'"
@@ -29,7 +29,7 @@
         <div class="nav-links">
           <router-link
             to="/"
-            class="nav-item"
+            class="nav-item touch-hit"
             :class="{ 'nav-item--active': mode === 'chat' || mode === 'project' }"
             title="Chats"
             aria-label="Chats"
@@ -43,7 +43,7 @@
               <polyline points="8 18 8 21 11 18" />
             </svg>
           </router-link>
-          <router-link to="/schedules" class="nav-item" active-class="nav-item--active" title="Schedules" aria-label="Schedules" data-tour="nav-schedules">
+          <router-link to="/schedules" class="nav-item touch-hit" active-class="nav-item--active" title="Schedules" aria-label="Schedules" data-tour="nav-schedules">
             <!-- Clock face with hour markers: more diagrammatic than calendar grid -->
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
@@ -55,7 +55,7 @@
               <polyline points="12 8 12 12 15 14" />
             </svg>
           </router-link>
-          <router-link to="/settings" class="nav-item" active-class="nav-item--active" title="Settings" aria-label="Settings">
+          <router-link to="/settings" class="nav-item touch-hit" active-class="nav-item--active" title="Settings" aria-label="Settings">
             <!-- Sliders / equalizer: more direct than a gear, mono-grid friendly -->
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
@@ -387,7 +387,7 @@
       <div class="sidebar-footer">
         <button class="add-project-btn" @click="addProject">+ New Project</button>
         <button
-          class="archive-btn"
+          class="archive-btn touch-hit"
           @click="openArchive"
           title="Completed projects"
           aria-label="Completed projects"
@@ -781,9 +781,8 @@ async function confirmDeleteChat(chatId: string) {
   border: none;
   color: var(--fg2);
   cursor: pointer;
-  padding: 4px;
-  width: 28px;
-  min-height: 32px;
+  width: 30px;
+  height: 30px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -793,13 +792,6 @@ async function confirmDeleteChat(chatId: string) {
 .toggle-btn:hover { color: var(--fg); background: var(--bg3); }
 .toggle-btn:active { transform: scale(0.94); }
 .toggle-btn--collapsed svg { transform: scaleX(-1); }
-
-@media (max-width: 768px) {
-  .toggle-btn {
-    min-width: var(--touch);
-    min-height: var(--touch);
-  }
-}
 
 .brand {
   /* Inherits .wordmark base from App.vue; override size and add interaction. */
@@ -965,13 +957,6 @@ async function confirmDeleteChat(chatId: string) {
   text-overflow: ellipsis;
 }
 
-@media (max-width: 768px) {
-  .recent-item {
-    min-height: var(--touch);
-    font-size: calc(14px * var(--font-scale));
-  }
-}
-
 .nav-links {
   display: flex;
   align-items: center;
@@ -1007,7 +992,6 @@ async function confirmDeleteChat(chatId: string) {
   background: none;
   border: none;
   border-radius: 6px;
-  padding: 0;
   cursor: pointer;
   transition: background 120ms var(--ease), color 120ms var(--ease);
 }
@@ -1030,14 +1014,6 @@ async function confirmDeleteChat(chatId: string) {
   height: 14px;
 }
 
-@media (max-width: 768px) {
-  .nav-item {
-    width: var(--touch);
-    height: var(--touch);
-  }
-  .sidebar-bell { display: none; }
-}
-
 .workspace-toggle {
   display: flex;
   flex-wrap: wrap;
@@ -1048,7 +1024,7 @@ async function confirmDeleteChat(chatId: string) {
 .workspace-toggle button {
   flex: 1 1 0;
   min-width: 0;
-  min-height: 44px;
+  min-height: 32px;
   padding: 6px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -1316,7 +1292,7 @@ async function confirmDeleteChat(chatId: string) {
 
 .add-project-btn {
   flex: 1;
-  min-height: 44px;
+  min-height: 32px;
   padding: 6px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -1340,8 +1316,8 @@ async function confirmDeleteChat(chatId: string) {
 
 .archive-btn {
   flex-shrink: 0;
-  width: 44px;
-  min-height: 44px;
+  width: 30px;
+  height: 30px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1470,12 +1446,8 @@ async function confirmDeleteChat(chatId: string) {
   .sidebar.collapsed .sidebar-footer {
     visibility: hidden;
   }
-  .chat-item, .project-header {
-    min-height: var(--touch);
-    font-size: calc(14px * var(--font-scale));
-  }
-  .chat-item { padding: 10px 16px 10px 32px; }
-  .add-chat-btn { opacity: 1; min-width: 32px; min-height: 32px; }
+  .add-chat-btn { opacity: 1; }
+  .sidebar-bell { display: none; }
 }
 
 /* Schedules list in sidebar (schedules mode) */

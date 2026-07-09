@@ -2,7 +2,7 @@
   <div class="bell-root" @keydown.esc="open = false">
     <button
       ref="btnRef"
-      class="bell-btn"
+      class="bell-btn touch-hit"
       :class="{ 'has-unread': totalUnread > 0 }"
       :aria-label="totalUnread > 0 ? `${totalUnread} unread chats` : 'Notifications'"
       :aria-expanded="open"
@@ -153,8 +153,8 @@ function formatTime(iso: string | undefined): string {
 }
 
 .bell-btn {
-  width: var(--touch);
-  height: var(--touch);
+  width: 30px;
+  height: 30px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -165,6 +165,10 @@ function formatTime(iso: string | undefined): string {
   cursor: pointer;
   position: relative;
   transition: transform 120ms var(--ease), background 120ms var(--ease);
+}
+.bell-btn svg {
+  width: 18px;
+  height: 18px;
 }
 .bell-btn:hover { background: var(--bg3); }
 .bell-btn:active { transform: scale(0.94); }

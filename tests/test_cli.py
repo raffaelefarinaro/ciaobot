@@ -281,9 +281,20 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     assert f'token=$(tr -d "[:space:]" < "{token_file}"' in app_text
     assert 'url="http://localhost:9443/?setup=$token"' in app_text
     assert 'url="http://localhost:9443/"' in app_text
-    # The launcher starts the server and menu bar agents when they're down.
-    assert 'launchctl kickstart "gui/$(id -u)/com.ciao.server"' in app_text
-    assert 'launchctl kickstart "gui/$(id -u)/com.ciao.menubar"' in app_text
+    # The launcher starts the server and menu bar agents when they're down,
+    # without permanently re-enabling labels the tray toggle disabled.
+    assert 'launchctl print-disabled "gui/$(id -u)"' in app_text
+    assert 'launchctl kickstart "gui/$(id -u)/$label"' in app_text
+    assert 'launchctl enable "gui/$(id -u)/$label"' in app_text
+    assert 'launchctl disable "gui/$(id -u)/$label"' in app_text
+    assert (
+        'start_agent "com.ciao.server" "$HOME/Library/LaunchAgents/com.ciao.server.plist"'
+        in app_text
+    )
+    assert (
+        'start_agent "com.ciao.menubar" "$HOME/Library/LaunchAgents/com.ciao.menubar.plist"'
+        in app_text
+    )
     # Prefers a browser-installed PWA bundle over the default browser, but
     # excludes our own launcher bundle so it doesn't just relaunch itself.
     assert '"$HOME/Applications/Ciaobot.app"' in app_text

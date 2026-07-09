@@ -112,6 +112,64 @@ def test_update_package_homebrew_noop_reports_failure(monkeypatch) -> None:
     assert "0.4.6" in res["error"]
 
 
+def test_update_package_homebrew_refreshes_tap_before_upgrade(monkeypatch) -> None:
+    # brew upgrade's own auto-update is throttled, so right after a release
+    # goes out the local formula cache can still be stale even though a
+    # newer version already exists upstream. Force a refresh first so the
+    # upgrade doesn't silently no-op against cached metadata.
+    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "homebrew")
+    monkeypatch.setattr("ciao.package_version._resolve_brew", lambda: "/opt/homebrew/bin/brew")
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        result = MagicMock()
+        result.stderr = ""
+        result.returncode = 0
+        if cmd[1:] == ["upgrade", "ciaobot"]:
+            result.stdout = "==> Upgrading ciaobot"
+        else:
+            upgraded = any(c[1:] == ["upgrade", "ciaobot"] for c in calls[:-1])
+            result.stdout = "ciaobot 0.4.7" if upgraded else "ciaobot 0.4.6"
+        return result
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    res = update_package()
+    assert res["ok"] is True
+
+    update_call = calls.index(["/opt/homebrew/bin/brew", "update", "--quiet"])
+    upgrade_call = calls.index(["/opt/homebrew/bin/brew", "upgrade", "ciaobot"])
+    assert update_call < upgrade_call
+
+
+def test_update_package_homebrew_upgrade_survives_refresh_failure(monkeypatch) -> None:
+    # A failed/offline tap refresh must not block the upgrade attempt itself.
+    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "homebrew")
+    monkeypatch.setattr("ciao.package_version._resolve_brew", lambda: "/opt/homebrew/bin/brew")
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[1:] == ["update", "--quiet"]:
+            raise TimeoutError("brew update timed out")
+        result = MagicMock()
+        result.stderr = ""
+        result.returncode = 0
+        if cmd[1:] == ["upgrade", "ciaobot"]:
+            result.stdout = "==> Upgrading ciaobot"
+        else:
+            upgraded = any(c[1:] == ["upgrade", "ciaobot"] for c in calls[:-1])
+            result.stdout = "ciaobot 0.4.7" if upgraded else "ciaobot 0.4.6"
+        return result
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    res = update_package()
+    assert res["ok"] is True
+    assert ["/opt/homebrew/bin/brew", "upgrade", "ciaobot"] in calls
+
+
 def test_update_package_homebrew_without_brew(monkeypatch) -> None:
     monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "homebrew")
     monkeypatch.setattr("ciao.package_version._resolve_brew", lambda: None)

@@ -85,6 +85,28 @@ def test_run_schedule_now_missing_schedule_returns_404(tmp_path: Path) -> None:
     assert response.status_code == 404, response.text
 
 
+def test_run_schedule_now_paused_instance_returns_409() -> None:
+    class _PausedScheduleManager:
+        async def dispatch_now(self, schedule_id: str) -> dict:
+            raise RuntimeError("Instance is paused; cannot run schedule now.")
+
+    app = Starlette(
+        routes=[
+            Route(
+                "/api/schedule-run/{schedule_id}",
+                run_schedule_now,
+                methods=["POST"],
+            ),
+        ]
+    )
+    app.state.schedule_manager = _PausedScheduleManager()
+
+    response = TestClient(app).post("/api/schedule-run/sched-1")
+
+    assert response.status_code == 409
+    assert response.json()["error"] == "Instance is paused; cannot run schedule now."
+
+
 def test_create_schedule_rejects_unknown_archive_policy(tmp_path: Path) -> None:
     client = _make_client(tmp_path)
     response = client.post(

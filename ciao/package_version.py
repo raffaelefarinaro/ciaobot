@@ -393,6 +393,19 @@ def update_package(
                 "error": "Homebrew 'brew' command not found in PATH.",
                 "command": "brew upgrade ciaobot",
             }
+        # `brew upgrade` auto-updates tap metadata itself, but that's
+        # throttled (HOMEBREW_AUTO_UPDATE_SECS, default 24h). Right after a
+        # release goes out, the local formula cache can still resolve to the
+        # old version, making the upgrade a silent no-op. Force a refresh
+        # first; best-effort, since a failed/offline refresh shouldn't block
+        # the upgrade attempt itself.
+        try:
+            subprocess.run(
+                [brew, "update", "--quiet"],
+                capture_output=True, text=True, timeout=60, check=False,
+            )
+        except Exception:
+            pass
         cmd = [brew, "upgrade", "ciaobot"]
         check_version = lambda: _brew_installed_version(brew)
         before_version = check_version()

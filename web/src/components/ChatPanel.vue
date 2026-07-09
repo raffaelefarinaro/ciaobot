@@ -94,7 +94,7 @@
         </span>
         <div class="model-picker-wrap" ref="modelPickerRef" data-tour="model-picker">
           <button
-            class="model-picker-btn btn-icon"
+            class="model-picker-btn touch-hit"
             :title="chat.model + (chat.thinking_level ? ' · ' + chat.thinking_level : '')"
             @click.stop="toggleModelPicker"
             aria-label="Model"
@@ -129,7 +129,7 @@
             <span class="trace-chevron">{{ openTraces[i] ? '\u25BE' : '\u25B8' }}</span>
             <span class="trace-icon">&#129504;</span>
             <span class="trace-label">Reasoning</span>
-            <span class="trace-meta">{{ traceSummaryMeta(item.steps) }}</span>
+            <span class="trace-meta">{{ traceSummaryMeta(item.steps, item.subs) }}</span>
           </div>
           <div v-if="openTraces[i]" class="trace-body">
             <template v-for="(step, j) in item.steps" :key="j">
@@ -166,6 +166,7 @@
               ></div>
               <div v-else class="trace-text" v-html="renderMarkdown(step.content)"></div>
             </template>
+            <SubagentPanel v-if="item.subs?.length" :subagents="item.subs" />
           </div>
         </div>
         <!-- User message -->
@@ -243,13 +244,19 @@
             </div>
           </div>
           <p v-if="speakError?.key === `assistant-${i}`" class="speak-error">{{ speakError.message }}</p>
-          <button
-            v-if="item.msg.is_error"
-            class="retry-btn fix-btn"
-            @click="openFixChat(i)"
-          >Fix this error</button>
+          <div v-if="item.msg.is_error" class="error-actions">
+            <button
+              v-if="lastUserBefore(i)"
+              class="retry-btn"
+              @click="retryFromError(i)"
+            >Retry</button>
+            <button
+              class="retry-btn fix-btn"
+              @click="openFixChat(i)"
+            >Fix this error</button>
+          </div>
         </div>
-        <!-- Subagent activity for the turn that dispatched the agents -->
+        <!-- Background (async) subagents still running after the parent turn -->
         <SubagentPanel v-else-if="item.kind === 'subagents'" :subagents="item.subs" />
         <!-- System message (errors, etc) -->
         <div v-else-if="item.kind === 'system'" class="message system">
@@ -342,12 +349,16 @@
             v-html="renderMarkdown(store.currentStreamingThinking)"
           ></div>
           <div v-if="store.currentStreamingText" class="trace-text trace-streaming" v-html="renderMarkdown(store.currentStreamingText)"></div>
-          <!-- Agents dispatched by the in-flight turn: their full transcripts
-               nest here while streaming; on result they re-anchor into the
-               timeline (renderItems handles the completed-turn placement). -->
+          <!-- Foreground subagents for the in-flight turn nest in the live trace;
+               background async agents render as a standalone panel below. -->
           <SubagentPanel v-if="liveSubagents.length" :subagents="liveSubagents" />
         </div>
         </div>
+
+      <SubagentPanel
+        v-if="liveStandaloneSubagents.length"
+        :subagents="liveStandaloneSubagents"
+      />
 
       <div ref="scrollAnchor"></div>
 
@@ -709,7 +720,7 @@ type RenderItem =
   | { kind: 'user'; msg: ChatMessage }
   | { kind: 'assistant'; msg: ChatMessage }
   | { kind: 'system'; msg: ChatMessage }
-  | { kind: 'trace'; steps: ChatMessage[] }
+  | { kind: 'trace'; steps: ChatMessage[]; subs?: SubagentTranscript[] }
   | { kind: 'subagents'; subs: SubagentTranscript[] }
 
 type ChatComment = {
@@ -1795,6 +1806,26 @@ function isSubagentLine(line: string): boolean {
   return line.trimStart().startsWith('↳')  // ↳
 }
 
+// Foreground Task/Agent dispatches run inside the parent turn and belong in
+// the Reasoning trace. Background (`run_in_background`) agents outlive the
+// parent reply and get a standalone panel the user can keep watching.
+function isBackgroundSubagent(sub: SubagentTranscript): boolean {
+  return sub.is_async === true
+}
+
+function partitionSubagents(subs: SubagentTranscript[]): {
+  trace: SubagentTranscript[]
+  standalone: SubagentTranscript[]
+} {
+  const trace: SubagentTranscript[] = []
+  const standalone: SubagentTranscript[] = []
+  for (const sub of subs) {
+    if (isBackgroundSubagent(sub)) standalone.push(sub)
+    else trace.push(sub)
+  }
+  return { trace, standalone }
+}
+
 function handleFileLinkClick(e: MouseEvent): void {
   const target = e.target as HTMLElement | null
   if (!target) return
@@ -1857,7 +1888,7 @@ function formatTokens(n: number): string {
   return `${m < 10 ? m.toFixed(1) : Math.round(m)}M`
 }
 
-function traceSummaryMeta(steps: ChatMessage[]): string {
+function traceSummaryMeta(steps: ChatMessage[], subs?: SubagentTranscript[]): string {
   let toolCount = 0
   let textCount = 0
   let thinkingCount = 0
@@ -1878,6 +1909,9 @@ function traceSummaryMeta(steps: ChatMessage[]): string {
   if (textCount) parts.push(`${textCount} note${textCount === 1 ? '' : 's'}`)
   if (toolCount) parts.push(`${toolCount} tool call${toolCount === 1 ? '' : 's'}`)
   if (fileCount) parts.push(`${fileCount} file${fileCount === 1 ? '' : 's'}`)
+  if (subs?.length) {
+    parts.push(`${subs.length} subagent${subs.length === 1 ? '' : 's'}`)
+  }
   return parts.join(' · ') || 'steps'
 }
 
@@ -1920,7 +1954,11 @@ function fileCardIcon(filePath: string): string {
   return '\u{1F4C4}'  // 📄
 }
 
-const renderData = computed<{ items: RenderItem[]; liveSubs: SubagentTranscript[] }>(() => {
+const renderData = computed<{
+  items: RenderItem[]
+  liveSubs: SubagentTranscript[]
+  liveStandaloneSubs: SubagentTranscript[]
+}>(() => {
   const items: RenderItem[] = []
   let buffer: ChatMessage[] = []
 
@@ -1940,13 +1978,26 @@ const renderData = computed<{ items: RenderItem[]; liveSubs: SubagentTranscript[
   }
   let currentTurnIndex: number | null = null
 
-  const flushSubagents = () => {
+  const takeForegroundSubs = (turnIndex: number | null): SubagentTranscript[] => {
+    if (turnIndex === null) return []
+    const subs = subsByTurn.get(turnIndex)
+    if (!subs?.length) return []
+    const { trace, standalone } = partitionSubagents(subs)
+    if (standalone.length) subsByTurn.set(turnIndex, standalone)
+    else subsByTurn.delete(turnIndex)
+    return trace
+  }
+
+  const flushStandaloneSubagents = () => {
     if (currentTurnIndex === null) return
     const subs = subsByTurn.get(currentTurnIndex)
-    if (subs?.length) {
-      items.push({ kind: 'subagents', subs })
-      subsByTurn.delete(currentTurnIndex)
-    }
+    if (!subs?.length) return
+    const standalone = subs.filter(isBackgroundSubagent)
+    if (!standalone.length) return
+    items.push({ kind: 'subagents', subs: standalone })
+    const foreground = subs.filter(s => !isBackgroundSubagent(s))
+    if (foreground.length) subsByTurn.set(currentTurnIndex, foreground)
+    else subsByTurn.delete(currentTurnIndex)
   }
 
   const flushTurn = (isFinal = false) => {
@@ -1977,7 +2028,12 @@ const renderData = computed<{ items: RenderItem[]; liveSubs: SubagentTranscript[
     // a normal assistant bubble; the trailing tools just join the trace.
     const trailingHasThinking = trailing.some(m => m.tool_name === '_thinking')
     if (trailingHasThinking && finalMsg) {
-      items.push({ kind: 'trace', steps: buffer.slice() })
+      const traceSubs = takeForegroundSubs(currentTurnIndex)
+      items.push({
+        kind: 'trace',
+        steps: buffer.slice(),
+        ...(traceSubs.length ? { subs: traceSubs } : {}),
+      })
       buffer = []
       return
     }
@@ -1991,8 +2047,15 @@ const renderData = computed<{ items: RenderItem[]; liveSubs: SubagentTranscript[
       return
     }
 
+    const traceSubs = takeForegroundSubs(currentTurnIndex)
     if (intermediate.length) {
-      items.push({ kind: 'trace', steps: intermediate })
+      items.push({
+        kind: 'trace',
+        steps: intermediate,
+        ...(traceSubs.length ? { subs: traceSubs } : {}),
+      })
+    } else if (traceSubs.length) {
+      items.push({ kind: 'trace', steps: [], subs: traceSubs })
     }
     if (finalMsg) {
       items.push({ kind: 'assistant', msg: finalMsg })
@@ -2006,7 +2069,7 @@ const renderData = computed<{ items: RenderItem[]; liveSubs: SubagentTranscript[
   for (const msg of store.activeMessages) {
     if (msg.role === 'user') {
       flushTurn()
-      flushSubagents()
+      flushStandaloneSubagents()
       currentTurnIndex = typeof msg.turn_index === 'number'
         ? msg.turn_index
         : currentTurnIndex === null ? 0 : currentTurnIndex + 1
@@ -2019,11 +2082,11 @@ const renderData = computed<{ items: RenderItem[]; liveSubs: SubagentTranscript[
     ) {
       flushTurn()
       // A subagent-completion notice marks where the background work ended:
-      // flush the dispatching turn's activity panel just before it so the
-      // chat reads chronologically (dispatch reply → subagent activity →
+      // flush the dispatching turn's standalone panel just before it so the
+      // chat reads chronologically (dispatch reply → background agents →
       // completion notice → report) instead of dumping the panel after the
       // report at the end of the turn.
-      if (isSubagentCompletionNotice(msg.content)) flushSubagents()
+      if (isSubagentCompletionNotice(msg.content)) flushStandaloneSubagents()
       items.push({ kind: 'system', msg })
     } else {
       // assistant text, _activity tool block, _thinking note, or _filecard:
@@ -2032,25 +2095,32 @@ const renderData = computed<{ items: RenderItem[]; liveSubs: SubagentTranscript[
     }
   }
   flushTurn(true)
-  // While streaming, the in-flight turn's panels (plus anything unanchored)
-  // nest inside the live "Working..." trace instead of floating as timeline
-  // items; they re-anchor via the completed-turn path once the result lands.
+  // While streaming, foreground subagents nest in the live trace; background
+  // async agents render as a standalone panel below it.
   if (store.isStreaming) {
-    const liveSubs = [...subsByTurn.values()].flat().concat(unanchoredSubs)
-    return { items, liveSubs }
+    const all = [...subsByTurn.values()].flat().concat(unanchoredSubs)
+    const { trace, standalone } = partitionSubagents(all)
+    return { items, liveSubs: trace, liveStandaloneSubs: standalone }
   }
-  flushSubagents()
+  flushStandaloneSubagents()
   // Anything still unplaced (turn not in history yet, or no turn info):
-  // show after the last turn rather than dropping it.
+  // foreground leftovers fold into a trace block; background ones stay standalone.
   const leftovers = [...subsByTurn.values()].flat().concat(unanchoredSubs)
-  if (leftovers.length) {
-    items.push({ kind: 'subagents', subs: leftovers })
+  const { trace, standalone } = partitionSubagents(leftovers)
+  if (standalone.length) {
+    items.push({ kind: 'subagents', subs: standalone })
   }
-  return { items, liveSubs: [] }
+  if (trace.length) {
+    items.push({ kind: 'trace', steps: [], subs: trace })
+  }
+  return { items, liveSubs: [], liveStandaloneSubs: [] }
 })
 
 const renderItems = computed<RenderItem[]>(() => renderData.value.items)
 const liveSubagents = computed<SubagentTranscript[]>(() => renderData.value.liveSubs)
+const liveStandaloneSubagents = computed<SubagentTranscript[]>(
+  () => renderData.value.liveStandaloneSubs,
+)
 
 // Watcher: keep highlights in sync with the pending list and message DOM.
 watch(
@@ -3982,6 +4052,9 @@ details[open] > .activity-summary::before {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  box-sizing: content-box;
+  width: 30px;
+  height: 30px;
   min-width: 30px;
   min-height: 30px;
   border-radius: 6px;
@@ -4062,6 +4135,24 @@ details[open] > .activity-summary::before {
   opacity: 0.7;
 }
 
+/* Pinned-file split: when the chat column is narrow, reclaim horizontal
+   space from gutter padding so bubbles stay readable without extra scroll. */
+@container chat-split (max-width: 560px) {
+  .messages {
+    padding: 8px 6px 16px 6px;
+  }
+  .message-wrap { max-width: 94%; }
+  .message-wrap.assistant { max-width: 96%; }
+}
+@container chat-split (max-width: 400px) {
+  .messages {
+    padding: 6px 4px 12px 4px;
+  }
+  .message-wrap,
+  .message-wrap.assistant { max-width: 100%; }
+  .message { padding: 8px 10px; }
+}
+
 @media (max-width: 768px) {
   /* Mobile header: spend the narrow width on the chat context, not on a
      giant one-line truncation. The project and title can wrap to two compact
@@ -4088,11 +4179,6 @@ details[open] > .activity-summary::before {
   :deep(.header-actions) {
     flex-shrink: 0;
     gap: 6px;
-  }
-  .model-picker-btn {
-    min-width: var(--touch);
-    min-height: var(--touch);
-    border-radius: var(--radius);
   }
   .model-picker-dropdown {
     right: 0;
