@@ -782,13 +782,14 @@ def run_menubar(workspace: Path, port: int) -> int:
         app.menu = menu
 
     def animate_icon(_timer=None) -> None:
-        # Owns the status bar icon: spins the head while a chat is working,
-        # otherwise shows the resting face (or the scared face when the server
-        # is unreachable). Pure state read — no HTTP — so it stays smooth.
+        # Owns the status bar icon: spins the head while a chat is working or
+        # a self-update is in flight, otherwise shows the resting face (or the
+        # scared face when the server is unreachable). Pure state read — no
+        # HTTP — so it stays smooth.
         if not state["reachable"]:
             _set_icon(face_scared)
             return
-        if state["working_ids"] and spin_frames:
+        if (state["working_ids"] or state["updating"]) and spin_frames:
             state["spin_index"] = (state["spin_index"] + 1) % len(spin_frames)
             _set_icon(spin_frames[state["spin_index"]])
         else:
