@@ -85,17 +85,21 @@
             <div v-if="fmTags.length" class="pfp-meta-row pfp-meta-tags">
               <span v-for="t in fmTags" :key="t" class="pfp-meta-tag">#{{ t }}</span>
             </div>
-            <div v-if="fmExtraEntries.length" class="pfp-meta-more">
-              <button class="pfp-meta-more-toggle" @click="showFmMore = !showFmMore" type="button">
-                {{ showFmMore ? '▾' : '▸' }} {{ showFmMore ? 'Hide' : 'Show' }} {{ fmExtraEntries.length }} more field{{ fmExtraEntries.length === 1 ? '' : 's' }}
-              </button>
-              <dl v-if="showFmMore" class="pfp-meta-extra">
-                <template v-for="entry in fmExtraEntries" :key="entry.key">
-                  <dt>{{ entry.key }}</dt>
-                  <dd>{{ entry.value }}</dd>
-                </template>
-              </dl>
+            <p v-if="fmProse" class="pfp-meta-summary">{{ fmProse }}</p>
+            <div
+              v-for="listExtra in fmListExtras"
+              :key="listExtra.key"
+              class="pfp-meta-row pfp-meta-links"
+            >
+              <span class="pfp-meta-links-label">{{ listExtra.key }}</span>
+              <span v-for="item in listExtra.items" :key="item" class="pfp-meta-link">{{ item }}</span>
             </div>
+            <dl v-if="fmExtraEntries.length" class="pfp-meta-extra">
+              <template v-for="entry in fmExtraEntries" :key="entry.key">
+                <dt>{{ entry.key }}</dt>
+                <dd>{{ entry.value }}</dd>
+              </template>
+            </dl>
           </div>
           <div
             v-if="isMarkdown"
@@ -303,9 +307,8 @@ const renderedMarkdown = computed(() => {
 })
 
 // ── Metadata card (parsed frontmatter) ───────────────────────────────
-// Surface the most useful fields as pills; relegate the rest to a
-// collapsible "more" section so noisy fields like `aliases` and `related`
-// don't dominate the top of the document.
+// Surface the most useful fields as pills; prose fields (description, etc.)
+// read as a summary; list fields (aliases, related) as compact chips.
 const fmTitle = computed(() => fmString('title'))
 const fmName = computed(() => fmString('name'))
 const fmType = computed(() => fmString('type'))
@@ -314,17 +317,34 @@ const fmTags = computed(() => fmList('tags'))
 const fmCreated = computed(() => fmString('created'))
 const fmUpdated = computed(() => fmString('updated'))
 
-// Anything we don't render as a primary chip falls into "more". Filter out
-// keys that are already on the main row, plus very long structural keys
-// (related, aliases) that humans rarely need to read while reviewing the
-// body.
 const PRIMARY_KEYS = new Set(['title', 'name', 'type', 'status', 'tags', 'created', 'updated'])
+const PROSE_KEYS = new Set(['description', 'summary', 'notes'])
+const LIST_EXTRA_KEYS = new Set(['aliases', 'related', 'links'])
+
+const fmProse = computed(() => {
+  for (const key of ['description', 'summary', 'notes']) {
+    const v = fmString(key)
+    if (v.trim()) return v
+  }
+  return ''
+})
+
+const fmListExtras = computed(() => {
+  const out: { key: string; items: string[] }[] = []
+  for (const key of ['aliases', 'related', 'links']) {
+    const items = fmList(key)
+    if (items.length) out.push({ key, items })
+  }
+  return out
+})
+
 const fmExtraEntries = computed(() => {
   const fm = frontmatter.value
   if (!fm) return [] as { key: string; value: string }[]
+  const skip = new Set([...PRIMARY_KEYS, ...PROSE_KEYS, ...LIST_EXTRA_KEYS])
   const out: { key: string; value: string }[] = []
   for (const [k, v] of Object.entries(fm)) {
-    if (PRIMARY_KEYS.has(k)) continue
+    if (skip.has(k)) continue
     if (v == null) continue
     const text = Array.isArray(v) ? v.join(', ') : String(v)
     if (!text.trim()) continue
@@ -332,8 +352,6 @@ const fmExtraEntries = computed(() => {
   }
   return out
 })
-
-const showFmMore = ref(false)
 
 function fmString(key: string): string {
   const v = frontmatter.value?.[key]
@@ -1209,20 +1227,37 @@ watch(() => props.filePath, () => {
   border-radius: 4px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
-.pfp-meta-more {
-  margin-top: 2px;
+.pfp-meta-summary {
+  margin: 2px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--fg);
 }
-.pfp-meta-more-toggle {
-  background: transparent;
-  border: none;
+.pfp-meta-links {
+  gap: 4px 6px;
+}
+.pfp-meta-links-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
   color: var(--fg2);
-  cursor: pointer;
-  font-size: 11px;
-  padding: 2px 0;
+  margin-right: 2px;
 }
-.pfp-meta-more-toggle:hover { color: var(--fg); }
+.pfp-meta-link {
+  font-size: 11px;
+  color: var(--fg2);
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
 .pfp-meta-extra {
-  margin: 6px 0 0;
+  margin: 8px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
   display: grid;
   grid-template-columns: max-content 1fr;
   gap: 2px 12px;
