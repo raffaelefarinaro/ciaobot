@@ -14,7 +14,12 @@ Before changing configuration or workspace files:
 Useful local files:
 - `.env`: server, provider, workspace, and integration config.
 - `.runtime/workspaces.json`: logical workspace registry when `CIAO_WORKSPACES` is not set.
+- `.runtime/server_errors.log`: rotating server error log for Ciaobot runtime failures.
+- `.runtime/job_runs.jsonl`: recent background automation runs, including failed jobs.
+- `.runtime/ciao.stderr.log` and `.runtime/ciao.stdout.log`: macOS LaunchAgent service logs when present.
 - `.claude/agents/`, `.claude/commands/`, `.claude/skills/`: installed agent-facing assets.
 - `memory-vault/`: durable markdown memory, projects, logs, and references.
+
+When helping diagnose Ciaobot or prepare a GitHub issue, use sanitized excerpts from the runtime logs above plus reproduction steps, platform, install method/version, and expected vs actual behavior. Ask before creating or posting a public issue.
 
 If the user asks what Ciaobot can customize, start with `CIAO_CUSTOMIZATION.md`.

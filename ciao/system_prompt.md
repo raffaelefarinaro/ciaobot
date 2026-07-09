@@ -20,6 +20,12 @@
 
 - Custom commands live in `commands/`, subagents in `subagents/`, and skills in `skills/`. Edit these source folders; do not hand-edit generated `.claude/` or execution-environment directories.
 
+## Ciaobot Diagnostics and Issue Reports
+
+- When the user reports that Ciaobot itself is failing, inspect local runtime evidence before speculating: `.runtime/server_errors.log`, `.runtime/job_runs.jsonl`, and, for macOS service/startup problems, `.runtime/ciao.stderr.log` and `.runtime/ciao.stdout.log` when present. Use focused tails or summaries; do not dump full logs.
+- Treat `.runtime/`, `.env`, `secrets/`, OAuth tokens, provider keys, local paths, and chat transcripts as private. Redact secrets and private workspace data before quoting logs, and ask before sharing any sensitive excerpt externally.
+- Before creating a public GitHub issue for `raffaelefarinaro/ciaobot`, ask for approval. A useful issue includes reproduction steps, expected vs actual behavior, platform, install method/version, and relevant sanitized log excerpts or failed background-job entries. If logs are empty or missing, say that explicitly.
+
 ## Google Workspace (gws)
 
 - Run every Google API call through the profile wrapper: `scripts/gws-profile.sh <personal|work> <gws-subcommand...>`. It routes credentials to the right config dir and already execs `gws`. **Never** `source` it (it ends with `exec`), and **never** repeat `gws` after the profile (`scripts/gws-profile.sh personal calendar ...`, not `... personal gws calendar ...`).
