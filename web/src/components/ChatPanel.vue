@@ -244,13 +244,19 @@
             </div>
           </div>
           <p v-if="speakError?.key === `assistant-${i}`" class="speak-error">{{ speakError.message }}</p>
-          <button
-            v-if="item.msg.is_error"
-            class="retry-btn fix-btn"
-            @click="openFixChat(i)"
-          >Fix this error</button>
+          <div v-if="item.msg.is_error" class="error-actions">
+            <button
+              v-if="lastUserBefore(i)"
+              class="retry-btn"
+              @click="retryFromError(i)"
+            >Retry</button>
+            <button
+              class="retry-btn fix-btn"
+              @click="openFixChat(i)"
+            >Fix this error</button>
+          </div>
         </div>
-        <!-- Subagent activity for the turn that dispatched the agents -->
+        <!-- Background (async) subagents still running after the parent turn -->
         <SubagentPanel v-else-if="item.kind === 'subagents'" :subagents="item.subs" />
         <!-- System message (errors, etc) -->
         <div v-else-if="item.kind === 'system'" class="message system">
