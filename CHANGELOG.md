@@ -4,10 +4,12 @@
 
 ### Added
 - feat(tray): spin the icon while a self-update is in progress (`1443731`)
+- feat(tray): animate a pixel pulsing dot beside working chats (`0512094`)
 
 ### Fixed
 - fix(web): make the Fix/Close buttons on error toasts actually respond (`fd15515`)
 - fix(web): top-align the voice-engine install banner with its text (`812d89a`)
+- fix(routes_api): tolerate more than "completed" in a subagent's self-reported sign-off (`892a1a1`)
 
 ### Maintenance
 - build(web): refresh bundled PWA assets (`64f6f64`)
