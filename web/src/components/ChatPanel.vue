@@ -2296,11 +2296,15 @@ function retryFromError(errorIdx: number) {
 // Open a fresh chat in the General project seeded with this error + the last
 // user turn, asking the agent to diagnose and fix it (or file a GitHub issue
 // if the bug is in Ciaobot itself).
-function openFixChat(errorIdx: number) {
+async function openFixChat(errorIdx: number) {
   const it = renderItems.value[errorIdx]
   const errorText = it && 'msg' in it ? it.msg.content : ''
   const context = lastUserBefore(errorIdx) || undefined
-  store.fixError({ errorText, context })
+  try {
+    await store.fixError({ errorText, context })
+  } catch (e) {
+    store.pushErrorToast('Could not open fix chat', `${(e as Error)?.message || e}`)
+  }
 }
 
 function formatRetryTime(value: string): string {
