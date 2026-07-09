@@ -660,6 +660,20 @@ def run_menubar(workspace: Path, port: int) -> int:
                 res = update_package()
                 if res.get("ok"):
                     subprocess.run(restart_server_command(), check=False)
+                    # NSUserNotificationCenter, not osascript: a detached
+                    # `display notification` process has no bundle icon of
+                    # its own, so macOS shows a generic placeholder. Posting
+                    # through rumps with an explicit icon renders the actual
+                    # Ciaobot face instead.
+                    try:
+                        rumps.notification(
+                            "Ciaobot updated",
+                            "",
+                            f"Version {latest} is installed.",
+                            icon=icon_path("Ciaobot.icns"),
+                        )
+                    except Exception:
+                        pass
                     # Relaunch via launchd so this process loads the new wheel.
                     subprocess.run(restart_menubar_command(), check=False)
                     return
