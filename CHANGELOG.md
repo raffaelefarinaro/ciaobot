@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.4.13 - 2026-07-09
+
+### Added
+- feat(tray): spin the icon while a self-update is in progress (`1443731`)
+
+### Fixed
+- fix(web): make the Fix/Close buttons on error toasts actually respond (`fd15515`)
+- fix(web): top-align the voice-engine install banner with its text (`812d89a`)
+
+### Maintenance
+- build(web): refresh bundled PWA assets (`64f6f64`)
+
 ## v0.4.12 - 2026-07-09
 
 ### Added
