@@ -4065,6 +4065,24 @@ details[open] > .activity-summary::before {
   opacity: 0.7;
 }
 
+/* Pinned-file split: when the chat column is narrow, reclaim horizontal
+   space from gutter padding so bubbles stay readable without extra scroll. */
+@container chat-split (max-width: 560px) {
+  .messages {
+    padding: 8px 6px 16px 6px;
+  }
+  .message-wrap { max-width: 94%; }
+  .message-wrap.assistant { max-width: 96%; }
+}
+@container chat-split (max-width: 400px) {
+  .messages {
+    padding: 6px 4px 12px 4px;
+  }
+  .message-wrap,
+  .message-wrap.assistant { max-width: 100%; }
+  .message { padding: 8px 10px; }
+}
+
 @media (max-width: 768px) {
   /* Mobile header: spend the narrow width on the chat context, not on a
      giant one-line truncation. The project and title can wrap to two compact

@@ -159,11 +159,9 @@ const MIN_SIDEBAR_WIDTH = 180
 const MAX_SIDEBAR_WIDTH = 500
 const SIDEBAR_SNAP_THRESHOLD = 15 // px
 
-// Chat gets a larger guaranteed floor than the pinned-file side: it's the
-// primary reading surface, while the side panel is more often skimmed.
-const DEFAULT_SPLIT_RATIO = 0.55
-const MIN_CHAT_PANE_WIDTH = 480
-const MIN_SIDE_PANE_WIDTH = 360
+const DEFAULT_SPLIT_RATIO = 0.5
+const MIN_CHAT_PANE_WIDTH = 240
+const MIN_SIDE_PANE_WIDTH = 240
 const SPLIT_SNAP_THRESHOLD = 15 // px
 const LATEST_STATUS_SYNC_MS = 15000
 
@@ -639,29 +637,27 @@ onBeforeUnmount(() => {
 
 @keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
 
-/* Split-screen layout for pinned file viewer.
-   Chat defaults to a larger share (55/45) and has a taller min-width floor
-   than the side panel, since the chat column is where sustained reading
-   happens; the pinned file is more often skimmed. min-width acts as a
-   hard floor so a narrow ratio persisted from a wider viewport (or a
-   drag near the limit) can never squeeze either pane below a readable
-   width. */
+/* Split-screen layout for pinned file viewer. Both panes share width 50/50
+   by default; min-width is a soft floor during drag so a compressed window
+   can still show chat and the pinned document side by side. */
 .chat-split {
   flex-direction: row;
 }
 .chat-split-main {
-  width: 55%;
+  width: 50%;
   flex: 1 1 0;
-  min-width: 480px;
+  min-width: 240px;
+  container-type: inline-size;
+  container-name: chat-split;
   display: flex;
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
 }
 .chat-split-side {
-  width: 45%;
+  width: 50%;
   flex: 1 1 0;
-  min-width: 360px;
+  min-width: 240px;
   border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
