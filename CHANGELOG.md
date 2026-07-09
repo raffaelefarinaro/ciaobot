@@ -10,6 +10,7 @@
 - fix(web): make the Fix/Close buttons on error toasts actually respond (`fd15515`)
 - fix(web): top-align the voice-engine install banner with its text (`812d89a`)
 - fix(routes_api): tolerate more than "completed" in a subagent's self-reported sign-off (`892a1a1`)
+- fix(web): anchor the standalone subagent panel to its own completion notice (`f34bb26`)
 
 ### Maintenance
 - build(web): refresh bundled PWA assets (`64f6f64`)
