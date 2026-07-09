@@ -42,15 +42,24 @@
             <PaneHeader title="Ciaobot" @open-sidebar="sidebarCollapsed = false" />
             <div class="empty-state">
               <div class="empty-mark">
-                <img
-                  class="empty-face"
-                  :src="faceSrc"
-                  alt="ciaobot"
-                  draggable="false"
-                  @click="faceToggled = !faceToggled"
-                  @mouseenter="faceHover = true"
-                  @mouseleave="faceHover = false"
-                />
+                <button
+                  type="button"
+                  class="empty-face-btn"
+                  aria-label="Say hello"
+                  @click="onFaceClick"
+                >
+                  <Transition name="face-bubble">
+                    <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
+                      {{ speechGreeting }}
+                    </div>
+                  </Transition>
+                  <img
+                    class="empty-face"
+                    :src="faceSrc"
+                    alt=""
+                    draggable="false"
+                  />
+                </button>
               </div>
               <p class="empty-hint">// select a chat from the sidebar, or start a new one.</p>
               <div class="empty-actions">
@@ -104,15 +113,24 @@
           <PaneHeader title="Ciaobot" @open-sidebar="sidebarCollapsed = false" />
           <div class="empty-state">
             <div class="empty-mark">
-              <img
-                class="empty-face"
-                :src="faceSrc"
-                alt="ciaobot"
-                draggable="false"
-                @click="faceToggled = !faceToggled"
-                @mouseenter="faceHover = true"
-                @mouseleave="faceHover = false"
-              />
+              <button
+                type="button"
+                class="empty-face-btn"
+                aria-label="Say hello"
+                @click="onFaceClick"
+              >
+                <Transition name="face-bubble">
+                  <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
+                    {{ speechGreeting }}
+                  </div>
+                </Transition>
+                <img
+                  class="empty-face"
+                  :src="faceSrc"
+                  alt=""
+                  draggable="false"
+                />
+              </button>
             </div>
             <p class="empty-hint">// select a chat from the sidebar, or start a new one.</p>
             <div class="empty-actions">
@@ -292,11 +310,43 @@ function stopSplitDrag() {
   }
 }
 
-// Welcome-screen mascot. Hover or click swaps between the two faces:
-// hover XOR the persistent click-toggle picks the scared face.
-const faceHover = ref(false)
-const faceToggled = ref(false)
-const faceSrc = computed(() => (faceHover.value !== faceToggled.value ? '/face_scared.png' : '/face.png'))
+// Welcome-screen mascot. Click opens the mouth and shows a comic bubble
+// with "hello" in a different language each time.
+const FACE_GREETINGS = [
+  'Ciao!', '¡Hola!', 'Salut!', 'Hallo!', 'Olá!', 'Hello!',
+  'こんにちは!', '안녕!', '你好!', 'مرحبا!', 'Привет!', 'नमस्ते!',
+  'Merhaba!', 'Γειά σου!', 'Hej!', 'Cześć!', 'สวัสดี!', 'Xin chào!',
+  'שלום!', 'Halo!', 'Ahoj!', 'Szia!', 'Dia dhuit!', 'Sawubona!',
+] as const
+
+const speechGreeting = ref<string | null>(null)
+let greetingQueue: string[] = []
+let speechHideTimer: ReturnType<typeof window.setTimeout> | null = null
+
+function shuffleGreetings(): string[] {
+  const next = [...FACE_GREETINGS]
+  for (let i = next.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[next[i], next[j]] = [next[j], next[i]]
+  }
+  return next
+}
+
+function nextGreeting(): string {
+  if (greetingQueue.length === 0) greetingQueue = shuffleGreetings()
+  return greetingQueue.pop()!
+}
+
+function onFaceClick() {
+  speechGreeting.value = nextGreeting()
+  if (speechHideTimer) window.clearTimeout(speechHideTimer)
+  speechHideTimer = window.setTimeout(() => {
+    speechGreeting.value = null
+    speechHideTimer = null
+  }, 2600)
+}
+
+const faceSrc = computed(() => (speechGreeting.value ? '/face_scared.png' : '/face.png'))
 const taskStore = useTaskStore()
 const route = useRoute()
 const router = useRouter()
@@ -544,6 +594,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  if (speechHideTimer) window.clearTimeout(speechHideTimer)
   stopLatestStatusSync()
   window.removeEventListener('resize', onResize)
   window.removeEventListener('touchstart', onTouchStart)
@@ -603,17 +654,80 @@ onBeforeUnmount(() => {
   gap: 10px;
   opacity: 0.85;
 }
+.empty-state .empty-face-btn {
+  position: relative;
+  display: inline-flex;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  user-select: none;
+  transition: transform 120ms var(--ease);
+}
+.empty-state .empty-face-btn:hover { transform: scale(1.08); }
+.empty-state .empty-face-btn:active { transform: scale(0.94); }
 .empty-state .empty-face {
+  display: block;
   width: 120px;
   height: 120px;
   image-rendering: pixelated;
-  cursor: pointer;
-  user-select: none;
   -webkit-user-drag: none;
-  transition: transform 120ms var(--ease);
+  pointer-events: none;
 }
-.empty-state .empty-face:hover { transform: scale(1.08); }
-.empty-state .empty-face:active { transform: scale(0.94); }
+.face-speech-bubble {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 14px;
+  background: #fff;
+  color: #111;
+  border: 3px solid #111;
+  border-radius: 14px 14px 14px 4px;
+  box-shadow: 4px 4px 0 #111;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+  z-index: 1;
+}
+.face-speech-bubble::after {
+  content: '';
+  position: absolute;
+  left: 18px;
+  bottom: -12px;
+  width: 0;
+  height: 0;
+  border: 6px solid transparent;
+  border-top-color: #111;
+}
+.face-speech-bubble::before {
+  content: '';
+  position: absolute;
+  left: 20px;
+  bottom: -6px;
+  width: 0;
+  height: 0;
+  border: 4px solid transparent;
+  border-top-color: #fff;
+  z-index: 1;
+}
+.face-bubble-enter-active {
+  animation: face-bubble-pop 220ms var(--ease);
+}
+.face-bubble-leave-active {
+  animation: face-bubble-pop 160ms var(--ease) reverse;
+}
+@keyframes face-bubble-pop {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(6px) scale(0.82);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0) scale(1);
+  }
+}
 .empty-state .empty-hint {
   color: var(--fg3);
   font-size: var(--text-sm);
