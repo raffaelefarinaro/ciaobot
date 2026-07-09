@@ -5,6 +5,11 @@
 // We take a conservative approach: require at least one "/" and an allow-
 // listed extension at the tail. This avoids common false positives like
 // "v1.2/v3.4" or domains appearing in bare text.
+//
+// A second pass can linkify paths the agent actually touched (Write/Edit
+// tool calls → `_filecard` rows) so basename-only mentions like
+// "stradivari-ondevice-slide.pptx" still open the viewer even when the
+// regex would miss them.
 
 const EXTS = [
   'md', 'markdown', 'txt',
@@ -14,6 +19,10 @@ const EXTS = [
   'sh', 'rs', 'go', 'java', 'xml', 'sql',
   'cfg', 'ini', 'log', 'csv',
   'env', 'example', 'excalidraw',
+  // Binary / office types served by /api/workspace-binary (inline PDF preview).
+  'pdf', 'pptx',
+  // Images served by /api/workspace-image.
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'avif', 'bmp', 'ico',
 ]
 
 // Path shape: optional leading "/", one or more `segment/`, then a final
@@ -24,6 +33,8 @@ export const FILE_PATH_RE = new RegExp(
   `(?<![\\w.])((?:\\/)?(?:[\\w.+-]+\\/)+[\\w.+-]+\\.(?:${EXT_ALT}))(?::(\\d+))?(?!\\w)`,
   'g',
 )
+
+type SpanMatch = { index: number; length: number; path: string; line?: string }
 
 function escapeHtml(s: string): string {
   return s
@@ -37,6 +48,11 @@ function escapeHtml(s: string): string {
 function anchor(match: string, path: string, line: string | undefined): string {
   const dataLine = line ? ` data-line="${line}"` : ''
   return `<a class="file-link" href="#" data-file-path="${escapeHtml(path)}"${dataLine}>${escapeHtml(match)}</a>`
+}
+
+function anchorRaw(match: string, path: string, line: string | undefined): string {
+  const dataLine = line ? ` data-line="${line}"` : ''
+  return `<a class="file-link" href="#" data-file-path="${escapeHtml(path)}"${dataLine}>${match}</a>`
 }
 
 // True if the match at `matchIdx` is preceded (without intervening
@@ -54,24 +70,122 @@ function isInsideUrl(text: string, matchIdx: number): boolean {
   return false
 }
 
-/**
- * Linkify path-like substrings in plain text. Returns HTML.
- * Safe to feed into v-html: input is HTML-escaped before wrapping.
- */
-export function linkifyText(text: string): string {
-  if (!text) return ''
-  let out = ''
-  let last = 0
+function overlaps(matches: SpanMatch[], index: number, length: number): boolean {
+  const end = index + length
+  return matches.some(m => index < m.index + m.length && end > m.index)
+}
+
+function basenameOf(filePath: string): string {
+  const cleaned = filePath.replace(/[/\\]+$/, '')
+  const slash = Math.max(cleaned.lastIndexOf('/'), cleaned.lastIndexOf('\\'))
+  return slash >= 0 ? cleaned.slice(slash + 1) : cleaned
+}
+
+type KnownPathRule = { match: string; path: string; basenameOnly: boolean }
+
+/** Build longest-first literal match rules from agent-touched file paths. */
+export function buildKnownPathRules(knownPaths: string[]): KnownPathRule[] {
+  const deduped = [...new Set(knownPaths.map(p => p.trim()).filter(Boolean))]
+  if (!deduped.length) return []
+
+  const basenameOwners = new Map<string, string>()
+  for (const p of deduped) {
+    const base = basenameOf(p)
+    if (!base) continue
+    const prev = basenameOwners.get(base)
+    if (prev === undefined) basenameOwners.set(base, p)
+    else if (prev !== p) basenameOwners.set(base, '')
+  }
+
+  const rules: KnownPathRule[] = []
+  for (const p of deduped) {
+    rules.push({ match: p, path: p, basenameOnly: false })
+  }
+  for (const [base, p] of basenameOwners) {
+    if (!p) continue
+    // Skip basename rule when it duplicates a full-path rule entry.
+    if (deduped.includes(base)) continue
+    rules.push({ match: base, path: p, basenameOnly: true })
+  }
+  rules.sort((a, b) => b.match.length - a.match.length)
+  return rules
+}
+
+function hasBasenameBoundary(text: string, index: number, length: number): boolean {
+  const before = index > 0 ? text[index - 1] : ''
+  const after = index + length < text.length ? text[index + length] : ''
+  if (before && /[\w./]/.test(before)) return false
+  if (after && /\w/.test(after)) return false
+  return true
+}
+
+function regexMatches(text: string): SpanMatch[] {
+  const out: SpanMatch[] = []
   const re = new RegExp(FILE_PATH_RE.source, 'g')
   let m: RegExpExecArray | null
   while ((m = re.exec(text)) !== null) {
     if (isInsideUrl(text, m.index)) continue
-    out += escapeHtml(text.slice(last, m.index))
-    out += anchor(m[0], m[1], m[2])
-    last = m.index + m[0].length
+    out.push({ index: m.index, length: m[0].length, path: m[1], line: m[2] })
   }
-  out += escapeHtml(text.slice(last))
   return out
+}
+
+function knownPathMatches(text: string, rules: KnownPathRule[], taken: SpanMatch[]): SpanMatch[] {
+  const out: SpanMatch[] = []
+  const occupied = [...taken, ...out]
+  for (const rule of rules) {
+    let idx = 0
+    while (idx < text.length) {
+      const found = text.indexOf(rule.match, idx)
+      if (found === -1) break
+      if (isInsideUrl(text, found)
+        || overlaps(occupied, found, rule.match.length)
+        || (rule.basenameOnly && !hasBasenameBoundary(text, found, rule.match.length))) {
+        idx = found + 1
+        continue
+      }
+      const span: SpanMatch = { index: found, length: rule.match.length, path: rule.path }
+      out.push(span)
+      occupied.push(span)
+      idx = found + rule.match.length
+    }
+  }
+  return out
+}
+
+function mergeMatches(text: string, knownPaths: string[]): SpanMatch[] {
+  const regex = regexMatches(text)
+  const rules = buildKnownPathRules(knownPaths)
+  const known = rules.length ? knownPathMatches(text, rules, regex) : []
+  return [...regex, ...known].sort((a, b) => a.index - b.index || b.length - a.length)
+}
+
+function linkifySpan(text: string, knownPaths: string[] = [], escape: boolean): string {
+  if (!text) return ''
+  const matches = mergeMatches(text, knownPaths)
+  if (!matches.length) return escape ? escapeHtml(text) : text
+
+  let out = ''
+  let last = 0
+  for (const m of matches) {
+    if (m.index < last) continue
+    const slice = text.slice(last, m.index)
+    out += escape ? escapeHtml(slice) : slice
+    const display = text.slice(m.index, m.index + m.length)
+    out += escape ? anchor(display, m.path, m.line) : anchorRaw(display, m.path, m.line)
+    last = m.index + m.length
+  }
+  const tail = text.slice(last)
+  out += escape ? escapeHtml(tail) : tail
+  return out
+}
+
+/**
+ * Linkify path-like substrings in plain text. Returns HTML.
+ * Safe to feed into v-html: input is HTML-escaped before wrapping.
+ */
+export function linkifyText(text: string, knownPaths: string[] = []): string {
+  return linkifySpan(text, knownPaths, true)
 }
 
 /**
@@ -84,7 +198,7 @@ export function linkifyText(text: string): string {
  * HTML string produced by marked, so we only need to avoid recursing into
  * existing <a> elements.
  */
-export function linkifyHtml(html: string): string {
+export function linkifyHtml(html: string, knownPaths: string[] = []): string {
   if (!html) return ''
   let out = ''
   let i = 0
@@ -104,11 +218,11 @@ export function linkifyHtml(html: string): string {
     // Advance to the next tag boundary; linkify the text span we skip over.
     const nextTag = html.indexOf('<', i)
     if (nextTag === -1) {
-      out += linkifyTextWithinHtml(html.slice(i))
+      out += linkifySpan(html.slice(i), knownPaths, false)
       break
     }
     if (nextTag > i) {
-      out += linkifyTextWithinHtml(html.slice(i, nextTag))
+      out += linkifySpan(html.slice(i, nextTag), knownPaths, false)
     }
     // Copy the tag itself verbatim (both opening and closing tags).
     const tagEnd = html.indexOf('>', nextTag)
@@ -119,24 +233,5 @@ export function linkifyHtml(html: string): string {
     out += html.slice(nextTag, tagEnd + 1)
     i = tagEnd + 1
   }
-  return out
-}
-
-// Text-span linkifier used inside linkifyHtml. Unlike linkifyText it does
-// NOT escape again, because the input already came from marked's escaped
-// HTML output — re-escaping would turn "&amp;" into "&amp;amp;".
-function linkifyTextWithinHtml(text: string): string {
-  if (!text) return ''
-  let out = ''
-  let last = 0
-  const re = new RegExp(FILE_PATH_RE.source, 'g')
-  let m: RegExpExecArray | null
-  while ((m = re.exec(text)) !== null) {
-    if (isInsideUrl(text, m.index)) continue
-    out += text.slice(last, m.index)
-    out += anchor(m[0], m[1], m[2])
-    last = m.index + m[0].length
-  }
-  out += text.slice(last)
   return out
 }

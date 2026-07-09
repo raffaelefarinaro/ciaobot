@@ -32,10 +32,10 @@ function escapeAttr(value: string): string {
     .replace(/'/g, '&#39;')
 }
 
-export function renderMarkdown(text: string): string {
+export function renderMarkdown(text: string, knownPaths: string[] = []): string {
   try {
     const html = marked.parse(text, MARKDOWN_OPTIONS) as string
-    return linkifyHtml(sanitizeHtml(withExternalLinkAttrs(html)))
+    return linkifyHtml(sanitizeHtml(withExternalLinkAttrs(html)), knownPaths)
   } catch {
     return sanitizeHtml(text)
   }

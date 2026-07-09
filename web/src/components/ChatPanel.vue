@@ -1715,12 +1715,14 @@ function notifyChatFocused(chatId: string | undefined) {
 
 watch(() => chat.value?.chat_id, (id) => notifyChatFocused(id))
 
+const knownFilePaths = computed(() => touchedFiles.value.map(f => f.file_path))
+
 function renderMarkdown(text: string): string {
-  return renderSafeMarkdown(text)
+  return renderSafeMarkdown(text, knownFilePaths.value)
 }
 
 function renderActivityLine(line: string): string {
-  return linkifyText(line)
+  return linkifyText(line, knownFilePaths.value)
 }
 
 function activityLines(content: string): string[] {
@@ -1850,7 +1852,12 @@ function handleFileLinkClick(e: MouseEvent): void {
   const path = a.getAttribute('data-file-path') || ''
   const lineAttr = a.getAttribute('data-line')
   const line = lineAttr ? parseInt(lineAttr, 10) : null
-  fileViewer.open(path, Number.isFinite(line as number) ? line : null)
+  const cid = chat.value?.chat_id || ''
+  if (_IMAGE_EXT_RE.test(path)) {
+    fileViewer.openImage(path, cid)
+  } else {
+    fileViewer.open(path, Number.isFinite(line as number) ? line : null, cid)
+  }
 }
 
 const liveTraceMeta = computed(() => {

@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
+import { api } from '../lib/api'
 
 // File viewer for workspace files. Opened by clicking a linkified file path
 // in a chat or by tapping an inline file-card. Backed by /api/workspace-file
@@ -70,6 +71,13 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
   const editSaving = ref(false)
   const editError = ref('')
 
+  // .pptx preview needs LibreOffice (soffice) server-side to convert to PDF.
+  // Checked proactively so a missing install shows a real "Install" button
+  // instead of the iframe silently failing to load with a browser-level error.
+  const pptxNeedsLibreoffice = ref(false)
+  const libreofficeInstalling = ref(false)
+  const libreofficeInstallError = ref('')
+
   function _reset(): void {
     kind.value = 'text'
     line.value = null
@@ -87,6 +95,35 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     editing.value = false
     editBuffer.value = ''
     editError.value = ''
+    pptxNeedsLibreoffice.value = false
+    libreofficeInstallError.value = ''
+  }
+
+  async function checkLibreofficeStatus(): Promise<void> {
+    try {
+      const res = await api.get<{ available: boolean }>('/api/libreoffice-status')
+      pptxNeedsLibreoffice.value = !res.available
+    } catch {
+      pptxNeedsLibreoffice.value = false
+    }
+  }
+
+  async function installLibreoffice(): Promise<void> {
+    libreofficeInstalling.value = true
+    libreofficeInstallError.value = ''
+    try {
+      const res = await api.post<{ ok: boolean; error?: string }>('/api/libreoffice-install', {})
+      if (res.ok) {
+        await checkLibreofficeStatus()
+        if (!pptxNeedsLibreoffice.value) loadToken.value++
+      } else {
+        libreofficeInstallError.value = res.error || 'Installation failed.'
+      }
+    } catch (e) {
+      libreofficeInstallError.value = e instanceof Error ? e.message : String(e)
+    } finally {
+      libreofficeInstalling.value = false
+    }
   }
 
   async function open(filePath: string, lineNumber: number | null = null, chat: string = ''): Promise<void> {
@@ -102,6 +139,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
       kind.value = fileViewerKindForPath(filePath)
       if (kind.value === 'pdf') {
         content.value = ''
+        if (/\.pptx$/i.test(filePath.replace(/:\d+$/, ''))) void checkLibreofficeStatus()
         return
       }
       const url = `/api/workspace-file?path=${encodeURIComponent(filePath)}`
@@ -326,6 +364,9 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     editBuffer,
     editSaving,
     editError,
+    pptxNeedsLibreoffice,
+    libreofficeInstalling,
+    libreofficeInstallError,
     // actions
     open,
     openImage,
@@ -337,5 +378,6 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     cancelEditing,
     saveEdits,
     restoreSnapshot,
+    installLibreoffice,
   }
 })
