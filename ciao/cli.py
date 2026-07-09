@@ -359,9 +359,23 @@ def _write_app_shortcut(
     # menubar.find_installed_webapp / menubar.open_command.
     executable.write_text(
         "#!/bin/sh\n"
+        "start_agent() {\n"
+        '  label="$1"\n'
+        '  plist="$2"\n'
+        "  disabled=0\n"
+        '  launchctl print-disabled "gui/$(id -u)" 2>/dev/null '
+        '| grep -q "\\"$label\\" => true" && disabled=1\n'
+        '  launchctl kickstart "gui/$(id -u)/$label" 2>/dev/null && return\n'
+        '  if [ "$disabled" -eq 1 ]; then\n'
+        '    launchctl enable "gui/$(id -u)/$label" 2>/dev/null\n'
+        "  fi\n"
+        '  launchctl load -w "$plist" 2>/dev/null\n'
+        '  if [ "$disabled" -eq 1 ]; then\n'
+        '    launchctl disable "gui/$(id -u)/$label" 2>/dev/null\n'
+        "  fi\n"
+        "}\n"
         f'if ! curl -s -o /dev/null --max-time 2 "http://localhost:{port}/"; then\n'
-        '  launchctl kickstart "gui/$(id -u)/com.ciao.server" 2>/dev/null \\\n'
-        '    || launchctl load -w "$HOME/Library/LaunchAgents/com.ciao.server.plist" 2>/dev/null\n'
+        '  start_agent "com.ciao.server" "$HOME/Library/LaunchAgents/com.ciao.server.plist"\n'
         "  i=0\n"
         "  while [ $i -lt 20 ]; do\n"
         f'    curl -s -o /dev/null --max-time 1 "http://localhost:{port}/" && break\n'
@@ -369,8 +383,7 @@ def _write_app_shortcut(
         "    i=$((i+1))\n"
         "  done\n"
         "fi\n"
-        'launchctl kickstart "gui/$(id -u)/com.ciao.menubar" 2>/dev/null \\\n'
-        '  || launchctl load -w "$HOME/Library/LaunchAgents/com.ciao.menubar.plist" 2>/dev/null\n'
+        'start_agent "com.ciao.menubar" "$HOME/Library/LaunchAgents/com.ciao.menubar.plist"\n'
         f'token=$(tr -d "[:space:]" < "{token_file}" 2>/dev/null)\n'
         "if [ -n \"$token\" ]; then\n"
         f'  url="http://localhost:{port}/?setup=$token"\n'

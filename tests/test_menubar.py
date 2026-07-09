@@ -190,6 +190,110 @@ def test_restart_menubar_command_targets_launchd_label() -> None:
     ]
 
 
+def test_parse_launchctl_disabled_reads_label_states() -> None:
+    output = """
+disabled services = {
+    "com.ciao.server" => false
+    "com.ciao.menubar" => true
+}
+"""
+
+    assert menubar.parse_launchctl_disabled(output) == {
+        "com.ciao.server": False,
+        "com.ciao.menubar": True,
+    }
+
+
+def test_start_at_login_status_is_on_when_launch_agents_are_enabled(tmp_path: Path) -> None:
+    for path in menubar.launch_agent_paths(tmp_path).values():
+        path.write_text("<plist />", encoding="utf-8")
+
+    status = menubar.start_at_login_status(
+        launch_agents_dir=tmp_path,
+        disabled_labels={
+            menubar.SERVER_LAUNCHD_LABEL: False,
+            menubar.MENUBAR_LAUNCHD_LABEL: False,
+        },
+    )
+
+    assert status.state == "on"
+    assert status.available
+    assert status.enabled
+    assert menubar.start_at_login_menu_label(status) == "Start Ciao at Login: On"
+
+
+def test_start_at_login_status_is_off_when_either_agent_is_disabled(tmp_path: Path) -> None:
+    for path in menubar.launch_agent_paths(tmp_path).values():
+        path.write_text("<plist />", encoding="utf-8")
+
+    status = menubar.start_at_login_status(
+        launch_agents_dir=tmp_path,
+        disabled_labels={menubar.SERVER_LAUNCHD_LABEL: True},
+    )
+
+    assert status.state == "off"
+    assert status.available
+    assert not status.enabled
+    assert menubar.start_at_login_menu_label(status) == "Start Ciao at Login: Off"
+
+
+def test_start_at_login_status_is_missing_without_launch_agent_plists(
+    tmp_path: Path,
+) -> None:
+    status = menubar.start_at_login_status(
+        launch_agents_dir=tmp_path,
+        disabled_labels={},
+    )
+
+    assert status.state == "missing"
+    assert not status.available
+    assert menubar.start_at_login_menu_label(status) == "Start at Login: not installed"
+
+
+def test_start_at_login_commands_target_both_launch_agents() -> None:
+    assert menubar.start_at_login_commands(True, uid=501) == [
+        ["launchctl", "enable", "gui/501/com.ciao.server"],
+        ["launchctl", "enable", "gui/501/com.ciao.menubar"],
+    ]
+    assert menubar.start_at_login_commands(False, uid=501) == [
+        ["launchctl", "disable", "gui/501/com.ciao.server"],
+        ["launchctl", "disable", "gui/501/com.ciao.menubar"],
+    ]
+
+
+def test_set_start_at_login_enabled_runs_launchctl_for_both_agents(
+    tmp_path: Path, monkeypatch
+) -> None:
+    for path in menubar.launch_agent_paths(tmp_path).values():
+        path.write_text("<plist />", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    class Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd: list[str], **kwargs):
+        calls.append(cmd)
+        return Completed()
+
+    monkeypatch.setattr(menubar.subprocess, "run", fake_run)
+
+    ok, error = menubar.set_start_at_login_enabled(
+        False,
+        launch_agents_dir=tmp_path,
+        uid=501,
+    )
+
+    assert ok
+    assert error == ""
+    assert calls == [
+        ["launchctl", "disable", "gui/501/com.ciao.server"],
+        ["launchctl", "disable", "gui/501/com.ciao.menubar"],
+    ]
+
+
 def test_relaunch_stale_process_kicks_launchd(monkeypatch) -> None:
     calls: list[list[str]] = []
     monkeypatch.setattr(

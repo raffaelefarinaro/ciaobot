@@ -253,6 +253,7 @@ Ciaobot runs on macOS under launchd.
 
 - `ciao setup --workspace <path> --load-launchd` renders and loads the LaunchAgent.
 - The packaged launchd template is `ciao/stock/deploy/com.ciao.server.plist.tmpl`.
+- The macOS menu bar shows `Start Ciao at Login: On/Off` and toggles both `com.ciao.server` and `com.ciao.menubar` with `launchctl enable/disable`.
 - Stop: `launchctl unload ~/Library/LaunchAgents/com.ciao.server.plist`.
 - Remote access is not configured by the public app. Use localhost by default, or put Tailscale or another user-owned network layer in front of the local server.
 

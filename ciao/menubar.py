@@ -28,6 +28,7 @@ from ciao.package_version import make_cached_package_status, update_package
 
 SERVER_LAUNCHD_LABEL = "com.ciao.server"
 MENUBAR_LAUNCHD_LABEL = "com.ciao.menubar"
+LAUNCHD_LABELS = (SERVER_LAUNCHD_LABEL, MENUBAR_LAUNCHD_LABEL)
 POLL_SECONDS = 10.0
 
 # Spinning-head animation played while a chat is working. Frame count matches
@@ -44,6 +45,19 @@ WORKING_POLL_SECONDS = 2.0
 class ServerStatus:
     reachable: bool
     ready: bool
+
+
+@dataclass(frozen=True, slots=True)
+class StartAtLoginStatus:
+    state: str
+
+    @property
+    def available(self) -> bool:
+        return self.state in {"on", "off"}
+
+    @property
+    def enabled(self) -> bool:
+        return self.state == "on"
 
 
 def fetch_server_status(port: int, *, timeout: float = 2.0) -> ServerStatus:
@@ -158,6 +172,101 @@ def restart_server_command(uid: int | None = None) -> list[str]:
 def restart_menubar_command(uid: int | None = None) -> list[str]:
     resolved = os.getuid() if uid is None else uid
     return ["launchctl", "kickstart", "-k", f"gui/{resolved}/{MENUBAR_LAUNCHD_LABEL}"]
+
+
+def default_launch_agents_dir() -> Path:
+    return Path.home() / "Library" / "LaunchAgents"
+
+
+def launch_agent_paths(launch_agents_dir: Path | None = None) -> dict[str, Path]:
+    base = (
+        default_launch_agents_dir()
+        if launch_agents_dir is None
+        else Path(launch_agents_dir).expanduser()
+    )
+    return {label: base / f"{label}.plist" for label in LAUNCHD_LABELS}
+
+
+_DISABLED_LINE_RE = re.compile(r'^\s*"([^"]+)"\s*=>\s*(true|false)\s*$', re.MULTILINE)
+
+
+def parse_launchctl_disabled(output: str) -> dict[str, bool]:
+    """Parse ``launchctl print-disabled`` output into label -> disabled."""
+
+    return {label: value == "true" for label, value in _DISABLED_LINE_RE.findall(output)}
+
+
+def read_launchctl_disabled(uid: int | None = None) -> dict[str, bool] | None:
+    resolved = os.getuid() if uid is None else uid
+    try:
+        completed = subprocess.run(
+            ["launchctl", "print-disabled", f"gui/{resolved}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    return parse_launchctl_disabled(completed.stdout)
+
+
+def start_at_login_status(
+    *,
+    launch_agents_dir: Path | None = None,
+    disabled_labels: dict[str, bool] | None = None,
+    uid: int | None = None,
+) -> StartAtLoginStatus:
+    paths = launch_agent_paths(launch_agents_dir)
+    if not all(path.is_file() for path in paths.values()):
+        return StartAtLoginStatus("missing")
+
+    disabled = disabled_labels if disabled_labels is not None else read_launchctl_disabled(uid)
+    if disabled is None:
+        return StartAtLoginStatus("unknown")
+
+    enabled = all(not disabled.get(label, False) for label in LAUNCHD_LABELS)
+    return StartAtLoginStatus("on" if enabled else "off")
+
+
+def start_at_login_menu_label(status: StartAtLoginStatus) -> str:
+    if status.state == "on":
+        return "Start Ciao at Login: On"
+    if status.state == "off":
+        return "Start Ciao at Login: Off"
+    if status.state == "missing":
+        return "Start at Login: not installed"
+    return "Start at Login: unknown"
+
+
+def start_at_login_commands(enabled: bool, uid: int | None = None) -> list[list[str]]:
+    resolved = os.getuid() if uid is None else uid
+    action = "enable" if enabled else "disable"
+    return [["launchctl", action, f"gui/{resolved}/{label}"] for label in LAUNCHD_LABELS]
+
+
+def set_start_at_login_enabled(
+    enabled: bool,
+    *,
+    launch_agents_dir: Path | None = None,
+    uid: int | None = None,
+) -> tuple[bool, str]:
+    paths = launch_agent_paths(launch_agents_dir)
+    if not all(path.is_file() for path in paths.values()):
+        return False, "Ciaobot's login items are not installed. Run setup again to recreate them."
+
+    errors: list[str] = []
+    for command in start_at_login_commands(enabled, uid):
+        try:
+            completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        except OSError as exc:
+            errors.append(str(exc))
+            continue
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout).strip()
+            errors.append(detail or " ".join(command))
+    return not errors, "\n".join(errors)
 
 
 def relaunch_stale_process(uid: int | None = None) -> None:
@@ -501,6 +610,31 @@ def run_menubar(workspace: Path, port: int) -> int:
     def on_logs(_sender) -> None:
         subprocess.run(view_logs_command(workspace), check=False)
 
+    def on_toggle_start_at_login(_sender) -> None:
+        current = start_at_login_status()
+        if not current.available:
+            rumps.alert(
+                title="Login item unavailable",
+                message=(
+                    "Ciaobot's login items are not installed yet. "
+                    "Run setup again to recreate them."
+                ),
+                ok="OK",
+                icon_path=icon_path("Ciaobot.icns"),
+            )
+            refresh()
+            return
+
+        ok, error = set_start_at_login_enabled(not current.enabled)
+        if not ok:
+            rumps.alert(
+                title="Could not update login item",
+                message=error or "launchctl did not accept the change.",
+                ok="OK",
+                icon_path=icon_path("Ciaobot.icns"),
+            )
+        refresh()
+
     def on_update(_sender) -> None:
         if state["updating"]:
             return
@@ -565,6 +699,7 @@ def run_menubar(workspace: Path, port: int) -> int:
         working_ids: set[str],
         addresses: list[str],
         pkg: dict[str, object],
+        login_status: StartAtLoginStatus,
     ) -> None:
         addresses_menu = rumps.MenuItem("Addresses (click to copy)")
         for url in addresses:
@@ -597,11 +732,24 @@ def run_menubar(workspace: Path, port: int) -> int:
             else:
                 update_items = [rumps.MenuItem(label, callback=on_update)]
 
+        login_item = rumps.MenuItem(
+            start_at_login_menu_label(login_status),
+            callback=on_toggle_start_at_login if login_status.available else None,
+        )
+        if not login_status.available:
+            login_item.set_callback(None)
+        else:
+            try:
+                login_item.state = 1 if login_status.enabled else 0
+            except Exception:
+                pass
+
         # Each group is rendered as its own section; separators are inserted
         # between non-empty groups so there are never doubled or trailing lines.
         groups = [
             [rumps.MenuItem("Open Ciaobot", callback=on_open),
-             _disabled_item(rumps, status_label(status))],
+             _disabled_item(rumps, status_label(status)),
+             login_item],
             update_items,
             chat_items,
             [rumps.MenuItem("View Logs", callback=on_logs), addresses_menu],
@@ -648,6 +796,7 @@ def run_menubar(workspace: Path, port: int) -> int:
         working_ids = set(state["working_ids"])
         addresses = server_addresses(port)
         pkg = status_fetcher()
+        login_status = start_at_login_status()
         state["package_status"] = pkg
         app.title = menubar_badge_title(len(unread_ids))
 
@@ -670,10 +819,11 @@ def run_menubar(workspace: Path, port: int) -> int:
             tuple(addresses),
             package_update_fingerprint(pkg),
             state["updating"],
+            login_status.state,
         )
         if fingerprint != state["fingerprint"]:
             state["fingerprint"] = fingerprint
-            _rebuild_menu(status, chats, unread_ids, working_ids, addresses, pkg)
+            _rebuild_menu(status, chats, unread_ids, working_ids, addresses, pkg, login_status)
 
     threading.Thread(target=poll_working, daemon=True).start()
     rumps.Timer(refresh, POLL_SECONDS).start()
