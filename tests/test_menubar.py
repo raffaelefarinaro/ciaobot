@@ -573,3 +573,20 @@ def test_run_menubar_without_rumps_explains_the_dependency(
     err = capsys.readouterr().err
     assert "rumps" in err
     assert "pip install rumps" in err
+
+
+def test_github_repo_url_uses_default_repo(monkeypatch) -> None:
+    monkeypatch.delenv("CIAO_GITHUB_REPO", raising=False)
+    assert menubar.github_repo_url() == "https://github.com/raffaelefarinaro/ciaobot"
+    assert menubar.github_new_issue_url() == (
+        "https://github.com/raffaelefarinaro/ciaobot/issues/new"
+    )
+
+
+def test_github_repo_url_respects_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("CIAO_GITHUB_REPO", "someone/fork")
+    assert menubar.github_repo_url() == "https://github.com/someone/fork"
+
+
+def test_open_url_command_wraps_open() -> None:
+    assert menubar.open_url_command("https://example.com") == ["open", "https://example.com"]

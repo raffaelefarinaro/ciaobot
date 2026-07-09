@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 
-from ciao.package_version import make_cached_package_status, update_package
+from ciao.package_version import _github_repo, make_cached_package_status, update_package
 
 
 SERVER_LAUNCHD_LABEL = "com.ciao.server"
@@ -304,6 +304,18 @@ def stop_server_command(uid: int | None = None) -> list[str]:
 
 def view_logs_command(workspace: Path) -> list[str]:
     return ["open", str(workspace / ".runtime" / "ciao.stderr.log")]
+
+
+def github_repo_url() -> str:
+    return f"https://github.com/{_github_repo()}"
+
+
+def github_new_issue_url() -> str:
+    return f"{github_repo_url()}/issues/new"
+
+
+def open_url_command(url: str) -> list[str]:
+    return ["open", url]
 
 
 def icon_path(name: str) -> str:
@@ -629,6 +641,12 @@ def run_menubar(workspace: Path, port: int) -> int:
     def on_logs(_sender) -> None:
         subprocess.run(view_logs_command(workspace), check=False)
 
+    def on_view_github(_sender) -> None:
+        subprocess.run(open_url_command(github_repo_url()), check=False)
+
+    def on_report_issue(_sender) -> None:
+        subprocess.run(open_url_command(github_new_issue_url()), check=False)
+
     def on_toggle_start_at_login(_sender) -> None:
         current = start_at_login_status()
         if not current.available:
@@ -787,15 +805,28 @@ def run_menubar(workspace: Path, port: int) -> int:
             except Exception:
                 pass
 
+        # Rarely-touched items live behind one "Advanced" submenu so the
+        # top-level menu stays focused on open/status/chats.
+        version = str(pkg.get("current_version") or "")
+        advanced_menu = rumps.MenuItem("Advanced")
+        advanced_menu.add(_disabled_item(rumps, f"Version {version}" if version else "Version unknown"))
+        advanced_menu.add(None)
+        advanced_menu.add(rumps.MenuItem("View on GitHub", callback=on_view_github))
+        advanced_menu.add(rumps.MenuItem("Report an Issue", callback=on_report_issue))
+        advanced_menu.add(None)
+        advanced_menu.add(rumps.MenuItem("View Logs", callback=on_logs))
+        advanced_menu.add(addresses_menu)
+        advanced_menu.add(None)
+        advanced_menu.add(login_item)
+
         # Each group is rendered as its own section; separators are inserted
         # between non-empty groups so there are never doubled or trailing lines.
         groups = [
             [rumps.MenuItem("Open Ciaobot", callback=on_open),
-             _disabled_item(rumps, status_label(status)),
-             login_item],
+             _disabled_item(rumps, status_label(status))],
             update_items,
             chat_items,
-            [rumps.MenuItem("View Logs", callback=on_logs), addresses_menu],
+            [advanced_menu],
             [rumps.MenuItem("Quit Ciaobot", callback=on_quit)],
         ]
 
