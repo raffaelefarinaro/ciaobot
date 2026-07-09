@@ -3837,12 +3837,13 @@ async function doPackageUpdate() {
 }
 .voice-warning {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--space-2);
   margin-top: var(--space-3);
 }
 .voice-install-btn {
   flex: 0 0 auto;
+  margin-top: 1px;
   padding: 4px 10px;
   font-size: var(--text-xs);
 }
