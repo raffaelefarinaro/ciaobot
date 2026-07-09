@@ -6,6 +6,8 @@
 - feat(tray): spin the icon while a self-update is in progress (`1443731`)
 - feat(tray): animate a pixel pulsing dot beside working chats (`0512094`)
 - feat(tray): move rarely-touched items into an Advanced submenu (`c44d2ee`)
+- feat(web): improve completed-projects modal and fix archive button sizing (`a67b4b8`)
+- feat(web): linkify chat file paths and open files in the OS default app (`045b234`)
 
 ### Fixed
 - fix(web): make the Fix/Close buttons on error toasts actually respond (`fd15515`)
