@@ -668,19 +668,21 @@ def setup_workspace(
         written.append(env_path)
 
     stock = resources.files("ciao.stock")
-    stock_agents = stock.joinpath("agents")
     stock_commands = stock.joinpath("commands")
     stock_workspace = stock.joinpath("workspace")
-    _copy_tree(stock_agents, root / ".claude" / "agents")
-    _copy_tree(stock_commands, root / ".claude" / "commands")
-    written.extend([root / ".claude" / "agents", root / ".claude" / "commands"])
-    written.extend(_copy_tree_if_missing(stock_workspace, root))
 
     # Canonical user-authored asset sources (mirrored into .claude/ by
     # sync-skills). App plumbing, not vault content: pre-creating them keeps
     # the Workspace Health checks warning-free on a fresh or adopted setup.
     for asset_dir in ("subagents", "commands"):
         (root / asset_dir).mkdir(parents=True, exist_ok=True)
+    from ciao.sync_skills import _install_stock_agents
+
+    _install_stock_agents(root)
+    written.append(root / ".claude" / "agents")
+    _copy_tree(stock_commands, root / ".claude" / "commands")
+    written.append(root / ".claude" / "commands")
+    written.extend(_copy_tree_if_missing(stock_workspace, root))
 
     runtime_schedules = root / ".runtime" / "schedules.json"
     _write_if_missing(

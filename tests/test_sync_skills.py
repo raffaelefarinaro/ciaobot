@@ -107,3 +107,69 @@ def test_stale_stock_skill_copy_is_pruned(tmp_path: Path) -> None:
     assert not stale.exists()
     assert (user_dir / "SKILL.md").is_file()  # unmarked dirs are untouched
     assert result.stock_pruned == 1
+
+
+def test_sync_installs_stock_agents_with_marker(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    memory = workspace / ".claude" / "agents" / "memory.md"
+    assert memory.is_file()
+    assert sync_skills._is_managed_stock_agent(memory)
+    assert "vault-read" in memory.read_text(encoding="utf-8")
+    assert result.stock_agents_installed == 4
+
+
+def test_sync_refreshes_managed_stock_agent(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    memory = workspace / ".claude" / "agents" / "memory.md"
+    _write(memory, "# Old memory agent\n")
+    sync_skills._mark_stock_agent(memory)
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    assert "vault-read" in memory.read_text(encoding="utf-8")
+
+
+def test_stale_stock_agent_copy_is_pruned(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    stale = workspace / ".claude" / "agents" / "no-longer-packaged.md"
+    _write(stale, "# Old stock agent\n")
+    sync_skills._mark_stock_agent(stale)
+    hand_made = workspace / ".claude" / "agents" / "hand-made.md"
+    _write(hand_made, "# Hand made, no marker\n")
+
+    result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    assert not stale.exists()
+    assert hand_made.is_file()
+    assert result.stock_agents_pruned == 1
+
+
+def test_legacy_removed_stock_agent_is_pruned_without_marker(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    removed = workspace / ".claude" / "agents" / "comment-analyzer.md"
+    _write(removed, "# Legacy dev agent\n")
+
+    result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    assert not removed.exists()
+    assert result.stock_agents_pruned == 1
+
+
+def test_subagent_shadows_stock_agent(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    custom = workspace / "subagents" / "memory.md"
+    _write(custom, "# Custom memory\n")
+    stock = workspace / ".claude" / "agents" / "memory.md"
+    _write(stock, "# Packaged memory\n")
+    sync_skills._mark_stock_agent(stock)
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    link = workspace / ".claude" / "agents" / "memory.md"
+    assert link.is_symlink()
+    assert link.resolve() == custom.resolve()
+    assert custom.read_text(encoding="utf-8") == "# Custom memory\n"

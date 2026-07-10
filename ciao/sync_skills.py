@@ -27,11 +27,22 @@ class SyncSkillsResult:
     commands_pruned: int = 0
     stock_installed: int = 0
     stock_pruned: int = 0
+    stock_agents_installed: int = 0
+    stock_agents_pruned: int = 0
 
 
 # Marker dropped into skills copied from ciao.stock so stale copies can be
 # pruned when the packaged set changes or a workspace skill overrides them.
 STOCK_SKILL_MARKER = ".ciao-stock-skill"
+STOCK_AGENT_MARKER_SUFFIX = ".ciao-stock-agent"
+
+# Legacy setup copies of agents removed from the stock ship set. Sync prunes
+# these when they still live only under .claude/agents/ (no subagents/ copy).
+LEGACY_REMOVED_STOCK_AGENTS = frozenset({
+    "comment-analyzer",
+    "pr-test-analyzer",
+    "silent-failure-hunter",
+})
 
 
 def _load_json(path: Path) -> dict:
@@ -218,6 +229,88 @@ def _rebuild_custom_skill_links(workspace: Path) -> tuple[int, int]:
     return installed, pruned
 
 
+def _stock_agent_marker(agent_path: Path) -> Path:
+    return agent_path.with_name(agent_path.name + STOCK_AGENT_MARKER_SUFFIX)
+
+
+def _is_managed_stock_agent(agent_path: Path) -> bool:
+    return _stock_agent_marker(agent_path).is_file()
+
+
+def _mark_stock_agent(agent_path: Path) -> None:
+    _stock_agent_marker(agent_path).touch()
+
+
+def _unmark_stock_agent(agent_path: Path) -> None:
+    _stock_agent_marker(agent_path).unlink(missing_ok=True)
+
+
+def _install_stock_agents(workspace: Path) -> tuple[int, int]:
+    """Copy packaged ``ciao.stock/agents`` into ``.claude/agents``.
+
+    A workspace ``subagents/<name>.md`` always wins over the packaged agent of
+    the same name. Copies carry a sibling ``*.ciao-stock-agent`` marker so they
+    are refreshed on every sync and pruned once they disappear from the package
+    (or become shadowed by a workspace subagent).
+    """
+    from importlib import resources
+
+    agents_dir = workspace / ".claude" / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    custom_dir = workspace / "subagents"
+
+    try:
+        stock_agents = resources.files("ciao.stock").joinpath("agents")
+        stock_files = sorted(
+            (entry for entry in stock_agents.iterdir() if entry.name.endswith(".md")),
+            key=lambda item: item.name,
+        )
+    except (ModuleNotFoundError, FileNotFoundError, OSError):
+        stock_files = []
+
+    installed = 0
+    live: set[str] = set()
+    for stock_entry in stock_files:
+        name = stock_entry.name
+        if (custom_dir / name).is_file():
+            continue  # workspace subagent shadows the packaged agent
+        target = agents_dir / name
+        if target.is_symlink():
+            continue  # user-managed link, leave it alone
+        with resources.as_file(stock_entry) as stock_path:
+            shutil.copy2(stock_path, target)
+        _mark_stock_agent(target)
+        live.add(name)
+        installed += 1
+
+    pruned = 0
+    for existing in _iter_entries(agents_dir):
+        if not existing.is_file() or existing.name.endswith(STOCK_AGENT_MARKER_SUFFIX):
+            continue
+        if not existing.name.endswith(".md") or existing.is_symlink():
+            continue
+        if existing.name in live:
+            continue
+        if _is_managed_stock_agent(existing):
+            _remove_path(existing)
+            _unmark_stock_agent(existing)
+            pruned += 1
+            continue
+        if (
+            existing.stem in LEGACY_REMOVED_STOCK_AGENTS
+            and not (custom_dir / existing.name).is_file()
+        ):
+            _remove_path(existing)
+            pruned += 1
+
+    for marker in agents_dir.glob(f"*{STOCK_AGENT_MARKER_SUFFIX}"):
+        agent_path = marker.with_name(marker.name[: -len(STOCK_AGENT_MARKER_SUFFIX)])
+        if agent_path.name not in live and not agent_path.exists():
+            marker.unlink(missing_ok=True)
+
+    return installed, pruned
+
+
 def _mirror_dir_symlinks(
     source_dir: Path,
     dest_dir: Path,
@@ -267,11 +360,17 @@ def sync_workspace_skills(
 
     stock_installed, stock_pruned = _install_stock_skills(root)
     custom_installed, custom_pruned = _rebuild_custom_skill_links(root)
+    stock_agents_installed, stock_agents_pruned = _install_stock_agents(root)
     print(
         f"Skills: {stock_installed} stock skills installed ({stock_pruned} stale pruned), "
         f"{custom_installed} custom-skill symlinks rebuilt, "
         f"{custom_pruned} orphaned pruned."
     )
+    if stock_agents_installed or stock_agents_pruned:
+        print(
+            f"Skills: {stock_agents_installed} stock agent(s) installed "
+            f"({stock_agents_pruned} stale pruned)."
+        )
     agents_installed, agents_pruned = _mirror_dir_symlinks(
         root / "subagents",
         root / ".claude" / "agents",
@@ -300,6 +399,8 @@ def sync_workspace_skills(
         commands_pruned=commands_pruned,
         stock_installed=stock_installed,
         stock_pruned=stock_pruned,
+        stock_agents_installed=stock_agents_installed,
+        stock_agents_pruned=stock_agents_pruned,
     )
 
 

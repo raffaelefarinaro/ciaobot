@@ -7,13 +7,10 @@ from pathlib import Path
 
 
 EXPECTED_AGENTS = {
-    "comment-analyzer.md",
     "doc-updater.md",
     "memory.md",
-    "pr-test-analyzer.md",
     "researcher.md",
     "secretary.md",
-    "silent-failure-hunter.md",
 }
 
 EXPECTED_COMMANDS = {

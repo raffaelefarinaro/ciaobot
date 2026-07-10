@@ -19,7 +19,7 @@ Generic checklist for a Ciaobot workspace. Review the past 7 days (archived chat
 7. **MEMORY.md drift** — index vs actual vault files; flag broken links.
 8. **Vault lint pass** — run `ciao vault-lint` and apply fixes for dead wikilinks, orphan pages, and near-duplicates. Manually flag stale entity pages (frontmatter `updated` older than 90 days) and contradictions (same entity, conflicting attributes across pages).
 9. **Connection discovery** — scan vault entity files for implicit relationships not yet surfaced: people mentioned together without cross-references, projects sharing people/tools/themes without links, ideas or resources related to active projects but unconnected. Propose specific wikilink additions with evidence.
-10. **Prompt hygiene** — review CLAUDE.md, `.claude/agents/*.md`, `.claude/commands/*.md`, and the prompts inside `.runtime/schedules.json` for contradictions, bloat, and outdated paths. Give file + short before/after per issue.
+10. **Prompt hygiene** — review AGENTS.md, CLAUDE.md, canonical `subagents/*.md` and `commands/*.md`, stock agents under `.claude/agents/` not yet promoted to `subagents/`, their generated `.claude/` / `.agents/skills/` mirrors, and the prompts inside `.runtime/schedules.json` for contradictions, bloat, and outdated paths. Give file + short before/after per issue.
 11. **Decision log** — if the vault has a `Workspace/Decision-Log.md`, flag "revisit when" items that are now ripe.
 12. **Workspace extension** — if the vault contains a `Workspace/Weekly-Review-Template.md`, run its additional workspace-specific bullets too.
 
