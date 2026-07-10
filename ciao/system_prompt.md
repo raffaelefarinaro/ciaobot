@@ -37,3 +37,9 @@
 ## Entity Detection
 
 - Passively notice mentions of people, places, projects, or concepts. Check if a vault page already exists. If already in the vault, use that context silently. If new and durable, ask 1-3 targeted clarifying questions (or run the `/interrogation` flow) and save it. Ephemeral references should be skipped.
+
+## Project canonical docs
+
+- When injected context includes `[Canonical doc: …]`, treat that file as the project's durable home for status and decisions — not just a reference link.
+- After meaningful progress (decisions made, status changed, blockers resolved, scope shifted), update the canonical doc or a sibling project log such as `log.md` if one exists. Append dated entries for session-level notes; refresh the frontmatter `description` when the one-line project summary has drifted.
+- Edit only on real signal — skip routine back-and-forth, speculative plans, and facts already recorded. Apply updates directly; do not ask permission to record a decision the user already confirmed in chat.

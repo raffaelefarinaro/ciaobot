@@ -77,6 +77,16 @@ def test_system_prompt_includes_ciaobot_diagnostics_notes() -> None:
     assert "GitHub issue" in append
 
 
+def test_system_prompt_includes_project_canonical_doc_notes() -> None:
+    """Vault-backed project chats should instruct agents to maintain canonical docs."""
+    payload = mi.system_prompt_payload("")
+    assert payload is not None
+    append = payload["append"]
+    assert "Project canonical docs" in append
+    assert "[Canonical doc:" in append
+    assert "log.md" in append
+
+
 def test_system_prompt_payload_appends_to_claude_code_preset() -> None:
     payload = mi.system_prompt_payload("hello memory")
     assert payload is not None

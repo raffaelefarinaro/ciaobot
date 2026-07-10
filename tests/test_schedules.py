@@ -118,6 +118,14 @@ def test_stock_error_triage_schedule_uses_issue_report(tmp_path: Path) -> None:
     assert "{{ISSUE_REPORT}}" in entry.prompt
 
 
+def test_stock_memory_curation_schedule_updates_project_canonical_docs(tmp_path: Path) -> None:
+    store = ScheduleStore(tmp_path, include_system=True)
+    entry = store.get("system-memory-curation")
+    assert entry is not None
+    assert "canonical doc" in entry.prompt.lower()
+    assert "session-insights" in entry.prompt.lower()
+
+
 def test_system_schedule_state_persists_separately(tmp_path: Path) -> None:
     store = ScheduleStore(tmp_path, include_system=True)
     entry = store.get("system-memory-curation")

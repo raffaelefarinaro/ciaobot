@@ -19,7 +19,7 @@
       "workspace": "default",
       "web_project_id": "",
       "web_chat_id": null,
-      "prompt": "Curate recent archived chats, memory proposals, and durable learnings. Use the memory agent. Prefer existing session-insights sections and update the configured vault. Append durable learnings to the vault's Workspace/Learnings.md using the format `[YYYY-MM-DD] category: one-liner — confidence: high/medium/low`; capture error resolutions, non-obvious workarounds, user corrections, and outdated assumptions. Do not log routine work. Report only processed counts plus changed files."
+      "prompt": "Curate recent archived chats, memory proposals, and durable learnings. Use the memory agent. Prefer existing session-insights sections and update the configured vault. Append durable learnings to the vault's Workspace/Learnings.md using the format `[YYYY-MM-DD] category: one-liner — confidence: high/medium/low`; capture error resolutions, non-obvious workarounds, user corrections, and outdated assumptions. Do not log routine work. Also scan recently archived chats by project: when session-insights contain Decisions, Open loops, or material status changes for a vault-backed project, update that project's canonical doc (and `log.md` if present) — edit only when something actually changed. Report only processed counts plus changed files."
     },
     {
       "schedule_id": "system-skill-evolution",
