@@ -151,12 +151,6 @@ EOF
   pip install -q ${PIP_UPGRADE_ARG} -e '.[test,voice-local]' || { log_err "Failed to install python dependencies."; return 1; }
 
 
-  log_info "Verifying Playwright browser binaries..."
-  # Only run playwright install if chromium is not installed or if upgrading
-  if [[ "${UPGRADE_DEPS}" -eq 1 ]] || ! ls ~/Library/Caches/ms-playwright/chromium-* ~/.cache/ms-playwright/chromium-* &>/dev/null; then
-    playwright install chromium 2>/dev/null || log_warn "Playwright chromium download failed or skipped (non-fatal)."
-  fi
-
   # --- 3. Node.js & NPM Validation ---
   local NODE_VER_TARGET="v22.11.0"
   local LOCAL_NODE_DIR="${ROOT_DIR}/.node"

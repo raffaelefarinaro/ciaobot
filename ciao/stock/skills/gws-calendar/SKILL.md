@@ -3,20 +3,14 @@ name: gws-calendar
 description: "Google Calendar: Manage calendars and events."
 metadata:
   version: 0.22.5
-  openclaw:
-    category: "productivity"
-    requires:
-      bins:
-        - gws
-    cliHelp: "gws calendar --help"
 ---
 
 # calendar (v3)
 
-> **PREREQUISITE:** Read `../gws-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gws generate-skills` to create it.
+> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), global flags, and security rules.
 
 ```bash
-gws calendar <resource> <method> [flags]
+scripts/gws-profile.sh <personal|work> calendar <resource> <method> [flags]
 ```
 
 ## Helper Commands
@@ -102,10 +96,10 @@ Before calling any API method, inspect it:
 
 ```bash
 # Browse resources and methods
-gws calendar --help
+scripts/gws-profile.sh <personal|work> calendar --help
 
 # Inspect a method's required params, types, and defaults
-gws schema calendar.<resource>.<method>
+scripts/gws-profile.sh <personal|work> schema calendar.<resource>.<method>
 ```
 
 Use `gws schema` output to build your `--params` and `--json` flags.

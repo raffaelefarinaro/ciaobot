@@ -3,20 +3,14 @@ name: gws-slides
 description: "Google Slides: Read and write presentations."
 metadata:
   version: 0.22.5
-  openclaw:
-    category: "productivity"
-    requires:
-      bins:
-        - gws
-    cliHelp: "gws slides --help"
 ---
 
 # slides (v1)
 
-> **PREREQUISITE:** Read `../gws-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gws generate-skills` to create it.
+> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), global flags, and security rules.
 
 ```bash
-gws slides <resource> <method> [flags]
+scripts/gws-profile.sh <personal|work> slides <resource> <method> [flags]
 ```
 
 ## API Resources
@@ -34,11 +28,10 @@ Before calling any API method, inspect it:
 
 ```bash
 # Browse resources and methods
-gws slides --help
+scripts/gws-profile.sh <personal|work> slides --help
 
 # Inspect a method's required params, types, and defaults
-gws schema slides.<resource>.<method>
+scripts/gws-profile.sh <personal|work> schema slides.<resource>.<method>
 ```
 
 Use `gws schema` output to build your `--params` and `--json` flags.
-

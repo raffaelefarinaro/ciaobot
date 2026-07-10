@@ -29,6 +29,7 @@ ciao public-preflight export . /tmp/ciao-public-export
 ciao public-preflight scan /tmp/ciao-public-export --private-patterns /tmp/private-patterns.txt
 ciao package-smoke --skip-frontend
 ciao auth claude --print-only              # show terminal OAuth command
+ciao auth codex --print-only               # show Codex / ChatGPT login command
 ciao auth ollama                           # run provider login helper
 ```
 
@@ -98,9 +99,19 @@ cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 
 Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `ciao-schedules`, `vault-read`, …) and the upstream **`gws-*` skills** for Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories. A workspace skill with the same name as a packaged one overrides it.
 
-The `gws-*` stock skills are kept byte-for-byte upstream: `python -m ciao.release --apply` regenerates them from the installed `gws` CLI via `ciao/gws_skills.py` (which strips only the generator's "Community & Feedback Etiquette" bloat from `gws-shared`). Ciaobot-specific gws conventions (the `scripts/gws-profile.sh` wrapper, profile config dirs, JSON banner stripping, `--json` vs `--params`, `supportsAllDrives`) are **not** in the skill anymore — they live in the system prompt (`ciao/memory_injector.py`), so the agent gets them every turn and the skills stay regeneratable. OAuth/setup walkthroughs live in `ciao-capabilities` and the Integrations page.
+The `gws-*` stock skills are regenerated from the installed `gws` CLI via `ciao/gws_skills.py` on release (`python -m ciao.release --apply`). The generator output is passed through Ciaobot curation: profile-wrapper command examples, integration auth notes in `gws-shared`, stripped upstream `openclaw` metadata and See Also boilerplate. Ciaobot-specific gws conventions also live in the system prompt (`ciao/system_prompt.md`).
 
 Edit canonical sources, not the generated `.claude/` dirs. Do not run `npx skills update` ad-hoc (it re-expands the lockfile and repopulates bloat); regenerate the `gws-*` skills through `ciao/release.py` rather than calling `gws generate-skills` by hand.
+
+## DAG-style schedules (maintainers)
+
+Some packaged schedules are multi-step workflows (load state, gate, model call, write). For these, use `ciao.dag` rather than a long `async def`:
+
+- `Node(id, kind, model='', timeout_s=180.0, payload={})` — kinds: `bash`, `prompt`, `gate`, `subagent`, `retention`.
+- `Edge(src, dst, when='ok')` — `when` is `ok` (default), `fail`, or `always`.
+- `run(dag, edges, job=..., label=..., initial_ctx={})` — records each node in `.runtime/job_runs.jsonl`.
+
+Canonical example: `ciao/skill_evolution.py:_process_skill_dag`. Use a DAG when there are 3+ sequential steps with branching and you want per-step timing on the Automation page.
 
 ## Change guidelines
 

@@ -6,16 +6,10 @@ recipes) into ``./skills/``. Ciaobot ships a **curated subset** of those under
 ``ciao/stock/skills/`` so they are installed into every workspace without the
 CLI needing to be present at install time.
 
-Historically the packaged ``gws-shared`` skill was hand-edited to carry
-Ciaobot integration notes (profiles, the ``gws-profile.sh`` wrapper, PWA OAuth
-setup). Those notes now live in the system prompt (see
-``ciao.memory_injector``), so the packaged skills can stay byte-for-byte
-upstream and be regenerated deterministically on release.
-
-The only non-verbatim step is stripping the generator's "Community & Feedback
-Etiquette" section (a "star the repo / open issues" block) from ``gws-shared``;
-it is boilerplate that does not belong in a shipped reference. The strip is
-idempotent, so regenerating an already-clean tree is a no-op.
+Upstream skills are regenerated on release, then passed through
+:func:`curate_gws_skill` to apply Ciaobot-specific edits (profile-wrapper
+commands, auth notes, boilerplate trimming). The curated files on disk are the
+source of truth installed by ``ciao sync-skills``.
 
 This module is import-safe without the ``gws`` binary: the actual generation
 is an injectable callable so the decision logic stays unit-testable.
@@ -40,6 +34,33 @@ GWS_SKILL_PREFIX = "gws-"
 # A generator populates ``<dest>/skills/<name>/SKILL.md`` for every skill the
 # CLI knows about. The default shells out to ``gws generate-skills``.
 Generator = Callable[[Path], None]
+
+_PREREQUISITE_OLD = re.compile(
+    r"> \*\*PREREQUISITE:\*\* Read `\.\./gws-shared/SKILL\.md` for auth, global flags, "
+    r"and security rules\. If missing, run `gws generate-skills` to create it\.\n+",
+)
+_PREREQUISITE_NEW = (
+    "> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), "
+    "global flags, and security rules.\n\n"
+)
+
+_CIAOBOT_SHARED_HEAD = """## Installation
+
+Install `gws` from Settings → Integrations (or see the Ciaobot README). The binary must be on `$PATH`.
+
+## Authentication (Ciaobot)
+
+Run every Google API call through the profile wrapper — never bare `gws`:
+
+```bash
+scripts/gws-profile.sh <personal|work> <service> <subcommand> [flags]
+```
+
+Use the chat's `GWS_PROFILE` unless the user asks otherwise. The wrapper routes credentials and execs `gws`. Do not `source` it and do not repeat the `gws` binary after the profile name.
+
+OAuth setup: Settings → Integrations. Config dirs: `secrets/gws-personal/` (personal), `secrets/gws/` (work).
+
+"""
 
 
 class GwsSkillsError(RuntimeError):
@@ -70,6 +91,28 @@ def shipped_gws_skills(stock_skills_dir: Path) -> list[str]:
     )
 
 
+def _split_frontmatter(text: str) -> tuple[str, str]:
+    if not text.startswith("---\n"):
+        return "", text
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        return "", text
+    return text[: end + 5], text[end + 5 :]
+
+
+def strip_openclaw_metadata(text: str) -> str:
+    """Drop the upstream ``metadata.openclaw`` block from YAML frontmatter."""
+    frontmatter, body = _split_frontmatter(text)
+    if not frontmatter:
+        return text
+    cleaned = re.sub(
+        r"(?m)^  openclaw:\n(?:    .*\n)*",
+        "",
+        frontmatter,
+    )
+    return cleaned + body
+
+
 def strip_community_etiquette(text: str) -> str:
     """Drop the generator's "Community & Feedback Etiquette" section.
 
@@ -84,6 +127,68 @@ def strip_community_etiquette(text: str) -> str:
     )
     stripped = pattern.sub("", text)
     return stripped.rstrip() + "\n"
+
+
+def replace_prerequisite(text: str) -> str:
+    """Swap the upstream prerequisite block for the Ciaobot pointer."""
+    return _PREREQUISITE_OLD.sub(_PREREQUISITE_NEW, text)
+
+
+def strip_see_also(text: str) -> str:
+    """Drop redundant See Also footers from helper skills."""
+    pattern = re.compile(r"\n## See Also\n.*\Z", re.DOTALL)
+    return pattern.sub("\n", text).rstrip() + "\n"
+
+
+def rewrite_gws_commands(text: str) -> str:
+    """Prefix bare ``gws `` CLI examples with the Ciaobot profile wrapper."""
+    frontmatter, body = _split_frontmatter(text)
+
+    def _rewrite_codeblock(match: re.Match[str]) -> str:
+        lang = match.group(1)
+        code = match.group(2)
+        if "scripts/gws-profile.sh" in code:
+            code = re.sub(
+                r"scripts/gws-profile\.sh <profile> ",
+                "scripts/gws-profile.sh <personal|work> ",
+                code,
+            )
+        code = re.sub(
+            r"(?m)^(\s*)gws ",
+            r"\1scripts/gws-profile.sh <personal|work> ",
+            code,
+        )
+        return f"```{lang}\n{code}```"
+
+    body = re.sub(
+        r"```([^\n]*)\n(.*?)```",
+        _rewrite_codeblock,
+        body,
+        flags=re.DOTALL,
+    )
+    return frontmatter + body
+
+
+def curate_gws_shared(text: str) -> str:
+    """Replace upstream install/auth with Ciaobot integration notes."""
+    text = strip_community_etiquette(text)
+    pattern = re.compile(r"## Installation\b.*?## Global Flags\b", re.DOTALL)
+    if not pattern.search(text):
+        return text
+    return pattern.sub(_CIAOBOT_SHARED_HEAD + "## Global Flags", text, count=1)
+
+
+def curate_gws_skill(name: str, text: str) -> str:
+    """Apply deterministic Ciaobot curation to a generated skill's content."""
+    text = _normalize(text)
+    text = strip_openclaw_metadata(text)
+    if name == "gws-shared":
+        text = curate_gws_shared(text)
+    else:
+        text = replace_prerequisite(text)
+        text = strip_see_also(text)
+    text = rewrite_gws_commands(text)
+    return _normalize(text)
 
 
 def _normalize(text: str) -> str:
@@ -142,10 +247,7 @@ def pinned_gws_version(stock_skills_dir: Path) -> str | None:
 
 def _transform(name: str, text: str) -> str:
     """Apply deterministic curation to a generated skill's content."""
-    text = _normalize(text)
-    if name == "gws-shared":
-        text = strip_community_etiquette(text)
-    return text
+    return curate_gws_skill(name, text)
 
 
 def regenerate_stock_gws_skills(

@@ -132,6 +132,45 @@ def test_regenerate_raises_without_shipped_skills(tmp_path: Path) -> None:
         )
 
 
+def test_strip_openclaw_metadata_removes_block() -> None:
+    text = (
+        "---\nname: gws-gmail\nmetadata:\n  version: 0.22.5\n  openclaw:\n"
+        "    category: productivity\n    requires:\n      bins:\n        - gws\n---\n\n# body\n"
+    )
+    out = gws_skills.strip_openclaw_metadata(text)
+    assert "openclaw" not in out
+    assert "version: 0.22.5" in out
+
+
+def test_replace_prerequisite_swaps_upstream_wording() -> None:
+    text = (
+        "> **PREREQUISITE:** Read `../gws-shared/SKILL.md` for auth, global flags, "
+        "and security rules. If missing, run `gws generate-skills` to create it.\n\n"
+        "Body\n"
+    )
+    out = gws_skills.replace_prerequisite(text)
+    assert "gws generate-skills" not in out
+    assert "gws-shared" in out
+
+
+def test_rewrite_gws_commands_only_in_code_blocks() -> None:
+    text = "# gws — Shared Reference\n\n```bash\ngws gmail +triage\n```\n"
+    out = gws_skills.rewrite_gws_commands(text)
+    assert out.startswith("# gws — Shared Reference")
+    assert "scripts/gws-profile.sh <personal|work> gmail +triage" in out
+
+
+def test_curate_gws_shared_replaces_auth_section() -> None:
+    text = (
+        "# gws — Shared Reference\n\n## Installation\n\nold\n\n## Authentication\n\n"
+        "gws auth login\n\n## Global Flags\n\n| x |\n"
+    )
+    out = gws_skills.curate_gws_shared(text)
+    assert "Authentication (Ciaobot)" in out
+    assert "gws auth login" not in out
+    assert "## Global Flags" in out
+
+
 def test_pinned_gws_version_reads_metadata(tmp_path: Path) -> None:
     _write_skill(
         tmp_path,

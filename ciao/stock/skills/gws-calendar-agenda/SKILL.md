@@ -3,24 +3,18 @@ name: gws-calendar-agenda
 description: "Google Calendar: Show upcoming events across all calendars."
 metadata:
   version: 0.22.5
-  openclaw:
-    category: "productivity"
-    requires:
-      bins:
-        - gws
-    cliHelp: "gws calendar +agenda --help"
 ---
 
 # calendar +agenda
 
-> **PREREQUISITE:** Read `../gws-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gws generate-skills` to create it.
+> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), global flags, and security rules.
 
 Show upcoming events across all calendars
 
 ## Usage
 
 ```bash
-gws calendar +agenda
+scripts/gws-profile.sh <personal|work> calendar +agenda
 ```
 
 ## Flags
@@ -37,11 +31,11 @@ gws calendar +agenda
 ## Examples
 
 ```bash
-gws calendar +agenda
-gws calendar +agenda --today
-gws calendar +agenda --week --format table
-gws calendar +agenda --days 3 --calendar 'Work'
-gws calendar +agenda --today --timezone America/New_York
+scripts/gws-profile.sh <personal|work> calendar +agenda
+scripts/gws-profile.sh <personal|work> calendar +agenda --today
+scripts/gws-profile.sh <personal|work> calendar +agenda --week --format table
+scripts/gws-profile.sh <personal|work> calendar +agenda --days 3 --calendar 'Work'
+scripts/gws-profile.sh <personal|work> calendar +agenda --today --timezone America/New_York
 ```
 
 ## Tips
@@ -49,8 +43,3 @@ gws calendar +agenda --today --timezone America/New_York
 - Read-only — never modifies events.
 - Queries all calendars by default; use --calendar to filter.
 - Uses your Google account timezone by default; override with --timezone.
-
-## See Also
-
-- [gws-shared](../gws-shared/SKILL.md) — Global flags and auth
-- [gws-calendar](../gws-calendar/SKILL.md) — All manage calendars and events commands

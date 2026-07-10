@@ -1,6 +1,6 @@
 ---
 name: web-research
-description: Reliable web lookup workflow using provider-native web search plus defuddle/playwright for source verification.
+description: Reliable web lookup workflow using provider-native web search plus defuddle for source verification.
 ---
 
 # Web Research
@@ -14,8 +14,8 @@ Use this skill for web questions and URL verification.
 
 2. Read
 - For **GitHub URLs** (`github.com/...`, `gist.github.com/...`), use `gh` CLI instead of defuddle. It hits the API directly: cleaner output, fewer tokens, and it works on private repos. See the GitHub URL mapping below.
-- For all other URLs, use `defuddle parse <url> --md`. This is the default for the rest of the web, it strips clutter and reduces token usage.
-- If defuddle returns empty or stub content (JS-rendered pages, SPAs, login-gated content, dashboards), invoke the **playwright-cli** skill to drive a headless browser.
+- For all other URLs, use `defuddle parse <url> --md`. This is the default for the rest of the web; it strips clutter and reduces token usage.
+- If defuddle returns empty or stub content (JS-rendered pages, SPAs, login-gated content, dashboards), say so clearly and ask the user to paste the content or try from a machine where they can access it.
 - Only fall back to WebFetch for non-HTML targets (API endpoints, raw files, binary content).
 
 ### GitHub URL mapping
@@ -53,5 +53,4 @@ This skill is guidance-only — it has no bash-executable component.
 - Web search is handled automatically by the provider (OpenRouter web plugin) — just reason about what to search and results will appear.
 - For reading specific URLs, use `defuddle parse <url> --md` via Bash, not `fetch_url`.
 - **Never use `curl`, `wget`, or raw Python HTTP requests for HTML pages in Bash.** These frequently return gzip-encoded bytes that cause `UnicodeDecodeError` when decoded as UTF-8. Use `defuddle` instead; it handles compression and encoding correctly.
-- **Do not use WebFetch for HTML pages.** It is reserved for non-HTML targets (API endpoints, raw files, binary content). If `defuddle` times out or fails on a heavy page, switch to the **playwright-cli** skill rather than WebFetch.
-- To load these instructions: `cat "$SKILL_DIR/SKILL.md"`
+- **Do not use WebFetch for HTML pages.** It is reserved for non-HTML targets (API endpoints, raw files, binary content).

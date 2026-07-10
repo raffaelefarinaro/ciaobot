@@ -24,21 +24,28 @@ Every entry is a flat JSON object. Use exactly these keys (the store filters unk
 
 ```json
 {
+  "archive_policy": "manual",
   "chat_id": 0,
   "created_at": "2026-05-11T13:42:00Z",
   "daily_time_utc": "09:00",
   "day_of_month": null,
   "days_of_week": ["mon"],
+  "editable": true,
+  "enabled": true,
   "frequency": "weekly",
   "last_triggered_on": "",
   "model": "",
   "prompt": "Your full prompt here.",
+  "removable": true,
   "run_at_date": null,
   "schedule_id": "sched-dd1c0790",
+  "scope": "user",
   "thread_id": null,
   "timezone_name": "UTC",
+  "title": "",
   "web_chat_id": null,
-  "web_project_id": "proj-72081e2d"
+  "web_project_id": "proj-72081e2d",
+  "workspace": ""
 }
 ```
 
@@ -57,6 +64,8 @@ Every entry is a flat JSON object. Use exactly these keys (the store filters unk
 - **`model`** — empty string lets the workspace pick its default at dispatch time. Override only when a specific model matters.
 - **`schedule_id`** — `f"sched-{uuid.uuid4().hex[:8]}"`. Match the existing convention.
 - **`last_triggered_on`** — empty string for new entries. The dispatcher writes the local-date string after each run.
+- **`enabled`** — `true` (default) runs on schedule; `false` pauses auto-fire (manual "Run now" still works).
+- **`scope`** — `"user"` for schedules you create; system schedules use `"system"`.
 
 ### Prompt placeholders
 
@@ -109,21 +118,28 @@ path = Path('.runtime/schedules.json')
 data = json.loads(path.read_text())
 
 entry = {
+    'archive_policy': 'manual',
     'chat_id': 0,
     'created_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
     'daily_time_utc': '09:00',          # local time in timezone_name
     'day_of_month': None,
     'days_of_week': ['mon'],            # weekly only; lowercase abbrevs
+    'editable': True,
+    'enabled': True,
     'frequency': 'weekly',              # daily | weekly | monthly | manual | once
     'last_triggered_on': '',
     'model': '',                        # empty = workspace default
     'prompt': '<full self-contained prompt with emoji sentinel>',
+    'removable': True,
     'run_at_date': None,                # only for frequency='once'
     'schedule_id': f"sched-{uuid.uuid4().hex[:8]}",
+    'scope': 'user',
     'thread_id': None,
     'timezone_name': 'UTC',             # or the user's IANA zone
+    'title': '',
     'web_chat_id': None,                # mutually exclusive with web_project_id
     'web_project_id': 'proj-XXXXXXXX',  # find via web_projects.json
+    'workspace': '',
 }
 
 data.setdefault('schedules', []).append(entry)
@@ -159,44 +175,6 @@ A `None` from `compute_next_run` means the entry is malformed (bad time string, 
 When a schedule exists to maintain a specific project or doc, mention it once in that doc by `schedule_id`. Example:
 `Auto-rechecked weekly: Ciaobot schedule \`sched-dd1c0790\` (Mon 09:00, project \`<name>\`).`
 That way the schedule's purpose is discoverable from the artifact it owns, not just from the JSON file.
-
-## DAG-style schedules (multi-step, multi-model pipelines)
-
-Some schedules are shaped like a small workflow: load some state, flag items, call a model, run a gate, write output. For these, the schedule's Python entry point should compose a DAG using `ciao.dag` rather than a 300-line `async def`.
-
-The DAG helper (`ciao/dag.py`) provides:
-
-- `Node(id, kind, model='', timeout_s=180.0, payload={})` — kinds: `bash`, `prompt`, `gate`, `subagent`, `retention`.
-- `Edge(src, dst, when='ok')` — `when` is `ok` (default), `fail`, or `always`.
-- `run(dag, edges, job=..., label=..., initial_ctx={})` — walks the DAG from the entry node, records each node in `.runtime/job_runs.jsonl` via `ciao.job_runs.track_sync`.
-
-Canonical example — the per-skill pipeline inside `ciao/skill_evolution.py:_process_skill_dag`:
-
-```python
-dag = [
-    Node(id="has_proposal", kind="gate", payload={"fn": proposal_present}),
-    Node(id="semantic",     kind="gate", payload={"fn": semantic_passed}),
-    Node(id="tests",        kind="gate", payload={"fn": tests_passed}),
-    Node(id="write",        kind="gate", payload={"fn": write_proposal_node}),
-    Node(id="write_stub",   kind="gate", payload={"fn": write_stub_node}),
-]
-edges = [
-    Edge(src="has_proposal", dst="semantic",    when="ok"),
-    Edge(src="has_proposal", dst="write_stub",  when="fail"),
-    Edge(src="semantic",     dst="tests",       when="ok"),
-    Edge(src="tests",        dst="write",       when="ok"),
-    Edge(src="tests",        dst="write_stub",  when="fail"),
-]
-ctx = run_dag(dag, edges, job="skill_evolution", label=f"skillevo:{skill_name}")
-```
-
-Why use it:
-
-- **Per-node visibility in `job_runs.jsonl`.** Each node's run is recorded with model, duration, status. Without the DAG, the inner model call is invisible in the Automation page; the outer schedule run shows as one opaque blob.
-- **Branching without nested `if`s.** `fail` and `always` edges express "if this fails, do X" without rewriting the function into a state machine.
-- **Local Python, no new runtime.** The helper is just a DAG walker. The schedule still runs in-process; no new service to operate, no new DB.
-
-When to use a DAG: 3+ sequential steps, at least one branch on a gate, and at least one model call you want per-step timing on. When NOT to use it: a single fetch-and-diff (use a flat prompt), or anything that's mostly human judgment (use a checklist-style prompt instead).
 
 ## When NOT to use this skill
 

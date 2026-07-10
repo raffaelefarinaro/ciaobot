@@ -3,24 +3,18 @@ name: gws-sheets-read
 description: "Google Sheets: Read values from a spreadsheet."
 metadata:
   version: 0.22.5
-  openclaw:
-    category: "productivity"
-    requires:
-      bins:
-        - gws
-    cliHelp: "gws sheets +read --help"
 ---
 
 # sheets +read
 
-> **PREREQUISITE:** Read `../gws-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gws generate-skills` to create it.
+> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), global flags, and security rules.
 
 Read values from a spreadsheet
 
 ## Usage
 
 ```bash
-gws sheets +read --spreadsheet <ID> --range <RANGE>
+scripts/gws-profile.sh <personal|work> sheets +read --spreadsheet <ID> --range <RANGE>
 ```
 
 ## Flags
@@ -33,16 +27,11 @@ gws sheets +read --spreadsheet <ID> --range <RANGE>
 ## Examples
 
 ```bash
-gws sheets +read --spreadsheet ID --range "Sheet1!A1:D10"
-gws sheets +read --spreadsheet ID --range Sheet1
+scripts/gws-profile.sh <personal|work> sheets +read --spreadsheet ID --range "Sheet1!A1:D10"
+scripts/gws-profile.sh <personal|work> sheets +read --spreadsheet ID --range Sheet1
 ```
 
 ## Tips
 
 - Read-only — never modifies the spreadsheet.
 - For advanced options, use the raw values.get API.
-
-## See Also
-
-- [gws-shared](../gws-shared/SKILL.md) — Global flags and auth
-- [gws-sheets](../gws-sheets/SKILL.md) — All read and write spreadsheets commands

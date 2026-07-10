@@ -28,12 +28,46 @@ from ciao.config import CiaoConfig
 from ciao.providers.oneshot import run_oneshot
 from ciao.providers.routing import routing_routine_env_for_model
 
-DEFAULT_PANEL = [
-    "anthropic/claude-sonnet-latest",
-    "anthropic/claude-haiku-latest",
-    "anthropic/claude-opus-latest",
-]
 DEFAULT_TIMEOUT = 120  # seconds per model
+
+
+def default_critique_panel(config: CiaoConfig) -> list[str]:
+    """Backend-aware default when Settings → Models has no critique override."""
+    if config.openrouter.available:
+        return [
+            "anthropic/claude-sonnet-latest",
+            "anthropic/claude-haiku-latest",
+            "anthropic/claude-opus-latest",
+        ]
+    if config.ollama.api_key and config.ollama.api_key != "ollama":
+        return [
+            config.ollama.sonnet_model,
+            config.ollama.haiku_model,
+            config.ollama.opus_model,
+        ]
+    return ["sonnet", "haiku", "opus"]
+
+
+def resolve_critique_panel(config: CiaoConfig, *, override: str = "") -> list[str]:
+    """Resolve the adversarial-review panel from UI/env overrides or defaults."""
+    csv = override.strip() or (config.critique_models or "").strip()
+    if csv:
+        return [model.strip() for model in csv.split(",") if model.strip()]
+    return default_critique_panel(config)
+
+
+def critique_models_effective(config: CiaoConfig) -> str:
+    """Comma-separated panel string for API responses."""
+    return ",".join(resolve_critique_panel(config))
+
+
+def apply_app_settings_overlay(config: CiaoConfig) -> None:
+    """Overlay `.runtime/app_settings.json` onto ``config`` (Settings → Models)."""
+    from ciao.app_settings import AppSettingsStore
+
+    runtime_env = os.environ.get("CIAO_RUNTIME_ROOT", os.environ.get("TELEGRAM_BRIDGE_RUNTIME_ROOT", "")).strip()
+    runtime_root = Path(runtime_env) if runtime_env else config.state_path.parent
+    AppSettingsStore(runtime_root / "app_settings.json").apply_to_config(config)
 
 
 SYSTEM_PROMPT = """You are an adversarial reviewer. The user is about to ship the artifact below and wants you to find what's wrong with it before anyone else does. Be sharp, specific, and honest. Don't hedge, don't flatter, and don't pad with generic best-practice advice that doesn't apply to this artifact.
@@ -208,18 +242,6 @@ def render_markdown(artifact_name: str, results: list[ModelResult], agg: dict) -
     return "\n".join(out)
 
 
-def _load_app_settings_models() -> str:
-    """Read the critique_models override from .runtime/app_settings.json."""
-    runtime_env = os.environ.get("CIAO_RUNTIME_ROOT", os.environ.get("TELEGRAM_BRIDGE_RUNTIME_ROOT", "")).strip()
-    repo_root = Path(__file__).resolve().parents[1]
-    runtime_root = Path(runtime_env) if runtime_env else repo_root / ".runtime"
-    path = runtime_root / "app_settings.json"
-    if not path.is_file():
-        return ""
-    try:
-        return json.loads(path.read_text(encoding="utf-8")).get("critique_models", "").strip()
-    except (OSError, ValueError):
-        return ""
 
 
 async def async_main(argv: list[str] | None = None) -> int:
@@ -236,23 +258,19 @@ async def async_main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     config = CiaoConfig.from_env()
+    apply_app_settings_overlay(config)
 
-    models_csv = (
-        args.models
-        or _load_app_settings_models()
-        or os.environ.get("CIAO_REVIEW_MODELS", "")
-        or os.environ.get("CIAO_ADVERSARIAL_MODELS", "")
+    models = resolve_critique_panel(
+        config,
+        override=(
+            args.models
+            or os.environ.get("CIAO_REVIEW_MODELS", "")
+            or os.environ.get("CIAO_ADVERSARIAL_MODELS", "")
+        ),
     )
-    if models_csv:
-        models = [m.strip() for m in models_csv.split(",") if m.strip()]
-    else:
-        # Dynamic default: OpenRouter panel when a key is set, else Ollama tiers.
-        if config.openrouter.available:
-            models = list(DEFAULT_PANEL)
-        elif config.ollama.api_key and config.ollama.api_key != "ollama":
-            models = [config.ollama.sonnet_model, config.ollama.haiku_model, config.ollama.opus_model]
-        else:
-            models = ["sonnet", "haiku", "opus"]  # Anthropic aliases
+    if not models:
+        print("error: no critique models configured (set panel in Settings → Models)", file=sys.stderr)
+        return 2
 
     if args.print_panel:
         for m in models:

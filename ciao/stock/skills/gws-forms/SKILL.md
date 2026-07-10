@@ -3,20 +3,14 @@ name: gws-forms
 description: "Read and write Google Forms."
 metadata:
   version: 0.22.5
-  openclaw:
-    category: "productivity"
-    requires:
-      bins:
-        - gws
-    cliHelp: "gws forms --help"
 ---
 
 # forms (v1)
 
-> **PREREQUISITE:** Read `../gws-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gws generate-skills` to create it.
+> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), global flags, and security rules.
 
 ```bash
-gws forms <resource> <method> [flags]
+scripts/gws-profile.sh <personal|work> forms <resource> <method> [flags]
 ```
 
 ## API Resources
@@ -36,11 +30,10 @@ Before calling any API method, inspect it:
 
 ```bash
 # Browse resources and methods
-gws forms --help
+scripts/gws-profile.sh <personal|work> forms --help
 
 # Inspect a method's required params, types, and defaults
-gws schema forms.<resource>.<method>
+scripts/gws-profile.sh <personal|work> schema forms.<resource>.<method>
 ```
 
 Use `gws schema` output to build your `--params` and `--json` flags.
-

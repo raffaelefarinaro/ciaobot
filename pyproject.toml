@@ -23,7 +23,6 @@ dependencies = [
   "httpx==0.28.1",
   "python-pptx==1.0.2",
   "notebooklm-py==0.7.3",
-  "playwright==1.61.0",
   # macOS menu bar companion (`ciao menubar`): installed automatically on
   # macOS so a plain wheel install includes the status-bar app.
   "rumps==0.4.0; platform_system == 'Darwin'",

@@ -10,9 +10,9 @@ You are running inside Ciaobot. The app's feature surface is not otherwise visib
 ## How to answer
 
 - **Specific question** ("can you schedule things?", "where do my archived chats go?") → answer from the relevant section only. Don't recite the whole catalog.
-- **Broad question** ("what can you do?") → give the one-paragraph pitch plus the six pillars in a few lines each, then offer to go deeper on any of them.
+- **Broad question** ("what can you do?") → give the one-paragraph pitch plus the capability areas below in a few lines each, then offer to go deeper on any of them.
 - **New user / onboarding** → offer the guided tour below.
-- Distinguish the **app** from **you**: this catalog is what the Ciaobot app provides. On top of it you have your normal agent abilities plus whatever skills, subagents, and slash commands are installed in this workspace (`.claude/skills/`, `.claude/agents/`, `.claude/commands/`).
+- Distinguish the **app** from **you**: this catalog is what the Ciaobot app provides. On top of it you have your normal agent abilities plus whatever skills, subagents, and slash commands are installed in this workspace (`skills/`, `subagents/`, `commands/`, and their `.claude/` / `.agents/skills/` mirrors).
 
 ## The one-paragraph pitch
 
@@ -48,14 +48,14 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 
 ### 5. Skills, subagents, and commands (extensibility)
 
-- **Stock skills** ship with the app and are synced into `.claude/skills/` (`ciao sync-skills`, runs at startup). A same-named skill in the workspace's `skills/` folder overrides the packaged copy.
+- **Stock skills** ship with the app and are synced into both `.claude/skills/` and `.agents/skills/` (`ciao sync-skills`, runs at startup). A same-named skill in the workspace's `skills/` folder overrides the packaged copy.
 - **Custom** skills, subagents, and slash commands are authored in the workspace (`skills/`, `subagents/`, `commands/`) and mirrored automatically.
 - **GitHub-sourced skills** can be installed and are refreshed automatically on restart when upstream changes.
 - **Skill evolution**: a background loop analyzes usage and proposes skill improvements — as reviewable proposals, never silent edits.
 
 ### 6. Models and providers
 
-- Backends: **Claude Code** (Claude subscription or Anthropic API key), **Ollama** (cloud or local daemon), **OpenRouter**. No provider lock-in — chats and schedules can route through any configured backend.
+- Backends: **Claude Code** (Claude subscription or Anthropic API key), **Codex** (OpenAI ChatGPT subscription via the Codex CLI), **Ollama** (cloud or local daemon, routed through Claude Code), and **OpenRouter** (routed through Claude Code). No provider lock-in — chats and schedules can route through any configured backend.
 - Per-workspace default model and model bucket (which controls how aliases like `opus`/`sonnet` resolve), per-chat override in the picker.
 
 ### 7. Google Workspace (`gws`)
@@ -77,17 +77,14 @@ Local-first: the server, vault, and runtime state live on the user's machine; tr
 
 ## Guided tour (new users)
 
-When onboarding someone, walk these in order, hands-on rather than as a lecture — one short step at a time, checking in between. **Point out the in-app product tour** (auto-starts on first launch; replay from Settings → Home) for the chat-comment, file-card, pin, and preview flows — then reinforce them live in chat:
+When onboarding someone, start with the **in-app product tour** (auto-starts on first launch; replay from Settings → Home), then walk through hands-on:
 
-1. **Orient**: workspaces in the sidebar, projects inside them, chats inside projects. Create or rename a project for something they're actually working on.
-2. **Chat**: show the model picker and voice input; explain that project files and notes are context the agent always sees.
-3. **Annotate**: demonstrate selecting text in a message → comment sidebar → send with the next prompt.
-4. **Files in chat**: when the agent touches a file, show the inline card → viewer → pin beside chat → line comments on a selection.
-5. **Rich previews**: open an image or PDF (and mention `.pptx` → PDF when LibreOffice is installed).
-6. **Files surface**: open the Files page, create or edit a note, show restore/history.
-7. **Memory**: explain archive → insights → memory proposals, and that nothing becomes durable memory without their approval.
-8. **Schedules**: set up one small routine they'd find useful (a weekly review, a daily check).
-9. **Settings & extras**: providers and models, package updates, replay product tour, and on macOS the menu bar companion.
+1. **Orient** — workspaces → projects → chats; create or rename a project for something they're working on.
+2. **Chat** — model picker, voice input, and project context the agent always sees.
+3. **Annotate & files** — message comments, inline file cards, pin, line comments, and rich previews (replay from the product tour if needed).
+4. **Memory** — archive → insights → memory proposals; nothing becomes durable without approval.
+5. **Schedules** — set up one small routine they'd actually use.
+6. **Settings** — providers/models, package updates, and on macOS the menu bar companion.
 
 Close with: they can ask "what can Ciaobot do?" (or about any specific feature) in any chat, anytime.
 

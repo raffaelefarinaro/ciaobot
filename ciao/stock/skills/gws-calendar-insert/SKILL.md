@@ -3,24 +3,18 @@ name: gws-calendar-insert
 description: "Google Calendar: Create a new event."
 metadata:
   version: 0.22.5
-  openclaw:
-    category: "productivity"
-    requires:
-      bins:
-        - gws
-    cliHelp: "gws calendar +insert --help"
 ---
 
 # calendar +insert
 
-> **PREREQUISITE:** Read `../gws-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gws generate-skills` to create it.
+> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), global flags, and security rules.
 
 create a new event
 
 ## Usage
 
 ```bash
-gws calendar +insert --summary <TEXT> --start <TIME> --end <TIME>
+scripts/gws-profile.sh <personal|work> calendar +insert --summary <TEXT> --start <TIME> --end <TIME>
 ```
 
 ## Flags
@@ -39,9 +33,9 @@ gws calendar +insert --summary <TEXT> --start <TIME> --end <TIME>
 ## Examples
 
 ```bash
-gws calendar +insert --summary 'Standup' --start '2026-06-17T09:00:00-07:00' --end '2026-06-17T09:30:00-07:00'
-gws calendar +insert --summary 'Review' --start ... --end ... --attendee alice@example.com
-gws calendar +insert --summary 'Meet' --start ... --end ... --meet
+scripts/gws-profile.sh <personal|work> calendar +insert --summary 'Standup' --start '2026-06-17T09:00:00-07:00' --end '2026-06-17T09:30:00-07:00'
+scripts/gws-profile.sh <personal|work> calendar +insert --summary 'Review' --start ... --end ... --attendee alice@example.com
+scripts/gws-profile.sh <personal|work> calendar +insert --summary 'Meet' --start ... --end ... --meet
 ```
 
 ## Tips
@@ -51,8 +45,3 @@ gws calendar +insert --summary 'Meet' --start ... --end ... --meet
 
 > [!CAUTION]
 > This is a **write** command — confirm with the user before executing.
-
-## See Also
-
-- [gws-shared](../gws-shared/SKILL.md) — Global flags and auth
-- [gws-calendar](../gws-calendar/SKILL.md) — All manage calendars and events commands
