@@ -431,6 +431,30 @@ def test_chat_url_deep_links_to_chat(tmp_path: Path) -> None:
     assert menubar.chat_url(tmp_path, 8443, "") == "http://localhost:8443/"
 
 
+def test_notify_open_chat_hits_local_endpoint(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_urlopen(url: str, timeout: float):
+        calls["url"] = url
+        calls["timeout"] = timeout
+        return _FakeResponse({"ok": True, "chat_id": "abc"})
+
+    monkeypatch.setattr(menubar.urllib.request, "urlopen", fake_urlopen)
+
+    assert menubar.notify_open_chat(8443, "abc") is True
+    assert calls["url"] == "http://localhost:8443/api/open-chat/abc"
+    assert calls["timeout"] == 2.0
+
+
+def test_notify_open_chat_returns_false_when_unreachable(monkeypatch) -> None:
+    def fake_urlopen(url: str, timeout: float):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(menubar.urllib.request, "urlopen", fake_urlopen)
+
+    assert menubar.notify_open_chat(8443, "abc") is False
+
+
 def test_read_open_chats_filters_archived_and_sorts_by_activity(tmp_path: Path) -> None:
     state = tmp_path / ".runtime" / "web_projects.json"
     state.parent.mkdir(parents=True)

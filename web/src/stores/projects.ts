@@ -780,11 +780,14 @@ export const useProjectStore = defineStore('projects', () => {
     //      isn't archived).
     //   3) First chat in the current workspace.
     const { router } = await import('../router')
-    const urlChatId = router.currentRoute.value.params.chatId as string | undefined
-    const chatExists = (id: string) => c.some(ch => ch.chat_id === id && !ch.archived)
-    if (urlChatId && chatExists(urlChatId)) {
+    const urlChatId = (router.currentRoute.value.params.chatId as string | undefined)
+      || (typeof window !== 'undefined'
+        ? window.location.pathname.match(/^\/chat\/([^/]+)/)?.[1]
+        : undefined)
+    if (urlChatId && chatExistsInList(urlChatId, c)) {
+      await ensureWorkspaceForChat(urlChatId)
       activeChatId.value = urlChatId
-    } else if (activeChatId.value && !chatExists(activeChatId.value)) {
+    } else if (activeChatId.value && !chatExistsInList(activeChatId.value, c)) {
       activeChatId.value = null
     }
     if (!activeChatId.value) {
@@ -1350,6 +1353,25 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Chat switching ──────────────────────────────────────────────────
 
+  function chatExistsInList(chatId: string, list: ChatInfo[] = chats.value): boolean {
+    return list.some(ch => ch.chat_id === chatId && !ch.archived)
+  }
+
+  async function ensureWorkspaceForChat(chatId: string) {
+    const project = projectFor(chatId)
+    if (!project || project.workspace === activeWorkspace.value) return
+    if (activeChatId.value) disconnectWs(activeChatId.value)
+    activeWorkspace.value = project.workspace
+    persistState()
+  }
+
+  /** Deep-link / tray / notification navigation into a specific chat. */
+  async function openChatFromDeepLink(chatId: string) {
+    if (!chatExistsInList(chatId)) return
+    await ensureWorkspaceForChat(chatId)
+    await switchChat(chatId)
+  }
+
   async function switchChat(chatId: string) {
     // Always sync URL, even if activeChatId already matches (we may have
     // landed here from /settings or /schedules where the chat route isn't
@@ -1505,6 +1527,11 @@ export const useProjectStore = defineStore('projects', () => {
         // report OPEN, but no messages flow.
         void resumeActiveChat()
         void syncLatest()
+        const chatId = (() => {
+          if (typeof window === 'undefined') return undefined
+          return window.location.pathname.match(/^\/chat\/([^/]+)/)?.[1]
+        })()
+        if (chatId) void openChatFromDeepLink(chatId)
       } else if (activeChatId.value) {
         // Visibility → hidden: just notify the server of focus state.
         sendFocus(activeChatId.value)
@@ -1525,9 +1552,9 @@ export const useProjectStore = defineStore('projects', () => {
       navigator.serviceWorker.addEventListener('message', (ev) => {
         const data = ev.data
         if (data && data.type === 'open-chat' && data.chat_id) {
-          switchChat(data.chat_id)
+          void openChatFromDeepLink(data.chat_id)
         } else if (data && data.type === 'pending-target' && data.chat_id) {
-          switchChat(data.chat_id)
+          void openChatFromDeepLink(data.chat_id)
         }
       })
     }
@@ -1762,6 +1789,9 @@ export const useProjectStore = defineStore('projects', () => {
         }
         break
       }
+      case 'open_chat':
+        void openChatFromDeepLink(msg.chat_id)
+        break
       case 'project_created': {
         const exists = projects.value.some(p => p.project_id === msg.project.project_id)
         if (!exists) projects.value.push(msg.project)
@@ -2763,7 +2793,7 @@ export const useProjectStore = defineStore('projects', () => {
     fetchCompletedProjects, restoreProject,
     createChat, renameChat, updateChat, handoverChat, moveChat, deleteChat, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
-    switchChat, switchWorkspace,
+    switchChat, switchWorkspace, openChatFromDeepLink,
     syncLatest,
     sendMessage, stopChat, respondPermission, transcribeVoice, speakMessage, uploadImages, uploadImageRefs, removePendingImage, clearPendingImages,
     addPendingComment, removePendingComment, clearPendingComments,

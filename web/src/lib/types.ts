@@ -180,6 +180,7 @@ export type EventsWsMessage =
   | { type: 'project_created'; project: ProjectInfo }
   | { type: 'project_updated'; project: ProjectInfo }
   | { type: 'project_deleted'; project_id: string }
+  | { type: 'open_chat'; chat_id: string }
 
 export interface InAppToast {
   id: number

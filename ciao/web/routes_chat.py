@@ -221,6 +221,7 @@ async def ws_events(websocket: WebSocket) -> None:
     - `chat_result_ready`       {chat_id, project_id, title, snippet}
     - `chat_subagents_ready`    {chat_id, project_id, remaining}
     - `chat_title`              {chat_id, title}
+    - `open_chat`               {chat_id}  (menu-bar deep link into running PWA)
 
     On connect, sends a snapshot of currently-active streams so a fresh client
     can paint sidebar indicators without waiting for the next event.

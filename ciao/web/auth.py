@@ -174,7 +174,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/api/setup/mkdir",
         }
         protected = (
-            (path.startswith("/api/") and path not in public_api)
+            (
+                path.startswith("/api/")
+                and path not in public_api
+                and not path.startswith("/api/open-chat/")
+            )
             or path.startswith("/ws/")
         )
         if not protected:

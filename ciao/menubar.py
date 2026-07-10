@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from importlib import resources
@@ -90,6 +91,20 @@ def fetch_active_chat_ids(port: int, *, timeout: float = 2.0) -> set[str]:
         return set()
     ids = payload.get("active_chat_ids")
     return {str(chat_id) for chat_id in ids} if isinstance(ids, list) else set()
+
+
+def notify_open_chat(port: int, chat_id: str, *, timeout: float = 2.0) -> bool:
+    """Tell an already-open PWA to navigate to ``chat_id`` via /ws/events."""
+
+    if not chat_id:
+        return False
+    url = f"http://localhost:{port}/api/open-chat/{urllib.parse.quote(chat_id, safe='')}"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+    return isinstance(payload, dict) and bool(payload.get("ok"))
 
 
 def status_label(status: ServerStatus) -> str:
@@ -625,6 +640,7 @@ def run_menubar(workspace: Path, port: int) -> int:
 
     def _open_chat_callback(chat_id: str):
         def _callback(_sender) -> None:
+            notify_open_chat(port, chat_id)
             subprocess.run(open_command(chat_url(workspace, port, chat_id)), check=False)
 
         return _callback

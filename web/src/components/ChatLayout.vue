@@ -486,7 +486,7 @@ onMounted(async () => {
   taskStore.fetchSchedules().catch(() => {})
   const chatId = route.params.chatId as string
   if (chatId && store.chats.find(c => c.chat_id === chatId)) {
-    store.switchChat(chatId)
+    await store.openChatFromDeepLink(chatId)
   }
   // Auto-collapse sidebar on mobile when a chat is active
   if (isMobile.value && store.activeChat) {
@@ -507,7 +507,7 @@ watch(
     const id = chatId as string
     if (!id) return
     if (!store.chats.find(c => c.chat_id === id)) return
-    if (store.activeChatId !== id) store.switchChat(id)
+    if (store.activeChatId !== id) void store.openChatFromDeepLink(id)
     else void store.markRead(id)
     if (isMobile.value) sidebarCollapsed.value = true
   }

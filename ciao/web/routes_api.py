@@ -3246,6 +3246,24 @@ async def active_chats_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({"active_chat_ids": sorted(ids)})
 
 
+async def open_chat_endpoint(request: Request) -> JSONResponse:
+    """Ask an already-open PWA to navigate to a chat.
+
+    macOS ``open -a PWA /chat/...`` often focuses the installed app without
+    changing the window URL when it is already running. The menu bar calls
+    this unauthenticated local endpoint first; connected clients receive an
+    ``open_chat`` event over ``/ws/events`` and switch chats in place.
+    """
+    chat_id = str(request.path_params.get("chat_id") or "").strip()
+    if not chat_id:
+        return JSONResponse({"ok": False, "error": "missing chat_id"}, status_code=400)
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    if pcm is None or pcm.get_chat(chat_id) is None:
+        return JSONResponse({"ok": False, "error": "chat not found"}, status_code=404)
+    pcm.events.publish({"type": "open_chat", "chat_id": chat_id})
+    return JSONResponse({"ok": True, "chat_id": chat_id})
+
+
 async def setup_status_endpoint(request: Request) -> JSONResponse:
     """Return first-run setup readiness for the onboarding wizard."""
     return JSONResponse(setup_status(request.app.state.config))
