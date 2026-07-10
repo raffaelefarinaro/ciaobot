@@ -1,5 +1,5 @@
 ---
-description: Challenge a plan, draft, or implementation before committing to it.
+description: Quick single-model review of a plan or draft (not the multi-model adversarial-review skill).
 argument-hint: <topic or artifact>
 ---
 

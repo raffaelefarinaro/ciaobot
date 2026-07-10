@@ -71,11 +71,10 @@ def _copy_tree(src, dest: Path) -> None:
             _copy_tree(item, dest / item.name)
         else:
             target = dest / item.name
-            # sync-skills turns stock .claude/agents|commands entries into
-            # symlinks once a workspace promotes one to a custom copy
-            # (subagents/ or commands/). write_bytes() follows symlinks, so
-            # without this a setup re-run would silently overwrite the
-            # user's custom file through the link instead of the stock copy.
+            # sync-skills mirrors canonical commands/ and subagents/ into
+            # .claude/. write_bytes() follows symlinks, so without this a
+            # setup re-run would silently overwrite the user's custom file
+            # through the link instead of the stock copy.
             if target.is_symlink():
                 target.unlink()
             target.write_bytes(item.read_bytes())
@@ -680,8 +679,8 @@ def setup_workspace(
 
     _install_stock_agents(root)
     written.append(root / ".claude" / "agents")
-    _copy_tree(stock_commands, root / ".claude" / "commands")
-    written.append(root / ".claude" / "commands")
+    written.extend(_copy_tree_if_missing(stock_commands, root / "commands"))
+    written.append(root / "commands")
     written.extend(_copy_tree_if_missing(stock_workspace, root))
 
     runtime_schedules = root / ".runtime" / "schedules.json"

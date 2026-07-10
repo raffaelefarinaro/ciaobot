@@ -5,11 +5,10 @@ argument-hint: <what to remember>
 
 # Remember: $ARGUMENTS
 
-Classify the information:
-- Cross-session preference, convention, or environment fact: bounded memory.
-- Project, person, place, idea, or resource fact: vault page.
-- Unclear or incomplete: ask a short clarifying question.
+Route per system memory policy:
+- preference / env fact → `ciao memory add --target memory`
+- identity / style → `ciao memory add --target user`
+- durable entity (person, project, idea, …) → vault page
+- unclear → ask one short clarifying question
 
-Before writing, check for an existing entry to avoid duplicates.
-
-After writing, confirm the destination and the exact saved summary.
+Search for duplicates first. Confirm destination and saved summary.

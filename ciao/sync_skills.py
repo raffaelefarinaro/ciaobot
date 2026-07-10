@@ -311,6 +311,47 @@ def _install_stock_agents(workspace: Path) -> tuple[int, int]:
     return installed, pruned
 
 
+def _seed_stock_commands(workspace: Path) -> int:
+    """Ensure packaged commands live in canonical ``commands/``.
+
+    Fresh installs seed from ``ciao.stock/commands``. Older workspaces that
+    still have stock copies only under ``.claude/commands/`` are migrated
+    into ``commands/`` so they become editable and covered by weekly-review
+    hygiene checks.
+    """
+    from importlib import resources
+
+    commands_dir = workspace / "commands"
+    commands_dir.mkdir(parents=True, exist_ok=True)
+    claude_commands = workspace / ".claude" / "commands"
+
+    try:
+        stock_commands = resources.files("ciao.stock").joinpath("commands")
+        stock_files = sorted(
+            (entry for entry in stock_commands.iterdir() if entry.name.endswith(".md")),
+            key=lambda item: item.name,
+        )
+    except (ModuleNotFoundError, FileNotFoundError, OSError):
+        return 0
+
+    seeded = 0
+    for stock_entry in stock_files:
+        canonical = commands_dir / stock_entry.name
+        if canonical.exists():
+            continue
+        legacy = claude_commands / stock_entry.name
+        with resources.as_file(stock_entry) as stock_path:
+            stock_text = stock_path.read_text(encoding="utf-8")
+            if legacy.is_file() and not legacy.is_symlink():
+                # Legacy stock installs lived only under .claude/commands/ and
+                # were not editable in Settings — seed the packaged revision.
+                canonical.write_text(stock_text, encoding="utf-8")
+            else:
+                shutil.copy2(stock_path, canonical)
+        seeded += 1
+    return seeded
+
+
 def _mirror_dir_symlinks(
     source_dir: Path,
     dest_dir: Path,
@@ -377,6 +418,9 @@ def sync_workspace_skills(
         glob_pattern="*.md",
         prune_regular=False,
     )
+    stock_commands_seeded = _seed_stock_commands(root)
+    if stock_commands_seeded:
+        print(f"Skills: {stock_commands_seeded} stock command(s) seeded into commands/.")
     commands_installed, commands_pruned = _mirror_dir_symlinks(
         root / "commands",
         root / ".claude" / "commands",

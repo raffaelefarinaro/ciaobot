@@ -236,7 +236,10 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
         "CIAO_PUSH_CONTACT=mailto:owner@example.com",
     ]
     assert (workspace / ".claude" / "agents" / "memory.md").is_file()
-    assert (workspace / ".claude" / "commands" / "remember.md").is_file()
+    assert (workspace / "commands" / "remember.md").is_file()
+    assert "ciao memory add --target memory" in (
+        workspace / "commands" / "remember.md"
+    ).read_text(encoding="utf-8")
     assert (workspace / "CLAUDE.md").is_file()
     customization = workspace / "CIAO_CUSTOMIZATION.md"
     assert customization.is_file()

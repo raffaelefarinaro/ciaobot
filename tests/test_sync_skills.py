@@ -64,7 +64,46 @@ def test_sync_workspace_skills_mirrors_subagents_and_commands(tmp_path: Path) ->
     assert command_link.resolve() == (workspace / "commands" / "remember.md").resolve()
     assert (workspace / ".claude" / "agents" / "stock.md").is_file()
     assert result.agents_installed == 1
-    assert result.commands_installed == 1
+    assert result.commands_installed >= 1
+
+
+def test_sync_workspace_skills_seeds_stock_commands_into_canonical_dir(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    remember = workspace / "commands" / "remember.md"
+    critique = workspace / "commands" / "critique.md"
+    interrogation = workspace / "commands" / "interrogation.md"
+    assert remember.is_file()
+    assert critique.is_file()
+    assert interrogation.is_file()
+    assert "ciao memory add --target memory" in remember.read_text(encoding="utf-8")
+    assert "1–3 targeted questions" in interrogation.read_text(encoding="utf-8")
+    assert "adversarial-review skill" in critique.read_text(encoding="utf-8")
+
+    link = workspace / ".claude" / "commands" / "remember.md"
+    assert link.is_symlink()
+    assert link.resolve() == remember.resolve()
+    assert result.commands_installed >= 3
+
+
+def test_sync_workspace_skills_migrates_legacy_stock_commands(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    legacy = workspace / ".claude" / "commands" / "remember.md"
+    _write(legacy, "# Old stock remember\n")
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    canonical = workspace / "commands" / "remember.md"
+    assert canonical.is_file()
+    text = canonical.read_text(encoding="utf-8")
+    assert "ciao memory add --target memory" in text
+    assert "# Old stock remember" not in text
+    link = workspace / ".claude" / "commands" / "remember.md"
+    assert link.is_symlink()
+    assert link.resolve() == canonical.resolve()
 
 
 def test_sync_installs_stock_skills_with_marker(tmp_path: Path) -> None:
