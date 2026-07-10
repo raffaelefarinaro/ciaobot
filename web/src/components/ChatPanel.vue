@@ -2847,7 +2847,8 @@ function insertImageRef(n: number) {
 .message-wrap {
   display: flex;
   flex-direction: column;
-  max-width: 85%;
+  width: 92%;
+  max-width: 92%;
   min-width: 0;
 }
 
@@ -2857,7 +2858,8 @@ function insertImageRef(n: number) {
 
 .message-wrap.assistant {
   align-self: flex-start;
-  max-width: 90%;
+  width: 98%;
+  max-width: 98%;
 }
 
 .message-row {
@@ -2865,6 +2867,7 @@ function insertImageRef(n: number) {
   align-items: flex-start;
   gap: 2px;
   min-width: 0;
+  width: 100%;
   max-width: 100%;
   position: relative;
 }
@@ -2874,6 +2877,7 @@ function insertImageRef(n: number) {
 }
 
 .message {
+  flex: 1;
   max-width: 100%;
   padding: 8px 12px;
   border-radius: var(--radius);
@@ -2970,7 +2974,8 @@ function insertImageRef(n: number) {
   align-self: center;
   color: var(--fg2);
   font-size: var(--text-sm);
-  max-width: 90%;
+  width: 98%;
+  max-width: 98%;
 }
 
 .retry-btn {
@@ -3028,7 +3033,8 @@ function insertImageRef(n: number) {
 /* Reasoning trace (intermediate assistant text + tool calls grouped) */
 .trace-block {
   align-self: flex-start;
-  max-width: 90%;
+  width: 98%;
+  max-width: 98%;
   background: transparent;
   border: 1px dashed var(--border);
   border-left: 3px solid var(--accent2);
@@ -3208,7 +3214,8 @@ function insertImageRef(n: number) {
 /* Activity blocks (live streaming) */
 .activity-block {
   align-self: flex-start;
-  max-width: 90%;
+  width: 98%;
+  max-width: 98%;
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -4188,15 +4195,15 @@ details[open] > .activity-summary::before {
   .messages {
     padding: 8px 6px 16px 6px;
   }
-  .message-wrap { max-width: 94%; }
-  .message-wrap.assistant { max-width: 96%; }
+  .message-wrap { width: 96%; max-width: 96%; }
+  .message-wrap.assistant { width: 100%; max-width: 100%; }
 }
 @container chat-split (max-width: 400px) {
   .messages {
     padding: 6px 4px 12px 4px;
   }
   .message-wrap,
-  .message-wrap.assistant { max-width: 100%; }
+  .message-wrap.assistant { width: 100%; max-width: 100%; }
   .message { padding: 8px 10px; }
 }
 
@@ -4233,8 +4240,8 @@ details[open] > .activity-summary::before {
     width: min(320px, calc(100vw - 24px));
     max-width: none;
   }
-  .message-wrap { max-width: 92%; }
-  .message-wrap.assistant { max-width: 92%; }
+  .message-wrap { width: 96%; max-width: 96%; }
+  .message-wrap.assistant { width: 100%; max-width: 100%; }
   .message { padding: 10px 14px; }
   /* Keep input and placeholder at the same size so the text doesn't jump
      when the user starts typing. 16px is the iOS auto-zoom floor: any
