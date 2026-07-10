@@ -545,13 +545,16 @@
 
             <div v-if="providerKeys.connections" class="setting-row setting-row--stack">
               <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="setting-row-main setting-row-main--inline">
-                <span class="routine-name">Codex <span class="muted-text">via Pi</span></span>
+                <span class="routine-name">{{ conn.name === 'codex' ? 'OpenAI Codex' : conn.name }}</span>
                 <span class="badge" :class="conn.ok ? 'badge--success' : 'badge--error'">
                   {{ conn.ok ? 'Connected' : 'Not connected' }}
                 </span>
               </div>
               <p v-if="providerKeys.connections.codex?.detail" class="hint hint--compact">
                 {{ providerKeys.connections.codex.detail }}
+              </p>
+              <p v-if="providerKeys.connections.codex && !providerKeys.connections.codex.ok" class="hint hint--compact">
+                Run <code>{{ providerKeys.connections.codex.command }}</code> in Terminal to sign in with ChatGPT.
               </p>
             </div>
 
@@ -1069,13 +1072,59 @@
         </template>
       </template>
 
-      <!-- INSTRUCTIONS TAB -->
-      <template v-if="currentTab === 'instructions'">
+      <!-- CONTEXT TAB -->
+      <template v-if="currentTab === 'context'">
         <div class="card">
           <div class="settings-card-header">
-            <p class="section-title">Instructions</p>
+            <p class="section-title">Context</p>
             <p class="hint">
-              Claude Code files and Ciaobot-generated prompt blocks that shape what the agent sees.
+              What the agent CLI loads from your workspace, plus what Ciaobot injects on top.
+            </p>
+          </div>
+
+          <div class="context-flow-diagram" aria-label="How chat context is built">
+            <p class="context-flow-title">How every chat turn is built</p>
+            <div class="context-flow-layers">
+              <section class="context-flow-layer context-flow-layer--cli">
+                <h3>Provider CLI <span class="context-flow-badge">Claude Code or Codex</span></h3>
+                <p class="context-flow-lead">High level — each CLI owns its own runtime and workspace discovery.</p>
+                <ul>
+                  <li>Agent runtime, built-in tools, and provider defaults</li>
+                  <li>Workspace instruction files — <code>CLAUDE.md</code> or <code>AGENTS.md</code>, plus <code>@imports</code></li>
+                  <li>Skills, subagents, and commands from <code>.claude/</code> or <code>.agents/</code></li>
+                </ul>
+              </section>
+              <div class="context-flow-arrow" aria-hidden="true">↓</div>
+              <section class="context-flow-layer context-flow-layer--ciao">
+                <h3>Ciaobot <span class="context-flow-badge">injected on top</span></h3>
+                <p class="context-flow-lead">Same for every provider — this is what the sections below inventory.</p>
+                <ul>
+                  <li>
+                    <strong>Session start</strong> <span class="context-flow-badge">frozen for the chat</span>
+                    — <code>system_prompt.md</code> policies; <code>~/.ciao/memory.md</code> + <code>user.md</code> snapshot
+                  </li>
+                  <li>
+                    <strong>Every turn</strong> <span class="context-flow-badge">before your message</span>
+                    — <code>&lt;ciao-runtime&gt;</code>, <code>&lt;ciao-entities&gt;</code>, project context (<code>[CIAO_CONTEXT_BEGIN]</code>)
+                  </li>
+                  <li>
+                    <strong>Your message</strong>
+                    — typed text, <code>----</code>, pinned-file and chat comments, image attachments
+                  </li>
+                </ul>
+              </section>
+            </div>
+            <p class="hint hint--compact context-flow-footnote">
+              Vault <code>MEMORY.md</code> and instruction imports are workspace files the CLI may load; bounded <code>memory.md</code>/<code>user.md</code> and generated blocks are listed below. Edit project context from the chat header chip.
+            </p>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="settings-card-header">
+            <p class="section-title">Context sources</p>
+            <p class="hint">
+              Workspace instruction files and Ciaobot-generated blocks currently on disk.
             </p>
           </div>
 
@@ -1084,19 +1133,19 @@
             <p class="hint hint--warn">{{ agentAssetsError }}</p>
           </template>
           <template v-else>
-            <p v-if="!instructionAssets.length" class="hint hint--section-empty">No instruction sources found.</p>
+            <p v-if="!contextAssets.length" class="hint hint--section-empty">No context sources found.</p>
             <div v-else class="skill-list">
               <div
-                v-for="item in instructionAssets"
+                v-for="item in contextAssets"
                 :key="item.id"
                 class="skill-row instruction-row"
-                :class="{ expanded: isInstructionExpanded(item) }"
+                :class="{ expanded: isContextExpanded(item) }"
                 :style="{ paddingLeft: `${10 + Math.min(item.level || 0, 4) * 18}px` }"
-                @click="toggleInstruction(item)"
+                @click="toggleContext(item)"
               >
                 <div class="skill-main">
                   <div class="skill-title-row command-title-row">
-                    <span class="skill-chevron">{{ isInstructionExpanded(item) ? '&#9662;' : '&#9656;' }}</span>
+                    <span class="skill-chevron">{{ isContextExpanded(item) ? '&#9662;' : '&#9656;' }}</span>
                     <span class="skill-name">{{ item.title }}</span>
                     <span class="skill-badges">
                       <span v-if="item.scope" class="badge badge--muted command-source">{{ item.scope }}</span>
@@ -1107,7 +1156,7 @@
                     </span>
                   </div>
                   <p class="skill-description">{{ item.description }}</p>
-                  <div v-if="isInstructionExpanded(item)" class="skill-detail">
+                  <div v-if="isContextExpanded(item)" class="skill-detail">
                     <p v-if="item.path" class="skill-meta">
                       <span class="skill-meta-label">Path</span>
                       <button class="inline-path-button" @click.stop="openAssetPath(item.path)">{{ item.path }}</button>
@@ -1121,11 +1170,50 @@
                       <code class="command-path">{{ item.imports.join(', ') }}</code>
                     </p>
                     <pre v-if="item.content" class="asset-code-preview"><code>{{ item.content }}</code></pre>
+                    <p v-else-if="item.scope === 'bounded-memory'" class="hint hint--compact">Empty — the agent can add entries via <code>/remember</code> or <code>ciao memory</code>.</p>
                   </div>
                 </div>
               </div>
             </div>
           </template>
+        </div>
+
+        <div v-if="reviewQueueAssets.length" class="card">
+          <div class="settings-card-header">
+            <p class="section-title">Review queue</p>
+            <p class="hint">
+              Draft memory from archived chats. Not injected until you or the agent promotes them.
+            </p>
+          </div>
+
+          <div class="skill-list">
+            <div
+              v-for="item in reviewQueueAssets"
+              :key="item.id"
+              class="skill-row instruction-row"
+              :class="{ expanded: isContextExpanded(item) }"
+              @click="toggleContext(item)"
+            >
+              <div class="skill-main">
+                <div class="skill-title-row command-title-row">
+                  <span class="skill-chevron">{{ isContextExpanded(item) ? '&#9662;' : '&#9656;' }}</span>
+                  <span class="skill-name">{{ item.title }}</span>
+                  <span class="skill-badges">
+                    <span class="badge badge--muted command-source">not injected</span>
+                    <span v-if="item.editable" class="badge badge--success command-source">editable</span>
+                  </span>
+                </div>
+                <p class="skill-description">{{ item.description }}</p>
+                <div v-if="isContextExpanded(item)" class="skill-detail">
+                  <p v-if="item.path" class="skill-meta">
+                    <span class="skill-meta-label">Path</span>
+                    <button class="inline-path-button" @click.stop="openAssetPath(item.path)">{{ item.path }}</button>
+                  </p>
+                  <pre v-if="item.content" class="asset-code-preview"><code>{{ item.content }}</code></pre>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </template>
 
@@ -1523,7 +1611,7 @@ const currentTab = computed(() => (route.params.tab as string) || 'home')
 const expandedSkills = ref<Record<string, boolean>>({})
 const expandedCommands = ref<Record<string, boolean>>({})
 const expandedSubagents = ref<Record<string, boolean>>({})
-const expandedInstructions = ref<Record<string, boolean>>({})
+const expandedContext = ref<Record<string, boolean>>({})
 
 // ── Appearance settings ────────────────────────────────────────────────────
 const activeTheme = ref('system')
@@ -1608,11 +1696,11 @@ function toggleSubagent(agent: SubagentAsset) {
   const key = `${agent.source}:${agent.name}:${agent.path}`
   expandedSubagents.value[key] = !isSubagentExpanded(agent)
 }
-function isInstructionExpanded(item: PromptAsset) {
-  return expandedInstructions.value[item.id] || false
+function isContextExpanded(item: PromptAsset) {
+  return expandedContext.value[item.id] || false
 }
-function toggleInstruction(item: PromptAsset) {
-  expandedInstructions.value[item.id] = !isInstructionExpanded(item)
+function toggleContext(item: PromptAsset) {
+  expandedContext.value[item.id] = !isContextExpanded(item)
 }
 function openAssetPath(path: string) {
   if (!path) return
@@ -2351,7 +2439,12 @@ const githubSkills = computed(() => {
   return skillsInventory.value?.skills.filter(s => s.label === 'github') || []
 })
 
-const instructionAssets = computed(() => agentAssets.value?.instructions || [])
+const contextAssets = computed(() =>
+  (agentAssets.value?.context || []).filter(item => item.scope !== 'review'),
+)
+const reviewQueueAssets = computed(() =>
+  (agentAssets.value?.context || []).filter(item => item.scope === 'review'),
+)
 const subagentAssets = computed(() => agentAssets.value?.subagents || [])
 const commandAssets = computed(() => agentAssets.value?.commands || [])
 const workspaceHealth = computed<WorkspaceHealthResponse | null>(() => agentAssets.value?.health || null)
@@ -3728,6 +3821,77 @@ async function doPackageUpdate() {
 }
 .routine-select::-ms-expand {
   display: none;
+}
+.context-flow-diagram {
+  margin-top: 8px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg2, var(--bg));
+}
+.context-flow-title {
+  margin: 0 0 12px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--fg);
+}
+.context-flow-layers {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.context-flow-layer {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg);
+}
+.context-flow-layer h3 {
+  margin: 0 0 8px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--fg);
+}
+.context-flow-lead {
+  margin: 0 0 8px;
+  font-size: var(--text-xs);
+  color: var(--fg3, var(--fg2));
+  line-height: 1.4;
+}
+.context-flow-layer--cli {
+  border-color: color-mix(in srgb, var(--border) 70%, var(--fg2) 30%);
+}
+.context-flow-layer--ciao {
+  border-color: color-mix(in srgb, var(--border) 55%, var(--accent, var(--fg)) 45%);
+}
+.context-flow-layer ul {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: var(--text-sm);
+  color: var(--fg2);
+  line-height: 1.45;
+}
+.context-flow-layer li + li {
+  margin-top: 4px;
+}
+.context-flow-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  color: var(--fg2);
+  background: var(--bg2, rgba(127, 127, 127, 0.12));
+}
+.context-flow-arrow {
+  align-self: center;
+  font-size: var(--text-lg);
+  line-height: 1;
+  color: var(--fg3, var(--fg2));
+}
+.context-flow-footnote {
+  margin: 12px 0 0;
 }
 .routine-context {
   display: flex;

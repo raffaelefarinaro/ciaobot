@@ -115,7 +115,7 @@ vi.mock('../../lib/api', () => {
       ],
     },
     '/api/agent-assets': {
-      instructions: [
+      context: [
         {
           id: 'claude-code-project-instructions',
           title: 'Claude Code project instructions',

@@ -505,7 +505,7 @@ export interface CommandAsset {
 }
 
 export interface AgentAssetsResponse {
-  instructions: PromptAsset[]
+  context: PromptAsset[]
   subagents: SubagentAsset[]
   commands: CommandAsset[]
   health?: WorkspaceHealthResponse

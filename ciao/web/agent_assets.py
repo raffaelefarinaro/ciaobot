@@ -14,7 +14,8 @@ from typing import Any, Iterable
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from ciao.memory_injector import build_memory_block, system_prompt_payload
+from ciao.memory_injector import system_prompt_payload
+from ciao.memory_tool import load_entries, memory_path, total_chars, user_path
 from ciao.observability.hooks import _runtime_lines
 from ciao.sync_skills import sync_workspace_skills
 from ciao.web.commands import _parse_frontmatter
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 _ASSET_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _IMPORT_RE = re.compile(r"(?<!\w)@([^\s\)\]>,]+\.md)")
+_PROPOSAL_BULLET_RE = re.compile(r"^\s*-\s*\[(?:memory|user)\]", re.I)
 
 
 @dataclass(slots=True)
@@ -365,6 +367,118 @@ def _collect_import_assets(
     return out
 
 
+def _count_proposal_bullets(path: Path) -> int:
+    if not path.is_file():
+        return 0
+    return sum(
+        1 for line in _read_text(path).splitlines() if _PROPOSAL_BULLET_RE.match(line)
+    )
+
+
+def _bounded_memory_assets(config: Any) -> list[PromptAsset]:
+    """Session-start ``~/.ciao/memory.md`` and ``user.md`` rows for Settings → Context."""
+    memory_enabled = bool(getattr(config, "memory_enabled", True))
+    mem_limit = int(getattr(config, "memory_char_limit", 2200))
+    usr_limit = int(getattr(config, "user_char_limit", 1800))
+    specs = (
+        (memory_path(), "ciaobot-memory", "Agent memory", "memory.md", mem_limit),
+        (user_path(), "ciaobot-user", "User profile", "user.md", usr_limit),
+    )
+    out: list[PromptAsset] = []
+    for path, asset_id, title, kind, limit in specs:
+        entries = load_entries(path)
+        used = total_chars(entries)
+        pct = (used / limit * 100) if limit else 0
+        if memory_enabled:
+            injection = "Injected at session start; edits apply on the next chat."
+        else:
+            injection = "Injection disabled (CIAO_MEMORY_ENABLED=false)."
+        description = (
+            f"Bounded {kind} ({used:,}/{limit:,} chars, {pct:.0f}%). "
+            f"{injection} Updated by the agent via `ciao memory` or `/remember`."
+        )
+        out.append(PromptAsset(
+            id=asset_id,
+            title=title,
+            description=description,
+            source="file",
+            path=str(path.resolve()),
+            editable=False,
+            content=_read_text(path),
+            scope="bounded-memory",
+        ))
+    return out
+
+
+def _memory_proposal_paths(config: Any, vault: Path, root: Path) -> list[tuple[Path, str]]:
+    """Proposal queue files under each workspace vault."""
+    paths: list[tuple[Path, str]] = []
+    ws_names: list[str] = []
+    if hasattr(config, "workspace_names") and callable(config.workspace_names):
+        ws_names = config.workspace_names()
+
+    if not ws_names:
+        for name in ("personal", "work"):
+            ws_dir = vault / name
+            if name == "personal" or ws_dir.is_dir():
+                paths.append((
+                    ws_dir / "Workspace" / "Memory-Proposals.md",
+                    f"Memory proposals ({name})" if (vault / "work").is_dir() else "Memory proposals",
+                ))
+        return paths
+
+    for name in ws_names:
+        ws_config = config.workspace(name)
+        raw_root = ws_config.vault_root if ws_config else name
+        ws_vault_root = Path(raw_root).expanduser()
+        if not ws_vault_root.is_absolute():
+            if name in {"personal", "work"} and raw_root == name:
+                ws_vault_root = (vault / name).resolve()
+            else:
+                ws_vault_root = (root / ws_vault_root).resolve()
+        title = f"Memory proposals ({name})" if len(ws_names) > 1 else "Memory proposals"
+        paths.append((ws_vault_root / "Workspace" / "Memory-Proposals.md", title))
+    return paths
+
+
+def _memory_proposal_assets(config: Any) -> list[PromptAsset]:
+    """Draft proposal queue rows — not injected into the prompt."""
+    vault = Path(config.vault_root)
+    root = Path(config.workspace_root)
+    out: list[PromptAsset] = []
+    for path, title in _memory_proposal_paths(config, vault, root):
+        pending = _count_proposal_bullets(path)
+        if not path.is_file() and pending == 0:
+            continue
+        if pending:
+            summary = f"{pending} pending proposal{'s' if pending != 1 else ''} from archived chats."
+        else:
+            summary = "No pending proposals."
+        description = (
+            f"{summary} Not injected until you or the agent promotes them into bounded memory or vault notes."
+        )
+        rel = _relative_or_absolute(path, root)
+        out.append(PromptAsset(
+            id=f"memory-proposals:{rel}",
+            title=title,
+            description=description,
+            source="proposal-queue",
+            path=rel,
+            editable=path.is_file() and _is_editable_file(path, config),
+            content=_read_text(path) if path.is_file() else "",
+            scope="review",
+        ))
+    return out
+
+
+def _insert_after_system_prompt(prompts: list[PromptAsset], items: list[PromptAsset]) -> None:
+    for index, item in enumerate(prompts):
+        if item.id == "ciaobot-system-prompt":
+            prompts[index + 1:index + 1] = items
+            return
+    prompts.extend(items)
+
+
 def _workspace_memory_paths(config: Any, root: Path, vault: Path) -> list[tuple[Path, str]]:
     """MEMORY.md locations per configured workspace (shared by the health
     check and the fix endpoint so they cannot drift)."""
@@ -412,13 +526,17 @@ def workspace_health(config: Any) -> dict:
 
     memory_paths = _workspace_memory_paths(config, root, vault)
 
-    check_paths = [(root / "CLAUDE.md", "Project CLAUDE.md")]
+    check_paths = [
+        (root / "CLAUDE.md", "Project CLAUDE.md"),
+        (root / "AGENTS.md", "Project AGENTS.md"),
+    ]
     check_paths.extend(memory_paths)
     check_paths.extend([
         (root / "subagents", "Canonical subagents directory"),
         (root / "commands", "Canonical commands directory"),
         (root / ".claude" / "agents", "Generated .claude agents directory"),
         (root / ".claude" / "commands", "Generated .claude commands directory"),
+        (root / ".agents" / "skills", "Generated Codex skills directory"),
     ])
 
     for path, title in check_paths:
@@ -427,7 +545,7 @@ def workspace_health(config: Any) -> dict:
             f"path-{_relative_or_absolute(path, root)}",
             title,
             "ok" if exists else "warn",
-            "Present." if exists else "Missing; Ciaobot can continue, but this workspace is less discoverable to Claude Code.",
+            "Present." if exists else "Missing; Ciaobot can continue, but this workspace is less discoverable to its agent providers.",
             path,
             "Create it or run sync-skills." if not exists else "",
         )
@@ -456,6 +574,7 @@ def workspace_health(config: Any) -> dict:
         (root / ".claude" / "agents", "agent"),
         (root / ".claude" / "commands", "command"),
         (root / ".claude" / "skills", "skill"),
+        (root / ".agents" / "skills", "Codex skill"),
     ]:
         if not link_dir.exists():
             continue
@@ -463,9 +582,9 @@ def workspace_health(config: Any) -> dict:
             if path.is_symlink() and not path.exists():
                 add(
                     f"broken-{label}-{path.name}",
-                    f"Broken .claude {label} link",
+                    f"Broken generated {label} link",
                     "error",
-                    "Generated Claude Code link points at a missing file.",
+                    "Generated provider asset points at a missing file.",
                     path,
                     "Run sync-skills.",
                 )
@@ -527,18 +646,14 @@ def list_prompt_assets(config: Any) -> list[PromptAsset]:
     prompts: list[PromptAsset] = []
     seen: set[Path] = set()
 
-    memory_enabled = bool(getattr(config, "memory_enabled", True))
-    memory_block = ""
-    if memory_enabled:
-        memory_block = build_memory_block(
-            memory_char_limit=int(getattr(config, "memory_char_limit", 2200)),
-            user_char_limit=int(getattr(config, "user_char_limit", 1800)),
-        )
-    system_prompt = system_prompt_payload(memory_block) or {}
+    system_prompt = system_prompt_payload("") or {}
     sys_prompt_asset = PromptAsset(
         id="ciaobot-system-prompt",
         title="Ciaobot system prompt append",
-        description="Generated instructions appended to Claude Code's default preset at session start.",
+        description=(
+            "Generated Ciaobot instructions appended at session start (all providers). "
+            "Bounded memory files are listed separately below."
+        ),
         source="generated",
         path="",
         editable=False,
@@ -551,6 +666,7 @@ def list_prompt_assets(config: Any) -> list[PromptAsset]:
     file_assets = [
         (Path.home() / ".claude" / "CLAUDE.md", "Claude Code global instructions", "User-level Claude Code instructions loaded before project files.", "global"),
         (root / "CLAUDE.md", "Claude Code project instructions", "Project-local Claude Code instructions loaded by the CLI.", "project"),
+        (root / "AGENTS.md", "Codex project instructions", "Project-local AGENTS.md loaded by Codex CLI discovery.", "project"),
         (root / "CLAUDE.local.md", "Claude Code local instructions", "Machine-local project instructions when present.", "local"),
         (root / ".claude" / "CLAUDE.md", "Claude Code .claude instructions", "Project .claude instruction file when present.", "project"),
     ]
@@ -605,6 +721,9 @@ def list_prompt_assets(config: Any) -> list[PromptAsset]:
     if not added_sys_prompt:
         prompts.append(sys_prompt_asset)
 
+    _insert_after_system_prompt(prompts, _bounded_memory_assets(config))
+    prompts.extend(_memory_proposal_assets(config))
+
     runtime_preview = "<ciao-runtime>\n" + "\n".join(_runtime_lines(root, os.environ.copy())) + "\n</ciao-runtime>"
     prompts.append(PromptAsset(
         id="runtime-context-hook",
@@ -620,11 +739,11 @@ def list_prompt_assets(config: Any) -> list[PromptAsset]:
 
 
 async def agent_assets_endpoint(request: Request) -> JSONResponse:
-    """GET /api/agent-assets — Settings inventory for instructions, agents, and commands."""
+    """GET /api/agent-assets — Settings inventory for context sources, agents, and commands."""
     config = request.app.state.config
     try:
         return JSONResponse({
-            "instructions": [asdict(item) for item in list_prompt_assets(config)],
+            "context": [asdict(item) for item in list_prompt_assets(config)],
             "subagents": [asdict(item) for item in list_subagents(config)],
             "commands": [asdict(item) for item in list_command_assets(config)],
             "health": workspace_health(config),

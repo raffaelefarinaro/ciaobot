@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
@@ -59,11 +60,51 @@ def test_agent_assets_lists_instruction_sources(tmp_path: Path) -> None:
 
     assert resp.status_code == 200
     data = resp.json()
-    titles = {item["title"] for item in data["instructions"]}
+    titles = {item["title"] for item in data["context"]}
     assert "Claude Code project instructions" in titles
     assert "Workspace memory" in titles
     assert "Ciaobot system prompt append" in titles
+    assert "Agent memory" in titles
+    assert "User profile" in titles
     assert "Per-turn runtime context hook" in titles
+
+
+def test_agent_assets_lists_bounded_memory_and_splits_system_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mem_dir = tmp_path / ".ciao"
+    mem_dir.mkdir()
+    (mem_dir / "memory.md").write_text("prefers bullet lists\n", encoding="utf-8")
+    (mem_dir / "user.md").write_text("name: Alice\n", encoding="utf-8")
+    monkeypatch.setenv("CIAO_MEMORY_DIR", str(mem_dir))
+    (tmp_path / "CLAUDE.md").write_text("# Local\n", encoding="utf-8")
+
+    resp = _client(tmp_path).get("/api/agent-assets")
+
+    assert resp.status_code == 200
+    by_id = {item["id"]: item for item in resp.json()["context"]}
+    assert by_id["ciaobot-memory"]["content"] == "prefers bullet lists\n"
+    assert by_id["ciaobot-user"]["content"] == "name: Alice\n"
+    assert "prefers bullet lists" not in by_id["ciaobot-system-prompt"]["content"]
+    assert "Ciaobot System Instructions" in by_id["ciaobot-system-prompt"]["content"]
+
+
+def test_agent_assets_lists_memory_proposals(tmp_path: Path) -> None:
+    proposals = tmp_path / "memory-vault" / "personal" / "Workspace" / "Memory-Proposals.md"
+    proposals.parent.mkdir(parents=True)
+    proposals.write_text(
+        "# Memory Proposals\n\n- [memory] prefers async reviews  _(from: Decisions)_\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "CLAUDE.md").write_text("# Local\n", encoding="utf-8")
+
+    resp = _client(tmp_path).get("/api/agent-assets")
+
+    assert resp.status_code == 200
+    review = [item for item in resp.json()["context"] if item["scope"] == "review"]
+    assert len(review) == 1
+    assert review[0]["title"] == "Memory proposals"
+    assert "1 pending proposal" in review[0]["description"]
 
 
 def test_agent_assets_lists_instruction_import_children(tmp_path: Path) -> None:
@@ -73,7 +114,7 @@ def test_agent_assets_lists_instruction_import_children(tmp_path: Path) -> None:
     resp = _client(tmp_path).get("/api/agent-assets")
 
     assert resp.status_code == 200
-    imports = [item for item in resp.json()["instructions"] if item["source"] == "file-import"]
+    imports = [item for item in resp.json()["context"] if item["source"] == "file-import"]
     paths = {item["path"] for item in imports}
     assert {"extra.md", "missing.md"}.issubset(paths)
     assert any(item["status"] == "ok" and item["parent_id"].startswith("file:") for item in imports)
