@@ -23,6 +23,9 @@
         >
           {{ showRunning ? 'Running...' : 'Run now' }}
         </button>
+        <button v-if="schedule && !editing" class="btn-small" @click="onToggleEnabled">
+          {{ schedule.enabled ? 'Disable' : 'Enable' }}
+        </button>
         <button v-if="schedule && !editing && schedule.scope !== 'system'" class="btn-small" @click="startEdit">Edit</button>
         <button v-if="schedule && !editing && schedule.scope !== 'system'" class="btn-small btn-danger" @click="onDelete">Delete</button>
       </template>
@@ -35,6 +38,9 @@
 
     <!-- Detail -->
     <div v-else-if="schedule" class="scroll-body">
+      <div v-if="!schedule.enabled" class="disabled-banner">
+        Disabled — won't run automatically. "Run now" still works.
+      </div>
       <div class="meta-grid">
         <div v-if="schedule.frequency !== 'manual'">
           <strong>Time</strong><br />{{ schedule.daily_time_utc }} ({{ schedule.timezone_name }})
@@ -334,6 +340,7 @@ function promptTitle(prompt: string): string {
 }
 
 function nextRunLabel(s: Schedule): string {
+  if (!s.enabled) return 'Disabled'
   if (!s.next_run) return '—'
   try {
     const d = new Date(s.next_run)
@@ -488,6 +495,11 @@ async function runNow() {
   }
 }
 
+async function onToggleEnabled() {
+  if (!schedule.value) return
+  await store.updateSchedule(schedule.value.schedule_id, { enabled: !schedule.value.enabled })
+}
+
 async function onDelete() {
   if (!schedule.value) return
   if (!confirm('Delete this schedule?')) return
@@ -524,6 +536,14 @@ function closeSchedule() {
   padding: var(--space-4);
 }
 
+.disabled-banner {
+  font-size: var(--text-sm);
+  color: var(--fg2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-4);
+}
 .meta-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));

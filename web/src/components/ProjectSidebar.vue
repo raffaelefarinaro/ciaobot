@@ -92,7 +92,7 @@
                 :key="s.schedule_id"
                 :to="`/schedules/${s.schedule_id}`"
                 class="schedule-item schedule-item--once"
-                :class="{ 'schedule-item--missed': s.missed }"
+                :class="{ 'schedule-item--missed': s.missed, 'schedule-item--disabled': !s.enabled }"
                 active-class="active"
               >
                 <span class="schedule-time">{{ s.run_at_date?.slice(5) }} {{ s.daily_time_utc }}</span>
@@ -115,10 +115,10 @@
                 :key="s.schedule_id"
                 :to="`/schedules/${s.schedule_id}`"
                 class="schedule-item"
-                :class="{ 'schedule-item--missed': s.missed }"
+                :class="{ 'schedule-item--missed': s.missed, 'schedule-item--disabled': !s.enabled }"
                 active-class="active"
               >
-                <span class="schedule-time">{{ s.frequency === 'manual' ? '·' : s.daily_time_utc }}</span>
+                <span class="schedule-time">{{ !s.enabled ? 'off' : s.frequency === 'manual' ? '·' : s.daily_time_utc }}</span>
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
                 <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
               </router-link>
@@ -138,10 +138,10 @@
                 :key="s.schedule_id"
                 :to="`/schedules/${s.schedule_id}`"
                 class="schedule-item"
-                :class="{ 'schedule-item--missed': s.missed }"
+                :class="{ 'schedule-item--missed': s.missed, 'schedule-item--disabled': !s.enabled }"
                 active-class="active"
               >
-                <span class="schedule-time">{{ s.frequency === 'manual' ? '·' : s.daily_time_utc }}</span>
+                <span class="schedule-time">{{ !s.enabled ? 'off' : s.frequency === 'manual' ? '·' : s.daily_time_utc }}</span>
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
                 <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
               </router-link>
@@ -1628,6 +1628,7 @@ async function confirmDeleteChat(chatId: string) {
   min-width: 0;
 }
 .schedule-item--missed .schedule-time { color: var(--warning); }
+.schedule-item--disabled { opacity: 0.5; }
 .schedule-item .missed-dot {
   width: 6px;
   height: 6px;

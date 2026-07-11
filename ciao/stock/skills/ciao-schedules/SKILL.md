@@ -84,11 +84,8 @@ Existing schedules follow a few patterns; copy them when writing new prompts.
 1. **First line states the goal in 3–7 words.** Acts as a chat title hint.
 2. **Lean on CLAUDE.md and skills, don't restate them.** The dispatched run is a fresh chat inside the target project, so it inherits `CLAUDE.md` and every auto-activating skill. Only put schedule-specific logic in the prompt — file paths, decision rules, output shape.
 3. **Vault edits only on signal change.** For periodic checks, instruct the dispatched run to report status in chat and only edit the vault when something actually changed. Otherwise the vault fills with identical "no change" bullets.
-4. **Emoji prefix sentinel.** End the prompt with:
-   `CRITICAL: Your ENTIRE response must start with "<emoji> <Topic>". Any text before that is a bug.`
-   Use a unique emoji per schedule so runs are recognizable at a glance.
-5. **Commit policy when the run edits the repo.** If the prompt writes to `memory-vault/` and the workspace is a git repo, end the edit step with a git commit.
-6. **OOO / no-op early exit.** For daily/weekly review schedules, add a check at the top that skips with a one-line output if there's nothing to do (e.g., no transcripts to process). Keeps cost low.
+4. **Commit policy when the run edits the repo.** If the prompt writes to `memory-vault/` and the workspace is a git repo, end the edit step with a git commit.
+5. **OOO / no-op early exit.** For daily/weekly review schedules, add a check at the top that skips with a one-line output if there's nothing to do (e.g., no transcripts to process). Keeps cost low.
 
 **Rule of thumb on length.** Aim for ≤1000 chars for simple checks, ≤4000 for review-style aggregations. A plain "read URL, compare, report" check should stay short. Re-skim and prune any prompt that drifts past those bounds.
 
