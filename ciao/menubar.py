@@ -423,6 +423,63 @@ class OpenChat:
     workspace: str = ""
 
 
+def _notification_entry_id(entry: dict[str, object]) -> str:
+    """Stable identity for one append-only local notification-log entry."""
+
+    return json.dumps(entry, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def read_notification_log(workspace: Path) -> list[dict[str, object]]:
+    """Read valid entries from the local notification log.
+
+    The PushManager appends this file from a background thread, so a reader
+    can occasionally see a partial last line. Ignore that line and retry on
+    the next refresh rather than letting a transient write break the tray.
+    """
+
+    path = workspace / ".runtime" / "notifications.jsonl"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+
+    entries: list[dict[str, object]] = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
+@dataclass(slots=True)
+class NotificationLogTail:
+    """Track local push entries already observed by this menu-bar process."""
+
+    seen_entry_ids: set[str]
+
+    @classmethod
+    def at_end(cls, workspace: Path) -> "NotificationLogTail":
+        """Start at the current end, so relaunching never replays old alerts."""
+
+        return cls({_notification_entry_id(entry) for entry in read_notification_log(workspace)})
+
+    def read_new(self, workspace: Path) -> list[dict[str, object]]:
+        """Return entries appended since the last read and advance the tail."""
+
+        entries = read_notification_log(workspace)
+        current_ids = {_notification_entry_id(entry) for entry in entries}
+        new_entries = [
+            entry for entry in entries if _notification_entry_id(entry) not in self.seen_entry_ids
+        ]
+        # PushManager retains a bounded log. Discard IDs it trimmed so the
+        # tracker stays bounded as well.
+        self.seen_entry_ids = current_ids
+        return new_entries
+
+
 def _load_web_state(workspace: Path) -> tuple[dict[str, dict], dict[str, dict]]:
     """Projects and chats from the server's persisted PWA state."""
 
@@ -609,6 +666,7 @@ def run_menubar(workspace: Path, port: int) -> int:
     app = rumps.App("Ciaobot", icon=face, template=True, quit_button=None)
 
     # Only notify for entries newer than launch, not the whole backlog.
+    notification_log = NotificationLogTail.at_end(workspace)
     status_fetcher = make_cached_package_status()
     state = {
         "fingerprint": None,
@@ -889,6 +947,19 @@ def run_menubar(workspace: Path, port: int) -> int:
             time.sleep(WORKING_POLL_SECONDS)
 
     def refresh(_timer=None) -> None:
+        for notification in notification_log.read_new(workspace):
+            try:
+                rumps.notification(
+                    str(notification.get("title") or "Ciaobot"),
+                    "",
+                    str(notification.get("body") or "New notification"),
+                    icon=icon_path("Ciaobot.icns"),
+                )
+            except Exception:
+                # A notification failure should not prevent the normal menu
+                # refresh (or leave a stale unread count) behind.
+                pass
+
         status = fetch_server_status(port)
         state["reachable"] = status.reachable
 

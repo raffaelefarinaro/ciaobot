@@ -549,6 +549,25 @@ def test_read_open_chats_missing_state_returns_empty(tmp_path: Path) -> None:
     assert menubar.read_open_chats(tmp_path) == []
 
 
+def test_notification_log_tail_only_returns_entries_after_startup(tmp_path: Path) -> None:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    log = runtime / "notifications.jsonl"
+    old_entry = {"ts": 1.0, "title": "Ciaobot", "body": "Old", "chat_id": "old"}
+    log.write_text(json.dumps(old_entry) + "\n", encoding="utf-8")
+
+    tail = menubar.NotificationLogTail.at_end(tmp_path)
+    assert tail.read_new(tmp_path) == []
+
+    new_entry = {"ts": 2.0, "title": "Ciaobot", "body": "New", "chat_id": "new"}
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(new_entry) + "\n")
+        handle.write("{partial")
+
+    assert tail.read_new(tmp_path) == [new_entry]
+    assert tail.read_new(tmp_path) == []
+
+
 def test_parse_inet_addresses_excludes_loopback_and_dupes() -> None:
     text = (
         "lo0: flags\n\tinet 127.0.0.1 netmask 0xff000000\n"

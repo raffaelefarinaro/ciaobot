@@ -147,7 +147,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 ### Required env vars
 
 - `PWA_AUTH_TOKEN` (required): pre-shared token for PWA auth.
-- `CIAO_PUSH_CONTACT` (optional): push notification contact string for the Web Push VAPID subject, for example `mailto:you@example.com`. Empty = Web Push disabled until set (in `.env` or Settings); nothing else breaks.
+- `CIAO_PUSH_CONTACT` (optional): push notification contact string for the Web Push VAPID subject, for example `mailto:you@example.com`. Empty disables Web Push delivery until set (in `.env` or Settings), but the macOS menu-bar companion still posts local alerts from the runtime notification log.
 - `PWA_PORT` (default `8443`), `PWA_HOST` (default `0.0.0.0`).
 - Session cookies are HttpOnly. Production/domain-scoped cookies are also Secure, and state-changing browser requests must come from the same host via `Origin` or `Referer`.
 - Ciaobot sends baseline security headers from the Starlette app, including CSP, `X-Content-Type-Options`, `Referrer-Policy`, and frame denial.
