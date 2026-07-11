@@ -22,7 +22,7 @@ import logging
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from ciao.web.auth import verify_session
+from ciao.web.auth import authorize_websocket
 from ciao.web.chat_broker import ChatStream
 from ciao.models import ImageAttachment
 
@@ -71,9 +71,7 @@ async def _attach_streams(websocket: WebSocket, pcm, chat_id: str) -> None:
 
 async def ws_chat(websocket: WebSocket) -> None:
     """Per-chat streaming WebSocket."""
-    serializer = websocket.app.state.serializer
-    if not verify_session(websocket, serializer):
-        await websocket.close(code=4001, reason="unauthorized")
+    if not await authorize_websocket(websocket):
         return
 
     await websocket.accept()
@@ -246,9 +244,7 @@ async def ws_events(websocket: WebSocket) -> None:
     On connect, sends a snapshot of currently-active streams so a fresh client
     can paint sidebar indicators without waiting for the next event.
     """
-    serializer = websocket.app.state.serializer
-    if not verify_session(websocket, serializer):
-        await websocket.close(code=4001, reason="unauthorized")
+    if not await authorize_websocket(websocket):
         return
 
     await websocket.accept()

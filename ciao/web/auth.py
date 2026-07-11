@@ -65,7 +65,7 @@ def _split_host(value: str) -> tuple[str, int | None]:
         return host, None
 
 
-def _same_origin(request: Request, origin: str) -> bool:
+def _same_origin(request: Request | WebSocket, origin: str) -> bool:
     from urllib.parse import urlsplit
 
     try:
@@ -98,6 +98,27 @@ def _state_change_origin_allowed(request: Request) -> bool:
     referer = request.headers.get("referer")
     if referer:
         return _same_origin(request, referer)
+    return True
+
+
+async def authorize_websocket(websocket: WebSocket) -> bool:
+    """Handshake gate for `/ws/*`, mirroring the HTTP policy in AuthMiddleware.
+
+    Cross-origin browser connections are always rejected (WebSockets are not
+    covered by CORS, so an unchecked handshake allows cross-site hijacking);
+    a session cookie is required only when auth is enabled, same as `/api/*`.
+    Closes the socket and returns False when the connection is not allowed.
+    """
+    origin = websocket.headers.get("origin")
+    if origin and not _same_origin(websocket, origin):
+        await websocket.close(code=4003, reason="forbidden origin")
+        return False
+    config = getattr(websocket.app.state, "config", None)
+    if getattr(config, "pwa_auth_required", False) and not verify_session(
+        websocket, websocket.app.state.serializer
+    ):
+        await websocket.close(code=4001, reason="unauthorized")
+        return False
     return True
 
 
