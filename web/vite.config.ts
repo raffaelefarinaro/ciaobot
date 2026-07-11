@@ -16,7 +16,11 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/api': backendUrl,
+      // Object form keeps changeOrigin off so the browser's Host header
+      // reaches the backend; its same-origin check compares Origin against
+      // Host, and the string shorthand rewrites Host to the target, turning
+      // every dev-server write request into a 403.
+      '/api': { target: backendUrl },
       '/ws': { target: backendWsUrl, ws: true },
     },
   },
