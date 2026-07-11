@@ -1,6 +1,6 @@
 ---
 name: ciao-schedules
-description: Create, edit, list, or delete Ciaobot native schedules in `.runtime/schedules.json`. Trigger on "schedule", "recurring", "every Monday", "monthly reminder", or when converting ad-hoc checks into automation. Do not use claude.ai cloud Routines.
+description: Create, edit, list, or delete Ciaobot native schedules (`.runtime/schedules.json`) and in-chat loops (`.runtime/loops.json`). Trigger on "schedule", "recurring", "every Monday", "monthly reminder", "loop", "every 10 minutes", "keep checking", or when converting ad-hoc checks into automation. Do not use claude.ai cloud Routines.
 ---
 
 # Ciaobot Schedules
