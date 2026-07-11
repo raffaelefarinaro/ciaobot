@@ -261,6 +261,7 @@ export interface Loop {
   autostart: boolean
   last_run_at: string
   last_status: '' | 'running' | 'ok' | 'error' | 'busy' | 'missing-chat'
+  scope?: 'user' | 'system'
   // Computed server-side
   running: boolean
   context_label: string

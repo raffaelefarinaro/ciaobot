@@ -93,6 +93,14 @@ def test_store_tolerates_unknown_keys(tmp_path: Path) -> None:
     assert entry.autostart is False
 
 
+def test_store_scope_defaults_to_user(store: LoopStore) -> None:
+    entry = store.create(prompt="p", web_chat_id="chat-x")
+    assert entry.scope == "user"
+    reloaded = store.get(entry.loop_id)
+    assert reloaded is not None
+    assert reloaded.scope == "user"
+
+
 def test_store_delete(store: LoopStore) -> None:
     entry = store.create(prompt="p", web_chat_id="chat-x")
     assert store.delete(entry.loop_id) is True

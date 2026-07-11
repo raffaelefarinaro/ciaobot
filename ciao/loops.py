@@ -69,6 +69,9 @@ class LoopEntry:
     # "ok", "error", "busy" (skipped because the chat had an active turn),
     # or "missing-chat" (target chat gone; the loop was auto-stopped).
     last_status: str = ""
+    # "user" for loops the user creates; "system" is reserved for packaged
+    # loops (mirrors ScheduleEntry.scope so the UI can group them apart).
+    scope: str = "user"
 
     def interval(self) -> timedelta:
         return timedelta(minutes=max(MIN_INTERVAL_MINUTES, self.interval_minutes))

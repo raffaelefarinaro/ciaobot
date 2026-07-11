@@ -106,7 +106,7 @@
         <template v-if="userRoutines.length">
           <div class="schedule-group">
             <div class="schedule-group-header">
-              <span>Routines <span class="schedule-group-hint">recurring</span></span>
+              <span>Routines <span class="schedule-group-hint">custom · recurring</span></span>
               <span class="schedule-group-count">{{ userRoutines.length }}</span>
             </div>
             <div class="schedule-group-items">
@@ -126,15 +126,15 @@
           </div>
         </template>
 
-        <template v-if="taskStore.loops.length">
+        <template v-if="userLoops.length">
           <div class="schedule-group">
             <div class="schedule-group-header">
-              <span>Loops <span class="schedule-group-hint">in-chat, every N min</span></span>
-              <span class="schedule-group-count">{{ taskStore.loops.length }}</span>
+              <span>Loops <span class="schedule-group-hint">custom · in-chat</span></span>
+              <span class="schedule-group-count">{{ userLoops.length }}</span>
             </div>
             <div class="schedule-group-items">
               <router-link
-                v-for="l in taskStore.loops"
+                v-for="l in userLoops"
                 :key="l.loop_id"
                 :to="`/schedules/${l.loop_id}`"
                 class="schedule-item"
@@ -151,7 +151,7 @@
         <template v-if="systemAutomations.length">
           <div class="schedule-group schedule-group--system">
             <div class="schedule-group-header">
-              <span>System <span class="schedule-group-hint">built-in</span></span>
+              <span>System Routines <span class="schedule-group-hint">built-in</span></span>
               <span class="schedule-group-count">{{ systemAutomations.length }}</span>
             </div>
             <div class="schedule-group-items">
@@ -166,6 +166,28 @@
                 <span class="schedule-time">{{ !s.enabled ? 'off' : s.frequency === 'manual' ? '·' : s.daily_time_utc }}</span>
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
                 <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
+              </router-link>
+            </div>
+          </div>
+        </template>
+
+        <template v-if="systemLoops.length">
+          <div class="schedule-group schedule-group--system">
+            <div class="schedule-group-header">
+              <span>System Loops <span class="schedule-group-hint">built-in</span></span>
+              <span class="schedule-group-count">{{ systemLoops.length }}</span>
+            </div>
+            <div class="schedule-group-items">
+              <router-link
+                v-for="l in systemLoops"
+                :key="l.loop_id"
+                :to="`/schedules/${l.loop_id}`"
+                class="schedule-item"
+                :class="{ 'schedule-item--disabled': !l.running }"
+                active-class="active"
+              >
+                <span class="schedule-time">{{ l.running ? `${l.interval_minutes}m` : 'off' }}</span>
+                <span class="schedule-label">{{ l.title || promptTitle(l.prompt) }}</span>
               </router-link>
             </div>
           </div>
@@ -511,6 +533,12 @@ const userRoutines = computed(() =>
 )
 const systemAutomations = computed(() =>
   taskStore.schedules.filter(s => s.frequency !== 'once' && s.scope === 'system'),
+)
+const userLoops = computed(() =>
+  taskStore.loops.filter(l => l.scope !== 'system'),
+)
+const systemLoops = computed(() =>
+  taskStore.loops.filter(l => l.scope === 'system'),
 )
 
 import type { ChatInfo, ProjectInfo } from '../lib/types'

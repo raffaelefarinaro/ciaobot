@@ -120,6 +120,20 @@
       </template>
     </PaneHeader>
 
+    <!-- Loop banner: this chat is driven by one or more loops -->
+    <div v-if="chatLoops.length" class="loop-banner">
+      <div v-for="l in chatLoops" :key="l.loop_id" class="loop-banner-row">
+        <span class="loop-banner-ico" aria-hidden="true">&#10227;</span>
+        <span class="loop-banner-text">
+          <strong>{{ l.title || 'Loop' }}</strong>
+          · every {{ l.interval_minutes }}m
+          · {{ l.running ? 'running' : 'stopped' }}<template v-if="l.last_status === 'busy'"> (waiting, chat busy)</template>
+        </span>
+        <button class="btn-small" @click="toggleLoop(l)">{{ l.running ? 'Stop loop' : 'Start loop' }}</button>
+        <router-link :to="`/schedules/${l.loop_id}`" class="btn-small loop-banner-manage">Manage</router-link>
+      </div>
+    </div>
+
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
     <div class="messages" ref="messagesEl" data-tour="chat-messages" @click="handleHighlightClick">
@@ -710,7 +724,8 @@ import VoiceRecorder from './VoiceRecorder.vue'
 // under the turn that spawned its agents.
 import SubagentPanel from './SubagentPanel.vue'
 import { api } from '../lib/api'
-import type { ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
+import type { Loop, ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
+import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import { linkifyText } from '../lib/filePaths'
@@ -814,6 +829,18 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const dragOver = ref(false)
 const chat = computed(() => store.activeChat!)
+
+// Loops bound to this chat (loop-driven chats get a banner with controls).
+const taskStore = useTaskStore()
+const chatLoops = computed(() =>
+  taskStore.loops.filter(l => l.web_chat_id === chat.value?.chat_id),
+)
+onMounted(() => {
+  taskStore.fetchLoops().catch(() => {})
+})
+async function toggleLoop(l: Loop) {
+  await taskStore.updateLoop(l.loop_id, { running: !l.running })
+}
 const project = computed(() => store.activeProject)
 const models = ref<string[]>(['haiku', 'sonnet', 'opus', 'fable'])
 const providerModels = ref<Record<string, string[]>>({})
@@ -4664,4 +4691,32 @@ details[open] > .activity-summary::before {
     max-height: 45vh;
   }
 }
+
+/* ── Loop banner ── */
+.loop-banner {
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  padding: 6px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.loop-banner-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.loop-banner-ico { color: var(--accent); font-weight: 700; flex-shrink: 0; }
+.loop-banner-text {
+  flex: 1;
+  font-size: var(--text-sm);
+  color: var(--fg2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.loop-banner-text strong { color: var(--fg); }
+.loop-banner-manage { text-decoration: none; }
 </style>
