@@ -493,6 +493,7 @@ onMounted(async () => {
   await store.fetchAll()
   startLatestStatusSync()
   taskStore.fetchSchedules().catch(() => {})
+  taskStore.fetchLoops().catch(() => {})
   const chatId = route.params.chatId as string
   if (chatId && store.chats.find(c => c.chat_id === chatId)) {
     await store.openChatFromDeepLink(chatId)

@@ -250,6 +250,23 @@ export interface Schedule {
   removable?: boolean
 }
 
+// In-chat loop: re-dispatches its prompt into one fixed chat every N minutes.
+export interface Loop {
+  loop_id: string
+  prompt: string
+  web_chat_id: string
+  created_at: string
+  interval_minutes: number
+  title: string
+  autostart: boolean
+  last_run_at: string
+  last_status: '' | 'running' | 'ok' | 'error' | 'busy' | 'missing-chat'
+  // Computed server-side
+  running: boolean
+  context_label: string
+  next_run: string | null
+}
+
 // ── Status & Models ─────────────────────────────────────────────────────
 
 export interface StatusResponse {

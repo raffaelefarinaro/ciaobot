@@ -43,7 +43,7 @@
               <polyline points="8 18 8 21 11 18" />
             </svg>
           </router-link>
-          <router-link to="/schedules" class="nav-item touch-hit" active-class="nav-item--active" title="Schedules" aria-label="Schedules" data-tour="nav-schedules">
+          <router-link to="/schedules" class="nav-item touch-hit" active-class="nav-item--active" title="Automations" aria-label="Automations" data-tour="nav-schedules">
             <!-- Clock face with hour markers: more diagrammatic than calendar grid -->
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
@@ -74,11 +74,11 @@
 
     <template v-if="!collapsed && (mode === 'schedules')">
       <div class="sidebar-section-header">
-        <span class="sidebar-section-title">Schedules</span>
-        <button class="add-chip" @click="emit('new-schedule')" title="New schedule">+ New</button>
+        <span class="sidebar-section-title">Automations</span>
+        <button class="add-chip" @click="emit('new-schedule')" title="New automation">+ New</button>
       </div>
       <div class="schedules-list">
-        <div v-if="taskStore.schedules.length === 0" class="empty-hint">// no schedules yet</div>
+        <div v-if="taskStore.schedules.length === 0 && taskStore.loops.length === 0" class="empty-hint">// no automations yet</div>
 
         <template v-if="oneOffSchedules.length">
           <div class="schedule-group schedule-group--once">
@@ -121,6 +121,28 @@
                 <span class="schedule-time">{{ !s.enabled ? 'off' : s.frequency === 'manual' ? '·' : s.daily_time_utc }}</span>
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
                 <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
+              </router-link>
+            </div>
+          </div>
+        </template>
+
+        <template v-if="taskStore.loops.length">
+          <div class="schedule-group">
+            <div class="schedule-group-header">
+              <span>Loops <span class="schedule-group-hint">in-chat, every N min</span></span>
+              <span class="schedule-group-count">{{ taskStore.loops.length }}</span>
+            </div>
+            <div class="schedule-group-items">
+              <router-link
+                v-for="l in taskStore.loops"
+                :key="l.loop_id"
+                :to="`/schedules/${l.loop_id}`"
+                class="schedule-item"
+                :class="{ 'schedule-item--disabled': !l.running }"
+                active-class="active"
+              >
+                <span class="schedule-time">{{ l.running ? `${l.interval_minutes}m` : 'off' }}</span>
+                <span class="schedule-label">{{ l.title || promptTitle(l.prompt) }}</span>
               </router-link>
             </div>
           </div>

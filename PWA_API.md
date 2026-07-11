@@ -61,6 +61,9 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET, POST | `/api/schedules` | List or create schedules |
 | POST | `/api/schedule-run/{schedule_id}` | Run schedule now |
 | PATCH, DELETE | `/api/schedules/{schedule_id}` | Update or delete schedule |
+| GET, POST | `/api/loops` | List or create in-chat loops (re-dispatch a prompt into a fixed chat every N minutes) |
+| POST | `/api/loop-run/{loop_id}` | Fire one loop iteration now (409 when the chat has a turn in flight) |
+| PATCH, DELETE | `/api/loops/{loop_id}` | Update, start/stop (`{"running": bool}`), or delete a loop |
 | GET | `/api/automation` | Background-job status (Settings → Automation): last run, duration, model, errors per process |
 | GET | `/api/debug/issues` | Runtime issue report (server error log tail + failed job runs) for the dev-mode "Fix issues in chat" flow; 404 unless `CIAO_DEV_MODE` is set |
 | GET | `/api/commands` | List slash commands |
@@ -300,6 +303,24 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/sched
 # Run a schedule on demand. Auto-archived routines can return archived_to.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/schedule-run/$SID"
 
+# Create a loop: re-sends the prompt into one existing chat every N minutes.
+# No model field — iterations run with the chat's own model/mode. autostart=true
+# starts it with the server; start=true starts it right now. GET /api/loops
+# enriches each entry with `running`, `context_label`, and `next_run`.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/loops" \
+  -H 'content-type: application/json' \
+  -d '{"prompt":"Check my PRs for review changes; reply \"no changes\" if nothing new.","web_chat_id":"chat-...","interval_minutes":10,"autostart":false,"start":true}'
+
+# Start / stop a loop (runtime state; survives only via autostart across restarts).
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/loops/$LID" \
+  -H 'content-type: application/json' -d '{"running":false}'
+
+# Fire one iteration now (works while stopped). 409 if the chat is mid-turn.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/loop-run/$LID"
+
+# Delete a loop (also stops it).
+curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/loops/$LID"
+
 # Deploy: snapshot, pull, build, restart. Don't call from inside the live PWA session
 # (CLAUDE.md "Never restart the ciao service yourself"); ask the operator to hit Deploy.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/admin/deploy"
@@ -393,6 +414,7 @@ Every file-touch tool call also triggers a debounced (1.5s) content snapshot via
 - Project and chat state: `.runtime/web_projects.json`. On-disk shape mirrors the `ProjectInfo` and `ChatInfo` dataclasses in `ciao/web/project_chats.py` (`class ProjectInfo:` around line 339, `class ChatInfo:` around line 373); `to_dict()` on each defines the JSON fields. `ChatInfo.user_turn_timings` holds per-turn `{sent_at, completed_at, duration_ms}` keyed by user-turn index (as str); the matching `_turn_perf_started` map on `ProjectChatManager` is in-memory only.
 - `ChatInfo.pending_question` (string, in `to_dict()` so it rides every chat list / chat object): raw AskUserQuestion JSON (`{"questions": [...]}`) set when the model paused the chat on a question. When the headless CLI fires AskUserQuestion the server interrupts the live turn so the CLI cannot auto-answer it, persists this field, and clears it on the next user send. The PWA reads it on chat open to rebuild the interactive question picker after a reload. Empty string when no question is pending.
 - Schedule state: `.runtime/schedules.json`. Shape and field semantics in `ciao/schedules.py` (`ScheduleEntry`); the `ciao-schedules` skill packs the create/edit recipes.
+- Loop state: `.runtime/loops.json` (`ciao/loops.py`, `LoopEntry`). Running/stopped is runtime-only state in the `LoopManager`: `autostart` decides what runs after boot, so prefer the API over direct file writes for loops.
 - Uploaded media: under the configured runtime/media directory
 
 ## Naming

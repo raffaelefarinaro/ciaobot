@@ -173,7 +173,24 @@ When a schedule exists to maintain a specific project or doc, mention it once in
 `Auto-rechecked weekly: Ciaobot schedule \`sched-dd1c0790\` (Mon 09:00, project \`<name>\`).`
 That way the schedule's purpose is discoverable from the artifact it owns, not just from the JSON file.
 
+## Loops (in-chat interval automations)
+
+Loops are the sub-day sibling of schedules and live next to them on the PWA's Automations page. A loop is bound to **one existing chat** (`web_chat_id`) and re-dispatches its prompt every `interval_minutes` (floor: 1), so the conversation keeps its context between iterations — e.g. "check my PRs for review changes every 10 minutes".
+
+- **Store:** `<workspace root>/.runtime/loops.json` (`ciao/loops.py`: `LoopEntry`, `LoopStore`, `LoopManager`).
+- **HTTP API:** `GET/POST /api/loops`, `PATCH/DELETE /api/loops/{id}` (PATCH `{"running": true|false}` starts/stops), `POST /api/loop-run/{id}` (fire one iteration now).
+- **Entry shape:** `loop_id` (`loop-<8hex>`), `prompt`, `web_chat_id`, `created_at`, `interval_minutes`, `title`, `autostart`, `last_run_at`, `last_status`.
+
+Semantics that differ from schedules:
+
+- **No model field.** Iterations always run with the target chat's current model/mode; the user changes the chat to change the loop.
+- **`autostart`** — `true` means the loop begins running when the server boots; `false` means it stays stopped after a restart until started manually. Run/stopped state itself is runtime-only (held by the `LoopManager`), so **adding an entry directly to `loops.json` does not start it** — the user must start it from the Automations page (or it starts on the next boot if `autostart` is set). Prefer the UI/API flow over direct file writes for loops.
+- **Skip, not queue.** If the chat still has a turn in flight when an iteration is due, the iteration is skipped and retried on the next ~20s tick (`last_status: "busy"`).
+- **No catch-up** after downtime; cadence just resumes.
+- **Prompt convention:** instruct the run to reply with a short fixed line (e.g. "no changes") when nothing happened, so iterations stay cheap and the chat stays scannable.
+
 ## When NOT to use this skill
 
 - Cloud-side claude.ai Routines or the `/schedule` skill → they can't read the vault and bypass project dispatch.
 - One-off ad-hoc reminders that the user will action manually → use the user's task system instead of a `once` schedule when one is configured.
+- Sub-day recurrence inside one conversation → that's a loop, not a schedule (see the Loops section above).

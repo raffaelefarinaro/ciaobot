@@ -3370,6 +3370,132 @@ async def schedule_detail(request: Request) -> JSONResponse:
     return JSONResponse(_enrich_schedule(entry, pcm))
 
 
+# ── Loops ────────────────────────────────────────────────────────────────
+# In-chat loops: re-dispatch a prompt into one fixed chat every N minutes.
+# Runtime start/stop state lives in the LoopManager (autostart decides what
+# runs at boot), so PATCH {"running": bool} toggles the manager, everything
+# else edits the persisted entry.
+
+def _enrich_loop(entry, manager, pcm=None) -> dict:
+    """Serialize a LoopEntry and attach computed fields (running, context_label, next_run)."""
+    entry_dict = asdict(entry)
+    running = manager.is_running(entry.loop_id)
+    entry_dict["running"] = running
+    chat = pcm.get_chat(entry.web_chat_id) if pcm else None
+    entry_dict["context_label"] = chat.title if chat else entry.web_chat_id
+    next_run = None
+    if running:
+        if entry.last_run_at:
+            try:
+                last = datetime.fromisoformat(entry.last_run_at)
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=UTC)
+                next_run = (last + entry.interval()).isoformat()
+            except ValueError:
+                pass
+        else:
+            next_run = datetime.now(UTC).isoformat(timespec="seconds")
+    entry_dict["next_run"] = next_run
+    return entry_dict
+
+
+async def list_loops(request: Request) -> JSONResponse:
+    lm = request.app.state.loop_manager
+    pcm = request.app.state.project_chat_manager
+    return JSONResponse([_enrich_loop(entry, lm, pcm) for entry in lm.list()])
+
+
+async def create_loop(request: Request) -> JSONResponse:
+    lm = request.app.state.loop_manager
+    pcm = request.app.state.project_chat_manager
+    body = await request.json()
+
+    prompt = (body.get("prompt") or "").strip()
+    if not prompt:
+        return JSONResponse({"error": "prompt is required"}, status_code=400)
+    web_chat_id = (body.get("web_chat_id") or "").strip()
+    if not web_chat_id or pcm.get_chat(web_chat_id) is None:
+        return JSONResponse({"error": "web_chat_id must point to an existing chat"}, status_code=400)
+    try:
+        interval_minutes = int(body.get("interval_minutes", 10))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "interval_minutes must be an integer"}, status_code=400)
+    if interval_minutes < 1:
+        return JSONResponse({"error": "interval_minutes must be >= 1"}, status_code=400)
+
+    entry = lm.create(
+        prompt=prompt,
+        web_chat_id=web_chat_id,
+        interval_minutes=interval_minutes,
+        title=(body.get("title") or "").strip(),
+        autostart=bool(body.get("autostart")),
+    )
+    if body.get("start"):
+        lm.start_loop(entry.loop_id)
+    return JSONResponse(_enrich_loop(entry, lm, pcm), status_code=201)
+
+
+async def loop_detail(request: Request) -> JSONResponse:
+    """Handle PATCH (update / start / stop) and DELETE for a single loop."""
+    loop_id = request.path_params["loop_id"]
+    lm = request.app.state.loop_manager
+    pcm = request.app.state.project_chat_manager
+    if request.method == "DELETE":
+        return JSONResponse({"ok": lm.delete(loop_id)})
+    # PATCH
+    entry = lm.get(loop_id)
+    if entry is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    body = await request.json()
+    if "prompt" in body:
+        prompt = (body["prompt"] or "").strip()
+        if not prompt:
+            return JSONResponse({"error": "prompt is required"}, status_code=400)
+        entry.prompt = prompt
+    if "title" in body:
+        entry.title = (body["title"] or "").strip()
+    if "interval_minutes" in body:
+        try:
+            interval_minutes = int(body["interval_minutes"])
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "interval_minutes must be an integer"}, status_code=400)
+        if interval_minutes < 1:
+            return JSONResponse({"error": "interval_minutes must be >= 1"}, status_code=400)
+        entry.interval_minutes = interval_minutes
+    if "web_chat_id" in body:
+        web_chat_id = (body["web_chat_id"] or "").strip()
+        if not web_chat_id or pcm.get_chat(web_chat_id) is None:
+            return JSONResponse({"error": "web_chat_id must point to an existing chat"}, status_code=400)
+        entry.web_chat_id = web_chat_id
+    if "autostart" in body:
+        entry.autostart = bool(body["autostart"])
+    lm.replace(entry)
+    if "running" in body:
+        if body["running"]:
+            lm.start_loop(loop_id)
+        else:
+            lm.stop_loop(loop_id)
+    return JSONResponse(_enrich_loop(entry, lm, pcm))
+
+
+async def run_loop_now(request: Request) -> JSONResponse:
+    """Fire one loop iteration immediately (works even when stopped)."""
+    loop_id = request.path_params["loop_id"]
+    lm = request.app.state.loop_manager
+    try:
+        result = await lm.run_now(loop_id)
+    except ValueError:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if result.get("status") == "busy":
+        return JSONResponse(
+            {"error": "chat has a turn in flight; retry when it finishes", **result},
+            status_code=409,
+        )
+    if result.get("status") == "missing-chat":
+        return JSONResponse({"error": "target chat no longer exists", **result}, status_code=409)
+    return JSONResponse(result, status_code=201)
+
+
 # ── Models ───────────────────────────────────────────────────────────────
 
 async def list_models(request: Request) -> JSONResponse:

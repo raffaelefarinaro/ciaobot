@@ -26,6 +26,7 @@ ciao/                          Python backend (Starlette).
   context/                     Per-turn context injection (workspace, project, vault hints).
   observability/               Hooks: UserPromptSubmit (runtime context + vault entity tags) and PostToolUse (WebSearch backfill on Ollama-cloud routes). Plus logging, transcript capture.
   schedules.py                 Cron-style schedule dispatch.
+  loops.py                     In-chat loops: re-dispatch a prompt into a fixed chat every N minutes.
   dag.py                       Tiny DAG runner (Node kinds: bash / prompt / gate / subagent / retention; edges: ok / fail / always). Subprocess nodes can merge per-node env overrides for routed models. Each node is timed via `job_runs.track_sync`, so Automation page shows per-node status. Used by skill evolution and dependency review.
   sessions.py                  Session state, auth, signed cookies, JSON-backed StateStore for `.runtime/state.json`.
   transcripts.py               Provider-neutral live transcripts and archives under memory-vault/Logs/Chats/.
@@ -142,6 +143,8 @@ The server registers a `UserPromptSubmit` hook (`ciao/observability/hooks.py`) t
 ## Schedules and background automation
 
 Schedule dispatch (`ciao/schedules.py`) runs cron-shaped jobs that use the same provider pipeline as a chat turn. System schedules ship in `ciao/stock/schedules.json` (memory curation, skill evolution, weekly review); user schedules live in the workspace's `.runtime/schedules.json`. Dependency review and runtime error triage are workspace-local schedules for operators who maintain an app checkout (see `ciao/dependency_review.py`). Schedule prompts support two placeholders substituted at dispatch: `{{ERROR_LOG}}` (server error-log tail) and `{{ISSUE_REPORT}}` (error log plus failed job runs); the error log is cleared only after a clean run.
+
+Loops (`ciao/loops.py`) are the sub-day sibling of schedules: a loop is bound to one existing PWA chat and re-dispatches its prompt every N minutes (floor: 1), keeping the conversation and its context going — e.g. "check my PRs for review changes every 10 minutes". Entries live in `.runtime/loops.json`; runtime start/stop state lives in the `LoopManager`, so a loop with `autostart: true` begins running at server boot while the rest stay stopped until started from the Automations page. Iterations always run with the target chat's own model and mode (loops never override them), overlap protection is skip-not-queue (an iteration due while the chat still has a turn in flight is skipped and retried on the next ~20s tick), and there is no downtime catch-up — cadence simply resumes. The PWA's Schedules page is titled "Automations" and hosts both schedules and loops (`GET/POST /api/loops`, `PATCH/DELETE /api/loops/{id}`, `POST /api/loop-run/{id}`).
 
 Background automations are instrumented through `ciao/job_runs.py`: title generation, schedule dispatch, session insights, memory proposals, trajectory capture, weekly skill evolution, weekly dependency review, and startup/system tasks (git sync, vault index refresh, PWA rebuild, skills update, device-branch backup) each record one run (status, duration, model/provider, error) to `.runtime/job_runs.jsonl`. `GET /api/automation` serves the grouped view that powers Settings → Automation.
 

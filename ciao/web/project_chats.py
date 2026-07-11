@@ -4570,6 +4570,47 @@ class ProjectChatManager:
             logger.warning("Schedule has no web target, skipping")
             return None
 
+    def chat_stream_active(self, chat_id: str) -> bool:
+        """True when the chat has a live user-visible turn in flight.
+
+        Between-turns drain streams don't count: they are background
+        housekeeping that a new prompt is allowed to replace.
+        """
+        existing = self._broker.get(chat_id)
+        return existing is not None and not existing.background
+
+    async def dispatch_loop(self, entry, prompt: str) -> dict[str, str]:
+        """Dispatch one loop iteration into the loop's fixed chat.
+
+        Unlike schedules, loops never override the chat's model or mode:
+        each iteration runs with whatever the user configured on the chat.
+        Returns a status dict: "ok", "error", "busy" (active turn already
+        in flight), or "missing-chat".
+        """
+        chat_id = entry.web_chat_id
+        if self._chats.get(chat_id) is None:
+            logger.warning("Loop target chat %s not found, skipping", chat_id)
+            return {"status": "missing-chat"}
+        if self.chat_stream_active(chat_id):
+            return {"status": "busy", "chat_id": chat_id}
+        is_error = False
+        try:
+            stream = self.start_stream(chat_id, prompt, unattended=True)
+            async for payload in stream.subscribe():
+                if not isinstance(payload, dict):
+                    continue
+                event_type = payload.get("type")
+                if event_type == "error":
+                    is_error = True
+                elif event_type == "result":
+                    is_error = bool(payload.get("is_error"))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Loop dispatch to %s failed", chat_id)
+            return {"status": "error", "chat_id": chat_id}
+        return {"status": "error" if is_error else "ok", "chat_id": chat_id}
+
     async def dispatch_schedule(
         self,
         entry,  # ScheduleEntry

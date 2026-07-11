@@ -18,6 +18,7 @@ from typing import Callable, Literal
 from ciao.config import CiaoConfig
 from ciao.git_sync import sync_workspace
 from ciao.models import ChatContext
+from ciao.loops import LoopManager, LoopStore
 from ciao.schedules import ScheduleManager, ScheduleStore
 from ciao.sessions import StateStore
 from ciao.signals import RestartRequested
@@ -372,10 +373,24 @@ async def _async_main() -> int:
         prepare_chat=_prepare_chat,
     )
 
+    # Loop manager: minute-interval re-dispatch into a fixed chat. Iterations
+    # run with the chat's own model/mode (no override), and skip (not queue)
+    # when the chat still has a turn in flight.
+    async def _dispatch_loop(entry):
+        return await pcm.dispatch_loop(entry, entry.prompt)
+
+    loop_manager = LoopManager(
+        store=LoopStore(config.state_path.parent),
+        dispatch=_dispatch_loop,
+        chat_busy=pcm.chat_stream_active,
+        chat_exists=lambda chat_id: pcm.get_chat(chat_id) is not None,
+    )
+
     # Create and wire up web app
     app = create_app(config, app_settings=app_settings)
     app.state.startup_tracker = tracker
     app.state.schedule_manager = schedule_manager
+    app.state.loop_manager = loop_manager
     app.state.state_store = state
     app.state.transcript_store = transcripts
     app.state.project_chat_manager = pcm
@@ -501,6 +516,10 @@ async def _async_main() -> int:
 
 
     schedule_manager.start()
+    # Loops with autostart begin running now; manually-started loops stay
+    # stopped until started from the Automations page. No catch-up pass:
+    # missed poll iterations from downtime are worthless, cadence just resumes.
+    loop_manager.start()
 
     # Fire any schedules whose target time already passed today but which
     # never triggered (e.g. due to a crash loop or the server being down

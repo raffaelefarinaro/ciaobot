@@ -1,8 +1,8 @@
 <template>
   <div class="schedule-panel">
     <PaneHeader
-      v-if="!schedule && !showNew"
-      title="Schedules"
+      v-if="!schedule && !loop && !showNew"
+      title="Automations"
       @open-sidebar="emit('open-sidebar')"
     />
     <PaneHeader v-else @open-sidebar="emit('open-sidebar')">
@@ -10,7 +10,8 @@
         <div class="header-left">
           <button class="close-btn desktop-only" @click="closeSchedule" title="Close">&times;</button>
           <span v-if="schedule" class="pane-title">{{ schedule.title || promptTitle(schedule.prompt) }}</span>
-          <span v-else-if="showNew" class="pane-title">New schedule</span>
+          <span v-else-if="loop" class="pane-title">{{ loop.title || promptTitle(loop.prompt) }}</span>
+          <span v-else-if="showNew" class="pane-title">New automation</span>
         </div>
       </template>
       <template #actions>
@@ -28,12 +29,33 @@
         </button>
         <button v-if="schedule && !editing && schedule.scope !== 'system'" class="btn-small" @click="startEdit">Edit</button>
         <button v-if="schedule && !editing && schedule.scope !== 'system'" class="btn-small btn-danger" @click="onDelete">Delete</button>
+        <button
+          v-if="loop && !loopEditing"
+          class="btn-small"
+          :class="{ 'btn-running': loop.running }"
+          @click="onToggleLoopRunning"
+        >
+          {{ loop.running ? 'Stop' : 'Start' }}
+        </button>
+        <button v-if="loop && !loopEditing" class="btn-small" @click="onRunLoopNow">Run now</button>
+        <button v-if="loop && !loopEditing" class="btn-small" @click="startLoopEdit">Edit</button>
+        <button v-if="loop && !loopEditing" class="btn-small btn-danger" @click="onDeleteLoop">Delete</button>
       </template>
     </PaneHeader>
 
-    <!-- New schedule form -->
+    <!-- New automation form (schedule or loop) -->
     <div v-if="showNew" class="scroll-body">
-      <NewScheduleForm @created="onCreated" />
+      <div class="type-toggle">
+        <button class="btn-chip" :class="{ 'type-active': newType === 'schedule' }" @click="newType = 'schedule'">Schedule</button>
+        <button class="btn-chip" :class="{ 'type-active': newType === 'loop' }" @click="newType = 'loop'">Loop</button>
+      </div>
+      <p class="hint type-hint">
+        {{ newType === 'schedule'
+          ? 'Fires at a time of day (daily / weekly / monthly / once), usually in a new chat per run.'
+          : 'Re-sends a prompt into one existing chat every N minutes, keeping the conversation going.' }}
+      </p>
+      <NewScheduleForm v-if="newType === 'schedule'" @created="onCreated" />
+      <NewLoopForm v-else @created="onCreated" />
     </div>
 
     <!-- Detail -->
@@ -139,8 +161,98 @@
       </div>
     </div>
 
-    <!-- Overview homepage: shown when no schedule is selected but some exist -->
-    <div v-else-if="store.schedules.length" class="scroll-body overview-body">
+    <!-- Loop detail -->
+    <div v-else-if="loop" class="scroll-body">
+      <div v-if="!loop.running" class="disabled-banner">
+        Stopped — won't fire automatically. "Run now" still works.
+      </div>
+      <div class="meta-grid">
+        <div><strong>Every</strong><br />{{ loop.interval_minutes }} min</div>
+        <div><strong>Chat</strong><br />{{ loopChatLabel(loop) }}</div>
+        <div><strong>Status</strong><br />{{ loopStatusLabel(loop) }}</div>
+        <div><strong>Last run</strong><br />{{ loop.last_run_at ? formatWhen(loop.last_run_at) : 'never' }}</div>
+        <div><strong>Next run</strong><br />{{ loop.running ? (loop.next_run ? formatWhen(loop.next_run) : 'soon') : 'stopped' }}</div>
+        <div><strong>On server start</strong><br />{{ loop.autostart ? 'starts automatically' : 'stays stopped' }}</div>
+      </div>
+
+      <div v-if="loopEditing" class="edit-form">
+        <div class="form-grid">
+          <div class="form-group">
+            <label>Every (minutes)</label>
+            <input v-model.number="loopEditData.interval_minutes" type="number" min="1" />
+          </div>
+          <div class="form-group">
+            <label>Chat</label>
+            <select v-model="loopEditData.web_chat_id">
+              <optgroup v-for="group in loopChatGroups" :key="group.label" :label="group.label">
+                <option v-for="c in group.items" :key="c.key" :value="c.key">{{ c.label }}</option>
+              </optgroup>
+            </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Title</label>
+          <input v-model="loopEditData.title" type="text" />
+        </div>
+        <label class="checkbox-line">
+          <input v-model="loopEditData.autostart" type="checkbox" />
+          Start with the server
+        </label>
+        <div class="form-group">
+          <label>Prompt</label>
+          <textarea v-model="loopEditData.prompt" rows="10"></textarea>
+        </div>
+        <div class="form-actions">
+          <button class="btn-primary" @click="saveLoopEdit">Save</button>
+          <button class="btn-chip" @click="loopEditing = false">Cancel</button>
+        </div>
+      </div>
+
+      <div v-else class="prompt-display">
+        <label class="prompt-label">Prompt</label>
+        <pre class="full-prompt">{{ loop.prompt }}</pre>
+      </div>
+    </div>
+
+    <!-- Overview homepage: shown when nothing is selected but automations exist -->
+    <div v-else-if="store.schedules.length || store.loops.length" class="scroll-body overview-body">
+      <div class="ov-card">
+        <div class="ov-head">
+          <span class="ov-dot"></span>
+          Schedules vs loops
+        </div>
+        <p class="ov-explain">
+          <strong>Schedules</strong> fire at a time of day — daily, weekly, monthly, or once —
+          and usually open a fresh chat per run. Use them for briefings, reports, and maintenance.
+        </p>
+        <p class="ov-explain">
+          <strong>Loops</strong> live inside one existing chat and re-send the same prompt every
+          N minutes (e.g. "check my PRs for changes every 10 minutes"), so the conversation keeps
+          its context between iterations. A loop always runs with the chat's own model — change the
+          chat's model to change the loop's. Loops set to <strong>start with the server</strong>
+          resume on boot; the others stay stopped until started manually. If an iteration is still
+          running when the next one is due, the loop skips it and retries shortly after.
+        </p>
+      </div>
+
+      <div v-if="store.loops.length" class="ov-card">
+        <div class="ov-head">
+          <span class="ov-dot"></span>
+          Loops
+          <span class="ov-hint">{{ runningLoops.length }} running</span>
+        </div>
+        <router-link
+          v-for="l in store.loops"
+          :key="l.loop_id"
+          :to="`/schedules/${l.loop_id}`"
+          class="ov-item"
+        >
+          <span class="ov-when" :class="{ 'ov-when--muted': !l.running }">
+            {{ l.running ? `every ${l.interval_minutes}m` : 'stopped' }}
+          </span>
+          <span class="ov-title">{{ l.title || promptTitle(l.prompt) }}</span>
+        </router-link>
+      </div>
       <div v-if="missedSchedules.length" class="ov-card ov-card--alert">
         <div class="ov-head">
           <span class="ov-dot ov-dot--alert"></span>
@@ -179,19 +291,24 @@
     </div>
 
     <div v-else class="empty-state">
-      <div class="empty-mark"><span class="wordmark wordmark--md">schedules</span></div>
+      <div class="empty-mark"><span class="wordmark wordmark--md">automations</span></div>
       <p class="empty-hint">// pick one on the left, or tap <strong>+ New</strong>.</p>
+      <p class="empty-hint">
+        <strong>Schedules</strong> fire at a time of day, usually in a new chat per run.<br />
+        <strong>Loops</strong> re-send a prompt into one existing chat every N minutes.
+      </p>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from '../stores/tasks'
 import { useProjectStore } from '../stores/projects'
-import type { Schedule, ScheduleArchivePolicy } from '../lib/types'
+import type { Loop, Schedule, ScheduleArchivePolicy } from '../lib/types'
 import NewScheduleForm from './NewScheduleForm.vue'
+import NewLoopForm from './NewLoopForm.vue'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
@@ -221,17 +338,44 @@ const editData = ref({
   archive_policy: 'manual' as ScheduleArchivePolicy,
 })
 
+// Loops change state server-side (running / last_status / next_run), so
+// refresh them periodically while the panel is open.
+let loopPollTimer: number | undefined
+
 onMounted(() => {
   if (!store.models) store.fetchModels()
+  loopPollTimer = window.setInterval(() => {
+    store.fetchLoops().catch(() => {})
+  }, 30_000)
+})
+
+onUnmounted(() => {
+  if (loopPollTimer !== undefined) window.clearInterval(loopPollTimer)
 })
 
 const scheduleId = computed(() => (route.params.scheduleId as string) || '')
 const schedule = computed(() =>
   store.schedules.find(s => s.schedule_id === scheduleId.value) || null,
 )
+// Loops share the /schedules/:id route; their ids are "loop-…" so they never
+// collide with "sched-…" schedule ids.
+const loop = computed(() =>
+  store.loops.find(l => l.loop_id === scheduleId.value) || null,
+)
+
+const newType = ref<'schedule' | 'loop'>('schedule')
+const loopEditing = ref(false)
+const loopEditData = ref({
+  prompt: '',
+  title: '',
+  interval_minutes: 10,
+  web_chat_id: '',
+  autostart: false,
+})
 
 watch(scheduleId, () => {
   editing.value = false
+  loopEditing.value = false
   purgeFinishedRuns()
 })
 
@@ -289,6 +433,85 @@ const upcomingSchedules = computed(() =>
     .slice(0, 5),
 )
 const missedSchedules = computed(() => store.schedules.filter(s => s.missed))
+const runningLoops = computed(() => store.loops.filter(l => l.running))
+
+const loopChatGroups = computed(() => {
+  const groups: { label: string; items: { key: string; label: string }[] }[] = []
+  for (const p of projectStore.projects) {
+    const items = projectStore.projectChats(p.project_id).map(c => ({
+      key: c.chat_id,
+      label: c.title,
+    }))
+    if (items.length) groups.push({ label: `${p.name} (${p.workspace})`, items })
+  }
+  return groups
+})
+
+function loopChatLabel(l: Loop): string {
+  if (l.context_label) return l.context_label
+  const chat = projectStore.chats.find(c => c.chat_id === l.web_chat_id)
+  return chat?.title || l.web_chat_id
+}
+
+function loopStatusLabel(l: Loop): string {
+  if (l.last_status === 'missing-chat') return 'stopped — chat missing'
+  if (l.last_status === 'busy') return 'waiting — chat busy'
+  if (l.last_status === 'running') return 'iteration running…'
+  if (l.last_status === 'error') return 'last run failed'
+  if (l.last_status === 'ok') return 'ok'
+  return l.running ? 'waiting for first run' : 'never ran'
+}
+
+function startLoopEdit() {
+  if (!loop.value) return
+  loopEditData.value = {
+    prompt: loop.value.prompt,
+    title: loop.value.title || '',
+    interval_minutes: loop.value.interval_minutes,
+    web_chat_id: loop.value.web_chat_id,
+    autostart: loop.value.autostart,
+  }
+  loopEditing.value = true
+}
+
+async function saveLoopEdit() {
+  if (!loop.value) return
+  await store.updateLoop(loop.value.loop_id, { ...loopEditData.value })
+  loopEditing.value = false
+}
+
+async function onToggleLoopRunning() {
+  if (!loop.value) return
+  await store.updateLoop(loop.value.loop_id, { running: !loop.value.running })
+}
+
+async function onRunLoopNow() {
+  if (!loop.value) return
+  const l = loop.value
+  try {
+    await store.runLoopNow(l.loop_id)
+    projectStore.pushToast({
+      chat_id: l.web_chat_id,
+      title: 'Loop iteration started',
+      body: l.title || promptTitle(l.prompt),
+    })
+  } catch {
+    projectStore.pushToast({
+      chat_id: l.web_chat_id,
+      title: 'Loop not started',
+      body: 'The chat has a turn in flight — try again when it finishes.',
+    })
+  }
+  await store.fetchLoops().catch(() => {})
+}
+
+async function onDeleteLoop() {
+  if (!loop.value) return
+  if (!confirm('Delete this loop?')) return
+  const id = loop.value.loop_id
+  await store.deleteLoop(id)
+  router.push('/schedules')
+}
 
 function archiveLabel(policy: ScheduleArchivePolicy | undefined): string {
   return policy === 'auto' ? 'auto (archive if boring)' : 'manual (keep chat)'
@@ -615,6 +838,35 @@ function closeSchedule() {
 .empty-state .empty-hint { color: var(--fg3); font-size: var(--text-sm); }
 
 .hint { font-size: var(--text-xs); color: var(--fg2); margin: 0; }
+
+/* ── New-automation type toggle ────────────────────────────────── */
+.type-toggle { display: flex; gap: 8px; margin-bottom: 8px; }
+.type-active {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+.type-hint { margin-bottom: 12px; }
+
+.checkbox-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-sm);
+  color: var(--fg2);
+  cursor: pointer;
+}
+.checkbox-line input { flex-shrink: 0; }
+
+.ov-explain {
+  margin: 0 0 8px;
+  font-size: var(--text-sm);
+  color: var(--fg2);
+  line-height: 1.55;
+}
+.ov-explain:last-child { margin-bottom: 0; }
+.ov-explain strong { color: var(--fg); }
+.ov-when--muted { color: var(--fg3); }
 
 /* ── Overview (next up + missed) ───────────────────────────────── */
 .overview-body {
