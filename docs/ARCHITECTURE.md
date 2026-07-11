@@ -64,7 +64,7 @@ ciao/                          Python backend (Starlette).
   package_version.py           Best-effort version probe: reads ciao.__version__ and queries the GitHub releases API for the latest published version. Powers GET /api/package/status.
   package_smoke.py             Wheel smoke target: build web, build wheel, install in a clean venv, and probe the installed app. CLI: `ciao package-smoke`.
   stock/                       Generic package-data assets for public installs: stock agents, commands, skills, launchd template, workspace docs, and system schedules.
-    skills/                    Packaged generic skills (ciao-capabilities, ciao-schedules, create-chat, web-research, vault-read, workspace-authoring, adversarial-review). Installed into every workspace's `.claude/skills/` by `ciao sync-skills`; a same-named workspace skill overrides the packaged copy.
+    skills/                    Packaged generic skills (ciao-capabilities, ciao-automations, create-chat, web-research, vault-read, workspace-authoring, adversarial-review). Installed into every workspace's `.claude/skills/` by `ciao sync-skills`; a same-named workspace skill overrides the packaged copy.
     workspace/                 Agent-readable docs copied into installed workspaces (`CLAUDE.md`, `CIAO_CUSTOMIZATION.md`).
     schedules.json             System schedules (memory curation, skill evolution, weekly review).
     schedules/                 Long-form schedule assets (weekly-review-template.md).

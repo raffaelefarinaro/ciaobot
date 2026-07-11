@@ -413,7 +413,7 @@ Every file-touch tool call also triggers a debounced (1.5s) content snapshot via
 
 - Project and chat state: `.runtime/web_projects.json`. On-disk shape mirrors the `ProjectInfo` and `ChatInfo` dataclasses in `ciao/web/project_chats.py` (`class ProjectInfo:` around line 339, `class ChatInfo:` around line 373); `to_dict()` on each defines the JSON fields. `ChatInfo.user_turn_timings` holds per-turn `{sent_at, completed_at, duration_ms}` keyed by user-turn index (as str); the matching `_turn_perf_started` map on `ProjectChatManager` is in-memory only.
 - `ChatInfo.pending_question` (string, in `to_dict()` so it rides every chat list / chat object): raw AskUserQuestion JSON (`{"questions": [...]}`) set when the model paused the chat on a question. When the headless CLI fires AskUserQuestion the server interrupts the live turn so the CLI cannot auto-answer it, persists this field, and clears it on the next user send. The PWA reads it on chat open to rebuild the interactive question picker after a reload. Empty string when no question is pending.
-- Schedule state: `.runtime/schedules.json`. Shape and field semantics in `ciao/schedules.py` (`ScheduleEntry`); the `ciao-schedules` skill packs the create/edit recipes.
+- Schedule state: `.runtime/schedules.json`. Shape and field semantics in `ciao/schedules.py` (`ScheduleEntry`); the `ciao-automations` skill packs the create/edit recipes.
 - Loop state: `.runtime/loops.json` (`ciao/loops.py`, `LoopEntry`). Running/stopped is runtime-only state in the `LoopManager`: `autostart` decides what runs after boot, so prefer the API over direct file writes for loops.
 - Uploaded media: under the configured runtime/media directory
 

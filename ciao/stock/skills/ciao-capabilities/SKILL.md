@@ -36,7 +36,7 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 
 ### 3. Schedules, loops, and automations
 
-- A native scheduler dispatches recurring or one-off prompts as fresh chat turns into a target project or chat — daily/weekly/monthly/once, timezone-aware. Configure from the **Automations page** or directly in chat (the `ciao-schedules` skill has the full recipe).
+- A native scheduler dispatches recurring or one-off prompts as fresh chat turns into a target project or chat — daily/weekly/monthly/once, timezone-aware. Configure from the **Automations page** or directly in chat (the `ciao-automations` skill has the full recipe).
 - **Loops** are the sub-day sibling of schedules: bound to one existing chat, they re-send the same prompt every N minutes (e.g. "check my PRs every 10 minutes"), keeping the conversation's context between iterations. A loop runs with the chat's own model; loops set to start with the server resume on boot, the rest are started manually. Managed from the same Automations page.
 - System maintenance schedules ship with the app; the Automation page shows background job runs.
 
@@ -70,7 +70,7 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 
 - **Settings page**: provider keys, model lists, skill/agent inventory, the injected system prompt (read-only), and local package updates from the UI.
 - **macOS extras**: a menu bar companion (`ciao menubar`) with server status, a Start Ciao at Login status/toggle, and open/restart/logs actions (the Ciaobot face turns scared when the server is down), a `Ciaobot.app` shortcut, and LaunchAgents so everything starts on login.
-- **Local HTTP API**: the app exposes an API an in-chat agent can drive (create chats, subagents, commands) — recipes are in `PWA_API.md` in the Ciaobot GitHub repo (`raffaelefarinaro/ciaobot`); fetch it when you need the raw API surface. For the common cases, the shipped `create-chat` and `ciao-schedules` skills already contain the working recipes.
+- **Local HTTP API**: the app exposes an API an in-chat agent can drive (create chats, subagents, commands) — recipes are in `PWA_API.md` in the Ciaobot GitHub repo (`raffaelefarinaro/ciaobot`); fetch it when you need the raw API surface. For the common cases, the shipped `create-chat` and `ciao-automations` skills already contain the working recipes.
 
 ### Privacy and trust posture
 
@@ -92,5 +92,5 @@ Close with: they can ask "what can Ciaobot do?" (or about any specific feature) 
 ## Where the details live
 
 - Workspace customization surface (env vars, workspaces registry, tool deny-lists, model routing): `CIAO_CUSTOMIZATION.md` in the workspace root.
-- Schedules how-to: the `ciao-schedules` skill. Spawning chats: the `create-chat` skill. Vault conventions: the `vault-read` skill.
+- Schedules and loops how-to: the `ciao-automations` skill. Spawning chats: the `create-chat` skill. Vault conventions: the `vault-read` skill.
 - Canonical docs in the Ciaobot GitHub repo (`raffaelefarinaro/ciaobot`, also present in source checkouts): `README.md`, `docs/ARCHITECTURE.md`, and `PWA_API.md` (routes, auth, agent recipes).

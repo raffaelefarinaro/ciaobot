@@ -1,9 +1,9 @@
 ---
-name: ciao-schedules
+name: ciao-automations
 description: Create, edit, list, or delete Ciaobot native schedules (`.runtime/schedules.json`) and in-chat loops (`.runtime/loops.json`). Trigger on "schedule", "recurring", "every Monday", "monthly reminder", "loop", "every 10 minutes", "keep checking", or when converting ad-hoc checks into automation. Do not use claude.ai cloud Routines.
 ---
 
-# Ciaobot Schedules
+# Ciaobot Automations
 
 Ciaobot has its own scheduler. Each tick (every minute) the `ScheduleManager` reads `.runtime/schedules.json` and dispatches matching entries as new chat turns into a target PWA project or chat. No service restart needed when you add or edit a row: the store is reloaded on every tick.
 

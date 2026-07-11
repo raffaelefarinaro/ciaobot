@@ -175,7 +175,7 @@ def test_sync_installs_stock_skills_with_marker(tmp_path: Path) -> None:
 
     result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
-    installed = workspace / ".claude" / "skills" / "ciao-schedules"
+    installed = workspace / ".claude" / "skills" / "ciao-automations"
     assert (installed / "SKILL.md").is_file()
     assert (installed / sync_skills.STOCK_SKILL_MARKER).is_file()
     assert not installed.is_symlink()
