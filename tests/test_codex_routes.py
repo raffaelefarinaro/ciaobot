@@ -76,11 +76,12 @@ def test_models_endpoint_exposes_codex_catalog_and_per_model_effort(
     data = json.loads(response.body)
 
     assert data["provider_models"]["codex"] == ["gpt-test"]
-    assert data["provider_defaults"]["codex"] == "sea"
+    assert data["provider_defaults"]["codex"] == "opus"
     assert data["alias_tiers"]["codex"] == {
-        "river": "gpt-test",
-        "lake": "gpt-test",
-        "sea": "gpt-test",
+        "haiku": "gpt-test",
+        "sonnet": "gpt-test",
+        "opus": "gpt-test",
+        "fable": "gpt-test",
     }
     assert data["model_reasoning_levels"]["gpt-test"] == ["low", "high"]
     assert data["codex_model_metadata"]["gpt-test"]["display_name"] == "GPT Test"

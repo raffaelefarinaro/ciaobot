@@ -26,9 +26,9 @@ describe('modelSections', () => {
       openrouter_models: ['anthropic/claude-sonnet-4.5'],
       codex_models: ['gpt-test'],
       alias_tiers: {
-        ollama: { lake: 'kimi-k2.7-code:cloud' },
-        openrouter: { lake: 'anthropic/claude-sonnet-4.5' },
-        codex: { river: 'gpt-test', lake: 'gpt-test', sea: 'gpt-test' },
+        ollama: { sonnet: 'kimi-k2.7-code:cloud' },
+        openrouter: { sonnet: 'anthropic/claude-sonnet-4.5' },
+        codex: { haiku: 'gpt-test', sonnet: 'gpt-test', opus: 'gpt-test' },
       },
       backends: { anthropic: true, ollama: true, openrouter: true },
       thinking_levels: {},
@@ -38,13 +38,13 @@ describe('modelSections', () => {
 
     expect(sections.map((section) => section.label)).toEqual(['Anthropic', 'OpenAI Codex', 'Ollama', 'OpenRouter'])
     expect(sections.find((section) => section.key === 'anthropic')?.models).toEqual([
-      'river',
-      'lake',
-      'sea',
-      'ocean',
+      'haiku',
+      'sonnet',
+      'opus',
+      'fable',
     ])
     expect(sections.find((section) => section.key === 'ollama')?.models).toEqual(['kimi-k2.7-code:cloud'])
-    expect(sections.find((section) => section.key === 'codex')?.models).toEqual(['river', 'lake', 'sea'])
+    expect(sections.find((section) => section.key === 'codex')?.models).toEqual(['haiku', 'sonnet', 'opus'])
     expect(sections.find((section) => section.key === 'openrouter')?.models).toEqual([
       'anthropic/claude-sonnet-4.5',
     ])
@@ -59,23 +59,23 @@ describe('modelSections', () => {
     }
 
     const sections = sectionsFromModelOptions(options, { ollama: true, openrouter: true }, {
-      ollama: { lake: 'kimi-k2.7-code:cloud' },
-      openrouter: { sea: 'openai/gpt-5.1' },
+      ollama: { sonnet: 'kimi-k2.7-code:cloud' },
+      openrouter: { opus: 'openai/gpt-5.1' },
     })
 
     expect(sections.map((section) => section.label)).toEqual(['Anthropic', 'Ollama', 'OpenRouter'])
     expect(sections.find((section) => section.key === 'anthropic')?.models).toEqual([
-      'river',
-      'lake',
-      'sea',
-      'ocean',
+      'haiku',
+      'sonnet',
+      'opus',
+      'fable',
     ])
     expect(sections.find((section) => section.key === 'ollama')?.modelBadges).toEqual({
       'llama3.1:latest': ['local'],
-      'kimi-k2.7-code:cloud': ['Lake'],
+      'kimi-k2.7-code:cloud': ['Sonnet'],
     })
     expect(sections.find((section) => section.key === 'openrouter')?.modelBadges).toEqual({
-      'openai/gpt-5.1': ['Sea'],
+      'openai/gpt-5.1': ['Opus'],
     })
   })
 })

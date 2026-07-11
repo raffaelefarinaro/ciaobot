@@ -26,7 +26,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from ciao import subagent_tracking
 from ciao.config import WorkspaceConfig, CLAUDE_AI_CONNECTORS, coerce_claude_ai_mcps
 from ciao.models import THINKING_LEVELS, ChatContext
-from ciao.model_tiers import canonical_tier, codex_tier_models
+from ciao.model_tiers import codex_tier_models
 from ciao.package_version import package_changelog, package_status, update_package
 from ciao.tool_path import login_shell_path, resolve_tool
 from ciao.providers.claude import _summarize_tool_input
@@ -3381,27 +3381,21 @@ async def list_models(request: Request) -> JSONResponse:
             "codex": codex_models,
         },
         "provider_defaults": {
-            "claude_work": canonical_tier(work_default),
-            "claude_personal": canonical_tier(personal_default),
+            "claude_work": work_default,
+            "claude_personal": personal_default,
             "openrouter": openrouter_default,
-            "codex": "sea" if codex_tiers else "",
+            "codex": "opus" if codex_tiers else "",
         },
-        # Provider-neutral tier mappings. Provider-native names are resolved
-        # only at the dispatch boundary.
+        # Per-backend tier models, so the picker can show
+        # "sonnet -> kimi (ollama) / gpt-5.6-terra (codex)". Tier names are
+        # resolved to provider-native ids only at the dispatch boundary.
         "alias_tiers": {
             "ollama": {
-                "river": config.ollama.haiku_model,
-                "lake": config.ollama.sonnet_model,
-                "sea": config.ollama.opus_model,
-                "ocean": config.ollama.opus_model,
+                "haiku": config.ollama.haiku_model,
+                "sonnet": config.ollama.sonnet_model,
+                "opus": config.ollama.opus_model,
             },
-            "openrouter": {
-                "river": openrouter_tiers.get("haiku", ""),
-                "lake": openrouter_tiers.get("sonnet", ""),
-                "sea": openrouter_tiers.get("opus", ""),
-                "ocean": openrouter_tiers.get("opus", ""),
-            } if openrouter_tiers else {},
-            "claude": {"river": "haiku", "lake": "sonnet", "sea": "opus", "ocean": "fable"},
+            "openrouter": openrouter_tiers,
             "codex": codex_tiers,
         },
         "backends": {
@@ -3449,14 +3443,12 @@ def _routines_payload(config, app_settings) -> dict:
         "insights_model": s.insights_model,
 
         "critique_models": s.critique_models,
-        "ollama_river_model": s.ollama_river_model,
-        "ollama_lake_model": s.ollama_lake_model,
-        "ollama_sea_model": s.ollama_sea_model,
-        "ollama_ocean_model": s.ollama_ocean_model,
-        "openrouter_river_model": s.openrouter_river_model,
-        "openrouter_lake_model": s.openrouter_lake_model,
-        "openrouter_sea_model": s.openrouter_sea_model,
-        "openrouter_ocean_model": s.openrouter_ocean_model,
+        "ollama_haiku_model": s.ollama_haiku_model,
+        "ollama_sonnet_model": s.ollama_sonnet_model,
+        "ollama_opus_model": s.ollama_opus_model,
+        "openrouter_haiku_model": s.openrouter_haiku_model,
+        "openrouter_sonnet_model": s.openrouter_sonnet_model,
+        "openrouter_opus_model": s.openrouter_opus_model,
         # What actually runs right now, after defaults.
         "title_model_effective": title_effective,
         "insights_model_effective": insights_effective,
@@ -3464,19 +3456,16 @@ def _routines_payload(config, app_settings) -> dict:
         "critique_models_effective": critique_effective,
         "alias_tiers": {
             "ollama": {
-                "river": config.ollama.haiku_model,
-                "lake": config.ollama.sonnet_model,
-                "sea": config.ollama.opus_model,
-                "ocean": s.ollama_ocean_model or config.ollama.opus_model,
+                "haiku": config.ollama.haiku_model,
+                "sonnet": config.ollama.sonnet_model,
+                "opus": config.ollama.opus_model,
             },
             "openrouter": {
-                "river": config.openrouter.haiku_model,
-                "lake": config.openrouter.sonnet_model,
-                "sea": config.openrouter.opus_model,
-                "ocean": s.openrouter_ocean_model or config.openrouter.opus_model,
+                "haiku": config.openrouter.haiku_model,
+                "sonnet": config.openrouter.sonnet_model,
+                "opus": config.openrouter.opus_model,
             } if config.openrouter.available else {},
-            "claude": {"river": "haiku", "lake": "sonnet", "sea": "opus", "ocean": "fable"},
-            "codex": {"river": "luna", "lake": "terra", "sea": "sol"},
+            "codex": {"haiku": "luna", "sonnet": "terra", "opus": "sol"},
         },
         "transcription": {
             "engine": config.transcription_engine,

@@ -2722,9 +2722,9 @@ class ProjectChatManager:
         if effective == "openrouter":
             target = tier_model(
                 model,
-                river=self._config.openrouter.haiku_model,
-                lake=self._config.openrouter.sonnet_model,
-                sea=self._config.openrouter.opus_model,
+                haiku=self._config.openrouter.haiku_model,
+                sonnet=self._config.openrouter.sonnet_model,
+                opus=self._config.openrouter.opus_model,
             )
             if target != model:
                 return target
@@ -2734,9 +2734,9 @@ class ProjectChatManager:
             return model
         target = tier_model(
             model,
-            river=self._config.ollama.haiku_model,
-            lake=self._config.ollama.sonnet_model,
-            sea=self._config.ollama.opus_model,
+            haiku=self._config.ollama.haiku_model,
+            sonnet=self._config.ollama.sonnet_model,
+            opus=self._config.ollama.opus_model,
         )
         if target and is_ollama_model(target, self._config.ollama):
             return target

@@ -1,62 +1,58 @@
-"""Provider-neutral model capability tiers and legacy alias migration."""
+"""Model capability tiers shared across providers.
+
+Ciaobot uses Claude Code's family names — haiku / sonnet / opus (and
+fable) — as the provider-neutral tier vocabulary. Every provider maps
+those names onto its own models, so schedules, routines, and chats can
+say "sonnet" regardless of which backend serves the request.
+"""
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 
-MODEL_TIERS = ("river", "lake", "sea", "ocean")
+MODEL_TIERS = ("haiku", "sonnet", "opus", "fable")
 
-LEGACY_TO_TIER = {
-    "haiku": "river",
-    "sonnet": "lake",
-    "opus": "sea",
-    "fable": "ocean",
-}
-TIER_TO_CLAUDE = {value: key for key, value in LEGACY_TO_TIER.items()}
-TIER_TO_CODEX_ALIAS = {
-    "river": "luna",
-    "lake": "terra",
-    "sea": "sol",
+# OpenAI ships tiered model families whose names line up with Claude's:
+# luna is the fast/affordable tier, terra the balanced everyday model,
+# sol the flagship (e.g. gpt-5.6-luna / gpt-5.6-terra / gpt-5.6-sol).
+CODEX_TIER_FAMILIES = {
+    "haiku": "luna",
+    "sonnet": "terra",
+    "opus": "sol",
+    "fable": "sol",
 }
 
 
 def canonical_tier(value: str) -> str:
-    """Return a canonical tier for either a new or legacy alias."""
-    normalized = (value or "").strip().lower()
-    if normalized in MODEL_TIERS:
-        return normalized
-    return LEGACY_TO_TIER.get(normalized, normalized)
+    """Normalize a tier name; non-tier values pass through unchanged."""
+    return (value or "").strip().lower()
 
 
-def claude_alias(value: str) -> str:
-    """Resolve a canonical tier to the alias understood by Claude Code."""
-    tier = canonical_tier(value)
-    return TIER_TO_CLAUDE.get(tier, value)
+def is_tier(value: str) -> bool:
+    return canonical_tier(value) in MODEL_TIERS
 
 
-def codex_alias(value: str) -> str:
-    """Return Ciaobot's public Codex alias for a canonical tier."""
-    tier = canonical_tier(value)
-    return TIER_TO_CODEX_ALIAS.get(tier, value)
-
-
-def tier_model(value: str, *, river: str, lake: str, sea: str, ocean: str = "") -> str:
-    """Resolve either generation of tier name to a provider model id."""
-    tier = canonical_tier(value)
+def tier_model(value: str, *, haiku: str, sonnet: str, opus: str, fable: str = "") -> str:
+    """Resolve a tier name to a provider model id; other values pass through."""
     return {
-        "river": river,
-        "lake": lake,
-        "sea": sea,
-        "ocean": ocean or sea,
-    }.get(tier, value)
+        "haiku": haiku,
+        "sonnet": sonnet,
+        "opus": opus,
+        "fable": fable or opus,
+    }.get(canonical_tier(value), value)
+
+
+def _name_segments(model_id: str) -> set[str]:
+    return set(re.split(r"[-_./:@ ]+", model_id.lower()))
 
 
 def codex_tier_models(catalog: Sequence[Mapping[str, object]]) -> dict[str, str]:
-    """Map Ciaobot's three Codex tiers to models visible to the account.
+    """Map Ciaobot's tiers to Codex models visible to the account.
 
-    Codex does not expose stable Luna/Terra/Sol model ids. Those are Ciaobot
-    aliases, resolved from the live catalog: Luna prefers a compact model,
-    Sol follows Codex's default, and Terra takes the next full-size option.
+    Matches by family name first (haiku→luna, sonnet→terra, opus→sol),
+    then falls back to catalog heuristics — compact names for haiku, the
+    catalog default for opus — so a renamed catalog still resolves.
     Sparse catalogs intentionally converge on the nearest available model.
     """
     visible = [item for item in catalog if not item.get("hidden")]
@@ -67,6 +63,11 @@ def codex_tier_models(catalog: Sequence[Mapping[str, object]]) -> dict[str, str]
     ]
     if not ids:
         return {}
+
+    def by_family(tier: str) -> str:
+        family = CODEX_TIER_FAMILIES[tier]
+        return next((m for m in ids if family in _name_segments(m)), "")
+
     default = next(
         (
             str(item.get("model") or item.get("id") or "")
@@ -75,18 +76,24 @@ def codex_tier_models(catalog: Sequence[Mapping[str, object]]) -> dict[str, str]
         ),
         ids[0],
     )
-    compact = next(
-        (model for model in ids if "mini" in model.lower() or "nano" in model.lower()),
+    flagship = by_family("opus") or default
+    compact = by_family("haiku") or next(
+        (m for m in ids if "mini" in m.lower() or "nano" in m.lower()),
         "",
     )
-    standard = next(
+    standard = by_family("sonnet") or next(
         (
-            model
-            for model in ids
-            if model != default
-            and "mini" not in model.lower()
-            and "nano" not in model.lower()
+            m
+            for m in ids
+            if m != flagship
+            and "mini" not in m.lower()
+            and "nano" not in m.lower()
         ),
-        default,
+        flagship,
     )
-    return {"river": compact or standard, "lake": standard, "sea": default}
+    return {
+        "haiku": compact or standard,
+        "sonnet": standard,
+        "opus": flagship,
+        "fable": flagship,
+    }

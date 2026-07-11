@@ -127,7 +127,7 @@ def test_list_models_exposes_openrouter_backend() -> None:
     data = json.loads(asyncio.run(list_models(Request(scope))).body)
     assert data["backends"]["openrouter"] is True
     assert "openrouter" in data["provider_models"]
-    assert data["alias_tiers"]["openrouter"]["lake"] == "anthropic/claude-sonnet-latest"
+    assert data["alias_tiers"]["openrouter"]["sonnet"] == "anthropic/claude-sonnet-latest"
 
 
 import json  # noqa: E402  (used by test_list_models above)

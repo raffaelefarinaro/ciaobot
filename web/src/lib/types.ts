@@ -282,7 +282,7 @@ export interface ModelsResponse {
     input_modalities: string[]
   }>
   model_reasoning_levels?: Record<string, string[]>
-  // Per-backend River/Lake/Sea/Ocean tier models and which
+  // Per-backend haiku/sonnet/opus tier models and which
   // backends are configured/available.
   alias_tiers?: Record<string, Record<string, string>>
   backends?: Record<string, boolean>
@@ -299,14 +299,12 @@ export interface RoutineSettings {
   insights_model: string
 
   critique_models: string
-  ollama_river_model: string
-  ollama_lake_model: string
-  ollama_sea_model: string
-  ollama_ocean_model: string
-  openrouter_river_model: string
-  openrouter_lake_model: string
-  openrouter_sea_model: string
-  openrouter_ocean_model: string
+  ollama_haiku_model: string
+  ollama_sonnet_model: string
+  ollama_opus_model: string
+  openrouter_haiku_model: string
+  openrouter_sonnet_model: string
+  openrouter_opus_model: string
   // What actually runs right now, after defaults.
   title_model_effective: string
   insights_model_effective: string

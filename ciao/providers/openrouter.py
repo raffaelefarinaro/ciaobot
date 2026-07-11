@@ -26,9 +26,7 @@ from ciao.model_tiers import tier_model
 
 logger = logging.getLogger(__name__)
 
-_ANTHROPIC_ALIASES = frozenset(
-    {"opus", "sonnet", "haiku", "fable", "river", "lake", "sea", "ocean"}
-)
+_ANTHROPIC_ALIASES = frozenset({"opus", "sonnet", "haiku", "fable"})
 
 # Shipped defaults: one Anthropic-family model per tier, reachable through
 # OpenRouter's Anthropic-compatible endpoint. Operators override via
@@ -86,9 +84,9 @@ def alias_model(alias: str, settings: OpenRouterSettings) -> str:
     """Resolve an Anthropic tier alias to an OpenRouter model id."""
     return tier_model(
         alias,
-        river=settings.haiku_model,
-        lake=settings.sonnet_model,
-        sea=settings.opus_model,
+        haiku=settings.haiku_model,
+        sonnet=settings.sonnet_model,
+        opus=settings.opus_model,
     )
 
 

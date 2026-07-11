@@ -19,14 +19,6 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 _VALID_ENGINES = {"", "cloud", "local"}
-_LEGACY_SETTING_KEYS = {
-    "ollama_haiku_model": "ollama_river_model",
-    "ollama_sonnet_model": "ollama_lake_model",
-    "ollama_opus_model": "ollama_sea_model",
-    "openrouter_haiku_model": "openrouter_river_model",
-    "openrouter_sonnet_model": "openrouter_lake_model",
-    "openrouter_opus_model": "openrouter_sea_model",
-}
 
 
 @dataclass(slots=True)
@@ -50,16 +42,14 @@ class AppSettings:
     tts_local_voice: str = ""
     # Comma-separated list of models for the critique / adversarial-review skill.
     critique_models: str = ""
-    # Provider-neutral River/Lake/Sea/Ocean tier mappings. Legacy
-    # haiku/sonnet/opus setting names are migrated while loading.
-    ollama_river_model: str = ""
-    ollama_lake_model: str = ""
-    ollama_sea_model: str = ""
-    ollama_ocean_model: str = ""
-    openrouter_river_model: str = ""
-    openrouter_lake_model: str = ""
-    openrouter_sea_model: str = ""
-    openrouter_ocean_model: str = ""
+    # Per-backend tier aliases used when a chat asks for haiku/sonnet/opus
+    # while the workspace routes through Ollama or OpenRouter.
+    ollama_haiku_model: str = ""
+    ollama_sonnet_model: str = ""
+    ollama_opus_model: str = ""
+    openrouter_haiku_model: str = ""
+    openrouter_sonnet_model: str = ""
+    openrouter_opus_model: str = ""
 
 
 class AppSettingsStore:
@@ -80,7 +70,6 @@ class AppSettingsStore:
         except (OSError, ValueError):
             logger.warning("Unreadable app settings at %s; using defaults", self._path)
             return AppSettings()
-        raw = {_LEGACY_SETTING_KEYS.get(k, k): v for k, v in raw.items()}
         known = {f.name for f in fields(AppSettings)}
         cleaned = {
             k: v.strip()
@@ -103,8 +92,7 @@ class AppSettingsStore:
         value so the API route can 400 instead of persisting garbage.
         """
         known = {f.name for f in fields(AppSettings)}
-        for raw_key, value in changes.items():
-            key = _LEGACY_SETTING_KEYS.get(raw_key, raw_key)
+        for key, value in changes.items():
             if key not in known:
                 continue
             if not isinstance(value, str):
@@ -134,14 +122,12 @@ class AppSettingsStore:
                 "tts_cloud_voice": config.tts_cloud_voice,
                 "tts_local_voice": config.tts_local_voice,
                 "critique_models": config.critique_models,
-                "ollama_river_model": config.ollama.haiku_model,
-                "ollama_lake_model": config.ollama.sonnet_model,
-                "ollama_sea_model": config.ollama.opus_model,
-                "ollama_ocean_model": config.ollama.opus_model,
-                "openrouter_river_model": config.openrouter.haiku_model,
-                "openrouter_lake_model": config.openrouter.sonnet_model,
-                "openrouter_sea_model": config.openrouter.opus_model,
-                "openrouter_ocean_model": config.openrouter.opus_model,
+                "ollama_haiku_model": config.ollama.haiku_model,
+                "ollama_sonnet_model": config.ollama.sonnet_model,
+                "ollama_opus_model": config.ollama.opus_model,
+                "openrouter_haiku_model": config.openrouter.haiku_model,
+                "openrouter_sonnet_model": config.openrouter.sonnet_model,
+                "openrouter_opus_model": config.openrouter.opus_model,
             }
         d = self._defaults
         s = self.settings
@@ -160,13 +146,13 @@ class AppSettingsStore:
         config.critique_models = s.critique_models or d["critique_models"]
         config.ollama = replace(
             config.ollama,
-            haiku_model=s.ollama_river_model or d["ollama_river_model"],
-            sonnet_model=s.ollama_lake_model or d["ollama_lake_model"],
-            opus_model=s.ollama_sea_model or d["ollama_sea_model"],
+            haiku_model=s.ollama_haiku_model or d["ollama_haiku_model"],
+            sonnet_model=s.ollama_sonnet_model or d["ollama_sonnet_model"],
+            opus_model=s.ollama_opus_model or d["ollama_opus_model"],
         )
         config.openrouter = replace(
             config.openrouter,
-            haiku_model=s.openrouter_river_model or d["openrouter_river_model"],
-            sonnet_model=s.openrouter_lake_model or d["openrouter_lake_model"],
-            opus_model=s.openrouter_sea_model or d["openrouter_sea_model"],
+            haiku_model=s.openrouter_haiku_model or d["openrouter_haiku_model"],
+            sonnet_model=s.openrouter_sonnet_model or d["openrouter_sonnet_model"],
+            opus_model=s.openrouter_opus_model or d["openrouter_opus_model"],
         )

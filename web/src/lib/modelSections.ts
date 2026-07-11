@@ -13,23 +13,20 @@ export interface ModelSection {
 type AliasTierMap = Record<string, Record<string, string>>
 
 const TIER_LABELS: Record<string, string> = {
-  river: 'River',
-  lake: 'Lake',
-  sea: 'Sea',
-  ocean: 'Ocean',
+  haiku: 'Haiku',
+  sonnet: 'Sonnet',
+  opus: 'Opus',
+  fable: 'Fable',
 }
 
-const ANTHROPIC_MODELS = ['river', 'lake', 'sea', 'ocean']
-const ANTHROPIC_BADGES = {
-  river: ['Haiku'],
-  lake: ['Sonnet'],
-  sea: ['Opus'],
-  ocean: ['Fable'],
-}
-const CODEX_ALIAS_LABELS: Record<string, string> = {
-  river: 'Luna',
-  lake: 'Terra',
-  sea: 'Sol',
+const ANTHROPIC_MODELS = ['haiku', 'sonnet', 'opus', 'fable']
+// OpenAI's tiered families line up with Claude's: luna≈haiku, terra≈sonnet,
+// sol≈opus. The picker offers the shared tier names; the badge shows the
+// catalog model each tier resolves to.
+const CODEX_FAMILY_LABELS: Record<string, string> = {
+  haiku: 'Luna',
+  sonnet: 'Terra',
+  opus: 'Sol',
 }
 
 export function parseModelList(raw: string): string[] {
@@ -97,14 +94,14 @@ export function sectionsFromModelsResponse(response: ModelsResponse | null): Mod
   const ollamaModels = orderedUnique(response.ollama_models || [])
   const openrouterModels = orderedUnique(response.openrouter_models || [])
 
-  sections.push({ key: 'anthropic', label: 'Anthropic', models: ANTHROPIC_MODELS, modelBadges: ANTHROPIC_BADGES })
+  sections.push({ key: 'anthropic', label: 'Anthropic', models: ANTHROPIC_MODELS })
 
   const codexTiers = response.alias_tiers?.codex || {}
-  const codexModels = ['river', 'lake', 'sea'].filter((tier) => Boolean(codexTiers[tier]))
+  const codexModels = ['haiku', 'sonnet', 'opus'].filter((tier) => Boolean(codexTiers[tier]))
   if (codexModels.length) {
     const modelBadges: Record<string, string[]> = {}
     for (const tier of codexModels) {
-      modelBadges[tier] = [CODEX_ALIAS_LABELS[tier], codexTiers[tier]].filter(Boolean)
+      modelBadges[tier] = [CODEX_FAMILY_LABELS[tier], codexTiers[tier]].filter(Boolean)
     }
     sections.push({ key: 'codex', label: 'OpenAI Codex', models: codexModels, modelBadges })
   }
@@ -145,7 +142,7 @@ export function sectionsFromModelOptions(
   const sections: ModelSection[] = []
 
   if (options.anthropic?.length) {
-    sections.push({ key: 'anthropic', label: 'Anthropic', models: ANTHROPIC_MODELS, modelBadges: ANTHROPIC_BADGES })
+    sections.push({ key: 'anthropic', label: 'Anthropic', models: ANTHROPIC_MODELS })
   }
 
   const ollamaAvailable = !!backends.ollama

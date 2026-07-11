@@ -34,9 +34,7 @@ logger = logging.getLogger(__name__)
 # Anthropic model aliases (and real claude-* ids) must never be rerouted to
 # Ollama by the routine helpers below — they belong to the Anthropic
 # subscription path.
-_ANTHROPIC_ALIASES = frozenset(
-    {"opus", "sonnet", "haiku", "fable", "river", "lake", "sea", "ocean"}
-)
+_ANTHROPIC_ALIASES = frozenset({"opus", "sonnet", "haiku", "fable"})
 
 
 @dataclass(frozen=True, slots=True)

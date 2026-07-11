@@ -14,7 +14,7 @@ from typing import Any
 
 from ciao.context.entity_tagger import find_entities, format_entities
 from ciao.memory_injector import build_memory_block, system_prompt_payload
-from ciao.model_tiers import canonical_tier, codex_tier_models
+from ciao.model_tiers import canonical_tier, codex_tier_models, is_tier
 from ciao.models import (
     AgentRequest,
     AssistantTextDelta,
@@ -588,7 +588,7 @@ class CodexProvider(BaseSDKProvider):
 
     async def _ensure_thread(self, request: AgentRequest) -> str:
         requested_model = request.model
-        if canonical_tier(requested_model) in {"river", "lake", "sea"}:
+        if is_tier(requested_model):
             catalog = await self.model_catalog(self.workspace_root)
             requested_model = codex_tier_models(catalog).get(
                 canonical_tier(requested_model), ""

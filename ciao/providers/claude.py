@@ -65,7 +65,6 @@ from ciao.models import (
     ToolUseEvent,
 )
 from ciao.memory_injector import build_memory_block, system_prompt_payload
-from ciao.model_tiers import claude_alias
 from ciao.observability.hooks import (
     build_user_prompt_submit_hook,
     build_web_search_post_tooluse_hook,
@@ -341,7 +340,7 @@ class ClaudeProvider(BaseSDKProvider):
         return self._session_id
 
     async def _ensure_connected(self, request: AgentRequest) -> ClaudeSDKClient:
-        requested_model = claude_alias(request.model)
+        requested_model = request.model
         if (
             self._client is not None
             and self._connected

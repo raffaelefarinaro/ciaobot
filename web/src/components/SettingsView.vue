@@ -859,7 +859,7 @@
             <div class="settings-card-header">
               <p class="section-title">Provider alias models</p>
               <p class="hint">
-                Ciaobot uses River, Lake, Sea, and Ocean everywhere, then maps each tier to the provider's own model names.
+                Ciaobot uses Haiku, Sonnet, and Opus everywhere, then maps each tier to the provider's own model names.
               </p>
             </div>
             <div class="alias-provider-bar">
@@ -900,8 +900,8 @@
               </div>
               <p v-if="!selectedTierProviderSection.configurable" class="hint hint--info tier-provider-note">
                 {{ selectedTierProviderSection.key === 'codex'
-                  ? 'Codex maps River to Luna, Lake to Terra, and Sea to Sol. Ocean has no Codex counterpart yet.'
-                  : 'Claude maps River to Haiku, Lake to Sonnet, Sea to Opus, and Ocean to Fable.' }}
+                  ? 'Codex maps Haiku to Luna, Sonnet to Terra, and Opus to Sol — OpenAI\'s fast, balanced, and flagship families.'
+                  : 'Claude runs Haiku, Sonnet, and Opus natively.' }}
               </p>
               <p v-else-if="!selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
                 {{ tierProviderUnavailableHint }}
@@ -1743,7 +1743,7 @@ const routinesResult = ref('')
 
 type AliasProviderKey = 'claude' | 'codex' | 'ollama' | 'openrouter'
 type TierProviderKey = Exclude<AliasProviderKey, 'claude' | 'codex'>
-type TierKey = 'river' | 'lake' | 'sea' | 'ocean'
+type TierKey = 'haiku' | 'sonnet' | 'opus'
 type RoutineModelKey = 'title_model' | 'insights_model'
 type RoutineProviderValue = 'automatic' | 'apple' | 'custom' | AliasProviderKey
 
@@ -1759,34 +1759,29 @@ type AliasProviderSection = {
   available: boolean
 }
 type TierSettingKey =
-  | 'ollama_river_model'
-  | 'ollama_lake_model'
-  | 'ollama_sea_model'
-  | 'ollama_ocean_model'
-  | 'openrouter_river_model'
-  | 'openrouter_lake_model'
-  | 'openrouter_sea_model'
-  | 'openrouter_ocean_model'
+  | 'ollama_haiku_model'
+  | 'ollama_sonnet_model'
+  | 'ollama_opus_model'
+  | 'openrouter_haiku_model'
+  | 'openrouter_sonnet_model'
+  | 'openrouter_opus_model'
 
 const modelTiers: { key: TierKey; label: string }[] = [
-  { key: 'river', label: 'River' },
-  { key: 'lake', label: 'Lake' },
-  { key: 'sea', label: 'Sea' },
-  { key: 'ocean', label: 'Ocean' },
+  { key: 'haiku', label: 'Haiku' },
+  { key: 'sonnet', label: 'Sonnet' },
+  { key: 'opus', label: 'Opus' },
 ]
 
 const tierSettingKeys: Record<TierProviderKey, Record<TierKey, TierSettingKey>> = {
   ollama: {
-    river: 'ollama_river_model',
-    lake: 'ollama_lake_model',
-    sea: 'ollama_sea_model',
-    ocean: 'ollama_ocean_model',
+    haiku: 'ollama_haiku_model',
+    sonnet: 'ollama_sonnet_model',
+    opus: 'ollama_opus_model',
   },
   openrouter: {
-    river: 'openrouter_river_model',
-    lake: 'openrouter_lake_model',
-    sea: 'openrouter_sea_model',
-    ocean: 'openrouter_ocean_model',
+    haiku: 'openrouter_haiku_model',
+    sonnet: 'openrouter_sonnet_model',
+    opus: 'openrouter_opus_model',
   },
 }
 
@@ -1796,8 +1791,8 @@ const routineEffectiveKeys: Record<RoutineModelKey, keyof RoutineSettings> = {
 }
 
 const routineDefaultTiers: Record<RoutineModelKey, TierKey> = {
-  title_model: 'river',
-  insights_model: 'lake',
+  title_model: 'haiku',
+  insights_model: 'sonnet',
 }
 
 async function fetchRoutines() {
@@ -2021,11 +2016,11 @@ function routineEffectiveModel(key: RoutineModelKey): string {
 
 function inferRoutineModel(model: string): { provider: RoutineProviderValue; tier: TierKey } {
   const raw = model.trim()
-  if (!raw) return { provider: 'automatic', tier: 'lake' }
-  if (raw === 'apfel') return { provider: 'apple', tier: 'river' }
-  const legacyTiers: Record<string, TierKey> = { haiku: 'river', sonnet: 'lake', opus: 'sea', fable: 'ocean' }
-  if (legacyTiers[raw]) {
-    return { provider: 'claude', tier: legacyTiers[raw] }
+  if (!raw) return { provider: 'automatic', tier: 'sonnet' }
+  if (raw === 'apfel') return { provider: 'apple', tier: 'haiku' }
+  const claudeTiers: Record<string, TierKey> = { haiku: 'haiku', sonnet: 'sonnet', opus: 'opus', fable: 'opus' }
+  if (claudeTiers[raw]) {
+    return { provider: 'claude', tier: claudeTiers[raw] }
   }
 
   const providers: TierProviderKey[] = ['ollama', 'openrouter']
@@ -2037,7 +2032,7 @@ function inferRoutineModel(model: string): { provider: RoutineProviderValue; tie
     }
   }
 
-  return { provider: 'custom', tier: 'lake' }
+  return { provider: 'custom', tier: 'sonnet' }
 }
 
 function routineProviderValue(key: RoutineModelKey): RoutineProviderValue {
@@ -2981,11 +2976,11 @@ function isCustomWorkspaceModel(model: string): boolean {
 function workspaceModelSectionsForProvider(provider: WorkspaceProvider, currentModelValue: string): ModelSection[] {
   if (provider === 'codex') {
     const mappings = workspaceModels.value?.alias_tiers?.codex || {}
-    const models: string[] = (['river', 'lake', 'sea'] as TierKey[]).filter((tier) => Boolean(mappings[tier]))
+    const models: string[] = (['haiku', 'sonnet', 'opus'] as TierKey[]).filter((tier) => Boolean(mappings[tier]))
     const badges: Record<string, string[]> = {
-      river: ['Luna', mappings.river].filter(Boolean),
-      lake: ['Terra', mappings.lake].filter(Boolean),
-      sea: ['Sol', mappings.sea].filter(Boolean),
+      haiku: ['Luna', mappings.haiku].filter(Boolean),
+      sonnet: ['Terra', mappings.sonnet].filter(Boolean),
+      opus: ['Sol', mappings.opus].filter(Boolean),
     }
     const current = currentModelValue.trim()
     if (current && !models.includes(current)) models.push(current)
@@ -2993,7 +2988,7 @@ function workspaceModelSectionsForProvider(provider: WorkspaceProvider, currentM
       ? [{ key: 'codex', label: 'OpenAI Codex', models, modelBadges: badges }]
       : []
   }
-  const tiers: TierKey[] = ['river', 'lake', 'sea', 'ocean']
+  const tiers: TierKey[] = ['haiku', 'sonnet', 'opus']
   const modelBadges: Record<string, string[]> = {}
   
   for (const tier of tiers) {

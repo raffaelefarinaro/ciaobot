@@ -815,7 +815,7 @@ const titleValue = ref('')
 const dragOver = ref(false)
 const chat = computed(() => store.activeChat!)
 const project = computed(() => store.activeProject)
-const models = ref<string[]>(['river', 'lake', 'sea', 'ocean'])
+const models = ref<string[]>(['haiku', 'sonnet', 'opus', 'fable'])
 const providerModels = ref<Record<string, string[]>>({})
 const providerDefaults = ref<Record<string, string>>({})
 const modelsResponse = ref<ModelsResponse | null>(null)
@@ -996,7 +996,7 @@ type ProviderKey = 'claude' | 'codex'
 type BucketKey = 'claude_work' | 'claude_personal' | 'openrouter' | 'codex'
 type ModelBucketValue = 'work' | 'personal' | 'openrouter' | ''
 type RouteKind = 'anthropic' | 'ollama' | 'ollama-local' | 'openrouter' | 'codex'
-type TierAlias = 'river' | 'lake' | 'sea' | 'ocean'
+type TierAlias = 'haiku' | 'sonnet' | 'opus' | 'fable'
 
 const BUCKET_DEFS: { key: BucketKey; label: string; provider: ProviderKey }[] = [
   { key: 'claude_work', label: 'Claude', provider: 'claude' },
@@ -2404,15 +2404,9 @@ function toggleModelPicker() {
 
 function tierAlias(model: string): TierAlias | null {
   const normalized = model.trim().toLowerCase()
-  const legacy: Record<string, TierAlias> = {
-    haiku: 'river',
-    sonnet: 'lake',
-    opus: 'sea',
-    fable: 'ocean',
-  }
-  return normalized === 'river' || normalized === 'lake' || normalized === 'sea' || normalized === 'ocean'
+  return normalized === 'haiku' || normalized === 'sonnet' || normalized === 'opus' || normalized === 'fable'
     ? normalized
-    : legacy[normalized] || null
+    : null
 }
 
 function canonicalTier(model: string): string {
