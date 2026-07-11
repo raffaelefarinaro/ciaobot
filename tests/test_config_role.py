@@ -141,6 +141,27 @@ def test_missing_auth_token_enters_bootstrap_mode_with_persisted_token(tmp_path:
     assert restarted.pwa_auth_token == config.pwa_auth_token
 
 
+def test_missing_token_without_auth_persists_random_secret_not_a_constant(tmp_path: Path) -> None:
+    env = {"CIAO_WORKSPACE": str(tmp_path)}  # no PWA_AUTH_TOKEN, auth not required
+
+    config = CiaoConfig.from_env(env)
+
+    assert config.bootstrap_mode is False
+    assert config.pwa_auth_token != "ciao-insecure-fallback-secret-key"
+    assert len(config.pwa_auth_token) >= 32
+    secret_path = tmp_path / ".runtime" / "session-secret"
+    assert secret_path.read_text(encoding="utf-8").strip() == config.pwa_auth_token
+
+    # Secret is stable across restarts, not regenerated each load.
+    restarted = CiaoConfig.from_env(env)
+    assert restarted.pwa_auth_token == config.pwa_auth_token
+
+
+def test_fallback_secret_constant_is_gone_from_source() -> None:
+    source = Path(__file__).parents[1] / "ciao" / "config.py"
+    assert "ciao-insecure-fallback-secret-key" not in source.read_text(encoding="utf-8")
+
+
 def test_explicit_auth_token_stays_out_of_bootstrap_mode(tmp_path: Path) -> None:
     config = _config(CIAO_WORKSPACE=str(tmp_path))
 

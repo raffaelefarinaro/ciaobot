@@ -2,7 +2,7 @@
 
 Review the past 7 days (archived chat insights under the vault's `Logs/Chats/` and recent schedule runs) for concrete setup improvements.
 
-Use the **memory** subagent for item 3 and **doc-updater** for item 4 if you delegate prompt hygiene.
+Use the **memory** subagent for item 3; handle item 4 (prompt hygiene) directly — no dedicated subagent ships for it.
 
 ## Checklist
 

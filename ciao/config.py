@@ -501,7 +501,13 @@ class CiaoConfig:
             ).expanduser().resolve()
             runtime_default = Path(".runtime")
             if not pwa_auth_token:
-                pwa_auth_token = "ciao-insecure-fallback-secret-key"
+                # No token configured (auth is typically off on this branch).
+                # Persist a random per-workspace secret instead of a shared
+                # constant, so the session-signing key is never a publicly
+                # known value baked into the source on any install.
+                pwa_auth_token = _read_or_create_secret(
+                    workspace_root / ".runtime" / "session-secret"
+                )
 
         vault_root_raw = source.get("CIAO_VAULT_ROOT", "").strip()
         if vault_root_raw:

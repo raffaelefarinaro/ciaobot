@@ -129,6 +129,31 @@ def test_export_public_tree_copies_only_allowlisted_paths(tmp_path: Path) -> Non
     assert not (dest / "scripts" / "morning-briefing.py").exists()
 
 
+def test_env_example_is_exported_but_real_dotenv_files_are_forbidden(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    dest = tmp_path / "dest"
+    _write(source / ".env.example", "PWA_AUTH_TOKEN=changeme\n")
+    _write(source / ".env", "PWA_AUTH_TOKEN=secret\n")
+    _write(source / ".env.local", "PWA_AUTH_TOKEN=secret\n")
+
+    # `.env.example` is allowlisted and ships; `.env`/`.env.local` never do.
+    assert is_public_export_allowlisted(".env.example")
+    copied = export_public_tree(source, dest)
+    assert ".env.example" in copied
+    assert ".env" not in copied
+    assert ".env.local" not in copied
+    assert (dest / ".env.example").is_file()
+
+    # Scanning must not flag the template, but must still flag real dotenv files.
+    report = scan_public_export(dest)
+    assert report.ok
+    forbidden = scan_public_export(source)
+    flagged = {finding.path for finding in forbidden.findings if finding.kind == "forbidden_path"}
+    assert ".env" in flagged
+    assert ".env.local" in flagged
+    assert ".env.example" not in flagged
+
+
 def test_export_public_tree_uses_generic_claude_overlay(tmp_path: Path) -> None:
     source = tmp_path / "source"
     dest = tmp_path / "dest"
