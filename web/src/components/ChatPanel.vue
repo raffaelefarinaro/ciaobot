@@ -1180,8 +1180,9 @@ const bucketLocked = computed(() => {
   return Boolean(c.session_id) || store.activeMessages.length > 0
 })
 
-// Thinking levels are provider-native (claude → SDK effort, pi → --thinking),
-// so they key off the provider, not the bucket.
+// Thinking levels are provider-native (claude → SDK effort, codex → reasoning
+// effort from the model catalog), so they key off the provider — narrowed per
+// model when the catalog reports levels — not the bucket.
 const filteredThinkingLevels = computed(() => {
   const modelLevels = modelsResponse.value?.model_reasoning_levels?.[chat.value?.model || '']
   if (modelLevels?.length) return modelLevels

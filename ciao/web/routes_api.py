@@ -1736,6 +1736,65 @@ async def create_project_chat(request: Request) -> JSONResponse:
 
 # ── Chats ────────────────────────────────────────────────────────────────
 
+def _codex_reasoning_levels(catalog: list[dict]) -> dict[str, list[str]]:
+    """Per-model reasoning levels from the codex catalog, tier aliases included."""
+    levels: dict[str, list[str]] = {}
+    for item in catalog:
+        if item.get("hidden"):
+            continue
+        model_id = str(item.get("model") or item.get("id") or "")
+        if not model_id:
+            continue
+        efforts = item.get("supportedReasoningEfforts")
+        levels[model_id] = [
+            str(option.get("reasoningEffort"))
+            for option in efforts or []
+            if isinstance(option, dict) and option.get("reasoningEffort")
+        ]
+    for tier, model_id in codex_tier_models(catalog).items():
+        levels[tier] = list(levels.get(model_id, []))
+    return levels
+
+
+async def _unsupported_codex_level_error(
+    config, pcm, chat_id: str, body: dict
+) -> JSONResponse | None:
+    """Reject a codex thinking level the target model doesn't support.
+
+    ``update_chat`` validates against the static ``THINKING_LEVELS`` union;
+    the model catalog is authoritative when discovery works, so narrow the
+    check to the target model here. Fails open when the catalog is
+    unavailable or has no levels for the model, leaving the union check as
+    the backstop.
+    """
+    level = body.get("thinking_level")
+    if not level:
+        return None
+    chat = pcm.get_chat(chat_id)
+    if chat is None:
+        return None
+    provider = body.get("provider") or chat.provider
+    if provider != "codex":
+        return None
+    model = body.get("model") or chat.model
+    try:
+        catalog = await CodexProvider.model_catalog(config.workspace_root)
+    except Exception:
+        return None
+    allowed = _codex_reasoning_levels(catalog).get(model)
+    if allowed and level not in allowed:
+        return JSONResponse(
+            {
+                "error": (
+                    f"Unknown thinking level '{level}' for codex model "
+                    f"'{model}' (allowed: {', '.join(allowed)})"
+                )
+            },
+            status_code=400,
+        )
+    return None
+
+
 async def list_all_chats(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     return JSONResponse(pcm.list_chats_dicts())
@@ -1749,6 +1808,11 @@ async def chat_detail(request: Request) -> JSONResponse:
         return JSONResponse({"ok": ok})
     # PATCH
     body = await request.json()
+    level_error = await _unsupported_codex_level_error(
+        request.app.state.config, pcm, chat_id, body
+    )
+    if level_error is not None:
+        return level_error
     try:
         chat = pcm.update_chat(
             chat_id,
@@ -3326,18 +3390,12 @@ async def list_models(request: Request) -> JSONResponse:
         codex_models[0] if codex_models else "",
     )
     codex_tiers = codex_tier_models(codex_catalog)
-    model_reasoning_levels: dict[str, list[str]] = {}
+    model_reasoning_levels = _codex_reasoning_levels(codex_catalog)
     codex_model_metadata: dict[str, dict] = {}
     for item in visible_codex:
         model_id = str(item.get("model") or item.get("id") or "")
         if not model_id:
             continue
-        efforts = item.get("supportedReasoningEfforts")
-        model_reasoning_levels[model_id] = [
-            str(option.get("reasoningEffort"))
-            for option in efforts or []
-            if isinstance(option, dict) and option.get("reasoningEffort")
-        ]
         codex_model_metadata[model_id] = {
             "display_name": str(item.get("displayName") or model_id),
             "description": str(item.get("description") or ""),
@@ -3346,8 +3404,6 @@ async def list_models(request: Request) -> JSONResponse:
             ),
             "input_modalities": list(item.get("inputModalities") or []),
         }
-    for tier, model_id in codex_tiers.items():
-        model_reasoning_levels[tier] = list(model_reasoning_levels.get(model_id, []))
     # Cloud allowlist + locally-discovered daemon models both count as
     # "Ollama" for bucketing: they show in the personal Claude bucket,
     # never in the work (Anthropic subscription) bucket.
