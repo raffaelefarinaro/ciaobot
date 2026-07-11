@@ -373,6 +373,10 @@ class CiaoConfig:
         workspace_config = self.workspace(workspace)
         if workspace_config and workspace_config.default_model:
             return workspace_config.default_model
+        if workspace_config and workspace_config.default_provider == "codex":
+            # Empty means "use the Codex account's current catalog default";
+            # app-server resolves it and the chat records the effective model.
+            return ""
         return self.claude_default_model
 
     def model_bucket_for_workspace(self, workspace: str | None) -> str:
@@ -388,6 +392,8 @@ class CiaoConfig:
                 return "ollama"
             if provider == "claude":
                 return "work"
+            if provider == "codex":
+                return ""
         if workspace == "work":
             return "work"
         return "personal"
@@ -412,7 +418,10 @@ class CiaoConfig:
 
     def default_provider_for_workspace(self, workspace: str | None) -> str:
         workspace_config = self.workspace(workspace)
-        if workspace_config and workspace_config.default_provider == "claude":
+        if (
+            workspace_config
+            and workspace_config.default_provider in {"claude", "codex"}
+        ):
             return workspace_config.default_provider
         return "claude"
 
@@ -829,4 +838,3 @@ def refresh_cloud_ollama_models(config: "CiaoConfig") -> bool:
 
 # Backward-compatible alias used by project_chats.py and other modules
 BridgeConfig = CiaoConfig
-

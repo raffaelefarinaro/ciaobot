@@ -260,6 +260,22 @@ async def _async_main() -> int:
 
     asyncio.create_task(check_claude_code())
 
+    tracker.start("connect_codex")
+
+    async def check_codex():
+        try:
+            from ciao.providers.codex import codex_login_status
+
+            status = await asyncio.to_thread(codex_login_status)
+            if status.get("ok"):
+                tracker.done("connect_codex", str(status.get("detail") or "connected"))
+            else:
+                tracker.fail("connect_codex", str(status.get("detail") or "not connected"))
+        except Exception as exc:
+            tracker.fail("connect_codex", f"not found: {exc}")
+
+    asyncio.create_task(check_codex())
+
     # Sync workspace before anything else
     if config.auto_sync_on_start:
         tracker.start("sync_workspace")
@@ -330,11 +346,23 @@ async def _async_main() -> int:
     def _resolve_schedule_target(entry):
         # Empty entry.model / entry.mode means "use the current default".
         ctx = ChatContext(chat_id=0)
-        model = entry.model or state.get_selected_model(ctx)
         mode = entry.mode or state.get_mode(ctx)
-        # Schedule provider is optional ("" inherits target chat's provider
-        # for fixed-chat schedules or "claude" for new chats via web_project_id).
-        provider = entry.provider
+        target_chat = (
+            pcm.get_chat(entry.web_chat_id)
+            if getattr(entry, "web_chat_id", None)
+            else None
+        )
+        if target_chat is not None:
+            provider = target_chat.provider
+            model = entry.model or target_chat.model
+        elif getattr(entry, "web_project_id", None):
+            provider = entry.provider or pcm.schedule_default_provider(
+                entry.web_project_id
+            )
+            model = entry.model or pcm.schedule_default_model(entry.web_project_id)
+        else:
+            provider = entry.provider
+            model = entry.model or state.get_selected_model(ctx)
         return ("claude", model, mode, provider)
 
     schedule_manager = ScheduleManager(

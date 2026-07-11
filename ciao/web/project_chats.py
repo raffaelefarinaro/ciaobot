@@ -38,11 +38,16 @@ from ciao.providers.ollama import (
     is_local_ollama_model,
     is_ollama_model,
 )
+from ciao.providers.codex import (
+    CodexProvider,
+    codex_collab_tree_counts,
+)
 from ciao.providers.routing import intended_backend, routing_env_for_model
-from ciao.provider_service import ProviderService
+from ciao.provider_service import ProviderService, supported_providers
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore, _claude_projects_dir
 from ciao.web.chat_broker import ChatStream, ChatStreamBroker, EventsHub
+from ciao.web.commands import expand_slash_command
 from ciao.web.file_snapshots import SnapshotStore
 
 logger = logging.getLogger(__name__)
@@ -144,7 +149,7 @@ def _parse_iso(value: str) -> datetime | None:
 def _provider_label(provider: str) -> str:
     labels = {
         "claude": "Claude",
-        "pi": "Pi",
+        "codex": "Codex",
     }
     return labels.get(provider, provider or "Provider")
 
@@ -308,6 +313,7 @@ async def _generate_chat_title(
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
     timeout_s: float = 15.0,
+    provider: str = "claude",
 ) -> str | None:
     """Summarize the first user message into a short chat title.
 
@@ -379,11 +385,18 @@ async def _generate_chat_title(
             model=fallback_model,
             env=env,
             timeout_s=timeout_s,
+            provider=provider,
+            cwd=cwd,
         )
         if text:
             return _clean_title(text, user_snippet)
     except Exception as exc:
-        logger.info("Title generation via Claude %s failed: %s", fallback_model, exc)
+        logger.info(
+            "Title generation via %s %s failed: %s",
+            provider,
+            fallback_model or "account default",
+            exc,
+        )
         return _fallback_title(user_snippet)
 
     return _fallback_title(user_snippet)
@@ -565,6 +578,7 @@ class ScheduleRunOutcome:
     completed: bool = False
     is_error: bool = False
     permission_requested: bool = False
+    question_requested: bool = False
     stream_error: bool = False
     retry_pending: bool = False
     final_text: str = ""
@@ -580,6 +594,7 @@ def _schedule_run_clean(outcome: ScheduleRunOutcome) -> bool:
         outcome.completed
         and not outcome.is_error
         and not outcome.permission_requested
+        and not outcome.question_requested
         and not outcome.stream_error
         and not outcome.retry_pending
         and not outcome.subagents_pending
@@ -1770,6 +1785,11 @@ class ProjectChatManager:
         if not chat.session_id:
             return True  # new chat, no session yet, treat as local
 
+        # Codex threads are owned by Codex and can be resumed by id through
+        # app-server. There is no public local thread-file contract to probe.
+        if chat.provider == "codex":
+            return True
+
         # Default / "claude" provider
         projects_dir = _claude_projects_dir(self._config.workspace_root)
         if (projects_dir / f"{chat.session_id}.jsonl").exists():
@@ -1807,7 +1827,7 @@ class ProjectChatManager:
     ) -> ChatInfo:
         if project_id not in self._projects:
             raise ValueError(f"Project '{project_id}' not found")
-        if provider is not None and provider not in ("claude",):
+        if provider is not None and provider not in supported_providers():
             raise ValueError(f"Unknown provider '{provider}'")
         if not self._model_bucket_allowed(model_bucket):
             raise ValueError(f"Unknown model bucket '{model_bucket}'")
@@ -1930,7 +1950,7 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is None:
             return None
-        if provider is not None and provider not in ("claude",):
+        if provider is not None and provider not in supported_providers():
             raise ValueError(f"Unknown provider '{provider}'")
         if not self._model_bucket_allowed(model_bucket):
             raise ValueError(f"Unknown model bucket '{model_bucket}'")
@@ -1966,7 +1986,7 @@ class ProjectChatManager:
             new_provider = provider if provider is not None else chat.provider
             new_bucket = model_bucket if model_bucket is not None else chat.model_bucket
             # Cross-provider switches mid-chat would silently break: the
-            # spawned CLI subprocess (Claude SDK or Pi) has env baked in at
+            # spawned CLI subprocess has provider/routing state baked in at
             # spawn time, so swapping providers, buckets, or moving between
             # Anthropic and Ollama endpoints within ClaudeProvider would
             # point the next API call at the wrong upstream. Reject when the
@@ -1985,9 +2005,10 @@ class ProjectChatManager:
                 new_bucket=new_bucket,
             ):
                 raise ValueError(
-                    "Can't switch between Claude (Work), Claude (Personal), "
-                    "and Pi (Personal) once a chat has started. Same-bucket "
-                    "model swaps are fine; close this chat for a new bucket."
+                    "Can't switch providers or model backends once a chat has "
+                    "started. Same-backend model swaps are fine; use handover "
+                    "to continue this chat with another provider, or close this "
+                    "chat and start a new one."
                 )
             chat.model = new_model
             chat.provider = new_provider
@@ -2104,7 +2125,7 @@ class ProjectChatManager:
             return None
         if chat.archived:
             raise ValueError("Cannot hand over an archived chat")
-        if provider not in ("claude",):
+        if provider not in supported_providers():
             raise ValueError(f"Unknown provider '{provider}'")
         clean_model = (model or "").strip()
         if not clean_model:
@@ -2165,7 +2186,7 @@ class ProjectChatManager:
         provider = self._providers.pop(chat_id, None)
         if provider:
             asyncio.ensure_future(provider.disconnect())
-        if chat.session_id:
+        if chat.session_id and chat.provider == "claude":
             self._transcripts.delete_sdk_session_blob(
                 self._config.workspace_root, chat.session_id
             )
@@ -2203,9 +2224,9 @@ class ProjectChatManager:
         ctx = ChatContext.for_web(chat_id)
         # Capture turn count before archive_session consumes the in-memory
         # transcript; capture the filtered JSONL before blob deletion.
-        turn_count = self._transcripts.peek_turn_count(ctx)
+        turn_count = self._transcripts.peek_turn_count(ctx, chat.provider)
         filtered_jsonl: str | None = None
-        if chat.session_id:
+        if chat.session_id and chat.provider == "claude":
             from ciao.insights import filter_session_jsonl
             try:
                 filtered_jsonl = filter_session_jsonl(
@@ -2216,11 +2237,16 @@ class ProjectChatManager:
                     "Failed to pre-filter JSONL for chat %s", chat_id
                 )
                 filtered_jsonl = None
+        elif chat.provider == "codex":
+            filtered_jsonl = self._transcripts.current_filtered_jsonl(
+                ctx, chat.provider
+            ) or None
         result = self._transcripts.archive_session(
             ctx=ctx,
             active_model=chat.model,
             last_effective_model=chat.model,
             session_id=chat.session_id,
+            provider=chat.provider,
         )
         if chat.retry_status:
             self._clear_chat_retry(chat)
@@ -2229,7 +2255,7 @@ class ProjectChatManager:
         provider = self._providers.pop(chat_id, None)
         if provider:
             asyncio.ensure_future(provider.disconnect())
-        if chat.session_id:
+        if chat.session_id and chat.provider == "claude":
             self._transcripts.delete_sdk_session_blob(
                 self._config.workspace_root, chat.session_id
             )
@@ -2279,7 +2305,11 @@ class ProjectChatManager:
             from ciao.insights import extract_and_append, resolve_insights_model
 
             workspace = project_meta.workspace if project_meta else None
-            insights_model = resolve_insights_model(config, workspace)
+            insights_model = (
+                chat_meta.model
+                if chat_meta is not None and chat_meta.provider == "codex"
+                else resolve_insights_model(config, workspace)
+            )
             asyncio.create_task(
                 extract_and_append(
                     archive_path=outcome.path,
@@ -2291,6 +2321,7 @@ class ProjectChatManager:
                     trajectories_enabled=trajectories_enabled,
                     workspace_root=config.workspace_root,
                     vault_root=config.vault_root,
+                    provider=chat_meta.provider if chat_meta else "claude",
                 )
             )
         elif trajectories_enabled:
@@ -2338,9 +2369,10 @@ class ProjectChatManager:
             active_model=chat.model,
             last_effective_model=chat.model,
             session_id=chat.session_id,
+            provider=chat.provider,
         )
         # Delete the SDK session blob for the now-archived session.
-        if chat.session_id:
+        if chat.session_id and chat.provider == "claude":
             self._transcripts.delete_sdk_session_blob(
                 self._config.workspace_root, chat.session_id
             )
@@ -2577,6 +2609,8 @@ class ProjectChatManager:
         self, provider: str, model: str, *, bucket: str = "", project_id: str = ""
     ) -> str:
         """Return the spawn kind a (provider, model, bucket) tuple produces."""
+        if provider == "codex":
+            return "codex"
         if provider and provider != "claude":
             return f"unsupported:{provider}"
         resolved = self._resolve_claude_model(model, bucket, project_id)
@@ -2600,6 +2634,8 @@ class ProjectChatManager:
         overridable via ``CIAO_DISALLOWED_TOOLS_PERSONAL`` /
         ``CIAO_DISALLOWED_TOOLS_WORK``.
         """
+        if chat.provider != "claude":
+            return []
         project = self._projects.get(chat.project_id)
         workspace = project.workspace if project else None
         return self._config.disallowed_tools_for_workspace(workspace)
@@ -2680,26 +2716,28 @@ class ProjectChatManager:
 
     def _resolve_claude_model(self, model: str, bucket: str, project_id: str) -> str:
         """Resolve picker aliases to Ollama or OpenRouter tier models."""
+        from ciao.model_tiers import tier_model
+
         effective = self._effective_bucket(bucket, project_id)
         if effective == "openrouter":
-            aliases = {
-                "haiku": self._config.openrouter.haiku_model,
-                "sonnet": self._config.openrouter.sonnet_model,
-                "opus": self._config.openrouter.opus_model,
-            }
-            target = aliases.get((model or "").lower())
-            if target:
+            target = tier_model(
+                model,
+                river=self._config.openrouter.haiku_model,
+                lake=self._config.openrouter.sonnet_model,
+                sea=self._config.openrouter.opus_model,
+            )
+            if target != model:
                 return target
             return model
 
         if not self._bucket_routes_to_ollama(effective):
             return model
-        aliases = {
-            "haiku": self._config.ollama.haiku_model,
-            "sonnet": self._config.ollama.sonnet_model,
-            "opus": self._config.ollama.opus_model,
-        }
-        target = aliases.get((model or "").lower())
+        target = tier_model(
+            model,
+            river=self._config.ollama.haiku_model,
+            lake=self._config.ollama.sonnet_model,
+            sea=self._config.ollama.opus_model,
+        )
         if target and is_ollama_model(target, self._config.ollama):
             return target
         return model
@@ -2741,10 +2779,10 @@ class ProjectChatManager:
         env["CIAO_MODEL"] = chat.model
         env["CIAO_PROVIDER"] = chat.provider
         env["CIAO_MODEL_BUCKET"] = chat.model_bucket or ""
-        env.update(
-            routing_env_for_model(self._runtime_model_for_chat(chat), self._config)
-        )
-        # Pi needs the chat_id to locate its session directory
+        if chat.provider == "claude":
+            env.update(
+                routing_env_for_model(self._runtime_model_for_chat(chat), self._config)
+            )
         env["CIAO_CHAT_ID"] = chat.chat_id
         return env
 
@@ -2788,7 +2826,13 @@ class ProjectChatManager:
 
         provider = self._get_provider(chat_id)
         prefix = self._build_prompt_prefix(chat)
-        full_prompt = prefix + prompt if prefix else prompt
+        provider_prompt = prompt
+        if chat.provider == "codex":
+            provider_prompt = (
+                expand_slash_command(prompt, self._config.workspace_root) or prompt
+            )
+        full_prompt = prefix + provider_prompt if prefix else provider_prompt
+        display_prompt = prefix + prompt if prefix else prompt
         handover_context_sent = bool(
             chat.handover_context_pending and chat.handover_messages
         )
@@ -2798,6 +2842,7 @@ class ProjectChatManager:
             model=self._runtime_model_for_chat(chat),
             provider=chat.provider,
             mode=self._effective_mode_for_chat(chat),
+            display_prompt=display_prompt,
             resume_session=chat.session_id or None,
             images=images or [],
             extra_env=self._build_extra_env(chat),
@@ -2811,6 +2856,7 @@ class ProjectChatManager:
         quota: dict[str, str] = {}
         cost_usd: float = 0.0
         had_error = False
+        tool_events: list[dict[str, Any]] = []
 
         async for event in provider.execute_streaming(request):
             yield event
@@ -2826,12 +2872,24 @@ class ProjectChatManager:
                 response_text = event.result
                 had_error = bool(event.is_error)
                 effective_model = event.effective_model or chat.model
+                if chat.provider == "codex" and not chat.model and effective_model:
+                    chat.model = effective_model
+                    self._save()
                 usage = event.usage
                 quota = event.quota
                 cost_usd = event.cost_usd or 0.0
                 if event.session_id and event.session_id != chat.session_id:
                     chat.session_id = event.session_id
                     self._save()
+                # Native questions are cleared by respond_question() (or a
+                # later user send). An unanswered question from an interrupted
+                # scheduled run stays available for continuation in the PWA.
+            elif isinstance(event, ToolUseEvent):
+                tool_events.append({
+                    "id": event.tool_use_id or "",
+                    "name": event.tool_name,
+                    "input": {"summary": event.tool_input},
+                })
 
         # Record transcript turn
         if handover_context_sent and not had_error:
@@ -2849,6 +2907,7 @@ class ProjectChatManager:
             input_kind="text",
             context_label=chat.title,
             provider=chat.provider,
+            tool_events=tool_events,
         )
 
         # Update global cost
@@ -3129,6 +3188,7 @@ class ProjectChatManager:
         images: list[ImageAttachment] | None = None,
         *,
         is_retry: bool = False,
+        unattended: bool = False,
     ) -> ChatStream:
         """Start (or return the in-flight) ChatStream for this chat.
 
@@ -3310,6 +3370,16 @@ class ProjectChatManager:
                                 # push manager so a backgrounded/locked
                                 # device gets the Approve/Deny prompt.
                                 self._notify_permission(chat_id, event)
+                                if unattended:
+                                    self.respond_permission(
+                                        chat_id,
+                                        request_id=event.request_id,
+                                        approved=False,
+                                        reason=(
+                                            "Scheduled runs cannot wait for "
+                                            "interactive approval."
+                                        ),
+                                    )
                             if isinstance(event, ToolUseEvent) and event.tool_name == "AskUserQuestion" and event.tool_input.strip():
                                 # The headless CLI can't render the SDK's
                                 # interactive picker. Left alone it auto-cancels
@@ -3327,11 +3397,42 @@ class ProjectChatManager:
                                 # consuming. The CLI records an interrupt
                                 # sentinel that /messages already strips, and
                                 # the user's answer starts a fresh resumed turn.
-                                self._notify_question(chat_id, event.tool_input)
+                                question_payload = event.tool_input
+                                if event.request_id:
+                                    try:
+                                        parsed_question = json.loads(event.tool_input)
+                                    except (TypeError, json.JSONDecodeError):
+                                        parsed_question = {"questions": []}
+                                    if not isinstance(parsed_question, dict):
+                                        parsed_question = {"questions": []}
+                                    parsed_question["request_id"] = event.request_id
+                                    question_payload = json.dumps(
+                                        parsed_question, ensure_ascii=False
+                                    )
+                                self._notify_question(chat_id, question_payload)
                                 cm_q = self._chats.get(chat_id)
                                 if cm_q is not None:
-                                    cm_q.pending_question = event.tool_input or ""
+                                    cm_q.pending_question = question_payload
                                     self._save()
+                                # Codex exposes a native blocking app-server
+                                # request. Keep consuming the turn while the
+                                # PWA answers that request in-band. Claude's
+                                # SDK picker still requires the interrupt and
+                                # next-turn answer flow documented above.
+                                if event.request_id:
+                                    if unattended:
+                                        q_provider = self._providers.get(chat_id)
+                                        if q_provider is not None:
+                                            try:
+                                                await q_provider.stop_active()
+                                            except Exception:
+                                                logger.exception(
+                                                    "interrupt unattended question failed for chat %s",
+                                                    chat_id,
+                                                )
+                                        question_paused = True
+                                        break
+                                    continue
                                 q_provider = self._providers.get(chat_id)
                                 if q_provider is not None:
                                     try:
@@ -3515,7 +3616,11 @@ class ProjectChatManager:
                 # instead of leaving the chat stuck on "I'll compile once the
                 # agents report back".
                 chat_for_watcher = self._chats.get(chat_id)
-                if chat_for_watcher is not None and chat_for_watcher.session_id:
+                if (
+                    chat_for_watcher is not None
+                    and chat_for_watcher.session_id
+                    and chat_for_watcher.provider in {"claude", "codex"}
+                ):
                     self._start_subagent_watcher(chat_id, project_id)
                     # Keep the SDK pipe drained while the client idles: a
                     # finishing background subagent triggers a CLI-initiated
@@ -3523,7 +3628,8 @@ class ProjectChatManager:
                     # transport buffer (and its stale ResultMessage would
                     # truncate the next turn). The drain also gives the PWA
                     # a live view of that follow-up turn.
-                    self._start_between_turns_drain(chat_id, project_id)
+                    if chat_for_watcher.provider == "claude":
+                        self._start_between_turns_drain(chat_id, project_id)
                 # Successful turn(s): announce result ready (drives unread
                 # badges + in-app toast on clients that aren't focused on
                 # this chat) and dispatch web push (decoupled from any WS).
@@ -3701,6 +3807,9 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is None or not chat.session_id:
             return
+        if chat.provider == "codex":
+            await self._watch_codex_subagent_completion(chat_id, project_id)
+            return
         path = subagent_tracking.find_parent_session_file(
             chat.session_id, self._config.workspace_root
         )
@@ -3754,7 +3863,45 @@ class ProjectChatManager:
             self._background_agents_last.pop(chat_id, None)
             # Clean up our slot when the watcher exits.
             current = self._pending_subagent_watchers.get(chat_id)
-            if current is not None and current.done():
+            if current is asyncio.current_task():
+                self._pending_subagent_watchers.pop(chat_id, None)
+
+    async def _watch_codex_subagent_completion(
+        self, chat_id: str, project_id: str
+    ) -> None:
+        """Poll app-server thread state while Codex collaboration children run."""
+        last_count = -1
+        deadline = time.perf_counter() + 3600
+        try:
+            while time.perf_counter() < deadline:
+                chat = self._chats.get(chat_id)
+                if chat is None or chat.provider != "codex" or not chat.session_id:
+                    break
+                thread = await CodexProvider.read_thread(
+                    self._config.workspace_root, chat.session_id
+                )
+                if thread is None:
+                    break
+                tree = await CodexProvider.read_collab_tree(
+                    self._config.workspace_root, thread
+                )
+                count, had_subagents = codex_collab_tree_counts(tree)
+                if count != last_count:
+                    self._publish_subagent_count(chat_id, project_id, count)
+                    if count == 0 and last_count > 0:
+                        chat.last_activity_at = _now_iso()
+                        self._save()
+                        self._schedule_push(
+                            chat_id, chat.title or "Ciaobot", "Background agents finished"
+                        )
+                    last_count = count
+                if not had_subagents or count == 0:
+                    break
+                await asyncio.sleep(3)
+        finally:
+            self._background_agents_last.pop(chat_id, None)
+            current = self._pending_subagent_watchers.get(chat_id)
+            if current is asyncio.current_task():
                 self._pending_subagent_watchers.pop(chat_id, None)
 
     async def _nudge_synthesis_after_subagents(self, chat_id: str) -> bool:
@@ -4000,6 +4147,30 @@ class ProjectChatManager:
         gate = provider.permission_gate
         return gate.answer(request_id, approved=approved, reason=reason)
 
+    def respond_question(
+        self,
+        chat_id: str,
+        *,
+        request_id: str,
+        answers: dict[str, list[str]],
+    ) -> bool:
+        """Deliver an answer to a provider-native user-input request."""
+        provider_service = self._providers.get(chat_id)
+        if provider_service is None or provider_service.provider is None:
+            return False
+        responder = getattr(
+            provider_service.provider, "send_question_response", None
+        )
+        if not callable(responder):
+            return False
+        accepted = bool(responder(request_id, answers))
+        if accepted:
+            chat = self._chats.get(chat_id)
+            if chat is not None:
+                chat.pending_question = ""
+                self._save()
+        return accepted
+
     async def stop_chat(self, chat_id: str) -> bool:
         # Mark the active stream as user-stopped so the drive loop flushes
         # any queued follow-up messages instead of dropping them. A stop is
@@ -4041,8 +4212,14 @@ class ProjectChatManager:
         from ciao.providers.ollama import is_local_ollama_model
         from ciao.providers.routing import resolve_with_fallback
 
-        requested = resolve_title_model(self._config, workspace)
-        if self._config.title_model_override:
+        requested = (
+            chat.model if chat.provider == "codex"
+            else resolve_title_model(self._config, workspace)
+        )
+        if chat.provider == "codex":
+            title_model = requested
+            title_env = self._build_extra_env(chat)
+        elif self._config.title_model_override:
             title_model = requested
             from ciao.providers.routing import routing_routine_env_for_model
 
@@ -4068,13 +4245,21 @@ class ProjectChatManager:
             "title", "Title generation", model=title_model,
             extra={"chat_id": chat_id},
         ) as run:
+            title_kwargs: dict[str, object] = {
+                "model": title_model,
+                "cwd": self._config.workspace_root,
+                "env": title_env,
+                "timeout_s": title_timeout,
+            }
+            # Keep the established Claude/Ollama call signature intact for
+            # integrations that wrap the title helper. Codex is the only
+            # provider that needs an explicit dispatch hint here.
+            if chat.provider == "codex":
+                title_kwargs["provider"] = "codex"
             title = await _generate_chat_title(
                 user_text,
                 assistant_text,
-                model=title_model,
-                cwd=self._config.workspace_root,
-                env=title_env,
-                timeout_s=title_timeout,
+                **title_kwargs,
             )
             if not title:
                 run.status = "error"
@@ -4112,6 +4297,27 @@ class ProjectChatManager:
         """
         chat = self._chats.get(chat_id)
         if chat is None or not chat.session_id:
+            return True, False
+        if chat.provider == "codex":
+            deadline = time.perf_counter() + timeout_s
+            had_async = False
+            running = 0
+            while time.perf_counter() < deadline:
+                thread = await CodexProvider.read_thread(
+                    self._config.workspace_root, chat.session_id
+                )
+                if thread is None:
+                    return True, had_async
+                tree = await CodexProvider.read_collab_tree(
+                    self._config.workspace_root, thread
+                )
+                running, had_now = codex_collab_tree_counts(tree)
+                had_async = had_async or had_now
+                if running == 0:
+                    return True, had_async
+                await asyncio.sleep(3)
+            return running == 0, had_async
+        if chat.provider != "claude":
             return True, False
         try:
             path = subagent_tracking.find_parent_session_file(
@@ -4213,21 +4419,44 @@ class ProjectChatManager:
             project_id = getattr(entry, "web_project_id", None)
             project = self._projects.get(project_id) if project_id else None
             workspace = project.workspace if project else None
-            insights_model = resolve_insights_model(self._config, workspace)
-            model, env, note = resolve_with_fallback(
-                insights_model,
-                self._config,
-                default_model=insights_model,
+            fixed_chat_id = getattr(entry, "web_chat_id", None)
+            fixed_chat = self._chats.get(fixed_chat_id) if fixed_chat_id else None
+            classifier_provider = (
+                fixed_chat.provider if fixed_chat is not None
+                else getattr(entry, "provider", "")
+                or self.schedule_default_provider(project_id)
             )
+            if classifier_provider == "codex":
+                model = (
+                    fixed_chat.model if fixed_chat is not None
+                    else getattr(entry, "model", "")
+                    or self.schedule_default_model(project_id)
+                )
+                env = (
+                    self._build_extra_env(fixed_chat)
+                    if fixed_chat is not None
+                    else {"CIAO_PROVIDER": "codex"}
+                )
+                note = None
+            else:
+                insights_model = resolve_insights_model(self._config, workspace)
+                model, env, note = resolve_with_fallback(
+                    insights_model,
+                    self._config,
+                    default_model=insights_model,
+                )
         except Exception:  # noqa: BLE001
             logger.exception("Schedule attention classifier setup failed; keeping chat visible")
             return True
-        provider = "routed" if env else "claude"
+        tracked_provider = (
+            "codex" if classifier_provider == "codex"
+            else ("routed" if env else "claude")
+        )
         async with job_runs.track(
             "schedule_attention_classifier",
             "Schedule attention classifier",
             model=model,
-            provider=provider,
+            provider=tracked_provider,
             extra={
                 "schedule_id": payload["schedule_id"],
                 "workspace": workspace or "",
@@ -4245,6 +4474,8 @@ class ProjectChatManager:
                     model=model,
                     env=env,
                     timeout_s=60.0,
+                    provider=classifier_provider,
+                    cwd=self._config.workspace_root,
                 )
                 raw = text.strip()
                 if raw.startswith("```"):
@@ -4399,13 +4630,18 @@ class ProjectChatManager:
             )
 
         try:
-            stream = self.start_stream(target_id, prompt)
+            stream = self.start_stream(target_id, prompt, unattended=True)
             async for payload in stream.subscribe():
                 if not isinstance(payload, dict):
                     continue
                 event_type = payload.get("type")
                 if event_type == "permission_request":
                     outcome.permission_requested = True
+                elif (
+                    event_type == "tool_use"
+                    and payload.get("tool_name") == "AskUserQuestion"
+                ):
+                    outcome.question_requested = True
                 elif event_type == "chat_retry":
                     if (payload.get("status") or "") == "pending":
                         outcome.retry_pending = True
@@ -4453,7 +4689,7 @@ class ProjectChatManager:
             settled, had_async = await self._await_schedule_subagents(target_id)
             if not settled:
                 outcome.subagents_pending = True
-            elif had_async:
+            elif had_async and chat_state is not None and chat_state.provider == "claude":
                 # Background subagents finished: the CLI runs a synthesis turn
                 # whose result the between-turns drain records. Feed that real
                 # summary to the archive classifier instead of the interim
@@ -4502,7 +4738,7 @@ class ProjectChatManager:
         if outcome.stream_error or outcome.is_error:
             _sched_status = "error"
             _sched_error = (outcome.final_text or "stream error")[:1000]
-        elif (outcome.permission_requested or outcome.retry_pending) and not outcome.completed:
+        elif outcome.permission_requested or outcome.question_requested or outcome.retry_pending:
             _sched_status = "skipped"
             _sched_error = None
         else:
@@ -4524,6 +4760,7 @@ class ProjectChatManager:
                 "chat_id": target_id,
                 "archived_to": outcome.archived_to,
                 "permission_requested": outcome.permission_requested,
+                "question_requested": outcome.question_requested,
                 "retry_pending": outcome.retry_pending,
             },
         ))
@@ -4862,6 +5099,7 @@ class ProjectChatManager:
                 active_model=chat.model,
                 last_effective_model=chat.model,
                 session_id=chat.session_id,
+                provider=chat.provider,
             )
         if chat is not None:
             self._unlink_chat_images(chat)

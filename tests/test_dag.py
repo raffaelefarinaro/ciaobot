@@ -315,6 +315,24 @@ def test_non_raising_failed_noderesult_marks_job_run_error(
     assert "drift detected" in (gate.get("error") or "")
 
 
+def test_failed_gate_records_output_as_error(tmp_path: Path) -> None:
+    """A gate returning ``(False, reason)`` carries its reason in
+    ``output``, not ``error``. The recorded job_run must surface that
+    reason instead of a blank ``error: null`` row. Regression for the
+    depcheck:write_baseline triage gap (gate failed with no message)."""
+
+    def reject(ctx):
+        return False, "no research output to persist"
+
+    dag = [Node(id="write_baseline", kind="gate", payload={"fn": reject})]
+    ctx = run(dag, [], job="unit", label="depcheck")
+    assert ctx["write_baseline"].ok is False
+    rows = _job_runs(tmp_path)
+    row = next(r for r in rows if r["extra"]["node_id"] == "write_baseline")
+    assert row["status"] == "error"
+    assert "no research output to persist" in (row.get("error") or "")
+
+
 def test_bash_missing_cmd_raises() -> None:
     dag = [Node(id="x", kind="bash", payload={})]
     with pytest.raises(ValueError, match="missing payload\\['cmd'\\]"):

@@ -43,27 +43,6 @@
       "prompt": "Run `python3 -m ciao.skill_evolution` with the workspace default model. Summarize proposals written and any failed gates. Do not apply proposals automatically.\n\nCRITICAL: Your ENTIRE response must start with \"🧬 Skill evolution\". Any text before that is a bug."
     },
     {
-      "schedule_id": "system-error-triage",
-      "title": "Runtime error triage",
-      "scope": "system",
-      "editable": false,
-      "removable": false,
-      "enabled": true,
-      "frequency": "weekly",
-      "daily_time_utc": "03:00",
-      "days_of_week": ["sat"],
-      "day_of_month": null,
-      "run_at_date": null,
-      "timezone_name": "UTC",
-      "archive_policy": "manual",
-      "provider": "",
-      "model": "",
-      "workspace": "default",
-      "web_project_id": "",
-      "web_chat_id": null,
-      "prompt": "Triage this instance's runtime issue report below. If it says no issues, reply with a one-line all-clear and stop. Otherwise: group the entries by root cause, note frequency and impact, then investigate the top causes in the app and workspace code. Apply concrete low-risk fixes directly and report anything riskier for user approval. The error log is cleared after this run, so include enough context from it in your report.\n\n{{ISSUE_REPORT}}\n\nCRITICAL: Your ENTIRE response must start with \"🔧 Runtime error triage\". Any text before that is a bug."
-    },
-    {
       "schedule_id": "system-weekly-review",
       "title": "Weekly self-improvement review",
       "scope": "system",

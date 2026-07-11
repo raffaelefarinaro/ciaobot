@@ -36,6 +36,8 @@ _FORBIDDEN_PATH_PREFIXES: tuple[str, ...] = (
     "memory-vault/",
     "secrets/",
     ".claude/",
+    ".agents/",
+    ".codex/",
     ".runtime/",
     ".mcp.json",
 )

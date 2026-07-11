@@ -22,9 +22,13 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, replace
 
+from ciao.model_tiers import tier_model
+
 logger = logging.getLogger(__name__)
 
-_ANTHROPIC_ALIASES = frozenset({"opus", "sonnet", "haiku"})
+_ANTHROPIC_ALIASES = frozenset(
+    {"opus", "sonnet", "haiku", "fable", "river", "lake", "sea", "ocean"}
+)
 
 # Shipped defaults: one Anthropic-family model per tier, reachable through
 # OpenRouter's Anthropic-compatible endpoint. Operators override via
@@ -80,12 +84,12 @@ def is_openrouter_model(model: str, settings: OpenRouterSettings) -> bool:
 
 def alias_model(alias: str, settings: OpenRouterSettings) -> str:
     """Resolve an Anthropic tier alias to an OpenRouter model id."""
-    aliases = {
-        "haiku": settings.haiku_model,
-        "sonnet": settings.sonnet_model,
-        "opus": settings.opus_model,
-    }
-    return aliases.get((alias or "").lower(), alias)
+    return tier_model(
+        alias,
+        river=settings.haiku_model,
+        lake=settings.sonnet_model,
+        sea=settings.opus_model,
+    )
 
 
 def _env_overrides(base_url: str, api_key: str) -> dict[str, str]:

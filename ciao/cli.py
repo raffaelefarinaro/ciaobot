@@ -447,7 +447,14 @@ def _register_app_with_launchservices(app_root: Path) -> None:
         pass
 
 
-_WORKSPACE_GITIGNORE_ENTRIES = (".env", ".runtime/", ".claude/", "*.log")
+_WORKSPACE_GITIGNORE_ENTRIES = (
+    ".env",
+    ".runtime/",
+    ".claude/",
+    ".agents/",
+    ".codex/",
+    "*.log",
+)
 
 
 def _ensure_workspace_gitignore(root: Path) -> None:
@@ -604,6 +611,7 @@ def setup_workspace(
     vault_root: Path | str | None = None,
     vault_mode: str = "scratch",
     workspace_name: str | None = None,
+    default_provider: str = "claude",
     python_path: str | None = None,
     port: int = 8443,
     launch_agents_dir: Path | str | None = None,
@@ -697,6 +705,12 @@ def setup_workspace(
     # personal/work nested-vault special case from ever triggering.
     name = (workspace_name or "").strip()
     if name:
+        provider = (default_provider or "claude").strip().lower()
+        model_bucket = {
+            "codex": "",
+            "ollama": "personal",
+            "openrouter": "openrouter",
+        }.get(provider, "anthropic")
         workspaces_registry = root / ".runtime" / "workspaces.json"
         _write_if_missing(
             workspaces_registry,
@@ -705,8 +719,9 @@ def setup_workspace(
                     {
                         "name": name,
                         "vault_root": vault_value,
+                        "default_provider": provider,
                         "gws_profile": name,
-                        "model_bucket": "anthropic",
+                        "model_bucket": model_bucket,
                     }
                 ],
                 indent=2,
@@ -809,7 +824,9 @@ def _menubar_command(args: argparse.Namespace) -> int:
     return run_menubar(Path(args.workspace).expanduser().resolve(), args.port)
 
 
-def _auth_command_for_provider(provider: str) -> list[str]:
+def _auth_command_for_provider(
+    provider: str, *, device_auth: bool = False
+) -> list[str]:
     if provider == "claude":
         from ciao.providers.claude import get_bundled_claude_path
 
@@ -817,6 +834,13 @@ def _auth_command_for_provider(provider: str) -> list[str]:
         if not binary:
             raise FileNotFoundError("Claude CLI not found")
         return [binary, "login"]
+    if provider == "codex":
+        from ciao.providers.codex import resolve_codex_binary
+
+        binary = resolve_codex_binary()
+        if not binary:
+            raise FileNotFoundError("Codex CLI not found")
+        return [binary, "login", "--device-auth"] if device_auth else [binary, "login"]
     if provider == "ollama":
         return ["ollama", "signin"]
     raise ValueError(f"Unknown provider '{provider}'")
@@ -824,7 +848,10 @@ def _auth_command_for_provider(provider: str) -> list[str]:
 
 def _auth_command(args: argparse.Namespace) -> int:
     try:
-        command = _auth_command_for_provider(args.provider)
+        command = _auth_command_for_provider(
+            args.provider,
+            device_auth=bool(getattr(args, "device_auth", False)),
+        )
     except (FileNotFoundError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -1320,11 +1347,16 @@ def build_parser() -> argparse.ArgumentParser:
         "auth",
         help="Run a provider OAuth/login command for first-run setup.",
     )
-    auth_parser.add_argument("provider", choices=["claude", "ollama"])
+    auth_parser.add_argument("provider", choices=["claude", "codex", "ollama"])
     auth_parser.add_argument(
         "--print-only",
         action="store_true",
         help="Print the terminal command without running it.",
+    )
+    auth_parser.add_argument(
+        "--device-auth",
+        action="store_true",
+        help="Use Codex device authorization (useful on a headless machine).",
     )
     auth_parser.set_defaults(func=_auth_command)
 
@@ -1493,7 +1525,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat_parser.add_argument("--model", help="Model override. Inherits CIAO_MODEL.")
     chat_parser.add_argument(
         "--provider",
-        choices=["claude"],
+        choices=["claude", "codex"],
         help="Provider override. Inherits CIAO_PROVIDER.",
     )
     chat_parser.add_argument(

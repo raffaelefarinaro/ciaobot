@@ -46,6 +46,7 @@
         </div>
         <div><strong>Last triggered</strong><br />{{ schedule.last_triggered_on || 'never' }}</div>
         <div><strong>Model</strong><br />{{ modelLabel(schedule) }}</div>
+        <div><strong>Provider</strong><br />{{ schedule.provider || 'inherit target' }}</div>
         <div><strong>Archive</strong><br />{{ archiveLabel(schedule.archive_policy) }}</div>
       </div>
 
@@ -413,6 +414,9 @@ async function saveEdit() {
     days_of_week: d.frequency === 'weekly' && d.days_of_week.length > 0 ? d.days_of_week : null,
     day_of_month: d.frequency === 'monthly' ? d.day_of_month : null,
     model: d.model,
+    provider: d.model && (store.models?.codex_models || []).includes(d.model)
+      ? 'codex'
+      : (d.model ? 'claude' : ''),
     archive_policy: d.archive_policy,
   }
   if (d.contextKey.startsWith('proj:')) {

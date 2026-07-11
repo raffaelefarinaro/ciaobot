@@ -33,6 +33,7 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/workspaces": "browser workspaces list config",
     "/api/workspaces/{name}": "browser workspaces management endpoint",
     "/api/settings/providers": "browser LLM providers configuration settings",
+    "/api/settings/providers/{provider}/{action}": "browser-only handoff to provider CLI login, verification, or logout",
     "/api/admin/skills/add": "browser admin skills addition; runs skills_add.py scripts",
     "/api/integrations/gws/install": "browser GWS integration; installs @googleworkspace/cli via npm",
     "/api/integrations/gws/client-secret": "browser GWS integration client_secret upload",

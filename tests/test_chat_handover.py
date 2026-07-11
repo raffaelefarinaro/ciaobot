@@ -73,6 +73,30 @@ def test_handover_chat_switches_model_and_persists_messages(tmp_path: Path) -> N
     assert reloaded.handover_context_pending is True
 
 
+def test_handover_chat_switches_between_claude_and_codex(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("handover", workspace="personal")
+    chat = pcm.create_chat(project.project_id, model="opus", provider="claude")
+    chat.session_id = "claude-session"
+    chat.thinking_level = "high"
+    pcm._save()
+
+    updated = pcm.handover_chat(
+        chat.chat_id,
+        provider="codex",
+        model="gpt-test",
+        messages=[{"role": "user", "content": "Continue this"}],
+    )
+
+    assert updated is not None
+    assert updated.provider == "codex"
+    assert updated.model == "gpt-test"
+    assert updated.model_bucket == ""
+    assert updated.thinking_level == ""
+    assert updated.session_id == ""
+    assert "Claude / opus to Codex / gpt-test" in updated.handover_messages[-1]["content"]
+
+
 def test_handover_messages_are_injected_into_next_prompt_once(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("handover", workspace="personal")

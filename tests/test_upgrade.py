@@ -12,6 +12,7 @@ from ciao.upgrade import (
     update_skills,
     upgrade_all,
     upgrade_claude_code,
+    upgrade_codex,
     upgrade_gws,
     upgrade_apfel,
     upgrade_root_npm,
@@ -83,6 +84,44 @@ def test_upgrade_claude_code_uses_bundled_cli(monkeypatch) -> None:
     assert result.after_version == "2.1.0"
 
 
+def test_upgrade_codex_reports_desktop_managed_binary(monkeypatch) -> None:
+    binary = "/Applications/ChatGPT.app/Contents/Resources/codex"
+    monkeypatch.setattr(
+        "ciao.providers.codex.resolve_codex_binary", lambda: binary
+    )
+    monkeypatch.setattr(
+        "ciao.upgrade.read_version", AsyncMock(return_value="codex-cli 1.2.3")
+    )
+
+    result = asyncio.run(upgrade_codex())
+
+    assert result.success is True
+    assert result.changed is False
+    assert "desktop app" in result.stdout
+    assert result.after_version == "codex-cli 1.2.3"
+
+
+def test_upgrade_codex_uses_native_updater(monkeypatch) -> None:
+    binary = "/usr/local/bin/codex"
+    expected = UpgradeResult(
+        command=[binary, "update"], changed=True, success=True,
+        stdout="", stderr="", before_version="1", after_version="2",
+    )
+    monkeypatch.setattr(
+        "ciao.providers.codex.resolve_codex_binary", lambda: binary
+    )
+    runner = AsyncMock(return_value=expected)
+    monkeypatch.setattr("ciao.upgrade.run_upgrade", runner)
+
+    result = asyncio.run(upgrade_codex())
+
+    assert result is expected
+    runner.assert_awaited_once_with(
+        install_command=[binary, "update"],
+        version_command=[binary, "--version"],
+    )
+
+
 
 _UNCHANGED = UpgradeResult(
     command=[], changed=False, success=True,
@@ -100,6 +139,7 @@ async def test_upgrade_all_returns_none_when_nothing_changed(monkeypatch, tmp_pa
     monkeypatch.setattr("ciao.upgrade.upgrade_gws", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_defuddle", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_claude_code", AsyncMock(return_value=_UNCHANGED))
+    monkeypatch.setattr("ciao.upgrade.upgrade_codex", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_root_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_web_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_apfel", AsyncMock(return_value=_UNCHANGED))
@@ -126,6 +166,7 @@ async def test_upgrade_all_reports_changes(monkeypatch, tmp_path, caplog) -> Non
     monkeypatch.setattr("ciao.upgrade.upgrade_gws", AsyncMock(return_value=gws_bumped))
     monkeypatch.setattr("ciao.upgrade.upgrade_defuddle", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_claude_code", AsyncMock(return_value=_UNCHANGED))
+    monkeypatch.setattr("ciao.upgrade.upgrade_codex", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_root_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_web_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_apfel", AsyncMock(return_value=_UNCHANGED))
@@ -156,6 +197,7 @@ async def test_upgrade_all_surfaces_silent_failures(monkeypatch, tmp_path, caplo
     monkeypatch.setattr("ciao.upgrade.upgrade_gws", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_defuddle", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_claude_code", AsyncMock(return_value=claude_failed))
+    monkeypatch.setattr("ciao.upgrade.upgrade_codex", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_root_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_web_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_apfel", AsyncMock(return_value=_UNCHANGED))

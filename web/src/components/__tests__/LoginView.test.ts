@@ -230,6 +230,7 @@ describe('LoginView setup wizard tests', () => {
       port: 8443,
       python: undefined,
       auth_required: false,
+      provider: 'claude',
       restart: true,
     })
     expect(wrapper.text()).toContain('restarting')

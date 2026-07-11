@@ -7,7 +7,6 @@ from pathlib import Path
 
 
 EXPECTED_AGENTS = {
-    "doc-updater.md",
     "memory.md",
     "researcher.md",
     "secretary.md",
@@ -22,7 +21,6 @@ EXPECTED_COMMANDS = {
 EXPECTED_SYSTEM_SCHEDULES = {
     "system-memory-curation",
     "system-skill-evolution",
-    "system-error-triage",
     "system-weekly-review",
 }
 

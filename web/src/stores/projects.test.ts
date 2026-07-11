@@ -6,13 +6,14 @@ import { shouldReconnectActiveChatOnStreamingStarted, useProjectStore } from './
 
 const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
+const apiPatch = vi.hoisted(() => vi.fn())
 const apiDel = vi.hoisted(() => vi.fn())
 
 vi.mock('../lib/api', () => ({
   api: {
     get: apiGet,
     post: apiPost,
-    patch: vi.fn(),
+    patch: apiPatch,
     del: apiDel,
   },
 }))
@@ -60,6 +61,8 @@ beforeEach(() => {
   fakeSockets = []
   localStorageData = {}
   apiGet.mockReset()
+  apiPost.mockReset()
+  apiPatch.mockReset()
   const storage = {
     getItem: vi.fn((key: string) => localStorageData[key] ?? null),
     setItem: vi.fn((key: string, value: string) => { localStorageData[key] = value }),
@@ -118,6 +121,107 @@ describe('queued message replay handling', () => {
     })
 
     expect(store.queuedMessages[chatId]).toBeUndefined()
+  })
+})
+
+describe('Codex structured questions', () => {
+  test('answers a native request inside the active websocket turn', () => {
+    const store = useProjectStore()
+    const chatId = 'codex-chat'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Codex',
+      model: 'gpt-test',
+      provider: 'codex',
+      mode: 'auto',
+      session_id: 'thread-1',
+      created_at: '',
+      archived: false,
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'tool_use',
+        tool_name: 'AskUserQuestion',
+        request_id: 'codex-1',
+        tool_input: JSON.stringify({
+          questions: [{
+            id: 'choice',
+            header: 'Choice',
+            question: 'Pick one',
+            isOther: false,
+            isSecret: false,
+            options: [{ label: 'A', description: 'first' }],
+          }],
+        }),
+      }),
+    })
+
+    expect(store.activeQuestions[chatId][0]).toMatchObject({
+      id: 'choice',
+      requestId: 'codex-1',
+      allowOther: false,
+      question: 'Pick one',
+    })
+
+    store.respondQuestion(chatId, 'codex-1', { choice: ['A'] })
+
+    expect(store.activeQuestions[chatId]).toBeUndefined()
+    expect(socket.send).toHaveBeenCalledWith(JSON.stringify({
+      type: 'question_response',
+      request_id: 'codex-1',
+      answers: { choice: ['A'] },
+    }))
+  })
+
+  test('surfaces approval requests and preserves Codex quota metadata', () => {
+    const store = useProjectStore()
+    const chatId = 'codex-gates'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Codex',
+      model: 'gpt-test',
+      provider: 'codex',
+      mode: 'normal',
+      session_id: 'thread-1',
+      created_at: '',
+      archived: false,
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'permission_request',
+      request_id: 'approval-1',
+      tool_name: 'Bash',
+      tool_input: 'touch safe.txt',
+      message: 'Approve?',
+    }) })
+
+    expect(store.pendingPermissions[chatId][0].request_id).toBe('approval-1')
+    store.respondPermission(chatId, 'approval-1', true)
+    expect(socket.send).toHaveBeenCalledWith(JSON.stringify({
+      type: 'permission_response',
+      request_id: 'approval-1',
+      approved: true,
+      reason: '',
+    }))
+
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'result',
+      text: 'done',
+      is_error: false,
+      effective_model: 'gpt-test',
+      usage: { input_tokens: '10' },
+      quota: { planType: 'plus', utilization: '0.2' },
+      session_id: 'thread-1',
+    }) })
+    expect(store.messages[chatId].at(-1)?.quota).toEqual({
+      planType: 'plus',
+      utilization: '0.2',
+    })
   })
 })
 

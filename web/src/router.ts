@@ -48,6 +48,10 @@ const routes = [
     component: () => import('./components/ChatLayout.vue'),
     meta: { requiresAuth: true },
   },
+  {
+    path: '/settings/instructions',
+    redirect: '/settings/context',
+  },
 ]
 
 export const router = createRouter({

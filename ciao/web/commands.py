@@ -80,6 +80,43 @@ def list_commands(workspace_root: Path) -> list[Command]:
     return sorted(merged.values(), key=lambda c: c.name)
 
 
+def expand_slash_command(prompt: str, workspace_root: Path) -> str | None:
+    """Expand a Ciaobot command for providers without native project commands.
+
+    Returns ``None`` when the prompt is not a known ``/command``. The marker
+    keeps the original input recoverable when Codex thread history is rendered
+    back into the PWA.
+    """
+    stripped = prompt.lstrip()
+    match = re.match(r"^/([A-Za-z0-9._-]+)(?:\s+([\s\S]*))?$", stripped)
+    if match is None:
+        return None
+    name = match.group(1)
+    command = next(
+        (item for item in list_commands(workspace_root) if item.name == name),
+        None,
+    )
+    if command is None:
+        return None
+    try:
+        template = Path(command.path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    template = _FRONTMATTER_RE.sub("", template, count=1).strip()
+    arguments = (match.group(2) or "").strip()
+    rendered = template.replace("$ARGUMENTS", arguments)
+    import json
+
+    return (
+        "[CIAO_COMMAND_BEGIN]\n"
+        f"command=/{name}\n"
+        f"user_input_json={json.dumps(prompt, ensure_ascii=False)}\n"
+        "[CIAO_COMMAND_INSTRUCTIONS]\n"
+        f"{rendered}\n"
+        "[CIAO_COMMAND_END]"
+    )
+
+
 def _workspace_root(request: Request) -> Path:
     config = request.app.state.config
     return Path(config.workspace_root)

@@ -9,6 +9,7 @@ import mimetypes
 import os
 import re
 import hmac
+import shlex
 import shutil
 import subprocess
 import sys
@@ -25,9 +26,12 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from ciao import subagent_tracking
 from ciao.config import WorkspaceConfig, CLAUDE_AI_CONNECTORS, coerce_claude_ai_mcps
 from ciao.models import THINKING_LEVELS, ChatContext
+from ciao.model_tiers import canonical_tier, codex_tier_models
 from ciao.package_version import package_changelog, package_status, update_package
 from ciao.tool_path import login_shell_path, resolve_tool
 from ciao.providers.claude import _summarize_tool_input
+from ciao.providers.codex import CodexProvider, codex_login_status
+from ciao.provider_service import supported_providers
 from ciao.schedules import (
     ScheduleEntry,
     compute_last_expected_run,
@@ -36,6 +40,7 @@ from ciao.schedules import (
     was_dispatched_since,
 )
 from ciao.setup_status import setup_status
+from ciao.cli import _auth_command_for_provider
 from ciao.skills_inventory import build_skill_inventory
 from ciao.web.auth import SESSION_COOKIE, session_cookie_kwargs
 from ciao.web.chat_broker import extract_file_touch
@@ -70,18 +75,11 @@ _IMAGE_MANIFEST_RE = re.compile(
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _WORKSPACE_PROVIDER_LABELS = {
     "claude": "Claude",
+    "codex": "Codex",
     "ollama": "Ollama",
     "openrouter": "OpenRouter",
 }
 _PROVIDER_KEY_META = {
-    "ANTHROPIC_API_KEY": {
-        "label": "Anthropic API key",
-        "description": "Fallback key for Claude provider auth when OAuth is not used.",
-    },
-    "OPENAI_API_KEY": {
-        "label": "OpenAI API key",
-        "description": "Used by cloud voice transcription and other OpenAI-backed features.",
-    },
     "CIAO_OLLAMA_API_KEY": {
         "label": "Ollama Cloud API key",
         "description": "Routes configured Ollama cloud models directly through ollama.com.",
@@ -89,6 +87,12 @@ _PROVIDER_KEY_META = {
     "OPENROUTER_API_KEY": {
         "label": "OpenRouter API key",
         "description": "Optional key for critique/review model routing.",
+    },
+}
+_SERVICE_KEY_META = {
+    "OPENAI_API_KEY": {
+        "label": "OpenAI voice API key",
+        "description": "Used directly by Ciaobot for cloud transcription and speech, not for Codex login.",
     },
 }
 _GWS_BUILTIN_PROFILES = ("personal", "work")
@@ -158,7 +162,7 @@ def _ollama_cloud_model_options(config) -> list[str]:
 
 
 def _workspace_provider_options(config) -> list[dict[str, str]]:
-    values = ["claude"]
+    values = ["claude", "codex"]
     if _ollama_backend_available(config):
         values.append("ollama")
     openrouter = getattr(config, "openrouter", None)
@@ -948,21 +952,99 @@ def _provider_key_configured(config, key: str) -> bool:
 
 
 def _provider_config_payload(config) -> dict:
-    keys = {}
-    for key, meta in _PROVIDER_KEY_META.items():
-        auth_method = _provider_key_auth_method(config, key)
-        keys[key] = {
-            **meta,
-            "configured": auth_method != "missing",
-            "auth_method": auth_method,
-        }
+    def key_payload(meta_by_key: dict) -> dict:
+        keys = {}
+        for key, meta in meta_by_key.items():
+            auth_method = _provider_key_auth_method(config, key)
+            keys[key] = {
+                **meta,
+                "configured": auth_method != "missing",
+                "auth_method": auth_method,
+            }
+        return keys
+
+    providers = setup_status(config, env=os.environ).get("providers", {})
     return {
-        "keys": keys,
+        "keys": key_payload(_PROVIDER_KEY_META),
+        "service_keys": key_payload(_SERVICE_KEY_META),
         "auto_update_github_skills": getattr(config, "auto_update_github_skills", False),
         "requires_restart": True,
         "env_path": str(_env_path(config)),
-        "connections": {},
+        "connections": {
+            key: providers[key]
+            for key in ("claude", "codex")
+            if key in providers
+        },
     }
+
+
+def _launch_provider_login(config, provider: str) -> tuple[bool, str]:
+    """Open the provider-owned interactive login in macOS Terminal."""
+    if provider not in {"claude", "codex"}:
+        raise ValueError(f"unsupported provider '{provider}'")
+    command = _auth_command_for_provider(provider)
+    rendered = shlex.join(command)
+    if sys.platform != "darwin":
+        return False, rendered
+    runtime_root = Path(config.runtime_root)
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    script = runtime_root / f"provider-login-{provider}.command"
+    script.write_text(
+        "#!/bin/zsh\n"
+        "script_path=$0\n"
+        "rm -f -- \"$script_path\"\n"
+        f"{rendered}\n"
+        "status=$?\n"
+        "echo\n"
+        "echo 'Authentication finished. You can close this window.'\n"
+        "exit $status\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o700)
+    subprocess.Popen(
+        ["/usr/bin/open", "-a", "Terminal", str(script)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return True, rendered
+
+
+async def provider_connection_action(request: Request) -> JSONResponse:
+    provider = request.path_params["provider"]
+    action = request.path_params["action"]
+    config = request.app.state.config
+    if provider not in {"claude", "codex"}:
+        return JSONResponse({"error": "unsupported provider"}, status_code=404)
+    if action == "connect":
+        try:
+            opened, command = await asyncio.to_thread(_launch_provider_login, config, provider)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse({"ok": True, "opened": opened, "command": command}, status_code=202)
+    if action == "verify":
+        payload = await asyncio.to_thread(_provider_config_payload, config)
+        return JSONResponse(payload["connections"].get(provider, {}))
+    if action == "logout":
+        try:
+            command = _auth_command_for_provider(provider)[:1] + ["logout"]
+            run = await asyncio.to_thread(
+                subprocess.run,
+                command,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (FileNotFoundError, OSError, subprocess.SubprocessError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if run.returncode != 0:
+            return JSONResponse(
+                {"error": (run.stderr or run.stdout or "logout failed").strip()},
+                status_code=400,
+            )
+        return JSONResponse({"ok": True})
+    return JSONResponse({"error": "unsupported action"}, status_code=404)
 
 
 def _apply_provider_key_updates(config, updates: dict[str, str]) -> None:
@@ -986,7 +1068,7 @@ def _apply_provider_key_updates(config, updates: dict[str, str]) -> None:
 async def provider_config_settings(request: Request) -> JSONResponse:
     config = request.app.state.config
     if request.method == "GET":
-        return JSONResponse(_provider_config_payload(config))
+        return JSONResponse(await asyncio.to_thread(_provider_config_payload, config))
     try:
         body = await request.json()
     except ValueError:
@@ -998,7 +1080,8 @@ async def provider_config_settings(request: Request) -> JSONResponse:
         if not isinstance(body["keys"], dict):
             return JSONResponse({"error": "keys must be an object"}, status_code=400)
         key_updates = {str(key): str(value) for key, value in body["keys"].items()}
-        unsupported = sorted(set(key_updates) - set(_PROVIDER_KEY_META))
+        supported_keys = set(_PROVIDER_KEY_META) | set(_SERVICE_KEY_META)
+        unsupported = sorted(set(key_updates) - supported_keys)
         if unsupported:
             return JSONResponse(
                 {"error": f"unsupported provider key(s): {', '.join(unsupported)}"},
@@ -1011,7 +1094,10 @@ async def provider_config_settings(request: Request) -> JSONResponse:
         config.auto_update_github_skills = val
 
     _write_env_values(_env_path(config), updates)
-    provider_key_changes = {k: v for k, v in updates.items() if k in _PROVIDER_KEY_META}
+    provider_key_changes = {
+        k: v for k, v in updates.items()
+        if k in _PROVIDER_KEY_META or k in _SERVICE_KEY_META
+    }
     _apply_provider_key_updates(config, provider_key_changes)
     if provider_key_changes:
         async def _do_restart():
@@ -1023,7 +1109,7 @@ async def provider_config_settings(request: Request) -> JSONResponse:
                 from ciao.signals import RestartRequested
                 raise RestartRequested(config.restart_exit_code)
         asyncio.create_task(_do_restart())
-    return JSONResponse(_provider_config_payload(config))
+    return JSONResponse(await asyncio.to_thread(_provider_config_payload, config))
 
 
 def _gws_profile_config_dir(config, profile: str) -> Path | None:
@@ -1855,6 +1941,163 @@ def _overlay_assistant_timings(
             entries[idx]["duration_ms"] = int(duration)
 
 
+def _codex_content_text(raw: object) -> str:
+    """Extract text from a Codex app-server user-message content array."""
+    if isinstance(raw, str):
+        return raw
+    if not isinstance(raw, list):
+        return ""
+    parts: list[str] = []
+    for block in raw:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and str(block.get("type") or "") in {
+            "text",
+            "inputText",
+        }:
+            parts.append(str(block.get("text") or ""))
+    return "\n".join(part for part in parts if part)
+
+
+def _strip_codex_command_expansion(content: str) -> str:
+    if not content.startswith("[CIAO_COMMAND_BEGIN]\n"):
+        return content
+    for line in content.splitlines()[1:4]:
+        if not line.startswith("user_input_json="):
+            continue
+        try:
+            original = json.loads(line.split("=", 1)[1])
+        except (json.JSONDecodeError, ValueError):
+            return content
+        return str(original) if isinstance(original, str) else content
+    return content
+
+
+def _render_codex_thread(thread: dict, chat) -> list[dict]:
+    """Render Codex thread items into the provider-neutral PWA row shape."""
+    result: list[dict] = []
+    turns = thread.get("turns")
+    if not isinstance(turns, list):
+        turns = []
+    user_idx = 0
+    for turn in turns:
+        if not isinstance(turn, dict):
+            continue
+        items = turn.get("items")
+        if not isinstance(items, list):
+            continue
+        pending_tools: list[str] = []
+
+        def flush_tools() -> None:
+            if pending_tools:
+                result.append({
+                    "role": "system",
+                    "content": "\n".join(pending_tools),
+                    "tool_name": "_activity",
+                })
+                pending_tools.clear()
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("type") or "")
+            if kind == "userMessage":
+                flush_tools()
+                content = _strip_injected_context(
+                    _codex_content_text(item.get("content"))
+                ).strip()
+                content = _strip_codex_command_expansion(content).strip()
+                if not content:
+                    continue
+                entry: dict = {
+                    "role": "user",
+                    "content": content,
+                    "turn_index": user_idx,
+                }
+                refs = chat.user_turn_images.get(str(user_idx))
+                if refs:
+                    entry["images"] = list(refs)
+                timing = chat.user_turn_timings.get(str(user_idx)) or {}
+                if timing.get("sent_at"):
+                    entry["sent_at"] = timing["sent_at"]
+                result.append(entry)
+                user_idx += 1
+                continue
+            if kind == "agentMessage":
+                flush_tools()
+                text = str(item.get("text") or "").strip()
+                if text:
+                    result.append({"role": "assistant", "content": text})
+                continue
+            if kind == "fileChange":
+                flush_tools()
+                changes = item.get("changes")
+                for change in changes if isinstance(changes, list) else []:
+                    if not isinstance(change, dict):
+                        continue
+                    file_path = str(change.get("path") or "")
+                    if file_path:
+                        result.append({
+                            "role": "system",
+                            "tool_name": "_filecard",
+                            "content": file_path,
+                            "file_path": file_path,
+                            "action": str(change.get("kind") or "edited"),
+                            "tool": "Edit",
+                        })
+                continue
+            if kind == "commandExecution":
+                command = item.get("command")
+                if isinstance(command, list):
+                    label = " ".join(str(part) for part in command)
+                else:
+                    label = str(command or "")
+                pending_tools.append(
+                    f"{_tool_icon('Bash')} Bash {label}".strip()
+                )
+                continue
+            if kind in {"mcpToolCall", "dynamicToolCall"}:
+                name = str(item.get("tool") or item.get("name") or kind)
+                server = str(item.get("server") or "")
+                label = f"{server}/{name}" if server else name
+                pending_tools.append(f"{_tool_icon(name)} {label}")
+                continue
+            if kind == "collabAgentToolCall":
+                status = str(item.get("status") or "")
+                prompt = str(item.get("prompt") or "").strip()
+                detail = f" {prompt[:180]}" if prompt else ""
+                pending_tools.append(
+                    f"{_tool_icon('Task')} Agent {status}{detail}".strip()
+                )
+        flush_tools()
+    _overlay_assistant_timings(result, chat.user_turn_timings)
+    return result
+
+
+def _overlay_codex_transcript_metadata(
+    entries: list[dict], transcript_rows: list[dict]
+) -> None:
+    metadata = [
+        row for row in transcript_rows
+        if row.get("role") == "assistant"
+    ]
+    targets: list[int] = []
+    last: int | None = None
+    for index, row in enumerate(entries):
+        if row.get("role") == "user":
+            if last is not None:
+                targets.append(last)
+            last = None
+        elif row.get("role") == "assistant":
+            last = index
+    if last is not None:
+        targets.append(last)
+    for index, source in zip(targets, metadata):
+        for key in ("usage", "quota", "effective_model"):
+            if source.get(key):
+                entries[index][key] = source[key]
+
+
 async def chat_messages(request: Request) -> JSONResponse:
     """Return conversation history for a chat.
 
@@ -1873,12 +2116,33 @@ async def chat_messages(request: Request) -> JSONResponse:
     if not chat.session_id:
         return JSONResponse(handover_messages)
 
+    config = request.app.state.config
+    if getattr(chat, "provider", "claude") == "codex":
+        thread = await CodexProvider.read_thread(
+            config.workspace_root, chat.session_id
+        )
+        if thread is not None:
+            rendered = _render_codex_thread(thread, chat)
+            if rendered:
+                _overlay_codex_transcript_metadata(
+                    rendered,
+                    pcm._transcripts.current_messages(
+                        ChatContext.for_web(chat_id), "codex"
+                    ),
+                )
+                return JSONResponse(handover_messages + rendered)
+        current = pcm._transcripts.current_messages(
+            ChatContext.for_web(chat_id), "codex"
+        )
+        if current:
+            _overlay_assistant_timings(current, chat.user_turn_timings)
+            return JSONResponse(handover_messages + current)
+
     try:
         from claude_agent_sdk import get_session_messages
     except ImportError:
         return JSONResponse({"error": "SDK not available"}, status_code=500)
 
-    config = request.app.state.config
     result: list[dict] = []
     try:
         msgs = get_session_messages(
@@ -2081,6 +2345,40 @@ async def chat_subagents(request: Request) -> JSONResponse:
         return JSONResponse([])
 
     config = request.app.state.config
+    if getattr(chat, "provider", "claude") == "codex":
+        parent = await CodexProvider.read_thread(
+            config.workspace_root, chat.session_id
+        )
+        if parent is None:
+            return JSONResponse([])
+        entries: list[dict] = []
+        for item in await CodexProvider.read_collab_tree(
+            config.workspace_root, parent
+        ):
+            thread = item.get("thread")
+            if not isinstance(thread, dict):
+                continue
+            agent_id = str(item["agent_id"])
+            raw_status = str(item.get("status") or "")
+            if raw_status in {"pendingInit", "running"}:
+                status = "running"
+            elif raw_status in {"errored", "interrupted", "notFound"}:
+                status = "failed"
+            else:
+                status = "completed"
+            entries.append({
+                "agent_id": agent_id,
+                "parent_agent_id": str(item.get("parent_agent_id") or ""),
+                "messages": _render_codex_thread(thread, chat),
+                "tool_use_id": str(item.get("tool_use_id") or ""),
+                "description": str(item.get("description") or ""),
+                "subagent_type": "codex",
+                "is_async": True,
+                "status": status,
+                "turn_index": int(item.get("root_turn_index") or 0),
+            })
+        return JSONResponse(entries)
+
     workspace = str(config.workspace_root)
 
     def _finalize(entries: list[dict]) -> JSONResponse:
@@ -2885,7 +3183,7 @@ async def create_schedule(request: Request) -> JSONResponse:
     # else we still require it (create will happily take "" but then the entry
     # would never tick).
     provider = (body.get("provider") or "").strip()
-    if provider and provider != "claude":
+    if provider and provider not in supported_providers():
         return JSONResponse({"error": f"unknown provider '{provider}'"}, status_code=400)
     try:
         archive_policy = normalize_archive_policy(body.get("archive_policy"))
@@ -2991,7 +3289,7 @@ async def schedule_detail(request: Request) -> JSONResponse:
         entry.model = new_model
     if "provider" in body:
         new_provider = (body["provider"] or "").strip()
-        if new_provider and new_provider != "claude":
+        if new_provider and new_provider not in supported_providers():
             return JSONResponse(
                 {"error": f"unknown provider '{new_provider}'"}, status_code=400
             )
@@ -3012,6 +3310,44 @@ async def schedule_detail(request: Request) -> JSONResponse:
 
 async def list_models(request: Request) -> JSONResponse:
     config = request.app.state.config
+    codex_catalog = await CodexProvider.model_catalog(config.workspace_root)
+    visible_codex = [item for item in codex_catalog if not item.get("hidden")]
+    codex_models = [
+        str(item.get("model") or item.get("id") or "")
+        for item in visible_codex
+        if str(item.get("model") or item.get("id") or "")
+    ]
+    codex_default = next(
+        (
+            str(item.get("model") or item.get("id") or "")
+            for item in visible_codex
+            if item.get("isDefault")
+        ),
+        codex_models[0] if codex_models else "",
+    )
+    codex_tiers = codex_tier_models(codex_catalog)
+    model_reasoning_levels: dict[str, list[str]] = {}
+    codex_model_metadata: dict[str, dict] = {}
+    for item in visible_codex:
+        model_id = str(item.get("model") or item.get("id") or "")
+        if not model_id:
+            continue
+        efforts = item.get("supportedReasoningEfforts")
+        model_reasoning_levels[model_id] = [
+            str(option.get("reasoningEffort"))
+            for option in efforts or []
+            if isinstance(option, dict) and option.get("reasoningEffort")
+        ]
+        codex_model_metadata[model_id] = {
+            "display_name": str(item.get("displayName") or model_id),
+            "description": str(item.get("description") or ""),
+            "default_reasoning_effort": str(
+                item.get("defaultReasoningEffort") or ""
+            ),
+            "input_modalities": list(item.get("inputModalities") or []),
+        }
+    for tier, model_id in codex_tiers.items():
+        model_reasoning_levels[tier] = list(model_reasoning_levels.get(model_id, []))
     # Cloud allowlist + locally-discovered daemon models both count as
     # "Ollama" for bucketing: they show in the personal Claude bucket,
     # never in the work (Anthropic subscription) bucket.
@@ -3042,30 +3378,44 @@ async def list_models(request: Request) -> JSONResponse:
             "claude_work": claude_work,
             "claude_personal": claude_personal,
             "openrouter": openrouter_models,
+            "codex": codex_models,
         },
         "provider_defaults": {
-            "claude_work": work_default,
-            "claude_personal": personal_default,
+            "claude_work": canonical_tier(work_default),
+            "claude_personal": canonical_tier(personal_default),
             "openrouter": openrouter_default,
+            "codex": "sea" if codex_tiers else "",
         },
-        # Per-backend alias tier models, so the picker can show
-        # "sonnet -> kimi (ollama) / anthropic-sonnet (openrouter)".
+        # Provider-neutral tier mappings. Provider-native names are resolved
+        # only at the dispatch boundary.
         "alias_tiers": {
             "ollama": {
-                "haiku": config.ollama.haiku_model,
-                "sonnet": config.ollama.sonnet_model,
-                "opus": config.ollama.opus_model,
+                "river": config.ollama.haiku_model,
+                "lake": config.ollama.sonnet_model,
+                "sea": config.ollama.opus_model,
+                "ocean": config.ollama.opus_model,
             },
-            "openrouter": openrouter_tiers,
+            "openrouter": {
+                "river": openrouter_tiers.get("haiku", ""),
+                "lake": openrouter_tiers.get("sonnet", ""),
+                "sea": openrouter_tiers.get("opus", ""),
+                "ocean": openrouter_tiers.get("opus", ""),
+            } if openrouter_tiers else {},
+            "claude": {"river": "haiku", "lake": "sonnet", "sea": "opus", "ocean": "fable"},
+            "codex": codex_tiers,
         },
         "backends": {
             "ollama": _ollama_backend_available(config),
             "openrouter": or_settings.available,
             "anthropic": True,
+            "codex": bool(codex_models),
         },
         "ollama_models": ollama,
         "ollama_local_models": list(config.ollama.local_models),
         "openrouter_models": openrouter_models,
+        "codex_models": codex_models,
+        "codex_model_metadata": codex_model_metadata,
+        "model_reasoning_levels": model_reasoning_levels,
         "thinking_levels": {k: list(v) for k, v in THINKING_LEVELS.items()},
     })
 
@@ -3085,14 +3435,9 @@ def _routines_payload(config, app_settings) -> dict:
         title_effective = "apfel"
     else:
         title_effective = config.haiku_model_for_workspace("personal")
-    if config.critique_models:
-        critique_effective = config.critique_models
-    elif config.openrouter.available:
-        critique_effective = "anthropic/claude-sonnet-latest,anthropic/claude-haiku-latest,anthropic/claude-opus-latest"
-    elif config.ollama.api_key and config.ollama.api_key != "ollama":
-        critique_effective = f"{config.ollama.sonnet_model},{config.ollama.haiku_model},{config.ollama.opus_model}"
-    else:
-        critique_effective = "sonnet,haiku,opus"
+    from ciao.critique import critique_models_effective
+
+    critique_effective = critique_models_effective(config)
     if config.insights_model_override:
         insights_effective = config.insights_model_override
     else:
@@ -3104,12 +3449,14 @@ def _routines_payload(config, app_settings) -> dict:
         "insights_model": s.insights_model,
 
         "critique_models": s.critique_models,
-        "ollama_haiku_model": s.ollama_haiku_model,
-        "ollama_sonnet_model": s.ollama_sonnet_model,
-        "ollama_opus_model": s.ollama_opus_model,
-        "openrouter_haiku_model": s.openrouter_haiku_model,
-        "openrouter_sonnet_model": s.openrouter_sonnet_model,
-        "openrouter_opus_model": s.openrouter_opus_model,
+        "ollama_river_model": s.ollama_river_model,
+        "ollama_lake_model": s.ollama_lake_model,
+        "ollama_sea_model": s.ollama_sea_model,
+        "ollama_ocean_model": s.ollama_ocean_model,
+        "openrouter_river_model": s.openrouter_river_model,
+        "openrouter_lake_model": s.openrouter_lake_model,
+        "openrouter_sea_model": s.openrouter_sea_model,
+        "openrouter_ocean_model": s.openrouter_ocean_model,
         # What actually runs right now, after defaults.
         "title_model_effective": title_effective,
         "insights_model_effective": insights_effective,
@@ -3117,15 +3464,19 @@ def _routines_payload(config, app_settings) -> dict:
         "critique_models_effective": critique_effective,
         "alias_tiers": {
             "ollama": {
-                "haiku": config.ollama.haiku_model,
-                "sonnet": config.ollama.sonnet_model,
-                "opus": config.ollama.opus_model,
+                "river": config.ollama.haiku_model,
+                "lake": config.ollama.sonnet_model,
+                "sea": config.ollama.opus_model,
+                "ocean": s.ollama_ocean_model or config.ollama.opus_model,
             },
             "openrouter": {
-                "haiku": config.openrouter.haiku_model,
-                "sonnet": config.openrouter.sonnet_model,
-                "opus": config.openrouter.opus_model,
+                "river": config.openrouter.haiku_model,
+                "lake": config.openrouter.sonnet_model,
+                "sea": config.openrouter.opus_model,
+                "ocean": s.openrouter_ocean_model or config.openrouter.opus_model,
             } if config.openrouter.available else {},
+            "claude": {"river": "haiku", "lake": "sonnet", "sea": "opus", "ocean": "fable"},
+            "codex": {"river": "luna", "lake": "terra", "sea": "sol"},
         },
         "transcription": {
             "engine": config.transcription_engine,
@@ -3489,6 +3840,11 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         return JSONResponse({"error": "port must be an integer"}, status_code=400)
     if port < 1 or port > 65535:
         return JSONResponse({"error": "port must be between 1 and 65535"}, status_code=400)
+    default_provider = str(body.get("provider") or "claude").strip().lower()
+    if default_provider not in _WORKSPACE_PROVIDER_LABELS:
+        return JSONResponse(
+            {"error": f"unknown provider '{default_provider}'"}, status_code=400
+        )
 
     from ciao.cli import detect_vault_mode, setup_workspace
 
@@ -3506,6 +3862,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         vault_root=str(body.get("vault_root", "")).strip() or None,
         vault_mode=vault_mode,
         workspace_name=str(body.get("workspace_name", "")).strip() or "personal",
+        default_provider=default_provider,
         python_path=str(body.get("python", "")).strip() or None,
         port=port,
         launch_agents_dir=str(body.get("launch_agents_dir", "")).strip() or None,

@@ -6,6 +6,19 @@ SDK-level wiring notes (fallback_model, hooks, setting_sources) live in the modu
 
 ## CLI Tools
 
+### `codex`: OpenAI Codex CLI
+
+Codex-backed chats use the official app-server protocol and the account owned by the CLI. Install and authenticate once:
+
+```bash
+npm install -g @openai/codex@latest
+ciao auth codex              # opens the Codex / ChatGPT login flow
+ciao auth codex --device-auth # device-code flow for a headless machine
+codex login status           # credential-free readiness check
+```
+
+The bundled CLI inside the ChatGPT desktop app is detected on macOS as well. Its updates follow the desktop app; standalone installs use `codex update`. `CIAO_CODEX_BIN` can point at an absolute Codex binary when launchd cannot discover it. Readiness also generates the installed app-server schema in a temporary directory and verifies the protocol methods Ciaobot needs, so a logged-in but incompatible CLI is reported as needing an update. Ciaobot gets the account-specific model catalog and reasoning efforts from `model/list`; no OpenAI API key is required for Codex subscription chats. `OPENAI_API_KEY` remains a separate optional credential for voice and other API-backed features.
+
 ### `gws`: Google Workspace CLI
 
 Required by `gws-*` and `recipe-*` skills (Gmail, Drive, Docs, Sheets, Slides, Calendar, Tasks, Forms).
@@ -103,11 +116,13 @@ Copy `.env.example` to `.env` and fill in the app-level settings first:
 
 **Required for a configured workspace:** `PWA_AUTH_TOKEN`. `CIAO_PUSH_CONTACT` is optional: leave it empty to run without Web Push notifications until you set a contact in Settings.
 
-`ciao setup` writes the initial `.env` into the selected workspace, seeds stock agents, commands, schedules, agent-readable workspace docs (`CLAUDE.md`, `CIAO_CUSTOMIZATION.md`), and the default vault, renders `~/Library/LaunchAgents/com.ciao.server.plist`, and creates `~/Applications/Ciaobot.app`. The app shortcut opens `http://localhost:<port>/?setup=<token>`; the server redeems `.runtime/setup-token` once on localhost, sets the signed session cookie, then deletes the token. By default setup prints the launchd load command without starting the service; use `--load-launchd` to run `launchctl`. `ciao auth <claude|ollama>` runs the provider login command in Terminal; `--print-only` shows the command for the setup wizard. `GET /api/setup-status` reports required local config plus Claude Code, Ollama, and OpenRouter readiness so the wizard can poll after terminal OAuth commands or `.env` edits. In bootstrap mode, `POST /api/setup/finish` accepts the wizard's final local choices (`workspace` is required; `vault_root` defaults to `memory-vault` inside it), writes the real workspace `.env`, scaffolds the configured `CIAO_VAULT_ROOT`, refreshes the LaunchAgent and `Ciaobot.app` shortcut, and requests the restart exit for supervisor relaunch (a foreground `ciao run` re-execs itself on that exit code).
+`ciao setup` writes the initial `.env` into the selected workspace, seeds stock agents, commands, schedules, agent-readable workspace docs (`CLAUDE.md`, `AGENTS.md`, `CIAO_CUSTOMIZATION.md`), and the default vault, renders `~/Library/LaunchAgents/com.ciao.server.plist`, and creates `~/Applications/Ciaobot.app`. The app shortcut opens `http://localhost:<port>/?setup=<token>`; the server redeems `.runtime/setup-token` once on localhost, sets the signed session cookie, then deletes the token. By default setup prints the launchd load command without starting the service; use `--load-launchd` to run `launchctl`. `ciao auth <claude|codex|ollama>` runs the provider login command in Terminal; `--print-only` shows the command for the setup wizard. `GET /api/setup-status` reports required local config plus Claude Code, Codex, Ollama, and OpenRouter readiness so the wizard can poll after terminal OAuth commands or `.env` edits. In bootstrap mode, `POST /api/setup/finish` accepts the wizard's final local choices (`workspace` is required; `provider` becomes the first logical workspace default; `vault_root` defaults to `memory-vault` inside it), writes the real workspace `.env`, scaffolds the configured `CIAO_VAULT_ROOT`, refreshes the LaunchAgent and `Ciaobot.app` shortcut, and requests the restart exit for supervisor relaunch (a foreground `ciao run` re-execs itself on that exit code).
 
 **Runtime:** `CIAO_WORKSPACE`, `CIAO_PORT`
 
-**Optional provider keys:** `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `CIAO_OLLAMA_API_KEY`
+**Internal command markers:** `CIAO_COMMAND_BEGIN`, `CIAO_COMMAND_INSTRUCTIONS`, and `CIAO_COMMAND_END` are reserved transcript markers used when Ciaobot expands a Claude-style slash command for Codex. They are not environment variables and should not be configured.
+
+**Optional direct-service keys:** `OPENAI_API_KEY` for Ciaobot cloud voice features and `CIAO_OLLAMA_API_KEY` for Ollama Cloud. Claude Code and Codex own their authentication through their respective CLIs.
 
 Workspace-specific integrations can still be set in `.env`, but the public `.env.example` does not ship private/work examples. Use user-owned credentials for each integration:
 
@@ -125,7 +140,7 @@ Workspace-specific integrations can still be set in `.env`, but the public `.env
 
 **OpenRouter:** `OPENROUTER_API_KEY` (optional). When set, OpenRouter is available as a model backend: the Anthropic-compatible endpoint (`https://openrouter.ai/api`) is reached via `ANTHROPIC_BASE_URL` env injection, so chats and one-shot automations can route `owner/model` ids (e.g. `anthropic/claude-haiku-4.5`) through OpenRouter. The picker exposes the per-tier alias defaults plus dynamically discovered anthropic-family models. The adversarial-review skill (`ciao.critique`) defaults to an OpenRouter panel when this key is set.
 
-**Provider key PWA editor.** `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `CIAO_OLLAMA_API_KEY`, and `OPENROUTER_API_KEY` can all be written or updated directly from Settings → Home → API Keys. The server patches the `.env` file in place and triggers a restart automatically — no terminal required. This is the recommended path during initial setup or when rotating keys.
+**Provider connections and direct keys.** Settings → Providers launches, verifies, and logs out Claude Code and Codex through their own CLIs; Ciaobot does not store their credentials. Keys Ciaobot calls directly remain editable: Ollama Cloud and OpenRouter under Providers, and the OpenAI cloud voice key under Settings → Models. Saving a direct key patches `.env` and restarts the server.
 
 ## Google Tasks Reference
 
@@ -160,7 +175,8 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_VAULT_MODE`: onboarding mode for memory-vault folders. Either `scratch` (create folders and documentation from scratch) or `existing` (connect and adapt existing markdown folders).
 - `CIAO_BOOTSTRAP_WORKSPACE`: temp workspace root used when `PWA_AUTH_TOKEN` is absent. Defaults to `~/.ciao/bootstrap`; Ciaobot persists the generated bootstrap auth token under its `.runtime/` so first-run setup survives a restart.
 - `CIAO_NO_BROWSER`: set to any value to stop a first-run `ciao run` from auto-opening the setup wizard in the default browser (the wizard URL is still printed). Auto-open already only happens on interactive terminals, never under launchd or CI.
-- `CIAO_WORKSPACE`: filesystem workspace root for operational state, `.runtime/`, `.env`, `.claude/`, and `CLAUDE.md`. Default `.`.
+- `CIAO_WORKSPACE`: filesystem workspace root for operational state, `.runtime/`, `.env`, `.claude/`, `.agents/skills/`, `CLAUDE.md`, and `AGENTS.md`. Default `.`.
+- `CIAO_CODEX_BIN`: optional absolute path to the Codex CLI. Normally unnecessary because Ciaobot checks the login-shell PATH and the macOS ChatGPT app bundle.
 - `CIAO_VAULT_ROOT`: durable memory/vault root. Default `<CIAO_WORKSPACE>/memory-vault`. Set this to an external notes folder when operational state should stay out of synced notes.
 - `CIAO_WORKSPACES`: JSON workspace registry. Preferred shape is a list of objects with `name`, `vault_root`, `default_model`, `disallowed_tools`, `claude_ai_mcps`, `gws_profile`, and `model_bucket`. `vault_root` is relative to `CIAO_WORKSPACE` unless absolute. If unset, Ciaobot reads `.runtime/workspaces.json`; if that is also missing, it falls back to the legacy `personal` and `work` workspace definitions. `model_bucket` is a routing label, not a workspace name: `work` and `anthropic` keep Anthropic aliases, `personal` and `ollama` route Claude aliases through the configured Ollama tier models, and any other configured bucket is accepted as an Anthropic-style bucket until a provider mapping is added. Example: `[{"name":"default","vault_root":"memory-vault","default_model":"opus","gws_profile":"personal","model_bucket":"anthropic"}]`.
 - `claude_ai_mcps` (workspace field, also settable from the PWA Workspaces tab): tri-state toggle for the claude.ai account-OAuth connector MCPs (Airtable, Atlassian, Slack, Asana, BigQuery, incident.io, Salesforce, Sentry). `null` = per-workspace default (personal off, else on). When off, the connector set is added to the effective denylist for that workspace. `disallowed_tools` covers extra non-connector tools (e.g. `mcp__n8n_mcp`); the effective denylist is the union of the two.
@@ -224,7 +240,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 
 ### Injected CLI context variables
 
-The Ciaobot server injects the following environment variables into every spawned agent CLI subprocess (`claude`):
+The Ciaobot server injects the following environment variables into every spawned agent CLI subprocess (`claude` or `codex app-server`):
 
 - `CIAO_WORKSPACE`: the filesystem workspace root path. This is operator config forwarded for compatibility; it is not the logical chat workspace.
 - `CIAO_ACTIVE_WORKSPACE`: the logical workspace name derived per turn from `chat -> project -> project.workspace`.

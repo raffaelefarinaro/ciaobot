@@ -257,6 +257,36 @@
 
       <!-- MODELS TAB -->
       <template v-if="currentTab === 'models'">
+        <div v-if="providerKeys?.service_keys?.OPENAI_API_KEY" class="card">
+          <div class="settings-card-header">
+            <p class="section-title">OpenAI voice services</p>
+            <p class="hint">This key is used directly by Ciaobot for cloud transcription and speech. Codex authentication is managed by the Codex CLI under Providers.</p>
+          </div>
+          <div class="credential-row">
+            <div class="setting-row-main setting-row-main--inline">
+              <div class="routine-info">
+                <span class="routine-name">{{ providerKeys.service_keys.OPENAI_API_KEY.label }}</span>
+                <p class="hint hint--compact">{{ providerKeys.service_keys.OPENAI_API_KEY.description }}</p>
+              </div>
+              <span class="badge" :class="providerKeys.service_keys.OPENAI_API_KEY.configured ? 'badge--success' : 'badge--error'">
+                {{ providerKeys.service_keys.OPENAI_API_KEY.configured ? 'Configured' : 'Unconfigured' }}
+              </span>
+            </div>
+            <input
+              v-model="providerKeyInputs.OPENAI_API_KEY"
+              type="password"
+              class="routine-input"
+              :placeholder="providerKeys.service_keys.OPENAI_API_KEY.configured ? '•••••••••••• (Leave blank to keep existing, or type empty space to clear)' : 'Enter API Key'"
+              :disabled="providerKeysSaving"
+            />
+          </div>
+          <div class="action-row settings-actions">
+            <button class="btn-primary" @click="saveProviderKeys" :disabled="providerKeysSaving">
+              {{ providerKeysSaving ? 'Saving...' : 'Save voice key' }}
+            </button>
+          </div>
+        </div>
+
         <div v-if="!routinesLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
         <template v-else-if="routinesError">
           <div class="card"><p class="hint hint--warn">{{ routinesError }}</p></div>
@@ -538,24 +568,36 @@
               <div>
                 <p class="section-title">Providers</p>
                 <p class="hint">
-                  Manage API keys and developer credentials. Changes are written to your local <code>.env</code> file and restart the server.
+                  Claude Code and Codex manage their own login and credentials. Ciaobot verifies each CLI connection and protocol.
                 </p>
               </div>
             </div>
 
-            <div v-if="providerKeys.connections" class="setting-row setting-row--stack">
-              <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="setting-row-main setting-row-main--inline">
-                <span class="routine-name">{{ conn.name === 'codex' ? 'OpenAI Codex' : conn.name }}</span>
-                <span class="badge" :class="conn.ok ? 'badge--success' : 'badge--error'">
-                  {{ conn.ok ? 'Connected' : 'Not connected' }}
-                </span>
+            <div v-if="providerKeys.connections" class="provider-connections">
+              <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="credential-row">
+                <div class="setting-row-main setting-row-main--inline">
+                  <div class="routine-info">
+                    <span class="routine-name">{{ connKey === 'codex' ? 'OpenAI Codex' : 'Claude Code' }}</span>
+                    <p class="hint hint--compact provider-connection-detail">
+                      <span v-if="conn.version">{{ conn.version }}</span>
+                      <span v-if="conn.account">{{ conn.account }}</span>
+                      <span v-if="conn.protocol">{{ conn.protocol }}</span>
+                      <span v-if="!conn.version && conn.detail">{{ conn.detail }}</span>
+                    </p>
+                  </div>
+                  <span class="badge" :class="conn.ok ? 'badge--success' : 'badge--error'">
+                    {{ conn.ok ? `Connected · ${conn.auth}` : 'Not connected' }}
+                  </span>
+                </div>
+                <div class="action-row provider-connection-actions">
+                  <button class="btn-primary btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'connect')">
+                    {{ conn.ok ? 'Reconnect' : 'Connect' }}
+                  </button>
+                  <button class="btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'verify')">Verify</button>
+                  <button v-if="conn.ok" class="btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'logout')">Log out</button>
+                </div>
               </div>
-              <p v-if="providerKeys.connections.codex?.detail" class="hint hint--compact">
-                {{ providerKeys.connections.codex.detail }}
-              </p>
-              <p v-if="providerKeys.connections.codex && !providerKeys.connections.codex.ok" class="hint hint--compact">
-                Run <code>{{ providerKeys.connections.codex.command }}</code> in Terminal to sign in with ChatGPT.
-              </p>
+              <div v-if="providerConnectionResult" class="action-result">{{ providerConnectionResult }}</div>
             </div>
 
             <div v-for="(meta, key) in providerKeys.keys" :key="key" class="credential-row">
@@ -817,7 +859,7 @@
             <div class="settings-card-header">
               <p class="section-title">Provider alias models</p>
               <p class="hint">
-                Pick a provider, then set the model behind <code>opus</code>, <code>sonnet</code>, and <code>haiku</code>.
+                Ciaobot uses River, Lake, Sea, and Ocean everywhere, then maps each tier to the provider's own model names.
               </p>
             </div>
             <div class="alias-provider-bar">
@@ -851,13 +893,15 @@
                   <input
                     v-else
                     class="routine-input"
-                    :value="tier.key"
+                    :value="tierModelForProvider(selectedTierProviderSection.key, tier.key)"
                     disabled
                   />
                 </label>
               </div>
               <p v-if="!selectedTierProviderSection.configurable" class="hint hint--info tier-provider-note">
-                Claude uses the native tier aliases directly.
+                {{ selectedTierProviderSection.key === 'codex'
+                  ? 'Codex maps River to Luna, Lake to Terra, and Sea to Sol. Ocean has no Codex counterpart yet.'
+                  : 'Claude maps River to Haiku, Lake to Sonnet, Sea to Opus, and Ocean to Fable.' }}
               </p>
               <p v-else-if="!selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
                 {{ tierProviderUnavailableHint }}
@@ -1076,52 +1120,6 @@
       <template v-if="currentTab === 'context'">
         <div class="card">
           <div class="settings-card-header">
-            <p class="section-title">Context</p>
-            <p class="hint">
-              What the agent CLI loads from your workspace, plus what Ciaobot injects on top.
-            </p>
-          </div>
-
-          <div class="context-flow-diagram" aria-label="How chat context is built">
-            <p class="context-flow-title">How every chat turn is built</p>
-            <div class="context-flow-layers">
-              <section class="context-flow-layer context-flow-layer--cli">
-                <h3>Provider CLI <span class="context-flow-badge">Claude Code or Codex</span></h3>
-                <p class="context-flow-lead">High level — each CLI owns its own runtime and workspace discovery.</p>
-                <ul>
-                  <li>Agent runtime, built-in tools, and provider defaults</li>
-                  <li>Workspace instruction files — <code>CLAUDE.md</code> or <code>AGENTS.md</code>, plus <code>@imports</code></li>
-                  <li>Skills, subagents, and commands from <code>.claude/</code> or <code>.agents/</code></li>
-                </ul>
-              </section>
-              <div class="context-flow-arrow" aria-hidden="true">↓</div>
-              <section class="context-flow-layer context-flow-layer--ciao">
-                <h3>Ciaobot <span class="context-flow-badge">injected on top</span></h3>
-                <p class="context-flow-lead">Same for every provider — this is what the sections below inventory.</p>
-                <ul>
-                  <li>
-                    <strong>Session start</strong> <span class="context-flow-badge">frozen for the chat</span>
-                    — <code>system_prompt.md</code> policies; <code>~/.ciao/memory.md</code> + <code>user.md</code> snapshot
-                  </li>
-                  <li>
-                    <strong>Every turn</strong> <span class="context-flow-badge">before your message</span>
-                    — <code>&lt;ciao-runtime&gt;</code>, <code>&lt;ciao-entities&gt;</code>, project context (<code>[CIAO_CONTEXT_BEGIN]</code>)
-                  </li>
-                  <li>
-                    <strong>Your message</strong>
-                    — typed text, <code>----</code>, pinned-file and chat comments, image attachments
-                  </li>
-                </ul>
-              </section>
-            </div>
-            <p class="hint hint--compact context-flow-footnote">
-              Vault <code>MEMORY.md</code> and instruction imports are workspace files the CLI may load; bounded <code>memory.md</code>/<code>user.md</code> and generated blocks are listed below. Edit project context from the chat header chip.
-            </p>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="settings-card-header">
             <p class="section-title">Context sources</p>
             <p class="hint">
               Workspace instruction files and Ciaobot-generated blocks currently on disk.
@@ -1236,7 +1234,7 @@
           </div>
 
           <p class="hint hint--info skill-scope-note">
-            Ciaobot runs on Claude Code, so any plugins and skills you install globally in Claude Code are also loaded and available to Ciaobot. This page only lists the skills managed here, the Ciaobot-specific ones (custom and GitHub/package skills).
+            Ciaobot runs chats through Claude Code or Codex. Ciaobot-managed skills are synchronized into both CLIs where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed custom and GitHub/package skills.
           </p>
 
           <!-- Auto-update GitHub skills -->
@@ -1349,7 +1347,7 @@
             <div>
               <p class="section-title">Subagents</p>
               <p class="hint">
-                Claude Code subagents available to Ciaobot. Custom subagents are saved in <code>subagents/</code> and mirrored into the vault.
+                Shared subagents available to Claude Code and Codex. Custom definitions are saved in <code>subagents/</code>, mirrored into the vault, and synchronized into each CLI's native format.
               </p>
             </div>
             <button class="btn-small" @click="toggleAddSubagent">
@@ -1446,7 +1444,7 @@
             <div>
               <p class="section-title">Commands</p>
               <p class="hint">
-                Slash commands available to Claude Code. Custom commands are saved in <code>commands/</code> and mirrored into the vault.
+                Shared commands available to Claude Code and Codex. Custom commands are saved in <code>commands/</code>, mirrored into the vault, and exposed to Codex through generated skill wrappers.
               </p>
             </div>
             <div class="settings-card-header-actions">
@@ -1581,6 +1579,7 @@ import type {
   DeployResult,
   GwsIntegrationSettings,
   LocalStatus,
+  ModelsResponse,
   PromptAsset,
   ProviderConfigSettings,
   RoutineSettings,
@@ -1742,9 +1741,9 @@ const routinesError = ref('')
 const routinesSaving = ref(false)
 const routinesResult = ref('')
 
-type AliasProviderKey = 'claude' | 'ollama' | 'openrouter'
-type TierProviderKey = Exclude<AliasProviderKey, 'claude'>
-type TierKey = 'haiku' | 'sonnet' | 'opus'
+type AliasProviderKey = 'claude' | 'codex' | 'ollama' | 'openrouter'
+type TierProviderKey = Exclude<AliasProviderKey, 'claude' | 'codex'>
+type TierKey = 'river' | 'lake' | 'sea' | 'ocean'
 type RoutineModelKey = 'title_model' | 'insights_model'
 type RoutineProviderValue = 'automatic' | 'apple' | 'custom' | AliasProviderKey
 
@@ -1760,29 +1759,34 @@ type AliasProviderSection = {
   available: boolean
 }
 type TierSettingKey =
-  | 'ollama_haiku_model'
-  | 'ollama_sonnet_model'
-  | 'ollama_opus_model'
-  | 'openrouter_haiku_model'
-  | 'openrouter_sonnet_model'
-  | 'openrouter_opus_model'
+  | 'ollama_river_model'
+  | 'ollama_lake_model'
+  | 'ollama_sea_model'
+  | 'ollama_ocean_model'
+  | 'openrouter_river_model'
+  | 'openrouter_lake_model'
+  | 'openrouter_sea_model'
+  | 'openrouter_ocean_model'
 
 const modelTiers: { key: TierKey; label: string }[] = [
-  { key: 'haiku', label: 'Haiku' },
-  { key: 'sonnet', label: 'Sonnet' },
-  { key: 'opus', label: 'Opus' },
+  { key: 'river', label: 'River' },
+  { key: 'lake', label: 'Lake' },
+  { key: 'sea', label: 'Sea' },
+  { key: 'ocean', label: 'Ocean' },
 ]
 
 const tierSettingKeys: Record<TierProviderKey, Record<TierKey, TierSettingKey>> = {
   ollama: {
-    haiku: 'ollama_haiku_model',
-    sonnet: 'ollama_sonnet_model',
-    opus: 'ollama_opus_model',
+    river: 'ollama_river_model',
+    lake: 'ollama_lake_model',
+    sea: 'ollama_sea_model',
+    ocean: 'ollama_ocean_model',
   },
   openrouter: {
-    haiku: 'openrouter_haiku_model',
-    sonnet: 'openrouter_sonnet_model',
-    opus: 'openrouter_opus_model',
+    river: 'openrouter_river_model',
+    lake: 'openrouter_lake_model',
+    sea: 'openrouter_sea_model',
+    ocean: 'openrouter_ocean_model',
   },
 }
 
@@ -1792,8 +1796,8 @@ const routineEffectiveKeys: Record<RoutineModelKey, keyof RoutineSettings> = {
 }
 
 const routineDefaultTiers: Record<RoutineModelKey, TierKey> = {
-  title_model: 'haiku',
-  insights_model: 'sonnet',
+  title_model: 'river',
+  insights_model: 'lake',
 }
 
 async function fetchRoutines() {
@@ -1914,6 +1918,13 @@ const tierProviderSections = computed<AliasProviderSection[]>(() => {
       available: true,
     },
     {
+      key: 'codex',
+      label: 'OpenAI Codex',
+      options: [],
+      configurable: false,
+      available: !!providerKeys.value?.connections?.codex?.ok,
+    },
+    {
       key: 'ollama',
       label: 'Ollama',
       options: ollamaAvailable
@@ -1991,7 +2002,8 @@ async function saveTierModel(provider: TierProviderKey, tier: TierKey, value: st
 }
 
 function tierModelForProvider(provider: AliasProviderKey, tier: TierKey): string {
-  if (provider === 'claude') return tier
+  if (provider === 'claude') return routines.value?.alias_tiers?.claude?.[tier] || tier
+  if (provider === 'codex') return routines.value?.alias_tiers?.codex?.[tier] || 'Not available'
   return tierEffectiveValue(provider, tier) || ''
 }
 
@@ -2009,10 +2021,11 @@ function routineEffectiveModel(key: RoutineModelKey): string {
 
 function inferRoutineModel(model: string): { provider: RoutineProviderValue; tier: TierKey } {
   const raw = model.trim()
-  if (!raw) return { provider: 'automatic', tier: 'sonnet' }
-  if (raw === 'apfel') return { provider: 'apple', tier: 'haiku' }
-  if (raw === 'haiku' || raw === 'sonnet' || raw === 'opus') {
-    return { provider: 'claude', tier: raw }
+  if (!raw) return { provider: 'automatic', tier: 'lake' }
+  if (raw === 'apfel') return { provider: 'apple', tier: 'river' }
+  const legacyTiers: Record<string, TierKey> = { haiku: 'river', sonnet: 'lake', opus: 'sea', fable: 'ocean' }
+  if (legacyTiers[raw]) {
+    return { provider: 'claude', tier: legacyTiers[raw] }
   }
 
   const providers: TierProviderKey[] = ['ollama', 'openrouter']
@@ -2024,7 +2037,7 @@ function inferRoutineModel(model: string): { provider: RoutineProviderValue; tie
     }
   }
 
-  return { provider: 'custom', tier: 'sonnet' }
+  return { provider: 'custom', tier: 'lake' }
 }
 
 function routineProviderValue(key: RoutineModelKey): RoutineProviderValue {
@@ -2095,6 +2108,8 @@ const providerKeysError = ref('')
 const providerKeysSaving = ref(false)
 const providerKeysResult = ref('')
 const providerKeyInputs = ref<Record<string, string>>({})
+const providerConnectionPending = ref('')
+const providerConnectionResult = ref('')
 const autoUpdateGithubSkills = ref(false)
 const autoUpdateSaving = ref(false)
 const autoUpdateResult = ref('')
@@ -2286,6 +2301,9 @@ async function fetchProviderKeys() {
     for (const key in res.keys) {
       providerKeyInputs.value[key] = ''
     }
+    for (const key in res.service_keys || {}) {
+      providerKeyInputs.value[key] = ''
+    }
     if (res.auto_update_github_skills !== undefined) {
       autoUpdateGithubSkills.value = res.auto_update_github_skills
     }
@@ -2296,6 +2314,31 @@ async function fetchProviderKeys() {
   }
 }
 
+async function providerConnectionAction(provider: string, action: 'connect' | 'verify' | 'logout') {
+  if (action === 'logout' && !confirm(`Log out of ${provider === 'codex' ? 'OpenAI Codex' : 'Claude Code'} on this computer?`)) {
+    return
+  }
+  providerConnectionPending.value = provider
+  providerConnectionResult.value = ''
+  try {
+    const result = await api.post<any>(`/api/settings/providers/${provider}/${action}`)
+    if (action === 'connect') {
+      providerConnectionResult.value = result.opened
+        ? `Opened ${provider === 'codex' ? 'Codex' : 'Claude Code'} login in Terminal.`
+        : `Run ${result.command} in Terminal.`
+    } else if (action === 'logout') {
+      providerConnectionResult.value = 'Logged out.'
+    } else {
+      providerConnectionResult.value = result.ok ? `Connection verified (${result.auth}).` : result.detail || 'Not connected.'
+    }
+    await fetchProviderKeys()
+  } catch (e: any) {
+    providerConnectionResult.value = `Error: ${e?.message || e}`
+  } finally {
+    providerConnectionPending.value = ''
+  }
+}
+
 async function saveProviderKeys() {
   if (!providerKeys.value) return
   providerKeysSaving.value = true
@@ -2303,6 +2346,12 @@ async function saveProviderKeys() {
   
   const patchKeys: Record<string, string> = {}
   for (const key in providerKeys.value.keys) {
+    const val = providerKeyInputs.value[key]
+    if (val !== '') {
+      patchKeys[key] = val
+    }
+  }
+  for (const key in providerKeys.value.service_keys || {}) {
     const val = providerKeyInputs.value[key]
     if (val !== '') {
       patchKeys[key] = val
@@ -2324,6 +2373,9 @@ async function saveProviderKeys() {
     const res = await api.patch<ProviderConfigSettings>('/api/settings/providers', payload)
     providerKeys.value = res
     for (const key in res.keys) {
+      providerKeyInputs.value[key] = ''
+    }
+    for (const key in res.service_keys || {}) {
       providerKeyInputs.value[key] = ''
     }
     if (res.auto_update_github_skills !== undefined) {
@@ -2857,6 +2909,7 @@ const workspacesError = ref('')
 const workspacesSaving = ref<string | null>(null)
 const workspacesResult = ref('')
 const showNewWorkspace = ref(false)
+const workspaceModels = ref<ModelsResponse | null>(null)
 
 type WorkspaceForm = {
   name: string
@@ -2926,7 +2979,21 @@ function isCustomWorkspaceModel(model: string): boolean {
 }
 
 function workspaceModelSectionsForProvider(provider: WorkspaceProvider, currentModelValue: string): ModelSection[] {
-  const tiers: TierKey[] = ['haiku', 'sonnet', 'opus']
+  if (provider === 'codex') {
+    const mappings = workspaceModels.value?.alias_tiers?.codex || {}
+    const models: string[] = (['river', 'lake', 'sea'] as TierKey[]).filter((tier) => Boolean(mappings[tier]))
+    const badges: Record<string, string[]> = {
+      river: ['Luna', mappings.river].filter(Boolean),
+      lake: ['Terra', mappings.lake].filter(Boolean),
+      sea: ['Sol', mappings.sea].filter(Boolean),
+    }
+    const current = currentModelValue.trim()
+    if (current && !models.includes(current)) models.push(current)
+    return models.length
+      ? [{ key: 'codex', label: 'OpenAI Codex', models, modelBadges: badges }]
+      : []
+  }
+  const tiers: TierKey[] = ['river', 'lake', 'sea', 'ocean']
   const modelBadges: Record<string, string[]> = {}
   
   for (const tier of tiers) {
@@ -3000,6 +3067,14 @@ async function fetchWorkspacesList() {
     workspacesError.value = `Failed to load workspaces: ${e?.message || e}`
   } finally {
     workspacesLoaded.value = true
+  }
+}
+
+async function fetchWorkspaceModels() {
+  try {
+    workspaceModels.value = await api.get<ModelsResponse>('/api/models')
+  } catch {
+    workspaceModels.value = null
   }
 }
 
@@ -3084,6 +3159,7 @@ onMounted(async () => {
   fetchAutomation()
   fetchPackageStatus()
   fetchProviderKeys()
+  fetchWorkspaceModels()
   fetchGwsIntegration()
   fetchWorkspacesList()
   pushSupportedFlag.value = pushSupported()
@@ -3822,77 +3898,6 @@ async function doPackageUpdate() {
 .routine-select::-ms-expand {
   display: none;
 }
-.context-flow-diagram {
-  margin-top: 8px;
-  padding: 14px 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 4px);
-  background: var(--bg2, var(--bg));
-}
-.context-flow-title {
-  margin: 0 0 12px;
-  font-size: var(--text-sm);
-  font-weight: 600;
-  color: var(--fg);
-}
-.context-flow-layers {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.context-flow-layer {
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm, 4px);
-  background: var(--bg);
-}
-.context-flow-layer h3 {
-  margin: 0 0 8px;
-  font-size: var(--text-sm);
-  font-weight: 600;
-  color: var(--fg);
-}
-.context-flow-lead {
-  margin: 0 0 8px;
-  font-size: var(--text-xs);
-  color: var(--fg3, var(--fg2));
-  line-height: 1.4;
-}
-.context-flow-layer--cli {
-  border-color: color-mix(in srgb, var(--border) 70%, var(--fg2) 30%);
-}
-.context-flow-layer--ciao {
-  border-color: color-mix(in srgb, var(--border) 55%, var(--accent, var(--fg)) 45%);
-}
-.context-flow-layer ul {
-  margin: 0;
-  padding-left: 1.1rem;
-  font-size: var(--text-sm);
-  color: var(--fg2);
-  line-height: 1.45;
-}
-.context-flow-layer li + li {
-  margin-top: 4px;
-}
-.context-flow-badge {
-  display: inline-block;
-  margin-left: 6px;
-  padding: 1px 6px;
-  border-radius: 999px;
-  font-size: var(--text-xs);
-  font-weight: 500;
-  color: var(--fg2);
-  background: var(--bg2, rgba(127, 127, 127, 0.12));
-}
-.context-flow-arrow {
-  align-self: center;
-  font-size: var(--text-lg);
-  line-height: 1;
-  color: var(--fg3, var(--fg2));
-}
-.context-flow-footnote {
-  margin: 12px 0 0;
-}
 .routine-context {
   display: flex;
   flex-direction: column;
@@ -3986,6 +3991,24 @@ async function doPackageUpdate() {
   max-width: none;
   min-width: 0;
   width: 100%;
+}
+.provider-connections {
+  display: flex;
+  flex-direction: column;
+}
+.provider-connection-actions {
+  justify-content: flex-start;
+  gap: var(--space-2);
+}
+.provider-connection-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+.provider-connection-detail > span + span::before {
+  content: '·';
+  margin-right: 10px;
+  color: var(--fg3);
 }
 .settings-control {
   width: min(100%, 430px);
@@ -4578,7 +4601,8 @@ async function doPackageUpdate() {
   position: absolute;
   z-index: 30;
   top: calc(100% + 6px);
-  left: 0;
+  right: 0;
+  left: auto;
   width: min(380px, calc(100vw - 48px));
   padding: var(--space-3);
   border: 1px solid var(--border);

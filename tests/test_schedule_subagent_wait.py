@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 from ciao.config import CiaoConfig
+from ciao.models import ToolUseEvent
+from ciao.providers.codex import CodexProvider
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
@@ -132,6 +135,96 @@ async def test_await_subagents_no_session_returns_no_wait(tmp_path: Path) -> Non
     settled, had_async = await pcm._await_schedule_subagents(chat.chat_id)
     assert settled is True
     assert had_async is False
+
+
+async def test_await_codex_subagents_uses_child_lifecycle(
+    tmp_path: Path, monkeypatch
+) -> None:
+    pcm = _make_manager(tmp_path)
+    chat = _seed_chat(pcm, "codex-parent")
+    chat.provider = "codex"
+    states = ["running", "completed"]
+
+    def thread(status: str) -> dict:
+        return {"turns": [{"items": [{
+            "type": "collabAgentToolCall",
+            "id": "spawn-1",
+            "tool": "spawnAgent",
+            "status": "completed",
+            "receiverThreadIds": ["codex-child"],
+            "agentsStates": {"codex-child": {"status": status}},
+        }]}]}
+
+    child = {"id": "codex-child", "turns": []}
+    read = AsyncMock(side_effect=[
+        thread(states[0]), child,
+        thread(states[1]), child,
+    ])
+    monkeypatch.setattr(CodexProvider, "read_thread", read)
+
+    async def fake_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    settled, had_async = await pcm._await_schedule_subagents(chat.chat_id)
+    assert settled is True
+    assert had_async is True
+    assert read.await_count == 4
+
+
+async def test_unattended_codex_question_interrupts_and_remains_pending(
+    tmp_path: Path,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("scheduled-codex", workspace="personal")
+    chat = pcm.create_chat(
+        project.project_id,
+        title="Scheduled Codex",
+        provider="codex",
+        model="gpt-test",
+    )
+
+    class FakeService:
+        current_session_id = ""
+
+        def __init__(self) -> None:
+            self.stopped = False
+
+        async def execute_streaming(self, _request):
+            yield ToolUseEvent(
+                type="assistant",
+                tool_name="AskUserQuestion",
+                tool_input=json.dumps({
+                    "questions": [{
+                        "id": "choice",
+                        "header": "Choice",
+                        "question": "Pick one",
+                        "options": [{"label": "A"}],
+                    }],
+                }),
+                request_id="question-1",
+            )
+
+        async def stop_active(self) -> bool:
+            self.stopped = True
+            return True
+
+    service = FakeService()
+    pcm._providers[chat.chat_id] = service  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "Run", unattended=True)
+    payloads = [payload async for payload in stream.subscribe()]
+
+    assert service.stopped is True
+    assert any(
+        payload.get("type") == "tool_use"
+        and payload.get("tool_name") == "AskUserQuestion"
+        for payload in payloads
+    )
+    saved = pcm.get_chat(chat.chat_id)
+    assert saved is not None
+    assert "question-1" in saved.pending_question
 
 
 async def test_await_subagents_times_out_while_running(

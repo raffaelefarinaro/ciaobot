@@ -149,6 +149,26 @@ async def ws_chat(websocket: WebSocket) -> None:
                     )
                 continue
 
+            if msg_type == "question_response":
+                request_id = str(msg.get("request_id", "")).strip()
+                raw_answers = msg.get("answers")
+                answers: dict[str, list[str]] = {}
+                if isinstance(raw_answers, dict):
+                    for question_id, values in raw_answers.items():
+                        if isinstance(values, list):
+                            answers[str(question_id)] = [
+                                str(value) for value in values
+                            ]
+                        elif values is not None:
+                            answers[str(question_id)] = [str(values)]
+                if request_id:
+                    pcm.respond_question(
+                        chat_id,
+                        request_id=request_id,
+                        answers=answers,
+                    )
+                continue
+
             if msg_type == "message":
                 text = msg.get("text", "")
                 if not text:

@@ -154,9 +154,13 @@ export const useProjectStore = defineStore('projects', () => {
   // implicitly answers, regardless of whether they clicked an option).
   type ActiveQuestionOption = { label: string; description?: string }
   type ActiveQuestion = {
+    id: string
     question: string
     header: string
     multiSelect: boolean
+    allowOther: boolean
+    isSecret: boolean
+    requestId: string
     options: ActiveQuestionOption[]
   }
   const activeQuestions = ref<Record<string, ActiveQuestion[]>>({})
@@ -165,15 +169,25 @@ export const useProjectStore = defineStore('projects', () => {
   // picker's shape. Shared by the live `tool_use` handler and the reload-time
   // rebuild from a chat's persisted `pending_question`. Returns [] on anything
   // unparseable so callers can fall through to the generic trace path.
-  function parseQuestions(toolInput: string | null | undefined): ActiveQuestion[] {
+  function parseQuestions(
+    toolInput: string | null | undefined,
+    requestId = '',
+  ): ActiveQuestion[] {
     if (!toolInput) return []
     try {
       const parsed = JSON.parse(toolInput)
       if (!Array.isArray(parsed?.questions)) return []
-      return parsed.questions.map((q: Record<string, unknown>) => ({
+      const resolvedRequestId = requestId || String(parsed?.request_id ?? '')
+      return parsed.questions.map((q: Record<string, unknown>, index: number) => ({
+        id: String(q.id ?? index),
         question: String(q.question ?? ''),
         header: String(q.header ?? ''),
         multiSelect: Boolean(q.multiSelect),
+        allowOther: q.isOther === undefined
+          ? true
+          : Boolean(q.isOther) || !Array.isArray(q.options) || q.options.length === 0,
+        isSecret: Boolean(q.isSecret),
+        requestId: resolvedRequestId,
         options: Array.isArray(q.options)
           ? (q.options as Array<Record<string, unknown>>).map(o => ({
               label: String(o.label ?? ''),
@@ -566,6 +580,7 @@ export const useProjectStore = defineStore('projects', () => {
       }
       const merged: ChatMessage = { ...sMsg }
       if (lMsg.usage && !sMsg.usage) merged.usage = lMsg.usage
+      if (lMsg.quota && !sMsg.quota) merged.quota = lMsg.quota
       if (lMsg.effective_model && !sMsg.effective_model) merged.effective_model = lMsg.effective_model
       if (lMsg.is_error !== undefined && sMsg.is_error === undefined) merged.is_error = lMsg.is_error
       if (lMsg.turn_index != null && sMsg.turn_index == null) merged.turn_index = lMsg.turn_index
@@ -1129,7 +1144,7 @@ export const useProjectStore = defineStore('projects', () => {
     updates: {
       model?: string
       mode?: string
-      provider?: 'claude'
+      provider?: 'claude' | 'codex'
       thinking_level?: string
       model_bucket?: string
     },
@@ -1141,7 +1156,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   async function handoverChat(
     chatId: string,
-    updates: { model: string; provider: 'claude'; model_bucket?: string },
+    updates: { model: string; provider: 'claude' | 'codex'; model_bucket?: string },
   ) {
     const visibleMessages = normalizeMessages(messages.value[chatId] || [])
     const c = await api.post<ChatInfo>(`/api/chats/${chatId}/handover`, {
@@ -2007,6 +2022,7 @@ export const useProjectStore = defineStore('projects', () => {
         pendingPermissions.value[chatId] = next
       } else {
         delete pendingPermissions.value[chatId]
+        delete activeQuestions.value[chatId]
       }
     }
     const ws = sockets.value[chatId]
@@ -2019,6 +2035,24 @@ export const useProjectStore = defineStore('projects', () => {
           reason,
         }),
       )
+    }
+  }
+
+  function respondQuestion(
+    chatId: string,
+    requestId: string,
+    answers: Record<string, string[]>,
+  ) {
+    delete activeQuestions.value[chatId]
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    if (chat?.pending_question) chat.pending_question = ''
+    const ws = sockets.value[chatId]
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'question_response',
+        request_id: requestId,
+        answers,
+      }))
     }
   }
 
@@ -2485,7 +2519,7 @@ export const useProjectStore = defineStore('projects', () => {
         // generic path on parse failure so the call still shows up in the
         // trace as a regular tool entry.
         if (event.tool_name === 'AskUserQuestion' && event.tool_input) {
-          const qs = parseQuestions(event.tool_input)
+          const qs = parseQuestions(event.tool_input, event.request_id || '')
           if (qs.length) {
             activeQuestions.value[chatId] = qs
             // Nudge the user when the tab is backgrounded so they don't
@@ -2654,6 +2688,7 @@ export const useProjectStore = defineStore('projects', () => {
             is_error: event.is_error,
             effective_model: event.effective_model,
             usage: event.usage,
+            quota: event.quota,
             duration_ms: event.duration_ms,
           })
           const isActive = activeChatId.value === chatId &&
@@ -2795,7 +2830,7 @@ export const useProjectStore = defineStore('projects', () => {
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, switchWorkspace, openChatFromDeepLink,
     syncLatest,
-    sendMessage, stopChat, respondPermission, transcribeVoice, speakMessage, uploadImages, uploadImageRefs, removePendingImage, clearPendingImages,
+    sendMessage, stopChat, respondPermission, respondQuestion, transcribeVoice, speakMessage, uploadImages, uploadImageRefs, removePendingImage, clearPendingImages,
     addPendingComment, removePendingComment, clearPendingComments,
     addPendingChatComment, removePendingChatComment, clearPendingChatComments, updatePendingChatComment,
     addPendingChatCommentImage, removePendingChatCommentImage,

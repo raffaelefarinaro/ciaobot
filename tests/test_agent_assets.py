@@ -69,6 +69,41 @@ def test_agent_assets_lists_instruction_sources(tmp_path: Path) -> None:
     assert "Per-turn runtime context hook" in titles
 
 
+def test_agent_assets_lists_codex_global_and_project_instructions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "AGENTS.md").write_text("# Global Codex\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("# Project Codex\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    resp = _client(tmp_path).get("/api/agent-assets")
+
+    assert resp.status_code == 200
+    by_title = {item["title"]: item for item in resp.json()["context"]}
+    assert by_title["Codex global instructions"]["content"] == "# Global Codex\n"
+    assert by_title["Codex project instructions"]["content"] == "# Project Codex\n"
+
+
+def test_agent_assets_respects_codex_override_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "AGENTS.md").write_text("# Global default\n", encoding="utf-8")
+    (codex_home / "AGENTS.override.md").write_text("# Global override\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("# Project default\n", encoding="utf-8")
+    (tmp_path / "AGENTS.override.md").write_text("# Project override\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    resp = _client(tmp_path).get("/api/agent-assets")
+
+    assert resp.status_code == 200
+    codex = [item for item in resp.json()["context"] if item["title"].startswith("Codex ")]
+    assert {item["content"] for item in codex} == {"# Global override\n", "# Project override\n"}
+
+
 def test_agent_assets_lists_bounded_memory_and_splits_system_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

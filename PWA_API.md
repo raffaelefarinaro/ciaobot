@@ -41,6 +41,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/read` | Mark chat read |
 | POST | `/api/chats/{chat_id}/retry` | Set, stop, or run deferred chat retry |
 | POST | `/api/chats/{chat_id}/prompt` | Send a prompt to start a background turn in the chat |
+| GET | `/api/open-chat/{chat_id}` | Focus an existing chat in the PWA and emit the local open-chat event |
 | GET | `/api/chats/{chat_id}/messages` | Load persisted chat messages |
 | GET | `/api/chats/{chat_id}/subagents` | Load subagent transcripts |
 | POST | `/api/chats/{chat_id}/voice` | Upload voice for transcription |
@@ -88,7 +89,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/workspaces` | List configured logical workspaces |
 | POST | `/api/workspaces/{name}` | Add or update a logical workspace config |
 | DELETE | `/api/workspaces/{name}` | Delete a logical workspace config |
-| POST | `/api/settings/providers` | Update configured LLM providers settings |
+| GET, PATCH | `/api/settings/providers` | Read or update keys used directly by Ciaobot |
+| POST | `/api/settings/providers/{provider}/{action}` | Connect, verify, or log out through the Claude Code or Codex CLI |
 | GET | `/api/integrations/gws` | Read Google Workspace CLI install, profile auth, and workspace usage status |
 | POST | `/api/integrations/gws/install` | Install the `@googleworkspace/cli` (`gws`) binary globally via npm |
 | POST | `/api/integrations/gws/client-secret` | Upload GCP client_secret.json for a profile |
@@ -131,7 +133,7 @@ Reuse the jar with `-b /tmp/ciao.jar` on every other call. The Origin/Referer ho
 **Agent assets**
 
 ```bash
-# Inspect Claude Code instructions, generated Ciaobot prompt blocks, subagents, and commands.
+# Inspect Claude Code context sources, generated Ciaobot prompt blocks, subagents, and commands.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/agent-assets"
 
 # Inspect workspace/vault health only.
@@ -152,7 +154,7 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/agen
 
 # Create a workspace-owned slash command.
 # Writes commands/<name>.md, mirrors a vault note under memory-vault/Workspace/Commands/,
-# then syncs the command into .claude/commands/.
+# then syncs it into .claude/commands/ plus a Codex .agents/skills/ wrapper.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/agent-assets/commands" \
   -H 'content-type: application/json' \
   -d '{"name":"decision-record","description":"Turn notes into a decision record.","argument_hint":"<notes>","prompt":"Convert $ARGUMENTS into a concise decision record with context, decision, and consequences."}'
@@ -199,7 +201,7 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/proj
 
 ```bash
 # Create — title/model/mode/provider/model_bucket all optional.
-# provider is currently `claude`. model_bucket controls the Claude backend:
+# provider is `claude` or `codex`. model_bucket only controls Claude backends:
 # '' = auto from the project's configured workspace bucket. Legacy
 # work/personal buckets still work; anthropic/ollama are the clearer
 # configured names. Unknown buckets are rejected unless a workspace config
@@ -218,7 +220,7 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/chats
   -H 'content-type: application/json' -d '{"thinking_level":"high"}'
 
 # Handover — switch model/backend inside the same visible chat.
-# Body keys: provider = claude, model, model_bucket (optional), messages
+# Body keys: provider = claude|codex, model, model_bucket (Claude only), messages
 # (visible rows). Starts the next provider turn as a fresh session seeded
 # with those messages.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/handover" \
@@ -359,13 +361,13 @@ Global `/ws/events` payloads the PWA reacts to:
 - `chat_title`: auto-title finished.
 - `chat_moved` / `chat_deleted`: project changes.
 
-Per-chat `/ws/chat/{chat_id}` events include text/thinking deltas, `tool_use` (with optional `file_touch`), `permission_request`, `result`, `user_echo`, `queued`, `steered`, `status`, and `error`.
+Per-chat `/ws/chat/{chat_id}` events include text/thinking deltas, `tool_use` (with optional `file_touch` and provider-native `request_id`), `permission_request`, `result`, `user_echo`, `queued`, `steered`, `status`, and `error`. Client messages include normal `message`, `stop`, `permission_response`, and `question_response`; Codex structured questions use `question_response {request_id, answers: {question_id: string[]}}` so the answer resolves inside the still-running app-server turn.
 
 **Message timings**
 
 Each user turn carries timing metadata, computed in `ciao/web/project_chats.py` (provider-agnostic) and persisted under `ChatInfo.user_turn_timings` as `{ "<turn_index>": {sent_at, completed_at, duration_ms} }`.
 
-- `GET /api/chats/{chat_id}/messages`: user entries include `sent_at`; the last assistant entry per turn includes `sent_at` (= `completed_at`) and `duration_ms`. Overlay is applied to Claude SDK sessions via `_overlay_assistant_timings` in `ciao/web/routes_api.py`. Pre-feature chats with no recorded timings get no extra fields.
+- `GET /api/chats/{chat_id}/messages`: user entries include `sent_at`; the last assistant entry per turn includes `sent_at` (= `completed_at`) and `duration_ms`. Overlay is applied to both Claude SDK and Codex app-server history. Pre-feature chats with no recorded timings get no extra fields.
 - WS `/ws/chat/{chat_id}` `user_echo` event: adds optional `sent_at`.
 - WS `/ws/chat/{chat_id}` `result` event: adds optional `sent_at`, `completed_at`, `duration_ms`.
 
@@ -374,7 +376,7 @@ Each user turn carries timing metadata, computed in `ciao/web/project_chats.py` 
 Write/Edit/MultiEdit/NotebookEdit tool calls flow through both transports tagged with `file_touch` so the PWA can render a clickable inline preview card next to the agent's reasoning trace.
 
 - WS `/ws/chat/{chat_id}` `tool_use` event: adds optional `file_touch: {file_path, action}` when the tool mutates a file on disk. Detection lives in `extract_file_touch` (`ciao/web/chat_broker.py`); `action` is `written | edited`.
-- `GET /api/chats/{chat_id}/messages` and `GET /api/chats/{chat_id}/subagents`: file-mutating tool calls become standalone `{role: "system", tool_name: "_filecard", file_path, action, tool, content: file_path}` entries instead of folding into `_activity`. Claude readers honour this.
+- `GET /api/chats/{chat_id}/messages` and `GET /api/chats/{chat_id}/subagents`: file-mutating tool calls become standalone `{role: "system", tool_name: "_filecard", file_path, action, tool, content: file_path}` entries instead of folding into `_activity`. Both provider readers honour this.
 - Card click opens `/api/workspace-file` (text/code) or `/api/workspace-image` (images by extension). The classification is advisory only. The viewer endpoints have no workspace sandbox: they serve any allowlisted-extension file on disk (relative paths anchor to `workspace_root`). The extension allowlist (no `.env`) and size caps are the only guards.
 
 **File snapshots, history, diff, edit-in-place**

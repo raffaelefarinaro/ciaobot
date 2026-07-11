@@ -89,6 +89,9 @@ class ImageAttachment:
 # Maps to ``ClaudeAgentOptions.effort``.
 THINKING_LEVELS: dict[str, tuple[str, ...]] = {
     "claude": ("low", "medium", "high", "xhigh", "max"),
+    # The model catalog is authoritative and the API narrows this per model.
+    # This union is the validation fallback when discovery is unavailable.
+    "codex": ("minimal", "low", "medium", "high", "xhigh", "max", "ultra"),
 }
 
 
@@ -99,10 +102,17 @@ class AgentRequest:
     prompt: str
     model: str
     mode: BridgeMode
+    # Optional human-visible form when provider-neutral preprocessing (for
+    # example Codex slash-command expansion) changes the model-facing prompt.
+    display_prompt: str = ""
     # Routing key for ProviderService. Public builds currently accept
     # "claude"; backend choice is handled by model/model_bucket routing.
     provider: str = "claude"
     resume_session: str | None = None
+    # Fork the resumed provider session into a new durable session before the
+    # turn. Used when a provider session is busy or an explicit branch is
+    # requested; false preserves ordinary resume semantics.
+    fork_session: bool = False
     images: list[ImageAttachment] = field(default_factory=list)
     extra_env: dict[str, str] = field(default_factory=dict)
     # Tools the spawned CLI must refuse to call. Forwarded to the SDK's
@@ -151,6 +161,9 @@ class ToolUseEvent(StreamEvent):
     tool_input: str = ""  # summarized input (e.g. file path, command)
     tool_use_id: str | None = None
     parent_tool_use_id: str | None = None
+    # Set for provider-native structured questions that must be answered
+    # inside the active turn (Codex app-server request_user_input).
+    request_id: str = ""
 
 
 @dataclass(slots=True)

@@ -96,6 +96,30 @@ async def test_generate_chat_title_apfel_selected_but_not_installed_falls_back_t
     assert title == "Generated Title"
 
 
+@pytest.mark.asyncio
+async def test_generate_chat_title_uses_codex_oneshot(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(shutil, "which", lambda _cmd: None)
+    captured: dict = {}
+
+    async def fake_oneshot(*args, **kwargs):
+        captured.update(kwargs)
+        return "Codex Title"
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+
+    title = await _generate_chat_title(
+        "Investigate provider support",
+        model="gpt-test",
+        provider="codex",
+        cwd=tmp_path,
+    )
+
+    assert title == "Codex Title"
+    assert captured["provider"] == "codex"
+    assert captured["model"] == "gpt-test"
+    assert captured["cwd"] == tmp_path
+
+
 def test_resolve_title_model_uses_override() -> None:
     from ciao.config import CiaoConfig
 

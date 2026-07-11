@@ -275,6 +275,7 @@ async def extract_and_append(
     vault_root: Path | None = None,
     trajectories_enabled: bool = True,
     memory_proposals_enabled: bool = True,
+    provider: str = "claude",
 ) -> None:
     """Call the model with the filtered transcript and append insights to the archive.
 
@@ -304,11 +305,14 @@ async def extract_and_append(
             logger.info("Archive %s already has insights, skipping", archive_path)
             return
 
-        from ciao.providers.routing import resolve_with_fallback
+        if provider == "codex":
+            effective_model, env, note = model, {}, None
+        else:
+            from ciao.providers.routing import resolve_with_fallback
 
-        effective_model, env, note = resolve_with_fallback(
-            model, config, default_model=config.insights_model
-        )
+            effective_model, env, note = resolve_with_fallback(
+                model, config, default_model=config.insights_model
+            )
         async with job_runs.track(
             "insights", "Session insights", model=effective_model,
             extra={"archive": archive_path.name, "session_id": session_id},
@@ -320,6 +324,8 @@ async def extract_and_append(
                 filtered_jsonl=filtered_jsonl,
                 model=effective_model,
                 env=env,
+                provider=provider,
+                cwd=workspace_root,
             )
             if output:
                 _append_section(archive_path, output)
@@ -415,16 +421,25 @@ async def _run_model_with_retry(
     filtered_jsonl: str,
     model: str,
     env: dict[str, str],
+    provider: str = "claude",
+    cwd: Path | None = None,
 ) -> str:
     """Call the model; on failure, wait 30s and retry once."""
+    async def call() -> str:
+        if provider == "claude":
+            return await _call_model(filtered_jsonl, model, env)
+        return await _call_model(
+            filtered_jsonl, model, env, provider=provider, cwd=cwd
+        )
+
     try:
-        return await _call_model(filtered_jsonl, model, env)
+        return await call()
     except Exception as exc:  # noqa: BLE001
         logger.info("Insights model call failed (%s); retrying in %ds", exc, _RETRY_DELAY_S)
 
     await asyncio.sleep(_RETRY_DELAY_S)
     try:
-        return await _call_model(filtered_jsonl, model, env)
+        return await call()
     except Exception:
         logger.exception("Insights model call failed twice; skipping")
         return ""
@@ -434,20 +449,25 @@ async def _call_model(
     filtered_jsonl: str,
     model: str,
     env: dict[str, str],
+    *,
+    provider: str = "claude",
+    cwd: Path | None = None,
 ) -> str:
     from ciao.providers.oneshot import run_oneshot
 
     user_prompt = (
-        "Below is a Claude Code session transcript as line-oriented JSON.\n"
+        "Below is a coding-agent session transcript as line-oriented JSON.\n"
         "Each line is one message with a numeric `idx` you must cite.\n"
         "Extract durable signal per the system prompt's section schema.\n\n"
         f"{filtered_jsonl}"
     )
 
-    return await run_oneshot(
-        user_prompt,
-        system_prompt=_INSIGHTS_SYSTEM_PROMPT,
-        model=model,
-        env=env,
-        timeout_s=120.0,
-    )
+    kwargs = {
+        "system_prompt": _INSIGHTS_SYSTEM_PROMPT,
+        "model": model,
+        "env": env,
+        "timeout_s": 120.0,
+    }
+    if provider != "claude":
+        kwargs.update({"provider": provider, "cwd": cwd})
+    return await run_oneshot(user_prompt, **kwargs)

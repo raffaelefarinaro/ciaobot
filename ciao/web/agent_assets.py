@@ -537,6 +537,8 @@ def workspace_health(config: Any) -> dict:
         (root / ".claude" / "agents", "Generated .claude agents directory"),
         (root / ".claude" / "commands", "Generated .claude commands directory"),
         (root / ".agents" / "skills", "Generated Codex skills directory"),
+        (root / ".codex" / "agents", "Generated Codex native agents directory"),
+        (root / ".codex" / "config.toml", "Generated Codex agent registrations"),
     ])
 
     for path, title in check_paths:
@@ -663,13 +665,40 @@ def list_prompt_assets(config: Any) -> list[PromptAsset]:
 
     added_sys_prompt = False
 
+    codex_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expanduser()
+
+    def first_nonempty(paths: tuple[Path, ...]) -> Path | None:
+        for candidate in paths:
+            try:
+                if candidate.is_file() and candidate.read_text(encoding="utf-8").strip():
+                    return candidate
+            except OSError:
+                continue
+        return None
+
+    codex_global = first_nonempty((codex_home / "AGENTS.override.md", codex_home / "AGENTS.md"))
+    codex_project = first_nonempty((root / "AGENTS.override.md", root / "AGENTS.md"))
+
     file_assets = [
         (Path.home() / ".claude" / "CLAUDE.md", "Claude Code global instructions", "User-level Claude Code instructions loaded before project files.", "global"),
         (root / "CLAUDE.md", "Claude Code project instructions", "Project-local Claude Code instructions loaded by the CLI.", "project"),
-        (root / "AGENTS.md", "Codex project instructions", "Project-local AGENTS.md loaded by Codex CLI discovery.", "project"),
         (root / "CLAUDE.local.md", "Claude Code local instructions", "Machine-local project instructions when present.", "local"),
         (root / ".claude" / "CLAUDE.md", "Claude Code .claude instructions", "Project .claude instruction file when present.", "project"),
     ]
+    if codex_global is not None:
+        file_assets.insert(1, (
+            codex_global,
+            "Codex global instructions",
+            f"User-level Codex instructions selected from {codex_home} before project files.",
+            "global",
+        ))
+    if codex_project is not None:
+        file_assets.insert(3 if codex_global is not None else 2, (
+            codex_project,
+            "Codex project instructions",
+            "Project-local AGENTS instructions selected by Codex CLI discovery.",
+            "project",
+        ))
 
     ws_names = []
     if hasattr(config, "workspace_names") and callable(config.workspace_names):

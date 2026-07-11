@@ -22,26 +22,30 @@ vi.mock('../../lib/api', () => {
     insights_model: '',
 
     critique_models: '',
-    ollama_haiku_model: '',
-    ollama_sonnet_model: '',
-    ollama_opus_model: '',
-    openrouter_haiku_model: '',
-    openrouter_sonnet_model: '',
-    openrouter_opus_model: '',
+    ollama_river_model: '',
+    ollama_lake_model: '',
+    ollama_sea_model: '',
+    ollama_ocean_model: '',
+    openrouter_river_model: '',
+    openrouter_lake_model: '',
+    openrouter_sea_model: '',
+    openrouter_ocean_model: '',
     title_model_effective: 'sonnet',
     insights_model_effective: 'haiku',
 
     critique_models_effective: 'anthropic/claude-sonnet-4.5,anthropic/claude-haiku-4.5',
     alias_tiers: {
       ollama: {
-        haiku: 'deepseek-v4-flash:cloud',
-        sonnet: 'kimi-k2.7-code:cloud',
-        opus: 'minimax-m3:cloud',
+        river: 'deepseek-v4-flash:cloud',
+        lake: 'kimi-k2.7-code:cloud',
+        sea: 'minimax-m3:cloud',
+        ocean: 'minimax-m3:cloud',
       },
       openrouter: {
-        haiku: 'anthropic/claude-haiku-4.5',
-        sonnet: 'anthropic/claude-sonnet-4.5',
-        opus: 'anthropic/claude-opus-4.8',
+        river: 'anthropic/claude-haiku-4.5',
+        lake: 'anthropic/claude-sonnet-4.5',
+        sea: 'anthropic/claude-opus-4.8',
+        ocean: 'anthropic/claude-opus-4.8',
       },
     },
     transcription: {
@@ -438,7 +442,7 @@ describe('component mount smoke', () => {
     await flushPromises()
 
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
-      ollama_haiku_model: 'llama3.1:latest',
+      ollama_river_model: 'llama3.1:latest',
     })
     wrapper.unmount()
   })
@@ -474,7 +478,7 @@ describe('component mount smoke', () => {
       await flushPromises()
       await nextTick()
       const tierSelectors = wrapper.findAll('.tier-provider-section .model-selector')
-      expect(tierSelectors.length).toBe(3)
+      expect(tierSelectors.length).toBe(4)
       for (const selector of tierSelectors) {
         expect(selector.find('.model-selector__trigger').attributes('disabled')).toBeDefined()
       }
@@ -514,7 +518,7 @@ describe('component mount smoke', () => {
 
     const insightsTier = insightsControls.find('.routine-select--tier')
     expect(insightsTier.exists()).toBe(true)
-    await insightsTier.setValue('opus')
+    await insightsTier.setValue('sea')
     await flushPromises()
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
       insights_model: 'anthropic/claude-opus-4.8',

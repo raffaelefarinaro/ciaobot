@@ -13,12 +13,24 @@ export interface ModelSection {
 type AliasTierMap = Record<string, Record<string, string>>
 
 const TIER_LABELS: Record<string, string> = {
-  haiku: 'Haiku',
-  sonnet: 'Sonnet',
-  opus: 'Opus',
+  river: 'River',
+  lake: 'Lake',
+  sea: 'Sea',
+  ocean: 'Ocean',
 }
 
-const ANTHROPIC_MODELS = ['haiku', 'sonnet', 'opus', 'fable']
+const ANTHROPIC_MODELS = ['river', 'lake', 'sea', 'ocean']
+const ANTHROPIC_BADGES = {
+  river: ['Haiku'],
+  lake: ['Sonnet'],
+  sea: ['Opus'],
+  ocean: ['Fable'],
+}
+const CODEX_ALIAS_LABELS: Record<string, string> = {
+  river: 'Luna',
+  lake: 'Terra',
+  sea: 'Sol',
+}
 
 export function parseModelList(raw: string): string[] {
   const seen = new Set<string>()
@@ -85,7 +97,17 @@ export function sectionsFromModelsResponse(response: ModelsResponse | null): Mod
   const ollamaModels = orderedUnique(response.ollama_models || [])
   const openrouterModels = orderedUnique(response.openrouter_models || [])
 
-  sections.push({ key: 'anthropic', label: 'Anthropic', models: ANTHROPIC_MODELS })
+  sections.push({ key: 'anthropic', label: 'Anthropic', models: ANTHROPIC_MODELS, modelBadges: ANTHROPIC_BADGES })
+
+  const codexTiers = response.alias_tiers?.codex || {}
+  const codexModels = ['river', 'lake', 'sea'].filter((tier) => Boolean(codexTiers[tier]))
+  if (codexModels.length) {
+    const modelBadges: Record<string, string[]> = {}
+    for (const tier of codexModels) {
+      modelBadges[tier] = [CODEX_ALIAS_LABELS[tier], codexTiers[tier]].filter(Boolean)
+    }
+    sections.push({ key: 'codex', label: 'OpenAI Codex', models: codexModels, modelBadges })
+  }
 
   // Ollama: cloud allowlist plus locally discovered daemon models.
   const local = orderedUnique(response.ollama_local_models || [])
@@ -123,7 +145,7 @@ export function sectionsFromModelOptions(
   const sections: ModelSection[] = []
 
   if (options.anthropic?.length) {
-    sections.push({ key: 'anthropic', label: 'Anthropic', models: ANTHROPIC_MODELS })
+    sections.push({ key: 'anthropic', label: 'Anthropic', models: ANTHROPIC_MODELS, modelBadges: ANTHROPIC_BADGES })
   }
 
   const ollamaAvailable = !!backends.ollama

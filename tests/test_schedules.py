@@ -109,15 +109,6 @@ def test_system_schedules_load_from_stock_not_runtime(tmp_path: Path) -> None:
     assert any(item.schedule_id == "system-memory-curation" for item in schedules)
 
 
-def test_stock_error_triage_schedule_uses_issue_report(tmp_path: Path) -> None:
-    store = ScheduleStore(tmp_path, include_system=True)
-    entry = store.get("system-error-triage")
-    assert entry is not None
-    assert entry.scope == "system"
-    assert entry.frequency == "weekly"
-    assert "{{ISSUE_REPORT}}" in entry.prompt
-
-
 def test_stock_memory_curation_schedule_updates_project_canonical_docs(tmp_path: Path) -> None:
     store = ScheduleStore(tmp_path, include_system=True)
     entry = store.get("system-memory-curation")

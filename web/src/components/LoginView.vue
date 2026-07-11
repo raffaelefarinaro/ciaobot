@@ -39,11 +39,11 @@
         </section>
 
         <section class="setup-tour" aria-label="Ciaobot setup tour">
-          <p class="tour-title">Claude Code, with a real interface and memory.</p>
+          <p class="tour-title">Your coding-agent subscription, with a real interface and memory.</p>
           <ul class="tour-list">
             <li>
               <strong>Bring your own backend.</strong>
-              <span>Use Claude Code, Ollama Cloud or local Ollama, or an OpenRouter API key.</span>
+              <span>Use Claude Code, OpenAI Codex, Ollama Cloud or local Ollama, or an OpenRouter API key.</span>
             </li>
             <li>
               <strong>Split your life into workspaces.</strong>
@@ -166,6 +166,9 @@
           <div class="provider-choices">
             <label class="choice-label">
               <input type="radio" v-model="provider" value="claude" :disabled="loading" /> Claude Code
+            </label>
+            <label class="choice-label">
+              <input type="radio" v-model="provider" value="codex" :disabled="loading" /> OpenAI Codex
             </label>
             <label class="choice-label">
               <input type="radio" v-model="provider" value="ollama" :disabled="loading" /> Ollama
@@ -468,6 +471,9 @@ const providerInstruction = computed(() => {
   if (provider.value === 'openrouter') {
     return 'Add this environment variable in your workspace .env:'
   }
+  if (provider.value === 'codex' && setupStatus.value?.providers?.codex?.auth === 'missing') {
+    return 'Install Codex if needed, then run `ciao auth codex` and refresh this check:'
+  }
   return 'To authorize, run this command in your Terminal:'
 })
 
@@ -548,6 +554,7 @@ async function doFinish() {
       port: Number(port.value),
       python: python.value || undefined,
       auth_required: authRequired.value,
+      provider: provider.value,
       restart: true,
     })
     isRestarting.value = true

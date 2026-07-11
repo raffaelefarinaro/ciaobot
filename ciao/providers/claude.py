@@ -65,6 +65,7 @@ from ciao.models import (
     ToolUseEvent,
 )
 from ciao.memory_injector import build_memory_block, system_prompt_payload
+from ciao.model_tiers import claude_alias
 from ciao.observability.hooks import (
     build_user_prompt_submit_hook,
     build_web_search_post_tooluse_hook,
@@ -73,6 +74,7 @@ from ciao.providers.permission_gate import PermissionGate
 from ciao.providers.base import (
     ActiveHandle,
     BaseSDKProvider,
+    ProviderCapabilities,
     build_claude_message_stream,
     rate_limit_quota_payload,
     rate_limit_status_text,
@@ -265,6 +267,24 @@ class SDKHandle(ActiveHandle):
 class ClaudeProvider(BaseSDKProvider):
     """Claude provider backed by the Agent SDK."""
 
+    capabilities = ProviderCapabilities(
+        resume=True,
+        fork=True,
+        images=True,
+        stop=True,
+        steer=True,
+        permissions=True,
+        structured_questions=True,
+        thinking_levels=True,
+        usage=True,
+        quota=True,
+        subagents=True,
+        background_subagents=True,
+        subagent_messages=True,
+        session_history=True,
+        schedule_unattended=True,
+    )
+
     def __init__(self, workspace_root: Path, *, config: object | None = None) -> None:
         super().__init__(workspace_root, config=config)
         self._client: ClaudeSDKClient | None = None
@@ -321,6 +341,7 @@ class ClaudeProvider(BaseSDKProvider):
         return self._session_id
 
     async def _ensure_connected(self, request: AgentRequest) -> ClaudeSDKClient:
+        requested_model = claude_alias(request.model)
         if (
             self._client is not None
             and self._connected
@@ -330,10 +351,10 @@ class ClaudeProvider(BaseSDKProvider):
             await self.disconnect()
 
         if self._client is not None and self._connected:
-            if request.model != self._current_model:
+            if requested_model != self._current_model:
                 try:
-                    await self._client.set_model(request.model)
-                    self._current_model = request.model
+                    await self._client.set_model(requested_model)
+                    self._current_model = requested_model
                 except _CLAUDE_OP_ERRORS:
                     logger.warning("Claude set_model failed; reconnecting")
                     await self.disconnect()
@@ -374,8 +395,8 @@ class ClaudeProvider(BaseSDKProvider):
         system_prompt = system_prompt_payload(memory_block)
 
         options = ClaudeAgentOptions(
-            model=request.model,
-            fallback_model=_fallback_model_for(request.model),
+            model=requested_model,
+            fallback_model=_fallback_model_for(requested_model),
             permission_mode=_sdk_permission_mode(request.mode),
             cwd=str(self.workspace_root),
             include_partial_messages=True,
@@ -551,6 +572,14 @@ class ClaudeProvider(BaseSDKProvider):
                         merged.put_nowait(event)
             except _CLAUDE_OP_ERRORS:
                 logger.debug("Between-turns drain ended on SDK error", exc_info=True)
+            except Exception:
+                # The SDK raises bare ``Exception`` for some result shapes
+                # (e.g. result_type=user, stop_reason=tool_use) that aren't
+                # subclasses of the typed SDK errors. Log and end the drain
+                # cleanly so the consumer task doesn't finish with an
+                # un-retrieved exception (which asyncio logs noisily as
+                # "Task exception was never retrieved").
+                logger.debug("Between-turns drain ended on unhandled SDK result", exc_info=True)
             finally:
                 merged.put_nowait(_DONE)
 
@@ -566,10 +595,15 @@ class ClaudeProvider(BaseSDKProvider):
             self._permission_gate.cancel_all("Background drain ended before approval")
             if not consumer.done():
                 consumer.cancel()
-                try:
-                    await consumer
-                except (asyncio.CancelledError, *_CLAUDE_OP_ERRORS):
-                    pass
+            # Always retrieve the consumer's result/exception so asyncio does
+            # not warn "Task exception was never retrieved" when the drain
+            # ended on an error before the generator was closed.
+            try:
+                await consumer
+            except (asyncio.CancelledError, *_CLAUDE_OP_ERRORS):
+                pass
+            except Exception:
+                logger.debug("Between-turns drain task ended with error", exc_info=True)
 
     async def run_streaming(
         self,

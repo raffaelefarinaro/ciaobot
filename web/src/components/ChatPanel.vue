@@ -37,6 +37,7 @@
               <div class="context-popup-body">
                 <div v-if="project?.vault_doc_path" class="context-popup-section">
                   <span class="label-eyebrow">Project</span>
+                  <p v-if="project.context" class="context-description">{{ project.context }}</p>
                   <button
                     class="btn-small"
                     @click="fileViewer.open(project.vault_doc_path)"
@@ -104,7 +105,7 @@
           <ModelSelector
             v-if="showModelPicker"
             triggerless
-            :model-value="chat.model"
+            :model-value="canonicalTier(chat.model)"
             :active-models="activeModelHighlights"
             :sections="chatModelSections"
             placeholder="Model"
@@ -540,7 +541,8 @@
           </button>
         </div>
         <input
-          type="text"
+          v-if="q.allowOther"
+          :type="q.isSecret ? 'password' : 'text'"
           class="question-other"
           placeholder="Other (free text)"
           :value="questionAnswers[qi]?.other || ''"
@@ -813,7 +815,7 @@ const titleValue = ref('')
 const dragOver = ref(false)
 const chat = computed(() => store.activeChat!)
 const project = computed(() => store.activeProject)
-const models = ref<string[]>(['sonnet', 'opus', 'haiku'])
+const models = ref<string[]>(['river', 'lake', 'sea', 'ocean'])
 const providerModels = ref<Record<string, string[]>>({})
 const providerDefaults = ref<Record<string, string>>({})
 const modelsResponse = ref<ModelsResponse | null>(null)
@@ -990,16 +992,17 @@ const touchedFiles = computed<TouchedFile[]>(() => {
   return Array.from(byPath.values()).sort((a, b) => b.index - a.index)
 })
 
-type ProviderKey = 'claude'
-type BucketKey = 'claude_work' | 'claude_personal' | 'openrouter'
-type ModelBucketValue = 'work' | 'personal' | 'openrouter'
-type RouteKind = 'anthropic' | 'ollama' | 'ollama-local' | 'openrouter'
-type TierAlias = 'haiku' | 'sonnet' | 'opus'
+type ProviderKey = 'claude' | 'codex'
+type BucketKey = 'claude_work' | 'claude_personal' | 'openrouter' | 'codex'
+type ModelBucketValue = 'work' | 'personal' | 'openrouter' | ''
+type RouteKind = 'anthropic' | 'ollama' | 'ollama-local' | 'openrouter' | 'codex'
+type TierAlias = 'river' | 'lake' | 'sea' | 'ocean'
 
 const BUCKET_DEFS: { key: BucketKey; label: string; provider: ProviderKey }[] = [
   { key: 'claude_work', label: 'Claude', provider: 'claude' },
   { key: 'claude_personal', label: 'Ollama', provider: 'claude' },
   { key: 'openrouter', label: 'OpenRouter', provider: 'claude' },
+  { key: 'codex', label: 'Codex', provider: 'codex' },
 ]
 
 const bucketOptions = computed(() => BUCKET_DEFS.filter(b => (providerModels.value[b.key] || []).length > 0))
@@ -1102,6 +1105,7 @@ function submitQuestionAnswers() {
   const qs = activeQuestions.value
   if (!qs.length) return
   const lines: string[] = []
+  const nativeAnswers: Record<string, string[]> = {}
   for (let i = 0; i < qs.length; i++) {
     const q = qs[i]
     const a = questionAnswers.value[i]
@@ -1111,7 +1115,14 @@ function submitQuestionAnswers() {
     if (picked.length) parts.push(...picked)
     if (other) parts.push(other)
     const answer = parts.length ? parts.join(', ') : '(no answer)'
+    nativeAnswers[q.id] = parts
     lines.push(`**${q.header || q.question}**: ${answer}`)
+  }
+  const requestId = qs[0]?.requestId || ''
+  if (requestId) {
+    store.respondQuestion(chat.value.chat_id, requestId, nativeAnswers)
+    questionAnswers.value = {}
+    return
   }
   const text = lines.join('\n')
   // sendMessage clears activeQuestions for this chat automatically.
@@ -1121,6 +1132,10 @@ function submitQuestionAnswers() {
 function dismissQuestions() {
   const id = store.activeChatId
   if (!id) return
+  const requestId = activeQuestions.value[0]?.requestId || ''
+  if (requestId) {
+    store.respondQuestion(id, requestId, {})
+  }
   delete store.activeQuestions[id]
   questionAnswers.value = {}
 }
@@ -1132,6 +1147,7 @@ const activeProvider = computed<ProviderKey>(() => {
 const activeBucket = computed<BucketKey>(() => {
   const c = chat.value
   if (!c) return 'claude_work'
+  if (c.provider === 'codex') return 'codex'
   // OpenRouter ids are owner/model (no ':' tag); Ollama ids carry ':'.
   if (c.model.includes('/') && !c.model.includes(':')) return 'openrouter'
   // The server records the explicit bucket choice. Legacy values are kept
@@ -1148,6 +1164,8 @@ const chatModelSections = computed(() => sectionsFromModelsResponse(modelsRespon
 const activeModelHighlights = computed(() => {
   const c = chat.value
   if (!c) return []
+  const tier = tierAlias(c.model)
+  if (tier) return [tier]
   const effective = effectiveModelForBucket(c.model, activeBucket.value)
   return [effective || c.model]
 })
@@ -1165,6 +1183,8 @@ const bucketLocked = computed(() => {
 // Thinking levels are provider-native (claude → SDK effort, pi → --thinking),
 // so they key off the provider, not the bucket.
 const filteredThinkingLevels = computed(() => {
+  const modelLevels = modelsResponse.value?.model_reasoning_levels?.[chat.value?.model || '']
+  if (modelLevels?.length) return modelLevels
   return thinkingLevels.value[activeProvider.value] || []
 })
 
@@ -2384,12 +2404,23 @@ function toggleModelPicker() {
 
 function tierAlias(model: string): TierAlias | null {
   const normalized = model.trim().toLowerCase()
-  return normalized === 'haiku' || normalized === 'sonnet' || normalized === 'opus'
+  const legacy: Record<string, TierAlias> = {
+    haiku: 'river',
+    sonnet: 'lake',
+    opus: 'sea',
+    fable: 'ocean',
+  }
+  return normalized === 'river' || normalized === 'lake' || normalized === 'sea' || normalized === 'ocean'
     ? normalized
-    : null
+    : legacy[normalized] || null
+}
+
+function canonicalTier(model: string): string {
+  return tierAlias(model) || model
 }
 
 function modelBucketForBucket(bucket: BucketKey): ModelBucketValue {
+  if (bucket === 'codex') return ''
   if (bucket === 'openrouter') return 'openrouter'
   return bucket === 'claude_personal' ? 'personal' : 'work'
 }
@@ -2400,6 +2431,8 @@ function bucketLabel(bucket: BucketKey): string {
 
 function bucketForSelectedModel(model: string): BucketKey {
   const response = modelsResponse.value
+  if (response?.alias_tiers?.codex?.[model]) return 'codex'
+  if ((response?.codex_models || []).includes(model)) return 'codex'
   const openrouterModels = response?.openrouter_models || []
   if (openrouterModels.includes(model) || (model.includes('/') && !model.includes(':'))) {
     return 'openrouter'
@@ -2412,6 +2445,7 @@ function bucketForSelectedModel(model: string): BucketKey {
 }
 
 function effectiveModelForBucket(model: string, bucket: BucketKey): string {
+  if (bucket === 'codex') return model
   const tier = tierAlias(model)
   if (!tier) return model
   if (bucket === 'openrouter') {
@@ -2424,6 +2458,7 @@ function effectiveModelForBucket(model: string, bucket: BucketKey): string {
 }
 
 function routeKindFor(model: string, bucket: BucketKey): RouteKind {
+  if (bucket === 'codex') return 'codex'
   const effective = effectiveModelForBucket(model, bucket)
   if (bucket === 'openrouter' || (effective.includes('/') && !effective.includes(':'))) {
     return 'openrouter'
@@ -2474,17 +2509,30 @@ async function selectModel(value: string | string[]) {
   }
   const targetBucket = bucketForSelectedModel(model)
   const modelBucket = modelBucketForBucket(targetBucket)
-  const sameModelAndRoute = model === chat.value.model && targetBucket === activeBucket.value
+  const sameModelAndRoute = canonicalTier(model) === canonicalTier(chat.value.model) && targetBucket === activeBucket.value
   if (sameModelAndRoute) {
     showModelPicker.value = false
     return
   }
   const targetRoute = routeKindFor(model, targetBucket)
   const currentRoute = routeKindFor(chat.value.model, activeBucket.value)
-  const updates = {
-    provider: 'claude' as const,
+  const updates: {
+    provider: ProviderKey
+    model: string
+    model_bucket: ModelBucketValue
+    thinking_level?: string
+  } = {
+    provider: (BUCKET_DEFS.find(def => def.key === targetBucket)?.provider || 'claude') as ProviderKey,
     model,
     model_bucket: modelBucket,
+  }
+  const targetLevels = modelsResponse.value?.model_reasoning_levels?.[model]
+  if (
+    chat.value.thinking_level
+    && targetLevels
+    && !targetLevels.includes(chat.value.thinking_level)
+  ) {
+    updates.thinking_level = ''
   }
   if (bucketLocked.value && targetRoute !== currentRoute) {
     const ok = window.confirm(
@@ -2729,6 +2777,14 @@ function insertImageRef(n: number) {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.context-popup .context-description {
+  font-size: var(--text-sm);
+  color: var(--fg2);
+  line-height: 1.45;
+  margin: 0;
+  white-space: pre-wrap;
 }
 
 .context-popup .context-textarea {

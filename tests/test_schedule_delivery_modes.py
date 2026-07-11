@@ -37,6 +37,15 @@ def test_permission_request_stays_visible() -> None:
     assert _should_auto_archive_schedule_run(_entry(), outcome) is False
 
 
+def test_structured_question_stays_visible() -> None:
+    outcome = ScheduleRunOutcome(
+        completed=False,
+        is_error=False,
+        question_requested=True,
+    )
+    assert _should_auto_archive_schedule_run(_entry(), outcome) is False
+
+
 def test_retry_pending_stays_visible() -> None:
     outcome = ScheduleRunOutcome(
         completed=True,
@@ -84,6 +93,7 @@ def test_failed_run_is_not_clean_so_error_log_survives() -> None:
     assert _schedule_run_clean(ScheduleRunOutcome(completed=True, stream_error=True)) is False
     assert _schedule_run_clean(ScheduleRunOutcome(completed=True, is_error=True)) is False
     assert _schedule_run_clean(ScheduleRunOutcome(completed=True, retry_pending=True)) is False
+    assert _schedule_run_clean(ScheduleRunOutcome(completed=True, question_requested=True)) is False
     assert _schedule_run_clean(ScheduleRunOutcome(completed=False)) is False
 
 

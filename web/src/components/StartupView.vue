@@ -80,7 +80,7 @@ const progressTrack = computed(() => {
 function phaseLabel(name: string): string {
   const labels: Record<string, string> = {
     connect_claude_code: 'connect_claude_code',
-    connect_pi: 'connect_pi',
+    connect_codex: 'connect_codex',
     sync_workspace: 'sync_workspace',
     refresh_vault_index: 'refresh_vault_index',
     update_skills: 'update_skills',

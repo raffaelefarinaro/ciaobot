@@ -76,13 +76,13 @@ def build_memory_block(
         return ""
 
     # Short preamble so the model knows what this block is and that the
-    # state is read-only until next session. The memory tool docstring
-    # (and the tool's own description) handles the "how to edit" half.
+    # state is read-only until next session. Editing is via `ciao memory`
+    # (documented in system_prompt.md); see tests/test_memory_injector.py.
     preamble = (
         "The block below is a frozen snapshot of your bounded memory files at "
-        "session start. Use the `memory` tool (action=add|replace|remove|read, "
-        f"target=memory|user) to edit them; entries are separated by '{SECTION_SEP}' "
-        "on its own line. Tool edits persist immediately but only appear in this "
+        "session start. Edit them with `ciao memory read|add|replace|remove "
+        f"(--target memory|user); entries are separated by '{SECTION_SEP}' "
+        "on its own line. CLI edits persist immediately but only appear in this "
         "block on the next session.\n"
     )
     return preamble + "\n\n".join(sections)

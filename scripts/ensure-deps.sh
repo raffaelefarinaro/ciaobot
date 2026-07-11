@@ -143,12 +143,12 @@ EOF
   fi
 
   log_info "Upgrading pip, setuptools, and wheel..."
-  pip install ${PIP_UPGRADE_ARG} -q pip setuptools wheel || log_warn "Pip self-upgrade failed, continuing..."
+  python -m pip install ${PIP_UPGRADE_ARG} -q pip setuptools wheel || log_warn "Pip self-upgrade failed, continuing..."
 
   log_info "Installing backend dependencies from pyproject.toml..."
   # Mac-only deployment: voice-local (mlx-whisper, Apple Silicon) is part of the
   # default install. Drop it from the extras if this ever runs on non-arm64.
-  pip install -q ${PIP_UPGRADE_ARG} -e '.[test,voice-local]' || { log_err "Failed to install python dependencies."; return 1; }
+  python -m pip install -q ${PIP_UPGRADE_ARG} -e '.[test,voice-local]' || { log_err "Failed to install python dependencies."; return 1; }
 
 
   # --- 3. Node.js & NPM Validation ---

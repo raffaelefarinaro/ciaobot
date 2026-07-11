@@ -77,6 +77,42 @@ Pin a document beside the chat and annotate it the same way:
 
 On first launch, an in-app product tour walks through these flows. Replay it anytime from **Settings → Home → Product tour**.
 
+## What ships by default
+
+Every install seeds a set of subagents, slash commands, and system routines from the package (`ciao/stock/`). `ciao sync-skills` mirrors them into the workspace on setup and upgrade; anything you create under the workspace's `subagents/` or `commands/` folders (or from **Settings**) takes precedence over the packaged version with the same name.
+
+### Subagents
+
+Specialized roles the main agent can delegate to ([ciao/stock/agents/](ciao/stock/agents/)):
+
+| Subagent | What it does |
+|---|---|
+| [memory](ciao/stock/agents/memory.md) | Vault curation, durable note updates, and memory-proposal processing. |
+| [researcher](ciao/stock/agents/researcher.md) | Researches current external information and summarizes it with sources. |
+| [secretary](ciao/stock/agents/secretary.md) | Calendar, email, reminders, and lightweight admin via the Google Workspace skills; asks before sending anything. |
+
+### Slash commands
+
+Type these in any chat ([ciao/stock/commands/](ciao/stock/commands/)):
+
+| Command | What it does |
+|---|---|
+| [/remember](ciao/stock/commands/remember.md) | Saves a durable fact or learning to the right memory layer (agent memory, user profile, or a vault page). |
+| [/interrogation](ciao/stock/commands/interrogation.md) | Asks a few targeted questions to turn a vague project, person, or idea into a useful canonical vault note. |
+| [/critique](ciao/stock/commands/critique.md) | Quick single-model review of a plan or draft (the multi-model `adversarial-review` skill is the heavier option). |
+
+### System routines
+
+Recurring schedules that ship enabled ([ciao/stock/schedules.json](ciao/stock/schedules.json)); they run through the same provider pipeline as a chat turn, and their runs are visible under **Settings → Automation**:
+
+| Routine | Cadence | What it does |
+|---|---|---|
+| Memory curation | Daily | Reviews recent archived chats, memory proposals, and learnings; updates vault pages and `Workspace/Learnings.md`. |
+| Skill evolution | Weekly (Sun) | Drafts skill-improvement proposals from recent usage; never applies them automatically. |
+| Weekly self-improvement review | Weekly (Sun) | Runs the [weekly review checklist](ciao/stock/schedules/weekly-review-template.md): promote recurring learnings, lint the vault, reconcile contradictions. |
+
+Your own schedules live alongside these in the workspace (`.runtime/schedules.json`) and are managed from the UI. Packaged **skills** (vault search, Google Workspace, web research, and more) are browsable under **Settings → Skills** and live in [ciao/stock/skills/](ciao/stock/skills/).
+
 ## Install
 
 **macOS ([Homebrew](https://brew.sh))** — recommended; includes `Ciaobot.app` and the background service:
@@ -109,7 +145,7 @@ Contributors running from a git checkout: see [docs/DEVELOPMENT.md](docs/DEVELOP
 
 Use the access you already have:
 
-- **Claude Code** — Claude subscription or Anthropic API key.
+- **Claude Code** — CLI-managed Claude subscription or Anthropic Console authentication.
 - **OpenAI Codex** — `codex login`, including eligible ChatGPT subscription accounts.
 - **Ollama** — cloud or local daemon.
 - **OpenRouter** — `OPENROUTER_API_KEY`.

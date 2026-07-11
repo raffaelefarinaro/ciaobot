@@ -64,8 +64,9 @@ class TranscriptStore:
         input_kind: str,
         context_label: str = "",
         provider: str = "claude",
+        tool_events: list[dict[str, Any]] | None = None,
     ) -> None:
-        transcript = self._load_current(ctx)
+        transcript = self._load_current(ctx, provider)
         if not transcript:
             transcript = {
                 "provider": provider,
@@ -86,7 +87,7 @@ class TranscriptStore:
             {
                 "timestamp": _now_iso(),
                 "input_kind": input_kind,
-                "prompt": request.prompt,
+                "prompt": request.display_prompt or request.prompt,
                 "mode": request.mode,
                 "resume_session": request.resume_session or "",
                 "image_count": len(request.images),
@@ -94,9 +95,10 @@ class TranscriptStore:
                 "effective_model": effective_model or request.model,
                 "usage": usage,
                 "quota": quota,
+                "tool_events": list(tool_events or []),
             }
         )
-        self._save_current(ctx, transcript)
+        self._save_current(ctx, transcript, provider)
 
     def archive_session(
         self,
@@ -105,8 +107,9 @@ class TranscriptStore:
         active_model: str,
         last_effective_model: str,
         session_id: str,
+        provider: str = "claude",
     ) -> Path | None:
-        transcript = self._load_current(ctx)
+        transcript = self._load_current(ctx, provider)
         if not transcript or not transcript.get("turns"):
             return None
         ended_at = _now_iso()
@@ -115,30 +118,114 @@ class TranscriptStore:
         transcript["last_effective_model"] = last_effective_model or active_model
         transcript["session_id"] = transcript.get("session_id") or session_id
         body = self._render_markdown(transcript)
-        archive_dir = self._archive_dir(ctx)
+        archive_dir = self._archive_dir(ctx, provider)
         archive_dir.mkdir(parents=True, exist_ok=True)
         started_at = str(transcript.get("started_at") or ended_at).replace(":", "-")
         session_slug = _safe_slug(str(transcript.get("session_id") or "no-session-id"))
         path = archive_dir / f"{started_at}-{session_slug}.md"
         path.write_text(body, encoding="utf-8")
-        self._delete_current(ctx)
+        self._delete_current(ctx, provider)
         return path
 
-    def current_path(self, ctx: ChatContext) -> Path:
-        return self._current_path(ctx)
+    def current_path(self, ctx: ChatContext, provider: str = "claude") -> Path:
+        return self._current_path(ctx, provider)
 
-    def archive_dir(self, ctx: ChatContext) -> Path:
-        return self._archive_dir(ctx)
+    def archive_dir(self, ctx: ChatContext, provider: str = "claude") -> Path:
+        return self._archive_dir(ctx, provider)
 
-    def peek_turn_count(self, ctx: ChatContext) -> int:
+    def peek_turn_count(self, ctx: ChatContext, provider: str = "claude") -> int:
         """Number of recorded turns in the current (pre-archive) transcript.
 
         Used by archive_chat to size-gate post-archive insights extraction
         before archive_session consumes the in-memory transcript file.
         """
-        transcript = self._load_current(ctx)
+        transcript = self._load_current(ctx, provider)
         turns = transcript.get("turns") if isinstance(transcript, dict) else None
         return len(turns) if isinstance(turns, list) else 0
+
+    def current_messages(
+        self, ctx: ChatContext, provider: str = "claude"
+    ) -> list[dict[str, Any]]:
+        """Render the durable in-progress transcript as PWA message rows."""
+        transcript = self._load_current(ctx, provider)
+        turns = transcript.get("turns") if isinstance(transcript, dict) else None
+        if not isinstance(turns, list):
+            return []
+        rows: list[dict[str, Any]] = []
+        for index, turn in enumerate(turns):
+            if not isinstance(turn, dict):
+                continue
+            timestamp = str(turn.get("timestamp") or "")
+            prompt = str(turn.get("prompt") or "").strip()
+            response = str(turn.get("response") or "").strip()
+            if prompt:
+                rows.append({
+                    "role": "user",
+                    "content": prompt,
+                    "turn_index": index,
+                    "sent_at": timestamp,
+                })
+            if response:
+                row: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": response,
+                    "sent_at": timestamp,
+                }
+                usage = turn.get("usage")
+                if isinstance(usage, dict) and usage:
+                    row["usage"] = usage
+                quota = turn.get("quota")
+                if isinstance(quota, dict) and quota:
+                    row["quota"] = quota
+                effective = str(turn.get("effective_model") or "")
+                if effective:
+                    row["effective_model"] = effective
+                rows.append(row)
+        return rows
+
+    def current_filtered_jsonl(
+        self, ctx: ChatContext, provider: str = "claude"
+    ) -> str:
+        """Return provider-neutral line JSON for insights and trajectories."""
+        transcript = self._load_current(ctx, provider)
+        turns = transcript.get("turns") if isinstance(transcript, dict) else None
+        if not isinstance(turns, list):
+            return ""
+        lines: list[str] = []
+        index = 0
+        for turn in turns:
+            if not isinstance(turn, dict):
+                continue
+            prompt = str(turn.get("prompt") or "").strip()
+            if prompt:
+                lines.append(json.dumps({
+                    "idx": index,
+                    "type": "user",
+                    "content": [{"type": "text", "text": prompt}],
+                }, ensure_ascii=False))
+                index += 1
+            content: list[dict[str, Any]] = []
+            response = str(turn.get("response") or "").strip()
+            if response:
+                content.append({"type": "text", "text": response})
+            events = turn.get("tool_events")
+            for event in events if isinstance(events, list) else []:
+                if not isinstance(event, dict):
+                    continue
+                content.append({
+                    "type": "tool_use",
+                    "id": str(event.get("id") or ""),
+                    "name": str(event.get("name") or "tool"),
+                    "input": event.get("input") or {},
+                })
+            if content:
+                lines.append(json.dumps({
+                    "idx": index,
+                    "type": "assistant",
+                    "content": content,
+                }, ensure_ascii=False))
+                index += 1
+        return "\n".join(lines)
 
     @staticmethod
     def delete_sdk_session_blob(workspace_root: Path, session_id: str) -> bool:
@@ -194,17 +281,17 @@ class TranscriptStore:
 
     # ── Internal paths ────────────────────────────────────────────────────
 
-    def _current_path(self, ctx: ChatContext) -> Path:
-        return self._runtime_root / "transcripts" / ctx.key / "claude.json"
+    def _current_path(self, ctx: ChatContext, provider: str = "claude") -> Path:
+        return self._runtime_root / "transcripts" / ctx.key / f"{_safe_slug(provider)}.json"
 
-    def _archive_dir(self, ctx: ChatContext) -> Path:
-        return self._archive_root / ctx.key / "claude"
+    def _archive_dir(self, ctx: ChatContext, provider: str = "claude") -> Path:
+        return self._archive_root / ctx.key / _safe_slug(provider)
 
-    def _load_current(self, ctx: ChatContext) -> dict[str, Any]:
-        path = self._current_path(ctx)
+    def _load_current(self, ctx: ChatContext, provider: str = "claude") -> dict[str, Any]:
+        path = self._current_path(ctx, provider)
         if not path.exists():
             self._maybe_migrate_v1()
-            path = self._current_path(ctx)
+            path = self._current_path(ctx, provider)
             if not path.exists():
                 return {}
         try:
@@ -212,13 +299,15 @@ class TranscriptStore:
         except json.JSONDecodeError:
             return {}
 
-    def _save_current(self, ctx: ChatContext, payload: dict[str, Any]) -> None:
-        path = self._current_path(ctx)
+    def _save_current(
+        self, ctx: ChatContext, payload: dict[str, Any], provider: str = "claude"
+    ) -> None:
+        path = self._current_path(ctx, provider)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
-    def _delete_current(self, ctx: ChatContext) -> None:
-        path = self._current_path(ctx)
+    def _delete_current(self, ctx: ChatContext, provider: str = "claude") -> None:
+        path = self._current_path(ctx, provider)
         if path.exists():
             path.unlink()
 

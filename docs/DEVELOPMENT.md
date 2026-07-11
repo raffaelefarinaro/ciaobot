@@ -101,7 +101,7 @@ Packaged generic skills live in `ciao/stock/skills/` and are installed into ever
 
 The `gws-*` stock skills are regenerated from the installed `gws` CLI via `ciao/gws_skills.py` on release (`python -m ciao.release --apply`). The generator output is passed through Ciaobot curation: profile-wrapper command examples, integration auth notes in `gws-shared`, stripped upstream `openclaw` metadata and See Also boilerplate. Ciaobot-specific gws conventions also live in the system prompt (`ciao/system_prompt.md`).
 
-Edit canonical sources, not the generated `.claude/` dirs. Do not run `npx skills update` ad-hoc (it re-expands the lockfile and repopulates bloat); regenerate the `gws-*` skills through `ciao/release.py` rather than calling `gws generate-skills` by hand.
+Edit canonical sources, not the generated `.claude/`, `.agents/`, or `.codex/` dirs. Do not run `npx skills update` ad-hoc (it re-expands the lockfile and repopulates bloat); regenerate the `gws-*` skills through `ciao/release.py` rather than calling `gws generate-skills` by hand.
 
 ## DAG-style schedules (maintainers)
 
@@ -115,7 +115,7 @@ Canonical example: `ciao/skill_evolution.py:_process_skill_dag`. Use a DAG when 
 
 ## Change guidelines
 
-- **Doc the change.** After any change to `ciao/`, `web/`, `scripts/`, `deploy/`, or `pyproject.toml`, dispatch the `doc-updater` agent before declaring the task complete. It refreshes `docs/ARCHITECTURE.md`, this file, `CLAUDE.md`, and `INTEGRATIONS.md` against actual repo state. Skip only for pure bugfixes that touch nothing in layout, capabilities, install steps, env vars, endpoints, or commands.
+- **Doc the change.** After any change to `ciao/`, `web/`, `scripts/`, `deploy/`, or `pyproject.toml`, refresh `docs/ARCHITECTURE.md`, this file, `CLAUDE.md`, and `INTEGRATIONS.md` against actual repo state before declaring the task complete. Skip only for pure bugfixes that touch nothing in layout, capabilities, install steps, env vars, endpoints, or commands.
 - **New API routes must be documented.** Add the route to `PWA_API.md`; state-changing routes also need an Agent recipe or an allowlist entry in `tests/test_pwa_api_docs.py`. New `CIAO_*` env vars must land in `INTEGRATIONS.md` or the allowlist in `tests/test_env_vars_documented.py`. Both are test-enforced.
 - **Never restart the ciao service yourself** from inside the PWA. Apply code changes and ask the operator to hit Deploy.
 - **Never commit `.env` or API keys.** `.env` minimum: `PWA_AUTH_TOKEN`.

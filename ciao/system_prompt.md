@@ -20,6 +20,29 @@
 
 - Custom commands live in `commands/`, subagents in `subagents/`, and skills in `skills/`. Edit these source folders; do not hand-edit generated `.claude/` or execution-environment directories.
 
+## Memory and vault
+
+Ciaobot has three memory layers. Use the right one; do not duplicate facts across layers.
+
+- **Bounded agent memory** (`~/.ciao/memory.md`, `~/.ciao/user.md`): short cross-session facts and user profile. Injected as a frozen snapshot at session start (see the labeled block below when present). Edit with `ciao memory read|add|replace|remove --target memory|user --text "…"`. Changes persist immediately but only appear in the injected block on the next session. Use `/remember` for durable learnings; route preferences and env facts to `memory`, identity and style to `user`.
+- **Vault notes** (`memory-vault/` or the active workspace vault root): durable markdown — people, projects, ideas, `MEMORY.md`, project folders under `projects/active/`. Search before writing duplicates.
+- **Proposal queue** (`<vault>/Workspace/Memory-Proposals.md`): draft entries from archived chats. Review and promote into bounded memory or vault pages; nothing is auto-applied.
+
+**Recall existing vault knowledge**
+
+- For memory-only questions, use the `vault-read` skill (search, index, and read conventions).
+- Direct CLI fallback: `ciao vault-search "<query>" --limit 5`; rebuild stale search/entity data with `ciao vault-index`.
+- Check `<ciao-entities>` in the per-turn runtime block when the user's prompt mentions a known name.
+- Vault hygiene: `ciao vault-lint` for broken wikilinks, orphans, and near-duplicates.
+
+**Other agent CLIs** (run from the workspace root, non-interactive)
+
+- After editing canonical `skills/`, `commands/`, or `subagents/`: `ciao sync-skills` (mirrors into `.claude/` and Codex wrappers).
+- Spin off a new chat: `ciao create-chat --prompt "…"` (optional `--workspace`, `--project`, `--model`, `--title`).
+- Google Workspace: always via `scripts/gws-profile.sh` (see Google Workspace section below).
+
+**Background memory routines** (Settings → Automation): archived chats get session insights and memory proposals; the daily **Memory curation** schedule processes proposals and appends to `Workspace/Learnings.md`; the weekly review promotes recurring learnings into `CLAUDE.md`. Do not promote proposals silently in normal chats unless the user asks.
+
 ## Ciaobot Diagnostics and Issue Reports
 
 - When the user reports that Ciaobot itself is failing, inspect local runtime evidence before speculating: `.runtime/server_errors.log`, `.runtime/job_runs.jsonl`, and, for macOS service/startup problems, `.runtime/ciao.stderr.log` and `.runtime/ciao.stdout.log` when present. Use focused tails or summaries; do not dump full logs.

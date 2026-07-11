@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import tomllib
 
 from ciao import sync_skills
 
@@ -23,7 +24,11 @@ def test_sync_workspace_skills_mirrors_custom_skills(tmp_path: Path) -> None:
     claude_skill = workspace / ".claude" / "skills" / "demo"
     assert claude_skill.is_symlink()
     assert claude_skill.resolve() == (workspace / "skills" / "demo").resolve()
+    codex_skill = workspace / ".agents" / "skills" / "demo"
+    assert codex_skill.is_symlink()
+    assert codex_skill.resolve() == (workspace / "skills" / "demo").resolve()
     assert result.custom_installed == 1
+    assert result.codex_skills_installed >= 1
 
 
 def test_sync_workspace_skills_prunes_orphaned_custom_links(tmp_path: Path) -> None:
@@ -65,6 +70,64 @@ def test_sync_workspace_skills_mirrors_subagents_and_commands(tmp_path: Path) ->
     assert (workspace / ".claude" / "agents" / "stock.md").is_file()
     assert result.agents_installed == 1
     assert result.commands_installed >= 1
+    command_skill = workspace / ".agents" / "skills" / "ciao-command-remember" / "SKILL.md"
+    agent_skill = workspace / ".agents" / "skills" / "ciao-agent-research" / "SKILL.md"
+    assert "name: ciao-command-remember" in command_skill.read_text(encoding="utf-8")
+    assert "name: ciao-agent-research" in agent_skill.read_text(encoding="utf-8")
+    assert result.codex_wrappers_installed >= 2
+    native_agent = workspace / ".codex" / "agents" / "research.toml"
+    assert "developer_instructions" in native_agent.read_text(encoding="utf-8")
+    codex_config = tomllib.loads(
+        (workspace / ".codex" / "config.toml").read_text(encoding="utf-8")
+    )
+    assert codex_config["agents"]["research"]["config_file"] == "agents/research.toml"
+    assert result.codex_agents_installed >= 1
+
+
+def test_codex_native_agent_sync_is_idempotent_and_preserves_user_toml(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    _write(
+        workspace / "subagents" / "research.md",
+        "---\ndescription: Research carefully\n---\n\n# Research\nRead primary sources.\n",
+    )
+    _write(
+        workspace / ".codex" / "config.toml",
+        'model = "account-default"\n\n[agents.user_owned]\n'
+        'description = "Keep me"\nconfig_file = "agents/user.toml"\n',
+    )
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+    first = (workspace / ".codex" / "config.toml").read_text(encoding="utf-8")
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+    second = (workspace / ".codex" / "config.toml").read_text(encoding="utf-8")
+
+    assert first == second
+    parsed = tomllib.loads(second)
+    assert parsed["model"] == "account-default"
+    assert parsed["agents"]["user_owned"]["description"] == "Keep me"
+    assert parsed["agents"]["research"]["description"] == "Research carefully"
+
+
+def test_codex_native_agent_sync_does_not_override_user_agent_name(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    _write(workspace / "subagents" / "research.md", "# Canonical research\n")
+    _write(
+        workspace / ".codex" / "config.toml",
+        '[agents.research]\ndescription = "User version"\n'
+        'config_file = "agents/custom.toml"\n',
+    )
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    parsed = tomllib.loads(
+        (workspace / ".codex" / "config.toml").read_text(encoding="utf-8")
+    )
+    assert parsed["agents"]["research"]["config_file"] == "agents/custom.toml"
+    assert not (workspace / ".codex" / "agents" / "research.toml").exists()
 
 
 def test_sync_workspace_skills_seeds_stock_commands_into_canonical_dir(tmp_path: Path) -> None:
@@ -158,7 +221,7 @@ def test_sync_installs_stock_agents_with_marker(tmp_path: Path) -> None:
     assert memory.is_file()
     assert sync_skills._is_managed_stock_agent(memory)
     assert "vault-read" in memory.read_text(encoding="utf-8")
-    assert result.stock_agents_installed == 4
+    assert result.stock_agents_installed == 3
 
 
 def test_sync_refreshes_managed_stock_agent(tmp_path: Path) -> None:

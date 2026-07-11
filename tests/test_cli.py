@@ -504,6 +504,17 @@ def test_auth_claude_uses_bundled_cli(monkeypatch) -> None:
     assert calls == [["/opt/ciao/claude", "login"]]
 
 
+def test_auth_codex_supports_device_authorization(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        "ciao.providers.codex.resolve_codex_binary",
+        lambda: "/opt/ciao/codex",
+    )
+
+    assert cli.main(["auth", "codex", "--device-auth", "--print-only"]) == 0
+
+    assert capsys.readouterr().out.strip() == "/opt/ciao/codex login --device-auth"
+
+
 def test_vault_index_accepts_arbitrary_workspace_name(monkeypatch) -> None:
     called = []
     monkeypatch.setattr(cli, "_vault_index_command", lambda args: called.append(args) or 0)

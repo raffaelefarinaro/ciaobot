@@ -373,7 +373,12 @@ def run(
                 result = executor(node, ctx)
                 if not result.ok:
                     handle.status = "error"
-                    handle.error = result.error
+                    # Gate nodes carry their failure reason in ``output``
+                    # (the second element of the ``(bool, str)`` tuple), not
+                    # ``error`` — surface it so the recorded run isn't blank.
+                    handle.error = result.error or (
+                        str(result.output) if result.output is not None else None
+                    )
             except Exception as exc:  # noqa: BLE001
                 handle.error = f"{type(exc).__name__}: {exc}"[:1000]
                 result = NodeResult(ok=False, error=str(exc))

@@ -177,7 +177,10 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
         ],
         "active": "personal",
         "app_default_model": "opus",
-        "provider_options": [{"value": "claude", "label": "Claude"}],
+        "provider_options": [
+            {"value": "claude", "label": "Claude"},
+            {"value": "codex", "label": "Codex"},
+        ],
         "claude_ai_connectors": [
             "mcp__claude_ai_Airtable",
             "mcp__claude_ai_Asana",

@@ -178,11 +178,11 @@
           Models
         </router-link>
         <router-link
-          to="/settings/instructions"
+          to="/settings/context"
           class="settings-nav-item"
-          :class="{ active: route.path === '/settings/instructions' }"
+          :class="{ active: route.path === '/settings/context' }"
         >
-          Instructions
+          Context
         </router-link>
         <router-link
           to="/settings/workspaces"
@@ -984,15 +984,37 @@ async function confirmDeleteChat(chatId: string) {
   justify-content: center;
   width: 30px;
   height: 30px;
+  position: relative;
+  isolation: isolate;
   color: var(--fg2);
   text-decoration: none;
-  border-radius: 6px;
-  transition: background 120ms var(--ease), color 120ms var(--ease);
+  transition: color 120ms var(--ease);
 }
 
-.nav-item:hover,
-.nav-item--active {
+/* `.touch-hit` expands the clickable box from 30px to 44px with padding.
+   Keep the visible hover/active surface at the intended 30px footprint. */
+.nav-item::before,
+.sidebar-bell :deep(.bell-btn)::before {
+  content: '';
+  position: absolute;
+  inset: calc((var(--touch) - var(--touch-hit-visual)) / 2);
+  z-index: -1;
+  border-radius: 6px;
+  background: transparent;
+  transition: background 120ms var(--ease);
+}
+
+.nav-item:hover {
   color: var(--fg);
+}
+
+.nav-item--active,
+.nav-item--active:hover {
+  color: var(--accent);
+}
+
+.nav-item:hover::before,
+.nav-item--active::before {
   background: var(--bg3);
 }
 
@@ -1002,12 +1024,13 @@ async function confirmDeleteChat(chatId: string) {
   justify-content: center;
   width: 30px;
   height: 30px;
+  position: relative;
+  isolation: isolate;
   color: var(--fg2);
   background: none;
   border: none;
-  border-radius: 6px;
   cursor: pointer;
-  transition: background 120ms var(--ease), color 120ms var(--ease);
+  transition: color 120ms var(--ease);
 }
 .sidebar-bell :deep(.bell-btn) svg {
   width: 18px;
@@ -1015,14 +1038,16 @@ async function confirmDeleteChat(chatId: string) {
 }
 .sidebar-bell :deep(.bell-btn:hover) {
   color: var(--fg);
+}
+.sidebar-bell :deep(.bell-btn:hover)::before {
   background: var(--bg3);
 }
 .sidebar-bell :deep(.bell-btn.has-unread) {
   color: var(--accent);
 }
 .sidebar-bell :deep(.bell-badge) {
-  top: -2px;
-  right: -2px;
+  top: 4px;
+  right: 4px;
   font-size: calc(10px * var(--font-scale));
   min-width: 14px;
   height: 14px;

@@ -87,6 +87,21 @@ def test_system_prompt_includes_project_canonical_doc_notes() -> None:
     assert "log.md" in append
 
 
+def test_system_prompt_includes_memory_and_vault_notes() -> None:
+    """Agents should know bounded memory, vault search, and recall CLIs every session."""
+    payload = mi.system_prompt_payload("")
+    assert payload is not None
+    append = payload["append"]
+    assert "Memory and vault" in append
+    assert "ciao memory" in append
+    assert "ciao vault-search" in append
+    assert "ciao vault-index" in append
+    assert "ciao vault-lint" in append
+    assert "ciao sync-skills" in append
+    assert "ciao create-chat" in append
+    assert "Memory-Proposals.md" in append
+
+
 def test_system_prompt_payload_appends_to_claude_code_preset() -> None:
     payload = mi.system_prompt_payload("hello memory")
     assert payload is not None
