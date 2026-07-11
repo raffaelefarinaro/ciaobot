@@ -1,6 +1,6 @@
 ---
 name: web-research
-description: Reliable web lookup workflow using provider-native web search plus defuddle for source verification.
+description: Reliable web lookup workflow using provider-native web search plus defuddle (with optional Scrapling fallback) for source verification.
 ---
 
 # Web Research
@@ -15,7 +15,10 @@ Use this skill for web questions and URL verification.
 2. Read
 - For **GitHub URLs** (`github.com/...`, `gist.github.com/...`), use `gh` CLI instead of defuddle. It hits the API directly: cleaner output, fewer tokens, and it works on private repos. See the GitHub URL mapping below.
 - For all other URLs, use `defuddle parse <url> --md`. This is the default for the rest of the web; it strips clutter and reduces token usage.
-- If defuddle returns empty or stub content (JS-rendered pages, SPAs, login-gated content, dashboards), say so clearly and ask the user to paste the content or try from a machine where they can access it.
+- If defuddle returns empty or stub content (JS-rendered pages, SPAs, login-gated content, dashboards), fall back to Scrapling when it is installed (`command -v scrapling`):
+  1. `scrapling extract get '<url>' /tmp/page.md --impersonate chrome` — fast HTTP fetch with browser impersonation, then read the output file.
+  2. If still empty or stub, `scrapling extract fetch '<url>' /tmp/page.md` — renders the page in a headless browser, so it handles JS-only content. Slower; use it only after step 1 fails.
+- If Scrapling is not installed or both attempts fail, say so clearly and ask the user to paste the content or try from a machine where they can access it. (Scrapling is an optional install: `pip install 'scrapling[fetchers]' && scrapling install`.)
 - Only fall back to WebFetch for non-HTML targets (API endpoints, raw files, binary content).
 
 ### GitHub URL mapping
