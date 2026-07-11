@@ -2316,7 +2316,12 @@ function send() {
   // here. The user sees the actual content in their bubble, not a placeholder.
   store.sendMessage(chat.value.chat_id, sendText, 'queue')
   inputText.value = ''
-  nextTick(autoResize)
+  // Sending implies following the reply: jump to the bottom even if the
+  // user had scrolled up, so their bubble and the response are in view.
+  nextTick(() => {
+    scrollToBottom()
+    autoResize()
+  })
 }
 
 // Compact label for a pending file comment — shows the file basename so a
