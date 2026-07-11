@@ -15,44 +15,22 @@ Ciaobot does not reinvent how you talk to agents. It runs [Claude Code](https://
 
 - **Workspaces and projects** — split life areas (personal, work, a client, …) into sidebar workspaces, then organize work inside projects. Ciaobot injects project notes and context into every turn.
 - **A vault you own** — durable knowledge as plain markdown with wikilinks and an `INDEX.md`, inspired by [Andrej Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). Browse in [Obsidian](https://obsidian.md/) or any editor; sync via GitHub, Drive, or iCloud.
-- **Skills, subagents, and commands** — packaged defaults for vault work, schedules, Google Workspace, and research. Extend from Settings or by adding files to the workspace.
+- **Skills, subagents, and commands** — packaged defaults, extensible from Settings or workspace files (see [What ships by default](#what-ships-by-default)).
 - **Files and schedules** — create, preview, edit, and restore vault files from the UI; run recurring routines on a cron you choose.
 - **Voice, notifications, and updates** — transcription, push alerts, model settings, and in-app package updates. On macOS: menu bar companion, `Ciaobot.app`, and background service after setup.
-- **Provider choice** — Claude Code or Codex with your existing login; route compatible chats through **Ollama** or **OpenRouter**; on-device models for lightweight tasks where available (titles via [apfel](https://github.com/Arthur-Ficial/apfel), speech via [mlx-whisper](https://pypi.org/project/mlx-whisper/), and similar).
+- **Provider choice** — Claude Code or Codex with your existing login; Ollama, OpenRouter, and on-device models for lighter tasks (see [Providers](#providers)).
 
 Pick a workspace folder, choose a provider, and work — Ciaobot is the interface on top; the vault is yours to keep.
 
 ## Memory and the vault
 
-Ciaobot keeps memory in layers so the agent can recall what matters without stuffing every prompt. **Settings → Context** shows what instruction files and generated blocks the agent actually loads.
+Ciaobot keeps memory in layers so the agent can recall what matters without stuffing every prompt. **Settings → Context** shows what the agent actually loads.
 
-### What the agent remembers automatically
+- **Short agent memory** (`~/.ciao/memory.md` and `user.md`) — a small, capped scratchpad the model maintains for you: preferences, conventions, lessons. Updated during conversation or via `/remember`; a snapshot is injected at the start of each chat.
+- **Your vault** (`memory-vault/`, or a separate vault root per sidebar workspace) — durable markdown you own: people, projects, ideas. Browse it in Obsidian or any editor; it stays useful even without Ciaobot.
+- **One behavior file for the install** — `<workspace>/CLAUDE.md` (and `AGENTS.md` for Codex) applies to every chat.
 
-**Short agent memory** (`~/.ciao/memory.md` and `user.md`) — a small, capped scratchpad the model maintains for you: your name and preferences in `user.md`, conventions and lessons in `memory.md`. Ciaobot injects a snapshot at the start of each chat. The agent can update these files during a conversation (or when you use `/remember`); changes save immediately but only show up in context on the **next** session. You can also edit the files by hand.
-
-**Your vault** (`memory-vault/`, or a separate vault root per sidebar workspace) — durable markdown you own: people, projects, ideas, `MEMORY.md`, project folders under `projects/active/`. Browse it in Obsidian or any editor; it stays useful even without Ciaobot.
-
-**One behavior file for the install** — `<workspace>/CLAUDE.md` (and `AGENTS.md` for Codex) applies to every chat. Personal, work, and other sidebar workspaces share it but can have different vault roots.
-
-### When you mention someone by name
-
-Ciaobot builds a catalog of vault notes (`INDEX.md`, refreshed on startup). Each turn, if your message mentions a name that appears in that index, the agent gets a quiet hint — “this probably means `People/Emma`” — so it can open the right note without you repeating context. This is automatic; you do not configure it per chat.
-
-When the agent needs to look something up, it can search the vault (by keyword or by entity type) and read note files directly. You do not need to run those commands yourself.
-
-### What happens when a chat is archived
-
-Archiving is where Ciaobot turns conversation into durable knowledge. Nothing from this pipeline is silently written into your long-term memory files without review.
-
-1. **Archive** — the transcript is saved under `memory-vault/Logs/Chats/`.
-2. **Session insights** — a fast model reads the archived session and appends a `## Session insights` section (decisions, corrections, new entities, dead ends).
-3. **Memory proposals** — a follow-up pass drafts bullet suggestions into `<vault>/Workspace/Memory-Proposals.md`, tagged for bounded memory or the vault. These are **proposals only**.
-4. **Memory curation** (daily schedule) — an agent run reviews recent archives, proposals, and learnings; updates vault pages and appends durable one-liners to `Workspace/Learnings.md` when warranted.
-5. **Weekly review** (schedule) — broader hygiene: promote recurring learnings into `CLAUDE.md`, lint the vault, reconcile contradictions.
-
-You stay in control: proposals are not auto-promoted into `~/.ciao/memory.md`, `user.md`, or vault pages unless you or the agent explicitly accepts them during a review chat or curation run. Ciaobot also never discards or rewrites an existing notes folder during onboarding, and never locks you into one provider. Track background steps under **Settings → Automation**.
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full pipeline.
+When your message mentions a name that appears in the vault index, the agent gets a quiet hint — “this probably means `People/Emma`” — so it opens the right note without you repeating context. And when a chat is archived, a pipeline turns it into durable knowledge: session insights are extracted, memory proposals are drafted, and daily/weekly curation runs update vault pages — but nothing is promoted into long-term memory without review, and Ciaobot never discards or rewrites an existing notes folder during onboarding. Track the background steps under **Settings → Automation**, and see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full pipeline.
 
 ## Working in chat
 
@@ -61,25 +39,13 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full pipeline.
 - **Pin documents** — keep a file open beside the chat; add line-level comments in the preview (attached to your next message, like chat comments).
 - **Rich previews** — images inline; PDFs in a built-in viewer; PowerPoint (`.pptx`) converted to PDF for display (requires LibreOffice on the machine running Ciaobot).
 
-Select text in any message to drop a comment, which collects in a side panel:
-
-![Selecting text in a chat message shows a Comment action](docs/images/chat-comment-select.png)
-
-![A pending comment in the Comments side panel](docs/images/chat-comment-sidebar.png)
-
-The comment travels with your next message, so the agent has the exact context:
-
-![The comment is attached to the follow-up message](docs/images/chat-comment-attached.png)
-
-Pin a document beside the chat and annotate it the same way:
-
 ![A document pinned in a split view next to the chat](docs/images/pinned-file.png)
 
 On first launch, an in-app product tour walks through these flows. Replay it anytime from **Settings → Home → Product tour**.
 
 ## What ships by default
 
-Every install seeds a set of subagents, slash commands, and system routines from the package (`ciao/stock/`). `ciao sync-skills` mirrors them into the workspace on setup and upgrade; anything you create under the workspace's `subagents/` or `commands/` folders (or from **Settings**) takes precedence over the packaged version with the same name.
+Every install seeds a set of subagents, slash commands, and system routines from the package (`ciao/stock/`); your own workspace versions with the same name take precedence.
 
 ### Subagents
 
@@ -149,6 +115,7 @@ Use the access you already have:
 - **OpenAI Codex** — `codex login`, including eligible ChatGPT subscription accounts.
 - **Ollama** — cloud or local daemon.
 - **OpenRouter** — `OPENROUTER_API_KEY`.
+- **On-device models** — for lightweight tasks where available: titles via [apfel](https://github.com/Arthur-Ficial/apfel), speech via [mlx-whisper](https://pypi.org/project/mlx-whisper/), and similar.
 
 See [INTEGRATIONS.md](INTEGRATIONS.md) for env vars, OAuth, and per-task model routing (titles, insights, voice).
 
@@ -169,6 +136,7 @@ I'm sharing it because the patterns may be useful to you. Ideas, bug reports, di
 | [web/README.md](web/README.md) | PWA frontend workflow, iOS Safari gotchas, design tokens. |
 | [SECURITY.md](SECURITY.md) | Security policy. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute. |
+| [docs/CREDITS.md](docs/CREDITS.md) | Open tools Ciaobot is built on. |
 
 Naming note: the user-facing product is **Ciaobot**. The CLI is installed as both `ciaobot` and `ciao` (same command); the Python package, import path, and many environment variables are still named `ciao`/`CIAO_*` for compatibility.
 
@@ -178,26 +146,4 @@ Naming note: the user-facing product is **Ciaobot**. The CLI is installed as bot
 
 ## Built on
 
-Ciaobot is glue around a lot of excellent open tools:
-
-**Agent engine and models**
-
-- [Claude Code](https://github.com/anthropics/claude-code) and the [Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-python)
-- [OpenAI Codex CLI](https://developers.openai.com/codex/cli/)
-- [Ollama](https://ollama.com) and [OpenRouter](https://openrouter.ai)
-- [OpenAI](https://openai.com) — cloud voice transcription
-- [mlx-whisper](https://pypi.org/project/mlx-whisper/) — on-device speech on Apple Silicon
-
-**Integrations and CLIs**
-
-- [Google Workspace CLI (`gws`)](https://github.com/googleworkspace/cli)
-- [NotebookLM CLI (`notebooklm-py`)](https://pypi.org/project/notebooklm-py/)
-- [opencli](https://www.npmjs.com/package/@jackwener/opencli)
-- [apfel](https://github.com/Arthur-Ficial/apfel)
-- [LibreOffice](https://www.libreoffice.org) — `.pptx` slide rendering
-
-**Frameworks and libraries**
-
-- [Starlette](https://www.starlette.io) + [Uvicorn](https://www.uvicorn.org)
-- [Vue](https://vuejs.org), [Vite](https://vite.dev), and [Pinia](https://pinia.vuejs.org)
-- [Excalidraw](https://excalidraw.com) — in-app diagram previews
+Ciaobot is glue around a lot of excellent open tools — Claude Code, the Claude Agent SDK, Codex CLI, Starlette, Vue, and more. See [docs/CREDITS.md](docs/CREDITS.md) for the full list.
