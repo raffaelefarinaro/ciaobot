@@ -147,6 +147,16 @@ def test_every_tracked_tool_has_repo() -> None:
         assert t["key"]
 
 
+def test_scrapling_optional_dep_is_tracked() -> None:
+    # The `scraping` extra must flow into dependency tracking with a known
+    # repo URL, so the weekly review can bump its pin.
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    deps = depreview.parse_pyproject_dependencies(pyproject)
+    assert "scrapling" in deps
+    assert deps["scrapling"].startswith("==")
+    assert depreview.KNOWN_REPOS["scrapling"] == "https://github.com/D4Vinci/Scrapling/releases"
+
+
 def test_pinned_version_extracts_from_python_and_npm_specs() -> None:
     assert _pinned_version("==0.2.111") == "0.2.111"
     assert _pinned_version("^5.0.0") == "5.0.0"

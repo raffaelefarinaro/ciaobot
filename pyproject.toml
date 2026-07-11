@@ -42,6 +42,12 @@ voice-local = [
 tts-local = [
   "kokoro-onnx==0.5.0",
 ]
+# Optional web-scraping fallback for the web-research skill (JS-rendered
+# pages defuddle cannot read). Browser binaries are installed separately
+# with `scrapling install`, keeping the base install light.
+scraping = [
+  "scrapling[fetchers]==0.4.10",
+]
 # macOS menu bar companion (`ciao menubar`). Kept for compatibility: the same
 # pin ships in the main dependencies with a Darwin platform marker.
 menubar = [

@@ -63,6 +63,7 @@ KNOWN_REPOS = {
     "defuddle": "https://github.com/kepano/defuddle/releases",
     "claude-code": "https://github.com/anthropics/claude-code/releases",
     "apfel": "https://github.com/Arthur-Ficial/apfel/releases",
+    "scrapling": "https://github.com/D4Vinci/Scrapling/releases",
     "starlette": "https://github.com/encode/starlette/releases",
     "uvicorn": "https://github.com/encode/uvicorn/releases",
     "itsdangerous": "https://github.com/pallets/itsdangerous/releases",
