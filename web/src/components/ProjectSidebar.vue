@@ -106,7 +106,7 @@
         <template v-if="userRoutines.length">
           <div class="schedule-group">
             <div class="schedule-group-header">
-              <span>Routines <span class="schedule-group-hint">custom · recurring</span></span>
+              <span>Custom Routines</span>
               <span class="schedule-group-count">{{ userRoutines.length }}</span>
             </div>
             <div class="schedule-group-items">
@@ -129,7 +129,7 @@
         <template v-if="userLoops.length">
           <div class="schedule-group">
             <div class="schedule-group-header">
-              <span>Loops <span class="schedule-group-hint">custom · in-chat</span></span>
+              <span>Custom Loops</span>
               <span class="schedule-group-count">{{ userLoops.length }}</span>
             </div>
             <div class="schedule-group-items">
@@ -151,7 +151,7 @@
         <template v-if="systemAutomations.length">
           <div class="schedule-group schedule-group--system">
             <div class="schedule-group-header">
-              <span>System Routines <span class="schedule-group-hint">built-in</span></span>
+              <span>System Routines</span>
               <span class="schedule-group-count">{{ systemAutomations.length }}</span>
             </div>
             <div class="schedule-group-items">
@@ -174,7 +174,7 @@
         <template v-if="systemLoops.length">
           <div class="schedule-group schedule-group--system">
             <div class="schedule-group-header">
-              <span>System Loops <span class="schedule-group-hint">built-in</span></span>
+              <span>System Loops</span>
               <span class="schedule-group-count">{{ systemLoops.length }}</span>
             </div>
             <div class="schedule-group-items">
