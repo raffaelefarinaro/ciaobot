@@ -521,10 +521,10 @@ async def _async_main() -> int:
     # missed poll iterations from downtime are worthless, cadence just resumes.
     loop_manager.start()
 
-    # Fire any schedules whose target time already passed today but which
-    # never triggered (e.g. due to a crash loop or the server being down
-    # at the scheduled minute). Runs once, asynchronously, so it doesn't
-    # block uvicorn from serving requests.
+    # Fire each schedule once when its latest expected occurrence was missed
+    # (for example while the server was down). This does not replay every
+    # skipped interval. Runs asynchronously so it doesn't block uvicorn from
+    # serving requests.
     async def _run_catch_up() -> None:
         try:
             fired = await schedule_manager.catch_up()

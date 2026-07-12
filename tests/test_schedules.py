@@ -1,9 +1,4 @@
-"""Tests for ScheduleManager.catch_up.
-
-Covers the "server missed the scheduled minute" case — the server restarts
-after the target time has already passed on the current day, and catch_up
-should fire the schedule once.
-"""
+"""Tests for schedule persistence, dispatch, and startup catch-up."""
 
 from __future__ import annotations
 
@@ -38,6 +33,17 @@ async def _make_manager(store: ScheduleStore):
         dispatch_to_web=dispatch,
     )
     return mgr, dispatched
+
+
+def _set_created_at(
+    store: ScheduleStore,
+    entry,
+    created_at: str = "2026-01-01T00:00:00Z",
+):
+    """Give time-travel tests a deterministic creation floor."""
+    entry.created_at = created_at
+    store.replace(entry)
+    return entry
 
 
 def test_schedule_policy_fields_default_for_legacy_entries(tmp_path: Path) -> None:
@@ -150,6 +156,7 @@ async def test_catch_up_fires_past_due_schedule(store: ScheduleStore):
         frequency="weekly",
         days_of_week=["mon", "tue", "wed", "thu", "fri"],
     )
+    _set_created_at(store, entry)
     mgr, dispatched = await _make_manager(store)
     # "Now" = Monday 2026-01-19 15:00 Zurich (= 14:00 UTC in winter)
     now_utc = datetime(2026, 1, 19, 14, 0, tzinfo=UTC)
@@ -163,7 +170,7 @@ async def test_catch_up_fires_past_due_schedule(store: ScheduleStore):
     assert reloaded.last_triggered_on == "2026-01-19"
 
 
-async def test_catch_up_skips_future_times(store: ScheduleStore):
+async def test_catch_up_skips_new_schedule_before_first_run(store: ScheduleStore):
     entry = store.create(
         daily_time_utc="18:00",
         prompt="evening",
@@ -172,6 +179,7 @@ async def test_catch_up_skips_future_times(store: ScheduleStore):
         chat_id=0,
         frequency="daily",
     )
+    _set_created_at(store, entry, "2026-01-19T05:00:00Z")
     mgr, dispatched = await _make_manager(store)
     # 15:00 Zurich (before 18:00) — should NOT fire
     now_utc = datetime(2026, 1, 19, 14, 0, tzinfo=UTC)
@@ -190,6 +198,7 @@ async def test_catch_up_skips_already_triggered_today(store: ScheduleStore):
         chat_id=0,
         frequency="daily",
     )
+    _set_created_at(store, entry)
     entry.last_triggered_on = "2026-01-19"
     store.replace(entry)
     mgr, dispatched = await _make_manager(store)
@@ -199,8 +208,10 @@ async def test_catch_up_skips_already_triggered_today(store: ScheduleStore):
     assert dispatched == []
 
 
-async def test_catch_up_respects_weekday_filter(store: ScheduleStore):
-    # Schedule only fires on Sundays
+async def test_catch_up_fires_latest_weekly_slot_from_previous_day(
+    store: ScheduleStore,
+):
+    # Schedule only fires on Sundays; the server returns Monday.
     entry = store.create(
         daily_time_utc="08:00",
         prompt="sunday-only",
@@ -210,12 +221,15 @@ async def test_catch_up_respects_weekday_filter(store: ScheduleStore):
         frequency="weekly",
         days_of_week=["sun"],
     )
+    _set_created_at(store, entry)
     mgr, dispatched = await _make_manager(store)
-    # Monday 2026-01-19 15:00 Zurich — not Sunday
+    # Monday 2026-01-19 15:00 Zurich — catch up Sunday's missed slot.
     now_utc = datetime(2026, 1, 19, 14, 0, tzinfo=UTC)
     fired = await mgr.catch_up(now=now_utc)
-    assert fired == []
-    assert dispatched == []
+    await asyncio.sleep(0.05)
+    assert fired == [entry.schedule_id]
+    assert dispatched == [entry.schedule_id]
+    assert store.get(entry.schedule_id).last_triggered_on == "2026-01-18"
 
 
 async def test_catch_up_monthly_matches_day(store: ScheduleStore):
@@ -228,6 +242,7 @@ async def test_catch_up_monthly_matches_day(store: ScheduleStore):
         frequency="monthly",
         day_of_month=19,
     )
+    _set_created_at(store, entry)
     mgr, dispatched = await _make_manager(store)
     # 2026-01-19 at 15:00 Zurich: day matches, time past
     now_utc = datetime(2026, 1, 19, 14, 0, tzinfo=UTC)
@@ -238,7 +253,7 @@ async def test_catch_up_monthly_matches_day(store: ScheduleStore):
 
 
 async def test_catch_up_monthly_skips_other_days(store: ScheduleStore):
-    store.create(
+    entry = store.create(
         daily_time_utc="10:00",
         prompt="monthly",
         model="sonnet",
@@ -247,11 +262,64 @@ async def test_catch_up_monthly_skips_other_days(store: ScheduleStore):
         frequency="monthly",
         day_of_month=25,
     )
+    _set_created_at(store, entry)
     mgr, dispatched = await _make_manager(store)
     # 2026-01-19: day does NOT match (only day 25)
     now_utc = datetime(2026, 1, 19, 14, 0, tzinfo=UTC)
     fired = await mgr.catch_up(now=now_utc)
     assert fired == []
+
+
+async def test_catch_up_runs_only_latest_missed_occurrence_once(
+    store: ScheduleStore,
+):
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="daily summary",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="daily",
+    )
+    _set_created_at(store, entry)
+    mgr, dispatched = await _make_manager(store)
+    now_utc = datetime(2026, 1, 19, 14, 0, tzinfo=UTC)
+
+    first = await mgr.catch_up(now=now_utc)
+    second = await mgr.catch_up(now=now_utc)
+    await asyncio.sleep(0.05)
+
+    assert first == [entry.schedule_id]
+    assert second == []
+    assert dispatched == [entry.schedule_id]
+
+
+async def test_previous_day_catch_up_does_not_suppress_todays_tick(
+    store: ScheduleStore,
+):
+    entry = store.create(
+        daily_time_utc="08:00",
+        prompt="daily summary",
+        model="sonnet",
+        mode="bypass",
+        chat_id=0,
+        frequency="daily",
+    )
+    _set_created_at(store, entry)
+    mgr, dispatched = await _make_manager(store)
+
+    # Server returns Monday at 07:00 local, before today's slot. Catch up the
+    # latest missed occurrence (Sunday), then allow Monday's 08:00 tick.
+    caught_up = await mgr.catch_up(
+        now=datetime(2026, 1, 19, 6, 0, tzinfo=UTC)
+    )
+    assert store.get(entry.schedule_id).last_triggered_on == "2026-01-18"
+    await mgr.tick(now=datetime(2026, 1, 19, 7, 0, tzinfo=UTC))
+    await asyncio.sleep(0.05)
+
+    assert caught_up == [entry.schedule_id]
+    assert dispatched == [entry.schedule_id, entry.schedule_id]
+    assert store.get(entry.schedule_id).last_triggered_on == "2026-01-19"
 
 
 # ── Manual schedules ────────────────────────────────────────────────────

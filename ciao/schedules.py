@@ -650,15 +650,13 @@ class ScheduleManager:
                 self._store.replace(entry)
 
     async def catch_up(self, now: datetime | None = None) -> list[str]:
-        """Fire schedules whose target time has already passed today but which
-        didn't trigger (e.g. because the server was down or in a crash loop
-        at the scheduled minute).
+        """Fire each schedule once when its latest expected run was missed.
 
-        Scope: today only. Missed runs from *previous* days are NOT replayed,
-        because a stale "morning briefing" from yesterday is worse than none.
-
-        Called once on startup. Respects the same day-of-week / day-of-month
-        filters that `tick` uses.
+        Called once on startup so schedules recover after the server was down
+        across their target time. Only the most recent missed occurrence is
+        dispatched; skipped intervals are not replayed as a backlog, and the
+        original prompt is dispatched unchanged (without backdating its
+        context to the missed slot).
 
         Returns the list of schedule_ids that were fired.
         """
@@ -670,13 +668,6 @@ class ScheduleManager:
                 continue
             tz = ZoneInfo(entry.timezone_name)
             localized = current.astimezone(tz)
-            current_day = localized.date().isoformat()
-            # Parse "HH:MM"
-            try:
-                hh, mm = entry.daily_time_utc.split(":")
-                target_hour, target_minute = int(hh), int(mm)
-            except (ValueError, AttributeError):
-                continue
 
             if entry.frequency == "once":
                 # One-shot: catch up *across days* (not just today). If the
@@ -690,7 +681,9 @@ class ScheduleManager:
                     continue
                 try:
                     target_date = datetime.fromisoformat(entry.run_at_date).date()
-                except ValueError:
+                    hh, mm = entry.daily_time_utc.split(":")
+                    target_hour, target_minute = int(hh), int(mm)
+                except (ValueError, AttributeError):
                     continue
                 target_dt = datetime(
                     target_date.year, target_date.month, target_date.day,
@@ -709,39 +702,38 @@ class ScheduleManager:
                     localized.isoformat(),
                 )
                 await self._dispatch_entry(entry, model, mode, provider)
+                entry.last_triggered_on = "done"
+                entry.last_dispatched_at = localized.isoformat(timespec="seconds")
+                self._store.replace(entry)
                 self._store.delete(entry.schedule_id)
                 fired.append(entry.schedule_id)
                 continue
 
-            if entry.last_triggered_on == current_day:
+            last_expected = compute_last_expected_run(entry, now=current)
+            if last_expected is None:
                 continue
-            # Frequency filters (recurring)
-            if entry.frequency == "monthly":
-                if localized.day != entry.day_of_month:
-                    continue
-            elif entry.frequency == "weekly":
-                if entry.days_of_week:
-                    if WEEKDAY_NAMES[localized.weekday()] not in entry.days_of_week:
-                        continue
-            scheduled_today = localized.replace(
-                hour=target_hour, minute=target_minute,
-                second=0, microsecond=0,
-            )
-            if localized < scheduled_today:
-                continue  # Not due yet; regular tick will handle it
+            expected_day = last_expected.date().isoformat()
+            if entry.last_triggered_on and entry.last_triggered_on >= expected_day:
+                continue
+            if was_dispatched_since(entry, last_expected):
+                continue
             _, model, mode, provider = (
                 self._resolve_target(entry)
                 if self._resolve_target is not None
                 else ("claude", entry.model, entry.mode, entry.provider)
             )
             logger.info(
-                "Schedule %s: catch-up fire (target %s, now %s %s)",
-                entry.schedule_id, entry.daily_time_utc,
-                localized.strftime("%H:%M"), entry.timezone_name,
+                "Schedule %s: catch-up fire (latest missed %s, now %s)",
+                entry.schedule_id,
+                last_expected.isoformat(),
+                localized.isoformat(),
             )
             await self._dispatch_entry(entry, model, mode, provider)
-            entry.last_triggered_on = current_day
-            entry.last_dispatched_at = current_day + "T" + localized.strftime("%H:%M:%S")
+            # Keep the idempotency date tied to the occurrence being caught
+            # up. If startup happens before today's target, today's regular
+            # tick must still be allowed to run later.
+            entry.last_triggered_on = expected_day
+            entry.last_dispatched_at = localized.isoformat(timespec="seconds")
             self._store.replace(entry)
             fired.append(entry.schedule_id)
         return fired

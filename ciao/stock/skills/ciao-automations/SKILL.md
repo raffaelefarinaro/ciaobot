@@ -5,7 +5,7 @@ description: Create, edit, list, or delete Ciaobot native schedules (`.runtime/s
 
 # Ciaobot Automations
 
-Ciaobot has its own scheduler. Each tick (every minute) the `ScheduleManager` reads `.runtime/schedules.json` and dispatches matching entries as new chat turns into a target PWA project or chat. No service restart needed when you add or edit a row: the store is reloaded on every tick.
+Ciaobot has its own scheduler. Each tick (every minute) the `ScheduleManager` reads `.runtime/schedules.json` and dispatches matching entries as new chat turns into a target PWA project or chat. No service restart needed when you add or edit a row: the store is reloaded on every tick. On server startup, an enabled schedule with a missed latest occurrence runs once immediately; older skipped intervals are not replayed and the prompt is not backdated.
 
 ## Where things live
 
@@ -63,7 +63,7 @@ Every entry is a flat JSON object. Use exactly these keys (the store filters unk
 - **`chat_id`** — legacy, set to `0`.
 - **`model`** — empty string lets the workspace pick its default at dispatch time. Override only when a specific model matters.
 - **`schedule_id`** — `f"sched-{uuid.uuid4().hex[:8]}"`. Match the existing convention.
-- **`last_triggered_on`** — empty string for new entries. The dispatcher writes the local-date string after each run.
+- **`last_triggered_on`** — empty string for new entries. The dispatcher writes the scheduled occurrence's local-date string after each automatic run; for startup catch-up this can be earlier than the actual dispatch date.
 - **`enabled`** — `true` (default) runs on schedule; `false` pauses auto-fire (manual "Run now" still works).
 - **`scope`** — `"user"` for schedules you create; system schedules use `"system"`.
 
