@@ -124,3 +124,4 @@ Canonical example: `ciao/skill_evolution.py:_process_skill_dag`. Use a DAG when 
 - **Keep edits minimal and consistent with existing patterns.** Don't refactor unrelated code; if unrelated changes appear, pause and ask.
 - **Avoid destructive git** (force push, hard reset on shared branches) unless explicitly asked.
 - **Write tests** for new Python behavior; add to `tests/`. PWA changes verify via `npm run build` typecheck at minimum.
+- **Verify UI accessibility.** For PWA layout changes, check keyboard operation, visible focus, browser zoom, and 44px mobile targets at a narrow-phone viewport in addition to the build.

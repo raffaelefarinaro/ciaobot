@@ -19,13 +19,13 @@
         </svg>
       </button>
       <template v-if="!collapsed">
-        <span
+        <button
+          type="button"
           class="brand wordmark wordmark--sm"
           :class="{ 'brand--refreshing': refreshing }"
           @click="onBrandClick"
           :title="refreshing ? 'Refreshing...' : 'Click to reload the latest app build'"
-          role="button"
-        >{{ refreshing ? 'sync...' : 'ciaobot' }}</span>
+        >{{ refreshing ? 'sync...' : 'ciaobot' }}</button>
         <div class="nav-links">
           <router-link
             to="/"
@@ -252,6 +252,7 @@
           v-for="workspace in store.workspaceOptions"
           :key="workspace.name"
           :class="{ active: store.activeWorkspace === workspace.name }"
+          :aria-pressed="store.activeWorkspace === workspace.name"
           @click="store.switchWorkspace(workspace.name)"
         >
           {{ workspaceLabel(workspace.name) }}
@@ -266,12 +267,14 @@
         <div v-if="store.recentChats.length" class="recent-section">
           <div class="recent-label">Recent</div>
           <div class="recent-items">
-            <div
+            <button
+              type="button"
               v-for="chat in store.recentChats"
               :key="'recent-' + chat.chat_id"
               class="recent-item"
               :class="{ active: chat.chat_id === store.activeChatId, remote: chat.local === false }"
               @click="chat.local !== false && selectChat(chat.chat_id)"
+              :disabled="chat.local === false"
               :title="chat.local === false ? 'This chat lives on another instance' : ''"
             >
               <span v-if="store.isChatStreaming(chat.chat_id)" class="spinner-dot" />
@@ -288,7 +291,7 @@
                 {{ store.projectFor(chat.chat_id)?.name }}
               </span>
               <span v-if="store.chatUnread(chat.chat_id) > 0" class="badge">{{ store.chatUnread(chat.chat_id) }}</span>
-            </div>
+            </button>
           </div>
         </div>
 
@@ -304,12 +307,16 @@
               :class="{ 'is-system': project.is_auto }"
               @contextmenu.prevent="toggleProjectMenu($event, project)"
             >
-              <span
+              <button
+                type="button"
                 class="project-icon"
                 @click="toggleProject(project.project_id)"
                 :title="expandedProjects.has(project.project_id) ? 'Collapse' : 'Expand'"
-              >{{ expandedProjects.has(project.project_id) ? '▾' : '▸' }}</span>
-              <span
+                :aria-label="`${expandedProjects.has(project.project_id) ? 'Collapse' : 'Expand'} ${project.name}`"
+                :aria-expanded="expandedProjects.has(project.project_id)"
+              >{{ expandedProjects.has(project.project_id) ? '▾' : '▸' }}</button>
+              <button
+                type="button"
                 class="project-name"
                 v-if="editingProject !== project.project_id"
                 @click="openProject(project.project_id)"
@@ -319,7 +326,7 @@
                 <span v-if="project.is_auto" class="system-chip" title="Auto-managed project">auto</span>
                 <span v-if="store.projectIsStreaming(project.project_id)" class="spinner-dot" title="A chat in this project is working" />
                 <span v-if="store.projectUnread(project.project_id) > 0" class="badge">{{ store.projectUnread(project.project_id) }}</span>
-              </span>
+              </button>
               <input
                 v-else
                 class="edit-input"
@@ -336,6 +343,7 @@
                 :disabled="store.creatingChatProjectIds[project.project_id]"
                 @click.stop="addChat(project.project_id)"
                 title="New chat"
+                :aria-label="`New chat in ${project.name}`"
               >{{ store.creatingChatProjectIds[project.project_id] ? '...' : '+' }}</button>
             </div>
 
@@ -368,7 +376,12 @@
                 class="chat-item"
                 :class="{ active: chat.chat_id === store.activeChatId, remote: chat.local === false }"
                 @click="chat.local !== false && selectChat(chat.chat_id)"
+                @keydown.enter.self.prevent="chat.local !== false && selectChat(chat.chat_id)"
+                @keydown.space.self.prevent="chat.local !== false && selectChat(chat.chat_id)"
                 @contextmenu.prevent="toggleChatMenu($event, chat.chat_id)"
+                role="link"
+                :tabindex="chat.local === false ? -1 : 0"
+                :aria-disabled="chat.local === false"
                 :title="chat.local === false ? 'This chat lives on another instance' : ''"
               >
                 <span
@@ -862,6 +875,10 @@ async function confirmDeleteChat(chatId: string) {
   font-size: calc(16px * var(--font-scale));
   cursor: pointer;
   transition: opacity 120ms var(--ease);
+  min-height: var(--touch);
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
 }
 .brand::before {
   content: none;
@@ -955,6 +972,8 @@ async function confirmDeleteChat(chatId: string) {
   display: flex;
   align-items: center;
   gap: 6px;
+  width: 100%;
+  min-height: var(--touch);
   padding: 6px 10px;
   cursor: pointer;
   font-size: var(--text-base);
@@ -963,6 +982,11 @@ async function confirmDeleteChat(chatId: string) {
   white-space: nowrap;
   border-bottom: 1px solid var(--border);
   border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  background: transparent;
+  text-align: left;
 }
 
 .recent-item:last-child {
@@ -1113,7 +1137,7 @@ async function confirmDeleteChat(chatId: string) {
 .workspace-toggle button {
   flex: 1 1 0;
   min-width: 0;
-  min-height: 32px;
+  min-height: var(--touch);
   padding: 6px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -1166,6 +1190,7 @@ async function confirmDeleteChat(chatId: string) {
   text-transform: uppercase;
   letter-spacing: 0.3px;
   background: var(--bg2);
+  min-height: var(--touch);
 }
 
 .project-header:hover {
@@ -1205,7 +1230,13 @@ async function confirmDeleteChat(chatId: string) {
 
 .project-icon {
   font-size: calc(10px * var(--font-scale));
-  width: 14px;
+  width: var(--touch);
+  height: var(--touch);
+  margin: -6px 0 -6px -10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
   cursor: pointer;
   text-align: center;
   user-select: none;
@@ -1218,6 +1249,16 @@ async function confirmDeleteChat(chatId: string) {
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
+  min-height: var(--touch);
+  margin: -6px 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-transform: inherit;
+  letter-spacing: inherit;
 }
 .project-name:hover { color: var(--fg); }
 
@@ -1238,16 +1279,20 @@ async function confirmDeleteChat(chatId: string) {
   color: var(--fg2);
   cursor: pointer;
   font-size: calc(14px * var(--font-scale));
-  padding: 0 4px;
+  width: var(--touch);
+  height: var(--touch);
+  margin: -6px -10px -6px 0;
+  padding: 0;
   opacity: 0;
   transition: opacity 0.15s;
-  min-width: 18px;
+  min-width: var(--touch);
   text-align: center;
 }
 
 .project-header:hover .add-chat-btn {
   opacity: 1;
 }
+.add-chat-btn:focus-visible { opacity: 1; }
 
 .add-chat-btn:disabled {
   cursor: not-allowed;
@@ -1258,7 +1303,8 @@ async function confirmDeleteChat(chatId: string) {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 10px 6px 20px;
+  min-height: var(--touch);
+  padding: 0 4px 0 20px;
   cursor: pointer;
   font-size: var(--text-base);
   color: var(--fg2);
@@ -1349,7 +1395,9 @@ async function confirmDeleteChat(chatId: string) {
 .chat-actions-btn {
   flex-shrink: 0;
   margin-left: 2px;
-  padding: 0 6px;
+  width: var(--touch);
+  height: var(--touch);
+  padding: 0;
   background: none;
   border: none;
   color: var(--fg2);
@@ -1381,7 +1429,7 @@ async function confirmDeleteChat(chatId: string) {
 
 .add-project-btn {
   flex: 1;
-  min-height: 32px;
+  min-height: var(--touch);
   padding: 6px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -1405,8 +1453,8 @@ async function confirmDeleteChat(chatId: string) {
 
 .archive-btn {
   flex-shrink: 0;
-  width: 32px;
-  height: 32px;
+  width: var(--touch);
+  height: var(--touch);
   padding: 0;
   display: inline-flex;
   align-items: center;
@@ -1578,6 +1626,7 @@ async function confirmDeleteChat(chatId: string) {
   padding: 3px 8px;
   border-radius: 999px;
   cursor: pointer;
+  min-height: var(--touch);
 }
 .add-chip:hover { background: var(--bg3); }
 
@@ -1654,6 +1703,7 @@ async function confirmDeleteChat(chatId: string) {
   color: var(--fg2);
   font-size: var(--text-base);
   cursor: pointer;
+  min-height: var(--touch);
 }
 .schedule-item:hover { background: var(--bg3); color: var(--fg); }
 .schedule-item.active {

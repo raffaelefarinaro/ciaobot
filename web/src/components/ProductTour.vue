@@ -232,13 +232,13 @@ onBeforeUnmount(() => {
 .product-tour-backdrop {
   position: absolute;
   inset: 0;
-  background: rgba(10, 10, 22, 0.55);
+  background: rgba(10, 10, 22, 0.72);
 }
 
 .product-tour-spotlight {
   position: fixed;
   border-radius: var(--radius);
-  box-shadow: 0 0 0 9999px rgba(10, 10, 22, 0.55);
+  box-shadow: 0 0 0 9999px rgba(10, 10, 22, 0.72);
   pointer-events: none;
   z-index: 1;
   transition: top 160ms var(--ease), left 160ms var(--ease), width 160ms var(--ease), height 160ms var(--ease);
@@ -312,20 +312,24 @@ onBeforeUnmount(() => {
 }
 
 .product-tour-skip {
-  background: none;
-  border: none;
-  color: var(--fg3);
+  min-height: var(--touch);
+  padding: 8px 12px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--fg2);
   font-family: var(--font);
   font-size: var(--text-sm);
   cursor: pointer;
-  padding: 4px 0;
 }
 .product-tour-skip:hover {
-  color: var(--fg2);
+  color: var(--fg);
+  border-color: var(--fg2);
 }
 
 .product-tour-nav {
   display: flex;
   gap: 8px;
 }
+.product-tour-nav > button { min-height: var(--touch); }
 </style>

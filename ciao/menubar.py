@@ -115,6 +115,12 @@ def status_label(status: ServerStatus) -> str:
     return "Server: running"
 
 
+def server_recovery_label(status: ServerStatus) -> str:
+    """Action label for starting a stopped server or restarting a live one."""
+
+    return "Restart Server" if status.reachable else "Start Server"
+
+
 def open_url(workspace: Path, port: int) -> str:
     """URL the menu bar opens; reuses the Ciaobot.app setup token when present."""
 
@@ -559,6 +565,13 @@ def read_unread_chats(workspace: Path, *, limit: int = 10) -> list[OpenChat]:
     return unread[:limit]
 
 
+def count_unread_chats(workspace: Path) -> int:
+    """Total unread chat count, without the menu's display limit."""
+
+    _, chats = _load_web_state(workspace)
+    return sum(1 for chat in chats.values() if chat_is_unread(chat))
+
+
 _INET_RE = re.compile(r"^\s*inet (\d+\.\d+\.\d+\.\d+)", re.MULTILINE)
 
 
@@ -711,6 +724,36 @@ def run_menubar(workspace: Path, port: int) -> int:
 
     def on_open(_sender) -> None:
         subprocess.run(open_app_command(workspace, port), check=False)
+
+    def on_recover_server(_sender) -> None:
+        current = fetch_server_status(port)
+        if current.reachable and not rumps.alert(
+            title="Restart Ciaobot server?",
+            message=(
+                "Active chats and scheduled tasks pause briefly while the "
+                "local server restarts."
+            ),
+            ok="Restart",
+            cancel="Cancel",
+            icon_path=icon_path("Ciaobot.icns"),
+        ):
+            return
+        try:
+            completed = subprocess.run(
+                restart_server_command(), capture_output=True, text=True, check=False
+            )
+        except OSError as exc:
+            rumps.alert(title="Could not start server", message=str(exc), ok="OK")
+            return
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout).strip()
+            rumps.alert(
+                title="Could not start server",
+                message=detail or "launchctl did not accept the request.",
+                ok="OK",
+                icon_path=icon_path("Ciaobot.icns"),
+            )
+        refresh()
 
     def on_logs(_sender) -> None:
         subprocess.run(view_logs_command(workspace), check=False)
@@ -897,7 +940,8 @@ def run_menubar(workspace: Path, port: int) -> int:
         # between non-empty groups so there are never doubled or trailing lines.
         groups = [
             [rumps.MenuItem("Open Ciaobot", callback=on_open),
-             _disabled_item(rumps, status_label(status))],
+             _disabled_item(rumps, status_label(status)),
+             rumps.MenuItem(server_recovery_label(status), callback=on_recover_server)],
             update_items,
             chat_items,
             [advanced_menu],
@@ -966,12 +1010,13 @@ def run_menubar(workspace: Path, port: int) -> int:
         chats = read_open_chats(workspace)
         unread_chats = read_unread_chats(workspace)
         unread_ids = {chat.chat_id for chat in unread_chats}
+        unread_count = count_unread_chats(workspace)
         working_ids = set(state["working_ids"])
         addresses = server_addresses(port)
         pkg = status_fetcher()
         login_status = start_at_login_status()
         state["package_status"] = pkg
-        app.title = menubar_badge_title(len(unread_ids))
+        app.title = menubar_badge_title(unread_count)
 
         # Rebuild only when content changed so an open menu doesn't flicker.
         show_workspace = len({chat.workspace for chat in chats if chat.workspace}) > 1
@@ -988,7 +1033,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                 )
                 for c in chats
             ),
-            len(unread_ids),
+            unread_count,
             tuple(addresses),
             package_update_fingerprint(pkg),
             state["updating"],

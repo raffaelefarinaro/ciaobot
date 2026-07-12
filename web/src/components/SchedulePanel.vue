@@ -15,31 +15,73 @@
         </div>
       </template>
       <template #actions>
-        <button
-          v-if="schedule && !editing"
-          class="btn-small"
-          :class="{ 'btn-running': showRunning }"
-          :disabled="isStarting && !runningChatId"
-          @click="onRunButtonClick"
-        >
-          {{ showRunning ? 'Running...' : 'Run now' }}
-        </button>
-        <button v-if="schedule && !editing" class="btn-small" @click="onToggleEnabled">
-          {{ schedule.enabled ? 'Disable' : 'Enable' }}
-        </button>
-        <button v-if="schedule && !editing && schedule.scope !== 'system'" class="btn-small" @click="startEdit">Edit</button>
-        <button v-if="schedule && !editing && schedule.scope !== 'system'" class="btn-small btn-danger" @click="onDelete">Delete</button>
-        <button
-          v-if="loop && !loopEditing"
-          class="btn-small"
-          :class="{ 'btn-running': loop.running }"
-          @click="onToggleLoopRunning"
-        >
-          {{ loop.running ? 'Stop' : 'Start' }}
-        </button>
-        <button v-if="loop && !loopEditing" class="btn-small" @click="onRunLoopNow">Run now</button>
-        <button v-if="loop && !loopEditing" class="btn-small" @click="startLoopEdit">Edit</button>
-        <button v-if="loop && !loopEditing" class="btn-small btn-danger" @click="onDeleteLoop">Delete</button>
+        <template v-if="schedule && !editing">
+          <button
+            class="btn-small desktop-only"
+            :class="{ 'btn-running': showRunning }"
+            :disabled="isStarting && !runningChatId"
+            @click="onRunButtonClick"
+          >{{ showRunning ? 'Running...' : 'Run now' }}</button>
+          <button class="btn-small desktop-only" @click="onToggleEnabled">
+            {{ schedule.enabled ? 'Disable' : 'Enable' }}
+          </button>
+          <button v-if="schedule.scope !== 'system'" class="btn-small desktop-only" @click="startEdit">Edit</button>
+          <button v-if="schedule.scope !== 'system'" class="btn-small btn-danger desktop-only" @click="onDelete">Delete</button>
+
+          <button
+            class="btn-small mobile-primary"
+            :class="{ 'btn-running': showRunning }"
+            :disabled="isStarting && !runningChatId"
+            @click="onRunButtonClick"
+          >{{ showRunning ? 'Running...' : 'Run now' }}</button>
+          <div class="mobile-overflow" @keydown.escape.stop="actionsOpen = false">
+            <button
+              type="button"
+              class="btn-icon overflow-trigger"
+              aria-label="Automation actions"
+              :aria-expanded="actionsOpen"
+              @click="actionsOpen = !actionsOpen"
+            >•••</button>
+            <div v-if="actionsOpen" class="header-menu" role="menu">
+              <button role="menuitem" @click="runHeaderAction(onToggleEnabled)">
+                {{ schedule.enabled ? 'Disable' : 'Enable' }}
+              </button>
+              <button v-if="schedule.scope !== 'system'" role="menuitem" @click="runHeaderAction(startEdit)">Edit</button>
+              <button v-if="schedule.scope !== 'system'" class="danger" role="menuitem" @click="runHeaderAction(onDelete)">Delete</button>
+            </div>
+          </div>
+        </template>
+
+        <template v-if="loop && !loopEditing">
+          <button
+            class="btn-small desktop-only"
+            :class="{ 'btn-running': loop.running }"
+            @click="onToggleLoopRunning"
+          >{{ loop.running ? 'Stop' : 'Start' }}</button>
+          <button class="btn-small desktop-only" @click="onRunLoopNow">Run now</button>
+          <button class="btn-small desktop-only" @click="startLoopEdit">Edit</button>
+          <button class="btn-small btn-danger desktop-only" @click="onDeleteLoop">Delete</button>
+
+          <button
+            class="btn-small mobile-primary"
+            :class="{ 'btn-running': loop.running }"
+            @click="onToggleLoopRunning"
+          >{{ loop.running ? 'Stop' : 'Start' }}</button>
+          <div class="mobile-overflow" @keydown.escape.stop="actionsOpen = false">
+            <button
+              type="button"
+              class="btn-icon overflow-trigger"
+              aria-label="Automation actions"
+              :aria-expanded="actionsOpen"
+              @click="actionsOpen = !actionsOpen"
+            >•••</button>
+            <div v-if="actionsOpen" class="header-menu" role="menu">
+              <button role="menuitem" @click="runHeaderAction(onRunLoopNow)">Run now</button>
+              <button role="menuitem" @click="runHeaderAction(startLoopEdit)">Edit</button>
+              <button class="danger" role="menuitem" @click="runHeaderAction(onDeleteLoop)">Delete</button>
+            </div>
+          </div>
+        </template>
       </template>
     </PaneHeader>
 
@@ -68,7 +110,11 @@
           <strong>Time</strong><br />{{ schedule.daily_time_utc }} ({{ schedule.timezone_name }})
         </div>
         <div><strong>Frequency</strong><br />{{ frequencyLabel(schedule) }}</div>
-        <div><strong>Context</strong><br />{{ contextLabel(schedule) }}</div>
+        <div>
+          <strong>Context</strong><br />
+          <span :class="{ 'context-unavailable': contextUnavailable(schedule) }">{{ contextLabel(schedule) }}</span>
+          <span v-if="contextUnavailable(schedule)" class="context-help">Edit this automation to choose an available target.</span>
+        </div>
         <div v-if="schedule.frequency !== 'manual'">
           <strong>Next run</strong><br />{{ nextRunLabel(schedule) }}
         </div>
@@ -141,7 +187,7 @@
           <label>Archive behavior</label>
           <select v-model="editData.archive_policy">
             <option value="manual">Manual, keep as normal chat</option>
-            <option value="auto">Auto, archive if boring</option>
+            <option value="auto">Automatically archive routine results</option>
           </select>
         </div>
         <p class="hint">Auto runs a post-run classifier. If it finds proposals, decisions, warnings, or anything useful for the user to judge, the chat stays visible.</p>
@@ -156,8 +202,22 @@
       </div>
 
       <div v-else class="prompt-display">
-        <label class="prompt-label">Prompt</label>
-        <pre class="full-prompt">{{ schedule.prompt }}</pre>
+        <div class="prompt-heading">
+          <span class="prompt-label">Prompt</span>
+          <div class="prompt-actions">
+            <button
+              v-if="isPromptLong(schedule.prompt)"
+              type="button"
+              class="btn-small"
+              :aria-expanded="promptExpanded"
+              @click="promptExpanded = !promptExpanded"
+            >{{ promptExpanded ? 'Collapse' : 'Expand' }}</button>
+            <button type="button" class="btn-small" @click="copyPrompt(schedule.prompt, schedule.schedule_id)">
+              {{ promptCopyLabel(schedule.schedule_id) }}
+            </button>
+          </div>
+        </div>
+        <pre class="full-prompt" :class="{ 'full-prompt--collapsed': isPromptLong(schedule.prompt) && !promptExpanded }">{{ schedule.prompt }}</pre>
       </div>
     </div>
 
@@ -168,7 +228,11 @@
       </div>
       <div class="meta-grid">
         <div><strong>Every</strong><br />{{ loop.interval_minutes }} min</div>
-        <div><strong>Chat</strong><br />{{ loopChatLabel(loop) }}</div>
+        <div>
+          <strong>Chat</strong><br />
+          <span :class="{ 'context-unavailable': loopContextUnavailable(loop) }">{{ loopChatLabel(loop) }}</span>
+          <span v-if="loopContextUnavailable(loop)" class="context-help">Edit this loop to choose an available chat.</span>
+        </div>
         <div><strong>Status</strong><br />{{ loopStatusLabel(loop) }}</div>
         <div><strong>Last run</strong><br />{{ loop.last_run_at ? formatWhen(loop.last_run_at) : 'never' }}</div>
         <div><strong>Next run</strong><br />{{ loop.running ? (loop.next_run ? formatWhen(loop.next_run) : 'soon') : 'stopped' }}</div>
@@ -209,8 +273,22 @@
       </div>
 
       <div v-else class="prompt-display">
-        <label class="prompt-label">Prompt</label>
-        <pre class="full-prompt">{{ loop.prompt }}</pre>
+        <div class="prompt-heading">
+          <span class="prompt-label">Prompt</span>
+          <div class="prompt-actions">
+            <button
+              v-if="isPromptLong(loop.prompt)"
+              type="button"
+              class="btn-small"
+              :aria-expanded="promptExpanded"
+              @click="promptExpanded = !promptExpanded"
+            >{{ promptExpanded ? 'Collapse' : 'Expand' }}</button>
+            <button type="button" class="btn-small" @click="copyPrompt(loop.prompt, loop.loop_id)">
+              {{ promptCopyLabel(loop.loop_id) }}
+            </button>
+          </div>
+        </div>
+        <pre class="full-prompt" :class="{ 'full-prompt--collapsed': isPromptLong(loop.prompt) && !promptExpanded }">{{ loop.prompt }}</pre>
       </div>
     </div>
 
@@ -323,6 +401,9 @@ const projectStore = useProjectStore()
 
 const allDays = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
 const editing = ref(false)
+const actionsOpen = ref(false)
+const promptExpanded = ref(false)
+const copiedPromptKey = ref('')
 const startingBySchedule = ref<Set<string>>(new Set())
 // schedule_id -> chat_id while the linked chat is still streaming
 const runningBySchedule = ref<Record<string, string>>({})
@@ -341,6 +422,7 @@ const editData = ref({
 // Loops change state server-side (running / last_status / next_run), so
 // refresh them periodically while the panel is open.
 let loopPollTimer: number | undefined
+let copiedPromptTimer: number | undefined
 
 onMounted(() => {
   if (!store.models) store.fetchModels()
@@ -351,6 +433,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (loopPollTimer !== undefined) window.clearInterval(loopPollTimer)
+  if (copiedPromptTimer !== undefined) window.clearTimeout(copiedPromptTimer)
 })
 
 const scheduleId = computed(() => (route.params.scheduleId as string) || '')
@@ -376,6 +459,9 @@ const loopEditData = ref({
 watch(scheduleId, () => {
   editing.value = false
   loopEditing.value = false
+  actionsOpen.value = false
+  promptExpanded.value = false
+  copiedPromptKey.value = ''
   purgeFinishedRuns()
 })
 
@@ -450,7 +536,11 @@ const loopChatGroups = computed(() => {
 function loopChatLabel(l: Loop): string {
   if (l.context_label) return l.context_label
   const chat = projectStore.chats.find(c => c.chat_id === l.web_chat_id)
-  return chat?.title || l.web_chat_id
+  return chat?.title || 'Unavailable chat'
+}
+
+function loopContextUnavailable(l: Loop): boolean {
+  return !l.context_label && !projectStore.chats.some(c => c.chat_id === l.web_chat_id)
 }
 
 function loopStatusLabel(l: Loop): string {
@@ -514,7 +604,7 @@ async function onDeleteLoop() {
 }
 
 function archiveLabel(policy: ScheduleArchivePolicy | undefined): string {
-  return policy === 'auto' ? 'auto (archive if boring)' : 'manual (keep chat)'
+  return policy === 'auto' ? 'automatic (archive routine results)' : 'manual (keep chat)'
 }
 
 function formatWhen(iso: string | null): string {
@@ -601,13 +691,56 @@ function contextLabel(s: Schedule): string {
   if (s.context_label) return s.context_label
   if (s.web_project_id) {
     const proj = projectStore.projects.find(p => p.project_id === s.web_project_id)
-    return proj ? `${proj.name} (new chat per run)` : s.web_project_id
+    return proj ? `${proj.name} (new chat per run)` : 'Unavailable project'
   }
   if (s.web_chat_id) {
     const chat = projectStore.chats.find(c => c.chat_id === s.web_chat_id)
-    return chat?.title || s.web_chat_id
+    return chat?.title || 'Unavailable chat'
   }
   return s.context_label || 'General'
+}
+
+function contextUnavailable(s: Schedule): boolean {
+  if (s.context_label) return false
+  if (s.web_project_id) {
+    return !projectStore.projects.some(p => p.project_id === s.web_project_id)
+  }
+  if (s.web_chat_id) {
+    return !projectStore.chats.some(c => c.chat_id === s.web_chat_id)
+  }
+  return false
+}
+
+function isPromptLong(prompt: string): boolean {
+  return prompt.length > 500 || prompt.split('\n').length > 12
+}
+
+async function copyPrompt(prompt: string, key: string) {
+  try {
+    await navigator.clipboard.writeText(prompt)
+    copiedPromptKey.value = key
+    if (copiedPromptTimer !== undefined) window.clearTimeout(copiedPromptTimer)
+    copiedPromptTimer = window.setTimeout(() => {
+      if (copiedPromptKey.value === key) copiedPromptKey.value = ''
+    }, 1800)
+  } catch {
+    copiedPromptKey.value = `error:${key}`
+    if (copiedPromptTimer !== undefined) window.clearTimeout(copiedPromptTimer)
+    copiedPromptTimer = window.setTimeout(() => {
+      if (copiedPromptKey.value === `error:${key}`) copiedPromptKey.value = ''
+    }, 1800)
+  }
+}
+
+function promptCopyLabel(key: string): string {
+  if (copiedPromptKey.value === key) return 'Copied'
+  if (copiedPromptKey.value === `error:${key}`) return 'Copy failed'
+  return 'Copy'
+}
+
+function runHeaderAction(action: () => void | Promise<void>) {
+  actionsOpen.value = false
+  void action()
 }
 
 function contextKeyFor(s: Schedule): string {
@@ -778,6 +911,14 @@ function closeSchedule() {
   color: var(--fg2);
 }
 .meta-grid strong { color: var(--fg); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.5px; }
+.context-unavailable { color: var(--warning); font-weight: 600; }
+.context-help {
+  display: block;
+  margin-top: 4px;
+  color: var(--fg3);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+}
 
 .prompt-label {
   display: block;
@@ -787,6 +928,15 @@ function closeSchedule() {
   letter-spacing: 0.5px;
   margin-bottom: 6px;
 }
+.prompt-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: 6px;
+}
+.prompt-heading .prompt-label { margin-bottom: 0; }
+.prompt-actions { display: flex; gap: var(--space-2); }
 
 .full-prompt {
   font-size: var(--text-base);
@@ -799,6 +949,12 @@ function closeSchedule() {
   border-radius: var(--radius);
   padding: var(--space-3);
   margin: 0;
+}
+.full-prompt--collapsed {
+  max-height: 14rem;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 72%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 72%, transparent 100%);
 }
 
 .edit-form { display: flex; flex-direction: column; gap: var(--space-3); }
@@ -908,7 +1064,8 @@ function closeSchedule() {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 6px 0;
+  padding: 8px 0;
+  min-height: var(--touch);
   min-width: 0;
   border-top: 1px solid var(--border);
   text-decoration: none;
@@ -937,7 +1094,49 @@ function closeSchedule() {
 
 /* Close button */
 .desktop-only { display: inline-flex; }
-@media (max-width: 768px) { .desktop-only { display: none; } }
+.mobile-primary,
+.mobile-overflow { display: none; }
+
+.mobile-overflow { position: relative; }
+.overflow-trigger {
+  font-size: 12px;
+  letter-spacing: 1px;
+}
+.header-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 100;
+  min-width: 160px;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+}
+.header-menu button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: var(--touch);
+  padding: 8px 12px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+}
+.header-menu button:hover { background: var(--bg3); }
+.header-menu button.danger { color: var(--error); }
+
+@media (max-width: 768px) {
+  .desktop-only,
+  .close-btn.desktop-only { display: none; }
+  .mobile-primary,
+  .mobile-overflow { display: inline-flex; }
+  .prompt-heading { align-items: flex-start; }
+}
 
 .close-btn {
   background: none;

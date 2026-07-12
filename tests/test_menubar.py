@@ -103,6 +103,12 @@ def test_status_labels() -> None:
     )
 
 
+def test_server_recovery_label_matches_reachability() -> None:
+    assert menubar.server_recovery_label(menubar.ServerStatus(True, True)) == "Restart Server"
+    assert menubar.server_recovery_label(menubar.ServerStatus(True, False)) == "Restart Server"
+    assert menubar.server_recovery_label(menubar.ServerStatus(False, False)) == "Start Server"
+
+
 def test_open_app_command_uses_setup_token(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(menubar, "find_installed_webapp", lambda: None)
     token_path = tmp_path / ".runtime" / "setup-token"
@@ -543,6 +549,29 @@ def test_read_unread_chats_filters_read_and_sorts_by_activity(tmp_path: Path) ->
 
     assert [chat.chat_id for chat in unread] == ["unread-new", "unread-old"]
     assert [chat.title for chat in unread] == ["Unread new", "Unread old"]
+
+
+def test_count_unread_chats_is_not_limited_to_menu_size(tmp_path: Path) -> None:
+    state = tmp_path / ".runtime" / "web_projects.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(
+        json.dumps(
+            {
+                "chats": {
+                    f"chat-{index}": {
+                        "title": f"Unread {index}",
+                        "last_activity_at": f"2026-01-01T10:{index:02d}:00",
+                        "last_read_at": "",
+                    }
+                    for index in range(14)
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert len(menubar.read_unread_chats(tmp_path)) == 10
+    assert menubar.count_unread_chats(tmp_path) == 14
 
 
 def test_read_open_chats_missing_state_returns_empty(tmp_path: Path) -> None:

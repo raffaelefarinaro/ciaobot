@@ -18,6 +18,7 @@ Verification:
 - Run focused tests for the changed behavior.
 - Run `pytest tests/` before claiming backend work is complete.
 - Run `cd web && npm run build` after frontend changes.
+- For UI changes, verify keyboard focus, browser zoom, and mobile touch targets.
 
 Use plain, factual engineering notes in commits and pull requests.
 

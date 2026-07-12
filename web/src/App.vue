@@ -212,9 +212,9 @@ body {
   font-size: calc(14px * var(--font-scale));
   -webkit-font-smoothing: antialiased;
   position: relative;
-  /* Suppress double-tap zoom across the PWA. Pinch-zoom is blocked at the
-     viewport meta level; gesturestart is blocked in main.ts for iOS Safari. */
-  touch-action: manipulation;
+  /* Keep browser zoom available for accessibility. Individual controls use
+     touch-action: manipulation to avoid delayed/double activation. */
+  touch-action: auto;
 }
 
 /* Subtle CRT-style grain. Fixed, behind all content, no pointer events.
@@ -285,6 +285,11 @@ button {
   font-family: var(--font);
   -webkit-tap-highlight-color: transparent;
   touch-action: manipulation;
+}
+
+:where(button, a, input, textarea, select, [role="button"], [role="link"]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 a {
@@ -578,6 +583,15 @@ input:focus, textarea:focus, select:focus {
 .btn-danger {
   border-color: var(--error) !important;
   color: var(--error) !important;
+}
+
+@media (max-width: 768px) {
+  .btn-small,
+  .btn-primary,
+  .btn-chip,
+  .checkbox-pill {
+    min-height: var(--touch);
+  }
 }
 
 /* ── Mobile sheet modal ───────────────────────────────────────── */

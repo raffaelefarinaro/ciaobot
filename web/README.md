@@ -44,15 +44,14 @@ The PWA runs primarily as a standalone iOS Safari app. Several iOS-specific quir
 - `window.scrollY` is force-clamped to 0 in `main.ts`. iOS can still shift the document when the keyboard opens, leaving the input bar floating with a gap below it.
 - `html.keyboard-open` collapses `--safe-bottom` to 0 in `App.vue`. Without that, the home-indicator safe-area inset adds dead space below the input bar while the keyboard covers the home indicator.
 
-### Zoom block
+### Zoom and text scaling
 
-Pinch zoom and double-tap zoom are disabled at three layers, because iOS Safari honors different flags in different contexts.
-
-1. **Viewport meta** (`index.html`): `maximum-scale=1, user-scalable=no, viewport-fit=cover`. Honored in standalone PWA mode and on Android.
-2. **CSS** (`App.vue` body): `touch-action: manipulation`. Kills double-tap zoom across the whole app and as a side effect removes the 300ms tap delay.
-3. **JS** (`main.ts`): `preventDefault()` on the WebKit-only `gesturestart`/`gesturechange`/`gestureend` events. This is the layer that catches Safari-tab use (not standalone PWA mode), where `user-scalable=no` is sometimes ignored.
-
-Accessibility note: `user-scalable=no` violates WCAG 2.1 SC 1.4.4. Acceptable for a personal-use PWA. Revisit if shipping to others.
+Browser pinch zoom remains enabled for accessibility in both Safari tabs and
+standalone PWA mode. Do not add `user-scalable=no`, `maximum-scale=1`, or
+WebKit gesture-event blockers. Individual controls may use
+`touch-action: manipulation` to avoid delayed/double activation without
+disabling page zoom. The in-app font scale under Settings > Appearance is an
+additional convenience, not a replacement for browser zoom.
 
 ### WebSocket suspension
 

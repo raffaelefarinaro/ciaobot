@@ -12,11 +12,11 @@
             <p class="section-title">App actions</p>
             <p class="hint">Snapshot, sync, or restart this local Ciaobot instance.</p>
           </div>
-          <div class="action-row action-row--spaced">
+          <div class="action-row action-row--spaced action-row--compact">
             <button class="btn-primary" @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()" :disabled="!!actionPending">
               {{ actionPending === 'snapshot' ? (localStatus?.git_repo ? 'Syncing...' : 'Snapshotting...') : (localStatus?.git_repo ? 'Sync with Remote' : 'Git Snapshot') }}
             </button>
-            <button class="btn-primary" @click="() => doDeploy()" :disabled="!!actionPending" title="Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code">
+            <button class="btn-caution" @click="() => doDeploy()" :disabled="!!actionPending" title="Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code">
               {{ actionPending === 'deploy' ? 'Restarting...' : 'Restart' }}
             </button>
           </div>
@@ -29,7 +29,7 @@
                 <pre v-if="step.output" class="deploy-step-error-output">{{ step.output }}</pre>
               </div>
             </div>
-            <div class="action-row action-row--spaced">
+            <div class="action-row action-row--spaced action-row--compact">
               <button class="btn-primary" @click="fixDeployErrorInChat">
                 Fix in Chat
               </button>
@@ -93,9 +93,9 @@
               Update check failed: {{ packageStatus.error }}
             </div>
 
-            <div class="action-row action-row--spaced">
+            <div class="action-row action-row--spaced action-row--compact">
               <button
-                class="btn-primary"
+                :class="packageStatus.update_available ? 'btn-primary' : 'btn-secondary'"
                 @click="openUpdatePanel"
                 :disabled="!packageStatus.update_available || packageUpdating || showUpdatePanel"
               >
@@ -154,8 +154,8 @@
           <div v-else-if="!pushSupportedFlag" class="loading">
             Push notifications are not supported in this browser.
           </div>
-          <div v-else class="action-row">
-            <button class="btn-primary" @click="togglePush" :disabled="pushPending">
+          <div v-else class="action-row action-row--compact">
+            <button :class="pushEnabledFlag ? 'btn-secondary' : 'btn-primary'" @click="togglePush" :disabled="pushPending">
               {{ pushPending ? 'Working...' : (pushEnabledFlag ? 'Disable on this device' : 'Enable on this device') }}
             </button>
           </div>
@@ -221,8 +221,8 @@
             <p class="section-title">Product tour</p>
             <p class="hint">Walk through workspaces, chat comments, inline file previews, pinning, and rich document viewing.</p>
           </div>
-          <div class="action-row action-row--spaced">
-            <button type="button" class="btn-primary" @click="replayProductTour">Replay tour</button>
+          <div class="action-row action-row--spaced action-row--compact">
+            <button type="button" class="btn-secondary" @click="replayProductTour">Replay tour</button>
           </div>
         </div>
 
@@ -3621,6 +3621,35 @@ async function doPackageUpdate() {
 .action-row > button {
   flex: 1 1 0;
 }
+.action-row--compact > button {
+  flex: 0 1 auto;
+  min-width: 190px;
+}
+.btn-secondary,
+.btn-caution {
+  min-height: var(--touch);
+  padding: 10px 20px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg3);
+  color: var(--fg);
+  cursor: pointer;
+  font-family: var(--font);
+  font-size: calc(14px * var(--font-scale));
+  font-weight: 600;
+  transition: background 120ms var(--ease), border-color 120ms var(--ease), transform 120ms var(--ease);
+}
+.btn-secondary:hover { background: var(--border-strong); }
+.btn-caution {
+  color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 65%, var(--border));
+  background: color-mix(in srgb, var(--warning) 8%, var(--bg3));
+}
+.btn-caution:hover { background: color-mix(in srgb, var(--warning) 15%, var(--bg3)); }
+.btn-secondary:active,
+.btn-caution:active { transform: scale(0.98); }
+.btn-secondary:disabled,
+.btn-caution:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 .settings-actions {
   justify-content: flex-end;
   margin-top: var(--space-2);
@@ -4338,6 +4367,10 @@ async function doPackageUpdate() {
   }
   .settings-actions > button {
     flex: 1 1 auto;
+  }
+  .action-row--compact > button {
+    flex: 1 1 100%;
+    width: 100%;
   }
   .settings-control {
     min-width: 0;

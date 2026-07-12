@@ -4332,21 +4332,18 @@ details[open] > .activity-summary::before {
      slightly truncated placeholder. */
   .chat-input { font-size: 16px; padding-top: 6px; padding-bottom: 6px; }
   .chat-input::placeholder { font-size: 16px; }
-  /* Tighten vertical rhythm in the input bar on mobile. Reduce buttons
-     from 44px (--touch) to 36px so the whole bar is ~46px not ~54px.
-     36px is still a usable touch target; 44px was designed for standalone
-     tap targets, not inline grouped actions. */
+  /* Keep every composer action at the shared touch-target minimum. */
   .input-bar { padding-top: 5px; padding-bottom: 5px; }
-  .chat-input { min-height: 36px; }
+  .chat-input { min-height: var(--touch); }
   .stop-btn, .input-actions .send-btn {
-    min-width: 36px;
-    min-height: 36px;
-    width: 36px;
-    height: 36px;
+    min-width: var(--touch);
+    min-height: var(--touch);
+    width: var(--touch);
+    height: var(--touch);
     padding: 0;
   }
-  .image-btn { min-height: 36px; min-width: 36px; }
-  :deep(.voice-btn) { min-height: 36px; min-width: 36px; }
+  .image-btn { min-height: var(--touch); min-width: var(--touch); }
+  :deep(.voice-btn) { min-height: var(--touch); min-width: var(--touch); }
   /* Compact streaming bar on mobile */
   .streaming-bar { padding-top: 4px; padding-bottom: 4px; }
 }
