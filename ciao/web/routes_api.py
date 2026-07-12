@@ -44,15 +44,40 @@ from ciao.cli import _auth_command_for_provider
 from ciao.skills_inventory import build_skill_inventory
 from ciao.web.auth import SESSION_COOKIE, session_cookie_kwargs
 from ciao.web.chat_broker import extract_file_touch
-from ciao.web.project_chats import _normalize_handover_messages
+from ciao.web.project_chats import (
+    _PROJECT_UPLOAD_MAX_BYTES,
+    _normalize_handover_messages,
+)
+from ciao.web.routes_helpers import (
+    _allowed_roots,
+    _commit_and_push,
+    _resolve_workspace_path,
+)
 
 logger = logging.getLogger(__name__)
 
-from ciao.web.routes_helpers import (
-    _allowed_roots,
-    _resolve_workspace_path,
-    _commit_and_push,
-)
+_UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
+
+
+async def _read_upload_limited(upload, max_bytes: int) -> bytes:
+    """Read an UploadFile while buffering at most its size cap plus one byte.
+
+    Starlette spools multipart files, but ``UploadFile.read()`` without a size
+    copies the complete file into memory. Read at most one byte beyond the cap
+    so oversized uploads are rejected before that unbounded allocation.
+    """
+    if max_bytes < 0:
+        raise ValueError("invalid upload size limit")
+    data = bytearray()
+    while True:
+        read_size = min(_UPLOAD_READ_CHUNK_BYTES, max_bytes + 1 - len(data))
+        chunk = await upload.read(read_size)
+        if not chunk:
+            return bytes(data)
+        data.extend(chunk)
+        if len(data) > max_bytes:
+            raise ValueError("file too large")
+
 
 _STATS_CACHE_PATH = Path.home() / ".claude" / "stats-cache.json"
 
@@ -1702,9 +1727,9 @@ async def project_files_upload(request: Request) -> JSONResponse:
         upload = form[key]
         if not hasattr(upload, "read"):
             continue
-        data = await upload.read()
         filename = getattr(upload, "filename", "") or ""
         try:
+            data = await _read_upload_limited(upload, _PROJECT_UPLOAD_MAX_BYTES)
             entry = pcm.save_project_file_upload(project_id, data, filename)
             saved.append(entry)
         except LookupError as exc:
@@ -2530,10 +2555,12 @@ async def chat_voice(request: Request) -> JSONResponse:
     if upload is None:
         return JSONResponse({"error": "no audio file"}, status_code=400)
 
-    data = await upload.read()
     filename = getattr(upload, "filename", "audio.webm") or "audio.webm"
 
     try:
+        data = await _read_upload_limited(
+            upload, request.app.state.config.max_voice_size_bytes
+        )
         path = pcm.save_voice_upload(data, filename)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -2601,9 +2628,11 @@ async def chat_images(request: Request) -> JSONResponse:
         upload = form[key]
         if not hasattr(upload, "read"):
             continue
-        data = await upload.read()
         filename = getattr(upload, "filename", "image.jpg") or "image.jpg"
         try:
+            data = await _read_upload_limited(
+                upload, request.app.state.config.max_image_size_bytes
+            )
             attachment = pcm.save_image_upload(data, filename)
             results.append({
                 "ref": attachment.path.name,
@@ -2658,7 +2687,7 @@ _WORKSPACE_IMAGE_MAX_BYTES = 15 * 1024 * 1024  # 15 MB
 
 
 async def workspace_file(request: Request) -> Response:
-    """Serve a read-only text file from inside the workspace.
+    """Serve a read-only allowlisted text file from the host filesystem.
 
     Path is provided as a query string (`?path=...`). The path may be
     workspace-relative or absolute, with an optional `:line` suffix that is

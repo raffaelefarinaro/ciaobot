@@ -4967,7 +4967,8 @@ class ProjectChatManager:
 
         Each entry: ``{path, vault_path, kind, size, mtime}`` where ``path``
         is relative to the vault folder, ``vault_path`` is workspace-relative
-        (suitable for the workspace-file/image/binary endpoints), ``kind`` is
+        for nested vaults and absolute for external vaults (both forms are
+        accepted by the workspace-file/image/binary endpoints), ``kind`` is
         one of ``markdown|image|text|binary``, ``size`` in bytes, ``mtime``
         ISO-8601 UTC.
 
@@ -4977,7 +4978,6 @@ class ProjectChatManager:
         vault_dir = self.project_vault_dir(project_id)
         if vault_dir is None:
             return []
-        ws_root = self._config.workspace_root.resolve()
         out: list[dict] = []
         for p in vault_dir.rglob("*"):
             if not p.is_file():
@@ -4995,17 +4995,15 @@ class ProjectChatManager:
                 resolved = p.resolve()
             except OSError:
                 continue
-            # Reject symlinks pointing outside the workspace.
-            if not resolved.is_relative_to(ws_root):
-                continue
-            try:
-                vault_rel = resolved.relative_to(ws_root)
-            except ValueError:
+            # Project listings stay scoped to this project folder even though
+            # the generic workspace viewers intentionally accept absolute
+            # paths elsewhere on the host.
+            if not resolved.is_relative_to(vault_dir):
                 continue
             stat = resolved.stat()
             out.append({
                 "path": rel.as_posix(),
-                "vault_path": vault_rel.as_posix(),
+                "vault_path": self._display_path(resolved),
                 "kind": _classify_file(resolved),
                 "size": stat.st_size,
                 "mtime": datetime.fromtimestamp(stat.st_mtime, UTC)
@@ -5055,19 +5053,17 @@ class ProjectChatManager:
                     break
                 n += 1
         target.write_bytes(data)
-        ws_root = self._config.workspace_root.resolve()
         resolved = target.resolve()
-        # Defence in depth: resolved must stay under workspace_root and
-        # under the vault folder (no symlink shenanigans during write).
-        if not resolved.is_relative_to(vault_dir) or not resolved.is_relative_to(ws_root):
+        # Project uploads are narrower than the generic file editor: the
+        # resolved target must remain inside this project's vault folder.
+        if not resolved.is_relative_to(vault_dir):
             target.unlink(missing_ok=True)
             raise ValueError("path escape detected")
         rel = resolved.relative_to(vault_dir)
-        vault_rel = resolved.relative_to(ws_root)
         stat = resolved.stat()
         return {
             "path": rel.as_posix(),
-            "vault_path": vault_rel.as_posix(),
+            "vault_path": self._display_path(resolved),
             "kind": _classify_file(resolved),
             "size": stat.st_size,
             "mtime": datetime.fromtimestamp(stat.st_mtime, UTC)

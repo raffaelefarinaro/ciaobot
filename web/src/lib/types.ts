@@ -107,7 +107,7 @@ export interface ChatMessage {
   duration_ms?: number
   // Populated when tool_name === '_filecard'. Drives the inline preview card
   // rendered alongside the activity trace. `file_path` is whatever the agent
-  // told us; the workspace-file endpoint enforces the sandbox on click.
+  // told us; absolute host paths are intentionally supported by the viewer.
   file_path?: string
   action?: string
   tool?: string
@@ -150,7 +150,7 @@ export type WsEvent =
       // Set by the backend when the tool mutates a file on disk. The PWA
       // renders this as a standalone inline preview card instead of folding
       // it into the generic _activity row. Path may be workspace-relative
-      // or absolute; the workspace-file endpoint is the security boundary.
+      // or absolute; the viewer enforces file-type and size allowlists.
       file_touch?: { file_path: string; action: string };
     }
   | { type: 'thinking'; text: string; parent_tool_use_id?: string }

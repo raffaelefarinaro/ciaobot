@@ -181,7 +181,8 @@ def create_app(config, app_settings=None) -> Starlette:
         Route("/api/chats/{chat_id}/speak", chat_speak, methods=["POST"]),
         Route("/api/chats/{chat_id}/images", chat_images, methods=["POST"]),
         Route("/api/images/{ref}", image_blob, methods=["GET"]),
-        # Workspace file viewer (read-only; bounded to config.workspace_root)
+        # Host file viewer/editor. Absolute paths are intentional; endpoints
+        # enforce type and size allowlists rather than a workspace sandbox.
         Route("/api/workspace-file", workspace_file, methods=["GET"]),
         Route("/api/workspace-file", workspace_file_write, methods=["POST"]),
         Route("/api/workspace-image", workspace_image, methods=["GET"]),
