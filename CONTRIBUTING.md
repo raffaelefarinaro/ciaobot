@@ -22,6 +22,17 @@ If you prefer `gh`, authenticate it with `gh auth login` before running `gh issu
 - Never include secrets, personal workspace data, or operator credentials in commits.
 - Use plain, factual engineering notes in commits and pull requests.
 
+## Branching and releases
+
+Day-to-day work lands on `develop` through pull requests. Do not push directly to `main`.
+
+1. Branch from `develop`, open a PR back into `develop`, and wait for CI.
+2. When it is time to ship, a maintainer runs `scripts/prepare-release --apply --create-pr` from a clean checkout. That cuts `release/vX.Y.Z` from `develop`, bumps versions, updates `CHANGELOG.md`, and opens a release PR into `main`.
+3. Merging the release PR into `main` creates the GitHub tag and release automatically. The existing `publish.yml` workflow then publishes the wheel to PyPI and updates the Homebrew tap.
+4. A follow-up job merges `main` back into `develop` so version files stay aligned.
+
+`main` is release-only. `develop` is the integration branch and the GitHub default branch.
+
 ## Design philosophy
 
 Defaults are opinionated on purpose (project-first navigation, vault-first memory, explicit provider routing, review-gated memory promotion). If a behavior gets in your way, prefer adding a configuration surface over changing the default, and explain the use case in the PR.

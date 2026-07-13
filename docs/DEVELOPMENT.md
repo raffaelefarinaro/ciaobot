@@ -58,6 +58,29 @@ The formula template lives in `deploy/homebrew/ciaobot.rb`. Regenerate it with:
 
 On each GitHub release, `publish.yml` updates the tap automatically. Add a repo-scoped `HOMEBREW_TAP_GITHUB_TOKEN` secret to this repository so the workflow can push to `homebrew-ciaobot` (the default `GITHUB_TOKEN` cannot write across repos).
 
+## Branching and releases
+
+- **`develop`** is the integration branch. Feature and fix PRs target `develop`.
+- **`main`** is release-only. Direct pushes and merges to `main` are blocked; only release PRs land there.
+- **CI** (`.github/workflows/ci.yml`) runs on pushes to `develop` and on pull requests into `develop` or `main`.
+- **Release prep:** from a clean checkout, run:
+
+```bash
+scripts/prepare-release --apply --create-pr --ready
+```
+
+  That cuts `release/vX.Y.Z` from `develop`, bumps `pyproject.toml`, `ciao/__init__.py`, `web/package.json`, and `web/package-lock.json`, refreshes `CHANGELOG.md`, runs release checks, and opens a PR into `main`. Use `--bump minor` or `--version X.Y.Z` when needed.
+
+- **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the wheel, publishes to PyPI, and updates the Homebrew tap. A follow-up job merges `main` back into `develop`.
+
+One-time GitHub setup for a fresh clone or repo admin:
+
+```bash
+./scripts/configure-github-branches.sh
+```
+
+That sets `develop` as the default branch and enables pull-request + CI requirements on `develop` and `main`.
+
 ## Frontend build
 
 ```bash
@@ -125,5 +148,6 @@ Canonical example: `ciao/skill_evolution.py:_process_skill_dag`. Use a DAG when 
 - **Never commit `.env` or API keys.** `.env` minimum: `PWA_AUTH_TOKEN`.
 - **Keep edits minimal and consistent with existing patterns.** Don't refactor unrelated code; if unrelated changes appear, pause and ask.
 - **Avoid destructive git** (force push, hard reset on shared branches) unless explicitly asked.
+- **Use the branch model in `CONTRIBUTING.md`.** Day-to-day PRs target `develop`; release PRs target `main`.
 - **Write tests** for new Python behavior; add to `tests/`. PWA changes verify via `npm run build` typecheck at minimum.
 - **Verify UI accessibility.** For PWA layout changes, check keyboard operation, visible focus, browser zoom, and 44px mobile targets at a narrow-phone viewport in addition to the build.
