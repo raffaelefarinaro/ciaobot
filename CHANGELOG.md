@@ -19,6 +19,7 @@
 - fix(web): keep chat pinned to bottom after send and streaming (`a2fc8e5`)
 - fix(web): highlight only the exact active model, not same-tier models from other providers (`6d5afd8`)
 - fix(menubar): make the native window single-instance; drop dead PWA lookup (`21f8b59`)
+- fix(macos): give the app icon the orange PWA background (`4bd5448`)
 - fix: surface mid-turn interruptions and stop menu-bar update crashes (`df1289f`)
 - fix(web): stop reply-shaped chat titles from contentless prompts (`fbd300b`)
 
