@@ -15,6 +15,7 @@ from ciao.package_version import (
     make_cached_package_status,
     package_changelog,
     package_status,
+    running_install_present,
 )
 from ciao.web.routes_api import package_changelog_endpoint, package_status_endpoint
 
@@ -286,3 +287,18 @@ def test_package_status_endpoint_uses_app_fetcher() -> None:
     assert data["current_version"] == "0.2.0"
     assert data["latest_version"] == "0.2.1"
     assert data["update_available"] is True
+
+
+def test_running_install_present_true_for_live_package() -> None:
+    # The running test process imports ciao from a real path, so its files
+    # exist; the stale-install self-heal must not fire in this case.
+    assert running_install_present() is True
+
+
+def test_running_install_present_false_when_files_gone(monkeypatch, tmp_path) -> None:
+    # Simulate the Homebrew-swap symptom: ciao.__file__ points at a keg dir
+    # that no longer exists on disk.
+    import ciao
+
+    monkeypatch.setattr(ciao, "__file__", str(tmp_path / "gone" / "ciao" / "__init__.py"))
+    assert running_install_present() is False

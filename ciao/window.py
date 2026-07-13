@@ -93,6 +93,31 @@ def _focus_running_window(pid: int) -> bool:
     return True
 
 
+def _set_dock_icon() -> None:
+    """Show the Ciaobot icon in the Dock instead of the generic Python rocket.
+
+    When the menu bar spawns ``python -m ciao.window`` the process has no app
+    bundle of its own, so macOS labels it "Python" with the rocket icon. Set
+    the running application's icon to the packaged ``Ciaobot.icns`` so the Dock
+    shows the real icon regardless of how the interpreter was launched.
+    """
+
+    if sys.platform != "darwin":
+        return
+    try:
+        from importlib import resources
+
+        from AppKit import NSApplication, NSImage
+
+        ref = resources.files("ciao.stock").joinpath("deploy", "Ciaobot.icns")
+        with resources.as_file(ref) as icns:
+            image = NSImage.alloc().initWithContentsOfFile_(str(icns))
+        if image is not None:
+            NSApplication.sharedApplication().setApplicationIconImage_(image)
+    except Exception:
+        pass
+
+
 def run_window(url: str, workspace: str | os.PathLike[str] | None = None) -> int:
     """Show ``url`` in a native window. Falls back to browser app mode.
 
@@ -121,8 +146,23 @@ def run_window(url: str, workspace: str | os.PathLike[str] | None = None) -> int
             cmd = ["open", url]
         return subprocess.call(cmd)
 
+    # pywebview defaults to private_mode=True, which gives the WebKit view an
+    # ephemeral data store: localStorage and cookies are wiped on every launch.
+    # That resets client-only state each time the window opens — most visibly
+    # the "Welcome to Ciaobot" tour, whose seen-flag lives in localStorage.
+    # Persist the store under the workspace so it survives across launches.
+    storage_path = None
+    if ws is not None:
+        candidate = ws / ".runtime" / "webview"
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            storage_path = str(candidate)
+        except OSError:
+            storage_path = None
+
     if ws is not None:
         _write_lock(ws)
+    _set_dock_icon()
     try:
         webview.create_window(
             "Ciaobot",
@@ -131,7 +171,7 @@ def run_window(url: str, workspace: str | os.PathLike[str] | None = None) -> int
             height=840,
             min_size=(720, 520),
         )
-        webview.start()
+        webview.start(private_mode=False, storage_path=storage_path)
     finally:
         if ws is not None:
             _clear_lock(ws)

@@ -29,10 +29,15 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "tag=v${version}" >> "$GITHUB_OUTPUT"
 
+      # Create the release with a PAT, not GITHUB_TOKEN: releases created by
+      # GITHUB_TOKEN do not fire the `release: published` event, so publish.yml
+      # (PyPI + Homebrew) never runs. RELEASE_PAT must be a token with
+      # contents:write. Falls back to github.token when the secret is absent
+      # (release still cut, but publish must then be run manually).
       - name: Create GitHub release
         id: release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_PAT || github.token }}
           VERSION: ${{ steps.version.outputs.version }}
           TAG: ${{ steps.version.outputs.tag }}
         run: |
@@ -69,13 +74,18 @@ jobs:
       contents: write
       pull-requests: write
     steps:
+      # Check out with the PAT so the sync branch push and PR use a token that
+      # is allowed to open PRs. GITHUB_TOKEN cannot create PRs when the org
+      # setting "Allow GitHub Actions to create and approve pull requests" is
+      # off, which fails this job.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT || github.token }}
 
       - name: Sync develop with main
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_PAT || github.token }}
           VERSION: ${{ needs.release.outputs.version }}
         run: |
           git config user.name "github-actions[bot]"
