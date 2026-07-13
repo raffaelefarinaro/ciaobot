@@ -771,6 +771,32 @@ async def _async_main() -> int:
 
     asyncio.create_task(_heal_voice_extras())
 
+    # ── Stale-install self-heal ──────────────────────────────
+    # A bare `brew upgrade ciaobot` (outside the app's Update button) swaps the
+    # Cellar out from under this running process: the files it resolves —
+    # index.html, stock schedules — are deleted, so it serves 500s until
+    # relaunched. Poll for the vanished package directory and ask launchd to
+    # relaunch onto the current install (the plist's `/opt/homebrew/opt/...`
+    # symlink always points at the current keg). Mirrors the menu bar's
+    # relaunch_stale_process. Only versioned installs can hit this; pip and
+    # editable rewrite/keep files in place.
+    async def _heal_stale_install() -> None:
+        from ciao.package_version import detect_install_mode, running_install_present
+
+        if detect_install_mode() != "homebrew":
+            return
+        while True:
+            await asyncio.sleep(60)
+            if not running_install_present():
+                logger.warning(
+                    "Package files vanished (install swapped by an upgrade); "
+                    "requesting restart onto the current version."
+                )
+                request_restart(config.restart_exit_code)
+                return
+
+    asyncio.create_task(_heal_stale_install())
+
     async def _shutdown_providers() -> None:
         # Disconnect every active provider before uvicorn finishes its
         # lifespan shutdown. Otherwise the Claude SDK subprocess transports

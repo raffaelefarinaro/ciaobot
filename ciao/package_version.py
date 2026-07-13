@@ -330,6 +330,28 @@ def detect_install_mode() -> str:
     return "unknown"
 
 
+def running_install_present() -> bool:
+    """False when the running install's files were swapped out from under it.
+
+    A bare ``brew upgrade ciaobot`` (or ``brew cleanup``) removes the versioned
+    Cellar keg this already-running process imported ``ciao`` from — e.g.
+    ``.../Cellar/ciaobot/0.4.14/...`` — while the launchd symlink moves to the
+    new keg. The live process keeps resolving packaged resources (index.html,
+    stock schedules) into the deleted directory and 500s until relaunched. A
+    missing ``ciao/__init__.py`` at the imported path is the tell. Only
+    meaningful for versioned installs; pip upgrades rewrite files in place, so
+    the path never disappears.
+    """
+    from pathlib import Path
+
+    try:
+        import ciao
+
+        return Path(ciao.__file__).exists()
+    except Exception:
+        return True
+
+
 def _latest_wheel_url(
     *,
     opener: Callable[..., object],

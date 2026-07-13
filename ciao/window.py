@@ -93,6 +93,31 @@ def _focus_running_window(pid: int) -> bool:
     return True
 
 
+def _set_dock_icon() -> None:
+    """Show the Ciaobot icon in the Dock instead of the generic Python rocket.
+
+    When the menu bar spawns ``python -m ciao.window`` the process has no app
+    bundle of its own, so macOS labels it "Python" with the rocket icon. Set
+    the running application's icon to the packaged ``Ciaobot.icns`` so the Dock
+    shows the real icon regardless of how the interpreter was launched.
+    """
+
+    if sys.platform != "darwin":
+        return
+    try:
+        from importlib import resources
+
+        from AppKit import NSApplication, NSImage
+
+        ref = resources.files("ciao.stock").joinpath("deploy", "Ciaobot.icns")
+        with resources.as_file(ref) as icns:
+            image = NSImage.alloc().initWithContentsOfFile_(str(icns))
+        if image is not None:
+            NSApplication.sharedApplication().setApplicationIconImage_(image)
+    except Exception:
+        pass
+
+
 def run_window(url: str, workspace: str | os.PathLike[str] | None = None) -> int:
     """Show ``url`` in a native window. Falls back to browser app mode.
 
@@ -123,6 +148,7 @@ def run_window(url: str, workspace: str | os.PathLike[str] | None = None) -> int
 
     if ws is not None:
         _write_lock(ws)
+    _set_dock_icon()
     try:
         webview.create_window(
             "Ciaobot",
