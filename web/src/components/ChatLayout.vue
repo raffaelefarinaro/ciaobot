@@ -38,6 +38,9 @@
             @open-sidebar="sidebarCollapsed = false"
           />
           <ChatPanel v-else-if="store.activeChat" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+          <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
+            <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
+          </div>
           <div v-else class="empty-shell">
             <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
             <div class="empty-state">
@@ -111,6 +114,9 @@
           @open-sidebar="sidebarCollapsed = false"
         />
         <ChatPanel v-else-if="store.activeChat" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+        <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
+          <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
+        </div>
         <div v-else class="empty-shell">
           <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
           <div class="empty-state">

@@ -436,6 +436,7 @@ describe('workspace and chat transitions', () => {
   test('fetchAll loads configured workspaces and keeps saved custom workspace', async () => {
     window.localStorage.setItem('ciao-active-workspace', 'client')
     const store = useProjectStore()
+    expect(store.bootstrapped).toBe(false)
     apiGet.mockImplementation((path: string) => {
       if (path === '/api/workspaces') {
         return Promise.resolve({
@@ -470,6 +471,14 @@ describe('workspace and chat transitions', () => {
     expect(store.workspaceOptions.map(w => w.name)).toEqual(['home', 'client'])
     expect(store.activeWorkspace).toBe('client')
     expect(store.activeChatId).toBe('c-client')
+    expect(store.bootstrapped).toBe(true)
+  })
+
+  test('restoreState runs at store init so active chat is known before fetchAll', () => {
+    window.localStorage.setItem('ciao-active-chat', 'saved-chat')
+    const store = useProjectStore()
+    expect(store.activeChatId).toBe('saved-chat')
+    expect(store.bootstrapped).toBe(false)
   })
 
   test('switchWorkspace transitions to first chat of new workspace and marks it read', async () => {
