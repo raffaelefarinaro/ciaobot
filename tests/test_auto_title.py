@@ -170,3 +170,39 @@ def test_clean_title_rejects_reply_shaped_output() -> None:
         "Wedding Checklist Google Tasks"
     )
     assert _clean_title("I/O Performance Tuning", user) == "I/O Performance Tuning"
+
+
+@pytest.mark.asyncio
+async def test_generate_title_reports_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ciao.web.project_chats import _generate_chat_title_with_engine
+
+    monkeypatch.setattr(shutil, "which", lambda _cmd: None)
+
+    async def good_oneshot(*args, **kwargs):
+        return "Wedding Task Planning"
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", good_oneshot)
+    title, engine = await _generate_chat_title_with_engine(
+        "Create google tasks for my wedding", model="haiku"
+    )
+    assert (title, engine) == ("Wedding Task Planning", "claude:haiku")
+
+    async def reply_shaped_oneshot(*args, **kwargs):
+        return "I'd be happy to help you create Google Tasks, but I need more info."
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", reply_shaped_oneshot)
+    title, engine = await _generate_chat_title_with_engine(
+        "Create google tasks for my wedding", model="haiku"
+    )
+    assert engine == "fallback"
+    assert title == "Create google tasks for my wedding"
+
+    async def failing_oneshot(*args, **kwargs):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
+    title, engine = await _generate_chat_title_with_engine(
+        "Create google tasks for my wedding", model="haiku"
+    )
+    assert engine == "fallback"
+    assert title == "Create google tasks for my wedding"

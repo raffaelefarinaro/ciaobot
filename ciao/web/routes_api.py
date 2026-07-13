@@ -3710,6 +3710,9 @@ def _routines_payload(config, app_settings) -> dict:
                 "fable": config.openrouter.fable_model,
             } if config.openrouter.available else {},
         },
+        # The "apple"/apfel title option only works when the CLI is on PATH;
+        # the Chat titles row warns instead of silently falling back.
+        "apfel_available": shutil.which("apfel") is not None,
         "transcription": {
             "engine": config.transcription_engine,
             "local_model": config.transcription_local_model,

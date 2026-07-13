@@ -336,6 +336,29 @@ async def _generate_chat_title(
     timeout_s: float = 15.0,
     provider: str = "claude",
 ) -> str | None:
+    """Back-compat wrapper around :func:`_generate_chat_title_with_engine`."""
+    title, _engine = await _generate_chat_title_with_engine(
+        user_text,
+        assistant_text,
+        model=model,
+        cwd=cwd,
+        env=env,
+        timeout_s=timeout_s,
+        provider=provider,
+    )
+    return title
+
+
+async def _generate_chat_title_with_engine(
+    user_text: str,
+    assistant_text: str = "",
+    *,
+    model: str = "haiku",
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+    timeout_s: float = 15.0,
+    provider: str = "claude",
+) -> tuple[str | None, str]:
     """Summarize the first user message into a short chat title.
 
     Prefers the local Apple Intelligence CLI (`apfel`) when available,
@@ -347,12 +370,17 @@ async def _generate_chat_title(
 
     Falls back to a deterministic truncation when both paths fail so the
     sidebar never gets stuck on "New Chat".
+
+    Returns ``(title, engine)`` where engine names what actually produced
+    the title: ``"apfel"``, ``"<provider>:<model>"``, or ``"fallback"``
+    for the deterministic truncation (including reply-shaped model output
+    that _clean_title rejected).
     """
     from ciao.providers.oneshot import run_oneshot
 
     user_snippet = (user_text or "").strip()[:1000]
     if not user_snippet:
-        return None
+        return None, "fallback"
 
     assistant_snippet = (assistant_text or "").strip()[:1000]
     if assistant_snippet:
@@ -383,7 +411,7 @@ async def _generate_chat_title(
             if proc.returncode == 0:
                 text = stdout.decode().strip()
                 if text:
-                    return _clean_title(text, user_snippet)
+                    return _titled(text, user_snippet, "apfel")
             else:
                 logger.info(
                     "apfel title generation exited with %d: %s",
@@ -410,7 +438,7 @@ async def _generate_chat_title(
             cwd=cwd,
         )
         if text:
-            return _clean_title(text, user_snippet)
+            return _titled(text, user_snippet, f"{provider}:{fallback_model}")
     except Exception as exc:
         logger.info(
             "Title generation via %s %s failed: %s",
@@ -418,9 +446,22 @@ async def _generate_chat_title(
             fallback_model or "account default",
             exc,
         )
-        return _fallback_title(user_snippet)
+        return _fallback_title(user_snippet), "fallback"
 
-    return _fallback_title(user_snippet)
+    return _fallback_title(user_snippet), "fallback"
+
+
+def _titled(raw: str, user_snippet: str, engine: str) -> tuple[str | None, str]:
+    """Pair a cleaned title with the engine that produced it.
+
+    When _clean_title rejects the raw output (empty or reply-shaped) the
+    result is really the deterministic fallback, and the engine label
+    must say so.
+    """
+    title = _clean_title(raw, user_snippet)
+    if title is not None and title == _fallback_title(user_snippet):
+        return title, "fallback"
+    return title, engine
 
 
 def _safe_validate(path: Path, root: Path, allowed_ext: set[str], max_bytes: int) -> None:
@@ -4300,9 +4341,15 @@ class ProjectChatManager:
             chat.model if chat.provider == "codex"
             else resolve_title_model(self._config, workspace)
         )
+        # A "codex:<model>" override routes titles through the Codex CLI for
+        # any chat, not just Codex chats (Settings -> Chat titles -> OpenAI).
+        codex_override = chat.provider != "codex" and requested.startswith("codex:")
         if chat.provider == "codex":
             title_model = requested
             title_env = self._build_extra_env(chat)
+        elif codex_override:
+            title_model = requested[len("codex:"):] or "gpt-5.1"
+            title_env = None
         elif self._config.title_model_override:
             title_model = requested
             from ciao.providers.routing import routing_routine_env_for_model
@@ -4338,17 +4385,25 @@ class ProjectChatManager:
             # Keep the established Claude/Ollama call signature intact for
             # integrations that wrap the title helper. Codex is the only
             # provider that needs an explicit dispatch hint here.
-            if chat.provider == "codex":
+            if chat.provider == "codex" or codex_override:
                 title_kwargs["provider"] = "codex"
-            title = await _generate_chat_title(
+            title, engine = await _generate_chat_title_with_engine(
                 user_text,
                 assistant_text,
                 **title_kwargs,
             )
+            run.extra["engine"] = engine
             if not title:
                 run.status = "error"
                 run.error = "title model returned no title (timeout/failure)"
                 return None
+            if engine == "fallback":
+                # A title was set, but the selected engine did not produce
+                # it — surface the degradation instead of reporting ok.
+                run.status = "error"
+                run.error = "title engine failed; used deterministic fallback"
+            elif title_model == "apfel" and engine != "apfel":
+                run.extra["note"] = f"apfel not installed; used {engine}"
 
             # Re-check: user may have renamed while we were generating.
             chat = self._chats.get(chat_id)
