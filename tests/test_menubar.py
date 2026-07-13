@@ -149,9 +149,10 @@ def test_open_command_prefers_browser_app_mode(monkeypatch) -> None:
     ]
 
 
-def test_window_launch_command_includes_workspace(tmp_path: Path, monkeypatch) -> None:
-    # No app bundle: falls back to an interpreter that can import ciao.
-    monkeypatch.setattr(menubar, "_bundle_python", lambda: None)
+def test_window_launch_command_uses_venv_python(tmp_path: Path) -> None:
+    # Must launch through the venv interpreter that can import ciao/webview —
+    # NOT the app-bundle python symlink, which resolves outside the venv and
+    # breaks `import webview` so the window never opens.
     interp = menubar._python_with_ciao()
     cmd = menubar._window_launch_command("http://localhost:8443/", tmp_path)
     assert cmd == [
@@ -168,14 +169,6 @@ def test_window_launch_command_includes_workspace(tmp_path: Path, monkeypatch) -
         "ciao.window",
         "http://localhost:8443/",
     ]
-
-
-def test_window_launch_command_prefers_bundle_python(monkeypatch) -> None:
-    # When Ciaobot.app is installed, launch the window through its bundle
-    # interpreter so macOS shows the Ciaobot Dock identity, not "Python".
-    monkeypatch.setattr(menubar, "_bundle_python", lambda: "/Apps/Ciaobot.app/Contents/MacOS/python")
-    cmd = menubar._window_launch_command("http://localhost:8443/", None)
-    assert cmd[0] == "/Apps/Ciaobot.app/Contents/MacOS/python"
 
 
 def _write_bundle(path: Path, *, bundle_id: str) -> None:

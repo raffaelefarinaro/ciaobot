@@ -285,31 +285,19 @@ def _python_with_ciao() -> str:
     return sys.executable
 
 
-def _bundle_python() -> str | None:
-    """Path to Ciaobot.app's bundle-local ``python`` symlink, if installed.
-
-    Launching the window through the interpreter that lives inside
-    ``Ciaobot.app/Contents/MacOS`` makes macOS attribute the process to the
-    app bundle, so the Dock shows "Ciaobot" and its icon instead of a bare
-    "Python" rocket. The symlink targets the real interpreter (written by
-    cli.py's _write_menubar_helper), so ``ciao``/``webview`` still import.
-    """
-
-    for base in (Path.home() / "Applications", Path("/Applications")):
-        candidate = base / "Ciaobot.app" / "Contents" / "MacOS" / "python"
-        if candidate.exists():
-            return str(candidate)
-    return None
-
-
 def _window_launch_command(url: str, workspace: Path | None) -> list[str]:
     """argv that opens ``url`` in the native window (single-instance aware).
 
-    Prefer the app-bundle interpreter so the window carries Ciaobot's Dock
-    identity; fall back to any interpreter that can import ``ciao``.
+    Must run through :func:`_python_with_ciao` — the venv interpreter that can
+    import ``ciao``/``webview``. Do NOT route this through the app bundle's
+    ``Contents/MacOS/python`` symlink: invoking Python via that out-of-venv
+    symlink resolves ``sys.prefix`` to the base Homebrew framework instead of
+    the ciaobot keg venv, so ``import webview`` fails and the window never
+    opens. The Dock icon is set from inside the window instead (see
+    ciao.window._set_dock_icon).
     """
 
-    cmd = [_bundle_python() or _python_with_ciao(), "-m", "ciao.window", url]
+    cmd = [_python_with_ciao(), "-m", "ciao.window", url]
     if workspace is not None:
         cmd += ["--workspace", str(workspace)]
     return cmd
