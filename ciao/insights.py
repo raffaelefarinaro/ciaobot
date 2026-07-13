@@ -367,8 +367,9 @@ async def extract_and_append(
                 )
         # Memory proposals: scan the freshly-appended insights section and
         # write actionable candidates to ``Workspace/Memory-Proposals.md``.
-        # Auto-apply is intentionally off; the curator agent promotes
-        # proposals via the ``memory`` MCP tool on the next session.
+        # "User corrections" are auto-promoted to bounded memory (gated on
+        # the config's memory_enabled); everything else waits for the
+        # curator agent to promote via `ciao memory` on the next session.
         proposals_vault_root = vault_root or (
             workspace_root / "memory-vault" if workspace_root is not None else None
         )
@@ -380,7 +381,13 @@ async def extract_and_append(
                     "memory_proposals", "Memory proposals",
                     extra={"archive": archive_path.name},
                 ) as run:
-                    wrote = proposals_from_archive(archive_path, proposals_vault_root)
+                    wrote = proposals_from_archive(
+                        archive_path,
+                        proposals_vault_root,
+                        auto_promote_memory=bool(
+                            getattr(config, "memory_enabled", True)
+                        ),
+                    )
                     run.extra["wrote"] = bool(wrote)
             except Exception:  # noqa: BLE001 — fire-and-forget, never crash
                 logger.exception(

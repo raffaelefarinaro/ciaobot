@@ -112,3 +112,89 @@ def test_proposals_from_archive_returns_none_when_no_insights(tmp_path: Path) ->
     archive.write_text("# chat\n\nonly turns\n", encoding="utf-8")
     out = mp.proposals_from_archive(archive, vault)
     assert out is None
+
+
+# ── Auto-promotion of user corrections ────────────────────────────────────
+
+
+def test_promote_writes_corrections_and_keeps_the_rest(tmp_path: Path) -> None:
+    proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
+    remaining, promoted = mp.promote_user_corrections(proposals, memory_dir=tmp_path)
+
+    assert len(promoted) == 1
+    assert "no em dashes" in promoted[0]
+    mem_text = (tmp_path / "memory.md").read_text(encoding="utf-8")
+    assert "no em dashes" in mem_text
+    # Decisions and entities are untouched and still reviewable.
+    remaining_texts = [p.text for p in remaining]
+    assert any("Chose Pi over Claude SDK" in t for t in remaining_texts)
+    assert all("no em dashes" not in t for t in remaining_texts)
+
+
+def test_promote_drops_exact_duplicates(tmp_path: Path) -> None:
+    from ciao import memory_tool as mt
+
+    proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
+    correction = next(p for p in proposals if p.source_section == "User corrections")
+    mt.add_entry(tmp_path / "memory.md", correction.text, char_limit=2200)
+
+    remaining, promoted = mp.promote_user_corrections(proposals, memory_dir=tmp_path)
+
+    assert promoted == []
+    # Already remembered: not promoted, not proposed again.
+    assert all(p.source_section != "User corrections" for p in remaining)
+
+
+def test_promote_falls_back_to_proposals_when_memory_full(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from ciao import memory_tool as mt
+
+    filler = "x" * 500
+    mt.add_entry(tmp_path / "memory.md", filler, char_limit=2200)
+    monkeypatch.setenv("CIAO_MEMORY_CHAR_LIMIT", str(len(filler) + 10))
+
+    proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
+    remaining, promoted = mp.promote_user_corrections(proposals, memory_dir=tmp_path)
+
+    assert promoted == []
+    # The correction stays reviewable instead of being lost.
+    assert any(p.source_section == "User corrections" for p in remaining)
+
+
+def test_proposals_from_archive_auto_promotes_corrections(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    memory_dir = tmp_path / "ciao-home"
+    archive = tmp_path / "chat.md"
+    archive.write_text(
+        f"# chat\n\nturns.\n\n## Session insights\n{_SAMPLE_INSIGHTS}",
+        encoding="utf-8",
+    )
+
+    out = mp.proposals_from_archive(
+        archive, vault, auto_promote_memory=True, memory_dir=memory_dir
+    )
+
+    mem_text = (memory_dir / "memory.md").read_text(encoding="utf-8")
+    assert "no em dashes" in mem_text
+    # The promoted correction is not duplicated into the proposals file.
+    assert out is not None
+    proposals_text = out.read_text(encoding="utf-8")
+    assert "no em dashes" not in proposals_text
+    assert "Chose Pi over Claude SDK" in proposals_text
+
+
+def test_proposals_from_archive_default_leaves_memory_untouched(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    memory_dir = tmp_path / "ciao-home"
+    archive = tmp_path / "chat.md"
+    archive.write_text(
+        f"# chat\n\nturns.\n\n## Session insights\n{_SAMPLE_INSIGHTS}",
+        encoding="utf-8",
+    )
+
+    out = mp.proposals_from_archive(archive, vault, memory_dir=memory_dir)
+
+    assert out is not None
+    assert not (memory_dir / "memory.md").exists()
+    assert "no em dashes" in out.read_text(encoding="utf-8")
