@@ -400,10 +400,13 @@ def test_setup_keeps_unrelated_ciao_app(tmp_path: Path) -> None:
     assert (apps / "Ciao.app").is_dir()
 
 
-def test_setup_is_idempotent_and_does_not_overwrite_env(tmp_path: Path) -> None:
+def test_setup_merges_into_existing_env(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    (workspace / ".env").write_text("PWA_AUTH_TOKEN=existing\n", encoding="utf-8")
+    (workspace / ".env").write_text(
+        "# my own settings\nMY_API_KEY=secret\nPWA_AUTH_TOKEN=existing\n",
+        encoding="utf-8",
+    )
 
     assert cli.main([
         "setup",
@@ -415,7 +418,37 @@ def test_setup_is_idempotent_and_does_not_overwrite_env(tmp_path: Path) -> None:
         str(tmp_path / "Applications"),
     ]) == 0
 
-    assert (workspace / ".env").read_text(encoding="utf-8") == "PWA_AUTH_TOKEN=existing\n"
+    content = (workspace / ".env").read_text(encoding="utf-8")
+    # The user's file survives verbatim: comments, own variables, and an
+    # already-configured token are never rewritten or regenerated.
+    assert content.startswith(
+        "# my own settings\nMY_API_KEY=secret\nPWA_AUTH_TOKEN=existing\n"
+    )
+    assert content.count("PWA_AUTH_TOKEN=") == 1
+    # Missing Ciaobot variables are appended so the install actually works.
+    assert "CIAO_WORKSPACE=." in content
+    assert "CIAO_VAULT_ROOT=" in content
+    assert "CIAO_RUNTIME_ROOT=.runtime" in content
+
+
+def test_setup_env_merge_is_idempotent(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    args = [
+        "setup",
+        "--workspace",
+        str(workspace),
+        "--launch-agents-dir",
+        str(tmp_path / "LaunchAgents"),
+        "--app-dir",
+        str(tmp_path / "Applications"),
+    ]
+
+    assert cli.main(args) == 0
+    first = (workspace / ".env").read_text(encoding="utf-8")
+    assert cli.main(args) == 0
+
+    # A second run finds every variable present and leaves the file alone.
+    assert (workspace / ".env").read_text(encoding="utf-8") == first
 
 
 def test_setup_prints_workspace_and_login_url(tmp_path: Path, capsys) -> None:

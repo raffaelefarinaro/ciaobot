@@ -630,15 +630,20 @@ def setup_workspace(
             vault_value = "."
 
     env_path = root / ".env"
-    env_exists = env_path.exists()
-    if env_exists:
-        # An existing .env is the source of truth for where the vault lives.
-        # Re-running setup with a stale or blank vault_root argument must not
-        # relocate scaffolding away from the real vault (and thus re-scatter
-        # MEMORY.md/INDEX.md at a bogus location).
+    existing_env: dict[str, str] = {}
+    if env_path.exists():
+        # An existing .env — the user's own, or a previous install — is the
+        # source of truth: every variable already in it wins over setup
+        # arguments. In particular the recorded vault root must keep
+        # scaffolding anchored (re-running setup with a stale or blank
+        # vault_root argument must not re-scatter MEMORY.md/INDEX.md at a
+        # bogus location).
         from dotenv import dotenv_values
 
-        existing_root = (dotenv_values(env_path).get("CIAO_VAULT_ROOT") or "").strip()
+        existing_env = {
+            key: (value or "") for key, value in dotenv_values(env_path).items()
+        }
+        existing_root = existing_env.get("CIAO_VAULT_ROOT", "").strip()
         if existing_root:
             vault_value = existing_root
 
@@ -650,29 +655,47 @@ def setup_workspace(
     else:
         vault_path = root / vault_path
 
-    if not env_exists:
-        token = auth_token or secrets.token_urlsafe(32)
-        # Empty contact = Web Push disabled until configured in Settings;
-        # never invent a fake default.
-        contact = (push_contact or "").strip()
-        lines = [
-            f"PWA_AUTH_TOKEN={token}",
-        ]
-        if auth_required:
-            lines.append("PWA_AUTH_REQUIRED=true")
-        lines.extend([
-            f"CIAO_PUSH_CONTACT={contact}",
-            "CIAO_WORKSPACE=.",
-            f"CIAO_VAULT_ROOT={vault_value}",
-            f"CIAO_VAULT_MODE={vault_mode}",
-            "CIAO_RUNTIME_ROOT=.runtime",
-            "",
-        ])
+    token = auth_token or secrets.token_urlsafe(32)
+    # Empty contact = Web Push disabled until configured in Settings;
+    # never invent a fake default.
+    contact = (push_contact or "").strip()
+    desired_env: list[tuple[str, str]] = [("PWA_AUTH_TOKEN", token)]
+    if auth_required:
+        desired_env.append(("PWA_AUTH_REQUIRED", "true"))
+    desired_env.extend([
+        ("CIAO_PUSH_CONTACT", contact),
+        ("CIAO_WORKSPACE", "."),
+        ("CIAO_VAULT_ROOT", vault_value),
+        ("CIAO_VAULT_MODE", vault_mode),
+        ("CIAO_RUNTIME_ROOT", ".runtime"),
+    ])
+    if not existing_env and not env_path.exists():
         env_path.write_text(
-            "\n".join(lines),
+            "\n".join(f"{key}={value}" for key, value in desired_env) + "\n",
             encoding="utf-8",
         )
         written.append(env_path)
+    else:
+        # Merge into the user's file: keep every existing line untouched
+        # (values, comments, unknown variables) and append only the Ciaobot
+        # variables that are missing entirely.
+        additions = [
+            f"{key}={value}"
+            for key, value in desired_env
+            if key not in existing_env
+        ]
+        if additions:
+            original = env_path.read_text(encoding="utf-8")
+            prefix = "" if not original or original.endswith("\n") else "\n"
+            env_path.write_text(
+                original
+                + prefix
+                + "# Added by Ciaobot setup\n"
+                + "\n".join(additions)
+                + "\n",
+                encoding="utf-8",
+            )
+            written.append(env_path)
 
     stock = resources.files("ciao.stock")
     stock_commands = stock.joinpath("commands")
