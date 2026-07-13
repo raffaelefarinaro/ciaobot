@@ -11,7 +11,13 @@ Ciaobot is built for **knowledge work, not software development**: brainstorming
 
 ## The idea
 
-Ciaobot does not reinvent how you talk to agents. It runs [Claude Code](https://github.com/anthropics/claude-code) or [OpenAI Codex](https://developers.openai.com/codex/cli/) in the background and focuses on what surrounds them: a local UI, structured workspaces, and memory that compounds as chats are archived.
+Ciaobot does not reinvent how you talk to agents. It runs [Claude Code](https://github.com/anthropics/claude-code) or [OpenAI Codex](https://developers.openai.com/codex/cli/) in the background, on the bet that the vendors' own CLIs are the best-maintained agent harnesses available — they keep the model communication, tool use, and agentic loop optimized so this project doesn't have to. Ciaobot stays in control of the three things that matter to me:
+
+1. **The context** — deciding exactly what memory, notes, and project state the agent is fed each turn.
+2. **One interface** — the same UI regardless of which project or provider you're talking to.
+3. **Incremental capabilities** — features are added only when I need them or discover a pattern worth adopting, not speculatively.
+
+What that looks like in practice:
 
 - **Workspaces and projects** — split life areas (personal, work, a client, …) into sidebar workspaces, then organize work inside projects. Ciaobot injects project notes and context into every turn.
 - **A vault you own** — durable knowledge as plain markdown with wikilinks and an `INDEX.md`, inspired by [Andrej Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). Browse in [Obsidian](https://obsidian.md/) or any editor; sync via GitHub, Drive, or iCloud.
