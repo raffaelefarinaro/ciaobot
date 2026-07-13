@@ -859,7 +859,7 @@
             <div class="settings-card-header">
               <p class="section-title">Provider alias models</p>
               <p class="hint">
-                Ciaobot uses Haiku, Sonnet, and Opus everywhere, then maps each tier to the provider's own model names.
+                Ciaobot uses Haiku, Sonnet, Opus, and Fable everywhere, then maps each tier to the provider's own model names.
               </p>
             </div>
             <div class="alias-provider-bar">
@@ -901,7 +901,7 @@
               <p v-if="!selectedTierProviderSection.configurable" class="hint hint--info tier-provider-note">
                 {{ selectedTierProviderSection.key === 'codex'
                   ? 'Codex maps Haiku to Luna, Sonnet to Terra, and Opus to Sol — OpenAI\'s fast, balanced, and flagship families.'
-                  : 'Claude runs Haiku, Sonnet, and Opus natively.' }}
+                  : 'Claude runs Haiku, Sonnet, Opus, and Fable natively.' }}
               </p>
               <p v-else-if="!selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
                 {{ tierProviderUnavailableHint }}
@@ -1601,7 +1601,7 @@ import { useProductTourStore } from '../stores/productTour'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import RestartOverlay from './RestartOverlay.vue'
-import { providerModelBadges, sectionsFromModelOptions, type ModelSection } from '../lib/modelSections'
+import { providerModelBadges, sectionsFromModelOptions, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 
 const emit = defineEmits<{ 'open-sidebar': [] }>()
 
@@ -1746,7 +1746,7 @@ const routinesResult = ref('')
 
 type AliasProviderKey = 'claude' | 'codex' | 'ollama' | 'openrouter'
 type TierProviderKey = Exclude<AliasProviderKey, 'claude' | 'codex'>
-type TierKey = 'haiku' | 'sonnet' | 'opus'
+type TierKey = 'haiku' | 'sonnet' | 'opus' | 'fable'
 type RoutineModelKey = 'title_model' | 'insights_model'
 type RoutineProviderValue = 'automatic' | 'apple' | 'custom' | AliasProviderKey
 
@@ -1765,14 +1765,17 @@ type TierSettingKey =
   | 'ollama_haiku_model'
   | 'ollama_sonnet_model'
   | 'ollama_opus_model'
+  | 'ollama_fable_model'
   | 'openrouter_haiku_model'
   | 'openrouter_sonnet_model'
   | 'openrouter_opus_model'
+  | 'openrouter_fable_model'
 
 const modelTiers: { key: TierKey; label: string }[] = [
   { key: 'haiku', label: 'Haiku' },
   { key: 'sonnet', label: 'Sonnet' },
   { key: 'opus', label: 'Opus' },
+  { key: 'fable', label: 'Fable' },
 ]
 
 const tierSettingKeys: Record<TierProviderKey, Record<TierKey, TierSettingKey>> = {
@@ -1780,11 +1783,13 @@ const tierSettingKeys: Record<TierProviderKey, Record<TierKey, TierSettingKey>> 
     haiku: 'ollama_haiku_model',
     sonnet: 'ollama_sonnet_model',
     opus: 'ollama_opus_model',
+    fable: 'ollama_fable_model',
   },
   openrouter: {
     haiku: 'openrouter_haiku_model',
     sonnet: 'openrouter_sonnet_model',
     opus: 'openrouter_opus_model',
+    fable: 'openrouter_fable_model',
   },
 }
 
@@ -2021,7 +2026,7 @@ function inferRoutineModel(model: string): { provider: RoutineProviderValue; tie
   const raw = model.trim()
   if (!raw) return { provider: 'automatic', tier: 'sonnet' }
   if (raw === 'apfel') return { provider: 'apple', tier: 'haiku' }
-  const claudeTiers: Record<string, TierKey> = { haiku: 'haiku', sonnet: 'sonnet', opus: 'opus', fable: 'opus' }
+  const claudeTiers: Record<string, TierKey> = { haiku: 'haiku', sonnet: 'sonnet', opus: 'opus', fable: 'fable' }
   if (claudeTiers[raw]) {
     return { provider: 'claude', tier: claudeTiers[raw] }
   }
@@ -2978,15 +2983,15 @@ function isCustomWorkspaceModel(model: string): boolean {
 
 function workspaceModelSectionsForProvider(provider: WorkspaceProvider, currentModelValue: string): ModelSection[] {
   if (provider === 'codex') {
-    const models = [...(workspaceModels.value?.codex_models || [])]
-    const badges = providerModelBadges('codex', models, workspaceModels.value?.alias_tiers)
+    const section = sectionsFromModelsResponse(workspaceModels.value).find((item) => item.key === 'codex')
+    if (!section) return []
+    const models = [...section.models]
+    const badges = { ...(section.modelBadges || {}) }
     const current = currentModelValue.trim()
     if (current && !modelTiers.some((tier) => tier.key === current) && !models.includes(current)) models.push(current)
-    return models.length
-      ? [{ key: 'codex', label: 'OpenAI Codex', models, modelBadges: badges }]
-      : []
+    return [{ ...section, models, modelBadges: badges }]
   }
-  const tiers: TierKey[] = ['haiku', 'sonnet', 'opus']
+  const tiers: TierKey[] = ['haiku', 'sonnet', 'opus', 'fable']
   const modelBadges: Record<string, string[]> = {}
   
   for (const tier of tiers) {

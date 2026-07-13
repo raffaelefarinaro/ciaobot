@@ -7,6 +7,7 @@ export interface ModelSection {
   models: string[]
   badge?: string
   modelBadges?: Record<string, string[]>
+  modelLabels?: Record<string, string>
   disabled?: boolean
   hint?: string
 }
@@ -38,6 +39,7 @@ const props = withDefaults(defineProps<Props>(), {
 
 const emit = defineEmits<{
   'update:modelValue': [value: string | string[]]
+  select: [value: string | string[], sectionKey: string]
   close: []
 }>()
 
@@ -58,6 +60,7 @@ const normalizedSections = computed<ModelSection[]>(() => {
     ...section,
     models: section.models.map((m) => m.trim()).filter(Boolean),
     modelBadges: section.modelBadges || {},
+    modelLabels: section.modelLabels || {},
   }))
 })
 
@@ -72,7 +75,11 @@ const filteredSections = computed<ModelSection[]>(() => {
         return section
       }
       const models = q
-        ? section.models.filter((m) => m.toLowerCase().includes(q))
+        ? section.models.filter((m) => (
+          m.toLowerCase().includes(q)
+          || (section.modelLabels?.[m] || '').toLowerCase().includes(q)
+          || (section.modelBadges?.[m] || []).some((badge) => badge.toLowerCase().includes(q))
+        ))
         : section.models
       return { ...section, models }
     })
@@ -137,7 +144,7 @@ function close() {
   if (props.triggerless) emit('close')
 }
 
-function selectModel(model: string) {
+function selectModel(model: string, sectionKey: string) {
   if (props.multiple) {
     const current = new Set(effectiveValue.value as string[])
     if (current.has(model)) {
@@ -145,10 +152,13 @@ function selectModel(model: string) {
     } else {
       current.add(model)
     }
-    emit('update:modelValue', Array.from(current))
+    const selected = Array.from(current)
+    emit('update:modelValue', selected)
+    emit('select', selected, sectionKey)
     nextTick(() => searchRef.value?.focus())
   } else {
     emit('update:modelValue', model)
+    emit('select', model, sectionKey)
     close()
   }
 }
@@ -170,6 +180,10 @@ function isActive(model: string): boolean {
 
 function modelBadges(section: ModelSection, model: string): string[] {
   return section.modelBadges?.[model] || []
+}
+
+function modelLabel(section: ModelSection, model: string): string {
+  return section.modelLabels?.[model] || model
 }
 
 function badgeClass(badge: string): string {
@@ -201,7 +215,7 @@ function onKeydown(event: KeyboardEvent) {
     if (focused) {
       if (!focused.classList.contains('ms-item')) return
       event.preventDefault()
-      selectModel(focused.dataset.model || '')
+      selectModel(focused.dataset.model || '', focused.dataset.section || '')
     }
   }
 }
@@ -330,16 +344,17 @@ onBeforeUnmount(() => {
               'ms-item--active': isActive(model),
             }"
             :data-model="model"
+            :data-section="section.key"
             :disabled="section.disabled"
             role="option"
             :aria-selected="isActive(model)"
-            @click="selectModel(model)"
+            @click="selectModel(model, section.key)"
           >
             <span v-if="multiple" class="model-selector__check" aria-hidden="true">
               <span v-if="isSelected(model)" class="model-selector__checkmark">✓</span>
             </span>
             <span class="model-selector__item-main">
-              <span class="model-selector__item-label">{{ model }}</span>
+              <span class="model-selector__item-label">{{ modelLabel(section, model) }}</span>
               <span v-if="modelBadges(section, model).length" class="model-selector__item-badges">
                 <span
                   v-for="badge in modelBadges(section, model)"
@@ -649,5 +664,21 @@ onBeforeUnmount(() => {
   text-align: center;
   font-size: 13px;
   color: var(--fg2);
+}
+
+@media (max-width: 768px) {
+  /* Header selectors have no trigger box of their own, so anchor their menu
+     to the viewport below the shared top bar and keep both edges visible. */
+  .model-selector--triggerless .model-selector__popover {
+    position: fixed;
+    top: calc(61px + var(--safe-top) + 4px);
+    right: calc(12px + var(--safe-right));
+    bottom: auto;
+    left: calc(12px + var(--safe-left));
+    width: auto;
+    min-width: 0;
+    max-width: none;
+    max-height: calc(100dvh - 61px - var(--safe-top) - var(--safe-bottom) - 20px);
+  }
 }
 </style>

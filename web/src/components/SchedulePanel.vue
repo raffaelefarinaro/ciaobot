@@ -154,10 +154,11 @@
           <div class="form-group">
             <label>Model</label>
             <ModelSelector
-              v-model="editData.model"
+              :model-value="editData.model"
               :sections="scheduleModelSections"
               placeholder="Default ({{ store.models?.default || '—' }})"
               empty-placeholder="Default ({{ store.models?.default || '—' }})"
+              @select="selectScheduleModel"
             />
           </div>
         </div>
@@ -628,6 +629,12 @@ function formatWhen(iso: string | null): string {
 }
 
 const scheduleModelSections = computed(() => sectionsFromModelsResponse(store.models))
+const editModelProvider = ref<'claude' | 'codex' | ''>('')
+
+function selectScheduleModel(value: string | string[], sectionKey: string) {
+  editData.value.model = Array.isArray(value) ? value[0] || '' : value
+  editModelProvider.value = sectionKey === 'codex' ? 'codex' : 'claude'
+}
 
 const contextGroups = computed(() => {
   const groups: { label: string; items: { key: string; label: string }[] }[] = []
@@ -763,6 +770,7 @@ function startEdit() {
     model: schedule.value.model || '',
     archive_policy: schedule.value.archive_policy || 'manual',
   }
+  editModelProvider.value = schedule.value.provider || ''
   editing.value = true
 }
 
@@ -777,9 +785,7 @@ async function saveEdit() {
     days_of_week: d.frequency === 'weekly' && d.days_of_week.length > 0 ? d.days_of_week : null,
     day_of_month: d.frequency === 'monthly' ? d.day_of_month : null,
     model: d.model,
-    provider: d.model && (store.models?.codex_models || []).includes(d.model)
-      ? 'codex'
-      : (d.model ? 'claude' : ''),
+    provider: d.model ? (editModelProvider.value || schedule.value.provider || 'claude') : '',
     archive_policy: d.archive_policy,
   }
   if (d.contextKey.startsWith('proj:')) {

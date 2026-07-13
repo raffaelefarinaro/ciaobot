@@ -25,9 +25,11 @@ vi.mock('../../lib/api', () => {
     ollama_haiku_model: '',
     ollama_sonnet_model: '',
     ollama_opus_model: '',
+    ollama_fable_model: '',
     openrouter_haiku_model: '',
     openrouter_sonnet_model: '',
     openrouter_opus_model: '',
+    openrouter_fable_model: '',
     title_model_effective: 'sonnet',
     insights_model_effective: 'haiku',
 
@@ -37,11 +39,13 @@ vi.mock('../../lib/api', () => {
         haiku: 'deepseek-v4-flash:cloud',
         sonnet: 'kimi-k2.7-code:cloud',
         opus: 'minimax-m3:cloud',
+        fable: 'glm-5.2:cloud',
       },
       openrouter: {
         haiku: 'anthropic/claude-haiku-4.5',
         sonnet: 'anthropic/claude-sonnet-4.5',
         opus: 'anthropic/claude-opus-4.8',
+        fable: 'anthropic/claude-fable-latest',
       },
     },
     transcription: {
@@ -474,7 +478,7 @@ describe('component mount smoke', () => {
       await flushPromises()
       await nextTick()
       const tierSelectors = wrapper.findAll('.tier-provider-section .model-selector')
-      expect(tierSelectors.length).toBe(3)
+      expect(tierSelectors.length).toBe(4)
       for (const selector of tierSelectors) {
         expect(selector.find('.model-selector__trigger').attributes('disabled')).toBeDefined()
       }

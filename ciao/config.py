@@ -590,6 +590,10 @@ class CiaoConfig:
             source.get("CIAO_OLLAMA_OPUS_MODEL", "").strip()
             or "glm-5.2:cloud"
         )
+        ollama_fable_model = (
+            source.get("CIAO_OLLAMA_FABLE_MODEL", "").strip()
+            or "glm-5.2:cloud"
+        )
         ollama_settings = OllamaSettings(
             models=ollama_models,
             base_url=ollama_url,
@@ -599,6 +603,7 @@ class CiaoConfig:
             haiku_model=ollama_haiku_model,
             sonnet_model=ollama_sonnet_model,
             opus_model=ollama_opus_model,
+            fable_model=ollama_fable_model,
             local_models=ollama_local_models,
             local_url=source.get("CIAO_OLLAMA_LOCAL_URL", "").strip()
             or "http://localhost:11434",
@@ -614,6 +619,8 @@ class CiaoConfig:
             or "anthropic/claude-sonnet-latest",
             opus_model=source.get("CIAO_OPENROUTER_OPUS_MODEL", "").strip()
             or "anthropic/claude-opus-latest",
+            fable_model=source.get("CIAO_OPENROUTER_FABLE_MODEL", "").strip()
+            or "anthropic/claude-fable-latest",
             models=tuple(_split_csv(source.get("CIAO_OPENROUTER_MODELS", ""))),
         )
 

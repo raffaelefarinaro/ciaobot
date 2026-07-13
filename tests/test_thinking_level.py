@@ -112,6 +112,36 @@ def test_stale_thinking_level_falls_back_to_default(tmp_path: Path) -> None:
     assert pcm._thinking_level_for_chat(chat) == "high"
 
 
+def test_codex_fable_preset_uses_ultra_effort(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("thinking", workspace="personal")
+    chat = pcm.create_chat(project.project_id, model="fable", provider="codex")
+
+    assert chat.thinking_level == "ultra"
+    assert pcm._thinking_level_for_chat(chat) == "ultra"
+
+    # Fable is a fixed preset; stale or manually altered persisted data still
+    # dispatches with Ultra.
+    chat.thinking_level = "medium"
+    assert pcm._thinking_level_for_chat(chat) == "ultra"
+
+    updated = pcm.update_chat(chat.chat_id, model="gpt-5.6-sol")
+    assert updated is not None
+    assert updated.thinking_level == ""
+
+
+def test_codex_fable_handover_uses_ultra_effort(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("thinking", workspace="personal")
+    chat = pcm.create_chat(project.project_id, model="opus", provider="claude")
+
+    updated = pcm.handover_chat(chat.chat_id, provider="codex", model="fable")
+
+    assert updated is not None
+    assert updated.model == "fable"
+    assert updated.thinking_level == "ultra"
+
+
 # ── provider command construction ────────────────────────────────────────
 
 def test_claude_levels_match_sdk_effort_literal() -> None:

@@ -48,6 +48,7 @@ describe('ModelSelector', () => {
     await flushPromises()
 
     expect(wrapper.emitted('update:modelValue')).toEqual([['glm-5.2:cloud']])
+    expect(wrapper.emitted('select')).toEqual([['glm-5.2:cloud', 'ollama_cloud']])
     expect(wrapper.find('.model-selector__popover').exists()).toBe(false)
   })
 
@@ -144,6 +145,26 @@ describe('ModelSelector', () => {
 
     const badges = wrapper.findAll('.model-selector__item-badge').map((el) => el.text())
     expect(badges).toEqual(['local', 'Haiku'])
+  })
+
+  it('renders and searches a display label while emitting the stored model value', async () => {
+    const sections: ModelSection[] = [{
+      key: 'codex',
+      label: 'OpenAI Codex',
+      models: ['fable'],
+      modelLabels: { fable: 'gpt-5.6-sol-ultra' },
+      modelBadges: { fable: ['Fable'] },
+    }]
+    const wrapper = mountSelector({ sections })
+    await wrapper.find('.model-selector__trigger').trigger('click')
+    await wrapper.find('.model-selector__search').setValue('sol-ultra')
+    await flushPromises()
+
+    const item = wrapper.find('.model-selector__item')
+    expect(item.text()).toContain('gpt-5.6-sol-ultra')
+    expect(item.text()).toContain('Fable')
+    await item.trigger('click')
+    expect(wrapper.emitted('update:modelValue')).toEqual([['fable']])
   })
 
   it('uses explicit active models instead of modelValue when provided', async () => {

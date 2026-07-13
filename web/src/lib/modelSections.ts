@@ -6,6 +6,7 @@ export interface ModelSection {
   models: string[]
   badge?: string
   modelBadges?: Record<string, string[]>
+  modelLabels?: Record<string, string>
   disabled?: boolean
   hint?: string
 }
@@ -90,11 +91,20 @@ export function sectionsFromModelsResponse(response: ModelsResponse | null): Mod
 
   const codexModels = orderedUnique(response.codex_models || response.provider_models?.codex || [])
   if (codexModels.length) {
+    const modelBadges = providerModelBadges('codex', codexModels, response.alias_tiers)
+    const fableModel = response.alias_tiers?.codex?.fable || ''
+    if (fableModel && modelBadges[fableModel]) {
+      modelBadges[fableModel] = modelBadges[fableModel].filter((badge) => badge !== 'Fable')
+    }
+    const models = fableModel && !codexModels.includes('fable') ? [...codexModels, 'fable'] : codexModels
+    const modelLabels = fableModel ? { fable: `${fableModel}-ultra` } : undefined
+    if (fableModel) modelBadges.fable = ['Fable']
     sections.push({
       key: 'codex',
       label: 'OpenAI Codex',
-      models: codexModels,
-      modelBadges: providerModelBadges('codex', codexModels, response.alias_tiers),
+      models,
+      modelBadges,
+      modelLabels,
     })
   }
 

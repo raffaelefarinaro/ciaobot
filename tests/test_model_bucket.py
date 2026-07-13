@@ -215,6 +215,28 @@ def test_configured_workspace_provider_preselects_openrouter_bucket(tmp_path):
     assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-or"
 
 
+def test_openrouter_fable_alias_uses_fable_latest(tmp_path):
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        openrouter=OpenRouterSettings(api_key="sk-or"),
+    )
+    pcm = ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    )
+    project = pcm.create_project("openrouter-fable", workspace="personal")
+    chat = pcm.create_chat(project.project_id, model="fable", model_bucket="openrouter")
+
+    assert pcm._runtime_model_for_chat(chat) == "anthropic/claude-fable-latest"
+
+
 def test_anthropic_to_openrouter_switch_rejected_mid_chat(tmp_path):
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)

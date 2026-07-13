@@ -170,6 +170,7 @@ def _openrouter_model_options(config) -> list[str]:
                 openrouter.haiku_model,
                 openrouter.sonnet_model,
                 openrouter.opus_model,
+                openrouter.fable_model,
                 *openrouter.models,
             ]
         )
@@ -179,7 +180,13 @@ def _openrouter_model_options(config) -> list[str]:
 def _ollama_cloud_model_options(config) -> list[str]:
     ollama = config.ollama
     tier_models = (
-        [ollama.haiku_model, ollama.sonnet_model, ollama.opus_model, ollama.title_model]
+        [
+            ollama.haiku_model,
+            ollama.sonnet_model,
+            ollama.opus_model,
+            ollama.fable_model,
+            ollama.title_model,
+        ]
         if _ollama_cloud_available(config)
         else []
     )
@@ -3583,6 +3590,7 @@ async def list_models(request: Request) -> JSONResponse:
         "haiku": or_settings.haiku_model,
         "sonnet": or_settings.sonnet_model,
         "opus": or_settings.opus_model,
+        "fable": or_settings.fable_model,
     } if or_settings.available else {}
     openrouter_default = or_settings.sonnet_model if or_settings.available else ""
 
@@ -3609,6 +3617,7 @@ async def list_models(request: Request) -> JSONResponse:
                 "haiku": config.ollama.haiku_model,
                 "sonnet": config.ollama.sonnet_model,
                 "opus": config.ollama.opus_model,
+                "fable": config.ollama.fable_model,
             },
             "openrouter": openrouter_tiers,
             "codex": codex_tiers,
@@ -3661,9 +3670,11 @@ def _routines_payload(config, app_settings) -> dict:
         "ollama_haiku_model": s.ollama_haiku_model,
         "ollama_sonnet_model": s.ollama_sonnet_model,
         "ollama_opus_model": s.ollama_opus_model,
+        "ollama_fable_model": s.ollama_fable_model,
         "openrouter_haiku_model": s.openrouter_haiku_model,
         "openrouter_sonnet_model": s.openrouter_sonnet_model,
         "openrouter_opus_model": s.openrouter_opus_model,
+        "openrouter_fable_model": s.openrouter_fable_model,
         # What actually runs right now, after defaults.
         "title_model_effective": title_effective,
         "insights_model_effective": insights_effective,
@@ -3674,13 +3685,20 @@ def _routines_payload(config, app_settings) -> dict:
                 "haiku": config.ollama.haiku_model,
                 "sonnet": config.ollama.sonnet_model,
                 "opus": config.ollama.opus_model,
+                "fable": config.ollama.fable_model,
             },
             "openrouter": {
                 "haiku": config.openrouter.haiku_model,
                 "sonnet": config.openrouter.sonnet_model,
                 "opus": config.openrouter.opus_model,
+                "fable": config.openrouter.fable_model,
             } if config.openrouter.available else {},
-            "codex": {"haiku": "luna", "sonnet": "terra", "opus": "sol"},
+            "codex": {
+                "haiku": "luna",
+                "sonnet": "terra",
+                "opus": "sol",
+                "fable": "sol",
+            },
         },
         "transcription": {
             "engine": config.transcription_engine,
@@ -3697,7 +3715,7 @@ def _routines_payload(config, app_settings) -> dict:
         },
         # Grouped options for the routine model selectors.
         "model_options": {
-            "anthropic": ["haiku", "sonnet", "opus"],
+            "anthropic": ["haiku", "sonnet", "opus", "fable"],
             "ollama_cloud": _ollama_cloud_model_options(config),
             "ollama_local": list(ollama.local_models),
             "openrouter": _openrouter_model_options(config),

@@ -36,6 +36,7 @@ _ANTHROPIC_ALIASES = frozenset({"opus", "sonnet", "haiku", "fable"})
 _DEFAULT_HAIKU = "anthropic/claude-haiku-latest"
 _DEFAULT_SONNET = "anthropic/claude-sonnet-latest"
 _DEFAULT_OPUS = "anthropic/claude-opus-latest"
+_DEFAULT_FABLE = "anthropic/claude-fable-latest"
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,8 +50,9 @@ class OpenRouterSettings:
     haiku_model: str = _DEFAULT_HAIKU
     sonnet_model: str = _DEFAULT_SONNET
     opus_model: str = _DEFAULT_OPUS
+    fable_model: str = _DEFAULT_FABLE
     # Models explicitly allowlisted by the operator (owner/model ids). When
-    # empty, the picker falls back to the three tier defaults above plus
+    # empty, the picker falls back to the four tier defaults above plus
     # whatever ``discover_models`` returns.
     models: tuple[str, ...] = ()
 
@@ -87,6 +89,7 @@ def alias_model(alias: str, settings: OpenRouterSettings) -> str:
         haiku=settings.haiku_model,
         sonnet=settings.sonnet_model,
         opus=settings.opus_model,
+        fable=settings.fable_model,
     )
 
 
@@ -114,7 +117,7 @@ def _tier_remap_env(settings: OpenRouterSettings) -> dict[str, str]:
         "ANTHROPIC_DEFAULT_HAIKU_MODEL": settings.haiku_model,
         "ANTHROPIC_DEFAULT_SONNET_MODEL": settings.sonnet_model,
         "ANTHROPIC_DEFAULT_OPUS_MODEL": settings.opus_model,
-        "ANTHROPIC_DEFAULT_FABLE_MODEL": settings.opus_model,
+        "ANTHROPIC_DEFAULT_FABLE_MODEL": settings.fable_model,
         "ANTHROPIC_SMALL_FAST_MODEL": settings.haiku_model,
         "CLAUDE_CODE_SUBAGENT_MODEL": settings.sonnet_model,
         "CLAUDE_CODE_AUTO_MODE_MODEL": settings.haiku_model,

@@ -65,6 +65,7 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     assert data["title_model_effective"] == config.haiku_model_for_workspace("personal")
     assert data["insights_model_effective"] == config.sonnet_model_for_workspace("personal")
     assert data["alias_tiers"]["ollama"]["sonnet"] == config.ollama.sonnet_model
+    assert data["alias_tiers"]["ollama"]["fable"] == "glm-5.2:cloud"
     assert data["model_options"]["ollama_cloud"] == [
         "kimi-k2.7-code:cloud",
         "deepseek-v4-flash:cloud",
@@ -117,6 +118,8 @@ def test_patch_applies_tier_model_overrides(tmp_path):
         json={
             "ollama_haiku_model": "llama3.1:latest",
             "openrouter_sonnet_model": "anthropic/claude-sonnet-4.6",
+            "ollama_fable_model": "minimax-m3:cloud",
+            "openrouter_fable_model": "anthropic/claude-fable-5",
         },
     )
 
@@ -124,10 +127,16 @@ def test_patch_applies_tier_model_overrides(tmp_path):
     data = resp.json()
     assert data["ollama_haiku_model"] == "llama3.1:latest"
     assert data["openrouter_sonnet_model"] == "anthropic/claude-sonnet-4.6"
+    assert data["ollama_fable_model"] == "minimax-m3:cloud"
+    assert data["openrouter_fable_model"] == "anthropic/claude-fable-5"
     assert data["alias_tiers"]["ollama"]["haiku"] == "llama3.1:latest"
     assert data["alias_tiers"]["openrouter"]["sonnet"] == "anthropic/claude-sonnet-4.6"
+    assert data["alias_tiers"]["ollama"]["fable"] == "minimax-m3:cloud"
+    assert data["alias_tiers"]["openrouter"]["fable"] == "anthropic/claude-fable-5"
     assert config.ollama.haiku_model == "llama3.1:latest"
     assert config.openrouter.sonnet_model == "anthropic/claude-sonnet-4.6"
+    assert config.ollama.fable_model == "minimax-m3:cloud"
+    assert config.openrouter.fable_model == "anthropic/claude-fable-5"
 
 
 def test_patch_clearing_restores_defaults(tmp_path):

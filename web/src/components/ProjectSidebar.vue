@@ -75,7 +75,7 @@
     <template v-if="!collapsed && (mode === 'schedules')">
       <div class="sidebar-section-header">
         <span class="sidebar-section-title">Automations</span>
-        <button class="add-chip" @click="emit('new-schedule')" title="New automation">+ New</button>
+        <button class="btn-small" @click="emit('new-schedule')" title="New automation">+ New</button>
       </div>
       <div class="schedules-list">
         <div v-if="taskStore.schedules.length === 0 && taskStore.loops.length === 0" class="empty-hint">// no automations yet</div>
@@ -849,6 +849,9 @@ async function confirmDeleteChat(chatId: string) {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* Keep the collapsed rail aligned with the expanded nav and pane headers. */
+  height: 61px;
+  flex-shrink: 0;
   padding: 8px;
   border-bottom: 1px solid var(--border);
 }
@@ -1619,18 +1622,6 @@ async function confirmDeleteChat(chatId: string) {
   color: var(--fg2);
   font-weight: 600;
 }
-.add-chip {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--fg);
-  font-size: var(--text-xs);
-  padding: 3px 8px;
-  border-radius: 999px;
-  cursor: pointer;
-  min-height: var(--touch);
-}
-.add-chip:hover { background: var(--bg3); }
-
 .schedules-list {
   display: flex;
   flex-direction: column;

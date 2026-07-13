@@ -12,6 +12,7 @@ import re
 from collections.abc import Mapping, Sequence
 
 MODEL_TIERS = ("haiku", "sonnet", "opus", "fable")
+CODEX_FABLE_THINKING_LEVEL = "ultra"
 
 # OpenAI ships tiered model families whose names line up with Claude's:
 # luna is the fast/affordable tier, terra the balanced everyday model,

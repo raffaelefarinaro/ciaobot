@@ -34,6 +34,7 @@ from ciao.models import (
     ThinkingEvent,
     ToolUseEvent,
 )
+from ciao.model_tiers import CODEX_FABLE_THINKING_LEVEL, canonical_tier
 from ciao.providers.ollama import (
     is_local_ollama_model,
     is_ollama_model,
@@ -1867,6 +1868,8 @@ class ProjectChatManager:
             mode=mode or self._config.claude_mode,
             created_at=_now_iso(),
         )
+        if chat_provider == "codex" and canonical_tier(chat_model) == "fable":
+            chat.thinking_level = CODEX_FABLE_THINKING_LEVEL
         self._chats[cid] = chat
         self._save()
         return chat
@@ -1950,6 +1953,9 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is None:
             return None
+        was_codex_fable = (
+            chat.provider == "codex" and canonical_tier(chat.model) == "fable"
+        )
         if provider is not None and provider not in supported_providers():
             raise ValueError(f"Unknown provider '{provider}'")
         if not self._model_bucket_allowed(model_bucket):
@@ -2015,7 +2021,16 @@ class ProjectChatManager:
             chat.model_bucket = new_bucket if new_provider == "claude" else ""
         if mode is not None:
             chat.mode = mode  # type: ignore[assignment]
-        if thinking_level is not None:
+        is_codex_fable = (
+            chat.provider == "codex" and canonical_tier(chat.model) == "fable"
+        )
+        if is_codex_fable:
+            chat.thinking_level = CODEX_FABLE_THINKING_LEVEL
+        elif was_codex_fable and thinking_level is None:
+            # Leaving the Fable preset restores the target model's default
+            # effort unless the caller explicitly chose another level.
+            chat.thinking_level = ""
+        elif thinking_level is not None:
             chat.thinking_level = thinking_level
         self._save()
         if moved_from is not None:
@@ -2153,8 +2168,13 @@ class ProjectChatManager:
         # Bucket only applies to Claude; explicit choice wins, otherwise
         # the workspace preselects on the next resolution ("" = auto).
         chat.model_bucket = model_bucket if provider == "claude" else ""
-        # Thinking levels are provider-native and don't carry across.
-        chat.thinking_level = ""
+        # Thinking levels are provider-native and don't carry across, except
+        # that the Codex Fable preset is defined as Sol with Ultra effort.
+        chat.thinking_level = (
+            CODEX_FABLE_THINKING_LEVEL
+            if provider == "codex" and canonical_tier(clean_model) == "fable"
+            else ""
+        )
         chat.session_id = ""
         chat.last_activity_at = _now_iso()
 
@@ -2725,6 +2745,7 @@ class ProjectChatManager:
                 haiku=self._config.openrouter.haiku_model,
                 sonnet=self._config.openrouter.sonnet_model,
                 opus=self._config.openrouter.opus_model,
+                fable=self._config.openrouter.fable_model,
             )
             if target != model:
                 return target
@@ -2737,6 +2758,7 @@ class ProjectChatManager:
             haiku=self._config.ollama.haiku_model,
             sonnet=self._config.ollama.sonnet_model,
             opus=self._config.ollama.opus_model,
+            fable=self._config.ollama.fable_model,
         )
         if target and is_ollama_model(target, self._config.ollama):
             return target
@@ -2757,6 +2779,8 @@ class ProjectChatManager:
         before a guard fix). Dispatch falls back to the provider default
         instead of failing the turn.
         """
+        if chat.provider == "codex" and canonical_tier(chat.model) == "fable":
+            return CODEX_FABLE_THINKING_LEVEL
         if chat.thinking_level in THINKING_LEVELS.get(chat.provider, ()):
             return chat.thinking_level
         return ""

@@ -30,10 +30,11 @@
       <div class="form-group">
         <label>Model</label>
         <ModelSelector
-          v-model="model"
+          :model-value="model"
           :sections="scheduleModelSections"
           placeholder="Default ({{ store.models?.default || '—' }})"
           empty-placeholder="Default ({{ store.models?.default || '—' }})"
+          @select="selectScheduleModel"
         />
       </div>
     </div>
@@ -112,12 +113,12 @@ onMounted(() => {
 
 const scheduleModelSections = computed(() => sectionsFromModelsResponse(store.models))
 
-const selectedProvider = computed<'claude' | 'codex' | undefined>(() => {
-  if (!model.value) return undefined
-  return (store.models?.codex_models || []).includes(model.value)
-    ? 'codex'
-    : 'claude'
-})
+const selectedProvider = ref<'claude' | 'codex' | undefined>(undefined)
+
+function selectScheduleModel(value: string | string[], sectionKey: string) {
+  model.value = Array.isArray(value) ? value[0] || '' : value
+  selectedProvider.value = sectionKey === 'codex' ? 'codex' : 'claude'
+}
 
 const contextGroups = computed(() => {
   const groups: { label: string; items: { key: string; label: string }[] }[] = []
@@ -178,6 +179,7 @@ async function submit() {
   runAtDate.value = ''
   contextKey.value = ''
   model.value = ''
+  selectedProvider.value = undefined
   archivePolicy.value = 'manual'
   emit('created')
 }

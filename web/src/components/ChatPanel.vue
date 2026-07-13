@@ -110,7 +110,7 @@
             :sections="chatModelSections"
             placeholder="Model"
             placement="bottom-end"
-            @update:model-value="selectModel"
+            @select="selectModel"
             @close="showModelPicker = false"
           />
         </div>
@@ -2520,13 +2520,19 @@ async function selectBucket(bucket: BucketKey) {
   })
 }
 
-async function selectModel(value: string | string[]) {
+async function selectModel(value: string | string[], sectionKey = '') {
   const model = Array.isArray(value) ? value[0] : value
   if (!model || !chat.value) {
     showModelPicker.value = false
     return
   }
-  const targetBucket = bucketForSelectedModel(model)
+  const sectionBucket: Partial<Record<string, BucketKey>> = {
+    anthropic: 'claude_work',
+    codex: 'codex',
+    ollama: 'claude_personal',
+    openrouter: 'openrouter',
+  }
+  const targetBucket = sectionBucket[sectionKey] || bucketForSelectedModel(model)
   const modelBucket = modelBucketForBucket(targetBucket)
   const sameModelAndRoute = canonicalTier(model) === canonicalTier(chat.value.model) && targetBucket === activeBucket.value
   if (sameModelAndRoute) {

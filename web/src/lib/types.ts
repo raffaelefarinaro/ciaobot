@@ -309,7 +309,7 @@ export interface ModelsResponse {
     input_modalities: string[]
   }>
   model_reasoning_levels?: Record<string, string[]>
-  // Per-backend haiku/sonnet/opus tier models and which
+  // Per-backend haiku/sonnet/opus/fable tier models and which
   // backends are configured/available.
   alias_tiers?: Record<string, Record<string, string>>
   backends?: Record<string, boolean>
@@ -329,9 +329,11 @@ export interface RoutineSettings {
   ollama_haiku_model: string
   ollama_sonnet_model: string
   ollama_opus_model: string
+  ollama_fable_model: string
   openrouter_haiku_model: string
   openrouter_sonnet_model: string
   openrouter_opus_model: string
+  openrouter_fable_model: string
   // What actually runs right now, after defaults.
   title_model_effective: string
   insights_model_effective: string

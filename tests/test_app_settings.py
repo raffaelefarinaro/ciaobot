@@ -29,12 +29,14 @@ class FakeConfig:
             haiku_model="deepseek-v4-flash:cloud",
             sonnet_model="kimi-k2.7-code:cloud",
             opus_model="minimax-m3:cloud",
+            fable_model="glm-5.2:cloud",
         )
         self.openrouter = OpenRouterSettings(
             api_key="sk-or",
             haiku_model="anthropic/claude-haiku-4.5",
             sonnet_model="anthropic/claude-sonnet-4.5",
             opus_model="anthropic/claude-opus-4.8",
+            fable_model="anthropic/claude-fable-latest",
         )
 
 
@@ -145,13 +147,24 @@ def test_tier_model_overrides_apply_and_clear(tmp_path):
         {
             "ollama_sonnet_model": "qwen3:8b",
             "openrouter_opus_model": "anthropic/claude-opus-4.9",
+            "ollama_fable_model": "minimax-m3:cloud",
+            "openrouter_fable_model": "anthropic/claude-fable-5",
         }
     )
     store.apply_to_config(config)
     assert config.ollama.sonnet_model == "qwen3:8b"
     assert config.openrouter.opus_model == "anthropic/claude-opus-4.9"
+    assert config.ollama.fable_model == "minimax-m3:cloud"
+    assert config.openrouter.fable_model == "anthropic/claude-fable-5"
 
-    store.update({"ollama_sonnet_model": "", "openrouter_opus_model": ""})
+    store.update({
+        "ollama_sonnet_model": "",
+        "openrouter_opus_model": "",
+        "ollama_fable_model": "",
+        "openrouter_fable_model": "",
+    })
     store.apply_to_config(config)
     assert config.ollama.sonnet_model == "kimi-k2.7-code:cloud"
     assert config.openrouter.opus_model == "anthropic/claude-opus-4.8"
+    assert config.ollama.fable_model == "glm-5.2:cloud"
+    assert config.openrouter.fable_model == "anthropic/claude-fable-latest"
