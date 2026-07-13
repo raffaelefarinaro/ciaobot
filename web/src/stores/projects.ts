@@ -1592,14 +1592,25 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Global events WS (cross-chat awareness) ─────────────────────────
 
+  // Consecutive handshakes that closed without ever opening. A server that
+  // rejects the upgrade (403 after a token rotation or restart) fails
+  // identically on every attempt, so a fixed 2s retry becomes a request
+  // storm that fills the server log.
+  let eventsWsFailureStreak = 0
+
   function connectEventsWs() {
     if (eventsSocket.value && eventsSocket.value.readyState <= WebSocket.OPEN) return
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(`${proto}//${location.host}/ws/events`)
     eventsSocket.value = ws
     lastEventsFrameAt = nowMs()
+    let opened = false
 
-    ws.onopen = () => { lastEventsFrameAt = nowMs() }
+    ws.onopen = () => {
+      opened = true
+      eventsWsFailureStreak = 0
+      lastEventsFrameAt = nowMs()
+    }
 
     ws.onmessage = (ev) => {
       // Any frame (including the server keepalive) proves the socket is live.
@@ -1611,10 +1622,22 @@ export const useProjectStore = defineStore('projects', () => {
 
     ws.onclose = () => {
       eventsSocket.value = null
-      // Reconnect after a short delay; cross-chat awareness is best-effort.
+      if (opened) {
+        eventsWsFailureStreak = 0
+      } else {
+        eventsWsFailureStreak += 1
+        if (eventsWsFailureStreak === 5) {
+          // Likely an auth rejection: probe the HTTP API so its 401
+          // handling can redirect this stale tab to /login.
+          void api.get('/api/projects').catch(() => {})
+        }
+      }
+      // Reconnect with exponential backoff on repeated handshake failures
+      // (2s → 64s cap); cross-chat awareness is best-effort.
+      const delay = Math.min(2000 * 2 ** Math.min(eventsWsFailureStreak, 5), 64000)
       setTimeout(() => {
         if (!eventsSocket.value) connectEventsWs()
-      }, 2000)
+      }, delay)
     }
 
     ws.onerror = () => {
