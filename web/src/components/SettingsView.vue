@@ -1130,8 +1130,8 @@
               </p>
             </div>
             <div class="context-provider-field">
-              <span class="ws-label">Provider view</span>
-              <div class="instance-toggle context-provider-toggle" role="group" aria-label="Context provider view">
+              <span class="ws-label">CLI view</span>
+              <div class="instance-toggle context-provider-toggle" role="group" aria-label="Context CLI view">
                 <button
                   type="button"
                   class="toggle-btn"
@@ -2614,7 +2614,15 @@ const workspaceMemoryAssets = computed(() => {
   const bounded = items.filter(item => item.scope === 'bounded-memory')
   const vault = items.filter(item => item.scope === 'vault')
   const activeWorkspace = projectStore.activeWorkspace
-  const activeVault = vault.filter(item => !item.workspace || item.workspace === activeWorkspace)
+  const activeVault = vault.filter(item => {
+    if (item.workspace) return item.workspace === activeWorkspace
+    const titleWorkspace = item.title.match(/\(([^)]+)\)$/)?.[1]?.trim()
+    if (titleWorkspace) return titleWorkspace === activeWorkspace
+    const normalizedPath = `/${item.path.replaceAll('\\', '/')}/`
+    const knownWorkspaces = projectStore.workspaceOptions.map(workspace => workspace.name)
+    const pathWorkspace = knownWorkspaces.find(workspace => normalizedPath.includes(`/${workspace}/`))
+    return !pathWorkspace || pathWorkspace === activeWorkspace
+  })
   return [...bounded, ...activeVault]
 })
 

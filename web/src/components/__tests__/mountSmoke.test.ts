@@ -225,7 +225,6 @@ vi.mock('../../lib/api', () => {
           content: '# Personal memory\n',
           scope: 'vault',
           provider: 'shared',
-          workspace: 'personal',
         },
         {
           id: 'workspace-memory-work',
@@ -237,7 +236,6 @@ vi.mock('../../lib/api', () => {
           content: '# Work memory\n',
           scope: 'vault',
           provider: 'shared',
-          workspace: 'work',
         },
         {
           id: 'runtime-context-hook',
