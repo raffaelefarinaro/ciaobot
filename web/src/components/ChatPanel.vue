@@ -1062,6 +1062,14 @@ function scrollToBottom() {
   isNearBottom.value = true
 }
 
+// Scroll after layout when we're already following the tail. Call checkScroll
+// only after scrolling — running it first clears isNearBottom when new content
+// just grew the list (user bubble, streaming indicator, etc.).
+function stickToBottomIfNeeded() {
+  if (!isNearBottom.value) return
+  scrollToBottom()
+}
+
 const pendingApprovals = computed(() => {
   const id = store.activeChatId
   if (!id) return []
@@ -1723,7 +1731,7 @@ onMounted(async () => {
   notifyChatFocused(chat.value?.chat_id)
   messagesEl.value?.addEventListener('scroll', checkScroll, { passive: true })
   if (messagesEl.value && typeof ResizeObserver !== 'undefined') {
-    messagesResizeObserver = new ResizeObserver(() => checkScroll())
+    messagesResizeObserver = new ResizeObserver(() => stickToBottomIfNeeded())
     messagesResizeObserver.observe(messagesEl.value)
   }
   nextTick(() => {
@@ -2241,14 +2249,7 @@ watch(() => store.activeChatId, () => {
 watch(
   () => [store.activeMessages.length, store.currentStreamingText, store.currentActivity.length],
   () => {
-    nextTick(() => {
-      checkScroll()
-      if (!isNearBottom.value) return
-      if (messagesEl.value) {
-        messagesEl.value.scrollTop = messagesEl.value.scrollHeight
-        checkScroll()
-      }
-    })
+    nextTick(() => stickToBottomIfNeeded())
   },
   { deep: true }
 )
@@ -2343,9 +2344,15 @@ function send() {
   inputText.value = ''
   // Sending implies following the reply: jump to the bottom even if the
   // user had scrolled up, so their bubble and the response are in view.
+  // Double nextTick + rAF: the user bubble and streaming row render after
+  // the first paint, so one-shot scroll can land above the true bottom.
   nextTick(() => {
     scrollToBottom()
     autoResize()
+    nextTick(() => {
+      scrollToBottom()
+      requestAnimationFrame(() => scrollToBottom())
+    })
   })
 }
 
