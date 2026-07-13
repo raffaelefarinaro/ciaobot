@@ -142,6 +142,26 @@ def test_patch_applies_tier_model_overrides(tmp_path):
     assert config.openrouter.fable_model == "anthropic/claude-fable-5"
 
 
+def test_patch_applies_codex_tier_pins(tmp_path):
+    client, config = _make_client(tmp_path)
+    resp = client.patch(
+        "/api/settings/routines",
+        json={"codex_sonnet_model": "gpt-5.6-sol", "codex_haiku_model": "gpt-5.6-terra"},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["codex_sonnet_model"] == "gpt-5.6-sol"
+    assert data["codex_haiku_model"] == "gpt-5.6-terra"
+    assert data["codex_opus_model"] == ""
+    # Codex effective tiers need the account catalog, so they live in
+    # /api/models, not here.
+    assert "codex" not in data["alias_tiers"]
+    assert config.codex.sonnet_model == "gpt-5.6-sol"
+    fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
+    assert fresh.settings.codex_sonnet_model == "gpt-5.6-sol"
+
+
 def test_patch_clearing_restores_defaults(tmp_path):
     client, config = _make_client(tmp_path)
     client.patch("/api/settings/routines", json={"insights_model": "haiku"})

@@ -49,6 +49,45 @@ def test_codex_tiers_fall_back_to_catalog_heuristics() -> None:
     }
 
 
+def test_codex_tier_overrides_pin_visible_models() -> None:
+    catalog = [
+        {"model": "gpt-5.6-terra", "isDefault": True},
+        {"model": "gpt-5.6-sol"},
+        {"model": "gpt-5.6-luna"},
+    ]
+    tiers = codex_tier_models(
+        catalog, overrides={"sonnet": "gpt-5.6-sol", "haiku": " gpt-5.6-terra "}
+    )
+    assert tiers["sonnet"] == "gpt-5.6-sol"
+    assert tiers["haiku"] == "gpt-5.6-terra"
+    # Unpinned tiers keep the automatic mapping.
+    assert tiers["opus"] == "gpt-5.6-sol"
+    assert tiers["fable"] == "gpt-5.6-sol"
+
+
+def test_codex_tier_overrides_ignore_unavailable_models() -> None:
+    catalog = [
+        {"model": "gpt-5.6-terra", "isDefault": True},
+        {"model": "gpt-5.6-luna"},
+        {"model": "gpt-5.6-sol", "hidden": True},
+    ]
+    tiers = codex_tier_models(
+        catalog,
+        overrides={
+            "sonnet": "gpt-4-retired",  # no longer in the catalog
+            "opus": "gpt-5.6-sol",  # hidden -> not selectable
+            "haiku": "",  # unset
+            "unknown-tier": "gpt-5.6-terra",
+        },
+    )
+    assert tiers == {
+        "haiku": "gpt-5.6-luna",
+        "sonnet": "gpt-5.6-terra",
+        "opus": "gpt-5.6-terra",
+        "fable": "gpt-5.6-terra",
+    }
+
+
 def test_codex_tiers_converge_on_sparse_catalogs() -> None:
     assert codex_tier_models([{"model": "gpt-only", "isDefault": True}]) == {
         "haiku": "gpt-only",

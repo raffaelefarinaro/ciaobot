@@ -9,12 +9,13 @@ import os
 import tempfile
 import time
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ciao.context.entity_tagger import find_entities, format_entities
 from ciao.memory_injector import build_memory_block, system_prompt_payload
-from ciao.model_tiers import canonical_tier, codex_tier_models, is_tier
+from ciao.model_tiers import MODEL_TIERS, canonical_tier, codex_tier_models, is_tier
 from ciao.models import (
     AgentRequest,
     AssistantTextDelta,
@@ -73,6 +74,36 @@ _REQUIRED_PROTOCOL_TOKENS = frozenset({
     "account/rateLimits/updated",
     "collabAgentToolCall",
 })
+
+
+@dataclass(frozen=True, slots=True)
+class CodexSettings:
+    """Operator overrides for the Codex tier aliases.
+
+    Empty string means "no pin": the tier resolves through the automatic
+    catalog mapping (:func:`ciao.model_tiers.codex_tier_models`). A pin
+    is honored only while its model is still visible in the signed-in
+    account's catalog, so removed models degrade gracefully.
+    """
+
+    haiku_model: str = ""
+    sonnet_model: str = ""
+    opus_model: str = ""
+    fable_model: str = ""
+
+    def tier_overrides(self) -> dict[str, str]:
+        return {tier: getattr(self, f"{tier}_model") for tier in MODEL_TIERS}
+
+
+def codex_tier_overrides(config: object) -> dict[str, str]:
+    """Extract the per-tier Codex pins from a (duck-typed) config object."""
+    codex = getattr(config, "codex", None)
+    if codex is None:
+        return {}
+    return {
+        tier: str(getattr(codex, f"{tier}_model", "") or "")
+        for tier in MODEL_TIERS
+    }
 
 
 def codex_protocol_status(
@@ -597,9 +628,9 @@ class CodexProvider(BaseSDKProvider):
         requested_model = request.model
         if is_tier(requested_model):
             catalog = await self.model_catalog(self.workspace_root)
-            requested_model = codex_tier_models(catalog).get(
-                canonical_tier(requested_model), ""
-            )
+            requested_model = codex_tier_models(
+                catalog, overrides=codex_tier_overrides(self.config)
+            ).get(canonical_tier(requested_model), "")
         peer = await self._ensure_peer(request)
         sandbox, approval, reviewer = _mode_settings(request.mode)
         params = {

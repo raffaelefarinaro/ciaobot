@@ -52,6 +52,13 @@ class AppSettings:
     openrouter_sonnet_model: str = ""
     openrouter_opus_model: str = ""
     openrouter_fable_model: str = ""
+    # Codex per-tier pins. Unlike Ollama/OpenRouter there is no env-backed
+    # default: empty string means the tier resolves through the automatic
+    # catalog mapping (luna→haiku, terra→sonnet, sol→opus/fable).
+    codex_haiku_model: str = ""
+    codex_sonnet_model: str = ""
+    codex_opus_model: str = ""
+    codex_fable_model: str = ""
 
 
 class AppSettingsStore:
@@ -143,6 +150,10 @@ class AppSettingsStore:
                 "openrouter_sonnet_model": config.openrouter.sonnet_model,
                 "openrouter_opus_model": config.openrouter.opus_model,
                 "openrouter_fable_model": config.openrouter.fable_model,
+                "codex_haiku_model": config.codex.haiku_model,
+                "codex_sonnet_model": config.codex.sonnet_model,
+                "codex_opus_model": config.codex.opus_model,
+                "codex_fable_model": config.codex.fable_model,
             }
         d = self._defaults
         s = self.settings
@@ -172,4 +183,11 @@ class AppSettingsStore:
             sonnet_model=s.openrouter_sonnet_model or d["openrouter_sonnet_model"],
             opus_model=s.openrouter_opus_model or d["openrouter_opus_model"],
             fable_model=s.openrouter_fable_model or d["openrouter_fable_model"],
+        )
+        config.codex = replace(
+            config.codex,
+            haiku_model=s.codex_haiku_model or d["codex_haiku_model"],
+            sonnet_model=s.codex_sonnet_model or d["codex_sonnet_model"],
+            opus_model=s.codex_opus_model or d["codex_opus_model"],
+            fable_model=s.codex_fable_model or d["codex_fable_model"],
         )

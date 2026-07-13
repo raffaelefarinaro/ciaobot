@@ -48,13 +48,21 @@ def _name_segments(model_id: str) -> set[str]:
     return set(re.split(r"[-_./:@ ]+", model_id.lower()))
 
 
-def codex_tier_models(catalog: Sequence[Mapping[str, object]]) -> dict[str, str]:
+def codex_tier_models(
+    catalog: Sequence[Mapping[str, object]],
+    overrides: Mapping[str, str] | None = None,
+) -> dict[str, str]:
     """Map Ciaobot's tiers to Codex models visible to the account.
 
     Matches by family name first (haiku→luna, sonnet→terra, opus→sol),
     then falls back to catalog heuristics — compact names for haiku, the
     catalog default for opus — so a renamed catalog still resolves.
     Sparse catalogs intentionally converge on the nearest available model.
+
+    ``overrides`` maps tier names to operator-pinned model ids. A pin
+    wins only while its model is still visible in the catalog, so a
+    stale override falls back to the automatic mapping instead of
+    sending an unknown model id to the app-server.
     """
     visible = [item for item in catalog if not item.get("hidden")]
     ids = [
@@ -92,9 +100,15 @@ def codex_tier_models(catalog: Sequence[Mapping[str, object]]) -> dict[str, str]
         ),
         flagship,
     )
-    return {
+    tiers = {
         "haiku": compact or standard,
         "sonnet": standard,
         "opus": flagship,
         "fable": flagship,
     }
+    for tier, pinned in (overrides or {}).items():
+        tier = canonical_tier(tier)
+        pinned = (pinned or "").strip()
+        if tier in tiers and pinned in ids:
+            tiers[tier] = pinned
+    return tiers

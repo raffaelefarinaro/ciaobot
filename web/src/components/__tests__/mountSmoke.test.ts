@@ -30,6 +30,10 @@ vi.mock('../../lib/api', () => {
     openrouter_sonnet_model: '',
     openrouter_opus_model: '',
     openrouter_fable_model: '',
+    codex_haiku_model: '',
+    codex_sonnet_model: '',
+    codex_opus_model: '',
+    codex_fable_model: '',
     title_model_effective: 'sonnet',
     insights_model_effective: 'haiku',
 
@@ -312,6 +316,12 @@ vi.mock('../../lib/api', () => {
           opus: 'gpt-5.6-sol',
           fable: 'gpt-5.6-sol',
         },
+      },
+      codex_tier_defaults: {
+        haiku: 'gpt-5.6-luna',
+        sonnet: 'gpt-5.6-terra',
+        opus: 'gpt-5.6-sol',
+        fable: 'gpt-5.6-sol',
       },
       backends: { codex: true },
     },
@@ -705,12 +715,25 @@ describe('component mount smoke', () => {
     ])
     expect(wrapper.text()).toContain('Model Routing')
     expect(wrapper.text()).not.toContain('Claude Code model routing')
-    expect(wrapper.findAll('.routing-model-input').map((input) => (input.element as HTMLInputElement).value)).toEqual([
-      'gpt-5.6-luna',
-      'gpt-5.6-terra',
-      'gpt-5.6-sol',
-      'gpt-5.6-sol',
+    // Codex tiers are editable pins whose default reflects the automatic
+    // catalog mapping.
+    const codexSelectors = wrapper.findAll('.tier-provider-section .model-selector')
+    expect(codexSelectors.map((selector) => selector.find('.model-selector__trigger').text())).toEqual([
+      'Automatic (gpt-5.6-luna)▾',
+      'Automatic (gpt-5.6-terra)▾',
+      'Automatic (gpt-5.6-sol)▾',
+      'Automatic (gpt-5.6-sol)▾',
     ])
+    await codexSelectors[0]!.find('.model-selector__trigger').trigger('click')
+    await flushPromises()
+    const codexOption = codexSelectors[0]!.findAll('.model-selector__item')
+      .find((el) => el.attributes('data-model') === 'gpt-5.6-terra')
+    expect(codexOption).toBeTruthy()
+    await codexOption!.trigger('click')
+    await flushPromises()
+    expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
+      codex_haiku_model: 'gpt-5.6-terra',
+    })
     expect(wrapper.find('.routing-model-catalog summary').text()).toBe('Available OpenAI models (3)')
     expect(wrapper.findAll('.routing-model-catalog code').map((model) => model.text())).toEqual([
       'gpt-5.6-luna',

@@ -7,6 +7,7 @@ import json
 import pytest
 
 from ciao.app_settings import AppSettings, AppSettingsStore
+from ciao.providers.codex import CodexSettings
 from ciao.providers.ollama import OllamaSettings
 from ciao.providers.openrouter import OpenRouterSettings
 
@@ -38,6 +39,8 @@ class FakeConfig:
             opus_model="anthropic/claude-opus-4.8",
             fable_model="anthropic/claude-fable-latest",
         )
+        # No env-backed defaults: empty = automatic catalog mapping.
+        self.codex = CodexSettings()
 
 
 def test_load_missing_file_gives_defaults(tmp_path):
@@ -182,3 +185,24 @@ def test_tier_model_overrides_apply_and_clear(tmp_path):
     assert config.openrouter.opus_model == "anthropic/claude-opus-4.8"
     assert config.ollama.fable_model == "glm-5.2:cloud"
     assert config.openrouter.fable_model == "anthropic/claude-fable-latest"
+
+
+def test_codex_tier_pins_apply_and_clear(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    config = FakeConfig()
+
+    store.update({"codex_sonnet_model": "gpt-5.6-sol", "codex_haiku_model": "gpt-5.6-terra"})
+    store.apply_to_config(config)
+    assert config.codex.sonnet_model == "gpt-5.6-sol"
+    assert config.codex.haiku_model == "gpt-5.6-terra"
+    assert config.codex.tier_overrides() == {
+        "haiku": "gpt-5.6-terra",
+        "sonnet": "gpt-5.6-sol",
+        "opus": "",
+        "fable": "",
+    }
+
+    # Clearing a pin restores the automatic (empty) default.
+    store.update({"codex_sonnet_model": "", "codex_haiku_model": ""})
+    store.apply_to_config(config)
+    assert config.codex == CodexSettings()

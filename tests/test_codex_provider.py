@@ -20,6 +20,7 @@ from ciao.models import (
 )
 from ciao.providers.codex import (
     CodexProvider,
+    CodexSettings,
     _PROTOCOL_CACHE,
     _REQUIRED_PROTOCOL_TOKENS,
     codex_collab_agents,
@@ -372,6 +373,73 @@ async def test_codex_provider_forks_resumed_thread(tmp_path: Path) -> None:
     records = _read_log(log)
     fork = next(row for row in records if row["kind"] == "thread/fork")
     assert fork["payload"]["threadId"] == "thread-parent"
+    await provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_codex_tier_resolution_honors_config_pins(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    catalog = [
+        {"model": "gpt-5.6-terra", "isDefault": True},
+        {"model": "gpt-5.6-sol"},
+        {"model": "gpt-5.6-luna"},
+    ]
+    monkeypatch.setattr(
+        CodexProvider, "model_catalog", AsyncMock(return_value=catalog)
+    )
+    command, log = _fake_command(tmp_path)
+    provider = CodexProvider(
+        tmp_path,
+        command=command,
+        config=SimpleNamespace(codex=CodexSettings(sonnet_model="gpt-5.6-sol")),
+    )
+    request = AgentRequest(
+        prompt="Hi",
+        model="sonnet",
+        mode="normal",
+        provider="codex",
+        extra_env={"FAKE_CODEX_LOG": str(log)},
+    )
+
+    await provider._ensure_thread(request)
+
+    records = _read_log(log)
+    start = next(row for row in records if row["kind"] == "thread/start")
+    assert start["payload"]["model"] == "gpt-5.6-sol"
+    await provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_codex_tier_resolution_drops_stale_pin(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    catalog = [
+        {"model": "gpt-5.6-terra", "isDefault": True},
+        {"model": "gpt-5.6-luna"},
+    ]
+    monkeypatch.setattr(
+        CodexProvider, "model_catalog", AsyncMock(return_value=catalog)
+    )
+    command, log = _fake_command(tmp_path)
+    provider = CodexProvider(
+        tmp_path,
+        command=command,
+        config=SimpleNamespace(codex=CodexSettings(sonnet_model="gpt-4-retired")),
+    )
+    request = AgentRequest(
+        prompt="Hi",
+        model="sonnet",
+        mode="normal",
+        provider="codex",
+        extra_env={"FAKE_CODEX_LOG": str(log)},
+    )
+
+    await provider._ensure_thread(request)
+
+    records = _read_log(log)
+    start = next(row for row in records if row["kind"] == "thread/start")
+    assert start["payload"]["model"] == "gpt-5.6-terra"
     await provider.disconnect()
 
 

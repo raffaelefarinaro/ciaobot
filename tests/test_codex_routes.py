@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 from starlette.requests import Request
 
 from ciao.config import CiaoConfig
-from ciao.providers.codex import CodexProvider
+from ciao.providers.codex import CodexProvider, CodexSettings
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
@@ -86,6 +86,46 @@ def test_models_endpoint_exposes_codex_catalog_and_per_model_effort(
     assert data["model_reasoning_levels"]["gpt-test"] == ["low", "high"]
     assert data["codex_model_metadata"]["gpt-test"]["display_name"] == "GPT Test"
     assert data["backends"]["codex"] is True
+    assert data["codex_tier_defaults"] == data["alias_tiers"]["codex"]
+
+
+def test_models_endpoint_applies_codex_tier_pins(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    config = CiaoConfig(
+        pwa_auth_token="test",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+        codex=CodexSettings(sonnet_model="gpt-5.6-sol", haiku_model="gpt-gone"),
+    )
+    catalog = [
+        {
+            "model": "gpt-5.6-terra",
+            "isDefault": True,
+            "supportedReasoningEfforts": [{"reasoningEffort": "high"}],
+        },
+        {
+            "model": "gpt-5.6-sol",
+            "supportedReasoningEfforts": [{"reasoningEffort": "low"}],
+        },
+    ]
+    monkeypatch.setattr(
+        CodexProvider, "model_catalog", AsyncMock(return_value=catalog)
+    )
+    app = SimpleNamespace(state=SimpleNamespace(config=config))
+
+    response = asyncio.run(list_models(_request("/api/models", app)))
+    data = json.loads(response.body)
+
+    # The pin wins where its model is visible; the stale haiku pin falls
+    # back to the automatic mapping.
+    assert data["alias_tiers"]["codex"]["sonnet"] == "gpt-5.6-sol"
+    assert data["alias_tiers"]["codex"]["haiku"] == "gpt-5.6-terra"
+    assert data["codex_tier_defaults"]["sonnet"] == "gpt-5.6-terra"
+    # Tier reasoning levels follow the effective (pinned) model.
+    assert data["model_reasoning_levels"]["sonnet"] == ["low"]
+    assert data["model_reasoning_levels"]["haiku"] == ["high"]
 
 
 def test_codex_chat_messages_render_thread_items(
