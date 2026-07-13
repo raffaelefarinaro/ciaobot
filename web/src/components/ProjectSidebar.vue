@@ -277,8 +277,6 @@
               :disabled="chat.local === false"
               :title="chat.local === false ? 'This chat lives on another instance' : ''"
             >
-              <span v-if="store.isChatStreaming(chat.chat_id)" class="spinner-dot" />
-              <span v-else-if="store.chatHasBackgroundAgents(chat.chat_id)" class="spinner-dot bg-agents" title="Background agents running" />
               <span
                 v-if="chat.title_status === 'pending'"
                 class="title-shimmer"
@@ -286,6 +284,8 @@
                 title="Generating title..."
               />
               <span v-else class="recent-title">{{ chat.title }}</span>
+              <span v-if="store.isChatStreaming(chat.chat_id)" class="spinner-dot" title="Working" />
+              <span v-else-if="store.chatHasBackgroundAgents(chat.chat_id)" class="spinner-dot bg-agents" title="Background agents running" />
               <span v-if="chat.local === false" class="remote-chip">remote</span>
               <span class="recent-project" v-if="store.projectFor(chat.chat_id)?.name">
                 {{ store.projectFor(chat.chat_id)?.name }}
