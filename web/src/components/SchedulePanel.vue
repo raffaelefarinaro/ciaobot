@@ -206,19 +206,12 @@
         <div class="prompt-heading">
           <span class="prompt-label">Prompt</span>
           <div class="prompt-actions">
-            <button
-              v-if="isPromptLong(schedule.prompt)"
-              type="button"
-              class="btn-small"
-              :aria-expanded="promptExpanded"
-              @click="promptExpanded = !promptExpanded"
-            >{{ promptExpanded ? 'Collapse' : 'Expand' }}</button>
             <button type="button" class="btn-small" @click="copyPrompt(schedule.prompt, schedule.schedule_id)">
               {{ promptCopyLabel(schedule.schedule_id) }}
             </button>
           </div>
         </div>
-        <pre class="full-prompt" :class="{ 'full-prompt--collapsed': isPromptLong(schedule.prompt) && !promptExpanded }">{{ schedule.prompt }}</pre>
+        <pre class="full-prompt">{{ schedule.prompt }}</pre>
       </div>
     </div>
 
@@ -277,19 +270,12 @@
         <div class="prompt-heading">
           <span class="prompt-label">Prompt</span>
           <div class="prompt-actions">
-            <button
-              v-if="isPromptLong(loop.prompt)"
-              type="button"
-              class="btn-small"
-              :aria-expanded="promptExpanded"
-              @click="promptExpanded = !promptExpanded"
-            >{{ promptExpanded ? 'Collapse' : 'Expand' }}</button>
             <button type="button" class="btn-small" @click="copyPrompt(loop.prompt, loop.loop_id)">
               {{ promptCopyLabel(loop.loop_id) }}
             </button>
           </div>
         </div>
-        <pre class="full-prompt" :class="{ 'full-prompt--collapsed': isPromptLong(loop.prompt) && !promptExpanded }">{{ loop.prompt }}</pre>
+        <pre class="full-prompt">{{ loop.prompt }}</pre>
       </div>
     </div>
 
@@ -403,7 +389,6 @@ const projectStore = useProjectStore()
 const allDays = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
 const editing = ref(false)
 const actionsOpen = ref(false)
-const promptExpanded = ref(false)
 const copiedPromptKey = ref('')
 const startingBySchedule = ref<Set<string>>(new Set())
 // schedule_id -> chat_id while the linked chat is still streaming
@@ -461,7 +446,6 @@ watch(scheduleId, () => {
   editing.value = false
   loopEditing.value = false
   actionsOpen.value = false
-  promptExpanded.value = false
   copiedPromptKey.value = ''
   purgeFinishedRuns()
 })
@@ -718,10 +702,6 @@ function contextUnavailable(s: Schedule): boolean {
   return false
 }
 
-function isPromptLong(prompt: string): boolean {
-  return prompt.length > 500 || prompt.split('\n').length > 12
-}
-
 async function copyPrompt(prompt: string, key: string) {
   try {
     await navigator.clipboard.writeText(prompt)
@@ -956,13 +936,6 @@ function closeSchedule() {
   padding: var(--space-3);
   margin: 0;
 }
-.full-prompt--collapsed {
-  max-height: 14rem;
-  overflow: hidden;
-  -webkit-mask-image: linear-gradient(to bottom, #000 72%, transparent 100%);
-  mask-image: linear-gradient(to bottom, #000 72%, transparent 100%);
-}
-
 .edit-form { display: flex; flex-direction: column; gap: var(--space-3); }
 .form-grid {
   display: grid;
