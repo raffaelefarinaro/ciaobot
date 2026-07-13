@@ -23,7 +23,6 @@ INTERNAL_VARS: dict[str, str] = {
     "CIAO_CONTEXT_END": "subprocess IPC delimiter wrapping injected context",
     "CIAO_RESTART_EXIT_CODE": "internal exit-code convention for restart-requesting handlers",
     "CIAO_RUNTIME_ROOT": "test-only override for the runtime/ directory",
-    "CIAO_MENUBAR_EXECUTABLE": "launchd plist template placeholder for the menu-bar helper path; not an env var",
 }
 
 

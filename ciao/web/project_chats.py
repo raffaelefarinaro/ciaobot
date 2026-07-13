@@ -266,12 +266,36 @@ _TITLE_SYSTEM_PROMPT = (
 )
 
 # A title that opens like an assistant reply means the model answered the
-# excerpt instead of titling it; treat it as a failure.
+# excerpt instead of titling it; treat it as a failure. Covers affirmative
+# openers ("I'll…", "Sure…") and the negated/apologetic ones a model emits
+# when the excerpt gave it nothing to work with ("I don't have any prior
+# context…", "There's no…", "It looks like…").
 _REPLY_SHAPED_RE = re.compile(
-    r"^(i['’](d|ll|m|ve)\b|i\s+(can|need|will|would|am)\b|sure\b|"
-    r"happy to\b|certainly\b|of course\b|sorry\b|unfortunately\b)",
+    r"^(i['’](d|ll|m|ve)\b|"
+    r"i\s+(can|need|will|would|am|do|don['’]t|cannot|can['’]t|won['’]t|"
+    r"couldn['’]t|didn['’]t|haven['’]t|apologi[sz]e)\b|"
+    r"there(['’]s|\s+is|\s+are|\s+isn['’]t|\s+aren['’]t)\b|"
+    r"it\s+(looks|seems|appears)\b|let\s+me\b|"
+    r"sure\b|happy to\b|certainly\b|of course\b|sorry\b|unfortunately\b)",
     re.IGNORECASE,
 )
+
+# Low-signal openers that give the titler nothing to summarize. Asking a
+# model to title one of these invites a conversational reply ("I don't have
+# any prior context to continue from…") that then gets saved as the title,
+# so we skip the model call and use the deterministic fallback instead.
+_CONTENTLESS_PROMPTS = frozenset({
+    "continue", "continue please", "please continue", "go", "go on",
+    "go ahead", "proceed", "next", "more", "keep going", "carry on",
+    "resume", "ok", "okay", "k", "yes", "yep", "yeah", "yup", "no",
+    "nope", "sure", "thanks", "thank you", "ty", "done", "stop",
+})
+
+
+def _is_contentless_prompt(text: str) -> bool:
+    """True for bare openers ("continue", "ok", "go on") with no topic."""
+    normalized = re.sub(r"[\s.!?,:;]+", " ", (text or "").strip().lower()).strip()
+    return normalized in _CONTENTLESS_PROMPTS
 
 
 def _fallback_title(user_text: str) -> str | None:
@@ -387,6 +411,13 @@ async def _generate_chat_title_with_engine(
     user_snippet = (user_text or "").strip()[:1000]
     if not user_snippet:
         return None, "fallback"
+
+    # A bare "continue"/"ok"/"go on" as the first message gives the titler
+    # nothing to summarize; asking a model to title it invites a
+    # conversational reply that then sticks as the title. Skip straight to
+    # the deterministic fallback (which just truncates the user text).
+    if _is_contentless_prompt(user_snippet):
+        return _fallback_title(user_snippet), "fallback"
 
     assistant_snippet = (assistant_text or "").strip()[:1000]
     if assistant_snippet:

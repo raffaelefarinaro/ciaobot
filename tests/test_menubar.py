@@ -150,10 +150,18 @@ def test_open_command_prefers_browser_app_mode(monkeypatch) -> None:
 
 
 def test_window_launch_command_includes_workspace(tmp_path: Path) -> None:
+    interp = menubar._python_with_ciao()
     cmd = menubar._window_launch_command("http://localhost:8443/", tmp_path)
-    assert cmd[1:] == ["-m", "ciao.window", "http://localhost:8443/", "--workspace", str(tmp_path)]
+    assert cmd == [
+        interp,
+        "-m",
+        "ciao.window",
+        "http://localhost:8443/",
+        "--workspace",
+        str(tmp_path),
+    ]
     assert menubar._window_launch_command("http://localhost:8443/", None) == [
-        sys.executable,
+        interp,
         "-m",
         "ciao.window",
         "http://localhost:8443/",

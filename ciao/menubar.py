@@ -256,10 +256,39 @@ def open_command(url: str) -> list[str]:
     return ["open", url]
 
 
+def _python_with_ciao() -> str:
+    """Return a Python interpreter that can import ``ciao``.
+
+    In the packaged menu-bar app ``sys.executable`` can point at a stock
+    system Python that has no ``ciao`` on its path — observed as
+    ``python3.12: No module named 'ciao'`` when the app bundle launches a
+    plain interpreter, so ``python -m ciao.window`` (and the older
+    ``-m ciao.cli``) failed silently. This process already imported ``ciao``
+    from *some* environment, so derive that environment's interpreter from
+    the package location and prefer it; fall back to ``sys.executable``.
+    """
+
+    try:
+        import ciao as _ciao_pkg
+
+        pkg_dir = Path(_ciao_pkg.__file__).resolve().parent  # .../site-packages/ciao
+        # venv/keg layout: <prefix>/lib/pythonX.Y/site-packages/ciao, so the
+        # interpreter lives at <prefix>/bin/python (parents[3]). Also probe
+        # parents[2] for flatter layouts.
+        for prefix in (pkg_dir.parents[3], pkg_dir.parents[2]):
+            for name in ("python", "python3"):
+                candidate = prefix / "bin" / name
+                if candidate.exists():
+                    return str(candidate)
+    except Exception:
+        pass
+    return sys.executable
+
+
 def _window_launch_command(url: str, workspace: Path | None) -> list[str]:
     """argv that opens ``url`` in the native window (single-instance aware)."""
 
-    cmd = [sys.executable, "-m", "ciao.window", url]
+    cmd = [_python_with_ciao(), "-m", "ciao.window", url]
     if workspace is not None:
         cmd += ["--workspace", str(workspace)]
     return cmd
@@ -875,6 +904,28 @@ def run_menubar(workspace: Path, port: int) -> int:
     except Exception:
         pass
 
+    def _on_main_thread(func, *args, **kwargs) -> None:
+        """Run a UI callable on the Cocoa main thread.
+
+        rumps/AppKit objects (NSAlert, NSWindow, notifications, menu items)
+        may only be touched from the main thread; calling them from a worker
+        thread raises "NSWindow should only be instantiated on the main
+        thread!" and crashes the thread — which is exactly what the update
+        flow's ``rumps.alert``/``rumps.notification``/``refresh`` calls did.
+        Background work marshals its UI through here. Falls back to a direct
+        call if PyObjC's AppHelper is unavailable.
+        """
+
+        try:
+            from PyObjCTools import AppHelper
+        except Exception:
+            func(*args, **kwargs)
+            return
+        if args or kwargs:
+            AppHelper.callAfter(lambda: func(*args, **kwargs))
+        else:
+            AppHelper.callAfter(func)
+
     _ensure_notification_bundle()
 
     # Monochrome template images (black + alpha): macOS tints them to
@@ -1053,6 +1104,10 @@ def run_menubar(workspace: Path, port: int) -> int:
         refresh()
 
         def _do_update() -> None:
+            # Runs on a worker thread: the blocking install and launchctl
+            # calls are safe here, but every rumps/AppKit call MUST be
+            # marshaled to the main thread via _on_main_thread — otherwise
+            # NSAlert/NSWindow instantiation crashes the thread.
             try:
                 res = update_package()
                 if res.get("ok"):
@@ -1062,26 +1117,31 @@ def run_menubar(workspace: Path, port: int) -> int:
                     # its own, so macOS shows a generic placeholder. Posting
                     # through rumps with an explicit icon renders the actual
                     # Ciaobot face instead.
-                    try:
-                        rumps.notification(
-                            "Ciaobot updated",
-                            "",
-                            f"Version {latest} is installed.",
-                            icon=icon_path("Ciaobot.icns"),
-                        )
-                    except Exception:
-                        pass
+                    def _notify_installed() -> None:
+                        try:
+                            rumps.notification(
+                                "Ciaobot updated",
+                                "",
+                                f"Version {latest} is installed.",
+                                icon=icon_path("Ciaobot.icns"),
+                            )
+                        except Exception:
+                            pass
+
+                    _on_main_thread(_notify_installed)
                     # Relaunch via launchd so this process loads the new wheel.
                     subprocess.run(restart_menubar_command(), check=False)
                     return
                 error = str(res.get("error") or "Update failed.")
                 command = str(res.get("command") or "")
                 message = error + (f"\n\nTry manually:\n{command}" if command else "")
-                rumps.alert(title="Update failed", message=message, ok="OK")
+                _on_main_thread(
+                    rumps.alert, title="Update failed", message=message, ok="OK"
+                )
             finally:
                 state["updating"] = False
                 state["package_status"] = status_fetcher()
-                refresh()
+                _on_main_thread(refresh)
 
         threading.Thread(target=_do_update, daemon=True).start()
 

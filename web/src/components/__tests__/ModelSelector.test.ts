@@ -181,6 +181,24 @@ describe('ModelSelector', () => {
     expect(activeModels).toEqual(['kimi-k2.7-code:cloud'])
   })
 
+  it('highlights only the exact explicit active model, not same-tier models from other providers', async () => {
+    const sections: ModelSection[] = [
+      { key: 'anthropic', label: 'Anthropic', models: ['haiku', 'sonnet', 'opus'] },
+      {
+        key: 'codex',
+        label: 'OpenAI Codex',
+        models: ['gpt-5.6-sol'],
+        modelBadges: { 'gpt-5.6-sol': ['Opus'] },
+      },
+    ]
+    const wrapper = mountSelector({ sections, activeModels: ['opus'] })
+    await wrapper.find('.model-selector__trigger').trigger('click')
+    await flushPromises()
+
+    const activeModels = wrapper.findAll('.ms-item--active').map((el) => el.attributes('data-model'))
+    expect(activeModels).toEqual(['opus'])
+  })
+
   it('highlights a native model selected through its tier alias badge', async () => {
     const sections: ModelSection[] = [{
       key: 'codex',
