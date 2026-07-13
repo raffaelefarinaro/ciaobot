@@ -111,38 +111,52 @@ def test_server_recovery_label_matches_reachability() -> None:
     assert menubar.server_recovery_label(menubar.ServerStatus(False, False)) == "Start Server"
 
 
-def test_open_app_command_uses_setup_token(tmp_path: Path, monkeypatch) -> None:
+def test_open_url_uses_setup_token(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(menubar, "_installed_browser_app_names", lambda: [])
     token_path = tmp_path / ".runtime" / "setup-token"
     token_path.parent.mkdir(parents=True)
     token_path.write_text("tok123\n", encoding="utf-8")
 
-    assert menubar.open_app_command(tmp_path, 9443) == [
+    url = menubar.open_url(tmp_path, 9443)
+    assert menubar.open_command(url) == [
         "open",
         "http://localhost:9443/?setup=tok123",
     ]
 
 
-def test_open_app_command_without_token_falls_back_to_plain_url(
+def test_open_url_without_token_falls_back_to_plain_url(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr(menubar, "_installed_browser_app_names", lambda: [])
 
-    assert menubar.open_app_command(tmp_path, 8443) == [
+    url = menubar.open_url(tmp_path, 8443)
+    assert menubar.open_command(url) == [
         "open",
         "http://localhost:8443/",
     ]
 
 
-def test_open_app_command_prefers_browser_app_mode(monkeypatch) -> None:
+def test_open_command_prefers_browser_app_mode(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(menubar, "_installed_browser_app_names", lambda: ["Google Chrome"])
 
-    assert menubar.open_app_command(Path("/tmp/ws"), 8443) == [
+    assert menubar.open_command("http://localhost:8443/") == [
         "open",
         "-a",
         "Google Chrome",
         "--args",
         "--app=http://localhost:8443/",
+    ]
+
+
+def test_window_launch_command_includes_workspace(tmp_path: Path) -> None:
+    cmd = menubar._window_launch_command("http://localhost:8443/", tmp_path)
+    assert cmd[1:] == ["-m", "ciao.window", "http://localhost:8443/", "--workspace", str(tmp_path)]
+    assert menubar._window_launch_command("http://localhost:8443/", None) == [
+        sys.executable,
+        "-m",
+        "ciao.window",
+        "http://localhost:8443/",
     ]
 
 
@@ -152,32 +166,6 @@ def _write_bundle(path: Path, *, bundle_id: str) -> None:
     (contents / "Info.plist").write_bytes(
         plistlib.dumps({"CFBundleIdentifier": bundle_id})
     )
-
-
-def test_find_installed_webapp_finds_browser_installed_pwa(
-    tmp_path: Path, monkeypatch
-) -> None:
-    monkeypatch.setattr(menubar.Path, "home", lambda: tmp_path)
-    webapp = tmp_path / "Applications" / "Ciaobot.app"
-    _write_bundle(webapp, bundle_id="org.chromium.Chromium.app.abc123")
-
-    assert menubar.find_installed_webapp() == webapp
-
-
-def test_find_installed_webapp_skips_our_own_launcher_bundle(
-    tmp_path: Path, monkeypatch
-) -> None:
-    monkeypatch.setattr(menubar.Path, "home", lambda: tmp_path)
-    launcher = tmp_path / "Applications" / "Ciaobot.app"
-    _write_bundle(launcher, bundle_id="local.ciaobot.app")
-
-    assert menubar.find_installed_webapp() is None
-
-
-def test_find_installed_webapp_absent_returns_none(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(menubar.Path, "home", lambda: tmp_path)
-
-    assert menubar.find_installed_webapp() is None
 
 
 def test_remove_browser_pwa_duplicates_skips_native_launcher(

@@ -393,11 +393,10 @@ def _write_app_shortcut(
     # is gone we open the plain URL and rely on the session cookie -- matching
     # how the menu bar builds its "Open Ciaobot" URL (menubar.open_url).
     #
-    # Before falling back to the default browser, look for a browser-installed
-    # PWA bundle (Chrome/Edge "Install Ciaobot", Safari's "Add to Dock") and
-    # open the URL in that instead -- excluding our own launcher bundle by its
-    # CFBundleIdentifier so this doesn't just relaunch itself. Mirrors
-    # menubar.find_installed_webapp / menubar.open_command.
+    # Open the URL in the native WebKit window (ciao.window). Passing the
+    # workspace lets that process de-duplicate: if a Ciaobot window is already
+    # open it focuses it instead of stacking another one (ciao.window's
+    # single-instance lock).
     executable.write_text(
         "#!/bin/sh\n"
         "start_agent() {\n"
@@ -434,7 +433,7 @@ def _write_app_shortcut(
         'DIR="$(cd "$(dirname "$0")" && pwd)"\n'
         "open_ciaobot_url() {\n"
         '  target="$1"\n'
-        '  exec "$DIR/python" -m ciao.window "$target"\n'
+        f'  exec "$DIR/python" -m ciao.window "$target" --workspace "{workspace}"\n'
         "}\n"
         'open_ciaobot_url "$url"\n',
         encoding="utf-8",
