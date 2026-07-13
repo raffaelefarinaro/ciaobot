@@ -45,9 +45,11 @@ async def test_generate_chat_title_via_apfel_failure_fallback(monkeypatch: pytes
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
 
-    # We mock claude_agent_sdk import to raise exception so it goes to deterministic fallback
-    import sys
-    monkeypatch.setitem(sys.modules, "claude_agent_sdk", None)
+    # Fail the provider one-shot too so it goes to deterministic fallback.
+    async def fake_oneshot(*args, **kwargs):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
 
     title = await _generate_chat_title("This is a very long user message that should be truncated to some words", assistant_text="")
     # Deterministic fallback takes first ~6 words
@@ -64,8 +66,10 @@ async def test_generate_chat_title_via_apfel_exception_fallback(monkeypatch: pyt
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
 
-    import sys
-    monkeypatch.setitem(sys.modules, "claude_agent_sdk", None)
+    async def fake_oneshot(*args, **kwargs):
+        raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
 
     title = await _generate_chat_title("How do I write Python unit tests?", assistant_text="")
     assert title == "How do I write Python unit"
