@@ -30,7 +30,8 @@ defineEmits<{ 'open-sidebar': [] }>()
 .pane-header {
   display: flex;
   align-items: center;
-  height: calc(46px + var(--safe-top));
+  /* Match the sidebar header: 44px controls + 8px vertical padding + border. */
+  height: calc(61px + var(--safe-top));
   padding: calc(8px + var(--safe-top)) 8px 8px;
   border-bottom: 1px solid var(--border);
   background: var(--bg);

@@ -158,6 +158,20 @@ describe('ModelSelector', () => {
     expect(activeModels).toEqual(['kimi-k2.7-code:cloud'])
   })
 
+  it('highlights a native model selected through its tier alias badge', async () => {
+    const sections: ModelSection[] = [{
+      key: 'codex',
+      label: 'OpenAI Codex',
+      models: ['gpt-5.6-sol'],
+      modelBadges: { 'gpt-5.6-sol': ['Opus'] },
+    }]
+    const wrapper = mountSelector({ sections, modelValue: 'opus' })
+    await wrapper.find('.model-selector__trigger').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.ms-item--active').attributes('data-model')).toBe('gpt-5.6-sol')
+  })
+
   it('can render as a triggerless popup and emit close', async () => {
     const wrapper = mountSelector({ triggerless: true })
     await flushPromises()

@@ -3595,7 +3595,7 @@ async def list_models(request: Request) -> JSONResponse:
             "claude_work": work_default,
             "claude_personal": personal_default,
             "openrouter": openrouter_default,
-            "codex": "opus" if codex_tiers else "",
+            "codex": codex_default,
         },
         # Per-backend tier models, so the picker can show
         # "sonnet -> kimi (ollama) / gpt-5.6-terra (codex)". Tier names are

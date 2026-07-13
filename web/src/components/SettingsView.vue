@@ -1238,20 +1238,23 @@
           </p>
 
           <!-- Auto-update GitHub skills -->
-          <div class="setting-row setting-row--inline">
+          <div class="setting-row setting-row--inline setting-row--toggle">
             <div class="routine-info">
               <span class="routine-name">Auto-update GitHub skills</span>
               <p class="hint hint--compact">
                 If enabled, Ciaobot checks GitHub for updates to locked package skills on boot.
               </p>
             </div>
-            <input
-              type="checkbox"
-              class="settings-checkbox"
-              v-model="autoUpdateGithubSkills"
-              :disabled="autoUpdateSaving"
-              @change="saveAutoUpdateGithubSkills"
-            />
+            <label class="settings-checkbox-hit">
+              <input
+                type="checkbox"
+                class="settings-checkbox"
+                v-model="autoUpdateGithubSkills"
+                :disabled="autoUpdateSaving"
+                aria-label="Auto-update GitHub skills"
+                @change="saveAutoUpdateGithubSkills"
+              />
+            </label>
           </div>
           <div v-if="autoUpdateResult" class="action-result">{{ autoUpdateResult }}</div>
 
@@ -2975,15 +2978,10 @@ function isCustomWorkspaceModel(model: string): boolean {
 
 function workspaceModelSectionsForProvider(provider: WorkspaceProvider, currentModelValue: string): ModelSection[] {
   if (provider === 'codex') {
-    const mappings = workspaceModels.value?.alias_tiers?.codex || {}
-    const models: string[] = (['haiku', 'sonnet', 'opus'] as TierKey[]).filter((tier) => Boolean(mappings[tier]))
-    const badges: Record<string, string[]> = {
-      haiku: ['Luna', mappings.haiku].filter(Boolean),
-      sonnet: ['Terra', mappings.sonnet].filter(Boolean),
-      opus: ['Sol', mappings.opus].filter(Boolean),
-    }
+    const models = [...(workspaceModels.value?.codex_models || [])]
+    const badges = providerModelBadges('codex', models, workspaceModels.value?.alias_tiers)
     const current = currentModelValue.trim()
-    if (current && !models.includes(current)) models.push(current)
+    if (current && !modelTiers.some((tier) => tier.key === current) && !models.includes(current)) models.push(current)
     return models.length
       ? [{ key: 'codex', label: 'OpenAI Codex', models, modelBadges: badges }]
       : []
@@ -4046,6 +4044,15 @@ async function doPackageUpdate() {
   cursor: pointer;
   accent-color: var(--accent);
 }
+.settings-checkbox-hit {
+  width: var(--touch);
+  height: var(--touch);
+  flex: 0 0 var(--touch);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
 .voice-warning {
   display: flex;
   align-items: flex-start;
@@ -4354,7 +4361,7 @@ async function doPackageUpdate() {
     padding: var(--space-3);
   }
   .settings-card-header--split,
-  .setting-row--inline,
+  .setting-row--inline:not(.setting-row--toggle),
   .setting-row-main--inline {
     flex-direction: column;
     align-items: stretch;

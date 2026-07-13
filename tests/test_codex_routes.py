@@ -76,7 +76,7 @@ def test_models_endpoint_exposes_codex_catalog_and_per_model_effort(
     data = json.loads(response.body)
 
     assert data["provider_models"]["codex"] == ["gpt-test"]
-    assert data["provider_defaults"]["codex"] == "opus"
+    assert data["provider_defaults"]["codex"] == "gpt-test"
     assert data["alias_tiers"]["codex"] == {
         "haiku": "gpt-test",
         "sonnet": "gpt-test",

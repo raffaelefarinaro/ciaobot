@@ -161,7 +161,11 @@ function isSelected(model: string): boolean {
 }
 
 function isActive(model: string): boolean {
-  return activeModelSet.value.has(model)
+  if (activeModelSet.value.has(model)) return true
+  const aliases = normalizedSections.value
+    .find((section) => section.models.includes(model))
+    ?.modelBadges?.[model] || []
+  return aliases.some((alias) => activeModelSet.value.has(alias.toLowerCase()))
 }
 
 function modelBadges(section: ModelSection, model: string): string[] {

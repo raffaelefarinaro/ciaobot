@@ -876,6 +876,7 @@ async function confirmDeleteChat(chatId: string) {
   cursor: pointer;
   transition: opacity 120ms var(--ease);
   min-height: var(--touch);
+  align-items: center;
   padding: 0 4px;
   border: 0;
   background: transparent;

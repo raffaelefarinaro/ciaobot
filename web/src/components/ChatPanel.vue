@@ -1192,6 +1192,9 @@ const activeModelHighlights = computed(() => {
   const c = chat.value
   if (!c) return []
   const tier = tierAlias(c.model)
+  if (tier && activeBucket.value === 'codex') {
+    return [modelsResponse.value?.alias_tiers?.codex?.[tier] || tier]
+  }
   if (tier) return [tier]
   const effective = effectiveModelForBucket(c.model, activeBucket.value)
   return [effective || c.model]

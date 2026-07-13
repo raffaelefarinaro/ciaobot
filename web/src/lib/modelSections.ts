@@ -20,14 +20,6 @@ const TIER_LABELS: Record<string, string> = {
 }
 
 const ANTHROPIC_MODELS = ['haiku', 'sonnet', 'opus', 'fable']
-// OpenAI's tiered families line up with Claude's: luna≈haiku, terra≈sonnet,
-// sol≈opus. The picker offers the shared tier names; the badge shows the
-// catalog model each tier resolves to.
-const CODEX_FAMILY_LABELS: Record<string, string> = {
-  haiku: 'Luna',
-  sonnet: 'Terra',
-  opus: 'Sol',
-}
 
 export function parseModelList(raw: string): string[] {
   const seen = new Set<string>()
@@ -96,14 +88,14 @@ export function sectionsFromModelsResponse(response: ModelsResponse | null): Mod
 
   sections.push({ key: 'anthropic', label: 'Anthropic', models: ANTHROPIC_MODELS })
 
-  const codexTiers = response.alias_tiers?.codex || {}
-  const codexModels = ['haiku', 'sonnet', 'opus'].filter((tier) => Boolean(codexTiers[tier]))
+  const codexModels = orderedUnique(response.codex_models || response.provider_models?.codex || [])
   if (codexModels.length) {
-    const modelBadges: Record<string, string[]> = {}
-    for (const tier of codexModels) {
-      modelBadges[tier] = [CODEX_FAMILY_LABELS[tier], codexTiers[tier]].filter(Boolean)
-    }
-    sections.push({ key: 'codex', label: 'OpenAI Codex', models: codexModels, modelBadges })
+    sections.push({
+      key: 'codex',
+      label: 'OpenAI Codex',
+      models: codexModels,
+      modelBadges: providerModelBadges('codex', codexModels, response.alias_tiers),
+    })
   }
 
   // Ollama: cloud allowlist plus locally discovered daemon models.

@@ -44,7 +44,10 @@ describe('modelSections', () => {
       'fable',
     ])
     expect(sections.find((section) => section.key === 'ollama')?.models).toEqual(['kimi-k2.7-code:cloud'])
-    expect(sections.find((section) => section.key === 'codex')?.models).toEqual(['haiku', 'sonnet', 'opus'])
+    expect(sections.find((section) => section.key === 'codex')?.models).toEqual(['gpt-test'])
+    expect(sections.find((section) => section.key === 'codex')?.modelBadges).toEqual({
+      'gpt-test': ['Haiku', 'Sonnet', 'Opus'],
+    })
     expect(sections.find((section) => section.key === 'openrouter')?.models).toEqual([
       'anthropic/claude-sonnet-4.5',
     ])
