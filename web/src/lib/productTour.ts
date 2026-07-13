@@ -46,7 +46,7 @@ export const PRODUCT_TOUR_STEPS: ProductTourStep[] = [
     id: 'welcome',
     title: 'Welcome to Ciaobot',
     body:
-      'This quick tour shows how to navigate workspaces, annotate chats, preview files inline, and pin documents beside your conversation. You can replay it anytime from Settings → Home.',
+      'This quick tour shows how to navigate workspaces, annotate chats, preview files inline, and pin documents beside your conversation. You can replay it anytime from Settings → Home while onboarding is in progress.',
     placement: 'center',
   },
   {
@@ -151,7 +151,7 @@ export const PRODUCT_TOUR_STEPS: ProductTourStep[] = [
     id: 'done',
     title: 'You are set',
     body:
-      'The Getting started checklist on the home screen walks you through your first project, workspace, and schedule — each step opens the real page. Ask "what can Ciaobot do?" in any chat for a deeper walkthrough, and replay this UI tour from Settings → Home whenever you like.',
+      'The Getting started checklist on the home screen walks you through your first project, workspace, and schedule — each step opens the real page. Ask "what can Ciaobot do?" in any chat for a deeper walkthrough.',
     placement: 'center',
   },
 ]
