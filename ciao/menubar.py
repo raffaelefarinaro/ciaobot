@@ -399,6 +399,7 @@ def chat_menu_title(
     title: str,
     *,
     unread: bool,
+    needs_input: bool = False,
     working: bool = False,
     working_has_icon: bool = False,
     workspace: str = "",
@@ -408,12 +409,15 @@ def chat_menu_title(
     """Menu label for an open chat.
 
     Working chats get a pulsing template icon when frames are packaged;
-    otherwise a static ◌ prefix. Unread chats get a ● prefix and can show
+    otherwise a static ◌ prefix. Chats blocked on AskUserQuestion get a ?
+    prefix (even when already read). Unread chats get a ● prefix and can show
     both signals when a working chat is also unread (matching the PWA).
     """
 
     text = title.strip() or "Untitled chat"
-    if working and not working_has_icon:
+    if needs_input:
+        prefix = "? "
+    elif working and not working_has_icon:
         prefix = "◌ "
     elif unread:
         prefix = "● "
@@ -428,14 +432,14 @@ def chat_menu_title(
     return f"{prefix}{text}{suffix}"
 
 
-def menubar_badge_title(unread_count: int) -> str:
-    """Short count shown beside the menu bar icon (empty when there is nothing unread)."""
+def menubar_badge_title(attention_count: int) -> str:
+    """Short count shown beside the menu bar icon (empty when nothing needs attention)."""
 
-    if unread_count <= 0:
+    if attention_count <= 0:
         return ""
-    if unread_count > 99:
+    if attention_count > 99:
         return "99+"
-    return str(unread_count)
+    return str(attention_count)
 
 
 def chat_url(workspace: Path, port: int, chat_id: str) -> str:
@@ -549,6 +553,24 @@ def chat_is_unread(chat: dict) -> bool:
     return bool(activity) and activity > read
 
 
+def chat_needs_input(chat: dict) -> bool:
+    """True when the model paused on AskUserQuestion and awaits an answer."""
+
+    if chat.get("archived"):
+        return False
+    raw = chat.get("pending_question")
+    if not raw or not isinstance(raw, str):
+        return False
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    questions = parsed.get("questions")
+    return isinstance(questions, list) and len(questions) > 0
+
+
 def _open_chat_from_state(
     chat_id: str, chat: dict, *, projects: dict[str, dict]
 ) -> OpenChat:
@@ -592,6 +614,28 @@ def count_unread_chats(workspace: Path) -> int:
 
     _, chats = _load_web_state(workspace)
     return sum(1 for chat in chats.values() if chat_is_unread(chat))
+
+
+def count_attention_chats(workspace: Path) -> int:
+    """Chats that are unread and/or blocked on AskUserQuestion."""
+
+    _, chats = _load_web_state(workspace)
+    return sum(
+        1
+        for chat in chats.values()
+        if chat_is_unread(chat) or chat_needs_input(chat)
+    )
+
+
+def needs_input_chat_ids(workspace: Path) -> set[str]:
+    """Non-archived chats waiting on AskUserQuestion."""
+
+    _, chats = _load_web_state(workspace)
+    return {
+        chat_id
+        for chat_id, chat in chats.items()
+        if chat_needs_input(chat)
+    }
 
 
 _INET_RE = re.compile(r"^\s*inet (\d+\.\d+\.\d+\.\d+)", re.MULTILINE)
@@ -897,6 +941,7 @@ def run_menubar(workspace: Path, port: int) -> int:
         status: ServerStatus,
         chats: list[OpenChat],
         unread_ids: set[str],
+        needs_input_ids: set[str],
         working_ids: set[str],
         addresses: list[str],
         pkg: dict[str, object],
@@ -913,11 +958,13 @@ def run_menubar(workspace: Path, port: int) -> int:
         for chat in chats:
             working = chat.chat_id in working_ids
             unread = chat.chat_id in unread_ids
+            needs_input = chat.chat_id in needs_input_ids
             working_has_icon = working and bool(dot_frames)
             item = rumps.MenuItem(
                 chat_menu_title(
                     chat.title,
                     unread=unread,
+                    needs_input=needs_input,
                     working=working,
                     working_has_icon=working_has_icon,
                     workspace=chat.workspace,
@@ -1043,13 +1090,14 @@ def run_menubar(workspace: Path, port: int) -> int:
         chats = read_open_chats(workspace)
         unread_chats = read_unread_chats(workspace)
         unread_ids = {chat.chat_id for chat in unread_chats}
-        unread_count = count_unread_chats(workspace)
+        needs_input_ids = needs_input_chat_ids(workspace)
+        attention_count = count_attention_chats(workspace)
         working_ids = set(state["working_ids"])
         addresses = server_addresses(port)
         pkg = status_fetcher()
         login_status = start_at_login_status()
         state["package_status"] = pkg
-        app.title = menubar_badge_title(unread_count)
+        app.title = menubar_badge_title(attention_count)
 
         # Rebuild only when content changed so an open menu doesn't flicker.
         show_workspace = len({chat.workspace for chat in chats if chat.workspace}) > 1
@@ -1061,12 +1109,13 @@ def run_menubar(workspace: Path, port: int) -> int:
                     c.title,
                     c.workspace,
                     c.chat_id in unread_ids,
+                    c.chat_id in needs_input_ids,
                     c.chat_id in working_ids,
                     show_workspace,
                 )
                 for c in chats
             ),
-            unread_count,
+            attention_count,
             tuple(addresses),
             package_update_fingerprint(pkg),
             state["updating"],
@@ -1074,7 +1123,7 @@ def run_menubar(workspace: Path, port: int) -> int:
         )
         if fingerprint != state["fingerprint"]:
             state["fingerprint"] = fingerprint
-            _rebuild_menu(status, chats, unread_ids, working_ids, addresses, pkg, login_status)
+            _rebuild_menu(status, chats, unread_ids, needs_input_ids, working_ids, addresses, pkg, login_status)
 
     threading.Thread(target=poll_working, daemon=True).start()
     rumps.Timer(refresh, POLL_SECONDS).start()

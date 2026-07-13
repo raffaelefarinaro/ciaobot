@@ -3,8 +3,8 @@
     <button
       ref="btnRef"
       class="bell-btn touch-hit"
-      :class="{ 'has-unread': totalUnread > 0 }"
-      :aria-label="totalUnread > 0 ? `${totalUnread} unread chats` : 'Notifications'"
+      :class="{ 'has-unread': totalActionRequired > 0 }"
+      :aria-label="totalActionRequired > 0 ? `${totalActionRequired} chats need attention` : 'Notifications'"
       :aria-expanded="open"
       @click="toggle"
     >
@@ -22,7 +22,7 @@
         <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
         <path d="M13.73 21a2 2 0 0 1-3.46 0" />
       </svg>
-      <span v-if="totalUnread > 0" class="bell-badge">{{ totalUnread }}</span>
+      <span v-if="totalActionRequired > 0" class="bell-badge">{{ totalActionRequired }}</span>
     </button>
 
     <teleport to="body">
@@ -37,13 +37,13 @@
         <div class="bell-header">
           <span class="bell-title">Notifications</span>
           <button
-            v-if="totalUnread > 0"
+            v-if="totalActionRequired > 0"
             class="bell-mark-all"
             @click="onMarkAll"
           >Mark all read</button>
         </div>
         <div v-if="unreadChats.length === 0" class="bell-empty">
-          No unread chats.
+          No chats need attention.
         </div>
         <ul v-else class="bell-list">
           <li
@@ -58,6 +58,7 @@
             </div>
             <div class="bell-item-sub">
               <span class="bell-item-project">{{ projectName(chat.chat_id) }}</span>
+              <span v-if="store.chatNeedsInput(chat.chat_id)" class="bell-item-needs-input">Needs your answer</span>
             </div>
           </li>
         </ul>
@@ -100,19 +101,21 @@ async function toggle() {
   }
 }
 
-const totalUnread = computed(() =>
+const totalActionRequired = computed(() =>
   store.chats.reduce(
-    (sum, c) => sum + (c.archived ? 0 : store.chatUnread(c.chat_id)),
+    (sum, c) => sum + (c.archived ? 0 : (store.chatNeedsInput(c.chat_id) || store.chatUnread(c.chat_id) > 0 ? 1 : 0)),
     0,
   ),
 )
 
-const unreadChats = computed<ChatInfo[]>(() =>
+const actionRequiredChats = computed<ChatInfo[]>(() =>
   store.chats
-    .filter(c => !c.archived && store.chatUnread(c.chat_id) > 0)
+    .filter(c => !c.archived && (store.chatNeedsInput(c.chat_id) || store.chatUnread(c.chat_id) > 0))
     .slice()
     .sort((a, b) => (b.last_activity_at || '').localeCompare(a.last_activity_at || '')),
 )
+
+const unreadChats = computed<ChatInfo[]>(() => actionRequiredChats.value)
 
 function projectName(chatId: string): string {
   const project = store.projectFor(chatId)
@@ -288,6 +291,14 @@ function formatTime(iso: string | undefined): string {
   margin-top: 2px;
   font-size: 11px;
   color: var(--fg2);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bell-item-needs-input {
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .bell-item-project {

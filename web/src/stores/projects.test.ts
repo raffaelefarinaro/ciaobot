@@ -176,6 +176,43 @@ describe('Codex structured questions', () => {
     }))
   })
 
+  test('chatNeedsInput reflects live and persisted AskUserQuestion state', () => {
+    const store = useProjectStore()
+    const chatId = 'question-chat'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Question',
+      model: 'gpt-test',
+      provider: 'codex',
+      mode: 'auto',
+      session_id: 'thread-1',
+      created_at: '',
+      archived: false,
+      pending_question: JSON.stringify({
+        questions: [{ id: 'q1', question: 'Pick one', options: [{ label: 'A' }] }],
+      }),
+    }]
+
+    expect(store.chatNeedsInput(chatId)).toBe(true)
+
+    store.activeQuestions[chatId] = [{
+      id: 'q1',
+      question: 'Pick one',
+      header: '',
+      multiSelect: false,
+      allowOther: false,
+      isSecret: false,
+      requestId: 'req-1',
+      options: [{ label: 'A', description: '' }],
+    }]
+    expect(store.chatNeedsInput(chatId)).toBe(true)
+
+    delete store.activeQuestions[chatId]
+    store.chats[0].pending_question = ''
+    expect(store.chatNeedsInput(chatId)).toBe(false)
+  })
+
   test('surfaces approval requests and preserves Codex quota metadata', () => {
     const store = useProjectStore()
     const chatId = 'codex-gates'

@@ -711,6 +711,19 @@ export const useProjectStore = defineStore('projects', () => {
     return activity && activity > read ? 1 : 0
   }
 
+  // A chat blocked on AskUserQuestion — persisted on the chat and mirrored in
+  // ephemeral activeQuestions while the picker is live. Unlike unread, this
+  // stays visible even when the chat is the active tab.
+  function chatNeedsInput(chatId: string): boolean {
+    if (activeQuestions.value[chatId]?.length) return true
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    return parseQuestions(chat?.pending_question).length > 0
+  }
+
+  function projectNeedsInput(projectId: string): number {
+    return projectChats(projectId).filter(c => chatNeedsInput(c.chat_id)).length
+  }
+
   function projectUnread(projectId: string): number {
     return projectChats(projectId).reduce((sum, c) => sum + chatUnread(c.chat_id), 0)
   }
@@ -2893,7 +2906,7 @@ export const useProjectStore = defineStore('projects', () => {
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
-    chatUnread, projectUnread, workspaceUnread, clearUnread, markRead, markAllRead,
+    chatUnread, chatNeedsInput, projectNeedsInput, projectUnread, workspaceUnread, clearUnread, markRead, markAllRead,
     recentChats, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
     // Actions
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,

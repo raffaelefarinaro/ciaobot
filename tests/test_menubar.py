@@ -363,6 +363,17 @@ def test_chat_menu_title_marks_unread_with_dot() -> None:
     assert menubar.chat_menu_title("x" * 80, unread=True, max_length=10).startswith("● ")
 
 
+def test_chat_menu_title_marks_needs_input_with_question_mark() -> None:
+    assert menubar.chat_menu_title("Test", unread=False, needs_input=True) == "? Test"
+    assert menubar.chat_menu_title("Test", unread=True, needs_input=True) == "? Test"
+    assert menubar.chat_menu_title(
+        "Test",
+        unread=False,
+        needs_input=True,
+        working=True,
+    ) == "? Test"
+
+
 def test_chat_menu_title_marks_working_and_takes_precedence() -> None:
     assert menubar.chat_menu_title("Test", unread=False, working=True) == "◌ Test"
     assert menubar.chat_menu_title("Test", unread=True, working=True) == "◌ Test"
@@ -511,6 +522,62 @@ def test_chat_is_unread_matches_pwa_logic() -> None:
             "last_read_at": "",
         }
     )
+
+
+def test_chat_needs_input_matches_pending_question() -> None:
+    assert menubar.chat_needs_input(
+        {
+            "pending_question": json.dumps(
+                {"questions": [{"question": "Pick one", "options": [{"label": "A"}]}]}
+            ),
+        }
+    )
+    assert not menubar.chat_needs_input({"pending_question": ""})
+    assert not menubar.chat_needs_input({"pending_question": "{not json"})
+    assert not menubar.chat_needs_input(
+        {"pending_question": json.dumps({"questions": []})}
+    )
+    assert not menubar.chat_needs_input(
+        {
+            "archived": True,
+            "pending_question": json.dumps({"questions": [{"question": "Still blocked?"}]}),
+        }
+    )
+
+
+def test_count_attention_chats_includes_read_questions(tmp_path: Path) -> None:
+    state = tmp_path / ".runtime" / "web_projects.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(
+        json.dumps(
+            {
+                "chats": {
+                    "read-question": {
+                        "title": "Answer me",
+                        "last_activity_at": "2026-01-02T10:00:00",
+                        "last_read_at": "2026-01-02T11:00:00",
+                        "pending_question": json.dumps(
+                            {"questions": [{"question": "Which tier?"}]}
+                        ),
+                    },
+                    "unread": {
+                        "title": "Unread",
+                        "last_activity_at": "2026-01-03T10:00:00",
+                        "last_read_at": "",
+                    },
+                    "idle": {
+                        "title": "Idle",
+                        "last_activity_at": "2026-01-01T10:00:00",
+                        "last_read_at": "2026-01-01T11:00:00",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert menubar.needs_input_chat_ids(tmp_path) == {"read-question"}
+    assert menubar.count_attention_chats(tmp_path) == 2
 
 
 def test_read_unread_chats_filters_read_and_sorts_by_activity(tmp_path: Path) -> None:
