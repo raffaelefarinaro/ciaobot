@@ -114,7 +114,12 @@
             @close="showModelPicker = false"
           />
         </div>
-        <button class="btn-icon" @click="doArchive" title="Archive chat" aria-label="Archive chat">
+        <button
+          class="archive-btn touch-hit"
+          @click="doArchive"
+          title="Archive chat"
+          aria-label="Archive chat"
+        >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
         </button>
       </template>
@@ -1057,6 +1062,14 @@ function scrollToBottom() {
   isNearBottom.value = true
 }
 
+// Scroll after layout when we're already following the tail. Call checkScroll
+// only after scrolling — running it first clears isNearBottom when new content
+// just grew the list (user bubble, streaming indicator, etc.).
+function stickToBottomIfNeeded() {
+  if (!isNearBottom.value) return
+  scrollToBottom()
+}
+
 const pendingApprovals = computed(() => {
   const id = store.activeChatId
   if (!id) return []
@@ -1718,7 +1731,7 @@ onMounted(async () => {
   notifyChatFocused(chat.value?.chat_id)
   messagesEl.value?.addEventListener('scroll', checkScroll, { passive: true })
   if (messagesEl.value && typeof ResizeObserver !== 'undefined') {
-    messagesResizeObserver = new ResizeObserver(() => checkScroll())
+    messagesResizeObserver = new ResizeObserver(() => stickToBottomIfNeeded())
     messagesResizeObserver.observe(messagesEl.value)
   }
   nextTick(() => {
@@ -2236,14 +2249,7 @@ watch(() => store.activeChatId, () => {
 watch(
   () => [store.activeMessages.length, store.currentStreamingText, store.currentActivity.length],
   () => {
-    nextTick(() => {
-      checkScroll()
-      if (!isNearBottom.value) return
-      if (messagesEl.value) {
-        messagesEl.value.scrollTop = messagesEl.value.scrollHeight
-        checkScroll()
-      }
-    })
+    nextTick(() => stickToBottomIfNeeded())
   },
   { deep: true }
 )
@@ -2338,9 +2344,15 @@ function send() {
   inputText.value = ''
   // Sending implies following the reply: jump to the bottom even if the
   // user had scrolled up, so their bubble and the response are in view.
+  // Double nextTick + rAF: the user bubble and streaming row render after
+  // the first paint, so one-shot scroll can land above the true bottom.
   nextTick(() => {
     scrollToBottom()
     autoResize()
+    nextTick(() => {
+      scrollToBottom()
+      requestAnimationFrame(() => scrollToBottom())
+    })
   })
 }
 
@@ -4202,6 +4214,24 @@ details[open] > .activity-summary::before {
 }
 .model-picker-btn:hover { background: var(--bg3); }
 .model-picker-btn:active { transform: scale(0.96); }
+
+.archive-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: content-box;
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
+  min-height: 30px;
+  border-radius: 6px;
+  color: var(--fg2);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.archive-btn:hover { background: var(--bg3); color: var(--fg); }
+.archive-btn:active { transform: scale(0.96); }
 
 .model-picker-dropdown {
   position: absolute;

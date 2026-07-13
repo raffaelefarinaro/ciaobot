@@ -13,6 +13,7 @@ import json
 import os
 import plistlib
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -24,6 +25,10 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 
+from ciao.menubar_prefs import (
+    notifications_enabled,
+    set_notifications_enabled,
+)
 from ciao.package_version import _github_repo, make_cached_package_status, update_package
 
 
@@ -135,9 +140,9 @@ def open_url(workspace: Path, port: int) -> str:
 
 
 # Bundle IDs of the native launcher this project installs itself (see
-# cli.py's _write_app_shortcut / _OUR_BUNDLE_IDS). A browser-installed PWA
-# can share the launcher's "Ciaobot.app" name, so find_installed_webapp()
-# excludes these IDs to avoid just relaunching the same shell-script wrapper.
+# cli.py's _write_app_shortcut / _OUR_BUNDLE_IDS). A browser-installed PWA can
+# share the launcher's "Ciaobot.app" name, so browser_pwa_duplicate_paths()
+# excludes these IDs to avoid removing our own shell-script wrapper.
 _OUR_LAUNCHER_BUNDLE_IDS = frozenset({"local.ciao.app", "local.ciaobot.app"})
 
 
@@ -150,42 +155,162 @@ def _bundle_identifier(app_bundle: Path) -> str:
     return str(plist.get("CFBundleIdentifier") or "")
 
 
-def find_installed_webapp(app_name: str = "Ciaobot") -> Path | None:
-    """Locate a browser-installed PWA bundle for ``app_name``, if any.
+_BROWSER_APP_MODE_CANDIDATES = (
+    "Google Chrome",
+    "Google Chrome Canary",
+    "Chromium",
+    "Microsoft Edge",
+    "Brave Browser",
+)
 
-    Chrome/Edge's "Install <app>" and Safari's "Add to Dock" each drop a real
-    .app bundle under one of a few well-known folders when the PWA is
-    installed. Opening links through that bundle (via ``open -a``) puts them
-    in the installed app's own window instead of a browser tab.
-    """
+
+def _installed_browser_app_names() -> list[str]:
+    applications = Path("/Applications")
+    return [
+        name
+        for name in _BROWSER_APP_MODE_CANDIDATES
+        if (applications / f"{name}.app").is_dir()
+    ]
+
+
+def browser_app_mode_command(url: str) -> list[str] | None:
+    """Open ``url`` in a browser app window without a separate PWA install."""
+
+    if sys.platform != "darwin":
+        return None
+    names = _installed_browser_app_names()
+    if not names:
+        return None
+    return ["open", "-a", names[0], "--args", f"--app={url}"]
+
+
+def browser_pwa_duplicate_paths(app_name: str = "Ciaobot") -> list[Path]:
+    """Browser-installed PWAs (and legacy helpers) that duplicate ``Ciaobot.app``."""
 
     home = Path.home()
-    candidates = [
-        home / "Applications" / f"{app_name}.app",
-        home / "Applications" / "Chrome Apps.localized" / f"{app_name}.app",
-        Path("/Applications") / f"{app_name}.app",
-        Path("/Applications") / "Chrome Apps.localized" / f"{app_name}.app",
+    roots = [
+        home / "Applications",
+        Path("/Applications"),
+        home / "Applications" / "Chrome Apps.localized",
+        Path("/Applications") / "Chrome Apps.localized",
     ]
-    for candidate in candidates:
-        if not candidate.is_dir():
+    seen: set[Path] = set()
+    paths: list[Path] = []
+    for root in roots:
+        candidate = (root / f"{app_name}.app").resolve()
+        if candidate in seen or not candidate.is_dir():
             continue
+        seen.add(candidate)
         if _bundle_identifier(candidate) in _OUR_LAUNCHER_BUNDLE_IDS:
             continue
-        return candidate
-    return None
+        paths.append(candidate)
+    for root in (Path("/Applications"), home / "Applications"):
+        legacy = (root / "Ciaobot Menu Bar.app").resolve()
+        if legacy.is_dir() and legacy not in seen:
+            paths.append(legacy)
+            seen.add(legacy)
+    return paths
+
+
+def unregister_app_bundle(app_root: Path) -> None:
+    """Drop a bundle from Launch Services so Launchpad stops listing it."""
+
+    if sys.platform != "darwin":
+        return
+    lsregister = Path(
+        "/System/Library/Frameworks/CoreServices.framework/Frameworks/"
+        "LaunchServices.framework/Support/lsregister"
+    )
+    if not lsregister.is_file():
+        return
+    try:
+        subprocess.run(
+            [str(lsregister), "-u", str(app_root)],
+            check=False,
+            capture_output=True,
+        )
+    except OSError:
+        pass
+
+
+def remove_browser_pwa_duplicates(app_name: str = "Ciaobot") -> list[Path]:
+    """Remove duplicate browser PWAs so only the native ``Ciaobot.app`` remains."""
+
+    removed: list[Path] = []
+    for path in browser_pwa_duplicate_paths(app_name):
+        unregister_app_bundle(path)
+        try:
+            shutil.rmtree(path)
+        except OSError:
+            continue
+        removed.append(path)
+    return removed
 
 
 def open_command(url: str) -> list[str]:
-    """``open`` invocation for a URL, preferring an installed PWA when found."""
+    """``open`` argv for a URL in an app-like window when possible."""
 
-    webapp = find_installed_webapp()
-    if webapp is not None:
-        return ["open", "-a", str(webapp), url]
+    app_mode = browser_app_mode_command(url)
+    if app_mode is not None:
+        return app_mode
     return ["open", url]
 
 
-def open_app_command(workspace: Path, port: int) -> list[str]:
-    return open_command(open_url(workspace, port))
+def _python_with_ciao() -> str:
+    """Return a Python interpreter that can import ``ciao``.
+
+    In the packaged menu-bar app ``sys.executable`` can point at a stock
+    system Python that has no ``ciao`` on its path — observed as
+    ``python3.12: No module named 'ciao'`` when the app bundle launches a
+    plain interpreter, so ``python -m ciao.window`` (and the older
+    ``-m ciao.cli``) failed silently. This process already imported ``ciao``
+    from *some* environment, so derive that environment's interpreter from
+    the package location and prefer it; fall back to ``sys.executable``.
+    """
+
+    try:
+        import ciao as _ciao_pkg
+
+        pkg_dir = Path(_ciao_pkg.__file__).resolve().parent  # .../site-packages/ciao
+        # venv/keg layout: <prefix>/lib/pythonX.Y/site-packages/ciao, so the
+        # interpreter lives at <prefix>/bin/python (parents[3]). Also probe
+        # parents[2] for flatter layouts.
+        for prefix in (pkg_dir.parents[3], pkg_dir.parents[2]):
+            for name in ("python", "python3"):
+                candidate = prefix / "bin" / name
+                if candidate.exists():
+                    return str(candidate)
+    except Exception:
+        pass
+    return sys.executable
+
+
+def _window_launch_command(url: str, workspace: Path | None) -> list[str]:
+    """argv that opens ``url`` in the native window (single-instance aware)."""
+
+    cmd = [_python_with_ciao(), "-m", "ciao.window", url]
+    if workspace is not None:
+        cmd += ["--workspace", str(workspace)]
+    return cmd
+
+
+def launch_ui(url: str, workspace: Path | None = None) -> None:
+    """Open the Ciaobot UI without blocking the caller (menu bar callbacks).
+
+    On macOS the URL opens in the native WebKit window (``ciao.window``);
+    passing ``workspace`` lets it focus an already-open window instead of
+    stacking a duplicate.
+    """
+
+    if sys.platform == "darwin":
+        subprocess.Popen(
+            _window_launch_command(url, workspace),
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return
+    subprocess.run(open_command(url), check=False)
 
 
 def restart_server_command(uid: int | None = None) -> list[str]:
@@ -345,6 +470,51 @@ def icon_path(name: str) -> str:
     return str(resources.files("ciao.stock").joinpath("deploy", name))
 
 
+def _menubar_app_candidates() -> list[Path]:
+    """Installed menu-bar app bundles, newest path first."""
+
+    home_apps = Path.home() / "Applications"
+    system_apps = Path("/Applications")
+    names = ("Ciaobot.app",)
+    candidates: list[Path] = []
+    for root in (system_apps, home_apps):
+        for name in names:
+            candidate = root / name
+            if candidate.is_dir():
+                candidates.append(candidate)
+    return candidates
+
+
+def _ensure_notification_bundle() -> None:
+    """Make Notification Center attribute alerts to Ciaobot, not Python.
+
+    When launchd starts ``python -m ciao.cli menubar`` directly, macOS has no
+    app identity and groups alerts under "Python". Setup writes a
+    ``CiaobotMenuBar`` helper inside ``Ciaobot.app`` and the LaunchAgent
+    should exec the bundle-local ``python`` symlink so alerts stay under the
+    existing Ciaobot app. As a fallback, load that bundle explicitly when we
+    can find it.
+    """
+
+    if sys.platform != "darwin":
+        return
+    try:
+        from Foundation import NSBundle
+    except Exception:
+        return
+
+    main = NSBundle.mainBundle()
+    if main is not None:
+        ident = main.bundleIdentifier()
+        if ident and ident not in ("org.python.python", "com.apple.python"):
+            return
+
+    for app_root in _menubar_app_candidates():
+        bundle = NSBundle.bundleWithPath_(str(app_root))
+        if bundle is not None and bundle.load():
+            return
+
+
 def spin_icon_paths() -> list[str]:
     """Ordered spinning-head frame paths that actually exist on disk.
 
@@ -399,6 +569,7 @@ def chat_menu_title(
     title: str,
     *,
     unread: bool,
+    needs_input: bool = False,
     working: bool = False,
     working_has_icon: bool = False,
     workspace: str = "",
@@ -408,12 +579,15 @@ def chat_menu_title(
     """Menu label for an open chat.
 
     Working chats get a pulsing template icon when frames are packaged;
-    otherwise a static ◌ prefix. Unread chats get a ● prefix and can show
+    otherwise a static ◌ prefix. Chats blocked on AskUserQuestion get a ?
+    prefix (even when already read). Unread chats get a ● prefix and can show
     both signals when a working chat is also unread (matching the PWA).
     """
 
     text = title.strip() or "Untitled chat"
-    if working and not working_has_icon:
+    if needs_input:
+        prefix = "? "
+    elif working and not working_has_icon:
         prefix = "◌ "
     elif unread:
         prefix = "● "
@@ -428,14 +602,14 @@ def chat_menu_title(
     return f"{prefix}{text}{suffix}"
 
 
-def menubar_badge_title(unread_count: int) -> str:
-    """Short count shown beside the menu bar icon (empty when there is nothing unread)."""
+def menubar_badge_title(attention_count: int) -> str:
+    """Short count shown beside the menu bar icon (empty when nothing needs attention)."""
 
-    if unread_count <= 0:
+    if attention_count <= 0:
         return ""
-    if unread_count > 99:
+    if attention_count > 99:
         return "99+"
-    return str(unread_count)
+    return str(attention_count)
 
 
 def chat_url(workspace: Path, port: int, chat_id: str) -> str:
@@ -549,6 +723,24 @@ def chat_is_unread(chat: dict) -> bool:
     return bool(activity) and activity > read
 
 
+def chat_needs_input(chat: dict) -> bool:
+    """True when the model paused on AskUserQuestion and awaits an answer."""
+
+    if chat.get("archived"):
+        return False
+    raw = chat.get("pending_question")
+    if not raw or not isinstance(raw, str):
+        return False
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    questions = parsed.get("questions")
+    return isinstance(questions, list) and len(questions) > 0
+
+
 def _open_chat_from_state(
     chat_id: str, chat: dict, *, projects: dict[str, dict]
 ) -> OpenChat:
@@ -592,6 +784,28 @@ def count_unread_chats(workspace: Path) -> int:
 
     _, chats = _load_web_state(workspace)
     return sum(1 for chat in chats.values() if chat_is_unread(chat))
+
+
+def count_attention_chats(workspace: Path) -> int:
+    """Chats that are unread and/or blocked on AskUserQuestion."""
+
+    _, chats = _load_web_state(workspace)
+    return sum(
+        1
+        for chat in chats.values()
+        if chat_is_unread(chat) or chat_needs_input(chat)
+    )
+
+
+def needs_input_chat_ids(workspace: Path) -> set[str]:
+    """Non-archived chats waiting on AskUserQuestion."""
+
+    _, chats = _load_web_state(workspace)
+    return {
+        chat_id
+        for chat_id, chat in chats.items()
+        if chat_needs_input(chat)
+    }
 
 
 _INET_RE = re.compile(r"^\s*inet (\d+\.\d+\.\d+\.\d+)", re.MULTILINE)
@@ -690,6 +904,30 @@ def run_menubar(workspace: Path, port: int) -> int:
     except Exception:
         pass
 
+    def _on_main_thread(func, *args, **kwargs) -> None:
+        """Run a UI callable on the Cocoa main thread.
+
+        rumps/AppKit objects (NSAlert, NSWindow, notifications, menu items)
+        may only be touched from the main thread; calling them from a worker
+        thread raises "NSWindow should only be instantiated on the main
+        thread!" and crashes the thread — which is exactly what the update
+        flow's ``rumps.alert``/``rumps.notification``/``refresh`` calls did.
+        Background work marshals its UI through here. Falls back to a direct
+        call if PyObjC's AppHelper is unavailable.
+        """
+
+        try:
+            from PyObjCTools import AppHelper
+        except Exception:
+            func(*args, **kwargs)
+            return
+        if args or kwargs:
+            AppHelper.callAfter(lambda: func(*args, **kwargs))
+        else:
+            AppHelper.callAfter(func)
+
+    _ensure_notification_bundle()
+
     # Monochrome template images (black + alpha): macOS tints them to
     # match the menu bar, like the built-in status icons. Regenerate
     # with scripts/make_menubar_template_icons.py.
@@ -699,6 +937,21 @@ def run_menubar(workspace: Path, port: int) -> int:
     dot_frames = dot_pulse_icon_paths()
 
     app = rumps.App("Ciaobot", icon=face, template=True, quit_button=None)
+
+    @rumps.notifications
+    def on_notification_click(info: object) -> None:
+        chat_id = ""
+        if isinstance(info, dict):
+            chat_id = str(info.get("chat_id") or "")
+        else:
+            data = getattr(info, "data", None)
+            if isinstance(data, dict):
+                chat_id = str(data.get("chat_id") or "")
+        if chat_id:
+            notify_open_chat(port, chat_id)
+            launch_ui(chat_url(workspace, port, chat_id), workspace)
+        else:
+            launch_ui(open_url(workspace, port), workspace)
 
     # Only notify for entries newer than launch, not the whole backlog.
     notification_log = NotificationLogTail.at_end(workspace)
@@ -734,7 +987,7 @@ def run_menubar(workspace: Path, port: int) -> int:
     def _open_chat_callback(chat_id: str):
         def _callback(_sender) -> None:
             notify_open_chat(port, chat_id)
-            subprocess.run(open_command(chat_url(workspace, port, chat_id)), check=False)
+            launch_ui(chat_url(workspace, port, chat_id), workspace)
 
         return _callback
 
@@ -745,7 +998,15 @@ def run_menubar(workspace: Path, port: int) -> int:
         return _callback
 
     def on_open(_sender) -> None:
-        subprocess.run(open_app_command(workspace, port), check=False)
+        launch_ui(open_url(workspace, port), workspace)
+
+    def on_toggle_notifications(_sender) -> None:
+        enabled = not notifications_enabled(workspace)
+        set_notifications_enabled(workspace, enabled)
+        try:
+            _sender.state = 1 if enabled else 0
+        except Exception:
+            pass
 
     def on_recover_server(_sender) -> None:
         current = fetch_server_status(port)
@@ -843,6 +1104,10 @@ def run_menubar(workspace: Path, port: int) -> int:
         refresh()
 
         def _do_update() -> None:
+            # Runs on a worker thread: the blocking install and launchctl
+            # calls are safe here, but every rumps/AppKit call MUST be
+            # marshaled to the main thread via _on_main_thread — otherwise
+            # NSAlert/NSWindow instantiation crashes the thread.
             try:
                 res = update_package()
                 if res.get("ok"):
@@ -852,26 +1117,31 @@ def run_menubar(workspace: Path, port: int) -> int:
                     # its own, so macOS shows a generic placeholder. Posting
                     # through rumps with an explicit icon renders the actual
                     # Ciaobot face instead.
-                    try:
-                        rumps.notification(
-                            "Ciaobot updated",
-                            "",
-                            f"Version {latest} is installed.",
-                            icon=icon_path("Ciaobot.icns"),
-                        )
-                    except Exception:
-                        pass
+                    def _notify_installed() -> None:
+                        try:
+                            rumps.notification(
+                                "Ciaobot updated",
+                                "",
+                                f"Version {latest} is installed.",
+                                icon=icon_path("Ciaobot.icns"),
+                            )
+                        except Exception:
+                            pass
+
+                    _on_main_thread(_notify_installed)
                     # Relaunch via launchd so this process loads the new wheel.
                     subprocess.run(restart_menubar_command(), check=False)
                     return
                 error = str(res.get("error") or "Update failed.")
                 command = str(res.get("command") or "")
                 message = error + (f"\n\nTry manually:\n{command}" if command else "")
-                rumps.alert(title="Update failed", message=message, ok="OK")
+                _on_main_thread(
+                    rumps.alert, title="Update failed", message=message, ok="OK"
+                )
             finally:
                 state["updating"] = False
                 state["package_status"] = status_fetcher()
-                refresh()
+                _on_main_thread(refresh)
 
         threading.Thread(target=_do_update, daemon=True).start()
 
@@ -897,6 +1167,7 @@ def run_menubar(workspace: Path, port: int) -> int:
         status: ServerStatus,
         chats: list[OpenChat],
         unread_ids: set[str],
+        needs_input_ids: set[str],
         working_ids: set[str],
         addresses: list[str],
         pkg: dict[str, object],
@@ -913,11 +1184,13 @@ def run_menubar(workspace: Path, port: int) -> int:
         for chat in chats:
             working = chat.chat_id in working_ids
             unread = chat.chat_id in unread_ids
+            needs_input = chat.chat_id in needs_input_ids
             working_has_icon = working and bool(dot_frames)
             item = rumps.MenuItem(
                 chat_menu_title(
                     chat.title,
                     unread=unread,
+                    needs_input=needs_input,
                     working=working,
                     working_has_icon=working_has_icon,
                     workspace=chat.workspace,
@@ -966,6 +1239,15 @@ def run_menubar(workspace: Path, port: int) -> int:
         advanced_menu.add(None)
         advanced_menu.add(rumps.MenuItem("View Logs", callback=on_logs))
         advanced_menu.add(addresses_menu)
+        notifications_item = rumps.MenuItem(
+            "Notifications",
+            callback=on_toggle_notifications,
+        )
+        try:
+            notifications_item.state = 1 if notifications_enabled(workspace) else 0
+        except Exception:
+            pass
+        advanced_menu.add(notifications_item)
         advanced_menu.add(None)
         advanced_menu.add(login_item)
 
@@ -1024,12 +1306,18 @@ def run_menubar(workspace: Path, port: int) -> int:
             time.sleep(WORKING_POLL_SECONDS)
 
     def refresh(_timer=None) -> None:
+        native_enabled = notifications_enabled(workspace)
         for notification in notification_log.read_new(workspace):
+            if not native_enabled:
+                continue
+            chat_id = str(notification.get("chat_id") or "")
+            payload = {"chat_id": chat_id} if chat_id else None
             try:
                 rumps.notification(
                     str(notification.get("title") or "Ciaobot"),
                     "",
                     str(notification.get("body") or "New notification"),
+                    data=payload,
                     icon=icon_path("Ciaobot.icns"),
                 )
             except Exception:
@@ -1043,13 +1331,14 @@ def run_menubar(workspace: Path, port: int) -> int:
         chats = read_open_chats(workspace)
         unread_chats = read_unread_chats(workspace)
         unread_ids = {chat.chat_id for chat in unread_chats}
-        unread_count = count_unread_chats(workspace)
+        needs_input_ids = needs_input_chat_ids(workspace)
+        attention_count = count_attention_chats(workspace)
         working_ids = set(state["working_ids"])
         addresses = server_addresses(port)
         pkg = status_fetcher()
         login_status = start_at_login_status()
         state["package_status"] = pkg
-        app.title = menubar_badge_title(unread_count)
+        app.title = menubar_badge_title(attention_count)
 
         # Rebuild only when content changed so an open menu doesn't flicker.
         show_workspace = len({chat.workspace for chat in chats if chat.workspace}) > 1
@@ -1061,12 +1350,13 @@ def run_menubar(workspace: Path, port: int) -> int:
                     c.title,
                     c.workspace,
                     c.chat_id in unread_ids,
+                    c.chat_id in needs_input_ids,
                     c.chat_id in working_ids,
                     show_workspace,
                 )
                 for c in chats
             ),
-            unread_count,
+            attention_count,
             tuple(addresses),
             package_update_fingerprint(pkg),
             state["updating"],
@@ -1074,7 +1364,7 @@ def run_menubar(workspace: Path, port: int) -> int:
         )
         if fingerprint != state["fingerprint"]:
             state["fingerprint"] = fingerprint
-            _rebuild_menu(status, chats, unread_ids, working_ids, addresses, pkg, login_status)
+            _rebuild_menu(status, chats, unread_ids, needs_input_ids, working_ids, addresses, pkg, login_status)
 
     threading.Thread(target=poll_working, daemon=True).start()
     rumps.Timer(refresh, POLL_SECONDS).start()

@@ -111,37 +111,59 @@ def test_server_recovery_label_matches_reachability() -> None:
     assert menubar.server_recovery_label(menubar.ServerStatus(False, False)) == "Start Server"
 
 
-def test_open_app_command_uses_setup_token(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(menubar, "find_installed_webapp", lambda: None)
+def test_open_url_uses_setup_token(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(menubar, "_installed_browser_app_names", lambda: [])
     token_path = tmp_path / ".runtime" / "setup-token"
     token_path.parent.mkdir(parents=True)
     token_path.write_text("tok123\n", encoding="utf-8")
 
-    assert menubar.open_app_command(tmp_path, 9443) == [
+    url = menubar.open_url(tmp_path, 9443)
+    assert menubar.open_command(url) == [
         "open",
         "http://localhost:9443/?setup=tok123",
     ]
 
 
-def test_open_app_command_without_token_falls_back_to_plain_url(
+def test_open_url_without_token_falls_back_to_plain_url(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setattr(menubar, "find_installed_webapp", lambda: None)
+    monkeypatch.setattr(menubar, "_installed_browser_app_names", lambda: [])
 
-    assert menubar.open_app_command(tmp_path, 8443) == [
+    url = menubar.open_url(tmp_path, 8443)
+    assert menubar.open_command(url) == [
         "open",
         "http://localhost:8443/",
     ]
 
 
-def test_open_app_command_prefers_installed_webapp(tmp_path: Path, monkeypatch) -> None:
-    webapp = tmp_path / "Ciaobot.app"
-    monkeypatch.setattr(menubar, "find_installed_webapp", lambda: webapp)
+def test_open_command_prefers_browser_app_mode(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(menubar, "_installed_browser_app_names", lambda: ["Google Chrome"])
 
-    assert menubar.open_app_command(tmp_path, 8443) == [
+    assert menubar.open_command("http://localhost:8443/") == [
         "open",
         "-a",
-        str(webapp),
+        "Google Chrome",
+        "--args",
+        "--app=http://localhost:8443/",
+    ]
+
+
+def test_window_launch_command_includes_workspace(tmp_path: Path) -> None:
+    interp = menubar._python_with_ciao()
+    cmd = menubar._window_launch_command("http://localhost:8443/", tmp_path)
+    assert cmd == [
+        interp,
+        "-m",
+        "ciao.window",
+        "http://localhost:8443/",
+        "--workspace",
+        str(tmp_path),
+    ]
+    assert menubar._window_launch_command("http://localhost:8443/", None) == [
+        interp,
+        "-m",
+        "ciao.window",
         "http://localhost:8443/",
     ]
 
@@ -154,30 +176,20 @@ def _write_bundle(path: Path, *, bundle_id: str) -> None:
     )
 
 
-def test_find_installed_webapp_finds_browser_installed_pwa(
+def test_remove_browser_pwa_duplicates_skips_native_launcher(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr(menubar.Path, "home", lambda: tmp_path)
-    webapp = tmp_path / "Applications" / "Ciaobot.app"
-    _write_bundle(webapp, bundle_id="org.chromium.Chromium.app.abc123")
+    native = tmp_path / "Applications" / "Ciaobot.app"
+    _write_bundle(native, bundle_id="local.ciaobot.app")
+    duplicate = tmp_path / "Applications" / "Chrome Apps.localized" / "Ciaobot.app"
+    _write_bundle(duplicate, bundle_id="org.chromium.Chromium.app.abc123")
 
-    assert menubar.find_installed_webapp() == webapp
+    removed = menubar.remove_browser_pwa_duplicates()
 
-
-def test_find_installed_webapp_skips_our_own_launcher_bundle(
-    tmp_path: Path, monkeypatch
-) -> None:
-    monkeypatch.setattr(menubar.Path, "home", lambda: tmp_path)
-    launcher = tmp_path / "Applications" / "Ciaobot.app"
-    _write_bundle(launcher, bundle_id="local.ciaobot.app")
-
-    assert menubar.find_installed_webapp() is None
-
-
-def test_find_installed_webapp_absent_returns_none(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(menubar.Path, "home", lambda: tmp_path)
-
-    assert menubar.find_installed_webapp() is None
+    assert removed == [duplicate.resolve()]
+    assert native.is_dir()
+    assert not duplicate.exists()
 
 
 def test_restart_server_command_targets_launchd_label() -> None:
@@ -363,6 +375,17 @@ def test_chat_menu_title_marks_unread_with_dot() -> None:
     assert menubar.chat_menu_title("x" * 80, unread=True, max_length=10).startswith("● ")
 
 
+def test_chat_menu_title_marks_needs_input_with_question_mark() -> None:
+    assert menubar.chat_menu_title("Test", unread=False, needs_input=True) == "? Test"
+    assert menubar.chat_menu_title("Test", unread=True, needs_input=True) == "? Test"
+    assert menubar.chat_menu_title(
+        "Test",
+        unread=False,
+        needs_input=True,
+        working=True,
+    ) == "? Test"
+
+
 def test_chat_menu_title_marks_working_and_takes_precedence() -> None:
     assert menubar.chat_menu_title("Test", unread=False, working=True) == "◌ Test"
     assert menubar.chat_menu_title("Test", unread=True, working=True) == "◌ Test"
@@ -511,6 +534,62 @@ def test_chat_is_unread_matches_pwa_logic() -> None:
             "last_read_at": "",
         }
     )
+
+
+def test_chat_needs_input_matches_pending_question() -> None:
+    assert menubar.chat_needs_input(
+        {
+            "pending_question": json.dumps(
+                {"questions": [{"question": "Pick one", "options": [{"label": "A"}]}]}
+            ),
+        }
+    )
+    assert not menubar.chat_needs_input({"pending_question": ""})
+    assert not menubar.chat_needs_input({"pending_question": "{not json"})
+    assert not menubar.chat_needs_input(
+        {"pending_question": json.dumps({"questions": []})}
+    )
+    assert not menubar.chat_needs_input(
+        {
+            "archived": True,
+            "pending_question": json.dumps({"questions": [{"question": "Still blocked?"}]}),
+        }
+    )
+
+
+def test_count_attention_chats_includes_read_questions(tmp_path: Path) -> None:
+    state = tmp_path / ".runtime" / "web_projects.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(
+        json.dumps(
+            {
+                "chats": {
+                    "read-question": {
+                        "title": "Answer me",
+                        "last_activity_at": "2026-01-02T10:00:00",
+                        "last_read_at": "2026-01-02T11:00:00",
+                        "pending_question": json.dumps(
+                            {"questions": [{"question": "Which tier?"}]}
+                        ),
+                    },
+                    "unread": {
+                        "title": "Unread",
+                        "last_activity_at": "2026-01-03T10:00:00",
+                        "last_read_at": "",
+                    },
+                    "idle": {
+                        "title": "Idle",
+                        "last_activity_at": "2026-01-01T10:00:00",
+                        "last_read_at": "2026-01-01T11:00:00",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert menubar.needs_input_chat_ids(tmp_path) == {"read-question"}
+    assert menubar.count_attention_chats(tmp_path) == 2
 
 
 def test_read_unread_chats_filters_read_and_sorts_by_activity(tmp_path: Path) -> None:

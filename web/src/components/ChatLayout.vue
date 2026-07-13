@@ -38,6 +38,9 @@
             @open-sidebar="sidebarCollapsed = false"
           />
           <ChatPanel v-else-if="store.activeChat" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+          <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
+            <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
+          </div>
           <div v-else class="empty-shell">
             <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
             <div class="empty-state">
@@ -111,6 +114,9 @@
           @open-sidebar="sidebarCollapsed = false"
         />
         <ChatPanel v-else-if="store.activeChat" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+        <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
+          <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
+        </div>
         <div v-else class="empty-shell">
           <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
           <div class="empty-state">
@@ -148,7 +154,7 @@
                 {{ action.isCreating ? 'Creating...' : `+ ${action.label} Chat` }}
               </button>
             </div>
-            <GettingStartedChecklist variant="home" @open-sidebar="sidebarCollapsed = false" />
+            <OnboardingCard variant="home" @open-sidebar="sidebarCollapsed = false" />
           </div>
         </div>
       </template>
@@ -173,7 +179,7 @@ import FileViewerModal from './FileViewerModal.vue'
 import PinnedFilePanel from './PinnedFilePanel.vue'
 import PaneHeader from './PaneHeader.vue'
 import ProductTour from './ProductTour.vue'
-import GettingStartedChecklist from './GettingStartedChecklist.vue'
+import OnboardingCard from './OnboardingCard.vue'
 
 const store = useProjectStore()
 const tourStore = useProductTourStore()

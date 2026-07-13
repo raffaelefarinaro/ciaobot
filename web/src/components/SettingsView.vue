@@ -148,6 +148,12 @@
           <div v-if="needsIosInstall" class="hint hint--warn">
             On iOS, push notifications only work after you "Add to Home Screen" and open the app from there.
           </div>
+          <div v-else-if="isMacDesktop()" class="hint">
+            On macOS, notifications come from the menu bar app — not the browser.
+            Open the face icon → <strong>Advanced → Notifications</strong> to turn them on or off,
+            and allow <strong>Ciaobot</strong> in System Settings → Notifications.
+            Use <strong>Ciaobot</strong> from Applications for the UI; skip Chrome&rsquo;s &ldquo;Install app&rdquo;.
+          </div>
           <div v-else-if="permissionDenied" class="hint hint--warn">
             Notifications are blocked at the OS level. Re-enable them in your phone's Settings &rarr; Notifications &rarr; Ciaobot.
           </div>
@@ -215,19 +221,7 @@
           </div>
         </div>
 
-        <!-- Product tour -->
-        <div class="card">
-          <div class="settings-card-header">
-            <p class="section-title">Product tour</p>
-            <p class="hint">Walk through workspaces, chat comments, inline file previews, pinning, and rich document viewing.</p>
-          </div>
-          <div class="action-row action-row--spaced action-row--compact">
-            <button type="button" class="btn-secondary" @click="replayProductTour">Replay tour</button>
-          </div>
-        </div>
-
-        <!-- Getting started checklist -->
-        <GettingStartedChecklist variant="settings" @open-sidebar="emit('open-sidebar')" />
+        <OnboardingCard variant="settings" @open-sidebar="emit('open-sidebar')" />
 
         <!-- Debug (dev mode only) -->
         <div v-if="localStatus?.dev_mode" class="card">
@@ -1604,18 +1598,16 @@ import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSuppor
 import { useAuthStore } from '../stores/auth'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
-import { useProductTourStore } from '../stores/productTour'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import RestartOverlay from './RestartOverlay.vue'
-import GettingStartedChecklist from './GettingStartedChecklist.vue'
+import OnboardingCard from './OnboardingCard.vue'
 import { providerModelBadges, sectionsFromModelOptions, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 
 const emit = defineEmits<{ 'open-sidebar': [] }>()
 
 const route = useRoute()
 const fileViewer = useFileViewerStore()
-const productTour = useProductTourStore()
 const projectStore = useProjectStore()
 const currentTab = computed(() => (route.params.tab as string) || 'home')
 
@@ -1628,12 +1620,6 @@ const workspaceMemoryExpanded = ref(false)
 // ── Appearance settings ────────────────────────────────────────────────────
 const activeTheme = ref('system')
 const fontScale = ref(1.0)
-
-async function replayProductTour() {
-  const { router } = await import('../router')
-  await router.push('/')
-  await productTour.replay()
-}
 
 function loadAppearanceSettings() {
   try {
@@ -3094,6 +3080,9 @@ const needsIosInstall = ref(false)
 
 function isIos(): boolean {
   return /iphone|ipad|ipod/i.test(navigator.userAgent)
+}
+function isMacDesktop(): boolean {
+  return /macintosh|mac os x/i.test(navigator.userAgent) && !isIos()
 }
 function isStandalone(): boolean {
   return (

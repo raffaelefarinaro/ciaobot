@@ -87,8 +87,9 @@
           <div class="chat-row-main">
             <span class="chat-name">{{ chat.title }}</span>
             <span v-if="store.isChatStreaming(chat.chat_id)" class="spinner-dot" title="Working" />
+            <span v-else-if="store.chatNeedsInput(chat.chat_id)" class="needs-input-badge" title="Needs your answer" aria-label="Needs your answer">?</span>
             <span v-if="chat.local === false" class="remote-chip">remote</span>
-            <span v-if="store.chatUnread(chat.chat_id) > 0" class="badge">{{ store.chatUnread(chat.chat_id) }}</span>
+            <span v-else-if="store.chatUnread(chat.chat_id) > 0" class="badge">{{ store.chatUnread(chat.chat_id) }}</span>
           </div>
           <div class="chat-row-meta">
             <span>{{ chat.model }}</span>
@@ -758,6 +759,28 @@ watch(() => props.projectId, reloadAll)
   font-size: 11px;
   font-weight: 700;
   line-height: 1;
+}
+
+.needs-input-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  flex-shrink: 0;
+  animation: ciao-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes ciao-pulse {
+  0%, 100% { transform: scale(0.85); opacity: 0.55; }
+  50% { transform: scale(1); opacity: 1; }
 }
 
 .empty-row {

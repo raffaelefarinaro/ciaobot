@@ -272,8 +272,12 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     assert "<key>AssociatedBundleIdentifiers</key>" in menubar_text
     assert "<string>local.ciaobot.app</string>" in menubar_text
     assert "<string>com.ciao.menubar</string>" in menubar_text
-    assert "<string>/opt/ciao/bin/python</string>" in menubar_text
-    assert "<string>menubar</string>" in menubar_text
+    menubar_app_exe = apps / "Ciaobot.app" / "Contents" / "MacOS" / "CiaobotMenuBar"
+    assert menubar_app_exe.is_file()
+    assert menubar_app_exe.stat().st_mode & 0o111
+    assert f"<string>{menubar_app_exe.resolve()}</string>" in menubar_text
+    assert "<string>/opt/ciao/bin/python</string>" not in menubar_text
+    assert "<string>menubar</string>" not in menubar_text
     assert "<string>9443</string>" in menubar_text
     assert f"<string>{workspace.resolve()}/.runtime/ciao.menubar.stdout.log</string>" in menubar_text
     app_exe = apps / "Ciaobot.app" / "Contents" / "MacOS" / "Ciaobot"
@@ -301,14 +305,9 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
         'start_agent "com.ciao.menubar" "$HOME/Library/LaunchAgents/com.ciao.menubar.plist"'
         in app_text
     )
-    # Prefers a browser-installed PWA bundle over the default browser, but
-    # excludes our own launcher bundle so it doesn't just relaunch itself.
-    assert '"$HOME/Applications/Ciaobot.app"' in app_text
-    assert '"$HOME/Applications/Chrome Apps.localized/Ciaobot.app"' in app_text
-    assert '"/Applications/Ciaobot.app"' in app_text
-    assert "local.ciao.app|local.ciaobot.app) continue" in app_text
-    assert 'open -a "$webapp" "$url"' in app_text
-    assert 'open "$url"' in app_text
+    # Opens the native Ciaobot window (WebKit via pywebview).
+    assert 'exec "$DIR/python" -m ciao.window "$target"' in app_text
+    assert 'open_ciaobot_url "$url"' in app_text
     setup_token = token_file.read_text(encoding="utf-8").strip()
     assert setup_token
     # The literal token value must not appear in the script -- it is read live.
@@ -318,6 +317,11 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     info_plist = (apps / "Ciaobot.app" / "Contents" / "Info.plist").read_text(encoding="utf-8")
     assert "<key>CFBundleIconFile</key>" in info_plist
     assert "<string>Ciaobot</string>" in info_plist
+    menubar_info = (apps / "Ciaobot.app" / "Contents" / "Info.plist").read_text(encoding="utf-8")
+    assert "<string>local.ciaobot.app</string>" in menubar_info
+    menubar_script = menubar_app_exe.read_text(encoding="utf-8")
+    assert 'exec "$DIR/python" -m ciao.cli menubar' in menubar_script
+    assert (menubar_app_exe.parent / "python").is_symlink()
 
 
 def test_setup_removes_our_legacy_ciao_app_only(tmp_path: Path) -> None:

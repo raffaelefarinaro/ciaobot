@@ -30,11 +30,17 @@ from ciao.models import (
     PermissionRequestEvent,
     ResultEvent,
     StreamEvent,
+    SystemStatusEvent,
     THINKING_LEVELS,
     ThinkingEvent,
     ToolUseEvent,
 )
-from ciao.model_tiers import CODEX_FABLE_THINKING_LEVEL, canonical_tier
+from ciao.model_tiers import (
+    CODEX_FABLE_THINKING_LEVEL,
+    canonical_tier,
+    is_capability_error,
+    next_tier_for_failure,
+)
 from ciao.providers.ollama import (
     is_local_ollama_model,
     is_ollama_model,
@@ -260,12 +266,36 @@ _TITLE_SYSTEM_PROMPT = (
 )
 
 # A title that opens like an assistant reply means the model answered the
-# excerpt instead of titling it; treat it as a failure.
+# excerpt instead of titling it; treat it as a failure. Covers affirmative
+# openers ("I'll…", "Sure…") and the negated/apologetic ones a model emits
+# when the excerpt gave it nothing to work with ("I don't have any prior
+# context…", "There's no…", "It looks like…").
 _REPLY_SHAPED_RE = re.compile(
-    r"^(i['’](d|ll|m|ve)\b|i\s+(can|need|will|would|am)\b|sure\b|"
-    r"happy to\b|certainly\b|of course\b|sorry\b|unfortunately\b)",
+    r"^(i['’](d|ll|m|ve)\b|"
+    r"i\s+(can|need|will|would|am|do|don['’]t|cannot|can['’]t|won['’]t|"
+    r"couldn['’]t|didn['’]t|haven['’]t|apologi[sz]e)\b|"
+    r"there(['’]s|\s+is|\s+are|\s+isn['’]t|\s+aren['’]t)\b|"
+    r"it\s+(looks|seems|appears)\b|let\s+me\b|"
+    r"sure\b|happy to\b|certainly\b|of course\b|sorry\b|unfortunately\b)",
     re.IGNORECASE,
 )
+
+# Low-signal openers that give the titler nothing to summarize. Asking a
+# model to title one of these invites a conversational reply ("I don't have
+# any prior context to continue from…") that then gets saved as the title,
+# so we skip the model call and use the deterministic fallback instead.
+_CONTENTLESS_PROMPTS = frozenset({
+    "continue", "continue please", "please continue", "go", "go on",
+    "go ahead", "proceed", "next", "more", "keep going", "carry on",
+    "resume", "ok", "okay", "k", "yes", "yep", "yeah", "yup", "no",
+    "nope", "sure", "thanks", "thank you", "ty", "done", "stop",
+})
+
+
+def _is_contentless_prompt(text: str) -> bool:
+    """True for bare openers ("continue", "ok", "go on") with no topic."""
+    normalized = re.sub(r"[\s.!?,:;]+", " ", (text or "").strip().lower()).strip()
+    return normalized in _CONTENTLESS_PROMPTS
 
 
 def _fallback_title(user_text: str) -> str | None:
@@ -381,6 +411,13 @@ async def _generate_chat_title_with_engine(
     user_snippet = (user_text or "").strip()[:1000]
     if not user_snippet:
         return None, "fallback"
+
+    # A bare "continue"/"ok"/"go on" as the first message gives the titler
+    # nothing to summarize; asking a model to title it invites a
+    # conversational reply that then sticks as the title. Skip straight to
+    # the deterministic fallback (which just truncates the user text).
+    if _is_contentless_prompt(user_snippet):
+        return _fallback_title(user_snippet), "fallback"
 
     assistant_snippet = (assistant_text or "").strip()[:1000]
     if assistant_snippet:
@@ -661,6 +698,26 @@ def _schedule_run_clean(outcome: ScheduleRunOutcome) -> bool:
         and not outcome.retry_pending
         and not outcome.subagents_pending
     )
+
+
+@dataclass(slots=True)
+class _StreamOutcome:
+    """Terminal result of a single ``provider.execute_streaming`` pass.
+
+    Used by :meth:`ProjectChatManager.stream_chat` to decide whether to
+    auto-retry against the next tier in the configured ladder. Carries
+    every field the caller needs to either yield to subscribers, persist
+    a transcript turn, or feed the post-stream accounting block.
+    """
+
+    events: list[StreamEvent] = field(default_factory=list)
+    response_text: str = ""
+    had_error: bool = False
+    effective_model: str = ""
+    usage: dict[str, str] = field(default_factory=dict)
+    quota: dict[str, str] = field(default_factory=dict)
+    cost_usd: float = 0.0
+    tool_events: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _should_auto_archive_schedule_run(
@@ -2909,6 +2966,71 @@ class ProjectChatManager:
         """
         return chat.mode
 
+    async def _drive_stream(
+        self,
+        *,
+        chat_id: str,
+        request: AgentRequest,
+    ) -> _StreamOutcome:
+        """Run a single ``execute_streaming`` pass and collect its outcome.
+
+        Extracted from :meth:`stream_chat` so the auto-fallback wrapper
+        can re-invoke the same logic on a re-issued request without
+        duplicating the event-collecting / session-persisting code. The
+        caller is responsible for forwarding ``events`` to subscribers
+        and for persisting the transcript turn — the helper just
+        aggregates the terminal state.
+        """
+        chat = self._chats.get(chat_id)
+        if chat is None:
+            raise ValueError(f"Chat '{chat_id}' not found")
+        provider = self._get_provider(chat_id)
+        events: list[StreamEvent] = []
+        response_text = ""
+        had_error = False
+        effective_model = chat.model
+        usage: dict[str, str] = {}
+        quota: dict[str, str] = {}
+        cost_usd: float = 0.0
+        tool_events: list[dict[str, Any]] = []
+
+        async for event in provider.execute_streaming(request):
+            events.append(event)
+            sdk_sid = provider.current_session_id
+            if sdk_sid and sdk_sid != chat.session_id:
+                chat.session_id = sdk_sid
+                self._save()
+            if isinstance(event, ResultEvent):
+                response_text = event.result
+                had_error = bool(event.is_error)
+                effective_model = event.effective_model or chat.model
+                if chat.provider == "codex" and not chat.model and effective_model:
+                    chat.model = effective_model
+                    self._save()
+                usage = event.usage
+                quota = event.quota
+                cost_usd = event.cost_usd or 0.0
+                if event.session_id and event.session_id != chat.session_id:
+                    chat.session_id = event.session_id
+                    self._save()
+            elif isinstance(event, ToolUseEvent):
+                tool_events.append({
+                    "id": event.tool_use_id or "",
+                    "name": event.tool_name,
+                    "input": {"summary": event.tool_input},
+                })
+
+        return _StreamOutcome(
+            events=events,
+            response_text=response_text,
+            had_error=had_error,
+            effective_model=effective_model,
+            usage=usage,
+            quota=quota,
+            cost_usd=cost_usd,
+            tool_events=tool_events,
+        )
+
     # ── Streaming chat ───────────────────────────────────────────────────
 
     async def stream_chat(
@@ -2956,39 +3078,101 @@ class ProjectChatManager:
         cost_usd: float = 0.0
         had_error = False
         tool_events: list[dict[str, Any]] = []
+        # First attempt may fail with a capability error (model does not
+        # support image input, tool use, etc.). The retry path below
+        # walks one tier in either direction on the configured ladder and
+        # re-issues the request. ``retry_used`` guards against a
+        # second-tier-fail re-entering the retry; one retry per turn is
+        # the floor — operators who configure a single-model ladder
+        # get the original error surfaced instead of a loop.
+        retry_used = False
 
-        async for event in provider.execute_streaming(request):
+        outcome = await self._drive_stream(
+            chat_id=chat_id,
+            request=request,
+        )
+        # Replay each event from the first attempt to subscribers so the
+        # PWA sees the same stream shape, then decide whether to retry.
+        for event in outcome.events:
             yield event
-            # Persist session_id as soon as the SDK exposes it. This way a
-            # dropped WebSocket (app close, network blip) mid-stream still
-            # leaves the chat recoverable: on reload, GET /messages can
-            # replay turns from the SDK session file.
-            sdk_sid = provider.current_session_id
-            if sdk_sid and sdk_sid != chat.session_id:
-                chat.session_id = sdk_sid
-                self._save()
-            if isinstance(event, ResultEvent):
-                response_text = event.result
-                had_error = bool(event.is_error)
-                effective_model = event.effective_model or chat.model
-                if chat.provider == "codex" and not chat.model and effective_model:
-                    chat.model = effective_model
-                    self._save()
-                usage = event.usage
-                quota = event.quota
-                cost_usd = event.cost_usd or 0.0
-                if event.session_id and event.session_id != chat.session_id:
-                    chat.session_id = event.session_id
-                    self._save()
-                # Native questions are cleared by respond_question() (or a
-                # later user send). An unanswered question from an interrupted
-                # scheduled run stays available for continuation in the PWA.
-            elif isinstance(event, ToolUseEvent):
-                tool_events.append({
-                    "id": event.tool_use_id or "",
-                    "name": event.tool_name,
-                    "input": {"summary": event.tool_input},
-                })
+        response_text = outcome.response_text
+        had_error = outcome.had_error
+        effective_model = outcome.effective_model
+        usage = outcome.usage
+        quota = outcome.quota
+        cost_usd = outcome.cost_usd
+        tool_events = outcome.tool_events
+
+        # Capability-error auto-fallback: the model's response came back
+        # as a 4xx/400 saying the model can't handle this input. Walk one
+        # step on the configured tier ladder (cheaper first, then more
+        # capable) and re-issue. Codex and any backend outside Claude /
+        # Ollama / OpenRouter skip the retry — the user explicitly opted
+        # out of broadening scope.
+        if (
+            had_error
+            and not retry_used
+            and is_capability_error(response_text)
+            and chat.provider in ("claude",)
+            and intended_backend(request.model) in ("anthropic", "ollama", "openrouter")
+        ):
+            next_model = next_tier_for_failure(request.model, self._config)
+            if next_model and next_model != request.model:
+                logger.warning(
+                    "Auto tier-fallback: %s failed (%s); retrying on %s",
+                    request.model,
+                    response_text.strip().splitlines()[0] if response_text else "capability error",
+                    next_model,
+                )
+                retry_used = True
+                # Drop the resume session: the failed model may have
+                # written a partial transcript under its own session id,
+                # and the new model should not try to continue that.
+                retry_request = AgentRequest(
+                    prompt=full_prompt,
+                    model=next_model,
+                    provider=chat.provider,
+                    mode=self._effective_mode_for_chat(chat),
+                    display_prompt=display_prompt,
+                    resume_session=None,
+                    # If the failure was image-related, strip the images
+                    # so the next model at least has a chance to answer
+                    # the text portion. For other capability errors
+                    # (context length, etc.) keep the payload intact.
+                    images=(
+                        []
+                        if "image" in response_text.lower()
+                        else (images or [])
+                    ),
+                    extra_env=self._build_extra_env(chat),
+                    disallowed_tools=self.disallowed_tools_for_chat(chat),
+                    thinking_level=self._thinking_level_for_chat(chat),
+                )
+                yield SystemStatusEvent(
+                    type="system",
+                    status=(
+                        f"primary model could not handle this input "
+                        f"(no image support); retrying on {next_model}"
+                    ),
+                )
+                outcome = await self._drive_stream(
+                    chat_id=chat_id,
+                    request=retry_request,
+                )
+                for event in outcome.events:
+                    yield event
+                response_text = outcome.response_text
+                had_error = outcome.had_error
+                effective_model = outcome.effective_model
+                usage = outcome.usage
+                quota = outcome.quota
+                cost_usd = outcome.cost_usd
+                tool_events = outcome.tool_events
+            else:
+                logger.info(
+                    "Auto tier-fallback skipped: no neighbor tier configured for %s",
+                    request.model,
+                )
 
         # Record transcript turn
         if handover_context_sent and not had_error:

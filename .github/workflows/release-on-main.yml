@@ -1,0 +1,97 @@
+name: Release on main
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      created: ${{ steps.release.outputs.created }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read package version
+        id: version
+        run: |
+          version="$(grep -E '^version = ' pyproject.toml | head -1 | sed -E 's/^version = "(.*)"/\1/')"
+          if [ -z "$version" ]; then
+            echo "Could not read version from pyproject.toml" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists; skipping release."
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ["VERSION"]
+          text = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          pattern = rf"^## v{re.escape(version)} -.*?(?=^## v|\Z)"
+          match = re.search(pattern, text, flags=re.MULTILINE | re.DOTALL)
+          notes = match.group(0).strip() if match else f"Release v{version}"
+          Path("release-notes.md").write_text(notes + "\n", encoding="utf-8")
+          PY
+
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file release-notes.md \
+            --target "${{ github.sha }}"
+          echo "created=true" >> "$GITHUB_OUTPUT"
+
+  sync-develop:
+    needs: release
+    if: needs.release.outputs.created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync develop with main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main develop
+          if git merge-base --is-ancestor origin/main origin/develop; then
+            echo "develop already contains main; nothing to sync."
+            exit 0
+          fi
+          branch="chore/sync-develop-v${VERSION}"
+          git checkout -b "$branch" origin/develop
+          git merge origin/main -m "chore: sync develop with main after v${VERSION}"
+          git push -u origin "$branch"
+          pr_url="$(gh pr create \
+            --base develop \
+            --head "$branch" \
+            --title "chore: sync develop with main after v${VERSION}" \
+            --body "Automated sync after release v${VERSION}.")"
+          gh pr merge "$pr_url" --merge --admin --delete-branch

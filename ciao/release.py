@@ -310,6 +310,25 @@ def _ensure_clean(root: Path, *, allow_dirty: bool) -> None:
         )
 
 
+def _resolve_source_ref(root: Path, source: str) -> str:
+    local = _git(root, ["rev-parse", "--verify", source], check=False)
+    if local:
+        return source
+    remote = _git(root, ["rev-parse", "--verify", f"origin/{source}"], check=False)
+    if remote:
+        return f"origin/{source}"
+    raise ReleaseError(
+        f"could not resolve release source branch {source!r}; "
+        "fetch origin or check out the branch locally"
+    )
+
+
+def _checkout_release_branch(root: Path, *, branch: str, source: str) -> None:
+    _run(["git", "fetch", "origin", source], cwd=root, check=False)
+    source_ref = _resolve_source_ref(root, source)
+    _run(["git", "switch", "-c", branch, source_ref], cwd=root)
+
+
 def _current_branch(root: Path) -> str:
     branch = _git(root, ["branch", "--show-current"])
     if not branch:
@@ -351,7 +370,7 @@ def _run_checks(root: Path, *, skip_frontend: bool) -> list[str]:
 def _pr_body(version: str, changelog_section: str, checks: list[str]) -> str:
     testing = "\n".join(f"- {label}" for label in checks) or "- Not run"
     return f"""## Summary
-- Prepare Ciaobot v{version}
+- Release Ciaobot v{version} to `main`
 - Update package, PWA, and package-lock versions
 - Add changelog notes for the release range
 
@@ -362,9 +381,8 @@ def _pr_body(version: str, changelog_section: str, checks: list[str]) -> str:
 {testing}
 
 ## After approval
-- Merge this PR
-- Create and push tag `v{version}`
-- Publish the package artifact from the tagged commit
+- Merge this PR into `main`
+- GitHub Actions will create tag `v{version}`, publish the GitHub release, and sync `develop`
 """
 
 
@@ -476,6 +494,8 @@ def _print_plan(
     current: RepoVersions,
     version: str,
     from_ref: str | None,
+    changelog_to_ref: str,
+    source: str,
     branch: str,
     changelog_section: str,
     apply: bool,
@@ -488,7 +508,8 @@ def _print_plan(
     if current.pwa != current.pyproject:
         print(f"Current PWA version: {current.pwa} (will be aligned)")
     print(f"Next version: {version}")
-    print(f"Changelog range: {from_ref or '<entire history>'}..HEAD")
+    print(f"Changelog range: {from_ref or '<entire history>'}..{changelog_to_ref}")
+    print(f"Release source: {source}")
     print(f"Release branch: {branch}")
     print(f"Apply changes: {'yes' if apply else 'no'}")
     print(f"Commit: {'yes' if commit else 'no'}")
@@ -514,6 +535,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--from-ref", help="Git ref/tag to start changelog from.")
     parser.add_argument("--to-ref", default="HEAD", help="Git ref to end changelog at.")
     parser.add_argument("--base", default="main", help="Pull request base branch.")
+    parser.add_argument(
+        "--source",
+        default="develop",
+        help="Branch to cut the release branch from (default: develop).",
+    )
     parser.add_argument("--branch", help="Release branch name. Defaults to release/vX.Y.Z.")
     parser.add_argument(
         "--date",
@@ -592,8 +618,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     release_date = date.fromisoformat(args.date)
     branch = args.branch or f"release/v{version}"
+    changelog_to_ref = args.to_ref
+    if changelog_to_ref == "HEAD" and not args.no_branch:
+        _run(["git", "fetch", "origin", args.source], cwd=root, check=False)
+        try:
+            changelog_to_ref = _resolve_source_ref(root, args.source)
+        except ReleaseError:
+            changelog_to_ref = "HEAD"
     from_ref = args.from_ref or _latest_release_tag(root)
-    commits = _commit_summaries(root, from_ref=from_ref, to_ref=args.to_ref)
+    commits = _commit_summaries(root, from_ref=from_ref, to_ref=changelog_to_ref)
     changelog_section = render_changelog_section(version, release_date, commits)
 
     if args.create_pr:
@@ -606,6 +639,8 @@ def main(argv: list[str] | None = None) -> int:
         current=current,
         version=version,
         from_ref=from_ref,
+        changelog_to_ref=changelog_to_ref,
+        source=args.source,
         branch=branch,
         changelog_section=changelog_section,
         apply=args.apply,
@@ -628,7 +663,7 @@ def main(argv: list[str] | None = None) -> int:
 
     _ensure_clean(root, allow_dirty=args.allow_dirty)
     if not args.no_branch:
-        _run(["git", "switch", "-c", branch], cwd=root)
+        _checkout_release_branch(root, branch=branch, source=args.source)
     else:
         branch = _current_branch(root)
 

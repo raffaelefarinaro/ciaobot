@@ -43,6 +43,9 @@ export const useProjectStore = defineStore('projects', () => {
   const workspaceAppDefaultModel = ref('')
   const activeWorkspace = ref<WorkspaceName>('personal')
   const activeChatId = ref<string | null>(null)
+  // False until the first fetchAll() resolves. Gates the home empty state so
+  // a restored active chat does not flash the getting-started screen.
+  const bootstrapped = ref(false)
   const messages = ref<Record<string, ChatMessage[]>>({})
   // Subagent transcripts keyed by chat_id. Loaded lazily on chat switch and
   // after each streaming turn (subagents can be spawned mid-turn).
@@ -708,6 +711,19 @@ export const useProjectStore = defineStore('projects', () => {
     return activity && activity > read ? 1 : 0
   }
 
+  // A chat blocked on AskUserQuestion — persisted on the chat and mirrored in
+  // ephemeral activeQuestions while the picker is live. Unlike unread, this
+  // stays visible even when the chat is the active tab.
+  function chatNeedsInput(chatId: string): boolean {
+    if (activeQuestions.value[chatId]?.length) return true
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    return parseQuestions(chat?.pending_question).length > 0
+  }
+
+  function projectNeedsInput(projectId: string): number {
+    return projectChats(projectId).filter(c => chatNeedsInput(c.chat_id)).length
+  }
+
   function projectUnread(projectId: string): number {
     return projectChats(projectId).reduce((sum, c) => sum + chatUnread(c.chat_id), 0)
   }
@@ -771,58 +787,62 @@ export const useProjectStore = defineStore('projects', () => {
   // ── Data fetching ───────────────────────────────────────────────────
 
   async function fetchAll() {
-    restoreMessages()
-    restoreState()
-    restoreUnread()
-    const [workspaceResponse, p, c] = await Promise.all([
-      api.get<WorkspacesResponse>('/api/workspaces'),
-      api.get<ProjectInfo[]>('/api/projects'),
-      api.get<ChatInfo[]>('/api/chats'),
-    ])
-    workspaces.value = workspaceResponse.workspaces || []
-    workspaceProviderOptions.value = workspaceResponse.provider_options?.length
-      ? workspaceResponse.provider_options
-      : [{ value: 'claude', label: 'Claude' }]
-    workspaceClaudeAiConnectors.value = workspaceResponse.claude_ai_connectors || []
-    projects.value = p
-    reconcileChatList(c)
-    const knownWorkspaceNames = workspaceOptions.value.map(w => w.name)
-    if (!knownWorkspaceNames.includes(activeWorkspace.value)) {
-      activeWorkspace.value = workspaceResponse.active || knownWorkspaceNames[0] || 'personal'
-    }
+    try {
+      restoreMessages()
+      restoreState()
+      restoreUnread()
+      const [workspaceResponse, p, c] = await Promise.all([
+        api.get<WorkspacesResponse>('/api/workspaces'),
+        api.get<ProjectInfo[]>('/api/projects'),
+        api.get<ChatInfo[]>('/api/chats'),
+      ])
+      workspaces.value = workspaceResponse.workspaces || []
+      workspaceProviderOptions.value = workspaceResponse.provider_options?.length
+        ? workspaceResponse.provider_options
+        : [{ value: 'claude', label: 'Claude' }]
+      workspaceClaudeAiConnectors.value = workspaceResponse.claude_ai_connectors || []
+      projects.value = p
+      reconcileChatList(c)
+      const knownWorkspaceNames = workspaceOptions.value.map(w => w.name)
+      if (!knownWorkspaceNames.includes(activeWorkspace.value)) {
+        activeWorkspace.value = workspaceResponse.active || knownWorkspaceNames[0] || 'personal'
+      }
 
-    // Initial active-chat resolution priority:
-    //   1) URL /chat/:chatId (represents the user's direct intent on a reload
-    //      or deep link; must beat localStorage to avoid briefly subscribing
-    //      to the wrong chat's WS and, on switch, rewriting the URL).
-    //   2) activeChatId restored from localStorage (if it still exists and
-    //      isn't archived).
-    //   3) First chat in the current workspace.
-    const { router } = await import('../router')
-    const urlChatId = (router.currentRoute.value.params.chatId as string | undefined)
-      || (typeof window !== 'undefined'
-        ? window.location.pathname.match(/^\/chat\/([^/]+)/)?.[1]
-        : undefined)
-    if (urlChatId && chatExistsInList(urlChatId, c)) {
-      await ensureWorkspaceForChat(urlChatId)
-      activeChatId.value = urlChatId
-    } else if (activeChatId.value && !chatExistsInList(activeChatId.value, c)) {
-      activeChatId.value = null
+      // Initial active-chat resolution priority:
+      //   1) URL /chat/:chatId (represents the user's direct intent on a reload
+      //      or deep link; must beat localStorage to avoid briefly subscribing
+      //      to the wrong chat's WS and, on switch, rewriting the URL).
+      //   2) activeChatId restored from localStorage (if it still exists and
+      //      isn't archived).
+      //   3) First chat in the current workspace.
+      const { router } = await import('../router')
+      const urlChatId = (router.currentRoute.value.params.chatId as string | undefined)
+        || (typeof window !== 'undefined'
+          ? window.location.pathname.match(/^\/chat\/([^/]+)/)?.[1]
+          : undefined)
+      if (urlChatId && chatExistsInList(urlChatId, c)) {
+        await ensureWorkspaceForChat(urlChatId)
+        activeChatId.value = urlChatId
+      } else if (activeChatId.value && !chatExistsInList(activeChatId.value, c)) {
+        activeChatId.value = null
+      }
+      if (!activeChatId.value) {
+        selectFirstChat()
+      }
+      if (activeChatId.value) {
+        void markRead(activeChatId.value)
+        await loadMessages(activeChatId.value)
+        connectWs(activeChatId.value)
+      }
+      // Open the cross-chat awareness socket once per app session.
+      connectEventsWs()
+      // If a push arrived while the PWA was closed/suspended and
+      // notificationclick didn't fire (iOS quirk), the SW still has the
+      // target chat cached. Query it and navigate if present.
+      checkPendingTarget()
+    } finally {
+      bootstrapped.value = true
     }
-    if (!activeChatId.value) {
-      selectFirstChat()
-    }
-    if (activeChatId.value) {
-      void markRead(activeChatId.value)
-      await loadMessages(activeChatId.value)
-      connectWs(activeChatId.value)
-    }
-    // Open the cross-chat awareness socket once per app session.
-    connectEventsWs()
-    // If a push arrived while the PWA was closed/suspended and
-    // notificationclick didn't fire (iOS quirk), the SW still has the
-    // target chat cached. Query it and navigate if present.
-    checkPendingTarget()
   }
 
   function reconcileChatList(nextChats: ChatInfo[]) {
@@ -2875,15 +2895,18 @@ export const useProjectStore = defineStore('projects', () => {
     return icons[name] || '\u2699\uFE0F' // ⚙️
   }
 
+  restoreState()
+  restoreUnread()
+
   return {
     // State
-    projects, chats, workspaces, workspaceProviderOptions, workspaceClaudeAiConnectors, workspaceAppDefaultModel, activeWorkspace, activeChatId, messages, subagents, unread,
+    projects, chats, workspaces, workspaceProviderOptions, workspaceClaudeAiConnectors, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, subagents, unread,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
     projectStreaming, backgroundAgents, toasts, pendingPermissions, activeQuestions, creatingChatProjectIds,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
-    chatUnread, projectUnread, workspaceUnread, clearUnread, markRead, markAllRead,
+    chatUnread, chatNeedsInput, projectNeedsInput, projectUnread, workspaceUnread, clearUnread, markRead, markAllRead,
     recentChats, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
     // Actions
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,

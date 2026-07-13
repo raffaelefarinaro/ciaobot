@@ -455,3 +455,63 @@ async def test_claude_run_streaming_raises_on_resume_failure(
     )
     with pytest.raises(CLIConnectionError):
         _ = [event async for event in claude_provider.run_streaming(request, lambda _handle: None)]
+
+
+@pytest.mark.asyncio
+async def test_claude_run_streaming_surfaces_error_when_no_result(
+    claude_provider: ClaudeProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A turn whose ``receive_response()`` ends without a ResultMessage (the
+    CLI stream closing mid-turn, e.g. a server restart) must surface an
+    explicit error ResultEvent instead of stopping silently, and preserve the
+    session id so the next turn can resume."""
+    from claude_agent_sdk import AssistantMessage, ToolUseBlock
+
+    from ciao.models import ResultEvent, ToolUseEvent
+    from ciao.providers.claude import _TURN_INTERRUPTED_MESSAGE
+
+    class FakeClient:
+        async def connect(self, _payload):
+            return None
+
+        async def query(self, _payload):
+            return None
+
+        async def receive_response(self):
+            # One tool call, then the stream closes with NO ResultMessage —
+            # exactly what a mid-turn subprocess kill looks like.
+            yield AssistantMessage(
+                content=[ToolUseBlock(id="t1", name="Bash", input={"command": "ls"})],
+                model="opus",
+                session_id="sess-mid",
+            )
+
+        async def get_context_usage(self):
+            return {}
+
+    fake = FakeClient()
+
+    async def fake_ensure(_request):
+        claude_provider._connected = True
+        claude_provider._client = fake
+        claude_provider._session_id = "sess-mid"
+        return fake
+
+    monkeypatch.setattr(claude_provider, "_ensure_connected", fake_ensure)
+    monkeypatch.setattr(claude_provider, "_prompt_payload", lambda _req: None)
+
+    request = AgentRequest(prompt="continue", model="opus", mode="normal")
+    events = [
+        event
+        async for event in claude_provider.run_streaming(request, lambda _handle: None)
+    ]
+
+    # The tool call still streams through before the interruption.
+    assert any(isinstance(e, ToolUseEvent) for e in events)
+
+    results = [e for e in events if isinstance(e, ResultEvent)]
+    assert len(results) == 1
+    assert results[0].is_error is True
+    assert results[0].result == _TURN_INTERRUPTED_MESSAGE
+    assert results[0].session_id == "sess-mid"

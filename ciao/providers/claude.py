@@ -84,6 +84,20 @@ logger = logging.getLogger(__name__)
 
 _CLAUDE_OP_ERRORS = (ClaudeSDKError, CLIConnectionError, ProcessError)
 
+# Shown when a turn's ``receive_response()`` ends without a terminal
+# ResultMessage. That is never a normal end-of-turn: the CLI subprocess
+# stream closed mid-turn (server restart/shutdown, subprocess kill, transport
+# drop). Without an explicit result the turn would end silently — no error,
+# no recorded response — so the chat just appears to "stop" after some tool
+# calls. Surfacing this keeps the failure visible and preserves the session
+# id so the next turn resumes instead of losing the conversation.
+_TURN_INTERRUPTED_MESSAGE = (
+    "⚠️ The turn was interrupted before it finished "
+    "(the local Ciaobot server or the model subprocess stopped mid-turn — "
+    "often a server restart). No output was lost from earlier steps; send "
+    "\"continue\" to resume."
+)
+
 
 def get_bundled_claude_path() -> str | None:
     """Find the bundled Claude CLI inside the installed claude-agent-sdk package."""
@@ -726,6 +740,24 @@ class ClaudeProvider(BaseSDKProvider):
                 if pending_result is not None:
                     await self._augment_with_context_pct(client, pending_result)
                     merged.put_nowait(pending_result)
+                else:
+                    # receive_response() completed *normally* but never yielded
+                    # a terminal ResultMessage — the stream closed mid-turn.
+                    # (An SDK error would have raised instead and be re-raised
+                    # via consumer.exception() below.) Emit an explicit error
+                    # result so the turn ends visibly and the session id is
+                    # preserved for a resume, rather than stopping silently.
+                    logger.warning(
+                        "Claude turn ended without a ResultMessage (stream closed "
+                        "mid-turn); surfacing an interruption error for session %s",
+                        self._session_id,
+                    )
+                    merged.put_nowait(ResultEvent(
+                        type="result",
+                        result=_TURN_INTERRUPTED_MESSAGE,
+                        session_id=self._session_id,
+                        is_error=True,
+                    ))
             finally:
                 merged.put_nowait(_DONE)
 

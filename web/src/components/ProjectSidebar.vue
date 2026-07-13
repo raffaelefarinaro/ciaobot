@@ -272,7 +272,11 @@
               v-for="chat in store.recentChats"
               :key="'recent-' + chat.chat_id"
               class="recent-item"
-              :class="{ active: chat.chat_id === store.activeChatId, remote: chat.local === false }"
+              :class="{
+                active: chat.chat_id === store.activeChatId,
+                remote: chat.local === false,
+                'needs-input': store.chatNeedsInput(chat.chat_id),
+              }"
               @click="chat.local !== false && selectChat(chat.chat_id)"
               :disabled="chat.local === false"
               :title="chat.local === false ? 'This chat lives on another instance' : ''"
@@ -286,11 +290,12 @@
               <span v-else class="recent-title">{{ chat.title }}</span>
               <span v-if="store.isChatStreaming(chat.chat_id)" class="spinner-dot" title="Working" />
               <span v-else-if="store.chatHasBackgroundAgents(chat.chat_id)" class="spinner-dot bg-agents" title="Background agents running" />
+              <span v-else-if="store.chatNeedsInput(chat.chat_id)" class="needs-input-badge" title="Needs your answer" aria-label="Needs your answer">?</span>
               <span v-if="chat.local === false" class="remote-chip">remote</span>
               <span class="recent-project" v-if="store.projectFor(chat.chat_id)?.name">
                 {{ store.projectFor(chat.chat_id)?.name }}
               </span>
-              <span v-if="store.chatUnread(chat.chat_id) > 0" class="badge">{{ store.chatUnread(chat.chat_id) }}</span>
+              <span v-else-if="store.chatUnread(chat.chat_id) > 0" class="badge">{{ store.chatUnread(chat.chat_id) }}</span>
             </button>
           </div>
         </div>
@@ -374,7 +379,11 @@
                 v-for="chat in store.projectChats(project.project_id)"
                 :key="chat.chat_id"
                 class="chat-item"
-                :class="{ active: chat.chat_id === store.activeChatId, remote: chat.local === false }"
+                :class="{
+                  active: chat.chat_id === store.activeChatId,
+                  remote: chat.local === false,
+                  'needs-input': store.chatNeedsInput(chat.chat_id),
+                }"
                 @click="chat.local !== false && selectChat(chat.chat_id)"
                 @keydown.enter.self.prevent="chat.local !== false && selectChat(chat.chat_id)"
                 @keydown.space.self.prevent="chat.local !== false && selectChat(chat.chat_id)"
@@ -393,9 +402,10 @@
                 <span v-else class="chat-title">{{ chat.title }}</span>
                 <span v-if="store.isChatStreaming(chat.chat_id)" class="spinner-dot" title="Working" />
                 <span v-else-if="store.chatHasBackgroundAgents(chat.chat_id)" class="spinner-dot bg-agents" title="Background agents running" />
+                <span v-else-if="store.chatNeedsInput(chat.chat_id)" class="needs-input-badge" title="Needs your answer" aria-label="Needs your answer">?</span>
                 <span v-else-if="chat.retry?.status === 'pending'" class="retry-dot" title="Retry scheduled" />
                 <span v-if="chat.local === false" class="remote-chip">remote</span>
-                <span v-if="store.chatUnread(chat.chat_id) > 0" class="badge">{{ store.chatUnread(chat.chat_id) }}</span>
+                <span v-else-if="store.chatUnread(chat.chat_id) > 0" class="badge">{{ store.chatUnread(chat.chat_id) }}</span>
                 <button
                   class="chat-actions-btn"
                   aria-label="Chat actions"
@@ -931,6 +941,36 @@ async function confirmDeleteChat(chatId: string) {
   border: 1px solid rgba(255, 193, 7, 0.8);
   background: rgba(255, 193, 7, 0.22);
   flex-shrink: 0;
+}
+
+/* AskUserQuestion: blocked until the user picks an answer. Pink ? badge
+   matches the question card accent and stays visible on the active chat. */
+.needs-input-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  margin-left: 6px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  line-height: 1;
+  flex-shrink: 0;
+  animation: ciao-pulse 1.1s ease-in-out infinite;
+}
+
+.recent-item.needs-input,
+.chat-item.needs-input {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.recent-item.needs-input.active,
+.chat-item.needs-input.active {
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg3));
 }
 
 /* Scrollable area for chats and projects */

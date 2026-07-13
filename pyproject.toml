@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ciaobot"
-version = "0.4.15"
+version = "0.4.16"
 description = "Ciaobot personal assistant server."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -26,6 +26,8 @@ dependencies = [
   # macOS menu bar companion (`ciao menubar`): installed automatically on
   # macOS so a plain wheel install includes the status-bar app.
   "rumps==0.4.0; platform_system == 'Darwin'",
+  # Native Ciaobot.app window (WebKit wrapper for the local PWA).
+  "pywebview==5.4; platform_system == 'Darwin'",
 ]
 
 [project.optional-dependencies]
