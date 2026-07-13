@@ -6,6 +6,8 @@ import sys
 import urllib.error
 from pathlib import Path
 
+import pytest
+
 from ciao import menubar
 
 
@@ -662,3 +664,18 @@ def test_github_repo_url_respects_env_override(monkeypatch) -> None:
 
 def test_open_url_command_wraps_open() -> None:
     assert menubar.open_url_command("https://example.com") == ["open", "https://example.com"]
+
+
+def test_keep_timer_running_while_menu_open_tolerates_any_object() -> None:
+    # No _nstimer attribute (and no Foundation off-macOS): must be a no-op.
+    menubar._keep_timer_running_while_menu_open(object())
+
+
+def test_keep_timer_running_while_menu_open_registers_common_modes() -> None:
+    rumps = pytest.importorskip("rumps")
+    timer = rumps.Timer(lambda _timer: None, 0.5)
+    timer.start()
+    try:
+        menubar._keep_timer_running_while_menu_open(timer)
+    finally:
+        timer.stop()

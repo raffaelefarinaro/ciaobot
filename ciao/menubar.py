@@ -363,6 +363,28 @@ def dot_pulse_icon_paths() -> list[str]:
     return [path for path in paths if os.path.isfile(path)]
 
 
+def _keep_timer_running_while_menu_open(timer) -> None:
+    """Re-register a started rumps.Timer in NSRunLoopCommonModes.
+
+    rumps schedules its NSTimer in the default run-loop mode only. While the
+    status-item menu is open, the run loop sits in the event-tracking mode,
+    so the timer stops firing and the spinning head plus the pulsing
+    working-chat dots freeze mid-frame. Common modes include menu tracking,
+    which keeps both animations running with the menu expanded.
+    """
+
+    try:
+        from Foundation import NSRunLoop, NSRunLoopCommonModes
+
+        nstimer = getattr(timer, "_nstimer", None)
+        if nstimer is not None:
+            NSRunLoop.currentRunLoop().addTimer_forMode_(nstimer, NSRunLoopCommonModes)
+    except Exception:
+        # Best-effort against rumps/pyobjc internals changing: the fallback
+        # is the old behavior (animation pauses while the menu is open).
+        pass
+
+
 def workspace_menu_label(name: str) -> str:
     """Human-readable workspace name for menu labels (matches the PWA sidebar)."""
 
@@ -1056,7 +1078,9 @@ def run_menubar(workspace: Path, port: int) -> int:
 
     threading.Thread(target=poll_working, daemon=True).start()
     rumps.Timer(refresh, POLL_SECONDS).start()
-    rumps.Timer(animate_icon, SPIN_INTERVAL_SECONDS).start()
+    animate_timer = rumps.Timer(animate_icon, SPIN_INTERVAL_SECONDS)
+    animate_timer.start()
+    _keep_timer_running_while_menu_open(animate_timer)
     refresh()
     animate_icon()
     app.run()
