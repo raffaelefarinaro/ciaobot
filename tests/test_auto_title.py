@@ -147,3 +147,26 @@ def test_resolve_title_model_falls_back_without_workspace() -> None:
     config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
     config.title_model_override = ""
     assert resolve_title_model(config) == config.title_model
+
+
+def test_clean_title_rejects_reply_shaped_output() -> None:
+    from ciao.web.project_chats import _clean_title
+
+    user = "Create google tasks for my wedding checklist please"
+    # The title model answered the message instead of titling it.
+    assert (
+        _clean_title(
+            "I'd be happy to help you create Google Tasks, but I need more "
+            "details about what tasks you want.",
+            user,
+        )
+        == "Create google tasks for my wedding"
+    )
+    assert _clean_title("Sure, let me create those tasks for you", user) == (
+        "Create google tasks for my wedding"
+    )
+    # Real titles pass through untouched, including ones with I/O-style words.
+    assert _clean_title("Wedding Checklist Google Tasks", user) == (
+        "Wedding Checklist Google Tasks"
+    )
+    assert _clean_title("I/O Performance Tuning", user) == "I/O Performance Tuning"
