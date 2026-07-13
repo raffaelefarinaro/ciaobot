@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.4.16 - 2026-07-13
+
+### Changed
+- Surface chats blocked on AskUserQuestion in the sidebar, bell, and tray. (`1bfc286`)
+- Adopt develop/main release workflow with automated publishing. (`a8284ea`)
+- Auto tier-fallback on capability errors (Claude, Ollama, OpenRouter) (`7c937a3`)
+- Merge onboarding into one Settings card and hide it when complete. (`611a130`)
+- Embed PWA in native WebKit window and unify macOS tray notifications. (`11a0be9`)
+- Merge pull request #73 from raffaelefarinaro/worktree-fix-ci-menubar-env (`b08ae6c`)
+- Merge branch 'develop' of https://github.com/raffaelefarinaro/ciaobot into develop (`d918a68`)
+- Merge remote-tracking branch 'origin/develop' into worktree-fix-dup-window (`b9cb9a8`)
+- Merge pull request #75 from raffaelefarinaro/worktree-fix-dup-window (`a0e6063`)
+
+### Fixed
+- Fix getting-started flash on PWA cold boot. (`ebe494f`)
+- fix(web): unify header icon button overlays (brain, archive, bell) (`1dda251`)
+- fix(web): keep chat pinned to bottom after send and streaming (`a2fc8e5`)
+- fix(web): highlight only the exact active model, not same-tier models from other providers (`6d5afd8`)
+- fix(menubar): make the native window single-instance; drop dead PWA lookup (`21f8b59`)
+- fix: surface mid-turn interruptions and stop menu-bar update crashes (`df1289f`)
+- fix(web): stop reply-shaped chat titles from contentless prompts (`fbd300b`)
+
+### Maintenance
+- docs: document CIAO_MENUBAR_EXECUTABLE plist placeholder (`f91370e`)
+
 ## v0.4.15 - 2026-07-13
 
 ### Changed
