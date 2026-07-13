@@ -153,6 +153,7 @@ def test_agent_assets_lists_memory_proposals(tmp_path: Path) -> None:
 def test_agent_assets_lists_instruction_import_children(tmp_path: Path) -> None:
     (tmp_path / "extra.md").write_text("# Extra\n", encoding="utf-8")
     (tmp_path / "CLAUDE.md").write_text("# Local\n\n@extra.md\n@missing.md\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("# Codex\n\n@extra.md\n", encoding="utf-8")
 
     resp = _client(tmp_path).get("/api/agent-assets")
 
@@ -162,7 +163,8 @@ def test_agent_assets_lists_instruction_import_children(tmp_path: Path) -> None:
     assert {"extra.md", "missing.md"}.issubset(paths)
     assert any(item["status"] == "ok" and item["parent_id"].startswith("file:") for item in imports)
     assert any(item["status"] == "missing" for item in imports)
-    assert all(item["provider"] == "claude" for item in imports)
+    extra_providers = {item["provider"] for item in imports if item["path"] == "extra.md"}
+    assert extra_providers == {"claude", "codex"}
 
 
 def test_create_subagent_writes_canonical_file_vault_mirror_and_claude_link(tmp_path: Path) -> None:
