@@ -1,5 +1,71 @@
 # Changelog
 
+## v0.4.14 - 2026-07-13
+
+### Added
+- Add Scrapling as an optional web-scraping fallback for web-research (`d6e72f6`)
+- Add in-chat loops next to schedules; Schedules page becomes Automations (`6ddd069`)
+- Add per-tier Codex model pins with automatic fallback (`7423f58`)
+- Add interactive onboarding: tour deep links and getting-started checklist (`49a0261`)
+
+### Changed
+- Instruct agents to maintain project canonical docs during chats and nightly curation. (`a81571d`)
+- Refresh stock skills: curate gws helpers and fix stale Ciao skill content. (`7c7f368`)
+- Simplify stock subagents and refresh them on sync-skills. (`32af9ad`)
+- Simplify stock slash commands and seed them into canonical commands/. (`355203d`)
+- Simplify shipped system schedules and align them with prompt conventions. (`6641fa6`)
+- Surface bounded memory and proposals in Settings → Context. (`a61ca42`)
+- Reflect PWA notifications in menu bar (`3a80435`)
+- Snapshot in-progress Codex CLI provider work (`3e2a7a6`)
+- Map OpenAI models onto the haiku/sonnet/opus families (`84fb9d9`)
+- Document stock subagents, commands, and routines in README; slim it down (`b562459`)
+- Rework welcome mascot greeting: hover previews, click pins (`2b40896`)
+- Stagger system schedule times, drop emoji sentinels, mark disabled schedules (`f334807`)
+- Scroll chat to bottom when sending a message (`908bb92`)
+- Ignore workspace runtime dirs seeded into the repo by sync-skills (`ac1e0d7`)
+- Validate codex thinking levels against the model catalog on PATCH (`7da3572`)
+- Document loops in skill triggers, capability catalog, and README (`d93a66a`)
+- Rename ciao-schedules skill to ciao-automations (`91fe4f9`)
+- Show loop banner in loop-driven chats; split sidebar automation groups (`e262cd5`)
+- Run missed schedules once on startup (`6cd4c2a`)
+- Simplify automation sidebar group labels (`dee1ac3`)
+- Improve PWA and tray UX (`04d08fd`)
+- Document Ciaobot design system (`5c266e2`)
+- Align sidebar activity indicators (`699294c`)
+- Simplify chat message placeholder (`a77379f`)
+- Increase assistant message line height (`4ed9667`)
+- Complete Fable model support and responsive UI fixes (`49f52ea`)
+- Drain active chats before restart (`1433b17`)
+- Clarify GitHub issue reporting workflow (`3d3d340`)
+- Run dev backend through restart supervisor (`5c731b4`)
+- Harden dependency review validation (`b81c65c`)
+- Update runtime dependency pins (`427549c`)
+- Improve provider-aware context settings (`77180dd`)
+- Link workspace AGENTS.md to CLAUDE.md and check it in health (`c67a833`)
+- Nudge agents to seed bounded memory when empty (`1583a98`)
+- Target bounded memory explicitly in the curation schedule (`4f06ade`)
+- Auto-promote user corrections into bounded memory at archive time (`53b5978`)
+- Update project canonical docs from insights at archive time (`9f012e1`)
+- Explain provider-CLI design rationale in README (#69) (`9a80f73`)
+- Show one source link for the linked CLAUDE.md/AGENTS.md guides (`1ef7998`)
+- Remove the OpenAI model catalog from routing settings (`9cd1abe`)
+
+### Fixed
+- fix(tray): open the selected chat when the PWA is already running (`b35dc06`)
+- fix(web): widen chat bubbles so messages use more horizontal space. (`2654834`)
+- Fix .env.example export drop, dead doc-updater ref, and hardcoded session secret (`4286f7c`)
+- fix(web): unbreak Vite dev proxy writes and WebSockets with auth off (`4273c1a`)
+- Fix external vault file uploads (`86a9b6c`)
+- Fix model picker metadata and polish PWA controls (`2d0e301`)
+- Fix Codex commentary rendering (`9cfa186`)
+- Fix workspace-scoped context display (`7cbf2b4`)
+- Fix auto-title fallback tests to mock the provider one-shot seam (`81fb398`)
+
+### Maintenance
+- docs: restructure README for clearer reader narrative. (`8ce1785`)
+- Test shared instruction imports across providers (`a62d4b4`)
+- build(web): refresh bundled PWA assets (`be22f5f`)
+
 ## v0.4.13 - 2026-07-09
 
 ### Added
