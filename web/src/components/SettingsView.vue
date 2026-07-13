@@ -886,26 +886,9 @@
                   />
                 </label>
               </div>
-              <template v-if="selectedTierProviderSection.key === 'codex' && selectedTierProviderSection.available">
-                <p class="hint hint--info tier-provider-note">
-                  OpenAI models are discovered from the signed-in Codex account. Ciaobot assigns the tiers automatically; pick a model above to pin a tier. A pin falls back to the automatic mapping if its model disappears from the account.
-                </p>
-                <details v-if="selectedTierProviderSection.options.length" class="routing-model-catalog">
-                  <summary>Available OpenAI models ({{ selectedTierProviderSection.options.length }})</summary>
-                  <ul class="routing-model-catalog__list">
-                    <li v-for="model in selectedTierProviderSection.options" :key="model">
-                      <code>{{ model }}</code>
-                      <span v-if="selectedTierModelBadges[model]?.length" class="routing-model-catalog__badges">
-                        <span
-                          v-for="badge in selectedTierModelBadges[model]"
-                          :key="`${model}-${badge}`"
-                          class="badge badge--muted"
-                        >{{ badge }}</span>
-                      </span>
-                    </li>
-                  </ul>
-                </details>
-              </template>
+              <p v-if="selectedTierProviderSection.key === 'codex' && selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
+                OpenAI models are discovered from the signed-in Codex account. Ciaobot assigns the tiers automatically; pick a model above to pin a tier. A pin falls back to the automatic mapping if its model disappears from the account.
+              </p>
               <p v-else-if="!selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
                 {{ tierProviderUnavailableHint }}
               </p>
@@ -2006,18 +1989,6 @@ const tierModelSections = computed<ModelSection[]>(() => {
       hint: section.available ? undefined : tierProviderUnavailableHint.value,
     },
   ]
-})
-
-const selectedTierModelBadges = computed<Record<string, string[]>>(() => {
-  const section = selectedTierProviderSection.value
-  if (!section?.options.length) return {}
-  const aliasTiers = section.key === 'codex'
-    ? workspaceModels.value?.alias_tiers
-    : routines.value?.alias_tiers
-  const localModels = section.key === 'ollama'
-    ? routines.value?.model_options.ollama_local || []
-    : []
-  return providerModelBadges(section.key, section.options, aliasTiers, localModels)
 })
 
 const tierProviderUnavailableHint = computed(() => {
@@ -4400,54 +4371,6 @@ async function doPackageUpdate() {
 }
 .tier-provider-note {
   margin-top: var(--space-2);
-}
-.routing-model-catalog {
-  margin-top: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--bg) 72%, transparent);
-}
-.routing-model-catalog summary {
-  display: flex;
-  align-items: center;
-  min-height: var(--touch);
-  padding: 0 var(--space-3);
-  color: var(--fg);
-  font-size: var(--text-sm);
-  font-weight: 600;
-  cursor: pointer;
-}
-.routing-model-catalog summary:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-.routing-model-catalog__list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  margin: 0;
-  padding: 0 var(--space-3) var(--space-3);
-  list-style: none;
-}
-.routing-model-catalog__list li {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-2);
-  min-width: 0;
-  padding-top: var(--space-2);
-  border-top: 1px solid var(--border);
-}
-.routing-model-catalog__list code {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.routing-model-catalog__badges {
-  display: flex;
-  flex: 0 0 auto;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: var(--space-1);
 }
 .integration-warning {
   margin-top: var(--space-3);

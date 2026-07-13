@@ -734,16 +734,7 @@ describe('component mount smoke', () => {
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
       codex_haiku_model: 'gpt-5.6-terra',
     })
-    expect(wrapper.find('.routing-model-catalog summary').text()).toBe('Available OpenAI models (3)')
-    expect(wrapper.findAll('.routing-model-catalog code').map((model) => model.text())).toEqual([
-      'gpt-5.6-luna',
-      'gpt-5.6-terra',
-      'gpt-5.6-sol',
-    ])
-    expect(wrapper.find('.routing-model-catalog').text()).toContain('Haiku')
-    expect(wrapper.find('.routing-model-catalog').text()).toContain('Sonnet')
-    expect(wrapper.find('.routing-model-catalog').text()).toContain('Opus')
-    expect(wrapper.find('.routing-model-catalog').text()).toContain('Fable')
+    expect(wrapper.find('.routing-model-catalog').exists()).toBe(false)
 
     await providerSelect.setValue('ollama')
     await flushPromises()
