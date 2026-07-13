@@ -114,7 +114,12 @@
             @close="showModelPicker = false"
           />
         </div>
-        <button class="btn-icon" @click="doArchive" title="Archive chat" aria-label="Archive chat">
+        <button
+          class="archive-btn touch-hit"
+          @click="doArchive"
+          title="Archive chat"
+          aria-label="Archive chat"
+        >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
         </button>
       </template>
@@ -4202,6 +4207,24 @@ details[open] > .activity-summary::before {
 }
 .model-picker-btn:hover { background: var(--bg3); }
 .model-picker-btn:active { transform: scale(0.96); }
+
+.archive-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: content-box;
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
+  min-height: 30px;
+  border-radius: 6px;
+  color: var(--fg2);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.archive-btn:hover { background: var(--bg3); color: var(--fg); }
+.archive-btn:active { transform: scale(0.96); }
 
 .model-picker-dropdown {
   position: absolute;

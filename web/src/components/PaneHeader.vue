@@ -119,12 +119,25 @@ defineEmits<{ 'open-sidebar': [] }>()
   height: 18px;
 }
 .header-bell :deep(.bell-btn) {
-  background: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  background: transparent;
   border: none;
   color: var(--fg2);
   cursor: pointer;
+  transition: background 120ms var(--ease), transform 120ms var(--ease);
 }
+.header-bell :deep(.bell-btn:hover) {
+  background: var(--bg3);
+  color: var(--fg);
+}
+.header-bell :deep(.bell-btn:active) { transform: scale(0.96); }
 .header-bell :deep(.bell-btn.has-unread) { color: var(--accent); }
+.header-bell :deep(.bell-btn.has-unread:hover) { background: var(--bg3); }
 @media (max-width: 768px) {
   .pane-header {
     height: auto;
