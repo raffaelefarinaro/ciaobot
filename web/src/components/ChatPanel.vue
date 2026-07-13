@@ -2970,6 +2970,7 @@ function insertImageRef(n: number) {
 .message.assistant {
   background: var(--bg2);
   border: 1px solid var(--border);
+  line-height: 1.6;
 }
 
 .message-actions {
