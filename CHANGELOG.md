@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.4.17 - 2026-07-14
+
+### Changed
+- Merge pull request #78 from raffaelefarinaro/chore/sync-develop-v0.4.16 (`edaeb8a`)
+- Merge pull request #80 from raffaelefarinaro/fix-macos-window-identity-and-upgrade (`b6b4e49`)
+
+### Fixed
+- fix(macos): native window Dock identity + self-heal server after brew upgrade (`4c7c7c1`)
+- fix(macos): persist WebKit localStorage so the welcome tour shows once (`c56d142`)
+
+### Maintenance
+- ci: fix release automation so publish and develop-sync actually run (`de45709`)
+
 ## v0.4.16 - 2026-07-13
 
 ### Changed
