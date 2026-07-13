@@ -654,6 +654,7 @@ def list_command_assets(config: Any) -> list[CommandAsset]:
 
 def list_prompt_assets(config: Any) -> list[PromptAsset]:
     root = Path(config.workspace_root)
+    system_prompt_path = Path(__file__).resolve().parents[1] / "system_prompt.md"
     prompts: list[PromptAsset] = []
     seen: set[tuple[str, Path]] = set()
 
@@ -666,7 +667,7 @@ def list_prompt_assets(config: Any) -> list[PromptAsset]:
             "Bounded memory files are listed separately below."
         ),
         source="generated",
-        path="",
+        path=_relative_or_absolute(system_prompt_path, root),
         editable=False,
         content=str(system_prompt.get("append") or ""),
         scope="generated",

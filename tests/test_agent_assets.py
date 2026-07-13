@@ -70,6 +70,9 @@ def test_agent_assets_lists_instruction_sources(tmp_path: Path) -> None:
     by_title = {item["title"]: item for item in data["context"]}
     assert by_title["Project CLAUDE.md"]["provider"] == "claude"
     assert by_title["Workspace memory"]["provider"] == "shared"
+    system_prompt = by_title["Ciaobot system prompt append"]
+    assert system_prompt["editable"] is False
+    assert Path(system_prompt["path"]).name == "system_prompt.md"
     runtime = by_title["Per-turn runtime context hook"]
     assert "README.md or canonical project document" in runtime["content"]
     assert "Project context" in runtime["description"]

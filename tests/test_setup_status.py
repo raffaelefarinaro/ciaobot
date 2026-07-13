@@ -321,7 +321,8 @@ def test_setup_finish_persists_codex_as_first_workspace_provider(tmp_path) -> No
     )
     assert registry[0]["default_provider"] == "codex"
     assert registry[0]["model_bucket"] == ""
-    assert (ws / "AGENTS.md").is_file()
+    assert (ws / "AGENTS.md").is_symlink()
+    assert (ws / "AGENTS.md").resolve() == (ws / "CLAUDE.md").resolve()
 
 
 def test_setup_finish_autodetects_existing_notes_folder(tmp_path) -> None:

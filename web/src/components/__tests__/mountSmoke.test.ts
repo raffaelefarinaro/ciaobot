@@ -172,6 +172,17 @@ vi.mock('../../lib/api', () => {
           provider: 'claude',
         },
         {
+          id: 'claude-import-rtk',
+          title: 'Import: RTK.md',
+          description: 'Imported by Claude Code global instructions.',
+          source: 'file-import',
+          path: '/tmp/.claude/RTK.md',
+          editable: false,
+          content: '# Claude-only instructions\n',
+          scope: 'import',
+          provider: 'claude',
+        },
+        {
           id: 'codex-project-instructions',
           title: 'Project AGENTS.md',
           description: 'Project-local Codex instructions loaded by the CLI.',
@@ -312,9 +323,10 @@ vi.mock('../../lib/api', () => {
       workspaces: [],
       active: null,
       provider_options: [
-        { value: 'claude', label: 'Claude' },
-        { value: 'ollama', label: 'Ollama' },
-        { value: 'openrouter', label: 'OpenRouter' },
+        { value: 'claude', label: 'Anthropic (via Claude Code)' },
+        { value: 'codex', label: 'OpenAI (via Codex)' },
+        { value: 'ollama', label: 'Ollama (via Claude Code)' },
+        { value: 'openrouter', label: 'OpenRouter (via Claude Code)' },
       ],
     },
   }
@@ -465,7 +477,7 @@ describe('component mount smoke', () => {
     expect(errors).toEqual([])
   })
 
-  it('SettingsView switches provider context and groups active-workspace memory', async () => {
+  it('SettingsView explains the generic context recipe for each CLI', async () => {
     localStorage.setItem('ciao-context-provider', 'claude')
     const router = makeRouter()
     await router.push('/settings/context')
@@ -483,17 +495,70 @@ describe('component mount smoke', () => {
 
     expect(wrapper.findAll('.memory-context-row')).toHaveLength(1)
     expect(wrapper.findAll('.memory-source')).toHaveLength(3)
-    expect(visibleContextRows()).toContain('Project CLAUDE.md')
-    expect(visibleContextRows()).not.toContain('Project AGENTS.md')
+    expect(wrapper.text()).toContain('independent of the current chat, project, and workspace')
+    expect(wrapper.text()).toContain('Global session memory is appended at chat start')
+    expect(wrapper.text()).toContain('Global · included automatically at chat start')
+    expect(wrapper.text()).toContain('Workspace-specific · opened only when relevant')
+    expect(wrapper.text()).toContain('Global remembered facts')
+    expect(wrapper.text()).toContain('Global user profile')
+    expect(wrapper.text()).toContain('Workspace notes (MEMORY.md)')
+    expect(wrapper.findAll('.memory-source-summary-copy').map((row) => row.text())).toEqual([
+      'Cross-session facts, conventions, and lessons shared across all workspaces.',
+      'Your identity and response preferences, shared across all workspaces.',
+      'Durable notes from whichever workspace the chat uses. This file is not inserted automatically.',
+    ])
+    expect(wrapper.findAll('.memory-source-badges').map((row) => row.text())).toEqual([
+      'session startautomatically generatednot editable',
+      'session startautomatically generatednot editable',
+      'on demandautomatically generatednot editable',
+    ])
+    expect(wrapper.findAll('.memory-source-file .inline-path-button').map((row) => row.text())).toEqual([
+      '/tmp/.ciao/memory.md',
+      '/tmp/.ciao/user.md',
+      'memory-vault/personal/MEMORY.md',
+      'memory-vault/work/MEMORY.md',
+    ])
+    expect(wrapper.text()).not.toContain('3 sources')
+    expect(visibleContextRows()).toContain('Claude Code instructions (CLAUDE.md)')
+    expect(visibleContextRows()).not.toContain('Codex instructions (AGENTS.md)')
+    expect(wrapper.findAll('.skill-list > .instruction-row .skill-name').map((row) => row.text())).toEqual([
+      'Claude Code instructions (CLAUDE.md)',
+      'Ciaobot system instructions',
+      'Memory sources',
+      'Per-turn runtime context hook',
+    ])
     expect(wrapper.text()).not.toContain('Review queue')
     expect(wrapper.text()).not.toContain('Memory proposals')
+    expect(wrapper.text()).toContain('memory-vault/personal/MEMORY.md')
+    expect(wrapper.text()).toContain('memory-vault/work/MEMORY.md')
+    expect(wrapper.text()).not.toContain('Name: Ada')
+    expect(wrapper.text()).not.toContain('Import: RTK.md')
+    expect(wrapper.text()).not.toContain('Imported by Claude Code global instructions')
+
+    const instructionRow = wrapper.findAll('.skill-list > .instruction-row')
+      .find((row) => row.text().includes('Claude Code instructions (CLAUDE.md)'))
+    expect(instructionRow).toBeTruthy()
+    expect(instructionRow!.text()).toContain('editable')
+    await instructionRow!.trigger('click')
+    await nextTick()
+    expect(instructionRow!.find('.inline-path-button').text()).toBe('CLAUDE.md')
+
+    const systemRow = wrapper.findAll('.skill-list > .instruction-row')
+      .find((row) => row.text().includes('Ciaobot system instructions'))
+    expect(systemRow).toBeTruthy()
+    expect(systemRow!.text()).toContain('not editable')
+    await systemRow!.trigger('click')
+    await nextTick()
+    expect(systemRow!.find('.inline-path-button').text()).toBe('ciao/system_prompt.md')
 
     const providerButtons = wrapper.findAll('.context-provider-toggle .toggle-btn')
     expect(providerButtons.map((button) => button.text())).toEqual(['Claude Code', 'Codex'])
     await providerButtons[1].trigger('click')
     await nextTick()
-    expect(visibleContextRows()).toContain('Project AGENTS.md')
-    expect(visibleContextRows()).not.toContain('Project CLAUDE.md')
+    expect(visibleContextRows()).toContain('Codex instructions (AGENTS.md)')
+    expect(visibleContextRows()).not.toContain('Claude Code instructions (CLAUDE.md)')
+    expect(visibleContextRows()).not.toContain('RTK.md')
+    expect(instructionRow!.find('.inline-path-button').text()).toBe('AGENTS.md')
 
     const runtimeRow = wrapper.findAll('.skill-list > .instruction-row')
       .find((row) => row.text().includes('Per-turn runtime context hook'))
@@ -503,6 +568,7 @@ describe('component mount smoke', () => {
     expect(runtimeRow!.text()).toContain('Project context:')
     expect(runtimeRow!.text()).toContain('Project document:')
     expect(runtimeRow!.text()).toContain('README.md or canonical document')
+    expect(runtimeRow!.text()).not.toContain('<ciao-runtime>')
     wrapper.unmount()
   })
 
@@ -583,9 +649,19 @@ describe('component mount smoke', () => {
     await nextTick()
 
     const providerOptions = wrapper.findAll('select.routine-input option').map((option) => option.text())
-    expect(providerOptions).toContain('Claude')
-    expect(providerOptions).toContain('Ollama')
-    expect(providerOptions).toContain('OpenRouter')
+    expect(providerOptions).toContain('Anthropic (via Claude Code)')
+    expect(providerOptions).toContain('OpenAI (via Codex)')
+    expect(providerOptions).toContain('Ollama (via Claude Code)')
+    expect(providerOptions).toContain('OpenRouter (via Claude Code)')
+    expect(wrapper.findAll('select.workspace-select')).toHaveLength(3)
+
+    expect(wrapper.find('[aria-label="Claude.ai MCPs"]').exists()).toBe(true)
+    const providerField = wrapper.findAll('label.settings-field')
+      .find((field) => field.find('.ws-label').text() === 'Provider')
+    expect(providerField).toBeTruthy()
+    await providerField!.find('select').setValue('codex')
+    await nextTick()
+    expect(wrapper.find('[aria-label="Claude.ai MCPs"]').exists()).toBe(false)
     wrapper.unmount()
   })
 

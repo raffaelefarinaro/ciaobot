@@ -949,7 +949,7 @@
                   <input class="routine-input" v-model="newWorkspaceForm.vault_root" :disabled="workspacesSaving === 'new'" placeholder="(defaults to name)" />
                 </label>
                 <label class="settings-field"><span class="ws-label">Provider</span>
-                  <select class="routine-input" v-model="newWorkspaceForm.default_provider" :disabled="workspacesSaving === 'new'">
+                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.default_provider" :disabled="workspacesSaving === 'new'">
                     <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
                       {{ provider.label }}
                     </option>
@@ -976,7 +976,7 @@
                       </div>
                     </details>
                   </div>
-                  <select class="routine-input" v-model="newWorkspaceForm.gws_profile" :disabled="workspacesSaving === 'new'">
+                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.gws_profile" :disabled="workspacesSaving === 'new'">
                     <option value="">Default ({{ defaultGwsProfileName }})</option>
                     <option v-for="profile in gwsProfileOptions" :key="`new-gws-${profile.name}`" :value="profile.name">
                       {{ profile.label }} ({{ profile.email || profile.name }})
@@ -986,7 +986,7 @@
                     </option>
                   </select>
                 </label>
-                <div class="settings-field settings-field--wide">
+                <div v-if="newWorkspaceForm.default_provider !== 'codex'" class="settings-field settings-field--wide">
                   <div class="settings-label-row">
                     <span class="ws-label">Claude.ai MCPs</span>
                     <details class="field-info">
@@ -1003,7 +1003,7 @@
                       </div>
                     </details>
                   </div>
-                  <select class="routine-input" v-model="newWorkspaceForm.claude_ai_mcps" :disabled="workspacesSaving === 'new'" aria-label="Claude.ai MCPs">
+                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.claude_ai_mcps" :disabled="workspacesSaving === 'new'" aria-label="Claude.ai MCPs">
                     <option value="on">On (connectors allowed)</option>
                     <option value="off">Off (connectors blocked)</option>
                   </select>
@@ -1050,7 +1050,7 @@
                     <input class="routine-input" v-model="form.vault_root" :disabled="workspacesSaving === form.name" placeholder="(defaults to workspace name)" />
                   </label>
                   <label class="settings-field"><span class="ws-label">Provider</span>
-                    <select class="routine-input" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
+                    <select class="routine-input workspace-select" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
                       <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
                         {{ provider.label }}
                       </option>
@@ -1077,7 +1077,7 @@
                         </div>
                       </details>
                     </div>
-                    <select class="routine-input" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
+                    <select class="routine-input workspace-select" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
                       <option value="">Default ({{ defaultGwsProfileName }})</option>
                       <option v-for="profile in gwsProfileOptions" :key="`${form.name}-gws-${profile.name}`" :value="profile.name">
                         {{ profile.label }} ({{ profile.email || profile.name }})
@@ -1087,7 +1087,7 @@
                       </option>
                     </select>
                   </label>
-                  <div class="settings-field settings-field--wide">
+                  <div v-if="form.default_provider !== 'codex'" class="settings-field settings-field--wide">
                     <div class="settings-label-row">
                       <span class="ws-label">Claude.ai MCPs</span>
                       <details class="field-info">
@@ -1104,7 +1104,7 @@
                         </div>
                       </details>
                     </div>
-                    <select class="routine-input" v-model="form.claude_ai_mcps" :disabled="workspacesSaving === form.name" aria-label="Claude.ai MCPs">
+                    <select class="routine-input workspace-select" v-model="form.claude_ai_mcps" :disabled="workspacesSaving === form.name" aria-label="Claude.ai MCPs">
                       <option value="on">On (connectors allowed)</option>
                       <option value="off">Off (connectors blocked)</option>
                     </select>
@@ -1126,7 +1126,7 @@
             <div>
               <p class="section-title">Context sources</p>
               <p class="hint">
-                The instruction files, workspace memory, and Ciaobot context sent to the selected provider.
+                How Ciaobot assembles context for each CLI. This guide is independent of the current chat, project, and workspace.
               </p>
             </div>
             <div class="context-provider-field">
@@ -1150,15 +1150,10 @@
             </div>
           </div>
 
-          <div v-if="!agentAssetsLoaded" class="action-row"><span class="loading">Loading&hellip;</span></div>
-          <template v-else-if="agentAssetsError">
-            <p class="hint hint--warn">{{ agentAssetsError }}</p>
-          </template>
-          <template v-else>
-            <p v-if="!contextAssets.length && !workspaceMemoryAssets.length" class="hint hint--section-empty">No context sources found.</p>
-            <div v-else class="skill-list">
+          <div class="skill-list">
+            <template v-for="item in contextAssets" :key="item.id">
               <details
-                v-if="workspaceMemoryAssets.length"
+                v-if="item.id === 'memory-sources'"
                 class="skill-row instruction-row memory-context-row"
                 :open="workspaceMemoryExpanded"
                 @toggle="workspaceMemoryExpanded = ($event.currentTarget as HTMLDetailsElement).open"
@@ -1166,36 +1161,38 @@
                 <summary class="skill-main memory-context-summary">
                   <div class="skill-title-row command-title-row">
                     <span class="skill-chevron">{{ workspaceMemoryExpanded ? '&#9662;' : '&#9656;' }}</span>
-                    <span class="skill-name">Workspace memory</span>
-                    <span class="skill-badges">
-                      <span class="badge badge--muted command-source">{{ projectStore.activeWorkspace }}</span>
-                      <span class="badge badge--muted command-source">{{ workspaceMemoryAssets.length }} sources</span>
-                    </span>
+                    <span class="skill-name">{{ item.title }}</span>
                   </div>
-                  <p class="skill-description">
-                    Bounded memory injected at session start plus durable memory from the active workspace.
-                  </p>
+                  <p class="skill-description">{{ item.description }}</p>
                 </summary>
                 <div class="skill-detail memory-source-list">
-                  <details v-for="memory in workspaceMemoryAssets" :key="memory.id" class="memory-source">
-                    <summary>
-                      <span>{{ memorySourceTitle(memory) }}</span>
-                      <span class="badge badge--muted command-source">{{ memoryInjectionLabel(memory) }}</span>
-                    </summary>
-                    <p class="skill-description">{{ memory.description }}</p>
-                    <p v-if="memory.path" class="skill-meta">
-                      <span class="skill-meta-label">Path</span>
-                      <button class="inline-path-button" @click.stop="openAssetPath(memory.path)">{{ memory.path }}</button>
-                    </p>
-                    <pre v-if="memory.content" class="asset-code-preview"><code>{{ memory.content }}</code></pre>
-                    <p v-else class="hint hint--compact">This memory source is currently empty.</p>
-                  </details>
+                  <template v-for="group in workspaceMemoryGroups" :key="group.id">
+                    <p class="memory-source-group-title">{{ group.title }}</p>
+                    <div v-for="memory in group.items" :key="memory.id" class="memory-source">
+                      <span class="memory-source-heading">
+                        <span>{{ memory.title }}</span>
+                        <span class="memory-source-badges">
+                          <span class="badge badge--muted command-source">{{ memoryInjectionLabel(memory) }}</span>
+                          <span class="badge badge--muted command-source">automatically generated</span>
+                          <span class="badge badge--muted command-source">not editable</span>
+                        </span>
+                      </span>
+                      <span class="memory-source-summary-copy">{{ memory.description }}</span>
+                      <p
+                        v-for="sourceFile in memorySourceFiles(memory)"
+                        :key="sourceFile.path"
+                        class="skill-meta memory-source-file"
+                      >
+                        <span class="skill-meta-label">Source file</span>
+                        <button class="inline-path-button" @click.stop="openAssetPath(sourceFile.path)">{{ sourceFile.label }}</button>
+                      </p>
+                    </div>
+                  </template>
                 </div>
               </details>
 
               <div
-                v-for="item in contextAssets"
-                :key="item.id"
+                v-else
                 class="skill-row instruction-row"
                 :class="{ expanded: isContextExpanded(item) }"
                 :style="{ paddingLeft: `${10 + Math.min(item.level || 0, 4) * 18}px` }"
@@ -1208,53 +1205,54 @@
                     <span class="skill-badges">
                       <span v-if="item.scope" class="badge badge--muted command-source">{{ item.scope }}</span>
                       <span class="badge badge--muted command-source">{{ item.source }}</span>
-                      <span v-if="item.status && item.status !== 'ok'" class="badge command-source" :class="item.status === 'missing' ? 'badge--warn' : 'badge--error'">{{ item.status }}</span>
-                      <span v-if="item.editable" class="badge badge--success command-source">editable</span>
-                      <span v-else class="badge badge--muted command-source">read-only</span>
+                      <span class="badge command-source" :class="item.editable ? 'badge--success' : 'badge--muted'">
+                        {{ item.editable ? 'editable' : 'not editable' }}
+                      </span>
                     </span>
                   </div>
                   <p class="skill-description">{{ item.description }}</p>
                   <div v-if="isContextExpanded(item)" class="skill-detail">
-                    <p v-if="item.path" class="skill-meta">
-                      <span class="skill-meta-label">Path</span>
-                      <button class="inline-path-button" @click.stop="openAssetPath(item.path)">{{ item.path }}</button>
+                    <p
+                      v-for="sourceFile in contextSourceFiles(item)"
+                      :key="sourceFile.path"
+                      class="skill-meta"
+                    >
+                      <span class="skill-meta-label">Source file</span>
+                      <button class="inline-path-button" @click.stop="openAssetPath(sourceFile.path)">{{ sourceFile.label }}</button>
                     </p>
-                    <p v-if="item.parent_id" class="skill-meta">
-                      <span class="skill-meta-label">Imported by</span>
-                      <code class="command-path">{{ item.parent_id }}</code>
-                    </p>
-                    <p v-if="item.imports?.length" class="skill-meta">
-                      <span class="skill-meta-label">Imports</span>
-                      <code class="command-path">{{ item.imports.join(', ') }}</code>
-                    </p>
-                    <div v-if="item.id === 'runtime-context-hook'" class="runtime-context-summary">
+                    <div v-if="item.id === 'cli-instruction-chain'" class="runtime-context-summary">
+                      <p class="hint hint--compact">At chat start, the selected CLI discovers the applicable instruction files:</p>
+                      <ul v-if="contextProvider === 'claude'">
+                        <li><strong>Global instructions:</strong> the user-level <code>CLAUDE.md</code>, when present.</li>
+                        <li><strong>Project instructions:</strong> applicable project <code>CLAUDE.md</code> files.</li>
+                        <li><strong>Local and imported instructions:</strong> local overrides and Markdown files referenced by the instruction chain.</li>
+                      </ul>
+                      <ul v-else>
+                        <li><strong>Global instructions:</strong> the Codex <code>AGENTS.md</code> or <code>AGENTS.override.md</code>, when present.</li>
+                        <li><strong>Project instructions:</strong> applicable project <code>AGENTS.md</code> or override files.</li>
+                        <li><strong>Nested instructions:</strong> more specific <code>AGENTS.md</code> files discovered for the working directory.</li>
+                      </ul>
+                    </div>
+                    <div v-else-if="item.id === 'ciaobot-system-prompt'" class="runtime-context-summary">
+                      <p class="hint hint--compact">
+                        Shared Ciaobot behavior and tool instructions are appended when the chat starts. The memory snapshot is appended next.
+                      </p>
+                    </div>
+                    <div v-else-if="item.id === 'runtime-context-hook'" class="runtime-context-summary">
                       <p class="hint hint--compact">Every user turn includes:</p>
                       <ul>
-                        <li>
-                          <strong>Project context:</strong>
-                          {{ activeContextProject?.context || 'No saved project context for the active chat.' }}
-                        </li>
-                        <li>
-                          <strong>Project document:</strong>
-                          <button
-                            v-if="activeContextProject?.vault_doc_path"
-                            class="inline-path-button"
-                            @click.stop="openAssetPath(activeContextProject.vault_doc_path)"
-                          >{{ activeContextProject.vault_doc_path }}</button>
-                          <span v-else>The project README.md or canonical document, when one is available.</span>
-                        </li>
-                        <li><strong>Runtime:</strong> today, active workspace and project, Google profile, and working directory.</li>
+                        <li><strong>Project context:</strong> the current project's single saved context value, when one is set.</li>
+                        <li><strong>Project document:</strong> a link to its <code>README.md</code> or canonical document, when available.</li>
+                        <li><strong>Runtime:</strong> today's date, workspace/project identifiers, Google profile, and working directory.</li>
                         <li><strong>Relevant vault context:</strong> entity links matched from the current prompt.</li>
                         <li><strong>Continuity:</strong> provider handover context when a chat has just switched providers.</li>
                       </ul>
-                      <pre v-if="item.content" class="asset-code-preview"><code>{{ item.content }}</code></pre>
                     </div>
-                    <pre v-else-if="item.content" class="asset-code-preview"><code>{{ item.content }}</code></pre>
                   </div>
                 </div>
               </div>
+            </template>
             </div>
-          </template>
         </div>
       </template>
 
@@ -2602,49 +2600,148 @@ const githubSkills = computed(() => {
   return skillsInventory.value?.skills.filter(s => s.label === 'github') || []
 })
 
-function contextAssetProvider(item: PromptAsset): 'claude' | 'codex' | 'shared' {
+function contextGuideAsset(
+  id: string,
+  title: string,
+  description: string,
+  scope: string,
+  source: string,
+  editable: boolean = false,
+): PromptAsset {
+  return { id, title, description, scope, source, path: '', editable, content: '' }
+}
+
+type ContextSourceFile = { label: string; path: string }
+
+function inventoryProvider(item: PromptAsset): ContextProvider | 'shared' {
   if (item.provider === 'claude' || item.provider === 'codex') return item.provider
-  if (/Claude|CLAUDE\.md/i.test(item.title) || /CLAUDE(?:\.local)?\.md/i.test(item.path)) return 'claude'
-  if (/Codex|AGENTS(?:\.override)?\.md/i.test(item.title) || /AGENTS(?:\.override)?\.md/i.test(item.path)) return 'codex'
+  if (/CLAUDE(?:\.local)?\.md/i.test(item.path) || /Claude/i.test(item.title)) return 'claude'
+  if (/AGENTS(?:\.override)?\.md/i.test(item.path) || /Codex/i.test(item.title)) return 'codex'
   return 'shared'
 }
 
-const workspaceMemoryAssets = computed(() => {
-  const items = agentAssets.value?.context || []
-  const bounded = items.filter(item => item.scope === 'bounded-memory')
-  const vault = items.filter(item => item.scope === 'vault')
-  const activeWorkspace = projectStore.activeWorkspace
-  const activeVault = vault.filter(item => {
-    if (item.workspace) return item.workspace === activeWorkspace
-    const titleWorkspace = item.title.match(/\(([^)]+)\)$/)?.[1]?.trim()
-    if (titleWorkspace) return titleWorkspace === activeWorkspace
-    const normalizedPath = `/${item.path.replaceAll('\\', '/')}/`
-    const knownWorkspaces = projectStore.workspaceOptions.map(workspace => workspace.name)
-    const pathWorkspace = knownWorkspaces.find(workspace => normalizedPath.includes(`/${workspace}/`))
-    return !pathWorkspace || pathWorkspace === activeWorkspace
-  })
-  return [...bounded, ...activeVault]
-})
-
-function memorySourceTitle(item: PromptAsset): string {
-  return item.scope === 'vault' ? 'Vault MEMORY.md' : item.title
+function sourceFile(item: PromptAsset, label: string = item.path): ContextSourceFile[] {
+  return item.path ? [{ label, path: item.path }] : []
 }
+
+function contextSourceFiles(item: PromptAsset): ContextSourceFile[] {
+  const inventory = agentAssets.value?.context || []
+  if (item.id === 'cli-instruction-chain') {
+    const expected = contextProvider.value === 'claude' ? /CLAUDE\.md$/i : /AGENTS(?:\.override)?\.md$/i
+    const candidates = inventory.filter(candidate =>
+      candidate.scope === 'project'
+      && inventoryProvider(candidate) === contextProvider.value
+      && expected.test(candidate.path),
+    )
+    const preferred = candidates.find(candidate => !candidate.path.replaceAll('\\', '/').includes('/')) || candidates[0]
+    if (preferred) return sourceFile(preferred)
+    const fallback = contextProvider.value === 'claude' ? 'CLAUDE.md' : 'AGENTS.md'
+    return [{ label: fallback, path: fallback }]
+  }
+  if (item.id === 'ciaobot-system-prompt') {
+    const configured = inventory.find(candidate => candidate.id === 'ciaobot-system-prompt')
+    return configured?.path
+      ? sourceFile(configured)
+      : [{ label: 'ciao/system_prompt.md', path: 'ciao/system_prompt.md' }]
+  }
+  return []
+}
+
+function memorySourceFiles(item: PromptAsset): ContextSourceFile[] {
+  const inventory = agentAssets.value?.context || []
+  if (item.id === 'ciaobot-memory' || item.id === 'ciaobot-user') {
+    const configured = inventory.find(candidate => candidate.id === item.id)
+    return configured ? sourceFile(configured) : []
+  }
+  if (item.id === 'workspace-memory') {
+    return inventory
+      .filter(candidate => candidate.scope === 'vault')
+      .flatMap(candidate => sourceFile(candidate))
+  }
+  return []
+}
+
+const workspaceMemoryAssets = computed<PromptAsset[]>(() => [
+  contextGuideAsset(
+    'ciaobot-memory',
+    'Global remembered facts',
+    'Cross-session facts, conventions, and lessons shared across all workspaces.',
+    'bounded-memory',
+    'session start',
+  ),
+  contextGuideAsset(
+    'ciaobot-user',
+    'Global user profile',
+    'Your identity and response preferences, shared across all workspaces.',
+    'bounded-memory',
+    'session start',
+  ),
+  contextGuideAsset(
+    'workspace-memory',
+    'Workspace notes (MEMORY.md)',
+    'Durable notes from whichever workspace the chat uses. This file is not inserted automatically.',
+    'vault',
+    'on demand',
+  ),
+])
+
+const workspaceMemoryGroups = computed(() => [
+  {
+    id: 'automatic',
+    title: 'Global · included automatically at chat start',
+    items: workspaceMemoryAssets.value.filter(item => item.scope === 'bounded-memory'),
+  },
+  {
+    id: 'available',
+    title: 'Workspace-specific · opened only when relevant',
+    items: workspaceMemoryAssets.value.filter(item => item.scope === 'vault'),
+  },
+].filter(group => group.items.length))
 
 function memoryInjectionLabel(item: PromptAsset): string {
-  if (item.scope === 'vault') return 'workspace vault'
-  if (item.description.includes('Injection disabled')) return 'disabled'
-  return 'session start'
+  return item.source
 }
 
-const contextAssets = computed(() =>
-  (agentAssets.value?.context || [])
-    .filter(item => !['review', 'vault', 'bounded-memory'].includes(item.scope || ''))
-    .filter(item => {
-      const provider = contextAssetProvider(item)
-      return provider === 'shared' || provider === contextProvider.value
-    }),
-)
-const activeContextProject = computed(() => projectStore.activeProject)
+const contextAssets = computed<PromptAsset[]>(() => [
+  contextProvider.value === 'claude'
+    ? contextGuideAsset(
+        'cli-instruction-chain',
+        'Claude Code instructions (CLAUDE.md)',
+        'Claude Code assembles the applicable global, project, local, and imported CLAUDE.md instructions.',
+        'CLI',
+        'session start',
+        true,
+      )
+    : contextGuideAsset(
+        'cli-instruction-chain',
+        'Codex instructions (AGENTS.md)',
+        'Codex assembles the applicable global, project, override, and nested AGENTS.md instructions.',
+        'CLI',
+        'session start',
+        true,
+      ),
+  contextGuideAsset(
+    'ciaobot-system-prompt',
+    'Ciaobot system instructions',
+    'Shared Ciaobot behavior and tool instructions appended when the chat starts.',
+    'Ciaobot',
+    'session start',
+  ),
+  contextGuideAsset(
+    'memory-sources',
+    'Memory sources',
+    'Global session memory is appended at chat start; workspace-specific notes are opened only when relevant.',
+    'Ciaobot',
+    'session start',
+  ),
+  contextGuideAsset(
+    'runtime-context-hook',
+    'Per-turn runtime context hook',
+    'Dynamic project references and runtime metadata added before every user prompt.',
+    'Ciaobot',
+    'each turn',
+  ),
+])
 const subagentAssets = computed(() => agentAssets.value?.subagents || [])
 const commandAssets = computed(() => agentAssets.value?.commands || [])
 const workspaceHealth = computed<WorkspaceHealthResponse | null>(() => agentAssets.value?.health || null)
@@ -4768,15 +4865,13 @@ async function doPackageUpdate() {
   line-height: 1.45;
   white-space: pre-wrap;
 }
-.memory-context-row {
+.skill-row.memory-context-row {
   display: block;
 }
-.memory-context-row > summary,
-.memory-source > summary {
+.memory-context-row > summary {
   list-style: none;
 }
-.memory-context-row > summary::-webkit-details-marker,
-.memory-source > summary::-webkit-details-marker {
+.memory-context-row > summary::-webkit-details-marker {
   display: none;
 }
 .memory-context-summary {
@@ -4791,33 +4886,57 @@ async function doPackageUpdate() {
 .memory-source-list {
   gap: var(--space-2);
 }
+.memory-source-group-title {
+  margin: var(--space-2) 0 0;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.memory-source-group-title:first-child {
+  margin-top: 0;
+}
 .memory-source {
-  padding: 0 var(--space-3) var(--space-3);
+  padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--bg2) 72%, transparent);
 }
-.memory-source > summary {
+.memory-source-heading {
   display: flex;
-  min-height: var(--touch);
-  align-items: center;
+  min-height: 24px;
+  align-items: flex-start;
   gap: var(--space-2);
   color: var(--fg);
-  cursor: pointer;
   font-size: var(--text-sm);
   font-weight: 600;
 }
-.memory-source > summary .badge {
+.memory-source-badges {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1);
   margin-left: auto;
 }
-.memory-source .skill-description {
+.memory-source-summary-copy {
   display: block;
-  margin-top: 0;
-  -webkit-line-clamp: unset;
-  overflow: visible;
+  margin-top: var(--space-1);
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  font-weight: 400;
+  line-height: 1.45;
 }
 .memory-source .skill-meta {
   margin-top: var(--space-2);
+}
+@container (max-width: 640px) {
+  .memory-source-heading {
+    flex-direction: column;
+  }
+  .memory-source-badges {
+    margin-left: 0;
+  }
 }
 .runtime-context-summary ul {
   margin: var(--space-2) 0 0;
@@ -4889,7 +5008,9 @@ async function doPackageUpdate() {
   gap: 4px;
   min-width: 0;
 }
+.settings-field > .ws-label,
 .settings-label-row {
+  min-height: 20px;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -4963,6 +5084,36 @@ async function doPackageUpdate() {
   max-width: none;
   min-width: 0;
   width: 100%;
+}
+.workspace-select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  min-height: 36px;
+  padding: 7px 36px 7px 12px;
+  border-radius: var(--radius);
+  background-color: var(--bg-elev);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M2.5 4.5L6 8l3.5-3.5' fill='none' stroke='%237a7a90' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 12px 12px;
+  color: var(--fg);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 120ms var(--ease), border-color 120ms var(--ease);
+}
+.workspace-select:hover:not(:disabled) {
+  background-color: var(--bg3);
+}
+.workspace-select:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-color: var(--accent);
+}
+.workspace-select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 .settings-advanced {
   padding: var(--space-2);

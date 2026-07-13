@@ -605,17 +605,34 @@ def _install_codex_agents(workspace: Path) -> tuple[int, int]:
     return installed, pruned
 
 
-def _ensure_codex_workspace_guide(workspace: Path) -> None:
-    """Seed AGENTS.md on older workspaces without overwriting local policy."""
-    target = workspace / "AGENTS.md"
-    if target.exists():
-        return
+def _ensure_linked_workspace_guides(workspace: Path) -> None:
+    """Expose one workspace guide through both CLI-native filenames.
+
+    ``CLAUDE.md`` is the canonical editable file and ``AGENTS.md`` is a
+    relative symlink to it. Existing user-authored AGENTS.md files (including
+    custom symlinks) are preserved; only a missing file or Ciaobot's packaged
+    stock copy is linked.
+    """
+    claude_guide = workspace / "CLAUDE.md"
+    codex_guide = workspace / "AGENTS.md"
     try:
         from importlib import resources
 
-        guide = resources.files("ciao.stock").joinpath("workspace", "AGENTS.md")
-        with resources.as_file(guide) as source:
-            shutil.copy2(source, target)
+        stock_workspace = resources.files("ciao.stock").joinpath("workspace")
+        stock_agents = stock_workspace.joinpath("AGENTS.md")
+        stock_claude = stock_workspace.joinpath("CLAUDE.md")
+
+        if codex_guide.is_symlink():
+            return
+        if codex_guide.exists():
+            if codex_guide.read_bytes() != stock_agents.read_bytes():
+                return
+            codex_guide.unlink()
+
+        if not claude_guide.exists():
+            with resources.as_file(stock_claude) as source:
+                shutil.copy2(source, claude_guide)
+        codex_guide.symlink_to(claude_guide.name)
     except (ModuleNotFoundError, FileNotFoundError, OSError):
         return
 
@@ -627,7 +644,7 @@ def sync_workspace_skills(
     runner=subprocess.run,
 ) -> SyncSkillsResult:
     root = Path(workspace).expanduser().resolve()
-    _ensure_codex_workspace_guide(root)
+    _ensure_linked_workspace_guides(root)
 
     upstream_updated = 0
     upstream_pruned = 0

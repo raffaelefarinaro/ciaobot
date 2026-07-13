@@ -124,8 +124,8 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
     ]
     assert pcm.refresh_count == 1
     assert data["provider_options"] == [
-        {"value": "claude", "label": "Claude"},
-        {"value": "codex", "label": "Codex"},
+        {"value": "claude", "label": "Anthropic (via Claude Code)"},
+        {"value": "codex", "label": "OpenAI (via Codex)"},
     ]
 
     stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
@@ -211,10 +211,10 @@ def test_workspace_provider_options_follow_available_backends(tmp_path):
 
     data = client.get("/api/workspaces").json()
     assert data["provider_options"] == [
-        {"value": "claude", "label": "Claude"},
-        {"value": "codex", "label": "Codex"},
-        {"value": "ollama", "label": "Ollama"},
-        {"value": "openrouter", "label": "OpenRouter"},
+        {"value": "claude", "label": "Anthropic (via Claude Code)"},
+        {"value": "codex", "label": "OpenAI (via Codex)"},
+        {"value": "ollama", "label": "Ollama (via Claude Code)"},
+        {"value": "openrouter", "label": "OpenRouter (via Claude Code)"},
     ]
 
     resp = client.post(
