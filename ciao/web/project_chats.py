@@ -676,6 +676,11 @@ class ProjectChatManager:
         # the /ws/events connect snapshot so a fresh client can paint the
         # "N agents running" indicator without waiting for the next change.
         self._background_agents_last: dict[str, int] = {}
+        # A requested server restart drains existing chat work before uvicorn
+        # shuts down. Once draining begins, ongoing streams (including their
+        # already-queued follow-ups) may finish, but idle chats must not start
+        # new turns or the server could race a fresh provider request.
+        self._restart_draining = False
         # Latest result (text, is_error) captured by the between-turns drain
         # for a chat, i.e. the CLI's post-subagent synthesis turn. The
         # schedule pipeline reads this after background subagents settle so
@@ -3052,6 +3057,28 @@ class ProjectChatManager:
         """Chats currently driving an in-flight broker stream."""
         return [cid for cid in list(self._broker._streams) if self._broker.get(cid) is not None]
 
+    def active_chat_ids(self) -> list[str]:
+        """Chats with work that must settle before a safe server restart.
+
+        Include live subagent watchers even before their first poll publishes a
+        running count. Without that slot, the parent stream can finish and
+        briefly make a chat look idle while its background agents still run.
+        Idle between-turn drains are deliberately excluded; a drain only
+        becomes active work when it opens a broker stream.
+        """
+        ids = set(self.active_stream_chat_ids())
+        ids.update(self.background_agent_counts)
+        ids.update(
+            chat_id
+            for chat_id, task in self._pending_subagent_watchers.items()
+            if not task.done()
+        )
+        return sorted(ids)
+
+    def begin_restart_drain(self) -> None:
+        """Stop admitting new turns while existing chat work finishes."""
+        self._restart_draining = True
+
     @property
     def background_agent_counts(self) -> dict[str, int]:
         """Last announced running-background-subagent count per chat (>0 only)."""
@@ -3226,15 +3253,19 @@ class ProjectChatManager:
         the result event on their own subscription.
         """
         existing = self._broker.get(chat_id)
+        if existing is not None and not existing.background:
+            logger.debug("Chat %s already has an active stream; reusing", chat_id)
+            return existing
+        if self._restart_draining:
+            raise RuntimeError(
+                "Ciaobot is waiting for active chats to finish before restarting"
+            )
         if existing is not None and existing.background:
             # A between-turns drain stream is live. The user's send starts a
             # real turn: cancel the drain (its cleanup finishes the stream)
             # and fall through — the new stream replaces it in the broker.
             self._cancel_between_turns_drain(chat_id)
             self._broker.clear(chat_id, existing)
-        elif existing is not None:
-            logger.debug("Chat %s already has an active stream; reusing", chat_id)
-            return existing
 
         if not is_retry:
             chat_for_retry = self._chats.get(chat_id)

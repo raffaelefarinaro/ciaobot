@@ -69,6 +69,8 @@ npm run build        # typecheck + Vite build, outputs to ciao/web/static/
 
 After PWA changes, rebuild and either restart the service or use the **Deploy** button in PWA Settings. **Never restart the ciao service from inside a PWA chat** (you'd sever your own session); ask the operator to deploy.
 
+Restart requests made through the running server enter a drain phase: existing chats and background agents finish before shutdown, and new turns are not admitted during that window. Directly killing the process bypasses this protection.
+
 ## Local PWA dev
 
 ```bash

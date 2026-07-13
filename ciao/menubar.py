@@ -727,17 +727,28 @@ def run_menubar(workspace: Path, port: int) -> int:
 
     def on_recover_server(_sender) -> None:
         current = fetch_server_status(port)
-        if current.reachable and not rumps.alert(
-            title="Restart Ciaobot server?",
-            message=(
-                "Active chats and scheduled tasks pause briefly while the "
-                "local server restarts."
-            ),
-            ok="Restart",
-            cancel="Cancel",
-            icon_path=icon_path("Ciaobot.icns"),
-        ):
-            return
+        if current.reachable:
+            active_chat_ids = fetch_active_chat_ids(port)
+            if active_chat_ids:
+                count = len(active_chat_ids)
+                rumps.alert(
+                    title="Ciaobot is still working",
+                    message=(
+                        f"{count} chat{' is' if count == 1 else 's are'} still active. "
+                        "Wait for the work to finish, then restart the server."
+                    ),
+                    ok="OK",
+                    icon_path=icon_path("Ciaobot.icns"),
+                )
+                return
+            if not rumps.alert(
+                title="Restart Ciaobot server?",
+                message="No active chats are running. Restart the local server now?",
+                ok="Restart",
+                cancel="Cancel",
+                icon_path=icon_path("Ciaobot.icns"),
+            ):
+                return
         try:
             completed = subprocess.run(
                 restart_server_command(), capture_output=True, text=True, check=False

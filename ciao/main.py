@@ -191,6 +191,30 @@ def _open_browser_when_ready(url: str) -> None:
     ).start()
 
 
+async def _wait_for_chat_drain(
+    pcm: ProjectChatManager,
+    *,
+    poll_interval: float = 0.5,
+    idle_polls_required: int = 3,
+) -> None:
+    """Wait until chat work stays idle across consecutive observations.
+
+    The stable-idle window closes the handoff race between a parent stream
+    ending and its background-subagent watcher or synthesis stream starting.
+    ``begin_restart_drain`` prevents unrelated new turns from extending the
+    wait after a restart has already been requested.
+    """
+    idle_polls = 0
+    required = max(1, idle_polls_required)
+    while idle_polls < required:
+        if pcm.active_chat_ids():
+            idle_polls = 0
+        else:
+            idle_polls += 1
+        if idle_polls < required:
+            await asyncio.sleep(max(0.0, poll_interval))
+
+
 async def _async_main() -> int:
     _ensure_homebrew_on_path()
     os.environ.setdefault("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "file")
@@ -627,36 +651,65 @@ async def _async_main() -> int:
     tracker.done("server_starting")
 
     restart_flag: list[int | None] = [None]
+    restart_task: list[asyncio.Task | None] = [None]
 
     def request_restart(code: int) -> None:
         restart_flag[0] = code
-        asyncio.create_task(server.shutdown())
-        # asyncio.run's cleanup phase (cancel tasks, shut down the default
-        # executor) can wedge after uvicorn drains: leaked Claude SDK
-        # subprocess transports and synchronous urllib calls in the
-        # heartbeat thread both hold the loop open indefinitely. The service
-        # then appears alive but is unreachable. If we haven't exited cleanly
-        # within the grace window, force the restart ourselves: a plain
-        # os._exit would leave a foreground `ciao run` dead right after the
-        # setup wizard or a package update (only launchd's KeepAlive would
-        # bring the server back). Exec a fresh interpreter instead — the pid
-        # is unchanged, so launchd keeps tracking it, and the relaunch picks
-        # up new code and the current environment (e.g. the CIAO_WORKSPACE
-        # handoff written by the setup wizard's finish step).
-        def _force_exit() -> None:
-            time.sleep(15)
-            if code == 0:
-                # A clean-exit request (setup wizard handing the server over
-                # to launchd): dying is the point, don't relaunch.
-                os._exit(0)
-            logger.info("Cleanup did not finish; re-execing for the requested restart")
-            try:
-                os.execv(sys.executable, [sys.executable, "-m", "ciao.cli", *sys.argv[1:]])
-            except OSError:
-                os._exit(code)
-        threading.Thread(
-            target=_force_exit, daemon=True, name="ciao-restart-watchdog"
-        ).start()
+        existing = restart_task[0]
+        if existing is not None and not existing.done():
+            return
+
+        # Close admission synchronously with the request, before the drain
+        # task gets its first event-loop turn. Existing streams keep running
+        # and can flush messages that were already queued on them.
+        pcm.begin_restart_drain()
+
+        async def _restart_when_idle() -> None:
+            active = pcm.active_chat_ids()
+            if active:
+                logger.info(
+                    "Restart requested; waiting for %d active chat(s): %s",
+                    len(active),
+                    ", ".join(active),
+                )
+            await _wait_for_chat_drain(pcm)
+            logger.info("Chat work drained; proceeding with requested restart")
+
+            # asyncio.run's cleanup phase (cancel tasks, shut down the default
+            # executor) can wedge after uvicorn drains: leaked Claude SDK
+            # subprocess transports and synchronous urllib calls in the
+            # heartbeat thread both hold the loop open indefinitely. Start
+            # the watchdog only after chat work drains so it cannot cut the
+            # wait short. A plain os._exit would leave a foreground `ciao run`
+            # dead; exec a fresh interpreter instead so launchd keeps tracking
+            # the same pid and the relaunch picks up the current environment.
+            restart_code = restart_flag[0]
+            if restart_code is None:
+                restart_code = code
+
+            def _force_exit() -> None:
+                time.sleep(15)
+                if restart_code == 0:
+                    # A clean-exit request (setup wizard handing the server
+                    # over to launchd): dying is the point, don't relaunch.
+                    os._exit(0)
+                logger.info(
+                    "Cleanup did not finish; re-execing for the requested restart"
+                )
+                try:
+                    os.execv(
+                        sys.executable,
+                        [sys.executable, "-m", "ciao.cli", *sys.argv[1:]],
+                    )
+                except OSError:
+                    os._exit(restart_code)
+
+            threading.Thread(
+                target=_force_exit, daemon=True, name="ciao-restart-watchdog"
+            ).start()
+            await server.shutdown()
+
+        restart_task[0] = asyncio.create_task(_restart_when_idle())
 
     app.state.request_restart = request_restart
 

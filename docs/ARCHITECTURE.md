@@ -126,6 +126,8 @@ secrets/                       OAuth credentials (gitignored).
 
 Chat transcripts are streamed via WebSocket and archived to `Logs/Chats/<chat-id>/claude/` under the vault root (`transcripts.py`). The Claude Agent SDK is configured in `ciao/providers/claude.py` with a `fallback_model` chain (Opus to Sonnet to Haiku) and `setting_sources=["user", "project", "local"]` so `.claude/skills/`, `.claude/agents/`, and `.claude/commands/` auto-discover.
 
+Server restart requests drain chat work before shutting down: active broker streams, already-queued follow-up turns, and background-subagent watchers are allowed to settle, while brand-new turns are rejected once draining begins. Shutdown starts only after several consecutive idle observations so the handoff from a completed parent turn to its background-agent watcher or synthesis stream cannot create a false-idle race. The macOS menu-bar action uses `/api/active-chats` as a guard before its direct launchd restart and asks the operator to retry once active chats finish.
+
 When the model calls `AskUserQuestion` (which the headless CLI can't render, and would otherwise auto-answer empty), `ProjectChatManager._drive` interrupts the turn so generation stops at the question; the PWA surfaces it in its own picker (persisted as `ChatInfo.pending_question` so it survives a reload) and the user's reply resumes the session as a fresh turn.
 
 If a turn fails before any provider progress with a quota or session-limit error, `ProjectChatManager` stores the last prompt and schedules an hourly deferred retry; the chat view and sidebar surface the pending state, and `/api/chats/{chat_id}/retry` lets the UI set, stop, or run that retry immediately.

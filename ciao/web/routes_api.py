@@ -3814,9 +3814,7 @@ async def active_chats_endpoint(request: Request) -> JSONResponse:
     pcm = getattr(request.app.state, "project_chat_manager", None)
     if pcm is None:
         return JSONResponse({"active_chat_ids": []})
-    ids = set(pcm.active_stream_chat_ids())
-    ids.update(pcm.background_agent_counts)
-    return JSONResponse({"active_chat_ids": sorted(ids)})
+    return JSONResponse({"active_chat_ids": pcm.active_chat_ids()})
 
 
 async def open_chat_endpoint(request: Request) -> JSONResponse:
