@@ -237,6 +237,28 @@ def test_subagent_node_merges_env_overrides(monkeypatch) -> None:
     assert "PATH" in captured["env"]
 
 
+def test_subagent_failure_uses_stdout_when_stderr_is_empty(monkeypatch) -> None:
+    class Proc:
+        returncode = 1
+        stdout = "Not logged in · Please run /login"
+        stderr = ""
+
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: Proc())
+    dag = [
+        Node(
+            id="agent",
+            kind="subagent",
+            model="sonnet",
+            payload={"cli": "claude", "prompt": "hi"},
+        )
+    ]
+
+    ctx = run(dag, [], job="unit", label="subagent-stdout-error")
+
+    assert ctx["agent"].ok is False
+    assert "Not logged in" in (ctx["agent"].error or "")
+
+
 # ── Retention kind: never blocks ────────────────────────────────────────
 
 

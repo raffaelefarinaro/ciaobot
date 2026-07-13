@@ -260,10 +260,11 @@ def _exec_subagent(node: Node, ctx: dict[str, Any]) -> NodeResult:
         return NodeResult(ok=False, error=f"timeout after {node.timeout_s}s: {exc}")
     if proc.returncode == 0:
         return NodeResult(ok=True, output=proc.stdout)
+    detail = proc.stderr.strip() or proc.stdout.strip() or "<no output>"
     return NodeResult(
         ok=False,
         output=proc.stdout,
-        error=f"exit {proc.returncode}: {proc.stderr.strip()[:500]}",
+        error=f"exit {proc.returncode}: {detail[:500]}",
     )
 
 

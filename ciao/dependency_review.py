@@ -10,9 +10,10 @@ Shape (sequential, because :mod:`ciao.dag` has no fan-out):
     read_baseline ──always──▶ installed ──always──▶ research ──ok──▶ write_baseline
                                                         └─fail─▶ (stop; baseline untouched)
 
-The 7-way release research stays parallel by living *inside* one ``subagent``
-node: the spawned ``claude -p`` process fans out its own Agent calls, one per
-repo, exactly like the old prompt. The DAG isolates the deterministic
+Release research stays parallel by living *inside* one ``subagent`` node: the
+spawned ``claude -p`` process fans out its own Agent calls, one per source,
+exactly like the old prompt. PyPI/npm remain authoritative for installable
+package versions. The DAG isolates the deterministic
 edges around it (load the baseline, persist the merged baseline) so a research
 hiccup can't corrupt ``.runtime/dependency_baseline.json``.
 
@@ -28,6 +29,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -239,7 +241,12 @@ def compile_tracked_tools(workspace_root: Path) -> list[dict[str, str]]:
                 repo_url = get_pypi_github_url(key)
         if not repo_url:
             repo_url = f"https://github.com/search?q={key}+releases"
-        tools.append({"key": key, "repo": repo_url})
+        registry_url = ""
+        if key in npm_deps:
+            registry_url = f"https://www.npmjs.com/package/{key}"
+        elif key in python_deps:
+            registry_url = f"https://pypi.org/project/{key}/"
+        tools.append({"key": key, "repo": repo_url, "registry": registry_url})
     return tools
 
 
@@ -325,16 +332,24 @@ def is_newer_and_safe_update(old_ver: str, new_ver: str) -> bool:
     return False
 
 
-def install_updated_packages(updated_python: bool, updated_npm: bool, workspace_root: Path) -> None:
+def install_updated_packages(
+    updated_python: bool, updated_npm: bool, workspace_root: Path
+) -> tuple[bool, str]:
+    errors: list[str] = []
     if updated_python:
         logger.info("Re-installing python workspace dependencies...")
         try:
-            venv_bin = workspace_root / ".venv" / "bin" / "pip"
-            pip_cmd = str(venv_bin) if venv_bin.exists() else "pip"
-            subprocess.run([pip_cmd, "install", "-e", ".[test]"], cwd=str(workspace_root), check=True)
+            venv_python = workspace_root / ".venv" / "bin" / "python"
+            python_cmd = str(venv_python) if venv_python.exists() else sys.executable
+            subprocess.run(
+                [python_cmd, "-m", "pip", "install", "-e", ".[test]"],
+                cwd=str(workspace_root),
+                check=True,
+            )
             logger.info("Python dependencies updated successfully.")
         except Exception as e:
             logger.error("Failed to run pip install: %s", e)
+            errors.append(f"pip install failed: {e}")
     if updated_npm:
         logger.info("Running npm install in web directory...")
         try:
@@ -342,6 +357,25 @@ def install_updated_packages(updated_python: bool, updated_npm: bool, workspace_
             logger.info("NPM dependencies updated successfully.")
         except Exception as e:
             logger.error("Failed to run npm install: %s", e)
+            errors.append(f"npm install failed: {e}")
+    if errors:
+        return False, "; ".join(errors)
+    return True, "dependencies installed"
+
+
+def _restore_dependency_files(
+    pyproject_path: Path,
+    package_json_path: Path,
+    package_lock_path: Path,
+    originals: tuple[str, str, str | None],
+) -> None:
+    original_pyproject, original_package_json, original_package_lock = originals
+    pyproject_path.write_text(original_pyproject, encoding="utf-8")
+    package_json_path.write_text(original_package_json, encoding="utf-8")
+    if original_package_lock is None:
+        package_lock_path.unlink(missing_ok=True)
+    else:
+        package_lock_path.write_text(original_package_lock, encoding="utf-8")
 
 
 def get_latest_pypi_version(package_name: str) -> str | None:
@@ -438,10 +472,18 @@ def apply_auto_updates(
     """
     pyproject_path = workspace_root / "pyproject.toml"
     package_json_path = workspace_root / "web" / "package.json"
+    package_lock_path = workspace_root / "web" / "package-lock.json"
 
     applied: list[str] = []
     updated_python = False
     updated_npm = False
+    originals = (
+        pyproject_path.read_text(encoding="utf-8"),
+        package_json_path.read_text(encoding="utf-8"),
+        package_lock_path.read_text(encoding="utf-8")
+        if package_lock_path.exists()
+        else None,
+    )
     for u in updates:
         if not u.auto:
             continue
@@ -455,7 +497,12 @@ def apply_auto_updates(
                 applied.append(f"{u.key} (NPM: {u.current} -> {u.latest})")
 
     if reinstall and (updated_python or updated_npm):
-        install_updated_packages(updated_python, updated_npm, workspace_root)
+        installed, error = install_updated_packages(updated_python, updated_npm, workspace_root)
+        if not installed:
+            _restore_dependency_files(
+                pyproject_path, package_json_path, package_lock_path, originals
+            )
+            raise RuntimeError(error)
     return applied
 
 
@@ -514,7 +561,11 @@ def _build_research_prompt(baseline: dict[str, Any], first_run: bool) -> str:
     base_tools = baseline.get("tools", {})
     for t in TRACKED_TOOLS:
         bv = base_tools.get(t["key"], {}).get("version", "unknown")
-        tools_lines.append(f"- {t['key']}: baseline={bv} | releases: {t['repo']}")
+        registry = t.get("registry")
+        registry_text = f" | registry: {registry}" if registry else ""
+        tools_lines.append(
+            f"- {t['key']}: baseline={bv} | releases: {t['repo']}{registry_text}"
+        )
     tools_block = "\n".join(tools_lines)
     depth = "the last 2 releases" if first_run else "releases newer than the baseline version"
     rendered = f"""Dependency changelog review. Compare each tool's GitHub releases against our tracked BASELINE version (NOT the installed version).
@@ -523,6 +574,11 @@ Tracked tools:
 {tools_block}
 
 For each tool, dispatch a parallel web lookup of its releases page and inspect {depth}.
+When a PyPI or npm registry URL is listed, treat that registry as authoritative
+for the latest installable version. A GitHub tag without a matching registry
+artifact is not an available dependency update: keep the version field at the
+latest registry version and call out the unpublished tag in notes/actionable.
+Write package versions without a leading "v".
 Verify:
 1. Version and release date of the latest release.
 2. Breaking changes, deprecation warnings, or compatibility requirements affecting a Python web/agent server or a Vue PWA.
@@ -598,12 +654,12 @@ def build_review_dag(
         parsed = _extract_json_block(raw)
         if not parsed or "tools" not in parsed:
             return False, "research output missing parseable {tools: ...} JSON"
-        holder["research_json"] = parsed
         baseline = holder["baseline"] or {"_meta": {}, "tools": {}}
         baseline.setdefault("tools", {})
 
         pyproject_path = workspace_root / "pyproject.toml"
         package_json_path = workspace_root / "web" / "package.json"
+        package_lock_path = workspace_root / "web" / "package-lock.json"
 
         python_deps = parse_pyproject_dependencies(pyproject_path)
         npm_deps = parse_npm_dependencies(package_json_path)
@@ -611,51 +667,125 @@ def build_review_dag(
         updated_python = False
         updated_npm = False
         updated_tools_list = []
+        planned_updates: list[tuple[str, str, str, str]] = []
+        registry_errors: list[str] = []
+        registry_mismatches: list[str] = []
+        originals = (
+            pyproject_path.read_text(encoding="utf-8"),
+            package_json_path.read_text(encoding="utf-8"),
+            package_lock_path.read_text(encoding="utf-8")
+            if package_lock_path.exists()
+            else None,
+        )
 
         for key, info in parsed["tools"].items():
             if not isinstance(info, dict):
                 continue
             existing = baseline["tools"].get(key, {})
+            latest_value = info.get("version")
+            latest_version = (
+                str(latest_value).lstrip("vV")
+                if latest_value and latest_value != "unknown"
+                else None
+            )
+            reviewed_version = latest_version or existing.get("version", "unknown")
+            release_date = info.get("release_date", existing.get("release_date", ""))
+            notes = info.get("notes") or existing.get("notes", "")
+
+            ecosystem = ""
+            current_ver = None
+            registry_version = None
+            if key in python_deps:
+                ecosystem = "python"
+                current_ver = _pinned_version(python_deps[key])
+            elif key in npm_deps:
+                ecosystem = "npm"
+                current_ver = _pinned_version(npm_deps[key])
+
+            if ecosystem and current_ver and latest_version != current_ver:
+                if ecosystem == "python":
+                    registry_version = get_latest_pypi_version(key)
+                else:
+                    registry_version = get_latest_npm_version(key)
+                if not registry_version:
+                    registry_errors.append(f"{key} ({ecosystem})")
+                else:
+                    registry_version = registry_version.lstrip("vV")
+                    reviewed_version = registry_version
+                    if registry_version != latest_version:
+                        registry_mismatches.append(
+                            f"{key} {latest_version} -> {registry_version}"
+                        )
+                        release_date = existing.get("release_date", "")
+                        correction = (
+                            f"Registry latest is {registry_version}; ignored "
+                            f"unpublished or mismatched tag {latest_version}."
+                        )
+                        notes = f"{notes} {correction}".strip()
+                    if is_newer_and_safe_update(current_ver, registry_version):
+                        planned_updates.append(
+                            (ecosystem, key, current_ver, registry_version)
+                        )
+
             merged = {
-                "version": info.get("version", existing.get("version", "unknown")),
-                "release_date": info.get("release_date", existing.get("release_date", "")),
-                "notes": info.get("notes") or existing.get("notes", ""),
+                "version": reviewed_version,
+                "release_date": release_date,
+                "notes": notes,
             }
             baseline["tools"][key] = merged
 
-            latest_version = info.get("version")
-            if not latest_version or latest_version == "unknown":
-                continue
+        if registry_errors:
+            return False, (
+                "registry validation failed for: " + ", ".join(registry_errors)
+            )
+        if registry_mismatches:
+            correction_summary = "Registry corrections: " + ", ".join(
+                registry_mismatches
+            )
+            parsed["summary"] = (
+                f"{parsed.get('summary', '').strip()} {correction_summary}"
+            ).strip()
 
-            if key in python_deps:
-                declared = python_deps[key]
-                m = re.search(r"([0-9a-zA-Z\.\-]+)$", declared)
-                current_ver = m.group(1) if m else None
-                if current_ver and latest_version != current_ver:
-                    if is_newer_and_safe_update(current_ver, latest_version):
-                        if update_pyproject_toml_dependency(pyproject_path, key, latest_version):
-                            updated_python = True
-                            updated_tools_list.append(f"{key} (Python: {current_ver} -> {latest_version})")
-            elif key in npm_deps:
-                declared = npm_deps[key]
-                m = re.search(r"([0-9a-zA-Z\.\-]+)$", declared)
-                current_ver = m.group(1) if m else None
-                if current_ver and latest_version != current_ver:
-                    if is_newer_and_safe_update(current_ver, latest_version):
-                        if update_npm_dependency(package_json_path, key, latest_version):
-                            updated_npm = True
-                            updated_tools_list.append(f"{key} (NPM: {current_ver} -> {latest_version})")
+        for ecosystem, key, current_ver, registry_version in planned_updates:
+            if ecosystem == "python":
+                updated = update_pyproject_toml_dependency(
+                    pyproject_path, key, registry_version
+                )
+                updated_python = updated_python or updated
+                label = f"{key} (Python: {current_ver} -> {registry_version})"
+            else:
+                updated = update_npm_dependency(
+                    package_json_path, key, registry_version
+                )
+                updated_npm = updated_npm or updated
+                label = f"{key} (NPM: {current_ver} -> {registry_version})"
+            if not updated:
+                _restore_dependency_files(
+                    pyproject_path, package_json_path, package_lock_path, originals
+                )
+                return False, f"failed to update manifest for {key}"
+            updated_tools_list.append(label)
+
+        if updated_tools_list:
+            installed, error = install_updated_packages(
+                updated_python, updated_npm, workspace_root
+            )
+            if not installed:
+                _restore_dependency_files(
+                    pyproject_path, package_json_path, package_lock_path, originals
+                )
+                return False, f"dependency setup failed; manifest changes rolled back: {error}"
 
         baseline.setdefault("_meta", {})
         baseline["_meta"]["last_reviewed_summary"] = parsed.get("summary", "")
         baseline_path.parent.mkdir(parents=True, exist_ok=True)
         baseline_path.write_text(json.dumps(baseline, indent=2) + "\n")
         holder["written"] = baseline
+        holder["research_json"] = parsed
 
         msg = f"baseline written: {len(baseline['tools'])} tool(s)"
         if updated_tools_list:
             msg += f". Updated config files for: {', '.join(updated_tools_list)}"
-            install_updated_packages(updated_python, updated_npm, workspace_root)
 
         return True, msg
 
@@ -699,7 +829,22 @@ def run_review(
         research_model=_resolve_model(research_model),
         research_timeout_s=research_timeout_s,
     )
-    run_dag(nodes, edges, job="dependency_review", label="depcheck")
+    ctx = run_dag(nodes, edges, job="dependency_review", label="depcheck")
+    write_result = ctx.get("write_baseline")
+    if not isinstance(write_result, NodeResult) or not write_result.ok:
+        detail = getattr(write_result, "output", None) or getattr(
+            write_result, "error", None
+        )
+        if not detail:
+            for result in reversed(tuple(ctx.values())):
+                if isinstance(result, NodeResult) and not result.ok:
+                    detail = result.error or result.output
+                    if detail:
+                        break
+        reason = detail or "write gate did not run"
+        raise RuntimeError(
+            f"dependency review did not complete cleanly: {str(reason)[:500]}"
+        )
     return holder
 
 
