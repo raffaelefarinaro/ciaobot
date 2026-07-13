@@ -713,6 +713,23 @@ async def _async_main() -> int:
 
     app.state.request_restart = request_restart
 
+    # ── Startup error triage ─────────────────────────────────
+    # Cap the append-only launchd service logs, then — when the error log
+    # or recent job runs contain failures — dispatch a triage chat through
+    # the schedule pipeline ({{ISSUE_REPORT}} substitution clears the error
+    # log after a clean run). Errors found at boot become a fix-it chat
+    # instead of silently accumulating.
+    async def _startup_error_triage() -> None:
+        try:
+            from ciao.startup_triage import cap_service_logs, run_startup_triage
+
+            await asyncio.to_thread(cap_service_logs, config.state_path.parent)
+            await run_startup_triage(pcm, config, _resolve_schedule_target)
+        except Exception:
+            logger.exception("Startup error triage failed")
+
+    asyncio.create_task(_startup_error_triage())
+
     # ── Voice extras self-heal ───────────────────────────────
     # `brew upgrade` replaces the app's private venv, dropping optional
     # local-voice packages the user installed from Settings. Reinstall
