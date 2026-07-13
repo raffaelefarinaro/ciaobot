@@ -478,7 +478,6 @@ describe('component mount smoke', () => {
   })
 
   it('SettingsView explains the generic context recipe for each CLI', async () => {
-    localStorage.setItem('ciao-context-provider', 'claude')
     const router = makeRouter()
     await router.push('/settings/context')
     await router.isReady()
@@ -519,10 +518,10 @@ describe('component mount smoke', () => {
       'memory-vault/work/MEMORY.md',
     ])
     expect(wrapper.text()).not.toContain('3 sources')
-    expect(visibleContextRows()).toContain('Claude Code instructions (CLAUDE.md)')
-    expect(visibleContextRows()).not.toContain('Codex instructions (AGENTS.md)')
+    expect(visibleContextRows()).toContain('CLI instructions (CLAUDE.md · AGENTS.md)')
+    expect(wrapper.findAll('.context-provider-toggle')).toHaveLength(0)
     expect(wrapper.findAll('.skill-list > .instruction-row .skill-name').map((row) => row.text())).toEqual([
-      'Claude Code instructions (CLAUDE.md)',
+      'CLI instructions (CLAUDE.md · AGENTS.md)',
       'Ciaobot system instructions',
       'Memory sources',
       'Per-turn runtime context hook',
@@ -536,12 +535,17 @@ describe('component mount smoke', () => {
     expect(wrapper.text()).not.toContain('Imported by Claude Code global instructions')
 
     const instructionRow = wrapper.findAll('.skill-list > .instruction-row')
-      .find((row) => row.text().includes('Claude Code instructions (CLAUDE.md)'))
+      .find((row) => row.text().includes('CLI instructions (CLAUDE.md · AGENTS.md)'))
     expect(instructionRow).toBeTruthy()
     expect(instructionRow!.text()).toContain('editable')
+    expect(instructionRow!.text()).toContain('CLAUDE.md and AGENTS.md are linked')
     await instructionRow!.trigger('click')
     await nextTick()
-    expect(instructionRow!.find('.inline-path-button').text()).toBe('CLAUDE.md')
+    expect(instructionRow!.findAll('.inline-path-button').map((button) => button.text())).toEqual([
+      'CLAUDE.md',
+      'AGENTS.md',
+    ])
+    expect(instructionRow!.text()).toContain('AGENTS.md is linked to CLAUDE.md, so every CLI reads the same instructions.')
 
     const systemRow = wrapper.findAll('.skill-list > .instruction-row')
       .find((row) => row.text().includes('Ciaobot system instructions'))
@@ -551,14 +555,7 @@ describe('component mount smoke', () => {
     await nextTick()
     expect(systemRow!.find('.inline-path-button').text()).toBe('ciao/system_prompt.md')
 
-    const providerButtons = wrapper.findAll('.context-provider-toggle .toggle-btn')
-    expect(providerButtons.map((button) => button.text())).toEqual(['Claude Code', 'Codex'])
-    await providerButtons[1].trigger('click')
-    await nextTick()
-    expect(visibleContextRows()).toContain('Codex instructions (AGENTS.md)')
-    expect(visibleContextRows()).not.toContain('Claude Code instructions (CLAUDE.md)')
     expect(visibleContextRows()).not.toContain('RTK.md')
-    expect(instructionRow!.find('.inline-path-button').text()).toBe('AGENTS.md')
 
     const runtimeRow = wrapper.findAll('.skill-list > .instruction-row')
       .find((row) => row.text().includes('Per-turn runtime context hook'))

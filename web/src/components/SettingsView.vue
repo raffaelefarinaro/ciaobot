@@ -1124,29 +1124,10 @@
         <div class="card">
           <div class="settings-card-header settings-card-header--context">
             <div>
-              <p class="section-title">Context sources</p>
+              <p class="section-title">Agent context</p>
               <p class="hint">
-                How Ciaobot assembles context for each CLI. This guide is independent of the current chat, project, and workspace.
+                How Ciaobot assembles context for every CLI. This guide is independent of the current chat, project, and workspace.
               </p>
-            </div>
-            <div class="context-provider-field">
-              <span class="ws-label">CLI view</span>
-              <div class="instance-toggle context-provider-toggle" role="group" aria-label="Context CLI view">
-                <button
-                  type="button"
-                  class="toggle-btn"
-                  :class="{ active: contextProvider === 'claude' }"
-                  :aria-pressed="contextProvider === 'claude'"
-                  @click="setContextProvider('claude')"
-                >Claude Code</button>
-                <button
-                  type="button"
-                  class="toggle-btn"
-                  :class="{ active: contextProvider === 'codex' }"
-                  :aria-pressed="contextProvider === 'codex'"
-                  @click="setContextProvider('codex')"
-                >Codex</button>
-              </div>
             </div>
           </div>
 
@@ -1221,16 +1202,11 @@
                       <button class="inline-path-button" @click.stop="openAssetPath(sourceFile.path)">{{ sourceFile.label }}</button>
                     </p>
                     <div v-if="item.id === 'cli-instruction-chain'" class="runtime-context-summary">
-                      <p class="hint hint--compact">At chat start, the selected CLI discovers the applicable instruction files:</p>
-                      <ul v-if="contextProvider === 'claude'">
-                        <li><strong>Global instructions:</strong> the user-level <code>CLAUDE.md</code>, when present.</li>
-                        <li><strong>Project instructions:</strong> applicable project <code>CLAUDE.md</code> files.</li>
-                        <li><strong>Local and imported instructions:</strong> local overrides and Markdown files referenced by the instruction chain.</li>
-                      </ul>
-                      <ul v-else>
-                        <li><strong>Global instructions:</strong> the Codex <code>AGENTS.md</code> or <code>AGENTS.override.md</code>, when present.</li>
-                        <li><strong>Project instructions:</strong> applicable project <code>AGENTS.md</code> or override files.</li>
-                        <li><strong>Nested instructions:</strong> more specific <code>AGENTS.md</code> files discovered for the working directory.</li>
+                      <p class="hint hint--compact">At chat start, the active CLI discovers the applicable instruction files:</p>
+                      <ul>
+                        <li><strong>Global instructions:</strong> the user-level instruction file (<code>CLAUDE.md</code> for Claude Code, <code>AGENTS.md</code> for Codex), when present.</li>
+                        <li><strong>Workspace instructions:</strong> the workspace guide. <code>AGENTS.md</code> is linked to <code>CLAUDE.md</code>, so every CLI reads the same instructions.</li>
+                        <li><strong>Local, override, and nested instructions:</strong> local overrides, imported Markdown files, and more specific instruction files each CLI discovers for the working directory.</li>
                       </ul>
                     </div>
                     <div v-else-if="item.id === 'ciaobot-system-prompt'" class="runtime-context-summary">
@@ -1656,27 +1632,7 @@ const expandedSkills = ref<Record<string, boolean>>({})
 const expandedCommands = ref<Record<string, boolean>>({})
 const expandedSubagents = ref<Record<string, boolean>>({})
 const expandedContext = ref<Record<string, boolean>>({})
-type ContextProvider = 'claude' | 'codex'
-const contextProvider = ref<ContextProvider>('claude')
 const workspaceMemoryExpanded = ref(false)
-
-function loadContextProvider() {
-  try {
-    const saved = localStorage.getItem('ciao-context-provider')
-    if (saved === 'claude' || saved === 'codex') contextProvider.value = saved
-  } catch (e) {
-    // Ignore localStorage restrictions.
-  }
-}
-
-function setContextProvider(provider: ContextProvider) {
-  contextProvider.value = provider
-  try {
-    localStorage.setItem('ciao-context-provider', provider)
-  } catch (e) {
-    // The selection still applies for this page when storage is unavailable.
-  }
-}
 
 // ── Appearance settings ────────────────────────────────────────────────────
 const activeTheme = ref('system')
@@ -2613,13 +2569,6 @@ function contextGuideAsset(
 
 type ContextSourceFile = { label: string; path: string }
 
-function inventoryProvider(item: PromptAsset): ContextProvider | 'shared' {
-  if (item.provider === 'claude' || item.provider === 'codex') return item.provider
-  if (/CLAUDE(?:\.local)?\.md/i.test(item.path) || /Claude/i.test(item.title)) return 'claude'
-  if (/AGENTS(?:\.override)?\.md/i.test(item.path) || /Codex/i.test(item.title)) return 'codex'
-  return 'shared'
-}
-
 function sourceFile(item: PromptAsset, label: string = item.path): ContextSourceFile[] {
   return item.path ? [{ label, path: item.path }] : []
 }
@@ -2627,16 +2576,15 @@ function sourceFile(item: PromptAsset, label: string = item.path): ContextSource
 function contextSourceFiles(item: PromptAsset): ContextSourceFile[] {
   const inventory = agentAssets.value?.context || []
   if (item.id === 'cli-instruction-chain') {
-    const expected = contextProvider.value === 'claude' ? /CLAUDE\.md$/i : /AGENTS(?:\.override)?\.md$/i
-    const candidates = inventory.filter(candidate =>
-      candidate.scope === 'project'
-      && inventoryProvider(candidate) === contextProvider.value
-      && expected.test(candidate.path),
-    )
-    const preferred = candidates.find(candidate => !candidate.path.replaceAll('\\', '/').includes('/')) || candidates[0]
-    if (preferred) return sourceFile(preferred)
-    const fallback = contextProvider.value === 'claude' ? 'CLAUDE.md' : 'AGENTS.md'
-    return [{ label: fallback, path: fallback }]
+    // One row per linked workspace guide; both resolve to the same content.
+    return ['CLAUDE.md', 'AGENTS.md'].map((guide) => {
+      const expected = new RegExp(`(?:^|[\\\\/])${guide.replace('.', '\\.')}$`, 'i')
+      const candidates = inventory.filter(candidate =>
+        candidate.scope === 'project' && expected.test(candidate.path),
+      )
+      const preferred = candidates.find(candidate => !candidate.path.replaceAll('\\', '/').includes('/')) || candidates[0]
+      return preferred ? sourceFile(preferred)[0] : { label: guide, path: guide }
+    })
   }
   if (item.id === 'ciaobot-system-prompt') {
     const configured = inventory.find(candidate => candidate.id === 'ciaobot-system-prompt')
@@ -2703,23 +2651,14 @@ function memoryInjectionLabel(item: PromptAsset): string {
 }
 
 const contextAssets = computed<PromptAsset[]>(() => [
-  contextProvider.value === 'claude'
-    ? contextGuideAsset(
-        'cli-instruction-chain',
-        'Claude Code instructions (CLAUDE.md)',
-        'Claude Code assembles the applicable global, project, local, and imported CLAUDE.md instructions.',
-        'CLI',
-        'session start',
-        true,
-      )
-    : contextGuideAsset(
-        'cli-instruction-chain',
-        'Codex instructions (AGENTS.md)',
-        'Codex assembles the applicable global, project, override, and nested AGENTS.md instructions.',
-        'CLI',
-        'session start',
-        true,
-      ),
+  contextGuideAsset(
+    'cli-instruction-chain',
+    'CLI instructions (CLAUDE.md · AGENTS.md)',
+    'The active CLI assembles the applicable global, workspace, override, and imported instruction files. The workspace CLAUDE.md and AGENTS.md are linked, so Claude Code and Codex read the same instructions.',
+    'CLI',
+    'session start',
+    true,
+  ),
   contextGuideAsset(
     'ciaobot-system-prompt',
     'Ciaobot system instructions',
@@ -3387,7 +3326,6 @@ async function removeWorkspace(name: string) {
 
 onMounted(async () => {
   loadAppearanceSettings()
-  loadContextProvider()
   fetchSkills()
   fetchCommands()
   fetchAgentAssets()
@@ -3822,26 +3760,10 @@ async function doPackageUpdate() {
 .settings-card-header--context > div:first-child {
   min-width: 0;
 }
-.context-provider-field {
-  display: flex;
-  flex: 0 0 min(340px, 42%);
-  flex-direction: column;
-  gap: var(--space-1);
-}
-.context-provider-toggle {
-  margin: 0;
-}
-.context-provider-toggle .toggle-btn {
-  min-height: var(--touch);
-}
 @container (max-width: 640px) {
   .settings-card-header--context {
     align-items: stretch;
     flex-direction: column;
-  }
-  .context-provider-field {
-    flex-basis: auto;
-    width: 100%;
   }
 }
 .hint--compact {

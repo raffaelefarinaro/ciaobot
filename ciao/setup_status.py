@@ -223,6 +223,16 @@ def _openrouter_status(env: Mapping[str, str]) -> dict[str, Any]:
     )
 
 
+def _workspace_guides_linked(workspace_root: Path) -> bool:
+    """True when AGENTS.md resolves to CLAUDE.md so both CLIs share one guide."""
+    claude_guide = workspace_root / "CLAUDE.md"
+    codex_guide = workspace_root / "AGENTS.md"
+    try:
+        return claude_guide.is_file() and codex_guide.resolve() == claude_guide.resolve()
+    except OSError:
+        return False
+
+
 def setup_status(
     config: Any,
     *,
@@ -265,6 +275,15 @@ def setup_status(
             ok=vault_root.is_dir(),
             required=True,
             detail=str(vault_root),
+        ),
+        _check(
+            check_id="workspace_guides",
+            label="Linked workspace guides",
+            ok=_workspace_guides_linked(workspace_root),
+            # Optional: a custom AGENTS.md is preserved on purpose, but then
+            # Claude Code and Codex read different workspace instructions.
+            required=False,
+            detail=str(workspace_root / "AGENTS.md"),
         ),
         _check(
             check_id="pwa_auth_token",

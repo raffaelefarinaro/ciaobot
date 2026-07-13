@@ -60,6 +60,30 @@ def test_setup_status_reports_workspace_and_required_config(tmp_path) -> None:
     assert data["configured"] is True
 
 
+def test_setup_status_reports_linked_workspace_guides(tmp_path) -> None:
+    """The optional guides check tracks whether AGENTS.md resolves to CLAUDE.md."""
+    config = _config(tmp_path)
+    (tmp_path / "memory-vault").mkdir()
+    env = {"PWA_AUTH_TOKEN": "test-token", "ANTHROPIC_API_KEY": "sk-anthropic"}
+
+    checks = {row["id"]: row for row in setup_status(config, env=env)["checks"]}
+    assert checks["workspace_guides"]["ok"] is False
+    assert checks["workspace_guides"]["required"] is False
+
+    (tmp_path / "CLAUDE.md").write_text("# Guide\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("# Custom Codex guide\n", encoding="utf-8")
+    checks = {row["id"]: row for row in setup_status(config, env=env)["checks"]}
+    assert checks["workspace_guides"]["ok"] is False
+
+    (tmp_path / "AGENTS.md").unlink()
+    (tmp_path / "AGENTS.md").symlink_to("CLAUDE.md")
+    data = setup_status(config, env=env)
+    checks = {row["id"]: row for row in data["checks"]}
+    assert checks["workspace_guides"]["ok"] is True
+    # Optional either way: an unlinked custom AGENTS.md never blocks setup.
+    assert data["configured"] is True
+
+
 def test_setup_status_configured_without_push_contact(tmp_path) -> None:
     """An empty CIAO_PUSH_CONTACT never blocks a configured workspace."""
     config = _config(tmp_path, {"CIAO_PUSH_CONTACT": ""})

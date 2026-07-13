@@ -334,6 +334,29 @@ def test_workspace_health_reports_unsynced_custom_assets(tmp_path: Path) -> None
     assert any(check["id"] == "unsynced-subagent-orphan" for check in data["checks"])
 
 
+def test_workspace_health_reports_linked_workspace_guides(tmp_path: Path) -> None:
+    (tmp_path / "CLAUDE.md").write_text("# Guide\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").symlink_to("CLAUDE.md")
+
+    data = _client(tmp_path).get("/api/workspace-health").json()
+
+    check = next(c for c in data["checks"] if c["id"] == "guides-linked")
+    assert check["status"] == "ok"
+    assert check["path"] == "AGENTS.md"
+
+
+def test_workspace_health_warns_when_workspace_guides_diverge(tmp_path: Path) -> None:
+    (tmp_path / "CLAUDE.md").write_text("# Guide\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("# Custom Codex guide\n", encoding="utf-8")
+
+    data = _client(tmp_path).get("/api/workspace-health").json()
+
+    check = next(c for c in data["checks"] if c["id"] == "guides-linked")
+    assert check["status"] == "warn"
+    assert "different workspace instructions" in check["detail"]
+    assert "sync-skills" in check["action"]
+
+
 def test_workspace_health_fix_applies_the_suggested_remedies(tmp_path: Path) -> None:
     """The Fix button covers what the checks suggest in prose: missing
     scaffold files are created and custom assets get linked into .claude."""
