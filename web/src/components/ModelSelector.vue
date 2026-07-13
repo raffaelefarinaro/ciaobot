@@ -119,9 +119,12 @@ const triggerLabel = computed(() => {
   return v ? displayModelLabel(v) : props.placeholder
 })
 
+const explicitActiveModels = computed(() =>
+  props.activeModels.map((model) => model.trim()).filter(Boolean),
+)
+
 const activeModelSet = computed(() => {
-  const explicit = props.activeModels.map((model) => model.trim()).filter(Boolean)
-  if (explicit.length) return new Set(explicit)
+  if (explicitActiveModels.value.length) return new Set(explicitActiveModels.value)
   return new Set(
     (props.multiple ? (effectiveValue.value as string[]) : [effectiveValue.value as string])
       .map((model) => model.trim())
@@ -177,6 +180,12 @@ function isSelected(model: string): boolean {
 
 function isActive(model: string): boolean {
   if (activeModelSet.value.has(model)) return true
+  // Tier-alias fallback: a bare tier value (e.g. "opus") highlights the
+  // provider-native model carrying that tier badge. Only applies when no
+  // explicit activeModels were given — those are already the exact models in
+  // use (resolved per provider), so alias matching would wrongly light up
+  // same-tier models from other providers.
+  if (explicitActiveModels.value.length) return false
   const aliases = normalizedSections.value
     .find((section) => section.models.includes(model))
     ?.modelBadges?.[model] || []
