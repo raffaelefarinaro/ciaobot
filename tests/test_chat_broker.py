@@ -28,6 +28,18 @@ def test_event_to_json_text_delta() -> None:
     }
 
 
+def test_event_to_json_text_delta_includes_message_phase() -> None:
+    assert event_to_json(AssistantTextDelta(
+        type="assistant",
+        text="Checking now.",
+        phase="commentary",
+    )) == {
+        "type": "text_delta",
+        "text": "Checking now.",
+        "phase": "commentary",
+    }
+
+
 def test_event_to_json_tool_use_omits_empty_input() -> None:
     assert event_to_json(ToolUseEvent(type="assistant", tool_name="Read")) == {
         "type": "tool_use",

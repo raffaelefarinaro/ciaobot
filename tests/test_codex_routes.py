@@ -139,6 +139,66 @@ def test_codex_chat_messages_render_thread_items(
     assert rows[-1] == {"role": "assistant", "content": "world"}
 
 
+def test_codex_chat_messages_preserve_commentary_and_final_phases(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    pcm = _manager(tmp_path)
+    project = pcm.create_project("codex-phases", workspace="personal")
+    chat = pcm.create_chat(
+        project.project_id, model="gpt-test", provider="codex"
+    )
+    chat.session_id = "thread-phases"
+    pcm._save()
+    thread = {
+        "id": "thread-phases",
+        "turns": [{
+            "id": "turn-1",
+            "items": [
+                {"type": "userMessage", "id": "u1", "content": [{
+                    "type": "text", "text": "check it",
+                }]},
+                {
+                    "type": "agentMessage",
+                    "id": "a1",
+                    "text": "I'll check that now.",
+                    "phase": "commentary",
+                },
+                {
+                    "type": "agentMessage",
+                    "id": "a2",
+                    "text": "Done.",
+                    "phase": "final_answer",
+                },
+            ],
+        }],
+    }
+    monkeypatch.setattr(
+        CodexProvider, "read_thread", AsyncMock(return_value=thread)
+    )
+    app = SimpleNamespace(state=SimpleNamespace(
+        config=pcm._config,
+        project_chat_manager=pcm,
+    ))
+
+    response = asyncio.run(chat_messages(_request(
+        f"/api/chats/{chat.chat_id}/messages",
+        app,
+        chat_id=chat.chat_id,
+    )))
+    rows = json.loads(response.body)
+
+    assert rows[1] == {
+        "role": "assistant",
+        "content": "I'll check that now.",
+        "phase": "commentary",
+    }
+    assert rows[2] == {
+        "role": "assistant",
+        "content": "Done.",
+        "phase": "final_answer",
+    }
+
+
 def test_codex_subagents_read_receiver_threads(
     tmp_path: Path, monkeypatch,
 ) -> None:

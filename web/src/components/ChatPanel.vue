@@ -2080,7 +2080,12 @@ const renderData = computed<{
     let finalIdx = -1
     for (let k = buffer.length - 1; k >= 0; k--) {
       const m = buffer[k]
-      if (m.role === 'assistant' && m.tool_name !== '_activity' && m.tool_name !== '_thinking') {
+      if (
+        m.role === 'assistant'
+        && m.tool_name !== '_activity'
+        && m.tool_name !== '_thinking'
+        && m.phase !== 'commentary'
+      ) {
         finalIdx = k
         break
       }

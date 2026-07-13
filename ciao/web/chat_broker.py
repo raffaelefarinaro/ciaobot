@@ -114,6 +114,8 @@ def event_to_json(event: StreamEvent) -> dict | None:
         payload: dict = {"type": "text_delta", "text": event.text}
         if event.parent_tool_use_id:
             payload["parent_tool_use_id"] = event.parent_tool_use_id
+        if event.phase:
+            payload["phase"] = event.phase
         return payload
     if isinstance(event, ToolUseEvent):
         payload = {"type": "tool_use", "tool_name": event.tool_name}

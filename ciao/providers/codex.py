@@ -53,6 +53,7 @@ _APP_SERVER_REQUESTS = {
     "execCommandApproval",
 }
 _ACTIVE_COLLAB_STATES = {"pendingInit", "running"}
+_MESSAGE_PHASES = {"commentary", "final_answer"}
 _REQUIRED_PROTOCOL_TOKENS = frozenset({
     "thread/start",
     "thread/resume",
@@ -189,6 +190,12 @@ def codex_collab_agents(thread: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
                     ),
                 }
     return agents
+
+
+def _agent_message_phase(item: Mapping[str, Any]) -> str | None:
+    """Return a valid Codex assistant-message phase, if the item declares one."""
+    phase = str(item.get("phase") or "")
+    return phase if phase in _MESSAGE_PHASES else None
 
 
 def codex_running_subagents(thread: Mapping[str, Any]) -> tuple[int, bool]:
@@ -849,12 +856,22 @@ class CodexProvider(BaseSDKProvider):
             )
         return None
 
-    def _notification_events(self, message: Mapping[str, Any]) -> list[StreamEvent]:
+    def _notification_events(
+        self,
+        message: Mapping[str, Any],
+        message_phases: Mapping[str, str] | None = None,
+    ) -> list[StreamEvent]:
         method = str(message.get("method") or "")
         params = message.get("params")
         params = params if isinstance(params, Mapping) else {}
         if method == "item/agentMessage/delta":
-            return [AssistantTextDelta(type="assistant", text=str(params.get("delta") or ""))]
+            item_id = str(params.get("itemId") or "")
+            phase = (message_phases or {}).get(item_id)
+            return [AssistantTextDelta(
+                type="assistant",
+                text=str(params.get("delta") or ""),
+                phase=phase if phase in _MESSAGE_PHASES else None,
+            )]
         if method == "item/reasoning/summaryTextDelta":
             return [ThinkingEvent(type="assistant", text=str(params.get("delta") or ""))]
         if method == "item/started":
@@ -925,7 +942,9 @@ class CodexProvider(BaseSDKProvider):
         self._turn_id = turn_id
         self._turn_tool_item_ids.clear()
         register_handle(CodexActiveHandle(self, thread_id, turn_id))
-        response_parts: list[str] = []
+        message_parts: dict[str, list[str]] = {}
+        message_phases: dict[str, str] = {}
+        message_order: list[str] = []
         error_text = ""
         terminal_status = ""
         try:
@@ -946,21 +965,43 @@ class CodexProvider(BaseSDKProvider):
                 method = str(message.get("method") or "")
                 params = message.get("params")
                 params = params if isinstance(params, Mapping) else {}
+
+                completed_item = params.get("item")
+                if method in {"item/started", "item/completed"} and isinstance(
+                    completed_item, Mapping
+                ) and completed_item.get("type") == "agentMessage":
+                    item_id = str(completed_item.get("id") or "")
+                    if item_id:
+                        if item_id not in message_parts:
+                            message_parts[item_id] = []
+                            message_order.append(item_id)
+                        phase = _agent_message_phase(completed_item)
+                        if phase:
+                            message_phases[item_id] = phase
+
                 if method == "item/agentMessage/delta":
+                    item_id = str(params.get("itemId") or "") or "__legacy__"
+                    if item_id not in message_parts:
+                        message_parts[item_id] = []
+                        message_order.append(item_id)
                     delta = str(params.get("delta") or "")
-                    response_parts.append(delta)
+                    message_parts[item_id].append(delta)
                 elif method == "item/completed":
-                    completed_item = params.get("item")
                     if (
                         isinstance(completed_item, Mapping)
                         and completed_item.get("type") == "agentMessage"
-                        and not response_parts
                     ):
+                        item_id = str(completed_item.get("id") or "") or "__legacy__"
+                        if item_id not in message_parts:
+                            message_parts[item_id] = []
+                            message_order.append(item_id)
                         fallback_text = str(completed_item.get("text") or "")
-                        if fallback_text:
-                            response_parts.append(fallback_text)
+                        if fallback_text and not message_parts[item_id]:
+                            message_parts[item_id].append(fallback_text)
                             yield AssistantTextDelta(
-                                type="assistant", text=fallback_text
+                                type="assistant",
+                                text=fallback_text,
+                                phase=message_phases.get(item_id),
                             )
                 if method == "error" and not bool(params.get("willRetry")):
                     raw_error = params.get("error")
@@ -969,7 +1010,7 @@ class CodexProvider(BaseSDKProvider):
                         if isinstance(raw_error, Mapping)
                         else str(raw_error)
                     )
-                for event in self._notification_events(message):
+                for event in self._notification_events(message, message_phases):
                     yield event
                 if method != "turn/completed":
                     continue
@@ -1003,7 +1044,14 @@ class CodexProvider(BaseSDKProvider):
                     ))
 
         is_error = terminal_status == "failed" or bool(error_text)
-        result_text = error_text if is_error else "".join(response_parts).strip()
+        final_parts = [
+            "".join(message_parts[item_id]).strip()
+            for item_id in message_order
+            if message_phases.get(item_id) != "commentary"
+        ]
+        result_text = error_text if is_error else "\n\n".join(
+            part for part in final_parts if part
+        )
         if terminal_status == "interrupted" and not result_text:
             result_text = "Interrupted by user"
         yield ResultEvent(

@@ -50,6 +50,7 @@ export const useProjectStore = defineStore('projects', () => {
   const sockets = ref<Record<string, WebSocket>>({})
   const streaming = ref<Record<string, boolean>>({})
   const streamingText = ref<Record<string, string>>({})
+  const streamingTextPhase = ref<Record<string, ChatMessage['phase']>>({})
   // Per-chat in-flight thinking buffer. Mirrors `streamingText` but for
   // `thinking_delta` events: we accumulate the model's reasoning text and
   // commit it as a `kind: 'thinking'` timeline entry the moment a visible
@@ -123,7 +124,9 @@ export const useProjectStore = defineStore('projects', () => {
   // It breaks contiguous 'tool' groups so the PWA can render a standalone
   // clickable card with a preview link instead of folding it into _activity.
   type StreamEntry =
-    | { kind: 'tool' | 'text' | 'thinking'; content: string }
+    | { kind: 'tool'; content: string }
+    | { kind: 'thinking'; content: string }
+    | { kind: 'text'; content: string; phase?: ChatMessage['phase'] }
     | { kind: 'filecard'; content: string; file_path: string; action: string; tool: string }
   const streamingTimeline = ref<Record<string, StreamEntry[]>>({})  // per-chat interleaved tool/text entries
   const unread = ref<Record<string, number>>({})  // per-chat unread assistant message count
@@ -562,6 +565,7 @@ export const useProjectStore = defineStore('projects', () => {
         content: message.content,
         tool_name: message.tool_name || '',
         is_error: Boolean(message.is_error),
+        phase: message.phase || '',
       }))
     )
   }
@@ -863,6 +867,7 @@ export const useProjectStore = defineStore('projects', () => {
     streamingText.value[chatId] = ''
     streamingThinking.value[chatId] = ''
     streamingTimeline.value[chatId] = []
+    delete streamingTextPhase.value[chatId]
     delete liveUsage.value[chatId]
     delete streamStartedAt.value[chatId]
     delete projectStreaming.value[chatId]
@@ -1272,7 +1277,7 @@ export const useProjectStore = defineStore('projects', () => {
     // Fetch authoritative history from the SDK session on the server.
     // This catches schedule outputs, turns from other devices, etc.
     try {
-      const serverMsgs = await api.get<{ role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string }[]>(
+      const serverMsgs = await api.get<{ role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer' }[]>(
         `/api/chats/${chatId}/messages`
       )
       if (!serverMsgs.length) {
@@ -1302,6 +1307,7 @@ export const useProjectStore = defineStore('projects', () => {
         file_path: m.file_path,
         action: m.action,
         tool: m.tool,
+        phase: m.phase,
       })))
       const normalizedLocal = normalizeMessages(messages.value[chatId] || [])
 
@@ -1461,6 +1467,7 @@ export const useProjectStore = defineStore('projects', () => {
       streamingText.value[chatId] = ''
       streamingThinking.value[chatId] = ''
       streamingTimeline.value[chatId] = []
+      delete streamingTextPhase.value[chatId]
     }
   }
 
@@ -1792,6 +1799,7 @@ export const useProjectStore = defineStore('projects', () => {
         if (subagents.value[msg.chat_id]) delete subagents.value[msg.chat_id]
         if (streaming.value[msg.chat_id]) delete streaming.value[msg.chat_id]
         if (streamingText.value[msg.chat_id]) delete streamingText.value[msg.chat_id]
+        delete streamingTextPhase.value[msg.chat_id]
         if (queuedMessages.value[msg.chat_id]) delete queuedMessages.value[msg.chat_id]
         if (unread.value[msg.chat_id]) {
           delete unread.value[msg.chat_id]
@@ -1963,6 +1971,7 @@ export const useProjectStore = defineStore('projects', () => {
     streaming.value[chatId] = true
     streamingText.value[chatId] = ''
     streamingThinking.value[chatId] = ''
+    delete streamingTextPhase.value[chatId]
     streamStartedAt.value[chatId] = Date.now()
     delete liveUsage.value[chatId]
 
@@ -2320,10 +2329,15 @@ export const useProjectStore = defineStore('projects', () => {
 
   function _commitStreamingTextToTimeline(chatId: string) {
     const text = (streamingText.value[chatId] || '').trim()
-    if (!text) return
+    const phase = streamingTextPhase.value[chatId]
+    if (!text) {
+      delete streamingTextPhase.value[chatId]
+      return
+    }
     if (!streamingTimeline.value[chatId]) streamingTimeline.value[chatId] = []
-    streamingTimeline.value[chatId].push({ kind: 'text', content: text })
+    streamingTimeline.value[chatId].push({ kind: 'text', content: text, phase })
     streamingText.value[chatId] = ''
+    delete streamingTextPhase.value[chatId]
   }
 
   function _commitStreamingThinkingToTimeline(chatId: string) {
@@ -2507,6 +2521,17 @@ export const useProjectStore = defineStore('projects', () => {
         // Visible text starts: any pending thinking block has ended, lock it
         // into the timeline so the Reasoning bubble renders it after the turn.
         _commitStreamingThinkingToTimeline(chatId)
+        // Codex starts a new agent-message item when it moves from progress
+        // commentary to the terminal answer. Preserve that boundary instead
+        // of concatenating both items into the final response buffer.
+        if (
+          event.phase
+          && streamingText.value[chatId]
+          && streamingTextPhase.value[chatId] !== event.phase
+        ) {
+          _commitStreamingTextToTimeline(chatId)
+        }
+        if (event.phase) streamingTextPhase.value[chatId] = event.phase
         streamingText.value[chatId] = (streamingText.value[chatId] || '') + event.text
         break
 
@@ -2620,6 +2645,12 @@ export const useProjectStore = defineStore('projects', () => {
         // trailing thinking/text deltas into the timeline so they render
         // in the correct order.
         _commitStreamingThinkingToTimeline(chatId)
+        // A completed/interrupted Codex turn may legitimately end after a
+        // commentary item with no final answer. Keep that text in the trace;
+        // never promote it into the response bubble via the defensive merge.
+        if (streamingTextPhase.value[chatId] === 'commentary') {
+          _commitStreamingTextToTimeline(chatId)
+        }
         // Flush accumulated timeline preserving order: tool runs → _activity
         // system msgs, thinking → _thinking system msgs (rendered in the
         // Reasoning trace, never as the final answer), intermediate text →
@@ -2668,11 +2699,17 @@ export const useProjectStore = defineStore('projects', () => {
             // Skip timeline text entries that are already represented in the
             // final merged text so the trace doesn't duplicate the answer bubble.
             const entryText = entry.content.trim()
-            if (text && entryText && text.indexOf(entryText) >= 0) continue
+            if (
+              entry.phase !== 'commentary'
+              && text
+              && entryText
+              && text.indexOf(entryText) >= 0
+            ) continue
             msgs.push({
               role: 'assistant',
               content: entry.content,
               timestamp: now,
+              phase: entry.phase,
             })
           }
         }
@@ -2690,6 +2727,7 @@ export const useProjectStore = defineStore('projects', () => {
             usage: event.usage,
             quota: event.quota,
             duration_ms: event.duration_ms,
+            phase: 'final_answer',
           })
           const isActive = activeChatId.value === chatId &&
             (typeof document === 'undefined' || document.visibilityState === 'visible')
@@ -2702,6 +2740,7 @@ export const useProjectStore = defineStore('projects', () => {
         streaming.value[chatId] = false
         streamingText.value[chatId] = ''
         streamingThinking.value[chatId] = ''
+        delete streamingTextPhase.value[chatId]
         delete liveUsage.value[chatId]
         delete streamStartedAt.value[chatId]
         // Turn ended: the server has already resolved any still-pending gate
@@ -2746,6 +2785,7 @@ export const useProjectStore = defineStore('projects', () => {
         streaming.value[chatId] = false
         streamingText.value[chatId] = ''
         streamingThinking.value[chatId] = ''
+        delete streamingTextPhase.value[chatId]
         delete liveUsage.value[chatId]
         delete streamStartedAt.value[chatId]
         delete pendingPermissions.value[chatId]

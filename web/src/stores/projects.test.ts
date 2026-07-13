@@ -225,6 +225,54 @@ describe('Codex structured questions', () => {
   })
 })
 
+describe('Codex assistant message phases', () => {
+  test('keeps commentary in the trace and the final answer separate', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'codex-phases'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Codex phases',
+      model: 'gpt-test',
+      provider: 'codex',
+      mode: 'normal',
+      session_id: 'thread-1',
+      created_at: '',
+      archived: false,
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'text_delta',
+      text: "I'll check that now.",
+      phase: 'commentary',
+    }) })
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'text_delta',
+      text: 'Done.',
+      phase: 'final_answer',
+    }) })
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'result',
+      text: 'Done.',
+      is_error: false,
+      effective_model: 'gpt-test',
+      usage: {},
+      session_id: 'thread-1',
+    }) })
+
+    expect(store.messages[chatId].map(message => ({
+      content: message.content,
+      phase: message.phase,
+    }))).toEqual([
+      { content: "I'll check that now.", phase: 'commentary' },
+      { content: 'Done.', phase: 'final_answer' },
+    ])
+  })
+})
+
 describe('latest status sync', () => {
   test('hydrates settled active chat history and clears stale streaming state', async () => {
     Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })

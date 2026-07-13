@@ -8,6 +8,7 @@ from typing import Literal
 
 ExecutionMode = Literal["provider_prompt", "provider_cli_arg", "bot_handler"]
 BridgeMode = Literal["normal", "plan", "auto", "bypass"]
+MessagePhase = Literal["commentary", "final_answer"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +145,11 @@ class AssistantTextDelta(StreamEvent):
 
     text: str = ""
     parent_tool_use_id: str | None = None
+    # Provider-declared assistant-message phase. Codex uses this to
+    # distinguish mid-turn progress commentary from the terminal answer.
+    # ``None`` preserves the legacy inference path for providers/models that
+    # do not expose a phase.
+    phase: MessagePhase | None = None
 
 
 @dataclass(slots=True)

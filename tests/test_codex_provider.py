@@ -93,6 +93,16 @@ for raw in sys.stdin:
     elif method == "turn/start":
         record("turn/start", params)
         send({"id": request_id, "result": {"turn": {"id": turn_id, "status": "inProgress", "items": []}}})
+        if os.environ.get("FAKE_CODEX_COMMENTARY"):
+            send({"method": "item/started", "params": {"item": {
+                "type": "agentMessage", "id": "note-1", "text": "", "phase": "commentary",
+            }}})
+            send({"method": "item/agentMessage/delta", "params": {
+                "itemId": "note-1", "delta": "I'll check that now.",
+            }})
+            send({"method": "item/completed", "params": {"item": {
+                "type": "agentMessage", "id": "note-1", "text": "I'll check that now.", "phase": "commentary",
+            }}})
         send({"method": "item/reasoning/summaryTextDelta", "params": {"delta": "checking"}})
         send({"method": "item/started", "params": {"item": {
             "type": "commandExecution", "id": "cmd-1", "command": "pwd",
@@ -113,7 +123,15 @@ for raw in sys.stdin:
         }})
     elif request_id == "permission-rpc" and "result" in message:
         record("permission-response", message.get("result"))
-        send({"method": "item/agentMessage/delta", "params": {"delta": "done"}})
+        send({"method": "item/started", "params": {"item": {
+            "type": "agentMessage", "id": "answer-1", "text": "", "phase": "final_answer",
+        }}})
+        send({"method": "item/agentMessage/delta", "params": {
+            "itemId": "answer-1", "delta": "done",
+        }})
+        send({"method": "item/completed", "params": {"item": {
+            "type": "agentMessage", "id": "answer-1", "text": "done", "phase": "final_answer",
+        }}})
         send({"method": "thread/tokenUsage/updated", "params": {"tokenUsage": {
             "last": {"inputTokens": 10, "outputTokens": 4, "cachedInputTokens": 2,
                      "reasoningOutputTokens": 1, "totalTokens": 14},
@@ -254,6 +272,8 @@ async def test_codex_provider_streams_native_protocol_and_answers_gates(
         for event in events
     )
     assert any(isinstance(event, TokenUsageEvent) for event in events)
+    text_delta = next(event for event in events if isinstance(event, AssistantTextDelta))
+    assert text_delta.phase == "final_answer"
     result = next(event for event in events if isinstance(event, ResultEvent))
     assert result.result == "done"
     assert result.session_id == "thread-1"
@@ -276,6 +296,42 @@ async def test_codex_provider_streams_native_protocol_and_answers_gates(
     assert question == {"answers": {"choice": {"answers": ["A"]}}}
     permission = next(row["payload"] for row in records if row["kind"] == "permission-response")
     assert permission == {"decision": "accept"}
+    await provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_excludes_commentary_from_final_result(
+    tmp_path: Path,
+) -> None:
+    command, log = _fake_command(tmp_path)
+    provider = CodexProvider(tmp_path, command=command)
+    request = AgentRequest(
+        prompt="Inspect this",
+        model="gpt-test",
+        mode="auto",
+        provider="codex",
+        extra_env={
+            "FAKE_CODEX_LOG": str(log),
+            "FAKE_CODEX_COMMENTARY": "1",
+        },
+    )
+    events = []
+    async for event in provider.run_streaming(request, lambda _handle: None):
+        events.append(event)
+        if isinstance(event, ToolUseEvent) and event.request_id:
+            provider.send_question_response(event.request_id, {"choice": ["A"]})
+        elif isinstance(event, PermissionRequestEvent):
+            provider.send_permission_response(event.request_id, True)
+
+    deltas = [
+        event for event in events if isinstance(event, AssistantTextDelta)
+    ]
+    assert [(event.text, event.phase) for event in deltas] == [
+        ("I'll check that now.", "commentary"),
+        ("done", "final_answer"),
+    ]
+    result = next(event for event in events if isinstance(event, ResultEvent))
+    assert result.result == "done"
     await provider.disconnect()
 
 

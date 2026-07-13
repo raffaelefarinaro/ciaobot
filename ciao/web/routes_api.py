@@ -2116,7 +2116,11 @@ def _render_codex_thread(thread: dict, chat) -> list[dict]:
                 flush_tools()
                 text = str(item.get("text") or "").strip()
                 if text:
-                    result.append({"role": "assistant", "content": text})
+                    entry = {"role": "assistant", "content": text}
+                    phase = str(item.get("phase") or "")
+                    if phase in {"commentary", "final_answer"}:
+                        entry["phase"] = phase
+                    result.append(entry)
                 continue
             if kind == "fileChange":
                 flush_tools()

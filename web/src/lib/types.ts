@@ -111,6 +111,10 @@ export interface ChatMessage {
   file_path?: string
   action?: string
   tool?: string
+  // Codex-native assistant-message phase. Commentary stays in the reasoning
+  // trace; only final_answer is eligible for the terminal response bubble.
+  // Undefined keeps the legacy last-assistant-message inference.
+  phase?: 'commentary' | 'final_answer'
 }
 
 // Subagent transcripts from /api/chats/{id}/subagents. One entry per subagent
@@ -139,7 +143,12 @@ export type WsEvent =
   // subagent. Its value is the parent's tool_use_id for the Task dispatch,
   // so the client can look up the subagent's description and label the
   // line in the trace ("[Explore] $ Bash …").
-  | { type: 'text_delta'; text: string; parent_tool_use_id?: string }
+  | {
+      type: 'text_delta';
+      text: string;
+      parent_tool_use_id?: string;
+      phase?: 'commentary' | 'final_answer';
+    }
   | {
       type: 'tool_use';
       tool_name: string;
