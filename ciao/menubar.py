@@ -13,6 +13,7 @@ import json
 import os
 import plistlib
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -24,6 +25,10 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 
+from ciao.menubar_prefs import (
+    notifications_enabled,
+    set_notifications_enabled,
+)
 from ciao.package_version import _github_repo, make_cached_package_status, update_package
 
 
@@ -157,6 +162,9 @@ def find_installed_webapp(app_name: str = "Ciaobot") -> Path | None:
     .app bundle under one of a few well-known folders when the PWA is
     installed. Opening links through that bundle (via ``open -a``) puts them
     in the installed app's own window instead of a browser tab.
+
+    Prefer :func:`open_command` on macOS: it opens a browser app window
+    without requiring a separate installed PWA that duplicates ``Ciaobot.app``.
     """
 
     home = Path.home()
@@ -175,13 +183,119 @@ def find_installed_webapp(app_name: str = "Ciaobot") -> Path | None:
     return None
 
 
-def open_command(url: str) -> list[str]:
-    """``open`` invocation for a URL, preferring an installed PWA when found."""
+_BROWSER_APP_MODE_CANDIDATES = (
+    "Google Chrome",
+    "Google Chrome Canary",
+    "Chromium",
+    "Microsoft Edge",
+    "Brave Browser",
+)
 
-    webapp = find_installed_webapp()
-    if webapp is not None:
-        return ["open", "-a", str(webapp), url]
+
+def _installed_browser_app_names() -> list[str]:
+    applications = Path("/Applications")
+    return [
+        name
+        for name in _BROWSER_APP_MODE_CANDIDATES
+        if (applications / f"{name}.app").is_dir()
+    ]
+
+
+def browser_app_mode_command(url: str) -> list[str] | None:
+    """Open ``url`` in a browser app window without a separate PWA install."""
+
+    if sys.platform != "darwin":
+        return None
+    names = _installed_browser_app_names()
+    if not names:
+        return None
+    return ["open", "-a", names[0], "--args", f"--app={url}"]
+
+
+def browser_pwa_duplicate_paths(app_name: str = "Ciaobot") -> list[Path]:
+    """Browser-installed PWAs (and legacy helpers) that duplicate ``Ciaobot.app``."""
+
+    home = Path.home()
+    roots = [
+        home / "Applications",
+        Path("/Applications"),
+        home / "Applications" / "Chrome Apps.localized",
+        Path("/Applications") / "Chrome Apps.localized",
+    ]
+    seen: set[Path] = set()
+    paths: list[Path] = []
+    for root in roots:
+        candidate = (root / f"{app_name}.app").resolve()
+        if candidate in seen or not candidate.is_dir():
+            continue
+        seen.add(candidate)
+        if _bundle_identifier(candidate) in _OUR_LAUNCHER_BUNDLE_IDS:
+            continue
+        paths.append(candidate)
+    for root in (Path("/Applications"), home / "Applications"):
+        legacy = (root / "Ciaobot Menu Bar.app").resolve()
+        if legacy.is_dir() and legacy not in seen:
+            paths.append(legacy)
+            seen.add(legacy)
+    return paths
+
+
+def unregister_app_bundle(app_root: Path) -> None:
+    """Drop a bundle from Launch Services so Launchpad stops listing it."""
+
+    if sys.platform != "darwin":
+        return
+    lsregister = Path(
+        "/System/Library/Frameworks/CoreServices.framework/Frameworks/"
+        "LaunchServices.framework/Support/lsregister"
+    )
+    if not lsregister.is_file():
+        return
+    try:
+        subprocess.run(
+            [str(lsregister), "-u", str(app_root)],
+            check=False,
+            capture_output=True,
+        )
+    except OSError:
+        pass
+
+
+def remove_browser_pwa_duplicates(app_name: str = "Ciaobot") -> list[Path]:
+    """Remove duplicate browser PWAs so only the native ``Ciaobot.app`` remains."""
+
+    removed: list[Path] = []
+    for path in browser_pwa_duplicate_paths(app_name):
+        unregister_app_bundle(path)
+        try:
+            shutil.rmtree(path)
+        except OSError:
+            continue
+        removed.append(path)
+    return removed
+
+
+def open_command(url: str) -> list[str]:
+    """``open`` argv for a URL in an app-like window when possible."""
+
+    app_mode = browser_app_mode_command(url)
+    if app_mode is not None:
+        return app_mode
     return ["open", url]
+
+
+def launch_ui(url: str) -> None:
+    """Open the Ciaobot UI without blocking the caller (menu bar callbacks)."""
+
+    if sys.platform == "darwin":
+        subprocess.Popen(
+            [sys.executable, "-m", "ciao.window", url],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return
+    subprocess.run(open_command(url), check=False)
 
 
 def open_app_command(workspace: Path, port: int) -> list[str]:
@@ -343,6 +457,51 @@ def icon_path(name: str) -> str:
     # Menu bar assets ship in ciao.stock/deploy: the PWA build empties
     # ciao/web/static, so nothing committed may live there.
     return str(resources.files("ciao.stock").joinpath("deploy", name))
+
+
+def _menubar_app_candidates() -> list[Path]:
+    """Installed menu-bar app bundles, newest path first."""
+
+    home_apps = Path.home() / "Applications"
+    system_apps = Path("/Applications")
+    names = ("Ciaobot.app",)
+    candidates: list[Path] = []
+    for root in (system_apps, home_apps):
+        for name in names:
+            candidate = root / name
+            if candidate.is_dir():
+                candidates.append(candidate)
+    return candidates
+
+
+def _ensure_notification_bundle() -> None:
+    """Make Notification Center attribute alerts to Ciaobot, not Python.
+
+    When launchd starts ``python -m ciao.cli menubar`` directly, macOS has no
+    app identity and groups alerts under "Python". Setup writes a
+    ``CiaobotMenuBar`` helper inside ``Ciaobot.app`` and the LaunchAgent
+    should exec the bundle-local ``python`` symlink so alerts stay under the
+    existing Ciaobot app. As a fallback, load that bundle explicitly when we
+    can find it.
+    """
+
+    if sys.platform != "darwin":
+        return
+    try:
+        from Foundation import NSBundle
+    except Exception:
+        return
+
+    main = NSBundle.mainBundle()
+    if main is not None:
+        ident = main.bundleIdentifier()
+        if ident and ident not in ("org.python.python", "com.apple.python"):
+            return
+
+    for app_root in _menubar_app_candidates():
+        bundle = NSBundle.bundleWithPath_(str(app_root))
+        if bundle is not None and bundle.load():
+            return
 
 
 def spin_icon_paths() -> list[str]:
@@ -734,6 +893,8 @@ def run_menubar(workspace: Path, port: int) -> int:
     except Exception:
         pass
 
+    _ensure_notification_bundle()
+
     # Monochrome template images (black + alpha): macOS tints them to
     # match the menu bar, like the built-in status icons. Regenerate
     # with scripts/make_menubar_template_icons.py.
@@ -743,6 +904,21 @@ def run_menubar(workspace: Path, port: int) -> int:
     dot_frames = dot_pulse_icon_paths()
 
     app = rumps.App("Ciaobot", icon=face, template=True, quit_button=None)
+
+    @rumps.notifications
+    def on_notification_click(info: object) -> None:
+        chat_id = ""
+        if isinstance(info, dict):
+            chat_id = str(info.get("chat_id") or "")
+        else:
+            data = getattr(info, "data", None)
+            if isinstance(data, dict):
+                chat_id = str(data.get("chat_id") or "")
+        if chat_id:
+            notify_open_chat(port, chat_id)
+            launch_ui(chat_url(workspace, port, chat_id))
+        else:
+            launch_ui(open_url(workspace, port))
 
     # Only notify for entries newer than launch, not the whole backlog.
     notification_log = NotificationLogTail.at_end(workspace)
@@ -778,7 +954,7 @@ def run_menubar(workspace: Path, port: int) -> int:
     def _open_chat_callback(chat_id: str):
         def _callback(_sender) -> None:
             notify_open_chat(port, chat_id)
-            subprocess.run(open_command(chat_url(workspace, port, chat_id)), check=False)
+            launch_ui(chat_url(workspace, port, chat_id))
 
         return _callback
 
@@ -789,7 +965,15 @@ def run_menubar(workspace: Path, port: int) -> int:
         return _callback
 
     def on_open(_sender) -> None:
-        subprocess.run(open_app_command(workspace, port), check=False)
+        launch_ui(open_url(workspace, port))
+
+    def on_toggle_notifications(_sender) -> None:
+        enabled = not notifications_enabled(workspace)
+        set_notifications_enabled(workspace, enabled)
+        try:
+            _sender.state = 1 if enabled else 0
+        except Exception:
+            pass
 
     def on_recover_server(_sender) -> None:
         current = fetch_server_status(port)
@@ -1013,6 +1197,15 @@ def run_menubar(workspace: Path, port: int) -> int:
         advanced_menu.add(None)
         advanced_menu.add(rumps.MenuItem("View Logs", callback=on_logs))
         advanced_menu.add(addresses_menu)
+        notifications_item = rumps.MenuItem(
+            "Notifications",
+            callback=on_toggle_notifications,
+        )
+        try:
+            notifications_item.state = 1 if notifications_enabled(workspace) else 0
+        except Exception:
+            pass
+        advanced_menu.add(notifications_item)
         advanced_menu.add(None)
         advanced_menu.add(login_item)
 
@@ -1071,12 +1264,18 @@ def run_menubar(workspace: Path, port: int) -> int:
             time.sleep(WORKING_POLL_SECONDS)
 
     def refresh(_timer=None) -> None:
+        native_enabled = notifications_enabled(workspace)
         for notification in notification_log.read_new(workspace):
+            if not native_enabled:
+                continue
+            chat_id = str(notification.get("chat_id") or "")
+            payload = {"chat_id": chat_id} if chat_id else None
             try:
                 rumps.notification(
                     str(notification.get("title") or "Ciaobot"),
                     "",
                     str(notification.get("body") or "New notification"),
+                    data=payload,
                     icon=icon_path("Ciaobot.icns"),
                 )
             except Exception:

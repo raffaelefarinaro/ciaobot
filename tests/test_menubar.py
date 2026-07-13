@@ -112,7 +112,7 @@ def test_server_recovery_label_matches_reachability() -> None:
 
 
 def test_open_app_command_uses_setup_token(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(menubar, "find_installed_webapp", lambda: None)
+    monkeypatch.setattr(menubar, "_installed_browser_app_names", lambda: [])
     token_path = tmp_path / ".runtime" / "setup-token"
     token_path.parent.mkdir(parents=True)
     token_path.write_text("tok123\n", encoding="utf-8")
@@ -126,7 +126,7 @@ def test_open_app_command_uses_setup_token(tmp_path: Path, monkeypatch) -> None:
 def test_open_app_command_without_token_falls_back_to_plain_url(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setattr(menubar, "find_installed_webapp", lambda: None)
+    monkeypatch.setattr(menubar, "_installed_browser_app_names", lambda: [])
 
     assert menubar.open_app_command(tmp_path, 8443) == [
         "open",
@@ -134,15 +134,15 @@ def test_open_app_command_without_token_falls_back_to_plain_url(
     ]
 
 
-def test_open_app_command_prefers_installed_webapp(tmp_path: Path, monkeypatch) -> None:
-    webapp = tmp_path / "Ciaobot.app"
-    monkeypatch.setattr(menubar, "find_installed_webapp", lambda: webapp)
+def test_open_app_command_prefers_browser_app_mode(monkeypatch) -> None:
+    monkeypatch.setattr(menubar, "_installed_browser_app_names", lambda: ["Google Chrome"])
 
-    assert menubar.open_app_command(tmp_path, 8443) == [
+    assert menubar.open_app_command(Path("/tmp/ws"), 8443) == [
         "open",
         "-a",
-        str(webapp),
-        "http://localhost:8443/",
+        "Google Chrome",
+        "--args",
+        "--app=http://localhost:8443/",
     ]
 
 
@@ -178,6 +178,22 @@ def test_find_installed_webapp_absent_returns_none(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(menubar.Path, "home", lambda: tmp_path)
 
     assert menubar.find_installed_webapp() is None
+
+
+def test_remove_browser_pwa_duplicates_skips_native_launcher(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(menubar.Path, "home", lambda: tmp_path)
+    native = tmp_path / "Applications" / "Ciaobot.app"
+    _write_bundle(native, bundle_id="local.ciaobot.app")
+    duplicate = tmp_path / "Applications" / "Chrome Apps.localized" / "Ciaobot.app"
+    _write_bundle(duplicate, bundle_id="org.chromium.Chromium.app.abc123")
+
+    removed = menubar.remove_browser_pwa_duplicates()
+
+    assert removed == [duplicate.resolve()]
+    assert native.is_dir()
+    assert not duplicate.exists()
 
 
 def test_restart_server_command_targets_launchd_label() -> None:

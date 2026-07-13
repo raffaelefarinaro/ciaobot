@@ -124,6 +124,7 @@ def _render_launchd_plist(
     port: int,
     path: str = "",
     template_name: str = "com.ciao.server.plist.tmpl",
+    menubar_executable: str = "",
 ) -> str:
     python_path = _stable_python_path(python_path)
     template = resources.files("ciao.stock").joinpath(
@@ -137,6 +138,7 @@ def _render_launchd_plist(
         "{{CIAO_PYTHON}}": html.escape(python_path, quote=False),
         "{{CIAO_PORT}}": html.escape(str(port), quote=False),
         "{{CIAO_PATH}}": html.escape(resolved_path, quote=False),
+        "{{CIAO_MENUBAR_EXECUTABLE}}": html.escape(menubar_executable, quote=False),
     }
     for key, value in replacements.items():
         template = template.replace(key, value)
@@ -151,6 +153,7 @@ def _write_launchd_plist(
     port: int,
     path: str = "",
     plist_name: str = "com.ciao.server.plist",
+    menubar_executable: str = "",
 ) -> Path:
     plist = launch_agents_dir.expanduser() / plist_name
     plist.parent.mkdir(parents=True, exist_ok=True)
@@ -161,6 +164,7 @@ def _write_launchd_plist(
             port=port,
             path=path,
             template_name=f"{plist_name}.tmpl",
+            menubar_executable=menubar_executable,
         ),
         encoding="utf-8",
     )
@@ -279,21 +283,54 @@ def _remove_legacy_app_shortcuts(app_dir: Path) -> None:
     target moved to /Applications. Only bundles with our bundle id are
     touched."""
 
-    candidates = {app_dir / "Ciao.app"}
+    candidates = {app_dir / "Ciao.app", app_dir / "Ciaobot Menu Bar.app"}
     home_apps = Path.home() / "Applications"
     if app_dir != home_apps:
-        candidates.update({home_apps / "Ciao.app", home_apps / "Ciaobot.app"})
+        candidates.update({
+            home_apps / "Ciao.app",
+            home_apps / "Ciaobot.app",
+            home_apps / "Ciaobot Menu Bar.app",
+        })
     for legacy in candidates:
         plist = legacy / "Contents" / "Info.plist"
         try:
             if not plist.is_file():
                 continue
             text = plist.read_text(encoding="utf-8")
-            if not any(bundle_id in text for bundle_id in _OUR_BUNDLE_IDS):
+            if not (
+                "local.ciaobot.menubar" in text
+                or any(bundle_id in text for bundle_id in _OUR_BUNDLE_IDS)
+            ):
                 continue
             shutil.rmtree(legacy)
         except OSError:
             print(f"Could not remove legacy app shortcut at {legacy}", file=sys.stderr)
+
+
+def _write_menubar_helper(*, app_root: Path, python_path: str) -> Path:
+    """Write the menu-bar LaunchAgent entrypoint inside ``Ciaobot.app``.
+
+    macOS Notification Center attributes alerts to the running process's app
+    bundle. The helper keeps the interpreter inside ``Ciaobot.app/Contents``
+    so native notifications show as Ciaobot instead of Python.
+    """
+
+    macos = app_root / "Contents" / "MacOS"
+    macos.mkdir(parents=True, exist_ok=True)
+    python_path = _stable_python_path(python_path)
+    bundle_python = macos / "python"
+    if bundle_python.exists() or bundle_python.is_symlink():
+        bundle_python.unlink()
+    bundle_python.symlink_to(python_path)
+    helper = macos / "CiaobotMenuBar"
+    helper.write_text(
+        "#!/bin/sh\n"
+        'DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+        'exec "$DIR/python" -m ciao.cli menubar\n',
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+    return helper
 
 
 def _write_app_shortcut(
@@ -301,11 +338,16 @@ def _write_app_shortcut(
     workspace: Path,
     app_dir: Path,
     port: int,
+    python_path: str | None = None,
 ) -> Path:
     # Create the setup token file if absent so the first launch can log in;
     # the launcher script below reads its current value live at click time.
     _ensure_setup_token(workspace)
     _remove_legacy_app_shortcuts(app_dir.expanduser())
+    if sys.platform == "darwin":
+        from ciao.menubar import remove_browser_pwa_duplicates
+
+        remove_browser_pwa_duplicates()
     app_root = app_dir.expanduser() / "Ciaobot.app"
     contents = app_root / "Contents"
     macos = contents / "MacOS"
@@ -389,30 +431,19 @@ def _write_app_shortcut(
         "else\n"
         f'  url="http://localhost:{port}/"\n'
         "fi\n"
-        'webapp=""\n'
-        "for candidate in \\\n"
-        '  "$HOME/Applications/Ciaobot.app" \\\n'
-        '  "$HOME/Applications/Chrome Apps.localized/Ciaobot.app" \\\n'
-        '  "/Applications/Ciaobot.app" \\\n'
-        '  "/Applications/Chrome Apps.localized/Ciaobot.app"\n'
-        "do\n"
-        '  if [ -d "$candidate" ]; then\n'
-        '    bundle_id=$(defaults read "$candidate/Contents/Info" CFBundleIdentifier 2>/dev/null)\n'
-        '    case "$bundle_id" in\n'
-        "      local.ciao.app|local.ciaobot.app) continue ;;\n"
-        "    esac\n"
-        '    webapp="$candidate"\n'
-        "    break\n"
-        "  fi\n"
-        "done\n"
-        'if [ -n "$webapp" ]; then\n'
-        '  open -a "$webapp" "$url"\n'
-        "else\n"
-        '  open "$url"\n'
-        "fi\n",
+        'DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+        "open_ciaobot_url() {\n"
+        '  target="$1"\n'
+        '  exec "$DIR/python" -m ciao.window "$target"\n'
+        "}\n"
+        'open_ciaobot_url "$url"\n',
         encoding="utf-8",
     )
     executable.chmod(0o755)
+    _write_menubar_helper(
+        app_root=app_root,
+        python_path=python_path or sys.executable,
+    )
     _register_app_with_launchservices(app_root)
     return app_root
 
@@ -771,20 +802,25 @@ def setup_workspace(
 
     launch_dir = Path(launch_agents_dir) if launch_agents_dir is not None else Path.home() / "Library" / "LaunchAgents"
     app_root_dir = Path(app_dir) if app_dir is not None else _default_app_dir()
+    resolved_python = python_path or sys.executable
+    app_root = _write_app_shortcut(
+        workspace=root,
+        app_dir=app_root_dir,
+        port=port,
+        python_path=resolved_python,
+    )
+    menubar_executable = str(app_root / "Contents" / "MacOS" / "CiaobotMenuBar")
     for plist_name in ("com.ciao.server.plist", "com.ciao.menubar.plist"):
         written.append(_write_launchd_plist(
             workspace=root,
             launch_agents_dir=launch_dir,
-            python_path=python_path or sys.executable,
+            python_path=resolved_python,
             port=port,
             path=os.environ.get("PATH", ""),
             plist_name=plist_name,
+            menubar_executable=menubar_executable,
         ))
-    written.append(_write_app_shortcut(
-        workspace=root,
-        app_dir=app_root_dir,
-        port=port,
-    ))
+    written.append(app_root)
 
     ensure_workspace_git(root)
     # A vault outside the workspace (existing notes folder) gets its own

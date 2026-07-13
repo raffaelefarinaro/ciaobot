@@ -3078,6 +3078,9 @@ const pushError = ref('')
 const permissionDenied = ref(false)
 const needsIosInstall = ref(false)
 
+function isIos(): boolean {
+  return /iphone|ipad|ipod/i.test(navigator.userAgent)
+}
 function isMacDesktop(): boolean {
   return /macintosh|mac os x/i.test(navigator.userAgent) && !isIos()
 }
