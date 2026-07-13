@@ -11,6 +11,7 @@ from pathlib import Path
 
 from ciao.execution_modes import normalize_claude_mode
 from ciao.models import BridgeMode
+from ciao.providers.codex import CodexSettings
 from ciao.providers.ollama import OllamaSettings
 from ciao.providers.openrouter import OpenRouterSettings
 
@@ -293,6 +294,10 @@ class CiaoConfig:
     # Models in `ollama.models` get rerouted to a local Ollama daemon via
     # the Anthropic-compatible API. Empty allowlist disables the routing.
     ollama: OllamaSettings = field(default_factory=OllamaSettings)
+    # Per-tier Codex model pins set from the PWA Settings → Providers tab.
+    # Empty means automatic: tiers derive from the signed-in account's
+    # model catalog (luna→haiku, terra→sonnet, sol→opus/fable).
+    codex: CodexSettings = field(default_factory=CodexSettings)
     # Auto-discover models installed on the local Ollama daemon at startup
     # (GET /api/tags against ``ollama.local_url``) and surface them in the
     # model pickers. Disable with ``CIAO_OLLAMA_LOCAL_DISCOVERY=0``.

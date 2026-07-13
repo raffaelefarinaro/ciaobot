@@ -312,6 +312,9 @@ export interface ModelsResponse {
   // Per-backend haiku/sonnet/opus/fable tier models and which
   // backends are configured/available.
   alias_tiers?: Record<string, Record<string, string>>
+  // Catalog-derived codex tier mapping before operator pins, used to
+  // label the "Automatic (…)" option while an override is active.
+  codex_tier_defaults?: Record<string, string>
   backends?: Record<string, boolean>
   // Keyed by runtime provider; Claude buckets share the SDK effort levels,
   // while Codex is additionally narrowed by model_reasoning_levels.
@@ -334,6 +337,12 @@ export interface RoutineSettings {
   openrouter_sonnet_model: string
   openrouter_opus_model: string
   openrouter_fable_model: string
+  // Codex per-tier pins; empty = automatic catalog mapping. Effective
+  // values come from /api/models (alias_tiers.codex).
+  codex_haiku_model: string
+  codex_sonnet_model: string
+  codex_opus_model: string
+  codex_fable_model: string
   // What actually runs right now, after defaults.
   title_model_effective: string
   insights_model_effective: string

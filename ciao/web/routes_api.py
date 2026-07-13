@@ -30,7 +30,7 @@ from ciao.model_tiers import codex_tier_models
 from ciao.package_version import package_changelog, package_status, update_package
 from ciao.tool_path import login_shell_path, resolve_tool
 from ciao.providers.claude import _summarize_tool_input
-from ciao.providers.codex import CodexProvider, codex_login_status
+from ciao.providers.codex import CodexProvider, codex_login_status, codex_tier_overrides
 from ciao.provider_service import supported_providers
 from ciao.schedules import (
     ScheduleEntry,
@@ -1768,7 +1768,9 @@ async def create_project_chat(request: Request) -> JSONResponse:
 
 # ── Chats ────────────────────────────────────────────────────────────────
 
-def _codex_reasoning_levels(catalog: list[dict]) -> dict[str, list[str]]:
+def _codex_reasoning_levels(
+    catalog: list[dict], overrides: dict[str, str] | None = None
+) -> dict[str, list[str]]:
     """Per-model reasoning levels from the codex catalog, tier aliases included."""
     levels: dict[str, list[str]] = {}
     for item in catalog:
@@ -1783,7 +1785,7 @@ def _codex_reasoning_levels(catalog: list[dict]) -> dict[str, list[str]]:
             for option in efforts or []
             if isinstance(option, dict) and option.get("reasoningEffort")
         ]
-    for tier, model_id in codex_tier_models(catalog).items():
+    for tier, model_id in codex_tier_models(catalog, overrides=overrides).items():
         levels[tier] = list(levels.get(model_id, []))
     return levels
 
@@ -1813,7 +1815,7 @@ async def _unsupported_codex_level_error(
         catalog = await CodexProvider.model_catalog(config.workspace_root)
     except Exception:
         return None
-    allowed = _codex_reasoning_levels(catalog).get(model)
+    allowed = _codex_reasoning_levels(catalog, codex_tier_overrides(config)).get(model)
     if allowed and level not in allowed:
         return JSONResponse(
             {
@@ -3555,8 +3557,13 @@ async def list_models(request: Request) -> JSONResponse:
         ),
         codex_models[0] if codex_models else "",
     )
-    codex_tiers = codex_tier_models(codex_catalog)
-    model_reasoning_levels = _codex_reasoning_levels(codex_catalog)
+    # Automatic (catalog-derived) mapping vs the effective one after the
+    # operator's per-tier pins; the settings UI labels "Automatic (…)"
+    # from the former and shows the latter on the tier badges.
+    codex_overrides = codex_tier_overrides(config)
+    codex_tier_defaults = codex_tier_models(codex_catalog)
+    codex_tiers = codex_tier_models(codex_catalog, overrides=codex_overrides)
+    model_reasoning_levels = _codex_reasoning_levels(codex_catalog, codex_overrides)
     codex_model_metadata: dict[str, dict] = {}
     for item in visible_codex:
         model_id = str(item.get("model") or item.get("id") or "")
@@ -3622,6 +3629,10 @@ async def list_models(request: Request) -> JSONResponse:
             "openrouter": openrouter_tiers,
             "codex": codex_tiers,
         },
+        # Catalog-derived codex mapping before per-tier pins, so the
+        # settings UI can label the automatic choice while an override
+        # is active.
+        "codex_tier_defaults": codex_tier_defaults,
         "backends": {
             "ollama": _ollama_backend_available(config),
             "openrouter": or_settings.available,
@@ -3675,6 +3686,10 @@ def _routines_payload(config, app_settings) -> dict:
         "openrouter_sonnet_model": s.openrouter_sonnet_model,
         "openrouter_opus_model": s.openrouter_opus_model,
         "openrouter_fable_model": s.openrouter_fable_model,
+        "codex_haiku_model": s.codex_haiku_model,
+        "codex_sonnet_model": s.codex_sonnet_model,
+        "codex_opus_model": s.codex_opus_model,
+        "codex_fable_model": s.codex_fable_model,
         # What actually runs right now, after defaults.
         "title_model_effective": title_effective,
         "insights_model_effective": insights_effective,

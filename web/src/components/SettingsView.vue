@@ -888,7 +888,7 @@
               </div>
               <template v-if="selectedTierProviderSection.key === 'codex' && selectedTierProviderSection.available">
                 <p class="hint hint--info tier-provider-note">
-                  OpenAI models are discovered from the signed-in Codex account. Ciaobot assigns the tiers automatically; chat and workspace model pickers can still select a concrete model directly.
+                  OpenAI models are discovered from the signed-in Codex account. Ciaobot assigns the tiers automatically; pick a model above to pin a tier. A pin falls back to the automatic mapping if its model disappears from the account.
                 </p>
                 <details v-if="selectedTierProviderSection.options.length" class="routing-model-catalog">
                   <summary>Available OpenAI models ({{ selectedTierProviderSection.options.length }})</summary>
@@ -1810,7 +1810,7 @@ const routinesSaving = ref(false)
 const routinesResult = ref('')
 
 type AliasProviderKey = 'claude' | 'codex' | 'ollama' | 'openrouter'
-type TierProviderKey = Exclude<AliasProviderKey, 'claude' | 'codex'>
+type TierProviderKey = Exclude<AliasProviderKey, 'claude'>
 type RoutingProviderKey = Exclude<AliasProviderKey, 'claude'>
 type TierKey = 'haiku' | 'sonnet' | 'opus' | 'fable'
 type RoutineModelKey = 'title_model' | 'insights_model'
@@ -1836,6 +1836,10 @@ type TierSettingKey =
   | 'openrouter_sonnet_model'
   | 'openrouter_opus_model'
   | 'openrouter_fable_model'
+  | 'codex_haiku_model'
+  | 'codex_sonnet_model'
+  | 'codex_opus_model'
+  | 'codex_fable_model'
 
 const modelTiers: { key: TierKey; label: string }[] = [
   { key: 'haiku', label: 'Haiku' },
@@ -1856,6 +1860,12 @@ const tierSettingKeys: Record<TierProviderKey, Record<TierKey, TierSettingKey>> 
     sonnet: 'openrouter_sonnet_model',
     opus: 'openrouter_opus_model',
     fable: 'openrouter_fable_model',
+  },
+  codex: {
+    haiku: 'codex_haiku_model',
+    sonnet: 'codex_sonnet_model',
+    opus: 'codex_opus_model',
+    fable: 'codex_fable_model',
   },
 }
 
@@ -1988,7 +1998,7 @@ const tierProviderSections = computed<AliasProviderSection[]>(() => {
       key: 'codex',
       label: 'OpenAI (via Codex)',
       options: codexModels,
-      configurable: false,
+      configurable: true,
       available: codexModels.length > 0,
     },
     {
@@ -2026,6 +2036,9 @@ const selectedTierProviderSection = computed(() =>
 const tierModelSections = computed<ModelSection[]>(() => {
   const section = selectedTierProviderSection.value
   if (!section || !section.options.length) return []
+  const aliasTiers = section.key === 'codex'
+    ? workspaceModels.value?.alias_tiers
+    : routines.value?.alias_tiers
   const localModels = section.key === 'ollama'
     ? routines.value?.model_options.ollama_local || []
     : []
@@ -2034,7 +2047,7 @@ const tierModelSections = computed<ModelSection[]>(() => {
       key: section.key,
       label: section.label,
       models: section.options,
-      modelBadges: providerModelBadges(section.key, section.options, routines.value?.alias_tiers, localModels),
+      modelBadges: providerModelBadges(section.key, section.options, aliasTiers, localModels),
       disabled: !section.available,
       hint: section.available ? undefined : tierProviderUnavailableHint.value,
     },
@@ -2076,17 +2089,25 @@ function tierOverrideValue(provider: TierProviderKey, tier: TierKey): string {
 }
 
 function tierEffectiveValue(provider: TierProviderKey, tier: TierKey): string {
+  // Codex effective tiers come from the account catalog, exposed by
+  // /api/models rather than the routines payload.
+  if (provider === 'codex') return workspaceModels.value?.alias_tiers?.codex?.[tier] || ''
   return routines.value?.alias_tiers?.[provider]?.[tier] || ''
 }
 
 function tierDefaultValue(provider: TierProviderKey, tier: TierKey): string {
+  if (provider === 'codex') {
+    return workspaceModels.value?.codex_tier_defaults?.[tier]
+      || tierEffectiveValue(provider, tier)
+  }
   return routines.value?.tier_defaults?.[provider]?.[tier]
     || tierEffectiveValue(provider, tier)
 }
 
 function tierDefaultLabel(provider: TierProviderKey, tier: TierKey): string {
   const model = tierDefaultValue(provider, tier)
-  return model ? `Default (${model})` : 'Default'
+  const word = provider === 'codex' ? 'Automatic' : 'Default'
+  return model ? `${word} (${model})` : word
 }
 
 function tierSelectorValue(provider: TierProviderKey, tier: TierKey): string {
@@ -2110,6 +2131,9 @@ async function saveTierModel(provider: TierProviderKey, tier: TierKey, value: st
   const model = selected === DEFAULT_TIER_SELECTION ? '' : selected
   const key = tierSettingKeys[provider][tier]
   await saveRoutines({ [key]: model.trim() })
+  // Codex effective tiers live in /api/models; refresh so the badges and
+  // "Automatic (…)" labels reflect the new pin immediately.
+  if (provider === 'codex') await fetchWorkspaceModels()
 }
 
 function tierModelForProvider(provider: AliasProviderKey, tier: TierKey): string {
