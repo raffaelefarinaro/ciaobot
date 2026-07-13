@@ -172,6 +172,59 @@ def test_clean_title_rejects_reply_shaped_output() -> None:
     assert _clean_title("I/O Performance Tuning", user) == "I/O Performance Tuning"
 
 
+def test_clean_title_rejects_negated_and_apologetic_openers() -> None:
+    """A model handed a contentless excerpt answers instead of titling
+    ("I don't have any prior context…"). These openers must be caught so
+    the reply never lands as the title (regression: "I don't"/"There's no"
+    slipped past the original affirmative-only guard)."""
+    from ciao.web.project_chats import _clean_title
+
+    user = "Add traction and pilot state to the delivery intelligence slides"
+    for reply in (
+        "I don't have any prior context to continue from. Could you clarify?",
+        "There's no prior conversation for me to continue.",
+        "It looks like there isn't enough information to continue.",
+        "I cannot continue without more details.",
+        "Let me know what you'd like me to continue with.",
+    ):
+        assert _clean_title(reply, user) == (
+            "Add traction and pilot state to"
+        ), reply
+
+
+def test_is_contentless_prompt() -> None:
+    from ciao.web.project_chats import _is_contentless_prompt
+
+    for prompt in ("continue", "Continue.", " GO ON ", "ok", "yes", "keep going"):
+        assert _is_contentless_prompt(prompt) is True, prompt
+    for prompt in ("continue the slide deck", "ok now add a chart", "resume the migration"):
+        assert _is_contentless_prompt(prompt) is False, prompt
+
+
+@pytest.mark.asyncio
+async def test_generate_title_skips_model_for_contentless_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bare "continue" must never reach the title model — otherwise the
+    model answers it conversationally and that reply becomes the title."""
+    from ciao.web.project_chats import _generate_chat_title_with_engine
+
+    monkeypatch.setattr(shutil, "which", lambda _cmd: None)
+
+    called = False
+
+    async def spy_oneshot(*args, **kwargs):
+        nonlocal called
+        called = True
+        return "I don't have any prior context to continue from."
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", spy_oneshot)
+    title, engine = await _generate_chat_title_with_engine("continue", model="haiku")
+    assert called is False
+    assert engine == "fallback"
+    assert title == "continue"
+
+
 @pytest.mark.asyncio
 async def test_generate_title_reports_engine(monkeypatch: pytest.MonkeyPatch) -> None:
     from ciao.web.project_chats import _generate_chat_title_with_engine
