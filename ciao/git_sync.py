@@ -58,12 +58,15 @@ async def sync_workspace(workspace: Path) -> str | None:
 
     if has_changes:
         await _git(workspace, "add", "-u")
-        rc, _, err = await _git(
+        rc, out, err = await _git(
             workspace, "commit", "-m", "auto-commit before startup sync",
         )
         if rc != 0:
-            logger.warning("Startup sync: auto-commit failed: %s", err)
-            return f"Startup sync: failed to auto-commit local changes.\n{err}"
+            # git commit reports many failures on stdout ("nothing added to
+            # commit", hook output), so include both streams.
+            detail = "\n".join(part for part in (err.strip(), out.strip()) if part)
+            logger.warning("Startup sync: auto-commit failed: %s", detail or f"exit {rc}")
+            return f"Startup sync: failed to auto-commit local changes.\n{detail}"
 
     # A fresh branch may not have an upstream yet (the backup-push loop sets
     # one with ``push -u`` once it succeeds). A bare ``git pull`` then

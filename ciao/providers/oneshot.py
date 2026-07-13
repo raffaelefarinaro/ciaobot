@@ -39,6 +39,12 @@ async def run_oneshot(
     caller decides how to handle it. ``timeout_s`` wraps the whole call
     via :func:`asyncio.wait_for`.
     """
+    # Chats can run with Claude Code's fast-mode suffix ("[1m]"), but the
+    # one-shot API path rejects annotated model ids ("There's an issue with
+    # the selected model (claude-opus-4-8[1m])"). Background calls never
+    # need fast mode; use the base model.
+    if model.endswith("[1m]"):
+        model = model[: -len("[1m]")]
     if provider == "codex":
         from ciao.models import AgentRequest, ResultEvent
         from ciao.providers.codex import CodexProvider

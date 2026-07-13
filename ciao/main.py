@@ -588,11 +588,24 @@ async def _async_main() -> int:
             )
             return
         logger.info("Working on branch '%s'", branch)
+        # Credential failures cannot self-heal (there is no TTY to prompt
+        # under launchd), so retrying at the normal cadence is pure waste.
+        auth_markers = (
+            "could not read username",
+            "authentication failed",
+            "invalid username or token",
+            "permission denied (publickey",
+        )
+        auth_backoff_multiplier = 12
         last_failure_detail: str | None = None
         repeated_failures = 0
+        auth_backoff = False
         while True:
             try:
-                await asyncio.sleep(BACKUP_PUSH_INTERVAL)
+                await asyncio.sleep(
+                    BACKUP_PUSH_INTERVAL
+                    * (auth_backoff_multiplier if auth_backoff else 1)
+                )
                 async with job_runs.track(
                     "branch_backup", "Branch backup",
                     category="system", extra={"branch": branch},
@@ -603,15 +616,28 @@ async def _async_main() -> int:
                             logger.info("Branch backup push recovered.")
                         last_failure_detail = None
                         repeated_failures = 0
+                        auth_backoff = False
                         continue
                     if detail == last_failure_detail:
                         repeated_failures += 1
                         run.skip("same failure as previous backup attempt")
                         run.extra["repeat_count"] = repeated_failures
+                        is_auth = any(
+                            marker in detail.lower() for marker in auth_markers
+                        )
+                        if is_auth and repeated_failures >= 3 and not auth_backoff:
+                            auth_backoff = True
+                            logger.warning(
+                                "Branch backup authentication keeps failing; "
+                                "retrying hourly instead. Store credentials to "
+                                "resume (e.g. `gh auth setup-git`, or switch "
+                                "the remote to SSH).",
+                            )
                         logger.debug("Branch backup push still failing: %s", detail)
                         continue
                     last_failure_detail = detail
                     repeated_failures = 1
+                    auth_backoff = False
                     run.status = "error"
                     run.error = detail
                     logger.warning("Branch backup push failed: %s", detail)
