@@ -11,6 +11,32 @@ def _write(path: Path, text: str = "content\n") -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def test_sync_links_codex_guide_to_canonical_claude_guide(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    claude_guide = workspace / "CLAUDE.md"
+    _write(claude_guide, "# Shared workspace instructions\n")
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    codex_guide = workspace / "AGENTS.md"
+    assert codex_guide.is_symlink()
+    assert codex_guide.readlink() == Path("CLAUDE.md")
+    assert codex_guide.resolve() == claude_guide.resolve()
+    assert codex_guide.read_text(encoding="utf-8") == "# Shared workspace instructions\n"
+
+
+def test_sync_preserves_custom_codex_guide(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    _write(workspace / "CLAUDE.md", "# Claude instructions\n")
+    codex_guide = workspace / "AGENTS.md"
+    _write(codex_guide, "# Custom Codex instructions\n")
+
+    sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    assert not codex_guide.is_symlink()
+    assert codex_guide.read_text(encoding="utf-8") == "# Custom Codex instructions\n"
+
+
 def test_sync_workspace_skills_mirrors_custom_skills(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     _write(workspace / "skills" / "demo" / "SKILL.md", "# Demo\n")

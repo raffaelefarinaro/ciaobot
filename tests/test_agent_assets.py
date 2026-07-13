@@ -70,6 +70,9 @@ def test_agent_assets_lists_instruction_sources(tmp_path: Path) -> None:
     by_title = {item["title"]: item for item in data["context"]}
     assert by_title["Project CLAUDE.md"]["provider"] == "claude"
     assert by_title["Workspace memory"]["provider"] == "shared"
+    system_prompt = by_title["Ciaobot system prompt append"]
+    assert system_prompt["editable"] is False
+    assert Path(system_prompt["path"]).name == "system_prompt.md"
     runtime = by_title["Per-turn runtime context hook"]
     assert "README.md or canonical project document" in runtime["content"]
     assert "Project context" in runtime["description"]
@@ -329,6 +332,29 @@ def test_workspace_health_reports_unsynced_custom_assets(tmp_path: Path) -> None
     data = resp.json()
     assert data["status"] in {"warn", "error"}
     assert any(check["id"] == "unsynced-subagent-orphan" for check in data["checks"])
+
+
+def test_workspace_health_reports_linked_workspace_guides(tmp_path: Path) -> None:
+    (tmp_path / "CLAUDE.md").write_text("# Guide\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").symlink_to("CLAUDE.md")
+
+    data = _client(tmp_path).get("/api/workspace-health").json()
+
+    check = next(c for c in data["checks"] if c["id"] == "guides-linked")
+    assert check["status"] == "ok"
+    assert check["path"] == "AGENTS.md"
+
+
+def test_workspace_health_warns_when_workspace_guides_diverge(tmp_path: Path) -> None:
+    (tmp_path / "CLAUDE.md").write_text("# Guide\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("# Custom Codex guide\n", encoding="utf-8")
+
+    data = _client(tmp_path).get("/api/workspace-health").json()
+
+    check = next(c for c in data["checks"] if c["id"] == "guides-linked")
+    assert check["status"] == "warn"
+    assert "different workspace instructions" in check["detail"]
+    assert "sync-skills" in check["action"]
 
 
 def test_workspace_health_fix_applies_the_suggested_remedies(tmp_path: Path) -> None:

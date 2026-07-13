@@ -241,6 +241,9 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
         workspace / "commands" / "remember.md"
     ).read_text(encoding="utf-8")
     assert (workspace / "CLAUDE.md").is_file()
+    assert (workspace / "AGENTS.md").is_symlink()
+    assert (workspace / "AGENTS.md").readlink() == Path("CLAUDE.md")
+    assert (workspace / "AGENTS.md").resolve() == (workspace / "CLAUDE.md").resolve()
     customization = workspace / "CIAO_CUSTOMIZATION.md"
     assert customization.is_file()
     assert "disallowed_tools" in customization.read_text(encoding="utf-8")

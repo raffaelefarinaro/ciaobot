@@ -226,7 +226,7 @@
           class="settings-nav-item"
           :class="{ active: route.path === '/settings/context' }"
         >
-          Context
+          Agent Context
         </router-link>
         <router-link
           to="/settings/workspaces"

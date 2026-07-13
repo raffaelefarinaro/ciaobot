@@ -99,10 +99,10 @@ _IMAGE_MANIFEST_RE = re.compile(
 
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _WORKSPACE_PROVIDER_LABELS = {
-    "claude": "Claude",
-    "codex": "Codex",
-    "ollama": "Ollama",
-    "openrouter": "OpenRouter",
+    "claude": "Anthropic (via Claude Code)",
+    "codex": "OpenAI (via Codex)",
+    "ollama": "Ollama (via Claude Code)",
+    "openrouter": "OpenRouter (via Claude Code)",
 }
 _PROVIDER_KEY_META = {
     "CIAO_OLLAMA_API_KEY": {

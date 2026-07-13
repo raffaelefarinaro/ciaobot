@@ -683,13 +683,14 @@ def setup_workspace(
     # the Workspace Health checks warning-free on a fresh or adopted setup.
     for asset_dir in ("subagents", "commands"):
         (root / asset_dir).mkdir(parents=True, exist_ok=True)
-    from ciao.sync_skills import _install_stock_agents
+    from ciao.sync_skills import _ensure_linked_workspace_guides, _install_stock_agents
 
     _install_stock_agents(root)
     written.append(root / ".claude" / "agents")
     written.extend(_copy_tree_if_missing(stock_commands, root / "commands"))
     written.append(root / "commands")
     written.extend(_copy_tree_if_missing(stock_workspace, root))
+    _ensure_linked_workspace_guides(root)
 
     runtime_schedules = root / ".runtime" / "schedules.json"
     _write_if_missing(

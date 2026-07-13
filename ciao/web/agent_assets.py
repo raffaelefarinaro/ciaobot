@@ -561,6 +561,24 @@ def workspace_health(config: Any) -> dict:
             "Create it or run sync-skills." if not exists else "",
         )
 
+    claude_guide = root / "CLAUDE.md"
+    codex_guide = root / "AGENTS.md"
+    if claude_guide.is_file() and (codex_guide.exists() or codex_guide.is_symlink()):
+        try:
+            guides_linked = codex_guide.resolve() == claude_guide.resolve()
+        except OSError:
+            guides_linked = False
+        add(
+            "guides-linked",
+            "Linked workspace guides",
+            "ok" if guides_linked else "warn",
+            "AGENTS.md links to CLAUDE.md, so Claude Code and Codex share one workspace guide."
+            if guides_linked
+            else "AGENTS.md is a separate file, so Claude Code and Codex read different workspace instructions.",
+            codex_guide,
+            "" if guides_linked else "Merge AGENTS.md into CLAUDE.md, delete AGENTS.md, then run sync-skills to relink.",
+        )
+
     for source_dir, link_dir, label in [
         (root / "subagents", root / ".claude" / "agents", "subagent"),
         (root / "commands", root / ".claude" / "commands", "command"),
@@ -654,6 +672,7 @@ def list_command_assets(config: Any) -> list[CommandAsset]:
 
 def list_prompt_assets(config: Any) -> list[PromptAsset]:
     root = Path(config.workspace_root)
+    system_prompt_path = Path(__file__).resolve().parents[1] / "system_prompt.md"
     prompts: list[PromptAsset] = []
     seen: set[tuple[str, Path]] = set()
 
@@ -666,7 +685,7 @@ def list_prompt_assets(config: Any) -> list[PromptAsset]:
             "Bounded memory files are listed separately below."
         ),
         source="generated",
-        path="",
+        path=_relative_or_absolute(system_prompt_path, root),
         editable=False,
         content=str(system_prompt.get("append") or ""),
         scope="generated",
