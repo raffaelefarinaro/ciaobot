@@ -305,10 +305,10 @@ async def test_auto_title_uses_workspace_haiku_model(
     async def fake_generate(user, assistant, *, model, cwd, env=None, pi_settings=None, timeout_s=15.0):
         captured["model"] = model
         captured["env"] = env
-        return "ollama-titled"
+        return "ollama-titled", "test"
 
     monkeypatch.setattr(
-        "ciao.web.project_chats._generate_chat_title", fake_generate
+        "ciao.web.project_chats._generate_chat_title_with_engine", fake_generate
     )
 
     new_title = await pcm.auto_title_if_default(
@@ -805,9 +805,9 @@ async def test_auto_title_honours_title_model_override(
     async def fake_generate(user, assistant, *, model, cwd, env=None, pi_settings=None, timeout_s=15.0):
         captured["model"] = model
         captured["env"] = env
-        return "ok"
+        return "ok", "test"
 
-    monkeypatch.setattr("ciao.web.project_chats._generate_chat_title", fake_generate)
+    monkeypatch.setattr("ciao.web.project_chats._generate_chat_title_with_engine", fake_generate)
     await pcm.auto_title_if_default(chat.chat_id, "hi", "hello")
     assert captured["model"] == "qwen3:8b"
 
@@ -828,10 +828,10 @@ async def test_auto_title_uses_workspace_haiku_for_anthropic_bucket(
     async def fake_generate(user, assistant, *, model, cwd, env=None, pi_settings=None, timeout_s=15.0):
         captured["model"] = model
         captured["env"] = env
-        return "haiku-titled"
+        return "haiku-titled", "test"
 
     monkeypatch.setattr(
-        "ciao.web.project_chats._generate_chat_title", fake_generate
+        "ciao.web.project_chats._generate_chat_title_with_engine", fake_generate
     )
 
     await pcm.auto_title_if_default(chat.chat_id, "hello", "hi")
@@ -856,10 +856,10 @@ async def test_auto_title_falls_back_to_haiku_when_ollama_disabled(
     async def fake_generate(user, assistant, *, model, cwd, env=None, pi_settings=None, timeout_s=15.0):
         captured["model"] = model
         captured["env"] = env
-        return "haiku-titled"
+        return "haiku-titled", "test"
 
     monkeypatch.setattr(
-        "ciao.web.project_chats._generate_chat_title", fake_generate
+        "ciao.web.project_chats._generate_chat_title_with_engine", fake_generate
     )
 
     await pcm.auto_title_if_default(chat.chat_id, "hello", "hi")
@@ -884,10 +884,10 @@ async def test_auto_title_works_with_user_text_only(
     async def fake_generate(user, assistant, *, model, cwd, env=None, pi_settings=None, timeout_s=15.0):
         captured["user"] = user
         captured["assistant"] = assistant
-        return "early-titled"
+        return "early-titled", "test"
 
     monkeypatch.setattr(
-        "ciao.web.project_chats._generate_chat_title", fake_generate
+        "ciao.web.project_chats._generate_chat_title_with_engine", fake_generate
     )
 
     new_title = await pcm.auto_title_if_default(chat.chat_id, "draft a haiku")

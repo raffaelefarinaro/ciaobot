@@ -328,6 +328,7 @@
                   <option v-for="provider in aliasProviderSections" :key="provider.key" :value="provider.key">
                     {{ provider.label }}
                   </option>
+                  <option v-if="codexTitlesAvailable" value="codex">OpenAI (via Codex)</option>
                   <option v-if="routineProviderValue('title_model') === 'custom'" value="custom">Custom model</option>
                 </select>
                 <select
@@ -344,6 +345,9 @@
                 <span class="routine-model-hint">
                   <template v-if="routineProviderValue('title_model') === 'apple'">
                     Runs on-device for free via <a :href="APFEL_REPO_URL" target="_blank" rel="noopener">apfel</a> (Apple Intelligence CLI).
+                    <span v-if="routines && routines.apfel_available === false" class="hint--warn">
+                      apfel is not installed on this machine — titles currently fall back to a cloud model.
+                    </span>
                   </template>
                   <template v-else>{{ routineModelSummary('title_model') }}</template>
                 </span>
@@ -2087,6 +2091,16 @@ function inferRoutineModel(model: string): { provider: RoutineProviderValue; tie
   const raw = model.trim()
   if (!raw) return { provider: 'automatic', tier: 'sonnet' }
   if (raw === 'apfel') return { provider: 'apple', tier: 'haiku' }
+  if (raw.startsWith('codex:')) {
+    const codexModel = raw.slice('codex:'.length)
+    const codexTiers = workspaceModels.value?.alias_tiers?.codex || {}
+    for (const tier of modelTiers) {
+      if (codexTiers[tier.key] === codexModel) {
+        return { provider: 'codex', tier: tier.key }
+      }
+    }
+    return { provider: 'codex', tier: 'sonnet' }
+  }
   const claudeTiers: Record<string, TierKey> = { haiku: 'haiku', sonnet: 'sonnet', opus: 'opus', fable: 'fable' }
   if (claudeTiers[raw]) {
     return { provider: 'claude', tier: claudeTiers[raw] }
@@ -2108,6 +2122,13 @@ function routineProviderValue(key: RoutineModelKey): RoutineProviderValue {
   return inferRoutineModel(routines.value?.[key] || '').provider
 }
 
+// Titles can be dispatched through the Codex CLI when it has discovered
+// models (i.e. Codex is connected). Other routines stay on Claude routing.
+const codexTitlesAvailable = computed(() => {
+  const tiers = workspaceModels.value?.alias_tiers?.codex
+  return !!tiers && Object.values(tiers).some(Boolean)
+})
+
 function routineTierValue(key: RoutineModelKey): TierKey {
   const raw = routines.value?.[key] || ''
   if (raw.trim()) return inferRoutineModel(raw).tier
@@ -2121,6 +2142,7 @@ function routineTierValue(key: RoutineModelKey): TierKey {
 function routineTierSelectable(key: RoutineModelKey): boolean {
   const provider = routineProviderValue(key)
   return provider === 'claude' || provider === 'ollama' || provider === 'openrouter'
+    || provider === 'codex'
 }
 
 function routineCustomModel(key: RoutineModelKey): string {
@@ -2140,7 +2162,9 @@ async function saveRoutineProvider(key: RoutineModelKey, providerValue: string) 
   if (provider === 'custom') return
   const tier = routineTierValue(key)
   const model = tierModelForProvider(provider, tier)
-  await saveRoutines({ [key]: model })
+  // Codex models are dispatched through the Codex CLI, not Claude Code
+  // env-injection; the prefix tells the backend which pipeline to use.
+  await saveRoutines({ [key]: provider === 'codex' ? `codex:${model}` : model })
 }
 
 async function saveRoutineTier(key: RoutineModelKey, tierValue: string) {
@@ -2150,7 +2174,7 @@ async function saveRoutineTier(key: RoutineModelKey, tierValue: string) {
     provider = 'claude'
   }
   const model = tierModelForProvider(provider, tier)
-  await saveRoutines({ [key]: model })
+  await saveRoutines({ [key]: provider === 'codex' ? `codex:${model}` : model })
 }
 
 function routineModelSummary(key: RoutineModelKey): string {
@@ -2162,6 +2186,7 @@ function routineModelSummary(key: RoutineModelKey): string {
   if (provider === 'custom') return `Custom: ${routineCustomModel(key)}`
   const tier = routineTierValue(key)
   const model = tierModelForProvider(provider, tier)
+  if (provider === 'codex') return `OpenAI (via Codex) ${tier}: ${model || 'default'}`
   return `${aliasProviderLabel(provider)} ${tier}: ${model || 'default'}`
 }
 

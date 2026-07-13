@@ -38,16 +38,63 @@ Ciaobot keeps memory in layers so the agent can recall what matters without stuf
 
 When your message mentions a name that appears in the vault index, the agent gets a quiet hint — “this probably means `People/Emma`” — so it opens the right note without you repeating context. And when a chat is archived, a pipeline turns it into durable knowledge: session insights are extracted, memory proposals are drafted, and daily/weekly curation runs update vault pages — but nothing is promoted into long-term memory without review, and Ciaobot never discards or rewrites an existing notes folder during onboarding. Track the background steps under **Settings → Automation**, and see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full pipeline.
 
-## Working in chat
+## Features
 
-- **Comment on text** — select any passage in a message, add a sidebar comment, and send it with your next prompt so the agent knows exactly what you mean.
-- **Inline file previews** — when the agent reads or edits a file, a card appears in the thread; click to open a viewer with history, diff, and restore.
-- **Pin documents** — keep a file open beside the chat; add line-level comments in the preview (attached to your next message, like chat comments).
-- **Rich previews** — images inline; PDFs in a built-in viewer; PowerPoint (`.pptx`) converted to PDF for display (requires LibreOffice on the machine running Ciaobot).
+**Chats, projects, and workspaces**
 
-![A document pinned in a split view next to the chat](docs/images/pinned-file.png)
+- Sidebar workspaces per life area (personal, work, a client) — each with its own vault, projects, and default model.
+- Projects group related chats and inject durable notes and context into every turn.
+- Comment on any passage of a reply — select text, attach a note, and it rides along with your next prompt; queue follow-ups while the agent is still working.
+- Per-chat model picker with provider thinking levels on top of per-workspace defaults.
 
-On first launch, an in-app product tour walks through these flows. Replay it anytime from **Settings → Home → Product tour**.
+**Voice — dictation and read-aloud**
+
+- Speech-to-text dictation in any chat: cloud transcription or free on-device via [mlx-whisper](https://pypi.org/project/mlx-whisper/) (Apple Silicon).
+- Text-to-speech read-aloud of replies: cloud voices or free on-device via [Kokoro](https://pypi.org/project/kokoro-onnx/); local models download on first use and are re-installed automatically after app upgrades.
+
+**Files and documents**
+
+- Agent file touches surface as inline cards in the thread; click one for a viewer with history, diff, and restore.
+- Pin a document beside the chat and add line-level comments on the preview (attached to your next message, like chat comments).
+- Rich previews: images inline, PDFs in a built-in viewer, PowerPoint (`.pptx`) converted to PDF for display (requires LibreOffice on the machine running Ciaobot).
+- Create, edit, and restore vault files from the UI, with snapshots behind every agent edit.
+
+**Memory, vault, and insight extraction**
+
+- Layered memory: a capped agent memory and user profile injected at chat start, plus a plain-markdown vault you own (Obsidian-compatible, syncable via GitHub/Drive/iCloud).
+- Archiving a chat runs an extraction pipeline: session insights and trajectories are captured, memory proposals are drafted, and project canonical docs are updated — nothing is promoted into long-term memory without review.
+- Daily and weekly curation routines keep vault pages and `Workspace/Learnings.md` current.
+- Vault-index hints: mention a name the index knows and the agent is quietly pointed at the right note.
+
+**Automations**
+
+- Schedules: recurring or one-off cron routines that dispatch fresh prompts into a project or chat.
+- Loops: re-run a prompt inside one chat every N minutes, keeping the conversation's context between iterations.
+- System routines ship enabled (memory curation, skill evolution, weekly self-improvement review); every background run is visible under **Settings → Automation**.
+
+**Extensibility — skills, subagents, commands**
+
+- Stock skills, subagents, and slash commands ship with the app; same-named workspace versions override them.
+- Install skills from GitHub repositories; they refresh automatically on restart.
+- A weekly skill-evolution routine proposes improvements from real usage — reviewable proposals, never silent edits.
+
+**Providers and models**
+
+- Claude Code or OpenAI Codex with the subscription login you already have; Ollama (cloud or local) and OpenRouter as API backends.
+- haiku/sonnet/opus tier routing mapped across providers; background tasks (titles, insights) routable to cheaper or on-device models ([apfel](https://github.com/Arthur-Ficial/apfel)).
+
+**Google Workspace**
+
+- Gmail, Calendar, Drive, Docs, Sheets, Slides, and Tasks through Google's `gws` CLI, connected with browser OAuth from Settings — no terminal required.
+
+**App surface**
+
+- Installable PWA with web-push notifications and in-app package updates.
+- macOS extras: menu bar companion, `Ciaobot.app`, and a background service that starts on login.
+- First-run product tour plus a getting-started checklist whose steps deep-link into the real pages.
+- A local HTTP API an in-chat agent can drive (create chats, subagents, commands — see [PWA_API.md](PWA_API.md)).
+
+On first launch, an in-app product tour walks through the core flows. Replay it anytime from **Settings → Home → Product tour**.
 
 ## What ships by default
 

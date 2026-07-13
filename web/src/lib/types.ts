@@ -351,6 +351,8 @@ export interface RoutineSettings {
   // Env-backed models used when a tier override is cleared.
   tier_defaults?: Record<string, Record<string, string>>
   alias_tiers?: Record<string, Record<string, string>>
+  // Whether the apfel CLI (the "Local (free)" title engine) is installed.
+  apfel_available?: boolean
   transcription: {
     engine: 'cloud' | 'local'
     local_model: string

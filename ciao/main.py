@@ -588,11 +588,24 @@ async def _async_main() -> int:
             )
             return
         logger.info("Working on branch '%s'", branch)
+        # Credential failures cannot self-heal (there is no TTY to prompt
+        # under launchd), so retrying at the normal cadence is pure waste.
+        auth_markers = (
+            "could not read username",
+            "authentication failed",
+            "invalid username or token",
+            "permission denied (publickey",
+        )
+        auth_backoff_multiplier = 12
         last_failure_detail: str | None = None
         repeated_failures = 0
+        auth_backoff = False
         while True:
             try:
-                await asyncio.sleep(BACKUP_PUSH_INTERVAL)
+                await asyncio.sleep(
+                    BACKUP_PUSH_INTERVAL
+                    * (auth_backoff_multiplier if auth_backoff else 1)
+                )
                 async with job_runs.track(
                     "branch_backup", "Branch backup",
                     category="system", extra={"branch": branch},
@@ -603,15 +616,28 @@ async def _async_main() -> int:
                             logger.info("Branch backup push recovered.")
                         last_failure_detail = None
                         repeated_failures = 0
+                        auth_backoff = False
                         continue
                     if detail == last_failure_detail:
                         repeated_failures += 1
                         run.skip("same failure as previous backup attempt")
                         run.extra["repeat_count"] = repeated_failures
+                        is_auth = any(
+                            marker in detail.lower() for marker in auth_markers
+                        )
+                        if is_auth and repeated_failures >= 3 and not auth_backoff:
+                            auth_backoff = True
+                            logger.warning(
+                                "Branch backup authentication keeps failing; "
+                                "retrying hourly instead. Store credentials to "
+                                "resume (e.g. `gh auth setup-git`, or switch "
+                                "the remote to SSH).",
+                            )
                         logger.debug("Branch backup push still failing: %s", detail)
                         continue
                     last_failure_detail = detail
                     repeated_failures = 1
+                    auth_backoff = False
                     run.status = "error"
                     run.error = detail
                     logger.warning("Branch backup push failed: %s", detail)
@@ -712,6 +738,38 @@ async def _async_main() -> int:
         restart_task[0] = asyncio.create_task(_restart_when_idle())
 
     app.state.request_restart = request_restart
+
+    # ── Startup error triage ─────────────────────────────────
+    # Cap the append-only launchd service logs, then — when the error log
+    # or recent job runs contain failures — dispatch a triage chat through
+    # the schedule pipeline ({{ISSUE_REPORT}} substitution clears the error
+    # log after a clean run). Errors found at boot become a fix-it chat
+    # instead of silently accumulating.
+    async def _startup_error_triage() -> None:
+        try:
+            from ciao.startup_triage import cap_service_logs, run_startup_triage
+
+            await asyncio.to_thread(cap_service_logs, config.state_path.parent)
+            await run_startup_triage(pcm, config, _resolve_schedule_target)
+        except Exception:
+            logger.exception("Startup error triage failed")
+
+    asyncio.create_task(_startup_error_triage())
+
+    # ── Voice extras self-heal ───────────────────────────────
+    # `brew upgrade` replaces the app's private venv, dropping optional
+    # local-voice packages the user installed from Settings. Reinstall
+    # them (once per version) when the saved settings still select the
+    # local engines, then restart to load them.
+    async def _heal_voice_extras() -> None:
+        try:
+            from ciao.voice_extras import heal_voice_extras
+
+            await heal_voice_extras(config, request_restart)
+        except Exception:
+            logger.exception("Voice extras self-heal failed")
+
+    asyncio.create_task(_heal_voice_extras())
 
     async def _shutdown_providers() -> None:
         # Disconnect every active provider before uvicorn finishes its

@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.4.15 - 2026-07-13
+
+### Changed
+- Self-heal local voice extras wiped by app upgrades (`c453608`)
+- Remove prompt expand/collapse on automation detail pages (`187a31b`)
+- Replace README screenshots with a grouped feature list (`765ac1f`)
+- Merge Ciaobot variables into an existing workspace .env (`af3cfd4`)
+- Keep menu bar animations running while the tray menu is open (`d0afe28`)
+- Triage runtime errors into a fix-it chat at startup; cap service logs (`e0863d4`)
+- Capitalize the sidebar wordmark to Ciaobot (`e71ac2a`)
+- Reject reply-shaped title outputs and harden the title prompt (`5697a40`)
+- Harden background plumbing: oneshot models, backup retries, sync logs (`6173759`)
+- Report the real title engine, warn on missing apfel, allow Codex titles (`163a97b`)
+- Back off events WebSocket reconnects that never complete a handshake (`3008cf6`)
+
+### Maintenance
+- Test fast-mode suffix stripping in run_oneshot (`4f1d80a`)
+
 ## v0.4.14 - 2026-07-13
 
 ### Added

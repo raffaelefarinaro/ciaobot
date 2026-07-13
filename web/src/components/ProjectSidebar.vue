@@ -25,7 +25,7 @@
           :class="{ 'brand--refreshing': refreshing }"
           @click="onBrandClick"
           :title="refreshing ? 'Refreshing...' : 'Click to reload the latest app build'"
-        >{{ refreshing ? 'sync...' : 'ciaobot' }}</button>
+        >{{ refreshing ? 'sync...' : 'Ciaobot' }}</button>
         <div class="nav-links">
           <router-link
             to="/"

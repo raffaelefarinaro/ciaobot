@@ -3710,6 +3710,9 @@ def _routines_payload(config, app_settings) -> dict:
                 "fable": config.openrouter.fable_model,
             } if config.openrouter.available else {},
         },
+        # The "apple"/apfel title option only works when the CLI is on PATH;
+        # the Chat titles row warns instead of silently falling back.
+        "apfel_available": shutil.which("apfel") is not None,
         "transcription": {
             "engine": config.transcription_engine,
             "local_model": config.transcription_local_model,
@@ -3902,12 +3905,16 @@ async def package_update_endpoint(request: Request) -> JSONResponse:
 
 async def voice_install_local_endpoint(request: Request) -> JSONResponse:
     """Install local voice transcription dependencies (mlx-whisper)."""
-    return await _pip_install_and_restart(request, "mlx-whisper>=0.4.0")
+    from ciao.voice_extras import VOICE_LOCAL_REQUIREMENT
+
+    return await _pip_install_and_restart(request, VOICE_LOCAL_REQUIREMENT)
 
 
 async def tts_install_local_endpoint(request: Request) -> JSONResponse:
     """Install local speech synthesis dependencies (kokoro-onnx)."""
-    return await _pip_install_and_restart(request, "kokoro-onnx>=0.5.0")
+    from ciao.voice_extras import TTS_LOCAL_REQUIREMENT
+
+    return await _pip_install_and_restart(request, TTS_LOCAL_REQUIREMENT)
 
 
 async def _pip_install_and_restart(request: Request, requirement: str) -> JSONResponse:
