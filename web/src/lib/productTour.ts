@@ -17,6 +17,8 @@ export interface ProductTourStep {
   /** Illustrative screenshot shown in the card for features that may not be visible live. */
   image?: string
   imageAlt?: string
+  /** "Try it" deep link: ends the tour and navigates to the real page. */
+  action?: { label: string; route: string }
 }
 
 export type TourAvailabilityContext = {
@@ -57,6 +59,7 @@ export const PRODUCT_TOUR_STEPS: ProductTourStep[] = [
     beforeEnter: ['openSidebar', 'chatRoute'],
     missingHint:
       'You will see workspace tabs in the sidebar once the main view is open. A default personal/work split is created on first launch.',
+    action: { label: 'Try it: manage workspaces', route: '/settings/workspaces' },
   },
   {
     id: 'projects',
@@ -78,6 +81,7 @@ export const PRODUCT_TOUR_STEPS: ProductTourStep[] = [
     placement: 'bottom',
     beforeEnter: ['openSidebar', 'chatRoute'],
     missingHint: 'You will find the Schedules shortcut in the sidebar header once the sidebar is open.',
+    action: { label: 'Try it: open schedules', route: '/schedules' },
   },
   {
     id: 'model',
@@ -147,7 +151,7 @@ export const PRODUCT_TOUR_STEPS: ProductTourStep[] = [
     id: 'done',
     title: 'You are set',
     body:
-      'Ask "what can Ciaobot do?" in any chat for a deeper walkthrough of memory, skills, and integrations. Replay this UI tour from Settings → Home whenever you like.',
+      'The Getting started checklist on the home screen walks you through your first project, workspace, and schedule — each step opens the real page. Ask "what can Ciaobot do?" in any chat for a deeper walkthrough, and replay this UI tour from Settings → Home whenever you like.',
     placement: 'center',
   },
 ]

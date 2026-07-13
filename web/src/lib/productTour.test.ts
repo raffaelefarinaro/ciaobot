@@ -38,6 +38,19 @@ describe('productTour', () => {
     expect(tourTargetSelector('chat-input')).toBe('[data-tour="chat-input"]')
   })
 
+  it('offers "Try it" deep links into the real pages', () => {
+    const withActions = Object.fromEntries(
+      PRODUCT_TOUR_STEPS.filter(s => s.action).map(s => [s.id, s.action!.route]),
+    )
+    expect(withActions['workspaces']).toBe('/settings/workspaces')
+    expect(withActions['schedules']).toBe('/schedules')
+    for (const step of PRODUCT_TOUR_STEPS) {
+      if (!step.action) continue
+      expect(step.action.route.startsWith('/')).toBe(true)
+      expect(step.action.label.length).toBeGreaterThan(0)
+    }
+  })
+
   it('shows missing hints when chat UI or projects are unavailable', () => {
     const modelStep = PRODUCT_TOUR_STEPS.find(s => s.id === 'model')!
     const fileStep = PRODUCT_TOUR_STEPS.find(s => s.id === 'file-cards')!
