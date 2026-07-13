@@ -1219,25 +1219,9 @@ const filteredThinkingLevels = computed(() => {
   return thinkingLevels.value[activeProvider.value] || []
 })
 
-// Most recent CLI-reported context-window occupancy (e.g. "73.2%").
-// Populated from the ResultEvent's usage dict; undefined until the first
-// turn completes, and omitted if the CLI call fails.
-const latestContextPct = computed(() => {
-  const msgs = store.activeMessages
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    const pct = msgs[i]?.usage?.context_pct
-    if (pct) return pct
-  }
-  return ''
-})
-
 const inputPlaceholder = computed(() => {
   if (store.isStreaming) return 'Follow-up...'
-  // Model name is already shown in the header selector, so it's redundant
-  // here. Context % is the genuinely useful info that isn't on screen
-  // elsewhere, so surface it alone when available.
-  const ctx = latestContextPct.value
-  return ctx ? `Message (${ctx})` : 'Message'
+  return 'Message'
 })
 
 // ── Chat comment selection UX ─────────────────────────────────────────
