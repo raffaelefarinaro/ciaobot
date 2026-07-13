@@ -146,6 +146,20 @@ def run_window(url: str, workspace: str | os.PathLike[str] | None = None) -> int
             cmd = ["open", url]
         return subprocess.call(cmd)
 
+    # pywebview defaults to private_mode=True, which gives the WebKit view an
+    # ephemeral data store: localStorage and cookies are wiped on every launch.
+    # That resets client-only state each time the window opens — most visibly
+    # the "Welcome to Ciaobot" tour, whose seen-flag lives in localStorage.
+    # Persist the store under the workspace so it survives across launches.
+    storage_path = None
+    if ws is not None:
+        candidate = ws / ".runtime" / "webview"
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            storage_path = str(candidate)
+        except OSError:
+            storage_path = None
+
     if ws is not None:
         _write_lock(ws)
     _set_dock_icon()
@@ -157,7 +171,7 @@ def run_window(url: str, workspace: str | os.PathLike[str] | None = None) -> int
             height=840,
             min_size=(720, 520),
         )
-        webview.start()
+        webview.start(private_mode=False, storage_path=storage_path)
     finally:
         if ws is not None:
             _clear_lock(ws)
