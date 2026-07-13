@@ -7,12 +7,6 @@ argument-hint: <project, person, idea, or topic>
 
 Collect enough detail to create or improve a durable vault page.
 
-Ask only the questions needed to establish:
-- Goal or reason this matters.
-- Definition of done.
-- Deadline or cadence.
-- Stakeholders or related entities.
-- Risks, constraints, and open questions.
-- Where the canonical note should live.
+Ask 1–3 targeted questions to fill the biggest gaps (goal, done-ness, deadline/cadence, stakeholders, constraints).
 
-Write the note only after the answers are clear enough to avoid a stub.
+Write the note only when you have enough to avoid a stub.

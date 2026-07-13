@@ -260,10 +260,11 @@ def _exec_subagent(node: Node, ctx: dict[str, Any]) -> NodeResult:
         return NodeResult(ok=False, error=f"timeout after {node.timeout_s}s: {exc}")
     if proc.returncode == 0:
         return NodeResult(ok=True, output=proc.stdout)
+    detail = proc.stderr.strip() or proc.stdout.strip() or "<no output>"
     return NodeResult(
         ok=False,
         output=proc.stdout,
-        error=f"exit {proc.returncode}: {proc.stderr.strip()[:500]}",
+        error=f"exit {proc.returncode}: {detail[:500]}",
     )
 
 
@@ -373,7 +374,12 @@ def run(
                 result = executor(node, ctx)
                 if not result.ok:
                     handle.status = "error"
-                    handle.error = result.error
+                    # Gate nodes carry their failure reason in ``output``
+                    # (the second element of the ``(bool, str)`` tuple), not
+                    # ``error`` — surface it so the recorded run isn't blank.
+                    handle.error = result.error or (
+                        str(result.output) if result.output is not None else None
+                    )
             except Exception as exc:  # noqa: BLE001
                 handle.error = f"{type(exc).__name__}: {exc}"[:1000]
                 result = NodeResult(ok=False, error=str(exc))

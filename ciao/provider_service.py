@@ -5,14 +5,24 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from ciao.config import BridgeConfig
 from ciao.models import AgentRequest, StreamEvent
-from ciao.providers import ClaudeProvider
-from ciao.providers.base import ActiveHandle
+from ciao.providers import ClaudeProvider, CodexProvider
+from ciao.providers.base import ActiveHandle, BaseProvider, ProviderCapabilities
 
-ProviderImpl = ClaudeProvider
+ProviderImpl = BaseProvider
+
+_PROVIDER_FACTORIES = {
+    "claude": ClaudeProvider,
+    "codex": CodexProvider,
+}
+
+
+def supported_providers() -> tuple[str, ...]:
+    """Provider names accepted by chats, schedules, and the CLI."""
+    return tuple(_PROVIDER_FACTORIES)
 
 
 class ProviderService:
-    """Routes requests to the Claude provider and tracks the live handle."""
+    """Routes requests to a provider and tracks its live operation."""
 
     def __init__(self, config: BridgeConfig, provider: str = "") -> None:
         self._config = config
@@ -24,10 +34,10 @@ class ProviderService:
     def _ensure_provider(self, provider: str) -> ProviderImpl:
         """Create the provider instance on first use based on provider name."""
         if self._provider is None:
-            if provider == "claude":
-                self._provider = ClaudeProvider(self._config.workspace_root, config=self._config)
-            else:
+            factory = _PROVIDER_FACTORIES.get(provider)
+            if factory is None:
                 raise ValueError(f"Unknown provider '{provider}'")
+            self._provider = factory(self._config.workspace_root, config=self._config)
         return self._provider
 
     def has_active_process(self) -> bool:
@@ -59,7 +69,10 @@ class ProviderService:
         """Yield between-turns provider events (see ClaudeProvider.drain_events)."""
         if self._provider is None:
             return
-        async for event in self._provider.drain_events():
+        drain = getattr(self._provider, "drain_events", None)
+        if not callable(drain):
+            return
+        async for event in drain():
             yield event
 
     async def steer(self, request: AgentRequest) -> bool:
@@ -69,11 +82,20 @@ class ProviderService:
         """
         if self._provider is None:
             return False
-        return await self._provider.steer(request)
+        steer = getattr(self._provider, "steer", None)
+        if not callable(steer):
+            return False
+        return await steer(request)
 
     @property
     def provider(self) -> ProviderImpl | None:
         return self._provider
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        if self._provider is None:
+            return ProviderCapabilities()
+        return self._provider.capabilities
 
     @property
     def current_session_id(self) -> str | None:

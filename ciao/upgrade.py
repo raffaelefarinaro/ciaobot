@@ -93,7 +93,7 @@ async def upgrade_project_deps(project_root: str) -> dict[str, tuple[str, str]]:
     Returns a dict of ``{package: (before, after)}`` for packages whose version changed.
     """
     # Packages we care about tracking individually
-    tracked = ["openai", "claude-agent-sdk", "notebooklm-py", "playwright"]
+    tracked = ["openai", "claude-agent-sdk", "notebooklm-py", "apfel"]
 
     async def _get_versions() -> dict[str, str]:
         versions: dict[str, str] = {}
@@ -185,6 +185,41 @@ async def upgrade_claude_code() -> UpgradeResult:
     )
 
 
+async def upgrade_codex() -> UpgradeResult:
+    """Upgrade the installed Codex CLI through its native updater."""
+    from ciao.providers.codex import resolve_codex_binary
+
+    binary = resolve_codex_binary()
+    if not binary:
+        return UpgradeResult(
+            command=["codex", "update"],
+            changed=False,
+            success=False,
+            stdout="",
+            stderr="codex not found",
+            before_version="",
+            after_version="",
+        )
+    if ".app/Contents/Resources/" in binary:
+        version = await read_version([binary, "--version"])
+        return UpgradeResult(
+            command=[],
+            changed=False,
+            success=True,
+            stdout=(
+                f"Using Codex bundled with the desktop app: {version}. "
+                "Update the desktop app to update Codex."
+            ),
+            stderr="",
+            before_version=version,
+            after_version=version,
+        )
+    return await run_upgrade(
+        install_command=[binary, "update"],
+        version_command=[binary, "--version"],
+    )
+
+
 
 
 async def upgrade_root_npm(project_root: str) -> UpgradeResult:
@@ -269,9 +304,39 @@ async def upgrade_libreoffice() -> UpgradeResult:
     )
 
 
+async def upgrade_scrapling() -> UpgradeResult:
+    """Upgrade the optional Scrapling web-scraping fallback via pip.
+
+    Scrapling is opt-in (it pulls in headless-browser fetchers), so this never
+    installs it fresh: it only upgrades an existing install, then refreshes the
+    browser binaries when the package version changed.
+    """
+    if shutil.which("scrapling") is None:
+        return UpgradeResult(
+            command=[], changed=False, success=True,
+            stdout="scrapling not installed (optional)", stderr="",
+            before_version="", after_version="",
+        )
+    result = await run_upgrade(
+        install_command=[sys.executable, "-m", "pip", "install", "--upgrade", "scrapling[fetchers]"],
+        version_command=[sys.executable, "-m", "pip", "show", "scrapling"],
+    )
+    if result.changed:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "scrapling", "install",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await process.communicate()
+        except (FileNotFoundError, OSError):
+            logger.warning("scrapling browser-binaries refresh failed")
+    return result
+
+
 async def upgrade_all(project_root: str) -> str | None:
     """Run all upgrades (pip deps + root npm + web npm + gws + defuddle
-    + claude). Returns a summary or *None*."""
+    + claude + codex). Returns a summary or *None*."""
     parts: list[str] = []
 
     # All upgrades in parallel.
@@ -279,17 +344,20 @@ async def upgrade_all(project_root: str) -> str | None:
     gws_task = asyncio.create_task(upgrade_gws())
     defuddle_task = asyncio.create_task(upgrade_defuddle())
     claude_task = asyncio.create_task(upgrade_claude_code())
+    codex_task = asyncio.create_task(upgrade_codex())
     root_npm_task = asyncio.create_task(upgrade_root_npm(project_root))
     web_npm_task = asyncio.create_task(upgrade_web_npm(project_root))
     apfel_task = asyncio.create_task(upgrade_apfel())
     libreoffice_task = asyncio.create_task(upgrade_libreoffice())
+    scrapling_task = asyncio.create_task(upgrade_scrapling())
     (
         pip_changed, gws_result, defuddle_result,
-        claude_result, root_npm_result, web_npm_result,
-        apfel_result, libreoffice_result,
+        claude_result, codex_result, root_npm_result, web_npm_result,
+        apfel_result, libreoffice_result, scrapling_result,
     ) = await asyncio.gather(
-        pip_task, gws_task, defuddle_task, claude_task,
+        pip_task, gws_task, defuddle_task, claude_task, codex_task,
         root_npm_task, web_npm_task, apfel_task, libreoffice_task,
+        scrapling_task,
     )
 
     # Failures get logged + surfaced in the summary even when nothing changed,
@@ -299,10 +367,12 @@ async def upgrade_all(project_root: str) -> str | None:
         ("gws", gws_result),
         ("defuddle", defuddle_result),
         ("claude", claude_result),
+        ("codex", codex_result),
         ("root-npm", root_npm_result),
         ("web-npm", web_npm_result),
         ("apfel", apfel_result),
         ("libreoffice", libreoffice_result),
+        ("scrapling", scrapling_result),
     ]
 
     for pkg, (before, after) in pip_changed.items():

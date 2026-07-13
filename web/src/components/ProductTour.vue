@@ -34,6 +34,13 @@
         />
         <p class="product-tour-body">{{ tour.currentStep.body }}</p>
         <p v-if="showMissingHint" class="product-tour-missing">{{ tour.currentStep.missingHint }}</p>
+        <button
+          v-if="tour.currentStep.action"
+          type="button"
+          class="product-tour-tryit"
+          :disabled="tour.preparing"
+          @click="tryIt(tour.currentStep.action)"
+        >{{ tour.currentStep.action.label }} →</button>
         <div class="product-tour-actions">
           <button type="button" class="product-tour-skip" @click="tour.skip()">Skip tour</button>
           <div class="product-tour-nav">
@@ -58,12 +65,23 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { useProductTourStore } from '../stores/productTour'
 import { useProjectStore } from '../stores/projects'
 import { shouldShowMissingHint, tourTargetSelector } from '../lib/productTour'
 
 const tour = useProductTourStore()
 const projectStore = useProjectStore()
+const router = useRouter()
+
+// "Try it" hands control to the user on the real page; the tour has done its
+// job and can be replayed from Settings → Home.
+async function tryIt(action: { label: string; route: string }) {
+  tour.finish()
+  if (router.currentRoute.value.path !== action.route) {
+    await router.push(action.route)
+  }
+}
 
 const targetRect = ref<DOMRect | null>(null)
 const cardEl = ref<HTMLElement | null>(null)
@@ -232,13 +250,13 @@ onBeforeUnmount(() => {
 .product-tour-backdrop {
   position: absolute;
   inset: 0;
-  background: rgba(10, 10, 22, 0.55);
+  background: rgba(10, 10, 22, 0.72);
 }
 
 .product-tour-spotlight {
   position: fixed;
   border-radius: var(--radius);
-  box-shadow: 0 0 0 9999px rgba(10, 10, 22, 0.55);
+  box-shadow: 0 0 0 9999px rgba(10, 10, 22, 0.72);
   pointer-events: none;
   z-index: 1;
   transition: top 160ms var(--ease), left 160ms var(--ease), width 160ms var(--ease), height 160ms var(--ease);
@@ -304,6 +322,26 @@ onBeforeUnmount(() => {
   border-radius: var(--radius-sm);
 }
 
+.product-tour-tryit {
+  display: block;
+  width: 100%;
+  min-height: var(--touch);
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-elev));
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms var(--ease);
+}
+.product-tour-tryit:hover {
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-elev));
+}
+
 .product-tour-actions {
   display: flex;
   align-items: center;
@@ -312,20 +350,24 @@ onBeforeUnmount(() => {
 }
 
 .product-tour-skip {
-  background: none;
-  border: none;
-  color: var(--fg3);
+  min-height: var(--touch);
+  padding: 8px 12px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--fg2);
   font-family: var(--font);
   font-size: var(--text-sm);
   cursor: pointer;
-  padding: 4px 0;
 }
 .product-tour-skip:hover {
-  color: var(--fg2);
+  color: var(--fg);
+  border-color: var(--fg2);
 }
 
 .product-tour-nav {
   display: flex;
   gap: 8px;
 }
+.product-tour-nav > button { min-height: var(--touch); }
 </style>

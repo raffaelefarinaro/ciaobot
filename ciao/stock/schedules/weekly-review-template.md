@@ -1,31 +1,21 @@
 # Weekly Self-Improvement Review
 
-Generic checklist for a Ciaobot workspace. Review the past 7 days (archived chat insights under the vault's `Logs/Chats/` and recent schedule runs) for concrete improvements to the setup.
+Review the past 7 days (archived chat insights under the vault's `Logs/Chats/` and recent schedule runs) for concrete setup improvements.
 
-## Dispatch strategy
-
-- **memory subagent**: vault-facing bullets (5, 6, 7, 8).
-- **doc-updater subagent**: bullet 10 (prompt hygiene on non-vault files).
-- **All other bullets**: main session inline.
+Use the **memory** subagent for item 3; handle item 4 (prompt hygiene) directly — no dedicated subagent ships for it.
 
 ## Checklist
 
-1. **Repeated corrections/misunderstandings** — propose CLAUDE.md or memory edits for anything the user had to correct more than once.
-2. **Skills that errored or needed workarounds** — propose skill edits.
-3. **Redundant/contradictory instructions** across CLAUDE.md, agents, commands, and schedule prompts.
-4. **Schedule health** — `.runtime/schedules.json` `last_triggered_on`; flag missed runs and prompts that produced poor results.
-5. **Learnings promotion** — review the `Workspace/Learnings.md` Active section in the vault. Promote high-confidence entries that recurred 3+ times into CLAUDE.md as rules (move the entry to a Promoted/Resolved section with a note). Prune low-confidence entries older than 30 days.
-6. **Memory gaps** — facts the user re-explained this week that should be in the vault; check memory proposals and remove items after promotion or rejection.
-7. **MEMORY.md drift** — index vs actual vault files; flag broken links.
-8. **Vault lint pass** — run `ciao vault-lint` and apply fixes for dead wikilinks, orphan pages, and near-duplicates. Manually flag stale entity pages (frontmatter `updated` older than 90 days) and contradictions (same entity, conflicting attributes across pages).
-9. **Connection discovery** — scan vault entity files for implicit relationships not yet surfaced: people mentioned together without cross-references, projects sharing people/tools/themes without links, ideas or resources related to active projects but unconnected. Propose specific wikilink additions with evidence.
-10. **Prompt hygiene** — review CLAUDE.md, `.claude/agents/*.md`, `.claude/commands/*.md`, and the prompts inside `.runtime/schedules.json` for contradictions, bloat, and outdated paths. Give file + short before/after per issue.
-11. **Decision log** — if the vault has a `Workspace/Decision-Log.md`, flag "revisit when" items that are now ripe.
-12. **Workspace extension** — if the vault contains a `Workspace/Weekly-Review-Template.md`, run its additional workspace-specific bullets too.
+1. **Instruction quality** — repeated user corrections (CLAUDE.md/memory edits), skills that errored or needed workarounds, and redundant or contradictory instructions across CLAUDE.md, agents, commands, and schedule prompts.
+2. **Schedule health** — `.runtime/schedules.json` `last_triggered_on`; flag missed runs and prompts that produced poor results.
+3. **Memory and vault** — review `Workspace/Learnings.md` Active as a lifecycle queue: promote entries that recurred 3+ times and were encoded in canonical guidance; resolve entries only when their own evidence shows the fix shipped, the behavior was removed or superseded, or the rule was encoded in a canonical skill/doc; move promoted/resolved entries to Promoted / Resolved while preserving the learning and recording the evidence or destination; prune low-confidence entries older than 30 days unless reinforced, but never retire medium/high-confidence entries solely because of age. Then clear promoted/rejected memory proposals; fix `MEMORY.md` drift; run `ciao vault-lint` and apply low-risk fixes (dead wikilinks, orphans, near-duplicates); flag stale entity pages (frontmatter `updated` >90 days) and attribute contradictions.
+4. **Prompt hygiene** — review AGENTS.md, CLAUDE.md, canonical `subagents/*.md` and `commands/*.md`, their generated `.claude/` / `.agents/skills/` mirrors, and prompts in `.runtime/schedules.json` for contradictions, bloat, and outdated paths. File + short before/after per issue.
+5. **Decision log** (optional) — if the vault has `Workspace/Decision-Log.md`, flag "revisit when" items that are now ripe.
+6. **Workspace extension** (optional) — if the vault has `Workspace/Weekly-Review-Template.md`, run its additional bullets too (e.g. connection discovery or other local checks).
 
 ## Rules
 
-- Apply concrete low-risk fixes directly during the review (prompt/doc/vault edits, dead-link fixes, schedule prompt rewrites). Ask before external actions, destructive changes, or anything touching auth, schemas, or data migrations.
+- Apply concrete low-risk fixes directly (prompt/doc/vault edits, dead-link fixes, schedule prompt rewrites). Ask before external actions, destructive changes, or anything touching auth, schemas, or data migrations.
 - Never restart the Ciaobot service from inside a run; apply code changes and tell the user to use Restart in Settings.
 
 ## Output format

@@ -9,6 +9,7 @@ import mimetypes
 import os
 import re
 import hmac
+import shlex
 import shutil
 import subprocess
 import sys
@@ -25,9 +26,12 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from ciao import subagent_tracking
 from ciao.config import WorkspaceConfig, CLAUDE_AI_CONNECTORS, coerce_claude_ai_mcps
 from ciao.models import THINKING_LEVELS, ChatContext
+from ciao.model_tiers import codex_tier_models
 from ciao.package_version import package_changelog, package_status, update_package
 from ciao.tool_path import login_shell_path, resolve_tool
 from ciao.providers.claude import _summarize_tool_input
+from ciao.providers.codex import CodexProvider, codex_login_status, codex_tier_overrides
+from ciao.provider_service import supported_providers
 from ciao.schedules import (
     ScheduleEntry,
     compute_last_expected_run,
@@ -36,18 +40,44 @@ from ciao.schedules import (
     was_dispatched_since,
 )
 from ciao.setup_status import setup_status
+from ciao.cli import _auth_command_for_provider
 from ciao.skills_inventory import build_skill_inventory
 from ciao.web.auth import SESSION_COOKIE, session_cookie_kwargs
 from ciao.web.chat_broker import extract_file_touch
-from ciao.web.project_chats import _normalize_handover_messages
+from ciao.web.project_chats import (
+    _PROJECT_UPLOAD_MAX_BYTES,
+    _normalize_handover_messages,
+)
+from ciao.web.routes_helpers import (
+    _allowed_roots,
+    _commit_and_push,
+    _resolve_workspace_path,
+)
 
 logger = logging.getLogger(__name__)
 
-from ciao.web.routes_helpers import (
-    _allowed_roots,
-    _resolve_workspace_path,
-    _commit_and_push,
-)
+_UPLOAD_READ_CHUNK_BYTES = 1024 * 1024
+
+
+async def _read_upload_limited(upload, max_bytes: int) -> bytes:
+    """Read an UploadFile while buffering at most its size cap plus one byte.
+
+    Starlette spools multipart files, but ``UploadFile.read()`` without a size
+    copies the complete file into memory. Read at most one byte beyond the cap
+    so oversized uploads are rejected before that unbounded allocation.
+    """
+    if max_bytes < 0:
+        raise ValueError("invalid upload size limit")
+    data = bytearray()
+    while True:
+        read_size = min(_UPLOAD_READ_CHUNK_BYTES, max_bytes + 1 - len(data))
+        chunk = await upload.read(read_size)
+        if not chunk:
+            return bytes(data)
+        data.extend(chunk)
+        if len(data) > max_bytes:
+            raise ValueError("file too large")
+
 
 _STATS_CACHE_PATH = Path.home() / ".claude" / "stats-cache.json"
 
@@ -69,19 +99,12 @@ _IMAGE_MANIFEST_RE = re.compile(
 
 _WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _WORKSPACE_PROVIDER_LABELS = {
-    "claude": "Claude",
-    "ollama": "Ollama",
-    "openrouter": "OpenRouter",
+    "claude": "Anthropic (via Claude Code)",
+    "codex": "OpenAI (via Codex)",
+    "ollama": "Ollama (via Claude Code)",
+    "openrouter": "OpenRouter (via Claude Code)",
 }
 _PROVIDER_KEY_META = {
-    "ANTHROPIC_API_KEY": {
-        "label": "Anthropic API key",
-        "description": "Fallback key for Claude provider auth when OAuth is not used.",
-    },
-    "OPENAI_API_KEY": {
-        "label": "OpenAI API key",
-        "description": "Used by cloud voice transcription and other OpenAI-backed features.",
-    },
     "CIAO_OLLAMA_API_KEY": {
         "label": "Ollama Cloud API key",
         "description": "Routes configured Ollama cloud models directly through ollama.com.",
@@ -89,6 +112,12 @@ _PROVIDER_KEY_META = {
     "OPENROUTER_API_KEY": {
         "label": "OpenRouter API key",
         "description": "Optional key for critique/review model routing.",
+    },
+}
+_SERVICE_KEY_META = {
+    "OPENAI_API_KEY": {
+        "label": "OpenAI voice API key",
+        "description": "Used directly by Ciaobot for cloud transcription and speech, not for Codex login.",
     },
 }
 _GWS_BUILTIN_PROFILES = ("personal", "work")
@@ -141,6 +170,7 @@ def _openrouter_model_options(config) -> list[str]:
                 openrouter.haiku_model,
                 openrouter.sonnet_model,
                 openrouter.opus_model,
+                openrouter.fable_model,
                 *openrouter.models,
             ]
         )
@@ -150,7 +180,13 @@ def _openrouter_model_options(config) -> list[str]:
 def _ollama_cloud_model_options(config) -> list[str]:
     ollama = config.ollama
     tier_models = (
-        [ollama.haiku_model, ollama.sonnet_model, ollama.opus_model, ollama.title_model]
+        [
+            ollama.haiku_model,
+            ollama.sonnet_model,
+            ollama.opus_model,
+            ollama.fable_model,
+            ollama.title_model,
+        ]
         if _ollama_cloud_available(config)
         else []
     )
@@ -158,7 +194,7 @@ def _ollama_cloud_model_options(config) -> list[str]:
 
 
 def _workspace_provider_options(config) -> list[dict[str, str]]:
-    values = ["claude"]
+    values = ["claude", "codex"]
     if _ollama_backend_available(config):
         values.append("ollama")
     openrouter = getattr(config, "openrouter", None)
@@ -948,21 +984,99 @@ def _provider_key_configured(config, key: str) -> bool:
 
 
 def _provider_config_payload(config) -> dict:
-    keys = {}
-    for key, meta in _PROVIDER_KEY_META.items():
-        auth_method = _provider_key_auth_method(config, key)
-        keys[key] = {
-            **meta,
-            "configured": auth_method != "missing",
-            "auth_method": auth_method,
-        }
+    def key_payload(meta_by_key: dict) -> dict:
+        keys = {}
+        for key, meta in meta_by_key.items():
+            auth_method = _provider_key_auth_method(config, key)
+            keys[key] = {
+                **meta,
+                "configured": auth_method != "missing",
+                "auth_method": auth_method,
+            }
+        return keys
+
+    providers = setup_status(config, env=os.environ).get("providers", {})
     return {
-        "keys": keys,
+        "keys": key_payload(_PROVIDER_KEY_META),
+        "service_keys": key_payload(_SERVICE_KEY_META),
         "auto_update_github_skills": getattr(config, "auto_update_github_skills", False),
         "requires_restart": True,
         "env_path": str(_env_path(config)),
-        "connections": {},
+        "connections": {
+            key: providers[key]
+            for key in ("claude", "codex")
+            if key in providers
+        },
     }
+
+
+def _launch_provider_login(config, provider: str) -> tuple[bool, str]:
+    """Open the provider-owned interactive login in macOS Terminal."""
+    if provider not in {"claude", "codex"}:
+        raise ValueError(f"unsupported provider '{provider}'")
+    command = _auth_command_for_provider(provider)
+    rendered = shlex.join(command)
+    if sys.platform != "darwin":
+        return False, rendered
+    runtime_root = Path(config.runtime_root)
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    script = runtime_root / f"provider-login-{provider}.command"
+    script.write_text(
+        "#!/bin/zsh\n"
+        "script_path=$0\n"
+        "rm -f -- \"$script_path\"\n"
+        f"{rendered}\n"
+        "status=$?\n"
+        "echo\n"
+        "echo 'Authentication finished. You can close this window.'\n"
+        "exit $status\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o700)
+    subprocess.Popen(
+        ["/usr/bin/open", "-a", "Terminal", str(script)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return True, rendered
+
+
+async def provider_connection_action(request: Request) -> JSONResponse:
+    provider = request.path_params["provider"]
+    action = request.path_params["action"]
+    config = request.app.state.config
+    if provider not in {"claude", "codex"}:
+        return JSONResponse({"error": "unsupported provider"}, status_code=404)
+    if action == "connect":
+        try:
+            opened, command = await asyncio.to_thread(_launch_provider_login, config, provider)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse({"ok": True, "opened": opened, "command": command}, status_code=202)
+    if action == "verify":
+        payload = await asyncio.to_thread(_provider_config_payload, config)
+        return JSONResponse(payload["connections"].get(provider, {}))
+    if action == "logout":
+        try:
+            command = _auth_command_for_provider(provider)[:1] + ["logout"]
+            run = await asyncio.to_thread(
+                subprocess.run,
+                command,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (FileNotFoundError, OSError, subprocess.SubprocessError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if run.returncode != 0:
+            return JSONResponse(
+                {"error": (run.stderr or run.stdout or "logout failed").strip()},
+                status_code=400,
+            )
+        return JSONResponse({"ok": True})
+    return JSONResponse({"error": "unsupported action"}, status_code=404)
 
 
 def _apply_provider_key_updates(config, updates: dict[str, str]) -> None:
@@ -986,7 +1100,7 @@ def _apply_provider_key_updates(config, updates: dict[str, str]) -> None:
 async def provider_config_settings(request: Request) -> JSONResponse:
     config = request.app.state.config
     if request.method == "GET":
-        return JSONResponse(_provider_config_payload(config))
+        return JSONResponse(await asyncio.to_thread(_provider_config_payload, config))
     try:
         body = await request.json()
     except ValueError:
@@ -998,7 +1112,8 @@ async def provider_config_settings(request: Request) -> JSONResponse:
         if not isinstance(body["keys"], dict):
             return JSONResponse({"error": "keys must be an object"}, status_code=400)
         key_updates = {str(key): str(value) for key, value in body["keys"].items()}
-        unsupported = sorted(set(key_updates) - set(_PROVIDER_KEY_META))
+        supported_keys = set(_PROVIDER_KEY_META) | set(_SERVICE_KEY_META)
+        unsupported = sorted(set(key_updates) - supported_keys)
         if unsupported:
             return JSONResponse(
                 {"error": f"unsupported provider key(s): {', '.join(unsupported)}"},
@@ -1011,7 +1126,10 @@ async def provider_config_settings(request: Request) -> JSONResponse:
         config.auto_update_github_skills = val
 
     _write_env_values(_env_path(config), updates)
-    provider_key_changes = {k: v for k, v in updates.items() if k in _PROVIDER_KEY_META}
+    provider_key_changes = {
+        k: v for k, v in updates.items()
+        if k in _PROVIDER_KEY_META or k in _SERVICE_KEY_META
+    }
     _apply_provider_key_updates(config, provider_key_changes)
     if provider_key_changes:
         async def _do_restart():
@@ -1023,7 +1141,7 @@ async def provider_config_settings(request: Request) -> JSONResponse:
                 from ciao.signals import RestartRequested
                 raise RestartRequested(config.restart_exit_code)
         asyncio.create_task(_do_restart())
-    return JSONResponse(_provider_config_payload(config))
+    return JSONResponse(await asyncio.to_thread(_provider_config_payload, config))
 
 
 def _gws_profile_config_dir(config, profile: str) -> Path | None:
@@ -1616,9 +1734,9 @@ async def project_files_upload(request: Request) -> JSONResponse:
         upload = form[key]
         if not hasattr(upload, "read"):
             continue
-        data = await upload.read()
         filename = getattr(upload, "filename", "") or ""
         try:
+            data = await _read_upload_limited(upload, _PROJECT_UPLOAD_MAX_BYTES)
             entry = pcm.save_project_file_upload(project_id, data, filename)
             saved.append(entry)
         except LookupError as exc:
@@ -1650,6 +1768,67 @@ async def create_project_chat(request: Request) -> JSONResponse:
 
 # ── Chats ────────────────────────────────────────────────────────────────
 
+def _codex_reasoning_levels(
+    catalog: list[dict], overrides: dict[str, str] | None = None
+) -> dict[str, list[str]]:
+    """Per-model reasoning levels from the codex catalog, tier aliases included."""
+    levels: dict[str, list[str]] = {}
+    for item in catalog:
+        if item.get("hidden"):
+            continue
+        model_id = str(item.get("model") or item.get("id") or "")
+        if not model_id:
+            continue
+        efforts = item.get("supportedReasoningEfforts")
+        levels[model_id] = [
+            str(option.get("reasoningEffort"))
+            for option in efforts or []
+            if isinstance(option, dict) and option.get("reasoningEffort")
+        ]
+    for tier, model_id in codex_tier_models(catalog, overrides=overrides).items():
+        levels[tier] = list(levels.get(model_id, []))
+    return levels
+
+
+async def _unsupported_codex_level_error(
+    config, pcm, chat_id: str, body: dict
+) -> JSONResponse | None:
+    """Reject a codex thinking level the target model doesn't support.
+
+    ``update_chat`` validates against the static ``THINKING_LEVELS`` union;
+    the model catalog is authoritative when discovery works, so narrow the
+    check to the target model here. Fails open when the catalog is
+    unavailable or has no levels for the model, leaving the union check as
+    the backstop.
+    """
+    level = body.get("thinking_level")
+    if not level:
+        return None
+    chat = pcm.get_chat(chat_id)
+    if chat is None:
+        return None
+    provider = body.get("provider") or chat.provider
+    if provider != "codex":
+        return None
+    model = body.get("model") or chat.model
+    try:
+        catalog = await CodexProvider.model_catalog(config.workspace_root)
+    except Exception:
+        return None
+    allowed = _codex_reasoning_levels(catalog, codex_tier_overrides(config)).get(model)
+    if allowed and level not in allowed:
+        return JSONResponse(
+            {
+                "error": (
+                    f"Unknown thinking level '{level}' for codex model "
+                    f"'{model}' (allowed: {', '.join(allowed)})"
+                )
+            },
+            status_code=400,
+        )
+    return None
+
+
 async def list_all_chats(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     return JSONResponse(pcm.list_chats_dicts())
@@ -1663,6 +1842,11 @@ async def chat_detail(request: Request) -> JSONResponse:
         return JSONResponse({"ok": ok})
     # PATCH
     body = await request.json()
+    level_error = await _unsupported_codex_level_error(
+        request.app.state.config, pcm, chat_id, body
+    )
+    if level_error is not None:
+        return level_error
     try:
         chat = pcm.update_chat(
             chat_id,
@@ -1855,6 +2039,167 @@ def _overlay_assistant_timings(
             entries[idx]["duration_ms"] = int(duration)
 
 
+def _codex_content_text(raw: object) -> str:
+    """Extract text from a Codex app-server user-message content array."""
+    if isinstance(raw, str):
+        return raw
+    if not isinstance(raw, list):
+        return ""
+    parts: list[str] = []
+    for block in raw:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and str(block.get("type") or "") in {
+            "text",
+            "inputText",
+        }:
+            parts.append(str(block.get("text") or ""))
+    return "\n".join(part for part in parts if part)
+
+
+def _strip_codex_command_expansion(content: str) -> str:
+    if not content.startswith("[CIAO_COMMAND_BEGIN]\n"):
+        return content
+    for line in content.splitlines()[1:4]:
+        if not line.startswith("user_input_json="):
+            continue
+        try:
+            original = json.loads(line.split("=", 1)[1])
+        except (json.JSONDecodeError, ValueError):
+            return content
+        return str(original) if isinstance(original, str) else content
+    return content
+
+
+def _render_codex_thread(thread: dict, chat) -> list[dict]:
+    """Render Codex thread items into the provider-neutral PWA row shape."""
+    result: list[dict] = []
+    turns = thread.get("turns")
+    if not isinstance(turns, list):
+        turns = []
+    user_idx = 0
+    for turn in turns:
+        if not isinstance(turn, dict):
+            continue
+        items = turn.get("items")
+        if not isinstance(items, list):
+            continue
+        pending_tools: list[str] = []
+
+        def flush_tools() -> None:
+            if pending_tools:
+                result.append({
+                    "role": "system",
+                    "content": "\n".join(pending_tools),
+                    "tool_name": "_activity",
+                })
+                pending_tools.clear()
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("type") or "")
+            if kind == "userMessage":
+                flush_tools()
+                content = _strip_injected_context(
+                    _codex_content_text(item.get("content"))
+                ).strip()
+                content = _strip_codex_command_expansion(content).strip()
+                if not content:
+                    continue
+                entry: dict = {
+                    "role": "user",
+                    "content": content,
+                    "turn_index": user_idx,
+                }
+                refs = chat.user_turn_images.get(str(user_idx))
+                if refs:
+                    entry["images"] = list(refs)
+                timing = chat.user_turn_timings.get(str(user_idx)) or {}
+                if timing.get("sent_at"):
+                    entry["sent_at"] = timing["sent_at"]
+                result.append(entry)
+                user_idx += 1
+                continue
+            if kind == "agentMessage":
+                flush_tools()
+                text = str(item.get("text") or "").strip()
+                if text:
+                    entry = {"role": "assistant", "content": text}
+                    phase = str(item.get("phase") or "")
+                    if phase in {"commentary", "final_answer"}:
+                        entry["phase"] = phase
+                    result.append(entry)
+                continue
+            if kind == "fileChange":
+                flush_tools()
+                changes = item.get("changes")
+                for change in changes if isinstance(changes, list) else []:
+                    if not isinstance(change, dict):
+                        continue
+                    file_path = str(change.get("path") or "")
+                    if file_path:
+                        result.append({
+                            "role": "system",
+                            "tool_name": "_filecard",
+                            "content": file_path,
+                            "file_path": file_path,
+                            "action": str(change.get("kind") or "edited"),
+                            "tool": "Edit",
+                        })
+                continue
+            if kind == "commandExecution":
+                command = item.get("command")
+                if isinstance(command, list):
+                    label = " ".join(str(part) for part in command)
+                else:
+                    label = str(command or "")
+                pending_tools.append(
+                    f"{_tool_icon('Bash')} Bash {label}".strip()
+                )
+                continue
+            if kind in {"mcpToolCall", "dynamicToolCall"}:
+                name = str(item.get("tool") or item.get("name") or kind)
+                server = str(item.get("server") or "")
+                label = f"{server}/{name}" if server else name
+                pending_tools.append(f"{_tool_icon(name)} {label}")
+                continue
+            if kind == "collabAgentToolCall":
+                status = str(item.get("status") or "")
+                prompt = str(item.get("prompt") or "").strip()
+                detail = f" {prompt[:180]}" if prompt else ""
+                pending_tools.append(
+                    f"{_tool_icon('Task')} Agent {status}{detail}".strip()
+                )
+        flush_tools()
+    _overlay_assistant_timings(result, chat.user_turn_timings)
+    return result
+
+
+def _overlay_codex_transcript_metadata(
+    entries: list[dict], transcript_rows: list[dict]
+) -> None:
+    metadata = [
+        row for row in transcript_rows
+        if row.get("role") == "assistant"
+    ]
+    targets: list[int] = []
+    last: int | None = None
+    for index, row in enumerate(entries):
+        if row.get("role") == "user":
+            if last is not None:
+                targets.append(last)
+            last = None
+        elif row.get("role") == "assistant":
+            last = index
+    if last is not None:
+        targets.append(last)
+    for index, source in zip(targets, metadata):
+        for key in ("usage", "quota", "effective_model"):
+            if source.get(key):
+                entries[index][key] = source[key]
+
+
 async def chat_messages(request: Request) -> JSONResponse:
     """Return conversation history for a chat.
 
@@ -1873,12 +2218,33 @@ async def chat_messages(request: Request) -> JSONResponse:
     if not chat.session_id:
         return JSONResponse(handover_messages)
 
+    config = request.app.state.config
+    if getattr(chat, "provider", "claude") == "codex":
+        thread = await CodexProvider.read_thread(
+            config.workspace_root, chat.session_id
+        )
+        if thread is not None:
+            rendered = _render_codex_thread(thread, chat)
+            if rendered:
+                _overlay_codex_transcript_metadata(
+                    rendered,
+                    pcm._transcripts.current_messages(
+                        ChatContext.for_web(chat_id), "codex"
+                    ),
+                )
+                return JSONResponse(handover_messages + rendered)
+        current = pcm._transcripts.current_messages(
+            ChatContext.for_web(chat_id), "codex"
+        )
+        if current:
+            _overlay_assistant_timings(current, chat.user_turn_timings)
+            return JSONResponse(handover_messages + current)
+
     try:
         from claude_agent_sdk import get_session_messages
     except ImportError:
         return JSONResponse({"error": "SDK not available"}, status_code=500)
 
-    config = request.app.state.config
     result: list[dict] = []
     try:
         msgs = get_session_messages(
@@ -2081,6 +2447,40 @@ async def chat_subagents(request: Request) -> JSONResponse:
         return JSONResponse([])
 
     config = request.app.state.config
+    if getattr(chat, "provider", "claude") == "codex":
+        parent = await CodexProvider.read_thread(
+            config.workspace_root, chat.session_id
+        )
+        if parent is None:
+            return JSONResponse([])
+        entries: list[dict] = []
+        for item in await CodexProvider.read_collab_tree(
+            config.workspace_root, parent
+        ):
+            thread = item.get("thread")
+            if not isinstance(thread, dict):
+                continue
+            agent_id = str(item["agent_id"])
+            raw_status = str(item.get("status") or "")
+            if raw_status in {"pendingInit", "running"}:
+                status = "running"
+            elif raw_status in {"errored", "interrupted", "notFound"}:
+                status = "failed"
+            else:
+                status = "completed"
+            entries.append({
+                "agent_id": agent_id,
+                "parent_agent_id": str(item.get("parent_agent_id") or ""),
+                "messages": _render_codex_thread(thread, chat),
+                "tool_use_id": str(item.get("tool_use_id") or ""),
+                "description": str(item.get("description") or ""),
+                "subagent_type": "codex",
+                "is_async": True,
+                "status": status,
+                "turn_index": int(item.get("root_turn_index") or 0),
+            })
+        return JSONResponse(entries)
+
     workspace = str(config.workspace_root)
 
     def _finalize(entries: list[dict]) -> JSONResponse:
@@ -2168,10 +2568,12 @@ async def chat_voice(request: Request) -> JSONResponse:
     if upload is None:
         return JSONResponse({"error": "no audio file"}, status_code=400)
 
-    data = await upload.read()
     filename = getattr(upload, "filename", "audio.webm") or "audio.webm"
 
     try:
+        data = await _read_upload_limited(
+            upload, request.app.state.config.max_voice_size_bytes
+        )
         path = pcm.save_voice_upload(data, filename)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -2239,9 +2641,11 @@ async def chat_images(request: Request) -> JSONResponse:
         upload = form[key]
         if not hasattr(upload, "read"):
             continue
-        data = await upload.read()
         filename = getattr(upload, "filename", "image.jpg") or "image.jpg"
         try:
+            data = await _read_upload_limited(
+                upload, request.app.state.config.max_image_size_bytes
+            )
             attachment = pcm.save_image_upload(data, filename)
             results.append({
                 "ref": attachment.path.name,
@@ -2296,7 +2700,7 @@ _WORKSPACE_IMAGE_MAX_BYTES = 15 * 1024 * 1024  # 15 MB
 
 
 async def workspace_file(request: Request) -> Response:
-    """Serve a read-only text file from inside the workspace.
+    """Serve a read-only allowlisted text file from the host filesystem.
 
     Path is provided as a query string (`?path=...`). The path may be
     workspace-relative or absolute, with an optional `:line` suffix that is
@@ -2885,7 +3289,7 @@ async def create_schedule(request: Request) -> JSONResponse:
     # else we still require it (create will happily take "" but then the entry
     # would never tick).
     provider = (body.get("provider") or "").strip()
-    if provider and provider != "claude":
+    if provider and provider not in supported_providers():
         return JSONResponse({"error": f"unknown provider '{provider}'"}, status_code=400)
     try:
         archive_policy = normalize_archive_policy(body.get("archive_policy"))
@@ -2991,7 +3395,7 @@ async def schedule_detail(request: Request) -> JSONResponse:
         entry.model = new_model
     if "provider" in body:
         new_provider = (body["provider"] or "").strip()
-        if new_provider and new_provider != "claude":
+        if new_provider and new_provider not in supported_providers():
             return JSONResponse(
                 {"error": f"unknown provider '{new_provider}'"}, status_code=400
             )
@@ -3008,10 +3412,171 @@ async def schedule_detail(request: Request) -> JSONResponse:
     return JSONResponse(_enrich_schedule(entry, pcm))
 
 
+# ── Loops ────────────────────────────────────────────────────────────────
+# In-chat loops: re-dispatch a prompt into one fixed chat every N minutes.
+# Runtime start/stop state lives in the LoopManager (autostart decides what
+# runs at boot), so PATCH {"running": bool} toggles the manager, everything
+# else edits the persisted entry.
+
+def _enrich_loop(entry, manager, pcm=None) -> dict:
+    """Serialize a LoopEntry and attach computed fields (running, context_label, next_run)."""
+    entry_dict = asdict(entry)
+    running = manager.is_running(entry.loop_id)
+    entry_dict["running"] = running
+    chat = pcm.get_chat(entry.web_chat_id) if pcm else None
+    entry_dict["context_label"] = chat.title if chat else entry.web_chat_id
+    next_run = None
+    if running:
+        if entry.last_run_at:
+            try:
+                last = datetime.fromisoformat(entry.last_run_at)
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=UTC)
+                next_run = (last + entry.interval()).isoformat()
+            except ValueError:
+                pass
+        else:
+            next_run = datetime.now(UTC).isoformat(timespec="seconds")
+    entry_dict["next_run"] = next_run
+    return entry_dict
+
+
+async def list_loops(request: Request) -> JSONResponse:
+    lm = request.app.state.loop_manager
+    pcm = request.app.state.project_chat_manager
+    return JSONResponse([_enrich_loop(entry, lm, pcm) for entry in lm.list()])
+
+
+async def create_loop(request: Request) -> JSONResponse:
+    lm = request.app.state.loop_manager
+    pcm = request.app.state.project_chat_manager
+    body = await request.json()
+
+    prompt = (body.get("prompt") or "").strip()
+    if not prompt:
+        return JSONResponse({"error": "prompt is required"}, status_code=400)
+    web_chat_id = (body.get("web_chat_id") or "").strip()
+    if not web_chat_id or pcm.get_chat(web_chat_id) is None:
+        return JSONResponse({"error": "web_chat_id must point to an existing chat"}, status_code=400)
+    try:
+        interval_minutes = int(body.get("interval_minutes", 10))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "interval_minutes must be an integer"}, status_code=400)
+    if interval_minutes < 1:
+        return JSONResponse({"error": "interval_minutes must be >= 1"}, status_code=400)
+
+    entry = lm.create(
+        prompt=prompt,
+        web_chat_id=web_chat_id,
+        interval_minutes=interval_minutes,
+        title=(body.get("title") or "").strip(),
+        autostart=bool(body.get("autostart")),
+    )
+    if body.get("start"):
+        lm.start_loop(entry.loop_id)
+    return JSONResponse(_enrich_loop(entry, lm, pcm), status_code=201)
+
+
+async def loop_detail(request: Request) -> JSONResponse:
+    """Handle PATCH (update / start / stop) and DELETE for a single loop."""
+    loop_id = request.path_params["loop_id"]
+    lm = request.app.state.loop_manager
+    pcm = request.app.state.project_chat_manager
+    if request.method == "DELETE":
+        return JSONResponse({"ok": lm.delete(loop_id)})
+    # PATCH
+    entry = lm.get(loop_id)
+    if entry is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    body = await request.json()
+    if "prompt" in body:
+        prompt = (body["prompt"] or "").strip()
+        if not prompt:
+            return JSONResponse({"error": "prompt is required"}, status_code=400)
+        entry.prompt = prompt
+    if "title" in body:
+        entry.title = (body["title"] or "").strip()
+    if "interval_minutes" in body:
+        try:
+            interval_minutes = int(body["interval_minutes"])
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "interval_minutes must be an integer"}, status_code=400)
+        if interval_minutes < 1:
+            return JSONResponse({"error": "interval_minutes must be >= 1"}, status_code=400)
+        entry.interval_minutes = interval_minutes
+    if "web_chat_id" in body:
+        web_chat_id = (body["web_chat_id"] or "").strip()
+        if not web_chat_id or pcm.get_chat(web_chat_id) is None:
+            return JSONResponse({"error": "web_chat_id must point to an existing chat"}, status_code=400)
+        entry.web_chat_id = web_chat_id
+    if "autostart" in body:
+        entry.autostart = bool(body["autostart"])
+    lm.replace(entry)
+    if "running" in body:
+        if body["running"]:
+            lm.start_loop(loop_id)
+        else:
+            lm.stop_loop(loop_id)
+    return JSONResponse(_enrich_loop(entry, lm, pcm))
+
+
+async def run_loop_now(request: Request) -> JSONResponse:
+    """Fire one loop iteration immediately (works even when stopped)."""
+    loop_id = request.path_params["loop_id"]
+    lm = request.app.state.loop_manager
+    try:
+        result = await lm.run_now(loop_id)
+    except ValueError:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if result.get("status") == "busy":
+        return JSONResponse(
+            {"error": "chat has a turn in flight; retry when it finishes", **result},
+            status_code=409,
+        )
+    if result.get("status") == "missing-chat":
+        return JSONResponse({"error": "target chat no longer exists", **result}, status_code=409)
+    return JSONResponse(result, status_code=201)
+
+
 # ── Models ───────────────────────────────────────────────────────────────
 
 async def list_models(request: Request) -> JSONResponse:
     config = request.app.state.config
+    codex_catalog = await CodexProvider.model_catalog(config.workspace_root)
+    visible_codex = [item for item in codex_catalog if not item.get("hidden")]
+    codex_models = [
+        str(item.get("model") or item.get("id") or "")
+        for item in visible_codex
+        if str(item.get("model") or item.get("id") or "")
+    ]
+    codex_default = next(
+        (
+            str(item.get("model") or item.get("id") or "")
+            for item in visible_codex
+            if item.get("isDefault")
+        ),
+        codex_models[0] if codex_models else "",
+    )
+    # Automatic (catalog-derived) mapping vs the effective one after the
+    # operator's per-tier pins; the settings UI labels "Automatic (…)"
+    # from the former and shows the latter on the tier badges.
+    codex_overrides = codex_tier_overrides(config)
+    codex_tier_defaults = codex_tier_models(codex_catalog)
+    codex_tiers = codex_tier_models(codex_catalog, overrides=codex_overrides)
+    model_reasoning_levels = _codex_reasoning_levels(codex_catalog, codex_overrides)
+    codex_model_metadata: dict[str, dict] = {}
+    for item in visible_codex:
+        model_id = str(item.get("model") or item.get("id") or "")
+        if not model_id:
+            continue
+        codex_model_metadata[model_id] = {
+            "display_name": str(item.get("displayName") or model_id),
+            "description": str(item.get("description") or ""),
+            "default_reasoning_effort": str(
+                item.get("defaultReasoningEffort") or ""
+            ),
+            "input_modalities": list(item.get("inputModalities") or []),
+        }
     # Cloud allowlist + locally-discovered daemon models both count as
     # "Ollama" for bucketing: they show in the personal Claude bucket,
     # never in the work (Anthropic subscription) bucket.
@@ -3032,6 +3597,7 @@ async def list_models(request: Request) -> JSONResponse:
         "haiku": or_settings.haiku_model,
         "sonnet": or_settings.sonnet_model,
         "opus": or_settings.opus_model,
+        "fable": or_settings.fable_model,
     } if or_settings.available else {}
     openrouter_default = or_settings.sonnet_model if or_settings.available else ""
 
@@ -3042,30 +3608,43 @@ async def list_models(request: Request) -> JSONResponse:
             "claude_work": claude_work,
             "claude_personal": claude_personal,
             "openrouter": openrouter_models,
+            "codex": codex_models,
         },
         "provider_defaults": {
             "claude_work": work_default,
             "claude_personal": personal_default,
             "openrouter": openrouter_default,
+            "codex": codex_default,
         },
-        # Per-backend alias tier models, so the picker can show
-        # "sonnet -> kimi (ollama) / anthropic-sonnet (openrouter)".
+        # Per-backend tier models, so the picker can show
+        # "sonnet -> kimi (ollama) / gpt-5.6-terra (codex)". Tier names are
+        # resolved to provider-native ids only at the dispatch boundary.
         "alias_tiers": {
             "ollama": {
                 "haiku": config.ollama.haiku_model,
                 "sonnet": config.ollama.sonnet_model,
                 "opus": config.ollama.opus_model,
+                "fable": config.ollama.fable_model,
             },
             "openrouter": openrouter_tiers,
+            "codex": codex_tiers,
         },
+        # Catalog-derived codex mapping before per-tier pins, so the
+        # settings UI can label the automatic choice while an override
+        # is active.
+        "codex_tier_defaults": codex_tier_defaults,
         "backends": {
             "ollama": _ollama_backend_available(config),
             "openrouter": or_settings.available,
             "anthropic": True,
+            "codex": bool(codex_models),
         },
         "ollama_models": ollama,
         "ollama_local_models": list(config.ollama.local_models),
         "openrouter_models": openrouter_models,
+        "codex_models": codex_models,
+        "codex_model_metadata": codex_model_metadata,
+        "model_reasoning_levels": model_reasoning_levels,
         "thinking_levels": {k: list(v) for k, v in THINKING_LEVELS.items()},
     })
 
@@ -3085,14 +3664,9 @@ def _routines_payload(config, app_settings) -> dict:
         title_effective = "apfel"
     else:
         title_effective = config.haiku_model_for_workspace("personal")
-    if config.critique_models:
-        critique_effective = config.critique_models
-    elif config.openrouter.available:
-        critique_effective = "anthropic/claude-sonnet-latest,anthropic/claude-haiku-latest,anthropic/claude-opus-latest"
-    elif config.ollama.api_key and config.ollama.api_key != "ollama":
-        critique_effective = f"{config.ollama.sonnet_model},{config.ollama.haiku_model},{config.ollama.opus_model}"
-    else:
-        critique_effective = "sonnet,haiku,opus"
+    from ciao.critique import critique_models_effective
+
+    critique_effective = critique_models_effective(config)
     if config.insights_model_override:
         insights_effective = config.insights_model_override
     else:
@@ -3107,24 +3681,33 @@ def _routines_payload(config, app_settings) -> dict:
         "ollama_haiku_model": s.ollama_haiku_model,
         "ollama_sonnet_model": s.ollama_sonnet_model,
         "ollama_opus_model": s.ollama_opus_model,
+        "ollama_fable_model": s.ollama_fable_model,
         "openrouter_haiku_model": s.openrouter_haiku_model,
         "openrouter_sonnet_model": s.openrouter_sonnet_model,
         "openrouter_opus_model": s.openrouter_opus_model,
+        "openrouter_fable_model": s.openrouter_fable_model,
+        "codex_haiku_model": s.codex_haiku_model,
+        "codex_sonnet_model": s.codex_sonnet_model,
+        "codex_opus_model": s.codex_opus_model,
+        "codex_fable_model": s.codex_fable_model,
         # What actually runs right now, after defaults.
         "title_model_effective": title_effective,
         "insights_model_effective": insights_effective,
 
         "critique_models_effective": critique_effective,
+        "tier_defaults": app_settings.tier_model_defaults(),
         "alias_tiers": {
             "ollama": {
                 "haiku": config.ollama.haiku_model,
                 "sonnet": config.ollama.sonnet_model,
                 "opus": config.ollama.opus_model,
+                "fable": config.ollama.fable_model,
             },
             "openrouter": {
                 "haiku": config.openrouter.haiku_model,
                 "sonnet": config.openrouter.sonnet_model,
                 "opus": config.openrouter.opus_model,
+                "fable": config.openrouter.fable_model,
             } if config.openrouter.available else {},
         },
         "transcription": {
@@ -3142,7 +3725,7 @@ def _routines_payload(config, app_settings) -> dict:
         },
         # Grouped options for the routine model selectors.
         "model_options": {
-            "anthropic": ["haiku", "sonnet", "opus"],
+            "anthropic": ["haiku", "sonnet", "opus", "fable"],
             "ollama_cloud": _ollama_cloud_model_options(config),
             "ollama_local": list(ollama.local_models),
             "openrouter": _openrouter_model_options(config),
@@ -3241,9 +3824,25 @@ async def active_chats_endpoint(request: Request) -> JSONResponse:
     pcm = getattr(request.app.state, "project_chat_manager", None)
     if pcm is None:
         return JSONResponse({"active_chat_ids": []})
-    ids = set(pcm.active_stream_chat_ids())
-    ids.update(pcm.background_agent_counts)
-    return JSONResponse({"active_chat_ids": sorted(ids)})
+    return JSONResponse({"active_chat_ids": pcm.active_chat_ids()})
+
+
+async def open_chat_endpoint(request: Request) -> JSONResponse:
+    """Ask an already-open PWA to navigate to a chat.
+
+    macOS ``open -a PWA /chat/...`` often focuses the installed app without
+    changing the window URL when it is already running. The menu bar calls
+    this unauthenticated local endpoint first; connected clients receive an
+    ``open_chat`` event over ``/ws/events`` and switch chats in place.
+    """
+    chat_id = str(request.path_params.get("chat_id") or "").strip()
+    if not chat_id:
+        return JSONResponse({"ok": False, "error": "missing chat_id"}, status_code=400)
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    if pcm is None or pcm.get_chat(chat_id) is None:
+        return JSONResponse({"ok": False, "error": "chat not found"}, status_code=404)
+    pcm.events.publish({"type": "open_chat", "chat_id": chat_id})
+    return JSONResponse({"ok": True, "chat_id": chat_id})
 
 
 async def setup_status_endpoint(request: Request) -> JSONResponse:
@@ -3471,6 +4070,11 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         return JSONResponse({"error": "port must be an integer"}, status_code=400)
     if port < 1 or port > 65535:
         return JSONResponse({"error": "port must be between 1 and 65535"}, status_code=400)
+    default_provider = str(body.get("provider") or "claude").strip().lower()
+    if default_provider not in _WORKSPACE_PROVIDER_LABELS:
+        return JSONResponse(
+            {"error": f"unknown provider '{default_provider}'"}, status_code=400
+        )
 
     from ciao.cli import detect_vault_mode, setup_workspace
 
@@ -3488,6 +4092,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         vault_root=str(body.get("vault_root", "")).strip() or None,
         vault_mode=vault_mode,
         workspace_name=str(body.get("workspace_name", "")).strip() or "personal",
+        default_provider=default_provider,
         python_path=str(body.get("python", "")).strip() or None,
         port=port,
         launch_agents_dir=str(body.get("launch_agents_dir", "")).strip() or None,

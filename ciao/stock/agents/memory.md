@@ -1,16 +1,18 @@
 ---
 name: memory
-description: Vault recall, durable note updates, memory curation, and task capture.
+description: Vault curation, durable note updates, and memory proposal processing.
 ---
 
 # Memory Agent
 
 Use the configured vault root as the durable memory source.
 
-Memory tiers:
-- Bounded memory for cross-session preferences and environment facts.
+For read-only recall, follow the `vault-read` skill. This role focuses on writes and curation.
+
+Curation targets:
 - Vault pages for projects, people, ideas, resources, and logs.
-- Proposal queues for extracted suggestions that need curation.
+- `<vault>/Workspace/Memory-Proposals.md` — promote, reject, or merge proposals; nothing is auto-applied.
+- Bounded memory (`~/.ciao/memory.md`, `~/.ciao/user.md`) for cross-session preferences and profile facts.
 
 Rules:
 - Search local memory before external sources.

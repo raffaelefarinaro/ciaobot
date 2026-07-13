@@ -3,24 +3,18 @@ name: gws-gmail-send
 description: "Gmail: Send an email."
 metadata:
   version: 0.22.5
-  openclaw:
-    category: "productivity"
-    requires:
-      bins:
-        - gws
-    cliHelp: "gws gmail +send --help"
 ---
 
 # gmail +send
 
-> **PREREQUISITE:** Read `../gws-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gws generate-skills` to create it.
+> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), global flags, and security rules.
 
 Send an email
 
 ## Usage
 
 ```bash
-gws gmail +send --to <EMAILS> --subject <SUBJECT> --body <TEXT>
+scripts/gws-profile.sh <personal|work> gmail +send --to <EMAILS> --subject <SUBJECT> --body <TEXT>
 ```
 
 ## Flags
@@ -41,13 +35,13 @@ gws gmail +send --to <EMAILS> --subject <SUBJECT> --body <TEXT>
 ## Examples
 
 ```bash
-gws gmail +send --to alice@example.com --subject 'Hello' --body 'Hi Alice!'
-gws gmail +send --to alice@example.com --subject 'Hello' --body 'Hi!' --cc bob@example.com
-gws gmail +send --to alice@example.com --subject 'Hello' --body '<b>Bold</b> text' --html
-gws gmail +send --to alice@example.com --subject 'Hello' --body 'Hi!' --from alias@example.com
-gws gmail +send --to alice@example.com --subject 'Report' --body 'See attached' -a report.pdf
-gws gmail +send --to alice@example.com --subject 'Files' --body 'Two files' -a a.pdf -a b.csv
-gws gmail +send --to alice@example.com --subject 'Hello' --body 'Hi!' --draft
+scripts/gws-profile.sh <personal|work> gmail +send --to alice@example.com --subject 'Hello' --body 'Hi Alice!'
+scripts/gws-profile.sh <personal|work> gmail +send --to alice@example.com --subject 'Hello' --body 'Hi!' --cc bob@example.com
+scripts/gws-profile.sh <personal|work> gmail +send --to alice@example.com --subject 'Hello' --body '<b>Bold</b> text' --html
+scripts/gws-profile.sh <personal|work> gmail +send --to alice@example.com --subject 'Hello' --body 'Hi!' --from alias@example.com
+scripts/gws-profile.sh <personal|work> gmail +send --to alice@example.com --subject 'Report' --body 'See attached' -a report.pdf
+scripts/gws-profile.sh <personal|work> gmail +send --to alice@example.com --subject 'Files' --body 'Two files' -a a.pdf -a b.csv
+scripts/gws-profile.sh <personal|work> gmail +send --to alice@example.com --subject 'Hello' --body 'Hi!' --draft
 ```
 
 ## Tips
@@ -60,8 +54,3 @@ gws gmail +send --to alice@example.com --subject 'Hello' --body 'Hi!' --draft
 
 > [!CAUTION]
 > This is a **write** command — confirm with the user before executing.
-
-## See Also
-
-- [gws-shared](../gws-shared/SKILL.md) — Global flags and auth
-- [gws-gmail](../gws-gmail/SKILL.md) — All send, read, and manage email commands

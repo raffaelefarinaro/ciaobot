@@ -22,7 +22,7 @@ import logging
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from ciao.web.auth import verify_session
+from ciao.web.auth import authorize_websocket
 from ciao.web.chat_broker import ChatStream
 from ciao.models import ImageAttachment
 
@@ -71,9 +71,7 @@ async def _attach_streams(websocket: WebSocket, pcm, chat_id: str) -> None:
 
 async def ws_chat(websocket: WebSocket) -> None:
     """Per-chat streaming WebSocket."""
-    serializer = websocket.app.state.serializer
-    if not verify_session(websocket, serializer):
-        await websocket.close(code=4001, reason="unauthorized")
+    if not await authorize_websocket(websocket):
         return
 
     await websocket.accept()
@@ -149,6 +147,26 @@ async def ws_chat(websocket: WebSocket) -> None:
                     )
                 continue
 
+            if msg_type == "question_response":
+                request_id = str(msg.get("request_id", "")).strip()
+                raw_answers = msg.get("answers")
+                answers: dict[str, list[str]] = {}
+                if isinstance(raw_answers, dict):
+                    for question_id, values in raw_answers.items():
+                        if isinstance(values, list):
+                            answers[str(question_id)] = [
+                                str(value) for value in values
+                            ]
+                        elif values is not None:
+                            answers[str(question_id)] = [str(values)]
+                if request_id:
+                    pcm.respond_question(
+                        chat_id,
+                        request_id=request_id,
+                        answers=answers,
+                    )
+                continue
+
             if msg_type == "message":
                 text = msg.get("text", "")
                 if not text:
@@ -221,13 +239,12 @@ async def ws_events(websocket: WebSocket) -> None:
     - `chat_result_ready`       {chat_id, project_id, title, snippet}
     - `chat_subagents_ready`    {chat_id, project_id, remaining}
     - `chat_title`              {chat_id, title}
+    - `open_chat`               {chat_id}  (menu-bar deep link into running PWA)
 
     On connect, sends a snapshot of currently-active streams so a fresh client
     can paint sidebar indicators without waiting for the next event.
     """
-    serializer = websocket.app.state.serializer
-    if not verify_session(websocket, serializer):
-        await websocket.close(code=4001, reason="unauthorized")
+    if not await authorize_websocket(websocket):
         return
 
     await websocket.accept()

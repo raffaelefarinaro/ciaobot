@@ -12,11 +12,11 @@
             <p class="section-title">App actions</p>
             <p class="hint">Snapshot, sync, or restart this local Ciaobot instance.</p>
           </div>
-          <div class="action-row action-row--spaced">
+          <div class="action-row action-row--spaced action-row--compact">
             <button class="btn-primary" @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()" :disabled="!!actionPending">
               {{ actionPending === 'snapshot' ? (localStatus?.git_repo ? 'Syncing...' : 'Snapshotting...') : (localStatus?.git_repo ? 'Sync with Remote' : 'Git Snapshot') }}
             </button>
-            <button class="btn-primary" @click="() => doDeploy()" :disabled="!!actionPending" title="Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code">
+            <button class="btn-caution" @click="() => doDeploy()" :disabled="!!actionPending" title="Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code">
               {{ actionPending === 'deploy' ? 'Restarting...' : 'Restart' }}
             </button>
           </div>
@@ -29,7 +29,7 @@
                 <pre v-if="step.output" class="deploy-step-error-output">{{ step.output }}</pre>
               </div>
             </div>
-            <div class="action-row action-row--spaced">
+            <div class="action-row action-row--spaced action-row--compact">
               <button class="btn-primary" @click="fixDeployErrorInChat">
                 Fix in Chat
               </button>
@@ -93,9 +93,9 @@
               Update check failed: {{ packageStatus.error }}
             </div>
 
-            <div class="action-row action-row--spaced">
+            <div class="action-row action-row--spaced action-row--compact">
               <button
-                class="btn-primary"
+                :class="packageStatus.update_available ? 'btn-primary' : 'btn-secondary'"
                 @click="openUpdatePanel"
                 :disabled="!packageStatus.update_available || packageUpdating || showUpdatePanel"
               >
@@ -154,8 +154,8 @@
           <div v-else-if="!pushSupportedFlag" class="loading">
             Push notifications are not supported in this browser.
           </div>
-          <div v-else class="action-row">
-            <button class="btn-primary" @click="togglePush" :disabled="pushPending">
+          <div v-else class="action-row action-row--compact">
+            <button :class="pushEnabledFlag ? 'btn-secondary' : 'btn-primary'" @click="togglePush" :disabled="pushPending">
               {{ pushPending ? 'Working...' : (pushEnabledFlag ? 'Disable on this device' : 'Enable on this device') }}
             </button>
           </div>
@@ -221,10 +221,13 @@
             <p class="section-title">Product tour</p>
             <p class="hint">Walk through workspaces, chat comments, inline file previews, pinning, and rich document viewing.</p>
           </div>
-          <div class="action-row action-row--spaced">
-            <button type="button" class="btn-primary" @click="replayProductTour">Replay tour</button>
+          <div class="action-row action-row--spaced action-row--compact">
+            <button type="button" class="btn-secondary" @click="replayProductTour">Replay tour</button>
           </div>
         </div>
+
+        <!-- Getting started checklist -->
+        <GettingStartedChecklist variant="settings" @open-sidebar="emit('open-sidebar')" />
 
         <!-- Debug (dev mode only) -->
         <div v-if="localStatus?.dev_mode" class="card">
@@ -249,6 +252,7 @@
               Ciaobot is an open-source project. Support and contributions are welcome:
               report issues, suggest features, or open a pull request on
               <a href="https://github.com/raffaelefarinaro/ciaobot" target="_blank" rel="noopener">GitHub</a>.
+              You can browse without an account; submitting an issue or pull request requires a free GitHub account, and GitHub will prompt you to sign in or create one.
             </p>
           </div>
         </div>
@@ -538,21 +542,54 @@
               <div>
                 <p class="section-title">Providers</p>
                 <p class="hint">
-                  Manage API keys and developer credentials. Changes are written to your local <code>.env</code> file and restart the server.
+                  Claude Code and Codex manage their own login and credentials. Ciaobot verifies each CLI connection.
                 </p>
               </div>
             </div>
 
-            <div v-if="providerKeys.connections" class="setting-row setting-row--stack">
-              <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="setting-row-main setting-row-main--inline">
-                <span class="routine-name">Codex <span class="muted-text">via Pi</span></span>
-                <span class="badge" :class="conn.ok ? 'badge--success' : 'badge--error'">
-                  {{ conn.ok ? 'Connected' : 'Not connected' }}
+            <div v-if="providerKeys.connections" class="provider-connections">
+              <div v-for="(conn, connKey) in providerKeys.connections" :key="connKey" class="credential-row">
+                <div class="setting-row-main setting-row-main--inline">
+                  <div class="routine-info">
+                    <span class="routine-name">{{ connKey === 'codex' ? 'OpenAI Codex' : 'Claude Code' }}</span>
+                    <p class="hint hint--compact provider-connection-detail">
+                      <span v-if="conn.version">{{ conn.version }}</span>
+                      <span v-if="conn.account">{{ conn.account }}</span>
+                      <span v-if="!conn.version && conn.detail">{{ conn.detail }}</span>
+                    </p>
+                  </div>
+                  <span class="badge" :class="conn.ok ? 'badge--success' : 'badge--error'">
+                    {{ conn.ok ? `Connected · ${conn.auth}` : 'Not connected' }}
+                  </span>
+                </div>
+                <div class="action-row provider-connection-actions">
+                  <button class="btn-primary btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'connect')">
+                    {{ conn.ok ? 'Reconnect' : 'Connect' }}
+                  </button>
+                  <button class="btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'verify')">Verify</button>
+                  <button v-if="conn.ok" class="btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'logout')">Log out</button>
+                </div>
+              </div>
+              <div v-if="providerConnectionResult" class="action-result">{{ providerConnectionResult }}</div>
+            </div>
+
+            <div v-for="(meta, key) in providerKeys.service_keys" :key="key" class="credential-row">
+              <div class="setting-row-main setting-row-main--inline">
+                <div class="routine-info">
+                  <span class="routine-name">{{ meta.label }}</span>
+                  <p class="hint hint--compact">{{ meta.description }}</p>
+                </div>
+                <span class="badge" :class="meta.configured ? 'badge--success' : 'badge--error'">
+                  {{ meta.configured ? 'Configured' : 'Unconfigured' }}
                 </span>
               </div>
-              <p v-if="providerKeys.connections.codex?.detail" class="hint hint--compact">
-                {{ providerKeys.connections.codex.detail }}
-              </p>
+              <input
+                type="password"
+                class="routine-input"
+                v-model="providerKeyInputs[key]"
+                :placeholder="meta.configured ? '•••••••••••• (Leave blank to keep existing, or type empty space to clear)' : 'Enter API Key'"
+                :disabled="providerKeysSaving"
+              />
             </div>
 
             <div v-for="(meta, key) in providerKeys.keys" :key="key" class="credential-row">
@@ -809,22 +846,22 @@
             </template>
           </div>
 
-          <!-- Provider alias tiers -->
+          <!-- Provider-neutral model routing -->
           <div v-if="tierProviderSections.length" class="card">
             <div class="settings-card-header">
-              <p class="section-title">Provider alias models</p>
+              <p class="section-title">Model Routing</p>
               <p class="hint">
-                Pick a provider, then set the model behind <code>opus</code>, <code>sonnet</code>, and <code>haiku</code>.
+                Ciaobot maps Haiku, Sonnet, Opus, and Fable to provider-specific models. OpenAI routes run through Codex; Ollama and OpenRouter routes run through Claude Code.
               </p>
             </div>
             <div class="alias-provider-bar">
               <label class="settings-field alias-provider-field">
                 <span class="ws-label">Provider</span>
                 <select
-                  class="routine-input alias-provider-select"
+                  class="routine-select alias-provider-select"
                   :value="selectedTierProviderSection?.key || ''"
                   :disabled="routinesSaving"
-                  @change="selectedTierProvider = ($event.target as HTMLSelectElement).value as AliasProviderKey"
+                  @change="selectedTierProvider = ($event.target as HTMLSelectElement).value as RoutingProviderKey"
                 >
                   <option v-for="section in tierProviderSections" :key="section.key" :value="section.key">
                     {{ section.label }}<template v-if="!section.available"> (not configured)</template>
@@ -838,23 +875,22 @@
                   <span class="ws-label">{{ tier.label }}</span>
                   <ModelSelector
                     v-if="selectedTierProviderSection.configurable"
-                    :model-value="tierOverrideValue(selectedTierProviderSection.key as TierProviderKey, tier.key)"
-                    :sections="tierModelSections"
+                    :model-value="tierSelectorValue(selectedTierProviderSection.key as TierProviderKey, tier.key)"
+                    :sections="tierModelSectionsFor(selectedTierProviderSection.key as TierProviderKey, tier.key)"
                     :disabled="routinesSaving || !selectedTierProviderSection.available"
-                    :placeholder="`Default (${tierEffectiveValue(selectedTierProviderSection.key as TierProviderKey, tier.key) || 'automatic'})`"
-                    :empty-placeholder="`Default (${tierEffectiveValue(selectedTierProviderSection.key as TierProviderKey, tier.key) || 'automatic'})`"
                     @update:model-value="saveTierModel(selectedTierProviderSection.key as TierProviderKey, tier.key, $event)"
                   />
                   <input
                     v-else
-                    class="routine-input"
-                    :value="tier.key"
+                    class="routine-input routing-model-input"
+                    :value="tierModelForProvider(selectedTierProviderSection.key, tier.key)"
+                    :aria-label="`${tier.label} ${selectedTierProviderSection.label} routing model`"
                     disabled
                   />
                 </label>
               </div>
-              <p v-if="!selectedTierProviderSection.configurable" class="hint hint--info tier-provider-note">
-                Claude uses the native tier aliases directly.
+              <p v-if="selectedTierProviderSection.key === 'codex' && selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
+                OpenAI models are discovered from the signed-in Codex account. Ciaobot assigns the tiers automatically; pick a model above to pin a tier. A pin falls back to the automatic mapping if its model disappears from the account.
               </p>
               <p v-else-if="!selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
                 {{ tierProviderUnavailableHint }}
@@ -899,7 +935,7 @@
                   <input class="routine-input" v-model="newWorkspaceForm.vault_root" :disabled="workspacesSaving === 'new'" placeholder="(defaults to name)" />
                 </label>
                 <label class="settings-field"><span class="ws-label">Provider</span>
-                  <select class="routine-input" v-model="newWorkspaceForm.default_provider" :disabled="workspacesSaving === 'new'">
+                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.default_provider" :disabled="workspacesSaving === 'new'">
                     <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
                       {{ provider.label }}
                     </option>
@@ -926,7 +962,7 @@
                       </div>
                     </details>
                   </div>
-                  <select class="routine-input" v-model="newWorkspaceForm.gws_profile" :disabled="workspacesSaving === 'new'">
+                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.gws_profile" :disabled="workspacesSaving === 'new'">
                     <option value="">Default ({{ defaultGwsProfileName }})</option>
                     <option v-for="profile in gwsProfileOptions" :key="`new-gws-${profile.name}`" :value="profile.name">
                       {{ profile.label }} ({{ profile.email || profile.name }})
@@ -936,7 +972,7 @@
                     </option>
                   </select>
                 </label>
-                <div class="settings-field settings-field--wide">
+                <div v-if="newWorkspaceForm.default_provider !== 'codex'" class="settings-field settings-field--wide">
                   <div class="settings-label-row">
                     <span class="ws-label">Claude.ai MCPs</span>
                     <details class="field-info">
@@ -953,7 +989,7 @@
                       </div>
                     </details>
                   </div>
-                  <select class="routine-input" v-model="newWorkspaceForm.claude_ai_mcps" :disabled="workspacesSaving === 'new'" aria-label="Claude.ai MCPs">
+                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.claude_ai_mcps" :disabled="workspacesSaving === 'new'" aria-label="Claude.ai MCPs">
                     <option value="on">On (connectors allowed)</option>
                     <option value="off">Off (connectors blocked)</option>
                   </select>
@@ -1000,7 +1036,7 @@
                     <input class="routine-input" v-model="form.vault_root" :disabled="workspacesSaving === form.name" placeholder="(defaults to workspace name)" />
                   </label>
                   <label class="settings-field"><span class="ws-label">Provider</span>
-                    <select class="routine-input" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
+                    <select class="routine-input workspace-select" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
                       <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
                         {{ provider.label }}
                       </option>
@@ -1027,7 +1063,7 @@
                         </div>
                       </details>
                     </div>
-                    <select class="routine-input" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
+                    <select class="routine-input workspace-select" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
                       <option value="">Default ({{ defaultGwsProfileName }})</option>
                       <option v-for="profile in gwsProfileOptions" :key="`${form.name}-gws-${profile.name}`" :value="profile.name">
                         {{ profile.label }} ({{ profile.email || profile.name }})
@@ -1037,7 +1073,7 @@
                       </option>
                     </select>
                   </label>
-                  <div class="settings-field settings-field--wide">
+                  <div v-if="form.default_provider !== 'codex'" class="settings-field settings-field--wide">
                     <div class="settings-label-row">
                       <span class="ws-label">Claude.ai MCPs</span>
                       <details class="field-info">
@@ -1054,7 +1090,7 @@
                         </div>
                       </details>
                     </div>
-                    <select class="routine-input" v-model="form.claude_ai_mcps" :disabled="workspacesSaving === form.name" aria-label="Claude.ai MCPs">
+                    <select class="routine-input workspace-select" v-model="form.claude_ai_mcps" :disabled="workspacesSaving === form.name" aria-label="Claude.ai MCPs">
                       <option value="on">On (connectors allowed)</option>
                       <option value="off">Off (connectors blocked)</option>
                     </select>
@@ -1069,63 +1105,116 @@
         </template>
       </template>
 
-      <!-- INSTRUCTIONS TAB -->
-      <template v-if="currentTab === 'instructions'">
+      <!-- CONTEXT TAB -->
+      <template v-if="currentTab === 'context'">
         <div class="card">
-          <div class="settings-card-header">
-            <p class="section-title">Instructions</p>
-            <p class="hint">
-              Claude Code files and Ciaobot-generated prompt blocks that shape what the agent sees.
-            </p>
+          <div class="settings-card-header settings-card-header--context">
+            <div>
+              <p class="section-title">Agent context</p>
+              <p class="hint">
+                How Ciaobot assembles context for every CLI. This guide is independent of the current chat, project, and workspace.
+              </p>
+            </div>
           </div>
 
-          <div v-if="!agentAssetsLoaded" class="action-row"><span class="loading">Loading&hellip;</span></div>
-          <template v-else-if="agentAssetsError">
-            <p class="hint hint--warn">{{ agentAssetsError }}</p>
-          </template>
-          <template v-else>
-            <p v-if="!instructionAssets.length" class="hint hint--section-empty">No instruction sources found.</p>
-            <div v-else class="skill-list">
+          <div class="skill-list">
+            <template v-for="item in contextAssets" :key="item.id">
+              <details
+                v-if="item.id === 'memory-sources'"
+                class="skill-row instruction-row memory-context-row"
+                :open="workspaceMemoryExpanded"
+                @toggle="workspaceMemoryExpanded = ($event.currentTarget as HTMLDetailsElement).open"
+              >
+                <summary class="skill-main memory-context-summary">
+                  <div class="skill-title-row command-title-row">
+                    <span class="skill-chevron">{{ workspaceMemoryExpanded ? '&#9662;' : '&#9656;' }}</span>
+                    <span class="skill-name">{{ item.title }}</span>
+                  </div>
+                  <p class="skill-description">{{ item.description }}</p>
+                </summary>
+                <div class="skill-detail memory-source-list">
+                  <template v-for="group in workspaceMemoryGroups" :key="group.id">
+                    <p class="memory-source-group-title">{{ group.title }}</p>
+                    <div v-for="memory in group.items" :key="memory.id" class="memory-source">
+                      <span class="memory-source-heading">
+                        <span>{{ memory.title }}</span>
+                        <span class="memory-source-badges">
+                          <span class="badge badge--muted command-source">{{ memoryInjectionLabel(memory) }}</span>
+                          <span class="badge badge--muted command-source">automatically generated</span>
+                          <span class="badge badge--muted command-source">not editable</span>
+                        </span>
+                      </span>
+                      <span class="memory-source-summary-copy">{{ memory.description }}</span>
+                      <p
+                        v-for="sourceFile in memorySourceFiles(memory)"
+                        :key="sourceFile.path"
+                        class="skill-meta memory-source-file"
+                      >
+                        <span class="skill-meta-label">Source file</span>
+                        <button class="inline-path-button" @click.stop="openAssetPath(sourceFile.path)">{{ sourceFile.label }}</button>
+                      </p>
+                    </div>
+                  </template>
+                </div>
+              </details>
+
               <div
-                v-for="item in instructionAssets"
-                :key="item.id"
+                v-else
                 class="skill-row instruction-row"
-                :class="{ expanded: isInstructionExpanded(item) }"
+                :class="{ expanded: isContextExpanded(item) }"
                 :style="{ paddingLeft: `${10 + Math.min(item.level || 0, 4) * 18}px` }"
-                @click="toggleInstruction(item)"
+                @click="toggleContext(item)"
               >
                 <div class="skill-main">
                   <div class="skill-title-row command-title-row">
-                    <span class="skill-chevron">{{ isInstructionExpanded(item) ? '&#9662;' : '&#9656;' }}</span>
+                    <span class="skill-chevron">{{ isContextExpanded(item) ? '&#9662;' : '&#9656;' }}</span>
                     <span class="skill-name">{{ item.title }}</span>
                     <span class="skill-badges">
                       <span v-if="item.scope" class="badge badge--muted command-source">{{ item.scope }}</span>
                       <span class="badge badge--muted command-source">{{ item.source }}</span>
-                      <span v-if="item.status && item.status !== 'ok'" class="badge command-source" :class="item.status === 'missing' ? 'badge--warn' : 'badge--error'">{{ item.status }}</span>
-                      <span v-if="item.editable" class="badge badge--success command-source">editable</span>
-                      <span v-else class="badge badge--muted command-source">read-only</span>
+                      <span class="badge command-source" :class="item.editable ? 'badge--success' : 'badge--muted'">
+                        {{ item.editable ? 'editable' : 'not editable' }}
+                      </span>
                     </span>
                   </div>
                   <p class="skill-description">{{ item.description }}</p>
-                  <div v-if="isInstructionExpanded(item)" class="skill-detail">
-                    <p v-if="item.path" class="skill-meta">
-                      <span class="skill-meta-label">Path</span>
-                      <button class="inline-path-button" @click.stop="openAssetPath(item.path)">{{ item.path }}</button>
+                  <div v-if="isContextExpanded(item)" class="skill-detail">
+                    <p
+                      v-for="sourceFile in contextSourceFiles(item)"
+                      :key="sourceFile.path"
+                      class="skill-meta"
+                    >
+                      <span class="skill-meta-label">Source file</span>
+                      <button class="inline-path-button" @click.stop="openAssetPath(sourceFile.path)">{{ sourceFile.label }}</button>
                     </p>
-                    <p v-if="item.parent_id" class="skill-meta">
-                      <span class="skill-meta-label">Imported by</span>
-                      <code class="command-path">{{ item.parent_id }}</code>
-                    </p>
-                    <p v-if="item.imports?.length" class="skill-meta">
-                      <span class="skill-meta-label">Imports</span>
-                      <code class="command-path">{{ item.imports.join(', ') }}</code>
-                    </p>
-                    <pre v-if="item.content" class="asset-code-preview"><code>{{ item.content }}</code></pre>
+                    <div v-if="item.id === 'cli-instruction-chain'" class="runtime-context-summary">
+                      <p class="hint hint--compact">At chat start, the active CLI discovers the applicable instruction files:</p>
+                      <ul>
+                        <li><strong>Global instructions:</strong> the user-level instruction file (<code>CLAUDE.md</code> for Claude Code, <code>AGENTS.md</code> for Codex), when present.</li>
+                        <li><strong>Workspace instructions:</strong> the workspace guide. <code>AGENTS.md</code> is linked to <code>CLAUDE.md</code>, so every CLI reads the same instructions.</li>
+                        <li><strong>Local, override, and nested instructions:</strong> local overrides, imported Markdown files, and more specific instruction files each CLI discovers for the working directory.</li>
+                      </ul>
+                    </div>
+                    <div v-else-if="item.id === 'ciaobot-system-prompt'" class="runtime-context-summary">
+                      <p class="hint hint--compact">
+                        Shared Ciaobot behavior and tool instructions are appended when the chat starts. The memory snapshot is appended next.
+                      </p>
+                    </div>
+                    <div v-else-if="item.id === 'runtime-context-hook'" class="runtime-context-summary">
+                      <p class="hint hint--compact">Every user turn includes:</p>
+                      <ul>
+                        <li><strong>Project context:</strong> the current project's single saved context value, when one is set.</li>
+                        <li><strong>Project document:</strong> a link to its <code>README.md</code> or canonical document, when available.</li>
+                        <li><strong>Runtime:</strong> today's date, workspace/project identifiers, Google profile, and working directory.</li>
+                        <li><strong>Relevant vault context:</strong> entity links matched from the current prompt.</li>
+                        <li><strong>Continuity:</strong> provider handover context when a chat has just switched providers.</li>
+                      </ul>
+                    </div>
                   </div>
                 </div>
               </div>
+            </template>
             </div>
-          </template>
         </div>
       </template>
 
@@ -1148,24 +1237,27 @@
           </div>
 
           <p class="hint hint--info skill-scope-note">
-            Ciaobot runs on Claude Code, so any plugins and skills you install globally in Claude Code are also loaded and available to Ciaobot. This page only lists the skills managed here, the Ciaobot-specific ones (custom and GitHub/package skills).
+            Ciaobot runs chats through Claude Code or Codex. Ciaobot-managed skills are synchronized into both CLIs where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed custom and GitHub/package skills.
           </p>
 
           <!-- Auto-update GitHub skills -->
-          <div class="setting-row setting-row--inline">
+          <div class="setting-row setting-row--inline setting-row--toggle">
             <div class="routine-info">
               <span class="routine-name">Auto-update GitHub skills</span>
               <p class="hint hint--compact">
                 If enabled, Ciaobot checks GitHub for updates to locked package skills on boot.
               </p>
             </div>
-            <input
-              type="checkbox"
-              class="settings-checkbox"
-              v-model="autoUpdateGithubSkills"
-              :disabled="autoUpdateSaving"
-              @change="saveAutoUpdateGithubSkills"
-            />
+            <label class="settings-checkbox-hit">
+              <input
+                type="checkbox"
+                class="settings-checkbox"
+                v-model="autoUpdateGithubSkills"
+                :disabled="autoUpdateSaving"
+                aria-label="Auto-update GitHub skills"
+                @change="saveAutoUpdateGithubSkills"
+              />
+            </label>
           </div>
           <div v-if="autoUpdateResult" class="action-result">{{ autoUpdateResult }}</div>
 
@@ -1261,7 +1353,7 @@
             <div>
               <p class="section-title">Subagents</p>
               <p class="hint">
-                Claude Code subagents available to Ciaobot. Custom subagents are saved in <code>subagents/</code> and mirrored into the vault.
+                Shared subagents available to Claude Code and Codex. Custom definitions are saved in <code>subagents/</code>, mirrored into the vault, and synchronized into each CLI's native format.
               </p>
             </div>
             <button class="btn-small" @click="toggleAddSubagent">
@@ -1358,7 +1450,7 @@
             <div>
               <p class="section-title">Commands</p>
               <p class="hint">
-                Slash commands available to Claude Code. Custom commands are saved in <code>commands/</code> and mirrored into the vault.
+                Shared commands available to Claude Code and Codex. Custom commands are saved in <code>commands/</code>, mirrored into the vault, and exposed to Codex through generated skill wrappers.
               </p>
             </div>
             <div class="settings-card-header-actions">
@@ -1493,6 +1585,7 @@ import type {
   DeployResult,
   GwsIntegrationSettings,
   LocalStatus,
+  ModelsResponse,
   PromptAsset,
   ProviderConfigSettings,
   RoutineSettings,
@@ -1511,19 +1604,22 @@ import { useProductTourStore } from '../stores/productTour'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import RestartOverlay from './RestartOverlay.vue'
-import { providerModelBadges, sectionsFromModelOptions, type ModelSection } from '../lib/modelSections'
+import GettingStartedChecklist from './GettingStartedChecklist.vue'
+import { providerModelBadges, sectionsFromModelOptions, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 
 const emit = defineEmits<{ 'open-sidebar': [] }>()
 
 const route = useRoute()
 const fileViewer = useFileViewerStore()
 const productTour = useProductTourStore()
+const projectStore = useProjectStore()
 const currentTab = computed(() => (route.params.tab as string) || 'home')
 
 const expandedSkills = ref<Record<string, boolean>>({})
 const expandedCommands = ref<Record<string, boolean>>({})
 const expandedSubagents = ref<Record<string, boolean>>({})
-const expandedInstructions = ref<Record<string, boolean>>({})
+const expandedContext = ref<Record<string, boolean>>({})
+const workspaceMemoryExpanded = ref(false)
 
 // ── Appearance settings ────────────────────────────────────────────────────
 const activeTheme = ref('system')
@@ -1608,11 +1704,11 @@ function toggleSubagent(agent: SubagentAsset) {
   const key = `${agent.source}:${agent.name}:${agent.path}`
   expandedSubagents.value[key] = !isSubagentExpanded(agent)
 }
-function isInstructionExpanded(item: PromptAsset) {
-  return expandedInstructions.value[item.id] || false
+function isContextExpanded(item: PromptAsset) {
+  return expandedContext.value[item.id] || false
 }
-function toggleInstruction(item: PromptAsset) {
-  expandedInstructions.value[item.id] = !isInstructionExpanded(item)
+function toggleContext(item: PromptAsset) {
+  expandedContext.value[item.id] = !isContextExpanded(item)
 }
 function openAssetPath(path: string) {
   if (!path) return
@@ -1654,9 +1750,10 @@ const routinesError = ref('')
 const routinesSaving = ref(false)
 const routinesResult = ref('')
 
-type AliasProviderKey = 'claude' | 'ollama' | 'openrouter'
+type AliasProviderKey = 'claude' | 'codex' | 'ollama' | 'openrouter'
 type TierProviderKey = Exclude<AliasProviderKey, 'claude'>
-type TierKey = 'haiku' | 'sonnet' | 'opus'
+type RoutingProviderKey = Exclude<AliasProviderKey, 'claude'>
+type TierKey = 'haiku' | 'sonnet' | 'opus' | 'fable'
 type RoutineModelKey = 'title_model' | 'insights_model'
 type RoutineProviderValue = 'automatic' | 'apple' | 'custom' | AliasProviderKey
 
@@ -1675,14 +1772,21 @@ type TierSettingKey =
   | 'ollama_haiku_model'
   | 'ollama_sonnet_model'
   | 'ollama_opus_model'
+  | 'ollama_fable_model'
   | 'openrouter_haiku_model'
   | 'openrouter_sonnet_model'
   | 'openrouter_opus_model'
+  | 'openrouter_fable_model'
+  | 'codex_haiku_model'
+  | 'codex_sonnet_model'
+  | 'codex_opus_model'
+  | 'codex_fable_model'
 
 const modelTiers: { key: TierKey; label: string }[] = [
   { key: 'haiku', label: 'Haiku' },
   { key: 'sonnet', label: 'Sonnet' },
   { key: 'opus', label: 'Opus' },
+  { key: 'fable', label: 'Fable' },
 ]
 
 const tierSettingKeys: Record<TierProviderKey, Record<TierKey, TierSettingKey>> = {
@@ -1690,11 +1794,19 @@ const tierSettingKeys: Record<TierProviderKey, Record<TierKey, TierSettingKey>> 
     haiku: 'ollama_haiku_model',
     sonnet: 'ollama_sonnet_model',
     opus: 'ollama_opus_model',
+    fable: 'ollama_fable_model',
   },
   openrouter: {
     haiku: 'openrouter_haiku_model',
     sonnet: 'openrouter_sonnet_model',
     opus: 'openrouter_opus_model',
+    fable: 'openrouter_fable_model',
+  },
+  codex: {
+    haiku: 'codex_haiku_model',
+    sonnet: 'codex_sonnet_model',
+    opus: 'codex_opus_model',
+    fable: 'codex_fable_model',
   },
 }
 
@@ -1778,7 +1890,7 @@ const aliasProviderSections = computed<AliasProviderSection[]>(() => {
   const sections: AliasProviderSection[] = [
     {
       key: 'claude',
-      label: 'Claude',
+      label: 'Anthropic (via Claude Code)',
       options: settings.model_options.anthropic || [],
       configurable: false,
       available: true,
@@ -1787,7 +1899,7 @@ const aliasProviderSections = computed<AliasProviderSection[]>(() => {
   if (settings.backends?.ollama) {
     sections.push({
       key: 'ollama',
-      label: 'Ollama',
+      label: 'Ollama (via Claude Code)',
       options: parseModelList([
         ...(settings.model_options.ollama_local || []),
         ...(settings.model_options.ollama_cloud || []),
@@ -1799,7 +1911,7 @@ const aliasProviderSections = computed<AliasProviderSection[]>(() => {
   if (settings.backends?.openrouter) {
     sections.push({
       key: 'openrouter',
-      label: 'OpenRouter',
+      label: 'OpenRouter (via Claude Code)',
       options: parseModelList((settings.model_options.openrouter || []).join(',')),
       configurable: true,
       available: true,
@@ -1808,26 +1920,31 @@ const aliasProviderSections = computed<AliasProviderSection[]>(() => {
   return sections
 })
 
-// Tier-mapping sections for the Providers tab "Provider alias models" card.
-// Always includes Ollama and OpenRouter (even when unconfigured) so the
-// operator can see the option exists; unconfigured backends render disabled
-// with a "set the API key" hint instead of vanishing.
+// Provider-neutral routing overview for the Providers tab. OpenAI models and
+// their automatic tier mapping come from Codex discovery in `/api/models`;
+// Ollama and OpenRouter expose editable Claude Code tier routes. Unconfigured
+// backends stay visible with setup guidance instead of vanishing.
 const tierProviderSections = computed<AliasProviderSection[]>(() => {
   const settings = routines.value
   if (!settings) return []
+  const codexModels = parseModelList((
+    workspaceModels.value?.codex_models
+    || workspaceModels.value?.provider_models?.codex
+    || []
+  ).join(','))
   const ollamaAvailable = !!settings.backends?.ollama
   const openrouterAvailable = !!settings.backends?.openrouter
   return [
     {
-      key: 'claude',
-      label: 'Claude',
-      options: settings.model_options.anthropic || [],
-      configurable: false,
-      available: true,
+      key: 'codex',
+      label: 'OpenAI (via Codex)',
+      options: codexModels,
+      configurable: true,
+      available: codexModels.length > 0,
     },
     {
       key: 'ollama',
-      label: 'Ollama',
+      label: 'Ollama (via Claude Code)',
       options: ollamaAvailable
         ? parseModelList([
             ...(settings.model_options.ollama_local || []),
@@ -1839,7 +1956,7 @@ const tierProviderSections = computed<AliasProviderSection[]>(() => {
     },
     {
       key: 'openrouter',
-      label: 'OpenRouter',
+      label: 'OpenRouter (via Claude Code)',
       options: openrouterAvailable
         ? parseModelList((settings.model_options.openrouter || []).join(','))
         : [],
@@ -1849,7 +1966,7 @@ const tierProviderSections = computed<AliasProviderSection[]>(() => {
   ]
 })
 
-const selectedTierProvider = ref<AliasProviderKey>('claude')
+const selectedTierProvider = ref<RoutingProviderKey>('codex')
 const selectedTierProviderSection = computed(() =>
   tierProviderSections.value.find((section) => section.key === selectedTierProvider.value)
   || tierProviderSections.value[0]
@@ -1860,6 +1977,9 @@ const selectedTierProviderSection = computed(() =>
 const tierModelSections = computed<ModelSection[]>(() => {
   const section = selectedTierProviderSection.value
   if (!section || !section.options.length) return []
+  const aliasTiers = section.key === 'codex'
+    ? workspaceModels.value?.alias_tiers
+    : routines.value?.alias_tiers
   const localModels = section.key === 'ollama'
     ? routines.value?.model_options.ollama_local || []
     : []
@@ -1868,7 +1988,7 @@ const tierModelSections = computed<ModelSection[]>(() => {
       key: section.key,
       label: section.label,
       models: section.options,
-      modelBadges: providerModelBadges(section.key, section.options, routines.value?.alias_tiers, localModels),
+      modelBadges: providerModelBadges(section.key, section.options, aliasTiers, localModels),
       disabled: !section.available,
       hint: section.available ? undefined : tierProviderUnavailableHint.value,
     },
@@ -1878,6 +1998,9 @@ const tierModelSections = computed<ModelSection[]>(() => {
 const tierProviderUnavailableHint = computed(() => {
   const section = selectedTierProviderSection.value
   if (!section || section.available) return ''
+  if (section.key === 'codex') {
+    return 'Sign in to Codex to discover the available OpenAI models and their tier routing.'
+  }
   if (section.key === 'ollama') {
     return 'Install local Ollama models or set the Ollama Cloud API key above to enable tier mapping.'
   }
@@ -1887,23 +2010,64 @@ const tierProviderUnavailableHint = computed(() => {
   return 'Configure this provider to enable tier mapping.'
 })
 
+const DEFAULT_TIER_SELECTION = '__ciao_default__'
+
 function tierOverrideValue(provider: TierProviderKey, tier: TierKey): string {
   const key = tierSettingKeys[provider][tier]
   return routines.value?.[key] || ''
 }
 
 function tierEffectiveValue(provider: TierProviderKey, tier: TierKey): string {
+  // Codex effective tiers come from the account catalog, exposed by
+  // /api/models rather than the routines payload.
+  if (provider === 'codex') return workspaceModels.value?.alias_tiers?.codex?.[tier] || ''
   return routines.value?.alias_tiers?.[provider]?.[tier] || ''
 }
 
+function tierDefaultValue(provider: TierProviderKey, tier: TierKey): string {
+  if (provider === 'codex') {
+    return workspaceModels.value?.codex_tier_defaults?.[tier]
+      || tierEffectiveValue(provider, tier)
+  }
+  return routines.value?.tier_defaults?.[provider]?.[tier]
+    || tierEffectiveValue(provider, tier)
+}
+
+function tierDefaultLabel(provider: TierProviderKey, tier: TierKey): string {
+  const model = tierDefaultValue(provider, tier)
+  const word = provider === 'codex' ? 'Automatic' : 'Default'
+  return model ? `${word} (${model})` : word
+}
+
+function tierSelectorValue(provider: TierProviderKey, tier: TierKey): string {
+  return tierOverrideValue(provider, tier) || DEFAULT_TIER_SELECTION
+}
+
+function tierModelSectionsFor(provider: TierProviderKey, tier: TierKey): ModelSection[] {
+  return [
+    {
+      key: 'default',
+      label: 'Default',
+      models: [DEFAULT_TIER_SELECTION],
+      modelLabels: { [DEFAULT_TIER_SELECTION]: tierDefaultLabel(provider, tier) },
+    },
+    ...tierModelSections.value,
+  ]
+}
+
 async function saveTierModel(provider: TierProviderKey, tier: TierKey, value: string | string[]) {
-  const model = Array.isArray(value) ? value[0] || '' : value
+  const selected = Array.isArray(value) ? value[0] || '' : value
+  const model = selected === DEFAULT_TIER_SELECTION ? '' : selected
   const key = tierSettingKeys[provider][tier]
   await saveRoutines({ [key]: model.trim() })
+  // Codex effective tiers live in /api/models; refresh so the badges and
+  // "Automatic (…)" labels reflect the new pin immediately.
+  if (provider === 'codex') await fetchWorkspaceModels()
 }
 
 function tierModelForProvider(provider: AliasProviderKey, tier: TierKey): string {
-  if (provider === 'claude') return tier
+  if (provider === 'claude') return routines.value?.alias_tiers?.claude?.[tier] || tier
+  if (provider === 'codex') return workspaceModels.value?.alias_tiers?.codex?.[tier] || 'Not available'
   return tierEffectiveValue(provider, tier) || ''
 }
 
@@ -1923,8 +2087,9 @@ function inferRoutineModel(model: string): { provider: RoutineProviderValue; tie
   const raw = model.trim()
   if (!raw) return { provider: 'automatic', tier: 'sonnet' }
   if (raw === 'apfel') return { provider: 'apple', tier: 'haiku' }
-  if (raw === 'haiku' || raw === 'sonnet' || raw === 'opus') {
-    return { provider: 'claude', tier: raw }
+  const claudeTiers: Record<string, TierKey> = { haiku: 'haiku', sonnet: 'sonnet', opus: 'opus', fable: 'fable' }
+  if (claudeTiers[raw]) {
+    return { provider: 'claude', tier: claudeTiers[raw] }
   }
 
   const providers: TierProviderKey[] = ['ollama', 'openrouter']
@@ -2007,6 +2172,8 @@ const providerKeysError = ref('')
 const providerKeysSaving = ref(false)
 const providerKeysResult = ref('')
 const providerKeyInputs = ref<Record<string, string>>({})
+const providerConnectionPending = ref('')
+const providerConnectionResult = ref('')
 const autoUpdateGithubSkills = ref(false)
 const autoUpdateSaving = ref(false)
 const autoUpdateResult = ref('')
@@ -2198,6 +2365,9 @@ async function fetchProviderKeys() {
     for (const key in res.keys) {
       providerKeyInputs.value[key] = ''
     }
+    for (const key in res.service_keys || {}) {
+      providerKeyInputs.value[key] = ''
+    }
     if (res.auto_update_github_skills !== undefined) {
       autoUpdateGithubSkills.value = res.auto_update_github_skills
     }
@@ -2208,6 +2378,31 @@ async function fetchProviderKeys() {
   }
 }
 
+async function providerConnectionAction(provider: string, action: 'connect' | 'verify' | 'logout') {
+  if (action === 'logout' && !confirm(`Log out of ${provider === 'codex' ? 'OpenAI Codex' : 'Claude Code'} on this computer?`)) {
+    return
+  }
+  providerConnectionPending.value = provider
+  providerConnectionResult.value = ''
+  try {
+    const result = await api.post<any>(`/api/settings/providers/${provider}/${action}`)
+    if (action === 'connect') {
+      providerConnectionResult.value = result.opened
+        ? `Opened ${provider === 'codex' ? 'Codex' : 'Claude Code'} login in Terminal.`
+        : `Run ${result.command} in Terminal.`
+    } else if (action === 'logout') {
+      providerConnectionResult.value = 'Logged out.'
+    } else {
+      providerConnectionResult.value = result.ok ? `Connection verified (${result.auth}).` : result.detail || 'Not connected.'
+    }
+    await fetchProviderKeys()
+  } catch (e: any) {
+    providerConnectionResult.value = `Error: ${e?.message || e}`
+  } finally {
+    providerConnectionPending.value = ''
+  }
+}
+
 async function saveProviderKeys() {
   if (!providerKeys.value) return
   providerKeysSaving.value = true
@@ -2215,6 +2410,12 @@ async function saveProviderKeys() {
   
   const patchKeys: Record<string, string> = {}
   for (const key in providerKeys.value.keys) {
+    const val = providerKeyInputs.value[key]
+    if (val !== '') {
+      patchKeys[key] = val
+    }
+  }
+  for (const key in providerKeys.value.service_keys || {}) {
     const val = providerKeyInputs.value[key]
     if (val !== '') {
       patchKeys[key] = val
@@ -2236,6 +2437,9 @@ async function saveProviderKeys() {
     const res = await api.patch<ProviderConfigSettings>('/api/settings/providers', payload)
     providerKeys.value = res
     for (const key in res.keys) {
+      providerKeyInputs.value[key] = ''
+    }
+    for (const key in res.service_keys || {}) {
       providerKeyInputs.value[key] = ''
     }
     if (res.auto_update_github_skills !== undefined) {
@@ -2351,7 +2555,130 @@ const githubSkills = computed(() => {
   return skillsInventory.value?.skills.filter(s => s.label === 'github') || []
 })
 
-const instructionAssets = computed(() => agentAssets.value?.instructions || [])
+function contextGuideAsset(
+  id: string,
+  title: string,
+  description: string,
+  scope: string,
+  source: string,
+  editable: boolean = false,
+): PromptAsset {
+  return { id, title, description, scope, source, path: '', editable, content: '' }
+}
+
+type ContextSourceFile = { label: string; path: string }
+
+function sourceFile(item: PromptAsset, label: string = item.path): ContextSourceFile[] {
+  return item.path ? [{ label, path: item.path }] : []
+}
+
+function contextSourceFiles(item: PromptAsset): ContextSourceFile[] {
+  const inventory = agentAssets.value?.context || []
+  if (item.id === 'cli-instruction-chain') {
+    // AGENTS.md is linked to CLAUDE.md, so a single row covers both guides;
+    // the link opens the canonical CLAUDE.md.
+    const expected = /(?:^|[\\/])CLAUDE\.md$/i
+    const candidates = inventory.filter(candidate =>
+      candidate.scope === 'project' && expected.test(candidate.path),
+    )
+    const preferred = candidates.find(candidate => !candidate.path.replaceAll('\\', '/').includes('/')) || candidates[0]
+    return [{ label: 'CLAUDE.md / AGENTS.md', path: preferred?.path || 'CLAUDE.md' }]
+  }
+  if (item.id === 'ciaobot-system-prompt') {
+    const configured = inventory.find(candidate => candidate.id === 'ciaobot-system-prompt')
+    return configured?.path
+      ? sourceFile(configured)
+      : [{ label: 'ciao/system_prompt.md', path: 'ciao/system_prompt.md' }]
+  }
+  return []
+}
+
+function memorySourceFiles(item: PromptAsset): ContextSourceFile[] {
+  const inventory = agentAssets.value?.context || []
+  if (item.id === 'ciaobot-memory' || item.id === 'ciaobot-user') {
+    const configured = inventory.find(candidate => candidate.id === item.id)
+    return configured ? sourceFile(configured) : []
+  }
+  if (item.id === 'workspace-memory') {
+    return inventory
+      .filter(candidate => candidate.scope === 'vault')
+      .flatMap(candidate => sourceFile(candidate))
+  }
+  return []
+}
+
+const workspaceMemoryAssets = computed<PromptAsset[]>(() => [
+  contextGuideAsset(
+    'ciaobot-memory',
+    'Global remembered facts',
+    'Cross-session facts, conventions, and lessons shared across all workspaces.',
+    'bounded-memory',
+    'session start',
+  ),
+  contextGuideAsset(
+    'ciaobot-user',
+    'Global user profile',
+    'Your identity and response preferences, shared across all workspaces.',
+    'bounded-memory',
+    'session start',
+  ),
+  contextGuideAsset(
+    'workspace-memory',
+    'Workspace notes (MEMORY.md)',
+    'Durable notes from whichever workspace the chat uses. This file is not inserted automatically.',
+    'vault',
+    'on demand',
+  ),
+])
+
+const workspaceMemoryGroups = computed(() => [
+  {
+    id: 'automatic',
+    title: 'Global · included automatically at chat start',
+    items: workspaceMemoryAssets.value.filter(item => item.scope === 'bounded-memory'),
+  },
+  {
+    id: 'available',
+    title: 'Workspace-specific · opened only when relevant',
+    items: workspaceMemoryAssets.value.filter(item => item.scope === 'vault'),
+  },
+].filter(group => group.items.length))
+
+function memoryInjectionLabel(item: PromptAsset): string {
+  return item.source
+}
+
+const contextAssets = computed<PromptAsset[]>(() => [
+  contextGuideAsset(
+    'cli-instruction-chain',
+    'CLI instructions (CLAUDE.md · AGENTS.md)',
+    'The active CLI assembles the applicable global, workspace, override, and imported instruction files. The workspace CLAUDE.md and AGENTS.md are linked, so Claude Code and Codex read the same instructions.',
+    'CLI',
+    'session start',
+    true,
+  ),
+  contextGuideAsset(
+    'ciaobot-system-prompt',
+    'Ciaobot system instructions',
+    'Shared Ciaobot behavior and tool instructions appended when the chat starts.',
+    'Ciaobot',
+    'session start',
+  ),
+  contextGuideAsset(
+    'memory-sources',
+    'Memory sources',
+    'Global session memory is appended at chat start; workspace-specific notes are opened only when relevant.',
+    'Ciaobot',
+    'session start',
+  ),
+  contextGuideAsset(
+    'runtime-context-hook',
+    'Per-turn runtime context hook',
+    'Dynamic project references and runtime metadata added before every user prompt.',
+    'Ciaobot',
+    'each turn',
+  ),
+])
 const subagentAssets = computed(() => agentAssets.value?.subagents || [])
 const commandAssets = computed(() => agentAssets.value?.commands || [])
 const workspaceHealth = computed<WorkspaceHealthResponse | null>(() => agentAssets.value?.health || null)
@@ -2751,8 +3078,6 @@ function isStandalone(): boolean {
 }
 
 // ── Workspaces settings (Workspaces tab) ───────────────────────────────────
-const projectStore = useProjectStore()
-
 // Transient success feedback. Routes through the app-wide in-app toast (the
 // same auto-dismissing popup used for routine/chat notifications) instead of
 // leaving persistent inline text under the form.
@@ -2764,6 +3089,7 @@ const workspacesError = ref('')
 const workspacesSaving = ref<string | null>(null)
 const workspacesResult = ref('')
 const showNewWorkspace = ref(false)
+const workspaceModels = ref<ModelsResponse | null>(null)
 
 type WorkspaceForm = {
   name: string
@@ -2833,7 +3159,16 @@ function isCustomWorkspaceModel(model: string): boolean {
 }
 
 function workspaceModelSectionsForProvider(provider: WorkspaceProvider, currentModelValue: string): ModelSection[] {
-  const tiers: TierKey[] = ['haiku', 'sonnet', 'opus']
+  if (provider === 'codex') {
+    const section = sectionsFromModelsResponse(workspaceModels.value).find((item) => item.key === 'codex')
+    if (!section) return []
+    const models = [...section.models]
+    const badges = { ...(section.modelBadges || {}) }
+    const current = currentModelValue.trim()
+    if (current && !modelTiers.some((tier) => tier.key === current) && !models.includes(current)) models.push(current)
+    return [{ ...section, models, modelBadges: badges }]
+  }
+  const tiers: TierKey[] = ['haiku', 'sonnet', 'opus', 'fable']
   const modelBadges: Record<string, string[]> = {}
   
   for (const tier of tiers) {
@@ -2907,6 +3242,14 @@ async function fetchWorkspacesList() {
     workspacesError.value = `Failed to load workspaces: ${e?.message || e}`
   } finally {
     workspacesLoaded.value = true
+  }
+}
+
+async function fetchWorkspaceModels() {
+  try {
+    workspaceModels.value = await api.get<ModelsResponse>('/api/models')
+  } catch {
+    workspaceModels.value = null
   }
 }
 
@@ -2991,6 +3334,7 @@ onMounted(async () => {
   fetchAutomation()
   fetchPackageStatus()
   fetchProviderKeys()
+  fetchWorkspaceModels()
   fetchGwsIntegration()
   fetchWorkspacesList()
   pushSupportedFlag.value = pushSupported()
@@ -3405,6 +3749,21 @@ async function doPackageUpdate() {
   justify-content: flex-end;
   flex: 0 0 auto;
 }
+.settings-card-header--context {
+  flex-direction: row;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+.settings-card-header--context > div:first-child {
+  min-width: 0;
+}
+@container (max-width: 640px) {
+  .settings-card-header--context {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
 .hint--compact {
   margin: 0;
 }
@@ -3457,6 +3816,35 @@ async function doPackageUpdate() {
 .action-row > button {
   flex: 1 1 0;
 }
+.action-row--compact > button {
+  flex: 0 1 auto;
+  min-width: 190px;
+}
+.btn-secondary,
+.btn-caution {
+  min-height: var(--touch);
+  padding: 10px 20px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg3);
+  color: var(--fg);
+  cursor: pointer;
+  font-family: var(--font);
+  font-size: calc(14px * var(--font-scale));
+  font-weight: 600;
+  transition: background 120ms var(--ease), border-color 120ms var(--ease), transform 120ms var(--ease);
+}
+.btn-secondary:hover { background: var(--border-strong); }
+.btn-caution {
+  color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 65%, var(--border));
+  background: color-mix(in srgb, var(--warning) 8%, var(--bg3));
+}
+.btn-caution:hover { background: color-mix(in srgb, var(--warning) 15%, var(--bg3)); }
+.btn-secondary:active,
+.btn-caution:active { transform: scale(0.98); }
+.btn-secondary:disabled,
+.btn-caution:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 .settings-actions {
   justify-content: flex-end;
   margin-top: var(--space-2);
@@ -3823,6 +4211,24 @@ async function doPackageUpdate() {
   min-width: 0;
   width: 100%;
 }
+.provider-connections {
+  display: flex;
+  flex-direction: column;
+}
+.provider-connection-actions {
+  justify-content: flex-start;
+  gap: var(--space-2);
+}
+.provider-connection-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+.provider-connection-detail > span + span::before {
+  content: '·';
+  margin-right: 10px;
+  color: var(--fg3);
+}
 .settings-control {
   width: min(100%, 430px);
   min-width: 320px;
@@ -3834,6 +4240,15 @@ async function doPackageUpdate() {
   flex: 0 0 auto;
   cursor: pointer;
   accent-color: var(--accent);
+}
+.settings-checkbox-hit {
+  width: var(--touch);
+  height: var(--touch);
+  flex: 0 0 var(--touch);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
 }
 .voice-warning {
   display: flex;
@@ -3956,7 +4371,7 @@ async function doPackageUpdate() {
   margin-top: var(--space-3);
 }
 .alias-provider-field {
-  width: min(360px, 100%);
+  width: 100%;
 }
 .tier-provider-note {
   margin-top: var(--space-2);
@@ -4143,7 +4558,7 @@ async function doPackageUpdate() {
     padding: var(--space-3);
   }
   .settings-card-header--split,
-  .setting-row--inline,
+  .setting-row--inline:not(.setting-row--toggle),
   .setting-row-main--inline {
     flex-direction: column;
     align-items: stretch;
@@ -4156,6 +4571,10 @@ async function doPackageUpdate() {
   }
   .settings-actions > button {
     flex: 1 1 auto;
+  }
+  .action-row--compact > button {
+    flex: 1 1 100%;
+    width: 100%;
   }
   .settings-control {
     min-width: 0;
@@ -4318,6 +4737,92 @@ async function doPackageUpdate() {
   line-height: 1.45;
   white-space: pre-wrap;
 }
+.skill-row.memory-context-row {
+  display: block;
+}
+.memory-context-row > summary {
+  list-style: none;
+}
+.memory-context-row > summary::-webkit-details-marker {
+  display: none;
+}
+.memory-context-summary {
+  min-height: var(--touch);
+  cursor: pointer;
+}
+.memory-context-row[open] .memory-context-summary .skill-description {
+  display: block;
+  -webkit-line-clamp: unset;
+  overflow: visible;
+}
+.memory-source-list {
+  gap: var(--space-2);
+}
+.memory-source-group-title {
+  margin: var(--space-2) 0 0;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.memory-source-group-title:first-child {
+  margin-top: 0;
+}
+.memory-source {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bg2) 72%, transparent);
+}
+.memory-source-heading {
+  display: flex;
+  min-height: 24px;
+  align-items: flex-start;
+  gap: var(--space-2);
+  color: var(--fg);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.memory-source-badges {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-left: auto;
+}
+.memory-source-summary-copy {
+  display: block;
+  margin-top: var(--space-1);
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  font-weight: 400;
+  line-height: 1.45;
+}
+.memory-source .skill-meta {
+  margin-top: var(--space-2);
+}
+@container (max-width: 640px) {
+  .memory-source-heading {
+    flex-direction: column;
+  }
+  .memory-source-badges {
+    margin-left: 0;
+  }
+}
+.runtime-context-summary ul {
+  margin: var(--space-2) 0 0;
+  padding-left: 20px;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  line-height: 1.55;
+}
+.runtime-context-summary li + li {
+  margin-top: var(--space-1);
+}
+.runtime-context-summary strong {
+  color: var(--fg);
+}
 .subsection-title--spaced {
   margin-bottom: var(--space-2);
 }
@@ -4375,7 +4880,9 @@ async function doPackageUpdate() {
   gap: 4px;
   min-width: 0;
 }
+.settings-field > .ws-label,
 .settings-label-row {
+  min-height: 20px;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -4414,7 +4921,8 @@ async function doPackageUpdate() {
   position: absolute;
   z-index: 30;
   top: calc(100% + 6px);
-  left: 0;
+  right: 0;
+  left: auto;
   width: min(380px, calc(100vw - 48px));
   padding: var(--space-3);
   border: 1px solid var(--border);
@@ -4448,6 +4956,36 @@ async function doPackageUpdate() {
   max-width: none;
   min-width: 0;
   width: 100%;
+}
+.workspace-select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  min-height: 36px;
+  padding: 7px 36px 7px 12px;
+  border-radius: var(--radius);
+  background-color: var(--bg-elev);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M2.5 4.5L6 8l3.5-3.5' fill='none' stroke='%237a7a90' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 12px 12px;
+  color: var(--fg);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 120ms var(--ease), border-color 120ms var(--ease);
+}
+.workspace-select:hover:not(:disabled) {
+  background-color: var(--bg3);
+}
+.workspace-select:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-color: var(--accent);
+}
+.workspace-select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 .settings-advanced {
   padding: var(--space-2);

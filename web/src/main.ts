@@ -93,12 +93,3 @@ if (window.visualViewport) {
 window.addEventListener('scroll', () => {
   if (window.scrollY !== 0) window.scrollTo(0, 0)
 }, { passive: true })
-
-// Block pinch-to-zoom on iOS Safari. The viewport meta's `user-scalable=no`
-// is honored in standalone PWA mode, but plain Safari historically ignores it
-// and still pinch-zooms the page. Listening to the (non-standard, WebKit-only)
-// `gesturestart` event catches the two-finger zoom gesture before it starts.
-// Double-tap zoom is killed via `touch-action: manipulation` on body.
-document.addEventListener('gesturestart', (e) => e.preventDefault())
-document.addEventListener('gesturechange', (e) => e.preventDefault())
-document.addEventListener('gestureend', (e) => e.preventDefault())

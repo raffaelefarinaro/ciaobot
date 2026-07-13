@@ -6,6 +6,7 @@ export interface ModelSection {
   models: string[]
   badge?: string
   modelBadges?: Record<string, string[]>
+  modelLabels?: Record<string, string>
   disabled?: boolean
   hint?: string
 }
@@ -16,6 +17,7 @@ const TIER_LABELS: Record<string, string> = {
   haiku: 'Haiku',
   sonnet: 'Sonnet',
   opus: 'Opus',
+  fable: 'Fable',
 }
 
 const ANTHROPIC_MODELS = ['haiku', 'sonnet', 'opus', 'fable']
@@ -86,6 +88,25 @@ export function sectionsFromModelsResponse(response: ModelsResponse | null): Mod
   const openrouterModels = orderedUnique(response.openrouter_models || [])
 
   sections.push({ key: 'anthropic', label: 'Anthropic', models: ANTHROPIC_MODELS })
+
+  const codexModels = orderedUnique(response.codex_models || response.provider_models?.codex || [])
+  if (codexModels.length) {
+    const modelBadges = providerModelBadges('codex', codexModels, response.alias_tiers)
+    const fableModel = response.alias_tiers?.codex?.fable || ''
+    if (fableModel && modelBadges[fableModel]) {
+      modelBadges[fableModel] = modelBadges[fableModel].filter((badge) => badge !== 'Fable')
+    }
+    const models = fableModel && !codexModels.includes('fable') ? [...codexModels, 'fable'] : codexModels
+    const modelLabels = fableModel ? { fable: `${fableModel}-ultra` } : undefined
+    if (fableModel) modelBadges.fable = ['Fable']
+    sections.push({
+      key: 'codex',
+      label: 'OpenAI Codex',
+      models,
+      modelBadges,
+      modelLabels,
+    })
+  }
 
   // Ollama: cloud allowlist plus locally discovered daemon models.
   const local = orderedUnique(response.ollama_local_models || [])

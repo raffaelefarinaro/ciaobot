@@ -7,13 +7,9 @@ from pathlib import Path
 
 
 EXPECTED_AGENTS = {
-    "comment-analyzer.md",
-    "doc-updater.md",
     "memory.md",
-    "pr-test-analyzer.md",
     "researcher.md",
     "secretary.md",
-    "silent-failure-hunter.md",
 }
 
 EXPECTED_COMMANDS = {
@@ -25,7 +21,6 @@ EXPECTED_COMMANDS = {
 EXPECTED_SYSTEM_SCHEDULES = {
     "system-memory-curation",
     "system-skill-evolution",
-    "system-error-triage",
     "system-weekly-review",
 }
 
@@ -70,6 +65,20 @@ def test_stock_schedules_are_read_only_system_entries() -> None:
         assert entry["workspace"] == "default"
         assert "last_triggered_on" not in entry
         assert "last_dispatched_at" not in entry
+
+
+def test_stock_text_does_not_reference_removed_agents() -> None:
+    from ciao.sync_skills import LEGACY_REMOVED_STOCK_AGENTS
+
+    stock = Path(resources.files("ciao.stock"))
+    for path in stock.rglob("*"):
+        if not path.is_file() or path.suffix not in {".md", ".json"}:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for agent in LEGACY_REMOVED_STOCK_AGENTS:
+            assert agent not in text, (
+                f"{path.relative_to(stock)} references removed agent '{agent}'"
+            )
 
 
 def test_stock_package_has_no_private_markers() -> None:

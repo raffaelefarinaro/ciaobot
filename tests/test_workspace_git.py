@@ -31,7 +31,7 @@ def test_ensure_workspace_git_initializes_fresh_dir(tmp_path: Path) -> None:
     assert len(log.stdout.strip().splitlines()) == 1
 
     gitignore = (root / ".gitignore").read_text(encoding="utf-8")
-    for entry in (".env", ".runtime/", ".claude/", "*.log"):
+    for entry in (".env", ".runtime/", ".claude/", ".agents/", "*.log"):
         assert entry in gitignore.splitlines()
 
     tracked = _git(root, "ls-files").stdout.splitlines()
@@ -66,7 +66,7 @@ def test_ensure_workspace_git_leaves_existing_repo_alone(tmp_path: Path) -> None
     lines = gitignore.splitlines()
     assert lines[:3] == ["# mine", "node_modules/", ".env"]
     assert lines.count(".env") == 1
-    for entry in (".runtime/", ".claude/", "*.log"):
+    for entry in (".runtime/", ".claude/", ".agents/", "*.log"):
         assert entry in lines
 
 
@@ -182,7 +182,9 @@ def test_setup_workspace_creates_git_repo_without_committing_env(
     assert ".env" not in tracked
     assert not any(path.startswith(".runtime/") for path in tracked)
     assert not any(path.startswith(".claude/") for path in tracked)
+    assert not any(path.startswith(".agents/") for path in tracked)
     assert "CLAUDE.md" in tracked
+    assert "AGENTS.md" in tracked
     assert _git(ws, "status", "--porcelain").stdout.strip() == ""
 
     # Default layout: the vault lives inside the workspace repo and is

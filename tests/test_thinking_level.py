@@ -112,6 +112,36 @@ def test_stale_thinking_level_falls_back_to_default(tmp_path: Path) -> None:
     assert pcm._thinking_level_for_chat(chat) == "high"
 
 
+def test_codex_fable_preset_uses_ultra_effort(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("thinking", workspace="personal")
+    chat = pcm.create_chat(project.project_id, model="fable", provider="codex")
+
+    assert chat.thinking_level == "ultra"
+    assert pcm._thinking_level_for_chat(chat) == "ultra"
+
+    # Fable is a fixed preset; stale or manually altered persisted data still
+    # dispatches with Ultra.
+    chat.thinking_level = "medium"
+    assert pcm._thinking_level_for_chat(chat) == "ultra"
+
+    updated = pcm.update_chat(chat.chat_id, model="gpt-5.6-sol")
+    assert updated is not None
+    assert updated.thinking_level == ""
+
+
+def test_codex_fable_handover_uses_ultra_effort(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("thinking", workspace="personal")
+    chat = pcm.create_chat(project.project_id, model="opus", provider="claude")
+
+    updated = pcm.handover_chat(chat.chat_id, provider="codex", model="fable")
+
+    assert updated is not None
+    assert updated.model == "fable"
+    assert updated.thinking_level == "ultra"
+
+
 # ── provider command construction ────────────────────────────────────────
 
 def test_claude_levels_match_sdk_effort_literal() -> None:
@@ -150,3 +180,124 @@ def test_list_models_exposes_thinking_levels(monkeypatch) -> None:
 
     data = json.loads(asyncio.run(list_models(request)).body)
     assert data["thinking_levels"]["claude"] == list(THINKING_LEVELS["claude"])
+
+
+# ── per-model codex level validation ─────────────────────────────────────
+
+_CATALOG = [
+    {
+        "model": "gpt-5.6-terra",
+        "supportedReasoningEfforts": [
+            {"reasoningEffort": "low"},
+            {"reasoningEffort": "medium"},
+            {"reasoningEffort": "high"},
+            {"reasoningEffort": "xhigh"},
+        ],
+    },
+]
+
+
+def _codex_chat(tmp_path: Path):
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("codex-levels", workspace="personal")
+    chat = pcm.create_chat(project.project_id, model="gpt-5.6-terra", provider="codex")
+    return pcm, chat
+
+
+def test_codex_level_rejected_when_model_lacks_it(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+
+    from ciao.web.routes_api import _unsupported_codex_level_error
+
+    async def _catalog(workspace_root):
+        return list(_CATALOG)
+
+    monkeypatch.setattr(
+        "ciao.web.routes_api.CodexProvider.model_catalog", staticmethod(_catalog)
+    )
+    pcm, chat = _codex_chat(tmp_path)
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+    )
+
+    # "ultra" is in the union fallback but not in this model's catalog entry.
+    error = asyncio.run(
+        _unsupported_codex_level_error(
+            config, pcm, chat.chat_id, {"thinking_level": "ultra"}
+        )
+    )
+    assert error is not None
+    assert error.status_code == 400
+    assert b"ultra" in error.body
+
+    # A catalog-supported level passes through.
+    ok = asyncio.run(
+        _unsupported_codex_level_error(
+            config, pcm, chat.chat_id, {"thinking_level": "xhigh"}
+        )
+    )
+    assert ok is None
+
+
+def test_codex_level_check_fails_open_without_catalog(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+
+    from ciao.web.routes_api import _unsupported_codex_level_error
+
+    async def _broken(workspace_root):
+        raise RuntimeError("codex app-server unavailable")
+
+    monkeypatch.setattr(
+        "ciao.web.routes_api.CodexProvider.model_catalog", staticmethod(_broken)
+    )
+    pcm, chat = _codex_chat(tmp_path)
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+    )
+
+    # No catalog -> fall back to the union validation in update_chat.
+    error = asyncio.run(
+        _unsupported_codex_level_error(
+            config, pcm, chat.chat_id, {"thinking_level": "ultra"}
+        )
+    )
+    assert error is None
+
+
+def test_codex_level_check_ignores_claude_chats(tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+
+    from ciao.web.routes_api import _unsupported_codex_level_error
+
+    called = []
+
+    async def _catalog(workspace_root):
+        called.append(True)
+        return list(_CATALOG)
+
+    monkeypatch.setattr(
+        "ciao.web.routes_api.CodexProvider.model_catalog", staticmethod(_catalog)
+    )
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("claude-levels", workspace="personal")
+    chat = pcm.create_chat(project.project_id, model="opus", provider="claude")
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=tmp_path / ".runtime" / "state.json",
+        media_root=tmp_path / ".runtime" / "media",
+    )
+
+    error = asyncio.run(
+        _unsupported_codex_level_error(
+            config, pcm, chat.chat_id, {"thinking_level": "max"}
+        )
+    )
+    assert error is None
+    assert called == []

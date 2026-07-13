@@ -24,6 +24,11 @@ class DevEnvironment:
     frontend_url: str
 
 
+def _backend_command() -> list[str]:
+    """Run the dev backend through the CLI's restart supervisor."""
+    return [sys.executable, "-m", "ciao.cli", "run"]
+
+
 def _load_env_file(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     if not path.exists():
@@ -114,7 +119,7 @@ def run_dev_stack(
     try:
         print(f"Starting backend on {dev_env.backend_url} ...")
         backend = subprocess.Popen(
-            [sys.executable, "-m", "ciao.main"],
+            _backend_command(),
             cwd=dev_env.workspace,
             env=dev_env.env,
         )

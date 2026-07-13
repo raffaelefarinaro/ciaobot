@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -29,6 +30,8 @@ async def run_oneshot(
     model: str,
     env: dict[str, str] | None = None,
     timeout_s: float = 120.0,
+    provider: str = "claude",
+    cwd: Path | None = None,
 ) -> str:
     """Run a single-turn model call and return the assistant's text.
 
@@ -36,6 +39,40 @@ async def run_oneshot(
     caller decides how to handle it. ``timeout_s`` wraps the whole call
     via :func:`asyncio.wait_for`.
     """
+    if provider == "codex":
+        from ciao.models import AgentRequest, ResultEvent
+        from ciao.providers.codex import CodexProvider
+
+        codex = CodexProvider(
+            (cwd or Path.cwd()).resolve(),
+            developer_instructions=system_prompt,
+            ephemeral=True,
+        )
+
+        async def _collect_codex() -> str:
+            try:
+                async for event in codex.run_streaming(
+                    AgentRequest(
+                        prompt=prompt,
+                        model=model,
+                        mode="plan",
+                        provider="codex",
+                        extra_env=env or {},
+                    ),
+                    lambda _handle: None,
+                ):
+                    if isinstance(event, ResultEvent):
+                        if event.is_error:
+                            raise RuntimeError(event.result or "Codex one-shot failed")
+                        return event.result
+                return ""
+            finally:
+                await codex.disconnect()
+
+        return await asyncio.wait_for(_collect_codex(), timeout=timeout_s)
+    if provider != "claude":
+        raise ValueError(f"Unknown one-shot provider '{provider}'")
+
     options = ClaudeAgentOptions(
         model=model,
         system_prompt=system_prompt,

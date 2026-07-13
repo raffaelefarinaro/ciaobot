@@ -15,8 +15,11 @@ import json
 import time
 import urllib.error
 import urllib.request
+from functools import lru_cache
 from pathlib import Path
 from typing import Mapping, Any
+
+from ciao.providers.codex import codex_login_status
 
 
 def _check(
@@ -48,6 +51,9 @@ def _provider(
     auth: str,
     command: str,
     detail: str = "",
+    version: str = "",
+    account: str = "",
+    protocol: str = "",
 ) -> dict[str, Any]:
     row: dict[str, Any] = {
         "name": name,
@@ -57,7 +63,26 @@ def _provider(
     }
     if detail:
         row["detail"] = detail
+    if version:
+        row["version"] = version
+    if account:
+        row["account"] = account
+    if protocol:
+        row["protocol"] = protocol
     return row
+
+
+@lru_cache(maxsize=4)
+def _cli_version(binary: str) -> str:
+    try:
+        run = subprocess.run(
+            [binary, "--version"], capture_output=True, text=True,
+            timeout=3, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "installed"
+    lines = (run.stdout or run.stderr).strip().splitlines()
+    return lines[-1] if lines else "installed"
 
 
 def _ollama_daemon_ready(local_url: str) -> bool:
@@ -74,6 +99,10 @@ def _claude_status(
     credentials_path: Path,
     config_path: Path,
 ) -> dict[str, Any]:
+    from ciao.providers.claude import get_bundled_claude_path
+
+    binary = get_bundled_claude_path() or shutil.which("claude") or ""
+    version = _cli_version(binary) if binary else "not installed"
     if env.get("ANTHROPIC_API_KEY", "").strip():
         return _provider(
             name="claude",
@@ -81,6 +110,9 @@ def _claude_status(
             auth="api_key",
             command="ciao auth claude",
             detail="ANTHROPIC_API_KEY is set.",
+            version=version,
+            account="Anthropic API",
+            protocol="Agent SDK ready",
         )
     if credentials_path.is_file():
         return _provider(
@@ -89,6 +121,9 @@ def _claude_status(
             auth="oauth",
             command="ciao auth claude",
             detail=str(credentials_path),
+            version=version,
+            account="OAuth credentials",
+            protocol="Agent SDK ready",
         )
     # Claude Code on macOS stores the OAuth token in the Keychain and writes
     # account metadata to ~/.claude.json. The token itself is not on disk, so
@@ -103,6 +138,9 @@ def _claude_status(
             auth="oauth",
             command="ciao auth claude",
             detail=account,
+            version=version,
+            account=account.removeprefix("oauthAccount: "),
+            protocol="Agent SDK ready",
         )
     return _provider(
         name="claude",
@@ -110,6 +148,7 @@ def _claude_status(
         auth="missing",
         command="ciao auth claude",
         detail="Run Claude OAuth or set ANTHROPIC_API_KEY.",
+        version=version,
     )
 
 
@@ -184,6 +223,16 @@ def _openrouter_status(env: Mapping[str, str]) -> dict[str, Any]:
     )
 
 
+def _workspace_guides_linked(workspace_root: Path) -> bool:
+    """True when AGENTS.md resolves to CLAUDE.md so both CLIs share one guide."""
+    claude_guide = workspace_root / "CLAUDE.md"
+    codex_guide = workspace_root / "AGENTS.md"
+    try:
+        return claude_guide.is_file() and codex_guide.resolve() == claude_guide.resolve()
+    except OSError:
+        return False
+
+
 def setup_status(
     config: Any,
     *,
@@ -228,6 +277,15 @@ def setup_status(
             detail=str(vault_root),
         ),
         _check(
+            check_id="workspace_guides",
+            label="Linked workspace guides",
+            ok=_workspace_guides_linked(workspace_root),
+            # Optional: a custom AGENTS.md is preserved on purpose, but then
+            # Claude Code and Codex read different workspace instructions.
+            required=False,
+            detail=str(workspace_root / "AGENTS.md"),
+        ),
+        _check(
             check_id="pwa_auth_token",
             label="PWA auth token",
             ok=bool(getattr(config, "pwa_auth_token", "")),
@@ -244,6 +302,7 @@ def setup_status(
     ]
     providers = {
         "claude": _claude_status(source, credentials_path, config_path),
+        "codex": codex_login_status(source),
         "ollama": _ollama_status(config, source),
         "openrouter": _openrouter_status(source),
     }

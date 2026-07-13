@@ -11,6 +11,7 @@ from pathlib import Path
 
 from ciao.execution_modes import normalize_claude_mode
 from ciao.models import BridgeMode
+from ciao.providers.codex import CodexSettings
 from ciao.providers.ollama import OllamaSettings
 from ciao.providers.openrouter import OpenRouterSettings
 
@@ -293,6 +294,10 @@ class CiaoConfig:
     # Models in `ollama.models` get rerouted to a local Ollama daemon via
     # the Anthropic-compatible API. Empty allowlist disables the routing.
     ollama: OllamaSettings = field(default_factory=OllamaSettings)
+    # Per-tier Codex model pins set from the PWA Settings → Providers tab.
+    # Empty means automatic: tiers derive from the signed-in account's
+    # model catalog (luna→haiku, terra→sonnet, sol→opus/fable).
+    codex: CodexSettings = field(default_factory=CodexSettings)
     # Auto-discover models installed on the local Ollama daemon at startup
     # (GET /api/tags against ``ollama.local_url``) and surface them in the
     # model pickers. Disable with ``CIAO_OLLAMA_LOCAL_DISCOVERY=0``.
@@ -373,6 +378,10 @@ class CiaoConfig:
         workspace_config = self.workspace(workspace)
         if workspace_config and workspace_config.default_model:
             return workspace_config.default_model
+        if workspace_config and workspace_config.default_provider == "codex":
+            # Empty means "use the Codex account's current catalog default";
+            # app-server resolves it and the chat records the effective model.
+            return ""
         return self.claude_default_model
 
     def model_bucket_for_workspace(self, workspace: str | None) -> str:
@@ -388,6 +397,8 @@ class CiaoConfig:
                 return "ollama"
             if provider == "claude":
                 return "work"
+            if provider == "codex":
+                return ""
         if workspace == "work":
             return "work"
         return "personal"
@@ -412,7 +423,10 @@ class CiaoConfig:
 
     def default_provider_for_workspace(self, workspace: str | None) -> str:
         workspace_config = self.workspace(workspace)
-        if workspace_config and workspace_config.default_provider == "claude":
+        if (
+            workspace_config
+            and workspace_config.default_provider in {"claude", "codex"}
+        ):
             return workspace_config.default_provider
         return "claude"
 
@@ -501,7 +515,13 @@ class CiaoConfig:
             ).expanduser().resolve()
             runtime_default = Path(".runtime")
             if not pwa_auth_token:
-                pwa_auth_token = "ciao-insecure-fallback-secret-key"
+                # No token configured (auth is typically off on this branch).
+                # Persist a random per-workspace secret instead of a shared
+                # constant, so the session-signing key is never a publicly
+                # known value baked into the source on any install.
+                pwa_auth_token = _read_or_create_secret(
+                    workspace_root / ".runtime" / "session-secret"
+                )
 
         vault_root_raw = source.get("CIAO_VAULT_ROOT", "").strip()
         if vault_root_raw:
@@ -575,6 +595,10 @@ class CiaoConfig:
             source.get("CIAO_OLLAMA_OPUS_MODEL", "").strip()
             or "glm-5.2:cloud"
         )
+        ollama_fable_model = (
+            source.get("CIAO_OLLAMA_FABLE_MODEL", "").strip()
+            or "glm-5.2:cloud"
+        )
         ollama_settings = OllamaSettings(
             models=ollama_models,
             base_url=ollama_url,
@@ -584,6 +608,7 @@ class CiaoConfig:
             haiku_model=ollama_haiku_model,
             sonnet_model=ollama_sonnet_model,
             opus_model=ollama_opus_model,
+            fable_model=ollama_fable_model,
             local_models=ollama_local_models,
             local_url=source.get("CIAO_OLLAMA_LOCAL_URL", "").strip()
             or "http://localhost:11434",
@@ -599,6 +624,8 @@ class CiaoConfig:
             or "anthropic/claude-sonnet-latest",
             opus_model=source.get("CIAO_OPENROUTER_OPUS_MODEL", "").strip()
             or "anthropic/claude-opus-latest",
+            fable_model=source.get("CIAO_OPENROUTER_FABLE_MODEL", "").strip()
+            or "anthropic/claude-fable-latest",
             models=tuple(_split_csv(source.get("CIAO_OPENROUTER_MODELS", ""))),
         )
 
@@ -823,4 +850,3 @@ def refresh_cloud_ollama_models(config: "CiaoConfig") -> bool:
 
 # Backward-compatible alias used by project_chats.py and other modules
 BridgeConfig = CiaoConfig
-

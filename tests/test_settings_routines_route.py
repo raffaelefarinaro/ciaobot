@@ -65,6 +65,10 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     assert data["title_model_effective"] == config.haiku_model_for_workspace("personal")
     assert data["insights_model_effective"] == config.sonnet_model_for_workspace("personal")
     assert data["alias_tiers"]["ollama"]["sonnet"] == config.ollama.sonnet_model
+    assert data["alias_tiers"]["ollama"]["fable"] == "glm-5.2:cloud"
+    assert "codex" not in data["alias_tiers"]
+    assert data["tier_defaults"]["ollama"]["sonnet"] == "kimi-k2.7-code:cloud"
+    assert data["tier_defaults"]["openrouter"]["fable"] == "anthropic/claude-fable-latest"
     assert data["model_options"]["ollama_cloud"] == [
         "kimi-k2.7-code:cloud",
         "deepseek-v4-flash:cloud",
@@ -117,6 +121,8 @@ def test_patch_applies_tier_model_overrides(tmp_path):
         json={
             "ollama_haiku_model": "llama3.1:latest",
             "openrouter_sonnet_model": "anthropic/claude-sonnet-4.6",
+            "ollama_fable_model": "minimax-m3:cloud",
+            "openrouter_fable_model": "anthropic/claude-fable-5",
         },
     )
 
@@ -124,10 +130,36 @@ def test_patch_applies_tier_model_overrides(tmp_path):
     data = resp.json()
     assert data["ollama_haiku_model"] == "llama3.1:latest"
     assert data["openrouter_sonnet_model"] == "anthropic/claude-sonnet-4.6"
+    assert data["ollama_fable_model"] == "minimax-m3:cloud"
+    assert data["openrouter_fable_model"] == "anthropic/claude-fable-5"
     assert data["alias_tiers"]["ollama"]["haiku"] == "llama3.1:latest"
     assert data["alias_tiers"]["openrouter"]["sonnet"] == "anthropic/claude-sonnet-4.6"
+    assert data["alias_tiers"]["ollama"]["fable"] == "minimax-m3:cloud"
+    assert data["alias_tiers"]["openrouter"]["fable"] == "anthropic/claude-fable-5"
     assert config.ollama.haiku_model == "llama3.1:latest"
     assert config.openrouter.sonnet_model == "anthropic/claude-sonnet-4.6"
+    assert config.ollama.fable_model == "minimax-m3:cloud"
+    assert config.openrouter.fable_model == "anthropic/claude-fable-5"
+
+
+def test_patch_applies_codex_tier_pins(tmp_path):
+    client, config = _make_client(tmp_path)
+    resp = client.patch(
+        "/api/settings/routines",
+        json={"codex_sonnet_model": "gpt-5.6-sol", "codex_haiku_model": "gpt-5.6-terra"},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["codex_sonnet_model"] == "gpt-5.6-sol"
+    assert data["codex_haiku_model"] == "gpt-5.6-terra"
+    assert data["codex_opus_model"] == ""
+    # Codex effective tiers need the account catalog, so they live in
+    # /api/models, not here.
+    assert "codex" not in data["alias_tiers"]
+    assert config.codex.sonnet_model == "gpt-5.6-sol"
+    fresh = AppSettingsStore(tmp_path / ".runtime" / "app_settings.json")
+    assert fresh.settings.codex_sonnet_model == "gpt-5.6-sol"
 
 
 def test_patch_clearing_restores_defaults(tmp_path):

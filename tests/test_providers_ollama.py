@@ -63,12 +63,13 @@ def test_ollama_env_includes_tier_remaps_for_cloud() -> None:
         haiku_model="deepseek-v4-flash:cloud",
         sonnet_model="kimi-k2.7-code:cloud",
         opus_model="glm-5.2:cloud",
+        fable_model="minimax-m3:cloud",
     )
     env = ollama_env_for_model("glm-5.2:cloud", settings)
     assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "deepseek-v4-flash:cloud"
     assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "kimi-k2.7-code:cloud"
     assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.2:cloud"
-    assert env["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "glm-5.2:cloud"
+    assert env["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "minimax-m3:cloud"
     assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "deepseek-v4-flash:cloud"
     assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "kimi-k2.7-code:cloud"
     assert env["CLAUDE_CODE_AUTO_MODE_MODEL"] == "deepseek-v4-flash:cloud"
@@ -144,6 +145,7 @@ def test_ciao_config_parses_ollama_env(monkeypatch) -> None:
     monkeypatch.delenv("CIAO_OLLAMA_API_KEY", raising=False)
     monkeypatch.delenv("CIAO_OLLAMA_TITLE_MODEL", raising=False)
     monkeypatch.delenv("CIAO_OLLAMA_OPUS_MODEL", raising=False)
+    monkeypatch.delenv("CIAO_OLLAMA_FABLE_MODEL", raising=False)
     monkeypatch.delenv("CIAO_OLLAMA_SONNET_MODEL", raising=False)
     monkeypatch.delenv("CIAO_OLLAMA_HAIKU_MODEL", raising=False)
     config = CiaoConfig.from_env()
@@ -153,6 +155,7 @@ def test_ciao_config_parses_ollama_env(monkeypatch) -> None:
     # Default cheap free-tier title model when nothing is set.
     assert config.ollama.title_model == "gemma4:e2b-it-qat"
     assert config.ollama.opus_model == "glm-5.2:cloud"
+    assert config.ollama.fable_model == "glm-5.2:cloud"
     assert config.ollama.sonnet_model == "kimi-k2.7-code:cloud"
     assert config.ollama.haiku_model == "deepseek-v4-flash:cloud"
 
@@ -228,6 +231,7 @@ def _make_manager(
             haiku_model="deepseek-v4-flash:cloud",
             sonnet_model="kimi-k2.7-code:cloud",
             opus_model="minimax-m3:cloud",
+            fable_model="glm-5.2:cloud",
         ),
     )
     state = StateStore(config.state_path, tmp_path, config.media_root)
@@ -250,6 +254,14 @@ def test_ollama_alias_uses_configured_tier_model(tmp_path: Path) -> None:
     assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-cloud"
     assert env["ANTHROPIC_API_KEY"] == ""
     assert env["ANTHROPIC_BASE_URL"] == "https://ollama.com"
+
+
+def test_ollama_fable_alias_uses_configured_fable_model(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path, ollama_models=("glm-5.2:cloud",))
+    project = pcm.create_project("ollama-fable", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="ollama-fable", model="fable")
+
+    assert pcm._runtime_model_for_chat(chat) == "glm-5.2:cloud"
 
 
 def test_build_extra_env_injects_ollama_overrides_for_allowlisted_chat(tmp_path: Path) -> None:

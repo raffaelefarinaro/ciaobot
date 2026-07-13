@@ -117,6 +117,9 @@ def _installed_targets(root: Path, name: str) -> list[str]:
     path = root / ".claude" / "skills" / name / "SKILL.md"
     if path.exists():
         targets.append("claude")
+    path = root / ".agents" / "skills" / name / "SKILL.md"
+    if path.exists():
+        targets.append("codex")
     return targets
 
 
@@ -136,4 +139,3 @@ def _content_for(root: Path, name: str, *, prefer_custom: bool) -> str:
             except OSError:
                 pass
     return ""
-

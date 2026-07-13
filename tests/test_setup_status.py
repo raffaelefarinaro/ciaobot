@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -56,6 +57,30 @@ def test_setup_status_reports_workspace_and_required_config(tmp_path) -> None:
     assert checks["vault"]["ok"] is True
     assert checks["pwa_auth_token"]["ok"] is True
     assert checks["push_contact"]["ok"] is True
+    assert data["configured"] is True
+
+
+def test_setup_status_reports_linked_workspace_guides(tmp_path) -> None:
+    """The optional guides check tracks whether AGENTS.md resolves to CLAUDE.md."""
+    config = _config(tmp_path)
+    (tmp_path / "memory-vault").mkdir()
+    env = {"PWA_AUTH_TOKEN": "test-token", "ANTHROPIC_API_KEY": "sk-anthropic"}
+
+    checks = {row["id"]: row for row in setup_status(config, env=env)["checks"]}
+    assert checks["workspace_guides"]["ok"] is False
+    assert checks["workspace_guides"]["required"] is False
+
+    (tmp_path / "CLAUDE.md").write_text("# Guide\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("# Custom Codex guide\n", encoding="utf-8")
+    checks = {row["id"]: row for row in setup_status(config, env=env)["checks"]}
+    assert checks["workspace_guides"]["ok"] is False
+
+    (tmp_path / "AGENTS.md").unlink()
+    (tmp_path / "AGENTS.md").symlink_to("CLAUDE.md")
+    data = setup_status(config, env=env)
+    checks = {row["id"]: row for row in data["checks"]}
+    assert checks["workspace_guides"]["ok"] is True
+    # Optional either way: an unlinked custom AGENTS.md never blocks setup.
     assert data["configured"] is True
 
 
@@ -170,6 +195,25 @@ def test_setup_status_detects_openrouter_key(tmp_path) -> None:
     assert data["providers"]["openrouter"]["auth"] == "api_key"
 
 
+def test_setup_status_includes_codex_subscription_login(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "ciao.setup_status.codex_login_status",
+        lambda env: {
+            "name": "codex",
+            "ok": True,
+            "auth": "chatgpt",
+            "command": "ciao auth codex",
+            "detail": "Logged in using ChatGPT",
+        },
+    )
+    config = _config(tmp_path)
+
+    data = setup_status(config, env={})
+
+    assert data["providers"]["codex"]["ok"] is True
+    assert data["providers"]["codex"]["auth"] == "chatgpt"
+
+
 def test_setup_status_route_is_public_before_login(tmp_path) -> None:
     config = _config(tmp_path)
     (tmp_path / "memory-vault").mkdir()
@@ -278,6 +322,31 @@ def test_setup_finish_autodetects_scratch_for_empty_folder(tmp_path) -> None:
     assert [w["name"] for w in registry] == ["life"]
     assert registry[0]["vault_root"] == "memory-vault"
     assert registry[0]["gws_profile"] == "life"
+
+
+def test_setup_finish_persists_codex_as_first_workspace_provider(tmp_path) -> None:
+    ws = tmp_path / "codex-workspace"
+    ws.mkdir()
+
+    resp = _finish_client(tmp_path).post(
+        "/api/setup/finish",
+        json={
+            "workspace": str(ws),
+            "workspace_name": "personal",
+            "provider": "codex",
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+        },
+    )
+
+    assert resp.status_code == 200
+    registry = json.loads(
+        (ws / ".runtime" / "workspaces.json").read_text(encoding="utf-8")
+    )
+    assert registry[0]["default_provider"] == "codex"
+    assert registry[0]["model_bucket"] == ""
+    assert (ws / "AGENTS.md").is_symlink()
+    assert (ws / "AGENTS.md").resolve() == (ws / "CLAUDE.md").resolve()
 
 
 def test_setup_finish_autodetects_existing_notes_folder(tmp_path) -> None:

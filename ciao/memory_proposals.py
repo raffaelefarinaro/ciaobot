@@ -18,11 +18,20 @@ The output is written as a Markdown bullet list to
 next session, via the ``memory`` tool) reviews and promotes them. Auto-apply
 is intentionally NOT the default — the agent layer is the right place to make
 the consolidation call.
+
+One exception: "User corrections" are rare, inherently durable, and
+highest-signal, so :func:`promote_user_corrections` applies them straight to
+bounded memory at archive time (when the caller opts in via
+``auto_promote_memory``). The write goes through the same validated
+``memory_tool.add_entry`` path the CLI uses: prompt-injection patterns are
+rejected, exact duplicates are dropped, and when the file is full the entry
+falls back to the proposals file for the daily curator to consolidate.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -32,6 +41,11 @@ logger = logging.getLogger(__name__)
 
 
 _PROPOSALS_PATH = "personal/Workspace/Memory-Proposals.md"
+
+# Insight sections safe to apply to bounded memory without review: rare,
+# behavioral, and durable by construction. Everything else stays in the
+# proposals file for the daily curator.
+_AUTO_PROMOTE_SECTIONS = ("User corrections",)
 
 # Section headers used by ``_INSIGHTS_SYSTEM_PROMPT`` in ``ciao/insights.py``.
 # Two of them are "behavioral" (durable preferences, decisions the user made),
@@ -141,6 +155,56 @@ def propose_from_insights(insights_md: str) -> list[MemoryProposal]:
     return proposals
 
 
+# ── Auto-promotion ────────────────────────────────────────────────────────
+
+
+def promote_user_corrections(
+    proposals: list[MemoryProposal],
+    *,
+    memory_dir: Path | None = None,
+) -> tuple[list[MemoryProposal], list[str]]:
+    """Apply "User corrections" proposals straight to bounded memory.
+
+    Returns ``(remaining, promoted_texts)``: ``remaining`` keeps every
+    proposal that was not promoted (other sections untouched; corrections
+    that failed the add because the file is full or the entry was rejected),
+    ``promoted_texts`` lists what was written. Exact duplicates are dropped
+    from both — they are already remembered, so there is nothing to review.
+    """
+    from ciao.memory_tool import (
+        DEFAULT_MEMORY_CHAR_LIMIT,
+        DEFAULT_USER_CHAR_LIMIT,
+        add_entry,
+        path_for_target,
+    )
+
+    remaining: list[MemoryProposal] = []
+    promoted: list[str] = []
+    for proposal in proposals:
+        if proposal.source_section not in _AUTO_PROMOTE_SECTIONS:
+            remaining.append(proposal)
+            continue
+        if proposal.target == "user":
+            limit = int(os.environ.get("CIAO_USER_CHAR_LIMIT", DEFAULT_USER_CHAR_LIMIT))
+        else:
+            limit = int(os.environ.get("CIAO_MEMORY_CHAR_LIMIT", DEFAULT_MEMORY_CHAR_LIMIT))
+        path = path_for_target(proposal.target, memory_dir)  # type: ignore[arg-type]
+        result = add_entry(path, proposal.text, char_limit=limit)
+        if result.get("ok"):
+            promoted.append(proposal.text)
+        elif "duplicate" in str(result.get("error", "")):
+            logger.info("memory promote: dropped exact duplicate %r", proposal.text[:80])
+        else:
+            # Full file or rejected entry: keep it reviewable instead of
+            # silently losing it.
+            logger.info(
+                "memory promote: falling back to proposals (%s)",
+                result.get("error", "unknown error"),
+            )
+            remaining.append(proposal)
+    return remaining, promoted
+
+
 # ── Persistence ───────────────────────────────────────────────────────────
 
 
@@ -217,9 +281,18 @@ def _proposals_header_block(source_path: Path | None) -> str:
 
 
 def proposals_from_archive(
-    archive_path: Path, vault_root: Path
+    archive_path: Path,
+    vault_root: Path,
+    *,
+    auto_promote_memory: bool = False,
+    memory_dir: Path | None = None,
 ) -> Path | None:
     """Read an archived chat, extract its ``## Session insights`` body, propose, write.
+
+    With ``auto_promote_memory`` set (callers gate it on the config's
+    ``memory_enabled``), "User corrections" are applied straight to bounded
+    memory via :func:`promote_user_corrections`; everything else — plus any
+    correction that could not be added — lands in the proposals file.
 
     Returns the proposals file path when something was written, else None.
     Swallows all exceptions; this runs as a fire-and-forget step.
@@ -232,6 +305,16 @@ def proposals_from_archive(
         if not body:
             return None
         proposals = propose_from_insights(body)
+        if auto_promote_memory and proposals:
+            proposals, promoted = promote_user_corrections(
+                proposals, memory_dir=memory_dir
+            )
+            if promoted:
+                logger.info(
+                    "memory proposals: auto-promoted %d user correction(s) from %s",
+                    len(promoted),
+                    archive_path.name,
+                )
         return append_proposals(proposals, vault_root, source_path=archive_path)
     except Exception:  # noqa: BLE001 — never crash the pipeline
         logger.exception("memory proposals failed for %s", archive_path)

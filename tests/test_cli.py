@@ -236,8 +236,14 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
         "CIAO_PUSH_CONTACT=mailto:owner@example.com",
     ]
     assert (workspace / ".claude" / "agents" / "memory.md").is_file()
-    assert (workspace / ".claude" / "commands" / "remember.md").is_file()
+    assert (workspace / "commands" / "remember.md").is_file()
+    assert "ciao memory add --target memory" in (
+        workspace / "commands" / "remember.md"
+    ).read_text(encoding="utf-8")
     assert (workspace / "CLAUDE.md").is_file()
+    assert (workspace / "AGENTS.md").is_symlink()
+    assert (workspace / "AGENTS.md").readlink() == Path("CLAUDE.md")
+    assert (workspace / "AGENTS.md").resolve() == (workspace / "CLAUDE.md").resolve()
     customization = workspace / "CIAO_CUSTOMIZATION.md"
     assert customization.is_file()
     assert "disallowed_tools" in customization.read_text(encoding="utf-8")
@@ -499,6 +505,17 @@ def test_auth_claude_uses_bundled_cli(monkeypatch) -> None:
     assert cli.main(["auth", "claude"]) == 0
 
     assert calls == [["/opt/ciao/claude", "login"]]
+
+
+def test_auth_codex_supports_device_authorization(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        "ciao.providers.codex.resolve_codex_binary",
+        lambda: "/opt/ciao/codex",
+    )
+
+    assert cli.main(["auth", "codex", "--device-auth", "--print-only"]) == 0
+
+    assert capsys.readouterr().out.strip() == "/opt/ciao/codex login --device-auth"
 
 
 def test_vault_index_accepts_arbitrary_workspace_name(monkeypatch) -> None:

@@ -22,9 +22,11 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, replace
 
+from ciao.model_tiers import tier_model
+
 logger = logging.getLogger(__name__)
 
-_ANTHROPIC_ALIASES = frozenset({"opus", "sonnet", "haiku"})
+_ANTHROPIC_ALIASES = frozenset({"opus", "sonnet", "haiku", "fable"})
 
 # Shipped defaults: one Anthropic-family model per tier, reachable through
 # OpenRouter's Anthropic-compatible endpoint. Operators override via
@@ -34,6 +36,7 @@ _ANTHROPIC_ALIASES = frozenset({"opus", "sonnet", "haiku"})
 _DEFAULT_HAIKU = "anthropic/claude-haiku-latest"
 _DEFAULT_SONNET = "anthropic/claude-sonnet-latest"
 _DEFAULT_OPUS = "anthropic/claude-opus-latest"
+_DEFAULT_FABLE = "anthropic/claude-fable-latest"
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,8 +50,9 @@ class OpenRouterSettings:
     haiku_model: str = _DEFAULT_HAIKU
     sonnet_model: str = _DEFAULT_SONNET
     opus_model: str = _DEFAULT_OPUS
+    fable_model: str = _DEFAULT_FABLE
     # Models explicitly allowlisted by the operator (owner/model ids). When
-    # empty, the picker falls back to the three tier defaults above plus
+    # empty, the picker falls back to the four tier defaults above plus
     # whatever ``discover_models`` returns.
     models: tuple[str, ...] = ()
 
@@ -80,12 +84,13 @@ def is_openrouter_model(model: str, settings: OpenRouterSettings) -> bool:
 
 def alias_model(alias: str, settings: OpenRouterSettings) -> str:
     """Resolve an Anthropic tier alias to an OpenRouter model id."""
-    aliases = {
-        "haiku": settings.haiku_model,
-        "sonnet": settings.sonnet_model,
-        "opus": settings.opus_model,
-    }
-    return aliases.get((alias or "").lower(), alias)
+    return tier_model(
+        alias,
+        haiku=settings.haiku_model,
+        sonnet=settings.sonnet_model,
+        opus=settings.opus_model,
+        fable=settings.fable_model,
+    )
 
 
 def _env_overrides(base_url: str, api_key: str) -> dict[str, str]:
@@ -112,7 +117,7 @@ def _tier_remap_env(settings: OpenRouterSettings) -> dict[str, str]:
         "ANTHROPIC_DEFAULT_HAIKU_MODEL": settings.haiku_model,
         "ANTHROPIC_DEFAULT_SONNET_MODEL": settings.sonnet_model,
         "ANTHROPIC_DEFAULT_OPUS_MODEL": settings.opus_model,
-        "ANTHROPIC_DEFAULT_FABLE_MODEL": settings.opus_model,
+        "ANTHROPIC_DEFAULT_FABLE_MODEL": settings.fable_model,
         "ANTHROPIC_SMALL_FAST_MODEL": settings.haiku_model,
         "CLAUDE_CODE_SUBAGENT_MODEL": settings.sonnet_model,
         "CLAUDE_CODE_AUTO_MODE_MODEL": settings.haiku_model,

@@ -1,7 +1,7 @@
 {
   "name": "ciaobot-pwa",
   "private": true,
-  "version": "0.4.13",
+  "version": "0.4.14",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,7 +14,7 @@
     "@excalidraw/excalidraw": "^0.18.1",
     "dompurify": "^3.4.11",
     "highlight.js": "^11.11.1",
-    "marked": "^15.0.0",
+    "marked": "^18.0.6",
     "marked-highlight": "^2.2.4",
     "pinia": "^3.0.4",
     "react": "^18.3.1",

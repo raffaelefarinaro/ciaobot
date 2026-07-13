@@ -3,24 +3,18 @@ name: gws-gmail-reply
 description: "Gmail: Reply to a message (handles threading automatically)."
 metadata:
   version: 0.22.5
-  openclaw:
-    category: "productivity"
-    requires:
-      bins:
-        - gws
-    cliHelp: "gws gmail +reply --help"
 ---
 
 # gmail +reply
 
-> **PREREQUISITE:** Read `../gws-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gws generate-skills` to create it.
+> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), global flags, and security rules.
 
 Reply to a message (handles threading automatically)
 
 ## Usage
 
 ```bash
-gws gmail +reply --message-id <ID> --body <TEXT>
+scripts/gws-profile.sh <personal|work> gmail +reply --message-id <ID> --body <TEXT>
 ```
 
 ## Flags
@@ -41,12 +35,12 @@ gws gmail +reply --message-id <ID> --body <TEXT>
 ## Examples
 
 ```bash
-gws gmail +reply --message-id 18f1a2b3c4d --body 'Thanks, got it!'
-gws gmail +reply --message-id 18f1a2b3c4d --body 'Looping in Carol' --cc carol@example.com
-gws gmail +reply --message-id 18f1a2b3c4d --body 'Adding Dave' --to dave@example.com
-gws gmail +reply --message-id 18f1a2b3c4d --body '<b>Bold reply</b>' --html
-gws gmail +reply --message-id 18f1a2b3c4d --body 'Updated version' -a updated.docx
-gws gmail +reply --message-id 18f1a2b3c4d --body 'Draft reply' --draft
+scripts/gws-profile.sh <personal|work> gmail +reply --message-id 18f1a2b3c4d --body 'Thanks, got it!'
+scripts/gws-profile.sh <personal|work> gmail +reply --message-id 18f1a2b3c4d --body 'Looping in Carol' --cc carol@example.com
+scripts/gws-profile.sh <personal|work> gmail +reply --message-id 18f1a2b3c4d --body 'Adding Dave' --to dave@example.com
+scripts/gws-profile.sh <personal|work> gmail +reply --message-id 18f1a2b3c4d --body '<b>Bold reply</b>' --html
+scripts/gws-profile.sh <personal|work> gmail +reply --message-id 18f1a2b3c4d --body 'Updated version' -a updated.docx
+scripts/gws-profile.sh <personal|work> gmail +reply --message-id 18f1a2b3c4d --body 'Draft reply' --draft
 ```
 
 ## Tips
@@ -59,8 +53,3 @@ gws gmail +reply --message-id 18f1a2b3c4d --body 'Draft reply' --draft
 - With --html, inline images in the quoted message are preserved via cid: references.
 - Use --draft to save the reply as a draft instead of sending it immediately.
 - For reply-all, use +reply-all instead.
-
-## See Also
-
-- [gws-shared](../gws-shared/SKILL.md) — Global flags and auth
-- [gws-gmail](../gws-gmail/SKILL.md) — All send, read, and manage email commands

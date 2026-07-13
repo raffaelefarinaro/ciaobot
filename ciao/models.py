@@ -8,6 +8,7 @@ from typing import Literal
 
 ExecutionMode = Literal["provider_prompt", "provider_cli_arg", "bot_handler"]
 BridgeMode = Literal["normal", "plan", "auto", "bypass"]
+MessagePhase = Literal["commentary", "final_answer"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +90,9 @@ class ImageAttachment:
 # Maps to ``ClaudeAgentOptions.effort``.
 THINKING_LEVELS: dict[str, tuple[str, ...]] = {
     "claude": ("low", "medium", "high", "xhigh", "max"),
+    # The model catalog is authoritative and the API narrows this per model.
+    # This union is the validation fallback when discovery is unavailable.
+    "codex": ("minimal", "low", "medium", "high", "xhigh", "max", "ultra"),
 }
 
 
@@ -99,10 +103,17 @@ class AgentRequest:
     prompt: str
     model: str
     mode: BridgeMode
+    # Optional human-visible form when provider-neutral preprocessing (for
+    # example Codex slash-command expansion) changes the model-facing prompt.
+    display_prompt: str = ""
     # Routing key for ProviderService. Public builds currently accept
     # "claude"; backend choice is handled by model/model_bucket routing.
     provider: str = "claude"
     resume_session: str | None = None
+    # Fork the resumed provider session into a new durable session before the
+    # turn. Used when a provider session is busy or an explicit branch is
+    # requested; false preserves ordinary resume semantics.
+    fork_session: bool = False
     images: list[ImageAttachment] = field(default_factory=list)
     extra_env: dict[str, str] = field(default_factory=dict)
     # Tools the spawned CLI must refuse to call. Forwarded to the SDK's
@@ -134,6 +145,11 @@ class AssistantTextDelta(StreamEvent):
 
     text: str = ""
     parent_tool_use_id: str | None = None
+    # Provider-declared assistant-message phase. Codex uses this to
+    # distinguish mid-turn progress commentary from the terminal answer.
+    # ``None`` preserves the legacy inference path for providers/models that
+    # do not expose a phase.
+    phase: MessagePhase | None = None
 
 
 @dataclass(slots=True)
@@ -151,6 +167,9 @@ class ToolUseEvent(StreamEvent):
     tool_input: str = ""  # summarized input (e.g. file path, command)
     tool_use_id: str | None = None
     parent_tool_use_id: str | None = None
+    # Set for provider-native structured questions that must be answered
+    # inside the active turn (Codex app-server request_user_input).
+    request_id: str = ""
 
 
 @dataclass(slots=True)

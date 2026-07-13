@@ -8,7 +8,7 @@
       "removable": false,
       "enabled": true,
       "frequency": "daily",
-      "daily_time_utc": "01:00",
+      "daily_time_utc": "00:01",
       "days_of_week": null,
       "day_of_month": null,
       "run_at_date": null,
@@ -19,7 +19,7 @@
       "workspace": "default",
       "web_project_id": "",
       "web_chat_id": null,
-      "prompt": "Curate recent archived chats, memory proposals, and durable learnings. Use the memory agent. Prefer existing session-insights sections and update the configured vault. Append durable learnings to the vault's Workspace/Learnings.md using the format `[YYYY-MM-DD] category: one-liner — confidence: high/medium/low`; capture error resolutions, non-obvious workarounds, user corrections, and outdated assumptions. Do not log routine work. Report only processed counts plus changed files."
+      "prompt": "Curate recent archived chats, memory proposals, and durable learnings. Use the memory agent. Prefer existing session-insights sections and update the configured vault; append durable learnings to Workspace/Learnings.md (error resolutions, non-obvious workarounds, user corrections, outdated assumptions — not routine work). Promote durable cross-session facts into bounded memory: review pending batches in Workspace/Memory-Proposals.md and apply accepted entries with `ciao memory add --target memory` (preferences, environment facts, lessons learned) or `--target user` (user identity, communication style), then remove processed batches from the proposals file; when a memory file nears its char limit, consolidate with `ciao memory read|replace|remove` rather than skipping. Scan recently archived chats by project: when session-insights contain Decisions, Open loops, or material status changes for a vault-backed project, update that project's canonical doc (and log.md if present) — edit only when something actually changed. If nothing new to process since the last run, reply with a one-line no-op and stop. Report only processed counts plus changed files."
     },
     {
       "schedule_id": "system-skill-evolution",
@@ -29,7 +29,7 @@
       "removable": false,
       "enabled": true,
       "frequency": "weekly",
-      "daily_time_utc": "02:00",
+      "daily_time_utc": "00:31",
       "days_of_week": ["sun"],
       "day_of_month": null,
       "run_at_date": null,
@@ -40,28 +40,7 @@
       "workspace": "default",
       "web_project_id": "",
       "web_chat_id": null,
-      "prompt": "Run the skill-evolution maintenance pipeline with the configured model. Surface generated proposals and any failed gates. Do not apply proposals automatically."
-    },
-    {
-      "schedule_id": "system-error-triage",
-      "title": "Runtime error triage",
-      "scope": "system",
-      "editable": false,
-      "removable": false,
-      "enabled": true,
-      "frequency": "weekly",
-      "daily_time_utc": "03:00",
-      "days_of_week": ["sat"],
-      "day_of_month": null,
-      "run_at_date": null,
-      "timezone_name": "UTC",
-      "archive_policy": "manual",
-      "provider": "",
-      "model": "",
-      "workspace": "default",
-      "web_project_id": "",
-      "web_chat_id": null,
-      "prompt": "Triage this instance's runtime issue report below. If it says no issues, reply with a one-line all-clear and stop. Otherwise: group the entries by root cause, note frequency and impact, then investigate the top causes in the app and workspace code. Apply concrete low-risk fixes directly and report anything riskier for user approval. The error log is cleared after this run, so include enough context from it in your report.\n\n{{ISSUE_REPORT}}"
+      "prompt": "Run `python3 -m ciao.skill_evolution` with the workspace default model. Summarize proposals written and any failed gates. Do not apply proposals automatically."
     },
     {
       "schedule_id": "system-weekly-review",
@@ -71,7 +50,7 @@
       "removable": false,
       "enabled": true,
       "frequency": "weekly",
-      "daily_time_utc": "10:00",
+      "daily_time_utc": "01:01",
       "days_of_week": ["sun"],
       "day_of_month": null,
       "run_at_date": null,
@@ -82,7 +61,7 @@
       "workspace": "default",
       "web_project_id": "",
       "web_chat_id": null,
-      "prompt": "Run the weekly self-improvement checklist from the packaged weekly-review-template.md asset (locate it with: python3 -c \"from importlib import resources; print(resources.files('ciao.stock').joinpath('schedules/weekly-review-template.md'))\"). Apply concrete low-risk local fixes and report anything that needs user approval."
+      "prompt": "Run the weekly self-improvement checklist from the installed ciao.stock package (`schedules/weekly-review-template.md`). If the past 7 days have no archived chats, no schedule misfires, and no actionable drift, reply with a one-line no-op and stop. Apply concrete low-risk local fixes and report anything that needs user approval."
     }
   ]
 }

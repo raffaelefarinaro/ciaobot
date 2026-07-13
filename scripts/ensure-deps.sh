@@ -143,19 +143,13 @@ EOF
   fi
 
   log_info "Upgrading pip, setuptools, and wheel..."
-  pip install ${PIP_UPGRADE_ARG} -q pip setuptools wheel || log_warn "Pip self-upgrade failed, continuing..."
+  python -m pip install ${PIP_UPGRADE_ARG} -q pip setuptools wheel || log_warn "Pip self-upgrade failed, continuing..."
 
   log_info "Installing backend dependencies from pyproject.toml..."
   # Mac-only deployment: voice-local (mlx-whisper, Apple Silicon) is part of the
   # default install. Drop it from the extras if this ever runs on non-arm64.
-  pip install -q ${PIP_UPGRADE_ARG} -e '.[test,voice-local]' || { log_err "Failed to install python dependencies."; return 1; }
+  python -m pip install -q ${PIP_UPGRADE_ARG} -e '.[test,voice-local]' || { log_err "Failed to install python dependencies."; return 1; }
 
-
-  log_info "Verifying Playwright browser binaries..."
-  # Only run playwright install if chromium is not installed or if upgrading
-  if [[ "${UPGRADE_DEPS}" -eq 1 ]] || ! ls ~/Library/Caches/ms-playwright/chromium-* ~/.cache/ms-playwright/chromium-* &>/dev/null; then
-    playwright install chromium 2>/dev/null || log_warn "Playwright chromium download failed or skipped (non-fatal)."
-  fi
 
   # --- 3. Node.js & NPM Validation ---
   local NODE_VER_TARGET="v22.11.0"

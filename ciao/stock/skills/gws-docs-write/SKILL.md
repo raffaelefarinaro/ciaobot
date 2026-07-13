@@ -3,24 +3,18 @@ name: gws-docs-write
 description: "Google Docs: Append text to a document."
 metadata:
   version: 0.22.5
-  openclaw:
-    category: "productivity"
-    requires:
-      bins:
-        - gws
-    cliHelp: "gws docs +write --help"
 ---
 
 # docs +write
 
-> **PREREQUISITE:** Read `../gws-shared/SKILL.md` for auth, global flags, and security rules. If missing, run `gws generate-skills` to create it.
+> **PREREQUISITE:** Read `gws-shared` for Ciaobot auth (profile wrapper), global flags, and security rules.
 
 Append text to a document
 
 ## Usage
 
 ```bash
-gws docs +write --document <ID> --text <TEXT>
+scripts/gws-profile.sh <personal|work> docs +write --document <ID> --text <TEXT>
 ```
 
 ## Flags
@@ -33,7 +27,7 @@ gws docs +write --document <ID> --text <TEXT>
 ## Examples
 
 ```bash
-gws docs +write --document DOC_ID --text 'Hello, world!'
+scripts/gws-profile.sh <personal|work> docs +write --document DOC_ID --text 'Hello, world!'
 ```
 
 ## Tips
@@ -43,8 +37,3 @@ gws docs +write --document DOC_ID --text 'Hello, world!'
 
 > [!CAUTION]
 > This is a **write** command — confirm with the user before executing.
-
-## See Also
-
-- [gws-shared](../gws-shared/SKILL.md) — Global flags and auth
-- [gws-docs](../gws-docs/SKILL.md) — All read and write google docs commands

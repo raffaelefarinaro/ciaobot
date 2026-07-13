@@ -103,6 +103,12 @@ def test_status_labels() -> None:
     )
 
 
+def test_server_recovery_label_matches_reachability() -> None:
+    assert menubar.server_recovery_label(menubar.ServerStatus(True, True)) == "Restart Server"
+    assert menubar.server_recovery_label(menubar.ServerStatus(True, False)) == "Restart Server"
+    assert menubar.server_recovery_label(menubar.ServerStatus(False, False)) == "Start Server"
+
+
 def test_open_app_command_uses_setup_token(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(menubar, "find_installed_webapp", lambda: None)
     token_path = tmp_path / ".runtime" / "setup-token"
@@ -431,6 +437,30 @@ def test_chat_url_deep_links_to_chat(tmp_path: Path) -> None:
     assert menubar.chat_url(tmp_path, 8443, "") == "http://localhost:8443/"
 
 
+def test_notify_open_chat_hits_local_endpoint(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_urlopen(url: str, timeout: float):
+        calls["url"] = url
+        calls["timeout"] = timeout
+        return _FakeResponse({"ok": True, "chat_id": "abc"})
+
+    monkeypatch.setattr(menubar.urllib.request, "urlopen", fake_urlopen)
+
+    assert menubar.notify_open_chat(8443, "abc") is True
+    assert calls["url"] == "http://localhost:8443/api/open-chat/abc"
+    assert calls["timeout"] == 2.0
+
+
+def test_notify_open_chat_returns_false_when_unreachable(monkeypatch) -> None:
+    def fake_urlopen(url: str, timeout: float):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(menubar.urllib.request, "urlopen", fake_urlopen)
+
+    assert menubar.notify_open_chat(8443, "abc") is False
+
+
 def test_read_open_chats_filters_archived_and_sorts_by_activity(tmp_path: Path) -> None:
     state = tmp_path / ".runtime" / "web_projects.json"
     state.parent.mkdir(parents=True)
@@ -521,8 +551,50 @@ def test_read_unread_chats_filters_read_and_sorts_by_activity(tmp_path: Path) ->
     assert [chat.title for chat in unread] == ["Unread new", "Unread old"]
 
 
+def test_count_unread_chats_is_not_limited_to_menu_size(tmp_path: Path) -> None:
+    state = tmp_path / ".runtime" / "web_projects.json"
+    state.parent.mkdir(parents=True)
+    state.write_text(
+        json.dumps(
+            {
+                "chats": {
+                    f"chat-{index}": {
+                        "title": f"Unread {index}",
+                        "last_activity_at": f"2026-01-01T10:{index:02d}:00",
+                        "last_read_at": "",
+                    }
+                    for index in range(14)
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert len(menubar.read_unread_chats(tmp_path)) == 10
+    assert menubar.count_unread_chats(tmp_path) == 14
+
+
 def test_read_open_chats_missing_state_returns_empty(tmp_path: Path) -> None:
     assert menubar.read_open_chats(tmp_path) == []
+
+
+def test_notification_log_tail_only_returns_entries_after_startup(tmp_path: Path) -> None:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    log = runtime / "notifications.jsonl"
+    old_entry = {"ts": 1.0, "title": "Ciaobot", "body": "Old", "chat_id": "old"}
+    log.write_text(json.dumps(old_entry) + "\n", encoding="utf-8")
+
+    tail = menubar.NotificationLogTail.at_end(tmp_path)
+    assert tail.read_new(tmp_path) == []
+
+    new_entry = {"ts": 2.0, "title": "Ciaobot", "body": "New", "chat_id": "new"}
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(new_entry) + "\n")
+        handle.write("{partial")
+
+    assert tail.read_new(tmp_path) == [new_entry]
+    assert tail.read_new(tmp_path) == []
 
 
 def test_parse_inet_addresses_excludes_loopback_and_dupes() -> None:

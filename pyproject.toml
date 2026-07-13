@@ -4,16 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ciaobot"
-version = "0.4.13"
+version = "0.4.14"
 description = "Ciaobot personal assistant server."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = [
-  "claude-agent-sdk==0.2.114",
-  "openai==2.44.0",
+  "claude-agent-sdk==0.2.116",
+  "openai==2.45.0",
   "starlette==0.52.1",
-  "uvicorn[standard]==0.50.2",
+  "uvicorn[standard]==0.51.0",
   "itsdangerous==2.2.0",
   "python-dotenv==1.2.2",
   "pyyaml==6.0.3",
@@ -23,7 +23,6 @@ dependencies = [
   "httpx==0.28.1",
   "python-pptx==1.0.2",
   "notebooklm-py==0.7.3",
-  "playwright==1.61.0",
   # macOS menu bar companion (`ciao menubar`): installed automatically on
   # macOS so a plain wheel install includes the status-bar app.
   "rumps==0.4.0; platform_system == 'Darwin'",
@@ -42,6 +41,12 @@ voice-local = [
 # Local on-device speech synthesis (Kokoro on ONNX Runtime; any platform).
 tts-local = [
   "kokoro-onnx==0.5.0",
+]
+# Optional web-scraping fallback for the web-research skill (JS-rendered
+# pages defuddle cannot read). Browser binaries are installed separately
+# with `scrapling install`, keeping the base install light.
+scraping = [
+  "scrapling[fetchers]==0.4.10",
 ]
 # macOS menu bar companion (`ciao menubar`). Kept for compatibility: the same
 # pin ships in the main dependencies with a Darwin platform marker.

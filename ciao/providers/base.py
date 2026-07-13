@@ -32,6 +32,28 @@ class ActiveHandle:
         """Stop the active operation."""
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderCapabilities:
+    """Provider features consumed by Ciaobot outside the streaming loop."""
+
+    resume: bool = False
+    fork: bool = False
+    images: bool = False
+    stop: bool = False
+    steer: bool = False
+    permissions: bool = False
+    structured_questions: bool = False
+    dynamic_models: bool = False
+    thinking_levels: bool = False
+    usage: bool = False
+    quota: bool = False
+    subagents: bool = False
+    background_subagents: bool = False
+    subagent_messages: bool = False
+    session_history: bool = False
+    schedule_unattended: bool = False
+
+
 def build_prompt(request: AgentRequest) -> str:
     """Build the shared prompt text for a request."""
     if not request.images:
@@ -159,6 +181,8 @@ def rate_limit_status_text(quota: dict[str, str]) -> str:
 
 class BaseProvider(ABC):
     """Abstract provider interface."""
+
+    capabilities = ProviderCapabilities()
 
     def __init__(self, workspace_root: Path, *, config: object | None = None) -> None:
         self.workspace_root = workspace_root

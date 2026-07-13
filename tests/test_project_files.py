@@ -21,13 +21,19 @@ from ciao.config import CiaoConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
-from ciao.web.routes_api import project_files_list, project_files_upload
+from ciao.web.routes_api import (
+    _read_upload_limited,
+    project_files_list,
+    project_files_upload,
+)
 
 
 # ── fixtures ───────────────────────────────────────────────────────────────
 
 
-def _make_manager(tmp_path: Path) -> ProjectChatManager:
+def _make_manager(
+    tmp_path: Path, *, vault_root: Path | None = None
+) -> ProjectChatManager:
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     config = CiaoConfig(
@@ -35,6 +41,7 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
         workspace_root=tmp_path,
         state_path=runtime / "state.json",
         media_root=runtime / "media",
+        vault_root=vault_root or Path("memory-vault"),
     )
     state = StateStore(config.state_path, tmp_path, config.media_root)
     transcripts = TranscriptStore(runtime, tmp_path / "transcripts")
@@ -100,6 +107,32 @@ def test_list_returns_files_with_classification(tmp_path: Path) -> None:
     # vault_path is workspace-relative and round-trippable.
     assert by_path["notes.md"]["vault_path"].endswith("/notes.md")
     assert by_path["notes.md"]["vault_path"].startswith("memory-vault/")
+
+
+def test_external_vault_files_list_and_upload_with_absolute_viewer_path(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    vault = tmp_path / "external-vault"
+    folder = vault / "work" / "projects" / "active" / "external-project"
+    folder.mkdir(parents=True)
+    (folder / "README.md").write_text(
+        "---\nname: External\nstatus: active\n---\n# External\n",
+        encoding="utf-8",
+    )
+    (folder / "notes.md").write_text("hello", encoding="utf-8")
+
+    pcm = _make_manager(workspace, vault_root=vault)
+    project = next(
+        p for p in pcm.list_projects() if p.vault_folder == "external-project"
+    )
+
+    files = {entry["path"]: entry for entry in pcm.list_project_files(project.project_id)}
+    assert files["notes.md"]["vault_path"] == str((folder / "notes.md").resolve())
+
+    uploaded = pcm.save_project_file_upload(project.project_id, b"new", "new.md")
+    assert uploaded["vault_path"] == str((folder / "new.md").resolve())
+    assert (folder / "new.md").read_bytes() == b"new"
 
 
 def test_list_recurses_subdirectories(tmp_path: Path) -> None:
@@ -243,6 +276,36 @@ def test_upload_rejects_oversized(tmp_path: Path) -> None:
     proj = next(p for p in pcm.list_projects() if p.vault_folder == "2026-q2-foo")
     with pytest.raises(ValueError):
         pcm.save_project_file_upload(proj.project_id, b"x" * (50 * 1024 * 1024 + 1), "big.zip")
+
+
+class _RecordingUpload:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+        self.offset = 0
+        self.read_sizes: list[int] = []
+
+    async def read(self, size: int = -1) -> bytes:
+        self.read_sizes.append(size)
+        if size < 0:
+            size = len(self.payload) - self.offset
+        chunk = self.payload[self.offset:self.offset + size]
+        self.offset += len(chunk)
+        return chunk
+
+
+async def test_bounded_upload_reader_accepts_exact_limit() -> None:
+    upload = _RecordingUpload(b"1234")
+    assert await _read_upload_limited(upload, 4) == b"1234"
+    assert -1 not in upload.read_sizes
+    assert max(upload.read_sizes) <= 5
+
+
+async def test_bounded_upload_reader_stops_one_byte_over_limit() -> None:
+    upload = _RecordingUpload(b"1234567890")
+    with pytest.raises(ValueError, match="file too large"):
+        await _read_upload_limited(upload, 4)
+    assert upload.offset == 5
+    assert -1 not in upload.read_sizes
 
 
 def test_upload_to_promoted_personal_project_succeeds(tmp_path: Path) -> None:

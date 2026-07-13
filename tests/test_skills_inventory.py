@@ -88,6 +88,16 @@ def test_build_skill_inventory_reads_yaml_block_descriptions(tmp_path: Path) -> 
     )
 
 
+def test_build_skill_inventory_reports_codex_install_target(tmp_path: Path) -> None:
+    _write_skill(tmp_path / "skills", "demo", "Demo")
+    _write_skill(tmp_path / ".claude" / "skills", "demo", "Demo")
+    _write_skill(tmp_path / ".agents" / "skills", "demo", "Demo")
+
+    inventory = build_skill_inventory(tmp_path)
+
+    assert inventory["skills"][0]["installed_targets"] == ["claude", "codex"]
+
+
 def test_build_skill_inventory_dedupes_custom_over_lock_entry(tmp_path: Path) -> None:
     _write_skill(tmp_path / "skills", "humanizer", "Local override")
     tmp_path.joinpath("skills-lock.json").write_text(

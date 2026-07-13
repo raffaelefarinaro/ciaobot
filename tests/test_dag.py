@@ -237,6 +237,28 @@ def test_subagent_node_merges_env_overrides(monkeypatch) -> None:
     assert "PATH" in captured["env"]
 
 
+def test_subagent_failure_uses_stdout_when_stderr_is_empty(monkeypatch) -> None:
+    class Proc:
+        returncode = 1
+        stdout = "Not logged in · Please run /login"
+        stderr = ""
+
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: Proc())
+    dag = [
+        Node(
+            id="agent",
+            kind="subagent",
+            model="sonnet",
+            payload={"cli": "claude", "prompt": "hi"},
+        )
+    ]
+
+    ctx = run(dag, [], job="unit", label="subagent-stdout-error")
+
+    assert ctx["agent"].ok is False
+    assert "Not logged in" in (ctx["agent"].error or "")
+
+
 # ── Retention kind: never blocks ────────────────────────────────────────
 
 
@@ -313,6 +335,24 @@ def test_non_raising_failed_noderesult_marks_job_run_error(
     gate = next(r for r in rows if r["extra"]["node_id"] == "gate")
     assert gate["status"] == "error"
     assert "drift detected" in (gate.get("error") or "")
+
+
+def test_failed_gate_records_output_as_error(tmp_path: Path) -> None:
+    """A gate returning ``(False, reason)`` carries its reason in
+    ``output``, not ``error``. The recorded job_run must surface that
+    reason instead of a blank ``error: null`` row. Regression for the
+    depcheck:write_baseline triage gap (gate failed with no message)."""
+
+    def reject(ctx):
+        return False, "no research output to persist"
+
+    dag = [Node(id="write_baseline", kind="gate", payload={"fn": reject})]
+    ctx = run(dag, [], job="unit", label="depcheck")
+    assert ctx["write_baseline"].ok is False
+    rows = _job_runs(tmp_path)
+    row = next(r for r in rows if r["extra"]["node_id"] == "write_baseline")
+    assert row["status"] == "error"
+    assert "no research output to persist" in (row.get("error") or "")
 
 
 def test_bash_missing_cmd_raises() -> None:

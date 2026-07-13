@@ -114,6 +114,8 @@ def event_to_json(event: StreamEvent) -> dict | None:
         payload: dict = {"type": "text_delta", "text": event.text}
         if event.parent_tool_use_id:
             payload["parent_tool_use_id"] = event.parent_tool_use_id
+        if event.phase:
+            payload["phase"] = event.phase
         return payload
     if isinstance(event, ToolUseEvent):
         payload = {"type": "tool_use", "tool_name": event.tool_name}
@@ -123,6 +125,8 @@ def event_to_json(event: StreamEvent) -> dict | None:
             payload["tool_use_id"] = event.tool_use_id
         if event.parent_tool_use_id:
             payload["parent_tool_use_id"] = event.parent_tool_use_id
+        if event.request_id:
+            payload["request_id"] = event.request_id
         touch = extract_file_touch(event.tool_name, event.tool_input)
         if touch:
             payload["file_touch"] = touch
@@ -141,7 +145,7 @@ def event_to_json(event: StreamEvent) -> dict | None:
             "output_tokens": event.output_tokens,
         }
     if isinstance(event, ResultEvent):
-        return {
+        payload = {
             "type": "result",
             "text": event.result,
             "is_error": event.is_error,
@@ -149,6 +153,9 @@ def event_to_json(event: StreamEvent) -> dict | None:
             "usage": event.usage,
             "session_id": event.session_id or "",
         }
+        if event.quota:
+            payload["quota"] = event.quota
+        return payload
     if isinstance(event, PermissionRequestEvent):
         return {
             "type": "permission_request",

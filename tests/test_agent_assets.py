@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
@@ -59,25 +60,114 @@ def test_agent_assets_lists_instruction_sources(tmp_path: Path) -> None:
 
     assert resp.status_code == 200
     data = resp.json()
-    titles = {item["title"] for item in data["instructions"]}
-    assert "Claude Code project instructions" in titles
+    titles = {item["title"] for item in data["context"]}
+    assert "Project CLAUDE.md" in titles
     assert "Workspace memory" in titles
     assert "Ciaobot system prompt append" in titles
+    assert "Agent memory" in titles
+    assert "User profile" in titles
     assert "Per-turn runtime context hook" in titles
+    by_title = {item["title"]: item for item in data["context"]}
+    assert by_title["Project CLAUDE.md"]["provider"] == "claude"
+    assert by_title["Workspace memory"]["provider"] == "shared"
+    system_prompt = by_title["Ciaobot system prompt append"]
+    assert system_prompt["editable"] is False
+    assert Path(system_prompt["path"]).name == "system_prompt.md"
+    runtime = by_title["Per-turn runtime context hook"]
+    assert "README.md or canonical project document" in runtime["content"]
+    assert "Project context" in runtime["description"]
+
+
+def test_agent_assets_lists_codex_global_and_project_instructions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "AGENTS.md").write_text("# Global Codex\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("# Project Codex\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    resp = _client(tmp_path).get("/api/agent-assets")
+
+    assert resp.status_code == 200
+    by_title = {item["title"]: item for item in resp.json()["context"]}
+    assert by_title["Global AGENTS.md"]["content"] == "# Global Codex\n"
+    assert by_title["Project AGENTS.md"]["content"] == "# Project Codex\n"
+    assert by_title["Global AGENTS.md"]["provider"] == "codex"
+    assert by_title["Project AGENTS.md"]["provider"] == "codex"
+
+
+def test_agent_assets_respects_codex_override_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "AGENTS.md").write_text("# Global default\n", encoding="utf-8")
+    (codex_home / "AGENTS.override.md").write_text("# Global override\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("# Project default\n", encoding="utf-8")
+    (tmp_path / "AGENTS.override.md").write_text("# Project override\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    resp = _client(tmp_path).get("/api/agent-assets")
+
+    assert resp.status_code == 200
+    codex = [item for item in resp.json()["context"] if item["provider"] == "codex"]
+    assert {item["content"] for item in codex} == {"# Global override\n", "# Project override\n"}
+
+
+def test_agent_assets_lists_bounded_memory_and_splits_system_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mem_dir = tmp_path / ".ciao"
+    mem_dir.mkdir()
+    (mem_dir / "memory.md").write_text("prefers bullet lists\n", encoding="utf-8")
+    (mem_dir / "user.md").write_text("name: Alice\n", encoding="utf-8")
+    monkeypatch.setenv("CIAO_MEMORY_DIR", str(mem_dir))
+    (tmp_path / "CLAUDE.md").write_text("# Local\n", encoding="utf-8")
+
+    resp = _client(tmp_path).get("/api/agent-assets")
+
+    assert resp.status_code == 200
+    by_id = {item["id"]: item for item in resp.json()["context"]}
+    assert by_id["ciaobot-memory"]["content"] == "prefers bullet lists\n"
+    assert by_id["ciaobot-user"]["content"] == "name: Alice\n"
+    assert "prefers bullet lists" not in by_id["ciaobot-system-prompt"]["content"]
+    assert "Ciaobot System Instructions" in by_id["ciaobot-system-prompt"]["content"]
+
+
+def test_agent_assets_lists_memory_proposals(tmp_path: Path) -> None:
+    proposals = tmp_path / "memory-vault" / "personal" / "Workspace" / "Memory-Proposals.md"
+    proposals.parent.mkdir(parents=True)
+    proposals.write_text(
+        "# Memory Proposals\n\n- [memory] prefers async reviews  _(from: Decisions)_\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "CLAUDE.md").write_text("# Local\n", encoding="utf-8")
+
+    resp = _client(tmp_path).get("/api/agent-assets")
+
+    assert resp.status_code == 200
+    review = [item for item in resp.json()["context"] if item["scope"] == "review"]
+    assert len(review) == 1
+    assert review[0]["title"] == "Memory proposals"
+    assert "1 pending proposal" in review[0]["description"]
 
 
 def test_agent_assets_lists_instruction_import_children(tmp_path: Path) -> None:
     (tmp_path / "extra.md").write_text("# Extra\n", encoding="utf-8")
     (tmp_path / "CLAUDE.md").write_text("# Local\n\n@extra.md\n@missing.md\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("# Codex\n\n@extra.md\n", encoding="utf-8")
 
     resp = _client(tmp_path).get("/api/agent-assets")
 
     assert resp.status_code == 200
-    imports = [item for item in resp.json()["instructions"] if item["source"] == "file-import"]
+    imports = [item for item in resp.json()["context"] if item["source"] == "file-import"]
     paths = {item["path"] for item in imports}
     assert {"extra.md", "missing.md"}.issubset(paths)
     assert any(item["status"] == "ok" and item["parent_id"].startswith("file:") for item in imports)
     assert any(item["status"] == "missing" for item in imports)
+    extra_providers = {item["provider"] for item in imports if item["path"] == "extra.md"}
+    assert extra_providers == {"claude", "codex"}
 
 
 def test_create_subagent_writes_canonical_file_vault_mirror_and_claude_link(tmp_path: Path) -> None:
@@ -242,6 +332,29 @@ def test_workspace_health_reports_unsynced_custom_assets(tmp_path: Path) -> None
     data = resp.json()
     assert data["status"] in {"warn", "error"}
     assert any(check["id"] == "unsynced-subagent-orphan" for check in data["checks"])
+
+
+def test_workspace_health_reports_linked_workspace_guides(tmp_path: Path) -> None:
+    (tmp_path / "CLAUDE.md").write_text("# Guide\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").symlink_to("CLAUDE.md")
+
+    data = _client(tmp_path).get("/api/workspace-health").json()
+
+    check = next(c for c in data["checks"] if c["id"] == "guides-linked")
+    assert check["status"] == "ok"
+    assert check["path"] == "AGENTS.md"
+
+
+def test_workspace_health_warns_when_workspace_guides_diverge(tmp_path: Path) -> None:
+    (tmp_path / "CLAUDE.md").write_text("# Guide\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").write_text("# Custom Codex guide\n", encoding="utf-8")
+
+    data = _client(tmp_path).get("/api/workspace-health").json()
+
+    check = next(c for c in data["checks"] if c["id"] == "guides-linked")
+    assert check["status"] == "warn"
+    assert "different workspace instructions" in check["detail"]
+    assert "sync-skills" in check["action"]
 
 
 def test_workspace_health_fix_applies_the_suggested_remedies(tmp_path: Path) -> None:

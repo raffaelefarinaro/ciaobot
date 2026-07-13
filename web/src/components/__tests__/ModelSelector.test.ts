@@ -48,6 +48,7 @@ describe('ModelSelector', () => {
     await flushPromises()
 
     expect(wrapper.emitted('update:modelValue')).toEqual([['glm-5.2:cloud']])
+    expect(wrapper.emitted('select')).toEqual([['glm-5.2:cloud', 'ollama_cloud']])
     expect(wrapper.find('.model-selector__popover').exists()).toBe(false)
   })
 
@@ -146,6 +147,28 @@ describe('ModelSelector', () => {
     expect(badges).toEqual(['local', 'Haiku'])
   })
 
+  it('renders and searches a display label while emitting the stored model value', async () => {
+    const sections: ModelSection[] = [{
+      key: 'codex',
+      label: 'OpenAI Codex',
+      models: ['fable'],
+      modelLabels: { fable: 'gpt-5.6-sol-ultra' },
+      modelBadges: { fable: ['Fable'] },
+    }]
+    const wrapper = mountSelector({ sections })
+    await wrapper.setProps({ modelValue: 'fable' })
+    expect(wrapper.find('.model-selector__trigger').text()).toContain('gpt-5.6-sol-ultra')
+    await wrapper.find('.model-selector__trigger').trigger('click')
+    await wrapper.find('.model-selector__search').setValue('sol-ultra')
+    await flushPromises()
+
+    const item = wrapper.find('.model-selector__item')
+    expect(item.text()).toContain('gpt-5.6-sol-ultra')
+    expect(item.text()).toContain('Fable')
+    await item.trigger('click')
+    expect(wrapper.emitted('update:modelValue')).toEqual([['fable']])
+  })
+
   it('uses explicit active models instead of modelValue when provided', async () => {
     const wrapper = mountSelector({
       modelValue: 'sonnet',
@@ -156,6 +179,20 @@ describe('ModelSelector', () => {
 
     const activeModels = wrapper.findAll('.ms-item--active').map((el) => el.attributes('data-model'))
     expect(activeModels).toEqual(['kimi-k2.7-code:cloud'])
+  })
+
+  it('highlights a native model selected through its tier alias badge', async () => {
+    const sections: ModelSection[] = [{
+      key: 'codex',
+      label: 'OpenAI Codex',
+      models: ['gpt-5.6-sol'],
+      modelBadges: { 'gpt-5.6-sol': ['Opus'] },
+    }]
+    const wrapper = mountSelector({ sections, modelValue: 'opus' })
+    await wrapper.find('.model-selector__trigger').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.ms-item--active').attributes('data-model')).toBe('gpt-5.6-sol')
   })
 
   it('can render as a triggerless popup and emit close', async () => {

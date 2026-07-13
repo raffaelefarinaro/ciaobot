@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from importlib import resources
@@ -92,12 +93,32 @@ def fetch_active_chat_ids(port: int, *, timeout: float = 2.0) -> set[str]:
     return {str(chat_id) for chat_id in ids} if isinstance(ids, list) else set()
 
 
+def notify_open_chat(port: int, chat_id: str, *, timeout: float = 2.0) -> bool:
+    """Tell an already-open PWA to navigate to ``chat_id`` via /ws/events."""
+
+    if not chat_id:
+        return False
+    url = f"http://localhost:{port}/api/open-chat/{urllib.parse.quote(chat_id, safe='')}"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+    return isinstance(payload, dict) and bool(payload.get("ok"))
+
+
 def status_label(status: ServerStatus) -> str:
     if not status.reachable:
         return "Server: not running"
     if not status.ready:
         return "Server: starting…"
     return "Server: running"
+
+
+def server_recovery_label(status: ServerStatus) -> str:
+    """Action label for starting a stopped server or restarting a live one."""
+
+    return "Restart Server" if status.reachable else "Start Server"
 
 
 def open_url(workspace: Path, port: int) -> str:
@@ -408,6 +429,63 @@ class OpenChat:
     workspace: str = ""
 
 
+def _notification_entry_id(entry: dict[str, object]) -> str:
+    """Stable identity for one append-only local notification-log entry."""
+
+    return json.dumps(entry, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def read_notification_log(workspace: Path) -> list[dict[str, object]]:
+    """Read valid entries from the local notification log.
+
+    The PushManager appends this file from a background thread, so a reader
+    can occasionally see a partial last line. Ignore that line and retry on
+    the next refresh rather than letting a transient write break the tray.
+    """
+
+    path = workspace / ".runtime" / "notifications.jsonl"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+
+    entries: list[dict[str, object]] = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries
+
+
+@dataclass(slots=True)
+class NotificationLogTail:
+    """Track local push entries already observed by this menu-bar process."""
+
+    seen_entry_ids: set[str]
+
+    @classmethod
+    def at_end(cls, workspace: Path) -> "NotificationLogTail":
+        """Start at the current end, so relaunching never replays old alerts."""
+
+        return cls({_notification_entry_id(entry) for entry in read_notification_log(workspace)})
+
+    def read_new(self, workspace: Path) -> list[dict[str, object]]:
+        """Return entries appended since the last read and advance the tail."""
+
+        entries = read_notification_log(workspace)
+        current_ids = {_notification_entry_id(entry) for entry in entries}
+        new_entries = [
+            entry for entry in entries if _notification_entry_id(entry) not in self.seen_entry_ids
+        ]
+        # PushManager retains a bounded log. Discard IDs it trimmed so the
+        # tracker stays bounded as well.
+        self.seen_entry_ids = current_ids
+        return new_entries
+
+
 def _load_web_state(workspace: Path) -> tuple[dict[str, dict], dict[str, dict]]:
     """Projects and chats from the server's persisted PWA state."""
 
@@ -485,6 +563,13 @@ def read_unread_chats(workspace: Path, *, limit: int = 10) -> list[OpenChat]:
         unread.append(_open_chat_from_state(chat_id, chat, projects=projects))
     unread.sort(key=lambda chat: chat.last_activity_at, reverse=True)
     return unread[:limit]
+
+
+def count_unread_chats(workspace: Path) -> int:
+    """Total unread chat count, without the menu's display limit."""
+
+    _, chats = _load_web_state(workspace)
+    return sum(1 for chat in chats.values() if chat_is_unread(chat))
 
 
 _INET_RE = re.compile(r"^\s*inet (\d+\.\d+\.\d+\.\d+)", re.MULTILINE)
@@ -594,6 +679,7 @@ def run_menubar(workspace: Path, port: int) -> int:
     app = rumps.App("Ciaobot", icon=face, template=True, quit_button=None)
 
     # Only notify for entries newer than launch, not the whole backlog.
+    notification_log = NotificationLogTail.at_end(workspace)
     status_fetcher = make_cached_package_status()
     state = {
         "fingerprint": None,
@@ -625,6 +711,7 @@ def run_menubar(workspace: Path, port: int) -> int:
 
     def _open_chat_callback(chat_id: str):
         def _callback(_sender) -> None:
+            notify_open_chat(port, chat_id)
             subprocess.run(open_command(chat_url(workspace, port, chat_id)), check=False)
 
         return _callback
@@ -637,6 +724,47 @@ def run_menubar(workspace: Path, port: int) -> int:
 
     def on_open(_sender) -> None:
         subprocess.run(open_app_command(workspace, port), check=False)
+
+    def on_recover_server(_sender) -> None:
+        current = fetch_server_status(port)
+        if current.reachable:
+            active_chat_ids = fetch_active_chat_ids(port)
+            if active_chat_ids:
+                count = len(active_chat_ids)
+                rumps.alert(
+                    title="Ciaobot is still working",
+                    message=(
+                        f"{count} chat{' is' if count == 1 else 's are'} still active. "
+                        "Wait for the work to finish, then restart the server."
+                    ),
+                    ok="OK",
+                    icon_path=icon_path("Ciaobot.icns"),
+                )
+                return
+            if not rumps.alert(
+                title="Restart Ciaobot server?",
+                message="No active chats are running. Restart the local server now?",
+                ok="Restart",
+                cancel="Cancel",
+                icon_path=icon_path("Ciaobot.icns"),
+            ):
+                return
+        try:
+            completed = subprocess.run(
+                restart_server_command(), capture_output=True, text=True, check=False
+            )
+        except OSError as exc:
+            rumps.alert(title="Could not start server", message=str(exc), ok="OK")
+            return
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout).strip()
+            rumps.alert(
+                title="Could not start server",
+                message=detail or "launchctl did not accept the request.",
+                ok="OK",
+                icon_path=icon_path("Ciaobot.icns"),
+            )
+        refresh()
 
     def on_logs(_sender) -> None:
         subprocess.run(view_logs_command(workspace), check=False)
@@ -823,7 +951,8 @@ def run_menubar(workspace: Path, port: int) -> int:
         # between non-empty groups so there are never doubled or trailing lines.
         groups = [
             [rumps.MenuItem("Open Ciaobot", callback=on_open),
-             _disabled_item(rumps, status_label(status))],
+             _disabled_item(rumps, status_label(status)),
+             rumps.MenuItem(server_recovery_label(status), callback=on_recover_server)],
             update_items,
             chat_items,
             [advanced_menu],
@@ -873,18 +1002,32 @@ def run_menubar(workspace: Path, port: int) -> int:
             time.sleep(WORKING_POLL_SECONDS)
 
     def refresh(_timer=None) -> None:
+        for notification in notification_log.read_new(workspace):
+            try:
+                rumps.notification(
+                    str(notification.get("title") or "Ciaobot"),
+                    "",
+                    str(notification.get("body") or "New notification"),
+                    icon=icon_path("Ciaobot.icns"),
+                )
+            except Exception:
+                # A notification failure should not prevent the normal menu
+                # refresh (or leave a stale unread count) behind.
+                pass
+
         status = fetch_server_status(port)
         state["reachable"] = status.reachable
 
         chats = read_open_chats(workspace)
         unread_chats = read_unread_chats(workspace)
         unread_ids = {chat.chat_id for chat in unread_chats}
+        unread_count = count_unread_chats(workspace)
         working_ids = set(state["working_ids"])
         addresses = server_addresses(port)
         pkg = status_fetcher()
         login_status = start_at_login_status()
         state["package_status"] = pkg
-        app.title = menubar_badge_title(len(unread_ids))
+        app.title = menubar_badge_title(unread_count)
 
         # Rebuild only when content changed so an open menu doesn't flicker.
         show_workspace = len({chat.workspace for chat in chats if chat.workspace}) > 1
@@ -901,7 +1044,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                 )
                 for c in chats
             ),
-            len(unread_ids),
+            unread_count,
             tuple(addresses),
             package_update_fingerprint(pkg),
             state["updating"],

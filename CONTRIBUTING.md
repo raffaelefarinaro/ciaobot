@@ -4,9 +4,15 @@ Ciaobot started as a personal project: it is one person's opinionated idea of ho
 
 Contributions of every size are welcome:
 
-- **Ideas and feedback.** Open a GitHub issue describing your use case, what felt wrong, or what you wish existed. Disagreement with the built-in opinions is useful input.
+- **Ideas and feedback.** Open a [GitHub issue](https://github.com/raffaelefarinaro/ciaobot/issues/new) describing your use case, what felt wrong, or what you wish existed. Disagreement with the built-in opinions is useful input.
 - **Bug reports.** Include reproduction steps, relevant log output (`.runtime/server_errors.log`), and your platform.
 - **Pull requests.** Small, focused changes are easiest to review. For larger ideas, open an issue first so we can agree on direction before you invest time.
+
+## Opening a GitHub issue
+
+You can browse the project without an account, but submitting an issue or pull request requires a free GitHub account. Open the issue link above and GitHub will prompt you to sign in or create one. You do not need to install the GitHub CLI (`gh`) to file a report in your browser.
+
+If you prefer `gh`, authenticate it with `gh auth login` before running `gh issue create`.
 
 ## Ground rules
 

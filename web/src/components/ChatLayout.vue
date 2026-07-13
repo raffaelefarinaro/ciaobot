@@ -39,7 +39,7 @@
           />
           <ChatPanel v-else-if="store.activeChat" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
           <div v-else class="empty-shell">
-            <PaneHeader title="Ciaobot" @open-sidebar="sidebarCollapsed = false" />
+            <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
             <div class="empty-state">
               <div class="empty-mark">
                 <button
@@ -47,6 +47,8 @@
                   class="empty-face-btn"
                   aria-label="Say hello"
                   @click="onFaceClick"
+                  @mouseenter="onFaceEnter"
+                  @mouseleave="onFaceLeave"
                 >
                   <Transition name="face-bubble">
                     <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
@@ -110,7 +112,7 @@
         />
         <ChatPanel v-else-if="store.activeChat" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
         <div v-else class="empty-shell">
-          <PaneHeader title="Ciaobot" @open-sidebar="sidebarCollapsed = false" />
+          <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
           <div class="empty-state">
             <div class="empty-mark">
               <button
@@ -118,6 +120,8 @@
                 class="empty-face-btn"
                 aria-label="Say hello"
                 @click="onFaceClick"
+                @mouseenter="onFaceEnter"
+                @mouseleave="onFaceLeave"
               >
                 <Transition name="face-bubble">
                   <div v-if="speechGreeting" :key="speechGreeting" class="face-speech-bubble">
@@ -144,6 +148,7 @@
                 {{ action.isCreating ? 'Creating...' : `+ ${action.label} Chat` }}
               </button>
             </div>
+            <GettingStartedChecklist variant="home" @open-sidebar="sidebarCollapsed = false" />
           </div>
         </div>
       </template>
@@ -168,6 +173,7 @@ import FileViewerModal from './FileViewerModal.vue'
 import PinnedFilePanel from './PinnedFilePanel.vue'
 import PaneHeader from './PaneHeader.vue'
 import ProductTour from './ProductTour.vue'
+import GettingStartedChecklist from './GettingStartedChecklist.vue'
 
 const store = useProjectStore()
 const tourStore = useProductTourStore()
@@ -310,8 +316,9 @@ function stopSplitDrag() {
   }
 }
 
-// Welcome-screen mascot. Click opens the mouth and shows a comic bubble
-// with "hello" in a different language each time.
+// Welcome-screen mascot. Hovering shows a comic bubble with "hello" in a
+// different language until the pointer leaves; clicking pins the bubble
+// on until the next click.
 const FACE_GREETINGS = [
   'Ciao!', '¡Hola!', 'Salut!', 'Hallo!', 'Olá!', 'Hello!',
   'こんにちは!', '안녕!', '你好!', 'مرحبا!', 'Привет!', 'नमस्ते!',
@@ -320,8 +327,8 @@ const FACE_GREETINGS = [
 ] as const
 
 const speechGreeting = ref<string | null>(null)
+const speechPinned = ref(false)
 let greetingQueue: string[] = []
-let speechHideTimer: ReturnType<typeof window.setTimeout> | null = null
 
 function shuffleGreetings(): string[] {
   const next = [...FACE_GREETINGS]
@@ -338,12 +345,16 @@ function nextGreeting(): string {
 }
 
 function onFaceClick() {
-  speechGreeting.value = nextGreeting()
-  if (speechHideTimer) window.clearTimeout(speechHideTimer)
-  speechHideTimer = window.setTimeout(() => {
-    speechGreeting.value = null
-    speechHideTimer = null
-  }, 2600)
+  speechPinned.value = !speechPinned.value
+  speechGreeting.value = speechPinned.value ? nextGreeting() : null
+}
+
+function onFaceEnter() {
+  if (!speechPinned.value) speechGreeting.value = nextGreeting()
+}
+
+function onFaceLeave() {
+  if (!speechPinned.value) speechGreeting.value = null
 }
 
 const faceSrc = computed(() => (speechGreeting.value ? '/face_scared.png' : '/face.png'))
@@ -484,9 +495,10 @@ onMounted(async () => {
   await store.fetchAll()
   startLatestStatusSync()
   taskStore.fetchSchedules().catch(() => {})
+  taskStore.fetchLoops().catch(() => {})
   const chatId = route.params.chatId as string
   if (chatId && store.chats.find(c => c.chat_id === chatId)) {
-    store.switchChat(chatId)
+    await store.openChatFromDeepLink(chatId)
   }
   // Auto-collapse sidebar on mobile when a chat is active
   if (isMobile.value && store.activeChat) {
@@ -507,7 +519,7 @@ watch(
     const id = chatId as string
     if (!id) return
     if (!store.chats.find(c => c.chat_id === id)) return
-    if (store.activeChatId !== id) store.switchChat(id)
+    if (store.activeChatId !== id) void store.openChatFromDeepLink(id)
     else void store.markRead(id)
     if (isMobile.value) sidebarCollapsed.value = true
   }
@@ -594,7 +606,6 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  if (speechHideTimer) window.clearTimeout(speechHideTimer)
   stopLatestStatusSync()
   window.removeEventListener('resize', onResize)
   window.removeEventListener('touchstart', onTouchStart)
@@ -664,7 +675,6 @@ onBeforeUnmount(() => {
   user-select: none;
   transition: transform 120ms var(--ease);
 }
-.empty-state .empty-face-btn:hover { transform: scale(1.08); }
 .empty-state .empty-face-btn:active { transform: scale(0.94); }
 .empty-state .empty-face {
   display: block;

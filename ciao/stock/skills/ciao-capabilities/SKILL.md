@@ -1,6 +1,6 @@
 ---
 name: ciao-capabilities
-description: Authoritative catalog of what Ciaobot can do, for capability questions and feature tours. Use whenever the user asks what Ciaobot is, what it can do, what features are available, whether it can do something specific, or how one of its features works (memory, vault, archiving, schedules, routines, workspaces, projects, skills, voice, models, providers, notifications, menu bar, files, chat comments, pinned files, document previews) — and when onboarding or giving a tour or walkthrough to a new user. Trigger on phrasings like "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "can you remind me / remember / schedule", even when the word "Ciaobot" is not mentioned.
+description: Authoritative catalog of what Ciaobot can do, for capability questions and feature tours. Use whenever the user asks what Ciaobot is, what it can do, what features are available, whether it can do something specific, or how one of its features works (memory, vault, archiving, schedules, loops, routines, workspaces, projects, skills, voice, models, providers, notifications, menu bar, files, chat comments, pinned files, document previews) — and when onboarding or giving a tour or walkthrough to a new user. Trigger on phrasings like "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "can you remind me / remember / schedule", even when the word "Ciaobot" is not mentioned.
 ---
 
 # Ciaobot Capabilities
@@ -10,9 +10,9 @@ You are running inside Ciaobot. The app's feature surface is not otherwise visib
 ## How to answer
 
 - **Specific question** ("can you schedule things?", "where do my archived chats go?") → answer from the relevant section only. Don't recite the whole catalog.
-- **Broad question** ("what can you do?") → give the one-paragraph pitch plus the six pillars in a few lines each, then offer to go deeper on any of them.
+- **Broad question** ("what can you do?") → give the one-paragraph pitch plus the capability areas below in a few lines each, then offer to go deeper on any of them.
 - **New user / onboarding** → offer the guided tour below.
-- Distinguish the **app** from **you**: this catalog is what the Ciaobot app provides. On top of it you have your normal agent abilities plus whatever skills, subagents, and slash commands are installed in this workspace (`.claude/skills/`, `.claude/agents/`, `.claude/commands/`).
+- Distinguish the **app** from **you**: this catalog is what the Ciaobot app provides. On top of it you have your normal agent abilities plus whatever skills, subagents, and slash commands are installed in this workspace (`skills/`, `subagents/`, `commands/`, and their `.claude/` / `.agents/skills/` mirrors).
 
 ## The one-paragraph pitch
 
@@ -34,9 +34,10 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 - The vault is standard, open markdown: notes, project folders, `CLAUDE.md`, `MEMORY.md`, a generated `INDEX.md` from frontmatter and wikilinks. It is agent-agnostic and remains useful without Ciaobot.
 - Vault tooling: `ciao vault-search` (search before adding duplicate facts), `ciao vault-index` (rebuild the index after larger edits). Reading conventions live in the `vault-read` skill.
 
-### 3. Schedules and automations
+### 3. Schedules, loops, and automations
 
-- A native scheduler dispatches recurring or one-off prompts as fresh chat turns into a target project or chat — daily/weekly/monthly/once, timezone-aware. Configure from the **Schedules page** or directly in chat (the `ciao-schedules` skill has the full recipe).
+- A native scheduler dispatches recurring or one-off prompts as fresh chat turns into a target project or chat — daily/weekly/monthly/once, timezone-aware. Configure from the **Automations page** or directly in chat (the `ciao-automations` skill has the full recipe).
+- **Loops** are the sub-day sibling of schedules: bound to one existing chat, they re-send the same prompt every N minutes (e.g. "check my PRs every 10 minutes"), keeping the conversation's context between iterations. A loop runs with the chat's own model; loops set to start with the server resume on boot, the rest are started manually. Managed from the same Automations page.
 - System maintenance schedules ship with the app; the Automation page shows background job runs.
 
 ### 4. Files
@@ -48,14 +49,14 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 
 ### 5. Skills, subagents, and commands (extensibility)
 
-- **Stock skills** ship with the app and are synced into `.claude/skills/` (`ciao sync-skills`, runs at startup). A same-named skill in the workspace's `skills/` folder overrides the packaged copy.
+- **Stock skills** ship with the app and are synced into both `.claude/skills/` and `.agents/skills/` (`ciao sync-skills`, runs at startup). A same-named skill in the workspace's `skills/` folder overrides the packaged copy.
 - **Custom** skills, subagents, and slash commands are authored in the workspace (`skills/`, `subagents/`, `commands/`) and mirrored automatically.
 - **GitHub-sourced skills** can be installed and are refreshed automatically on restart when upstream changes.
 - **Skill evolution**: a background loop analyzes usage and proposes skill improvements — as reviewable proposals, never silent edits.
 
 ### 6. Models and providers
 
-- Backends: **Claude Code** (Claude subscription or Anthropic API key), **Ollama** (cloud or local daemon), **OpenRouter**. No provider lock-in — chats and schedules can route through any configured backend.
+- Backends: **Claude Code** (Claude subscription or Anthropic API key), **Codex** (OpenAI ChatGPT subscription via the Codex CLI), **Ollama** (cloud or local daemon, routed through Claude Code), and **OpenRouter** (routed through Claude Code). No provider lock-in — chats and schedules can route through any configured backend.
 - Per-workspace default model and model bucket (which controls how aliases like `opus`/`sonnet` resolve), per-chat override in the picker.
 
 ### 7. Google Workspace (`gws`)
@@ -69,7 +70,7 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 
 - **Settings page**: provider keys, model lists, skill/agent inventory, the injected system prompt (read-only), and local package updates from the UI.
 - **macOS extras**: a menu bar companion (`ciao menubar`) with server status, a Start Ciao at Login status/toggle, and open/restart/logs actions (the Ciaobot face turns scared when the server is down), a `Ciaobot.app` shortcut, and LaunchAgents so everything starts on login.
-- **Local HTTP API**: the app exposes an API an in-chat agent can drive (create chats, subagents, commands) — recipes are in `PWA_API.md` in the Ciaobot GitHub repo (`raffaelefarinaro/ciaobot`); fetch it when you need the raw API surface. For the common cases, the shipped `create-chat` and `ciao-schedules` skills already contain the working recipes.
+- **Local HTTP API**: the app exposes an API an in-chat agent can drive (create chats, subagents, commands) — recipes are in `PWA_API.md` in the Ciaobot GitHub repo (`raffaelefarinaro/ciaobot`); fetch it when you need the raw API surface. For the common cases, the shipped `create-chat` and `ciao-automations` skills already contain the working recipes.
 
 ### Privacy and trust posture
 
@@ -77,22 +78,19 @@ Local-first: the server, vault, and runtime state live on the user's machine; tr
 
 ## Guided tour (new users)
 
-When onboarding someone, walk these in order, hands-on rather than as a lecture — one short step at a time, checking in between. **Point out the in-app product tour** (auto-starts on first launch; replay from Settings → Home) for the chat-comment, file-card, pin, and preview flows — then reinforce them live in chat:
+When onboarding someone, start with the **in-app product tour** (auto-starts on first launch; replay from Settings → Home), then walk through hands-on:
 
-1. **Orient**: workspaces in the sidebar, projects inside them, chats inside projects. Create or rename a project for something they're actually working on.
-2. **Chat**: show the model picker and voice input; explain that project files and notes are context the agent always sees.
-3. **Annotate**: demonstrate selecting text in a message → comment sidebar → send with the next prompt.
-4. **Files in chat**: when the agent touches a file, show the inline card → viewer → pin beside chat → line comments on a selection.
-5. **Rich previews**: open an image or PDF (and mention `.pptx` → PDF when LibreOffice is installed).
-6. **Files surface**: open the Files page, create or edit a note, show restore/history.
-7. **Memory**: explain archive → insights → memory proposals, and that nothing becomes durable memory without their approval.
-8. **Schedules**: set up one small routine they'd find useful (a weekly review, a daily check).
-9. **Settings & extras**: providers and models, package updates, replay product tour, and on macOS the menu bar companion.
+1. **Orient** — workspaces → projects → chats; create or rename a project for something they're working on.
+2. **Chat** — model picker, voice input, and project context the agent always sees.
+3. **Annotate & files** — message comments, inline file cards, pin, line comments, and rich previews (replay from the product tour if needed).
+4. **Memory** — archive → insights → memory proposals; nothing becomes durable without approval.
+5. **Schedules** — set up one small routine they'd actually use.
+6. **Settings** — providers/models, package updates, and on macOS the menu bar companion.
 
 Close with: they can ask "what can Ciaobot do?" (or about any specific feature) in any chat, anytime.
 
 ## Where the details live
 
 - Workspace customization surface (env vars, workspaces registry, tool deny-lists, model routing): `CIAO_CUSTOMIZATION.md` in the workspace root.
-- Schedules how-to: the `ciao-schedules` skill. Spawning chats: the `create-chat` skill. Vault conventions: the `vault-read` skill.
+- Schedules and loops how-to: the `ciao-automations` skill. Spawning chats: the `create-chat` skill. Vault conventions: the `vault-read` skill.
 - Canonical docs in the Ciaobot GitHub repo (`raffaelefarinaro/ciaobot`, also present in source checkouts): `README.md`, `docs/ARCHITECTURE.md`, and `PWA_API.md` (routes, auth, agent recipes).

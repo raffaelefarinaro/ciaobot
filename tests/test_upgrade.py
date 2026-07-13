@@ -12,9 +12,11 @@ from ciao.upgrade import (
     update_skills,
     upgrade_all,
     upgrade_claude_code,
+    upgrade_codex,
     upgrade_gws,
     upgrade_apfel,
     upgrade_root_npm,
+    upgrade_scrapling,
     upgrade_web_npm,
 )
 
@@ -83,6 +85,44 @@ def test_upgrade_claude_code_uses_bundled_cli(monkeypatch) -> None:
     assert result.after_version == "2.1.0"
 
 
+def test_upgrade_codex_reports_desktop_managed_binary(monkeypatch) -> None:
+    binary = "/Applications/ChatGPT.app/Contents/Resources/codex"
+    monkeypatch.setattr(
+        "ciao.providers.codex.resolve_codex_binary", lambda: binary
+    )
+    monkeypatch.setattr(
+        "ciao.upgrade.read_version", AsyncMock(return_value="codex-cli 1.2.3")
+    )
+
+    result = asyncio.run(upgrade_codex())
+
+    assert result.success is True
+    assert result.changed is False
+    assert "desktop app" in result.stdout
+    assert result.after_version == "codex-cli 1.2.3"
+
+
+def test_upgrade_codex_uses_native_updater(monkeypatch) -> None:
+    binary = "/usr/local/bin/codex"
+    expected = UpgradeResult(
+        command=[binary, "update"], changed=True, success=True,
+        stdout="", stderr="", before_version="1", after_version="2",
+    )
+    monkeypatch.setattr(
+        "ciao.providers.codex.resolve_codex_binary", lambda: binary
+    )
+    runner = AsyncMock(return_value=expected)
+    monkeypatch.setattr("ciao.upgrade.run_upgrade", runner)
+
+    result = asyncio.run(upgrade_codex())
+
+    assert result is expected
+    runner.assert_awaited_once_with(
+        install_command=[binary, "update"],
+        version_command=[binary, "--version"],
+    )
+
+
 
 _UNCHANGED = UpgradeResult(
     command=[], changed=False, success=True,
@@ -100,10 +140,12 @@ async def test_upgrade_all_returns_none_when_nothing_changed(monkeypatch, tmp_pa
     monkeypatch.setattr("ciao.upgrade.upgrade_gws", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_defuddle", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_claude_code", AsyncMock(return_value=_UNCHANGED))
+    monkeypatch.setattr("ciao.upgrade.upgrade_codex", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_root_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_web_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_apfel", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_libreoffice", AsyncMock(return_value=_UNCHANGED))
+    monkeypatch.setattr("ciao.upgrade.upgrade_scrapling", AsyncMock(return_value=_UNCHANGED))
 
     with caplog.at_level(logging.INFO):
         result = await upgrade_all(str(tmp_path))
@@ -126,10 +168,12 @@ async def test_upgrade_all_reports_changes(monkeypatch, tmp_path, caplog) -> Non
     monkeypatch.setattr("ciao.upgrade.upgrade_gws", AsyncMock(return_value=gws_bumped))
     monkeypatch.setattr("ciao.upgrade.upgrade_defuddle", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_claude_code", AsyncMock(return_value=_UNCHANGED))
+    monkeypatch.setattr("ciao.upgrade.upgrade_codex", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_root_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_web_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_apfel", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_libreoffice", AsyncMock(return_value=_UNCHANGED))
+    monkeypatch.setattr("ciao.upgrade.upgrade_scrapling", AsyncMock(return_value=_UNCHANGED))
 
     with caplog.at_level(logging.INFO):
         result = await upgrade_all(str(tmp_path))
@@ -156,10 +200,12 @@ async def test_upgrade_all_surfaces_silent_failures(monkeypatch, tmp_path, caplo
     monkeypatch.setattr("ciao.upgrade.upgrade_gws", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_defuddle", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_claude_code", AsyncMock(return_value=claude_failed))
+    monkeypatch.setattr("ciao.upgrade.upgrade_codex", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_root_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_web_npm", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_apfel", AsyncMock(return_value=_UNCHANGED))
     monkeypatch.setattr("ciao.upgrade.upgrade_libreoffice", AsyncMock(return_value=_UNCHANGED))
+    monkeypatch.setattr("ciao.upgrade.upgrade_scrapling", AsyncMock(return_value=_UNCHANGED))
 
     with caplog.at_level(logging.WARNING):
         result = await upgrade_all(str(tmp_path))
@@ -216,6 +262,65 @@ def test_upgrade_apfel_runs_upgrade_when_installed(monkeypatch) -> None:
     assert result.success is True
     assert result.changed is False
     assert result.before_version == "1.5.2"
+
+
+def test_upgrade_scrapling_skips_when_not_installed(monkeypatch) -> None:
+    # Scrapling is opt-in: a missing binary is not a failure and must not
+    # trigger an install.
+    monkeypatch.setattr("ciao.upgrade.shutil.which", lambda cmd: None)
+    result = asyncio.run(upgrade_scrapling())
+    assert result.success is True
+    assert result.changed is False
+    assert result.command == []
+    assert "not installed (optional)" in result.stdout
+
+
+def test_upgrade_scrapling_upgrades_when_installed(monkeypatch) -> None:
+    import sys as _sys
+    monkeypatch.setattr(
+        "ciao.upgrade.shutil.which",
+        lambda cmd: "/usr/local/bin/scrapling" if cmd == "scrapling" else None,
+    )
+
+    async def mock_run_upgrade(install_command, version_command):
+        assert install_command == [
+            _sys.executable, "-m", "pip", "install", "--upgrade", "scrapling[fetchers]",
+        ]
+        assert version_command == [_sys.executable, "-m", "pip", "show", "scrapling"]
+        return UpgradeResult(
+            command=install_command, changed=False, success=True,
+            stdout="", stderr="", before_version="0.4.10", after_version="0.4.10",
+        )
+
+    monkeypatch.setattr("ciao.upgrade.run_upgrade", mock_run_upgrade)
+    result = asyncio.run(upgrade_scrapling())
+    assert result.success is True
+    assert result.before_version == "0.4.10"
+
+
+def test_upgrade_scrapling_refreshes_browsers_on_change(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "ciao.upgrade.shutil.which",
+        lambda cmd: "/usr/local/bin/scrapling" if cmd == "scrapling" else None,
+    )
+    bumped = UpgradeResult(
+        command=[], changed=True, success=True,
+        stdout="", stderr="", before_version="0.4.9", after_version="0.4.10",
+    )
+    monkeypatch.setattr("ciao.upgrade.run_upgrade", AsyncMock(return_value=bumped))
+
+    exec_calls = []
+
+    async def mock_exec(*cmd, **kwargs):
+        exec_calls.append(list(cmd))
+        proc = AsyncMock()
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        return proc
+
+    monkeypatch.setattr("ciao.upgrade.asyncio.create_subprocess_exec", mock_exec)
+    result = asyncio.run(upgrade_scrapling())
+    assert result.changed is True
+    assert exec_calls == [["scrapling", "install"]]
 
 
 def test_upgrade_root_npm_uses_prefix(monkeypatch, tmp_path) -> None:

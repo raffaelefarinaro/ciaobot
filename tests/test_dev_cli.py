@@ -7,6 +7,15 @@ import pytest
 from ciao import dev
 
 
+def test_backend_command_uses_restart_supervisor() -> None:
+    assert dev._backend_command() == [
+        dev.sys.executable,
+        "-m",
+        "ciao.cli",
+        "run",
+    ]
+
+
 def test_build_dev_environment_loads_dotenv_and_sets_dev_defaults(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     (workspace / "web").mkdir(parents=True)

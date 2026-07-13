@@ -123,7 +123,10 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         "Bash",
     ]
     assert pcm.refresh_count == 1
-    assert data["provider_options"] == [{"value": "claude", "label": "Claude"}]
+    assert data["provider_options"] == [
+        {"value": "claude", "label": "Anthropic (via Claude Code)"},
+        {"value": "codex", "label": "OpenAI (via Codex)"},
+    ]
 
     stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
     client_workspace = next(item for item in stored if item["name"] == "client-a")
@@ -208,9 +211,10 @@ def test_workspace_provider_options_follow_available_backends(tmp_path):
 
     data = client.get("/api/workspaces").json()
     assert data["provider_options"] == [
-        {"value": "claude", "label": "Claude"},
-        {"value": "ollama", "label": "Ollama"},
-        {"value": "openrouter", "label": "OpenRouter"},
+        {"value": "claude", "label": "Anthropic (via Claude Code)"},
+        {"value": "codex", "label": "OpenAI (via Codex)"},
+        {"value": "ollama", "label": "Ollama (via Claude Code)"},
+        {"value": "openrouter", "label": "OpenRouter (via Claude Code)"},
     ]
 
     resp = client.post(
@@ -280,8 +284,8 @@ def test_provider_config_status_and_write_only_patch(tmp_path):
     )
 
     data = client.get("/api/settings/providers").json()
-    assert data["keys"]["ANTHROPIC_API_KEY"]["configured"] is True
-    assert data["keys"]["OPENAI_API_KEY"]["configured"] is True
+    assert "ANTHROPIC_API_KEY" not in data["keys"]
+    assert data["service_keys"]["OPENAI_API_KEY"]["configured"] is True
     assert data["keys"]["CIAO_OLLAMA_API_KEY"]["configured"] is False
     assert data["auto_update_github_skills"] is False
     assert "sk-anthropic" not in json.dumps(data)
@@ -508,4 +512,3 @@ def test_gws_setup_endpoints(tmp_path, monkeypatch):
     profiles = {p["name"]: p for p in resp.json()["profiles"]}
     assert profiles["personal"]["configured"] is False
     assert profiles["personal"]["client_secret_present"] is False
-

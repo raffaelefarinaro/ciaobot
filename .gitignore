@@ -31,3 +31,10 @@ memory-vault/
 
 # Claude Code session tooling (worktrees, local permission grants)
 .claude/
+
+# Workspace runtime artifacts seeded by `ciao sync-skills` when a dev
+# instance runs with this repo as its workspace (canonical copies live
+# in ciao/stock/; .agents/ and .codex/ are generated Codex mirrors)
+/.agents/
+/.codex/
+/commands/

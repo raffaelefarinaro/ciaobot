@@ -10,6 +10,8 @@ This document is for agents and operators working inside an installed Ciaobot wo
 - `.claude/agents/`: project agents available to Claude-backed chats.
 - `.claude/commands/`: slash commands available to Claude-backed chats.
 - `.claude/skills/`: skills available to Claude-backed chats.
+- `.agents/skills/`: Codex workspace skills plus generated command/agent wrappers.
+- `.codex/agents/` and `.codex/config.toml`: generated native Codex agent definitions and registrations.
 - `memory-vault/`: durable workspace memory, projects, references, and chat logs.
 
 Do not edit package files under the Python installation for normal customization. Prefer workspace files.
@@ -50,9 +52,10 @@ Example `.runtime/workspaces.json`:
 
 ## Providers and Models
 
-Ciaobot routes each chat through the Claude provider:
+Ciaobot supports two native subscription-backed chat providers:
 
 - `claude`: Claude Code / Claude Agent SDK. It can use Anthropic models directly or route selected models through Ollama-compatible or OpenRouter settings.
+- `codex`: OpenAI Codex CLI app-server. It uses the account authenticated by `codex login` (including ChatGPT subscription login) and discovers that account's models and reasoning levels dynamically.
 
 Useful `.env` settings:
 
@@ -61,6 +64,7 @@ Useful `.env` settings:
 - `CIAO_OLLAMA_LOCAL_MODELS`: local Ollama daemon model IDs to pin into the picker.
 - `CLAUDE_DEFAULT_MODEL_PERSONAL` and `CLAUDE_DEFAULT_MODEL_WORK`: legacy defaults for the built-in personal/work workspaces.
 - `CIAO_WORKSPACES`: preferred multi-workspace registry. Use `default_model` and `model_bucket` per workspace.
+- `CIAO_CODEX_BIN`: optional absolute override when `codex` is not discoverable on the service PATH.
 
 `model_bucket` controls how Claude aliases route:
 
@@ -76,7 +80,7 @@ Provider keys live in `.env` or the provider's own OAuth store. Do not put keys 
 
 Common keys:
 
-- `ANTHROPIC_API_KEY`: Anthropic API fallback when not using Claude OAuth.
+- Claude Code authentication is owned by the Claude CLI; use Settings → Providers to connect or verify it.
 - `OPENAI_API_KEY`: OpenAI features such as cloud voice transcription.
 - `CIAO_OLLAMA_API_KEY`: Ollama cloud API key.
 - `OPENROUTER_API_KEY`: optional critique/review model routing.
@@ -108,7 +112,7 @@ Tool names follow Claude SDK naming:
 - `mcp__server_name__tool_name`: block one MCP tool.
 - `Bash`: block the Bash tool.
 
-Skills and agents are installed into `.claude/skills/` and `.claude/agents/`. Ciaobot also mirrors supported assets with `ciao sync-skills`.
+Canonical assets live in `skills/`, `commands/`, and `subagents/`. `ciao sync-skills` mirrors them into Claude's `.claude/` catalogs, Codex's `.agents/skills/` catalog, and native Codex agent definitions under `.codex/`. Ciaobot commands remain available through the same `/command` syntax in chats; Codex also receives skill wrappers for commands and named agent roles.
 
 Use workspace-level tool deny lists for access control. Use skills and agents for behavior and workflow guidance.
 
@@ -145,7 +149,7 @@ Safe workspace-level changes:
 
 - Add or edit `.runtime/workspaces.json`.
 - Add project docs, vault references, and memory pages.
-- Add or update `.claude/skills/`, `.claude/agents/`, and `.claude/commands/`.
+- Add or update canonical `skills/`, `subagents/`, and `commands/` assets, then run `ciao sync-skills`.
 - Change model lists and provider keys in `.env` without printing secrets.
 
 Changes that usually need restart:

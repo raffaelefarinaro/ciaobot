@@ -25,6 +25,12 @@ const routes = [
     meta: { requiresAuth: true },
   },
   {
+    // The Schedules page grew into "Automations" (schedules + loops); keep
+    // the /schedules paths as canonical and alias /automations onto them.
+    path: '/automations',
+    redirect: '/schedules',
+  },
+  {
     path: '/schedules',
     name: 'schedules',
     component: () => import('./components/ChatLayout.vue'),
@@ -47,6 +53,10 @@ const routes = [
     name: 'settings-tab',
     component: () => import('./components/ChatLayout.vue'),
     meta: { requiresAuth: true },
+  },
+  {
+    path: '/settings/instructions',
+    redirect: '/settings/context',
   },
 ]
 

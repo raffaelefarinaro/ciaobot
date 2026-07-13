@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 # Anthropic model aliases (and real claude-* ids) must never be rerouted to
 # Ollama by the routine helpers below — they belong to the Anthropic
 # subscription path.
-_ANTHROPIC_ALIASES = frozenset({"opus", "sonnet", "haiku"})
+_ANTHROPIC_ALIASES = frozenset({"opus", "sonnet", "haiku", "fable"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,12 +66,13 @@ class OllamaSettings:
     # and already pulled. Override with ``CIAO_OLLAMA_TITLE_MODEL``.
     title_model: str = "gemma4:e2b-it-qat"
     # Per-tier Ollama model overrides. Used when a chat is configured with
-    # Anthropic alias names (haiku/sonnet/opus) but the operator wants the
+    # Anthropic alias names (haiku/sonnet/opus/fable) but the operator wants the
     # request routed through Ollama. Override with ``CIAO_OLLAMA_HAIKU_MODEL``
-    # / ``_SONNET_MODEL`` / ``_OPUS_MODEL``.
+    # / ``_SONNET_MODEL`` / ``_OPUS_MODEL`` / ``_FABLE_MODEL``.
     haiku_model: str = "deepseek-v4-flash:cloud"
     sonnet_model: str = "kimi-k2.7-code:cloud"
     opus_model: str = "glm-5.2:cloud"
+    fable_model: str = "glm-5.2:cloud"
     # Models served by a *local* Ollama daemon, routed independently of the
     # cloud allowlist above so both flavours can coexist (cloud key set →
     # ``base_url`` points at ollama.com while ``local_models`` still go to
@@ -128,6 +129,7 @@ def _tier_remap_env(
     haiku_model: str | None = None,
     sonnet_model: str | None = None,
     opus_model: str | None = None,
+    fable_model: str | None = None,
 ) -> dict[str, str]:
     """Tier-alias + control-plane model remaps for Ollama-routed CLIs.
 
@@ -148,12 +150,12 @@ def _tier_remap_env(
     haiku = haiku_model or settings.haiku_model
     sonnet = sonnet_model or settings.sonnet_model
     opus = opus_model or settings.opus_model
+    fable = fable_model or settings.fable_model
     return {
         "ANTHROPIC_DEFAULT_HAIKU_MODEL": haiku,
         "ANTHROPIC_DEFAULT_SONNET_MODEL": sonnet,
         "ANTHROPIC_DEFAULT_OPUS_MODEL": opus,
-        # No dedicated Fable tier on Ollama; reuse the opus-tier model.
-        "ANTHROPIC_DEFAULT_FABLE_MODEL": opus,
+        "ANTHROPIC_DEFAULT_FABLE_MODEL": fable,
         "ANTHROPIC_SMALL_FAST_MODEL": haiku,
         "CLAUDE_CODE_SUBAGENT_MODEL": sonnet,
         # Auto-mode + background classifier: the env is set so the classifier
@@ -185,6 +187,7 @@ def ollama_env_for_model(model: str, settings: OllamaSettings) -> dict[str, str]
                 haiku_model=model,
                 sonnet_model=model,
                 opus_model=model,
+                fable_model=model,
             ),
         }
     if model and _is_ollama_shaped(model) and _cloud_available(settings):

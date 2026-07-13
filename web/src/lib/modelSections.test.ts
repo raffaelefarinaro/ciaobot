@@ -17,15 +17,18 @@ describe('modelSections', () => {
       provider_models: {
         claude_work: ['opus', 'sonnet', 'haiku', 'claude-3-7-sonnet-20250219'],
         claude_personal: ['kimi-k2.7-code:cloud'],
-        openrouter: ['anthropic/claude-sonnet-4.5'],
+        openrouter: ['anthropic/claude-sonnet-4.5', 'anthropic/claude-fable-latest'],
+        codex: ['gpt-test'],
       },
       provider_defaults: {},
-      ollama_models: ['kimi-k2.7-code:cloud'],
+      ollama_models: ['kimi-k2.7-code:cloud', 'glm-5.2:cloud'],
       ollama_local_models: [],
-      openrouter_models: ['anthropic/claude-sonnet-4.5'],
+      openrouter_models: ['anthropic/claude-sonnet-4.5', 'anthropic/claude-fable-latest'],
+      codex_models: ['gpt-test'],
       alias_tiers: {
-        ollama: { sonnet: 'kimi-k2.7-code:cloud' },
-        openrouter: { sonnet: 'anthropic/claude-sonnet-4.5' },
+        ollama: { sonnet: 'kimi-k2.7-code:cloud', fable: 'glm-5.2:cloud' },
+        openrouter: { sonnet: 'anthropic/claude-sonnet-4.5', fable: 'anthropic/claude-fable-latest' },
+        codex: { haiku: 'gpt-test', sonnet: 'gpt-test', opus: 'gpt-test', fable: 'gpt-test' },
       },
       backends: { anthropic: true, ollama: true, openrouter: true },
       thinking_levels: {},
@@ -33,17 +36,33 @@ describe('modelSections', () => {
 
     const sections = sectionsFromModelsResponse(response)
 
-    expect(sections.map((section) => section.label)).toEqual(['Anthropic', 'Ollama', 'OpenRouter'])
+    expect(sections.map((section) => section.label)).toEqual(['Anthropic', 'OpenAI Codex', 'Ollama', 'OpenRouter'])
     expect(sections.find((section) => section.key === 'anthropic')?.models).toEqual([
       'haiku',
       'sonnet',
       'opus',
       'fable',
     ])
-    expect(sections.find((section) => section.key === 'ollama')?.models).toEqual(['kimi-k2.7-code:cloud'])
+    expect(sections.find((section) => section.key === 'ollama')?.modelBadges).toEqual({
+      'kimi-k2.7-code:cloud': ['Sonnet'],
+      'glm-5.2:cloud': ['Fable'],
+    })
+    expect(sections.find((section) => section.key === 'codex')?.models).toEqual(['gpt-test', 'fable'])
+    expect(sections.find((section) => section.key === 'codex')?.modelBadges).toEqual({
+      'gpt-test': ['Haiku', 'Sonnet', 'Opus'],
+      fable: ['Fable'],
+    })
+    expect(sections.find((section) => section.key === 'codex')?.modelLabels).toEqual({
+      fable: 'gpt-test-ultra',
+    })
     expect(sections.find((section) => section.key === 'openrouter')?.models).toEqual([
       'anthropic/claude-sonnet-4.5',
+      'anthropic/claude-fable-latest',
     ])
+    expect(sections.find((section) => section.key === 'openrouter')?.modelBadges).toEqual({
+      'anthropic/claude-sonnet-4.5': ['Sonnet'],
+      'anthropic/claude-fable-latest': ['Fable'],
+    })
   })
 
   it('keeps routine Anthropic options fixed and dynamic provider lists separate', () => {

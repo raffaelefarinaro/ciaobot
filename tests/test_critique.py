@@ -87,7 +87,6 @@ def test_review_one_records_failure_on_exception(monkeypatch) -> None:
 
 
 def test_print_panel_uses_openrouter_default_when_key_set() -> None:
-    # Exit code 0 and the default OpenRouter panel printed on stdout.
     import sys
     from contextlib import redirect_stdout
     import io
@@ -106,3 +105,19 @@ def test_print_panel_uses_openrouter_default_when_key_set() -> None:
         os.environ.update(old)
     assert rc == 0
     assert "anthropic/claude-sonnet-latest" in buf.getvalue()
+
+
+def test_resolve_critique_panel_uses_settings_override() -> None:
+    from ciao.config import CiaoConfig
+
+    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
+    config.critique_models = "model-a,model-b"
+    assert crt.resolve_critique_panel(config) == ["model-a", "model-b"]
+
+
+def test_resolve_critique_panel_cli_override_wins() -> None:
+    from ciao.config import CiaoConfig
+
+    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
+    config.critique_models = "model-a,model-b"
+    assert crt.resolve_critique_panel(config, override="only-this") == ["only-this"]

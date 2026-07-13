@@ -43,7 +43,7 @@ def test_env_includes_tier_remaps() -> None:
     assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "anthropic/claude-haiku-latest"
     assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "anthropic/claude-sonnet-latest"
     assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "anthropic/claude-opus-latest"
-    assert env["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "anthropic/claude-opus-latest"
+    assert env["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "anthropic/claude-fable-latest"
     assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "anthropic/claude-haiku-latest"
     assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "anthropic/claude-sonnet-latest"
     assert env["CLAUDE_CODE_AUTO_MODE_MODEL"] == "anthropic/claude-haiku-latest"
@@ -72,6 +72,7 @@ def test_alias_resolves_to_tier_default() -> None:
     assert alias_model("haiku", s) == "anthropic/claude-haiku-latest"
     assert alias_model("sonnet", s) == "anthropic/claude-sonnet-latest"
     assert alias_model("opus", s) == "anthropic/claude-opus-latest"
+    assert alias_model("fable", s) == "anthropic/claude-fable-latest"
     # unknown alias passes through unchanged
     assert alias_model("weird", s) == "weird"
 

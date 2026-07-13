@@ -38,6 +38,18 @@ _RULE = "═" * 46
 _MEMORY_HEADER = "MEMORY (your personal notes)"
 _USER_HEADER = "USER PROFILE"
 
+# Rendered when both memory files are empty. Without this, a fresh install
+# never shows the memory block at all, so the model has no visible cue to
+# seed entry #1 (the block itself is the reinforcement loop once non-empty).
+_EMPTY_STATE_NUDGE = (
+    "Your bounded memory files (~/.ciao/memory.md and ~/.ciao/user.md) are "
+    "empty. When you learn a durable fact this session, save it: "
+    '`ciao memory add --target memory --text "…"` for preferences, '
+    "environment facts, and lessons learned; `--target user` for the user's "
+    "identity, role, and communication style. Entries persist immediately "
+    "and appear in this block from the next session on."
+)
+
 
 def _section(title: str, entries: list[str], limit: int) -> str | None:
     """Render one labeled memory section. Empty files return None."""
@@ -73,16 +85,16 @@ def build_memory_block(
         sections.append(usr_section)
 
     if not sections:
-        return ""
+        return _EMPTY_STATE_NUDGE
 
     # Short preamble so the model knows what this block is and that the
-    # state is read-only until next session. The memory tool docstring
-    # (and the tool's own description) handles the "how to edit" half.
+    # state is read-only until next session. Editing is via `ciao memory`
+    # (documented in system_prompt.md); see tests/test_memory_injector.py.
     preamble = (
         "The block below is a frozen snapshot of your bounded memory files at "
-        "session start. Use the `memory` tool (action=add|replace|remove|read, "
-        f"target=memory|user) to edit them; entries are separated by '{SECTION_SEP}' "
-        "on its own line. Tool edits persist immediately but only appear in this "
+        "session start. Edit them with `ciao memory read|add|replace|remove "
+        f"(--target memory|user); entries are separated by '{SECTION_SEP}' "
+        "on its own line. CLI edits persist immediately but only appear in this "
         "block on the next session.\n"
     )
     return preamble + "\n\n".join(sections)

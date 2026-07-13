@@ -3,28 +3,25 @@ name: gws-shared
 description: "gws CLI: Shared patterns for authentication, global flags, and output formatting."
 metadata:
   version: 0.22.5
-  openclaw:
-    category: "productivity"
-    requires:
-      bins:
-        - gws
 ---
 
 # gws — Shared Reference
 
 ## Installation
 
-The `gws` binary must be on `$PATH`. See the project README for install options.
+Install `gws` from Settings → Integrations (or see the Ciaobot README). The binary must be on `$PATH`.
 
-## Authentication
+## Authentication (Ciaobot)
+
+Run every Google API call through the profile wrapper — never bare `gws`:
 
 ```bash
-# Browser-based OAuth (interactive)
-gws auth login
-
-# Service Account
-export GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
+scripts/gws-profile.sh <personal|work> <service> <subcommand> [flags]
 ```
+
+Use the chat's `GWS_PROFILE` unless the user asks otherwise. The wrapper routes credentials and execs `gws`. Do not `source` it and do not repeat the `gws` binary after the profile name.
+
+OAuth setup: Settings → Integrations. Config dirs: `secrets/gws-personal/` (personal), `secrets/gws/` (work).
 
 ## Global Flags
 
@@ -37,7 +34,7 @@ export GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
 ## CLI Syntax
 
 ```bash
-gws <service> <resource> [sub-resource] <method> [flags]
+scripts/gws-profile.sh <personal|work> <service> <resource> [sub-resource] <method> [flags]
 ```
 
 ### Method Flags
@@ -64,12 +61,12 @@ gws <service> <resource> [sub-resource] <method> [flags]
 - **zsh `!` expansion:** Sheet ranges like `Sheet1!A1` contain `!` which zsh interprets as history expansion. Use double quotes with escaped inner quotes instead of single quotes:
   ```bash
   # WRONG (zsh will mangle the !)
-  gws sheets +read --spreadsheet ID --range 'Sheet1!A1:D10'
+  scripts/gws-profile.sh <personal|work> sheets +read --spreadsheet ID --range 'Sheet1!A1:D10'
 
   # CORRECT
-  gws sheets +read --spreadsheet ID --range "Sheet1!A1:D10"
+  scripts/gws-profile.sh <personal|work> sheets +read --spreadsheet ID --range "Sheet1!A1:D10"
   ```
 - **JSON with double quotes:** Wrap `--params` and `--json` values in single quotes so the shell does not interpret the inner double quotes:
   ```bash
-  gws drive files list --params '{"pageSize": 5}'
+  scripts/gws-profile.sh <personal|work> drive files list --params '{"pageSize": 5}'
   ```

@@ -23,8 +23,7 @@ def test_active_chats_endpoint_without_manager_returns_empty() -> None:
 
 def test_active_chats_endpoint_unions_streams_and_background_agents() -> None:
     pcm = SimpleNamespace(
-        active_stream_chat_ids=lambda: ["c-stream", "c-both"],
-        background_agent_counts={"c-both": 2, "c-agents": 1},
+        active_chat_ids=lambda: ["c-agents", "c-both", "c-stream"],
     )
 
     resp = _client(pcm=pcm).get("/api/active-chats")

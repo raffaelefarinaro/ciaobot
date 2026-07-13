@@ -37,6 +37,7 @@
               <div class="context-popup-body">
                 <div v-if="project?.vault_doc_path" class="context-popup-section">
                   <span class="label-eyebrow">Project</span>
+                  <p v-if="project.context" class="context-description">{{ project.context }}</p>
                   <button
                     class="btn-small"
                     @click="fileViewer.open(project.vault_doc_path)"
@@ -104,12 +105,12 @@
           <ModelSelector
             v-if="showModelPicker"
             triggerless
-            :model-value="chat.model"
+            :model-value="canonicalTier(chat.model)"
             :active-models="activeModelHighlights"
             :sections="chatModelSections"
             placeholder="Model"
             placement="bottom-end"
-            @update:model-value="selectModel"
+            @select="selectModel"
             @close="showModelPicker = false"
           />
         </div>
@@ -118,6 +119,20 @@
         </button>
       </template>
     </PaneHeader>
+
+    <!-- Loop banner: this chat is driven by one or more loops -->
+    <div v-if="chatLoops.length" class="loop-banner">
+      <div v-for="l in chatLoops" :key="l.loop_id" class="loop-banner-row">
+        <span class="loop-banner-ico" aria-hidden="true">&#10227;</span>
+        <span class="loop-banner-text">
+          <strong>{{ l.title || 'Loop' }}</strong>
+          · every {{ l.interval_minutes }}m
+          · {{ l.running ? 'running' : 'stopped' }}<template v-if="l.last_status === 'busy'"> (waiting, chat busy)</template>
+        </span>
+        <button class="btn-small" @click="toggleLoop(l)">{{ l.running ? 'Stop loop' : 'Start loop' }}</button>
+        <router-link :to="`/schedules/${l.loop_id}`" class="btn-small loop-banner-manage">Manage</router-link>
+      </div>
+    </div>
 
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
@@ -540,7 +555,8 @@
           </button>
         </div>
         <input
-          type="text"
+          v-if="q.allowOther"
+          :type="q.isSecret ? 'password' : 'text'"
           class="question-other"
           placeholder="Other (free text)"
           :value="questionAnswers[qi]?.other || ''"
@@ -708,7 +724,8 @@ import VoiceRecorder from './VoiceRecorder.vue'
 // under the turn that spawned its agents.
 import SubagentPanel from './SubagentPanel.vue'
 import { api } from '../lib/api'
-import type { ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
+import type { Loop, ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
+import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import { linkifyText } from '../lib/filePaths'
@@ -812,8 +829,20 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const dragOver = ref(false)
 const chat = computed(() => store.activeChat!)
+
+// Loops bound to this chat (loop-driven chats get a banner with controls).
+const taskStore = useTaskStore()
+const chatLoops = computed(() =>
+  taskStore.loops.filter(l => l.web_chat_id === chat.value?.chat_id),
+)
+onMounted(() => {
+  taskStore.fetchLoops().catch(() => {})
+})
+async function toggleLoop(l: Loop) {
+  await taskStore.updateLoop(l.loop_id, { running: !l.running })
+}
 const project = computed(() => store.activeProject)
-const models = ref<string[]>(['sonnet', 'opus', 'haiku'])
+const models = ref<string[]>(['haiku', 'sonnet', 'opus', 'fable'])
 const providerModels = ref<Record<string, string[]>>({})
 const providerDefaults = ref<Record<string, string>>({})
 const modelsResponse = ref<ModelsResponse | null>(null)
@@ -990,16 +1019,17 @@ const touchedFiles = computed<TouchedFile[]>(() => {
   return Array.from(byPath.values()).sort((a, b) => b.index - a.index)
 })
 
-type ProviderKey = 'claude'
-type BucketKey = 'claude_work' | 'claude_personal' | 'openrouter'
-type ModelBucketValue = 'work' | 'personal' | 'openrouter'
-type RouteKind = 'anthropic' | 'ollama' | 'ollama-local' | 'openrouter'
-type TierAlias = 'haiku' | 'sonnet' | 'opus'
+type ProviderKey = 'claude' | 'codex'
+type BucketKey = 'claude_work' | 'claude_personal' | 'openrouter' | 'codex'
+type ModelBucketValue = 'work' | 'personal' | 'openrouter' | ''
+type RouteKind = 'anthropic' | 'ollama' | 'ollama-local' | 'openrouter' | 'codex'
+type TierAlias = 'haiku' | 'sonnet' | 'opus' | 'fable'
 
 const BUCKET_DEFS: { key: BucketKey; label: string; provider: ProviderKey }[] = [
   { key: 'claude_work', label: 'Claude', provider: 'claude' },
   { key: 'claude_personal', label: 'Ollama', provider: 'claude' },
   { key: 'openrouter', label: 'OpenRouter', provider: 'claude' },
+  { key: 'codex', label: 'Codex', provider: 'codex' },
 ]
 
 const bucketOptions = computed(() => BUCKET_DEFS.filter(b => (providerModels.value[b.key] || []).length > 0))
@@ -1102,6 +1132,7 @@ function submitQuestionAnswers() {
   const qs = activeQuestions.value
   if (!qs.length) return
   const lines: string[] = []
+  const nativeAnswers: Record<string, string[]> = {}
   for (let i = 0; i < qs.length; i++) {
     const q = qs[i]
     const a = questionAnswers.value[i]
@@ -1111,7 +1142,14 @@ function submitQuestionAnswers() {
     if (picked.length) parts.push(...picked)
     if (other) parts.push(other)
     const answer = parts.length ? parts.join(', ') : '(no answer)'
+    nativeAnswers[q.id] = parts
     lines.push(`**${q.header || q.question}**: ${answer}`)
+  }
+  const requestId = qs[0]?.requestId || ''
+  if (requestId) {
+    store.respondQuestion(chat.value.chat_id, requestId, nativeAnswers)
+    questionAnswers.value = {}
+    return
   }
   const text = lines.join('\n')
   // sendMessage clears activeQuestions for this chat automatically.
@@ -1121,6 +1159,10 @@ function submitQuestionAnswers() {
 function dismissQuestions() {
   const id = store.activeChatId
   if (!id) return
+  const requestId = activeQuestions.value[0]?.requestId || ''
+  if (requestId) {
+    store.respondQuestion(id, requestId, {})
+  }
   delete store.activeQuestions[id]
   questionAnswers.value = {}
 }
@@ -1132,6 +1174,7 @@ const activeProvider = computed<ProviderKey>(() => {
 const activeBucket = computed<BucketKey>(() => {
   const c = chat.value
   if (!c) return 'claude_work'
+  if (c.provider === 'codex') return 'codex'
   // OpenRouter ids are owner/model (no ':' tag); Ollama ids carry ':'.
   if (c.model.includes('/') && !c.model.includes(':')) return 'openrouter'
   // The server records the explicit bucket choice. Legacy values are kept
@@ -1148,6 +1191,11 @@ const chatModelSections = computed(() => sectionsFromModelsResponse(modelsRespon
 const activeModelHighlights = computed(() => {
   const c = chat.value
   if (!c) return []
+  const tier = tierAlias(c.model)
+  if (tier && activeBucket.value === 'codex') {
+    return [modelsResponse.value?.alias_tiers?.codex?.[tier] || tier]
+  }
+  if (tier) return [tier]
   const effective = effectiveModelForBucket(c.model, activeBucket.value)
   return [effective || c.model]
 })
@@ -1162,31 +1210,18 @@ const bucketLocked = computed(() => {
   return Boolean(c.session_id) || store.activeMessages.length > 0
 })
 
-// Thinking levels are provider-native (claude → SDK effort, pi → --thinking),
-// so they key off the provider, not the bucket.
+// Thinking levels are provider-native (claude → SDK effort, codex → reasoning
+// effort from the model catalog), so they key off the provider — narrowed per
+// model when the catalog reports levels — not the bucket.
 const filteredThinkingLevels = computed(() => {
+  const modelLevels = modelsResponse.value?.model_reasoning_levels?.[chat.value?.model || '']
+  if (modelLevels?.length) return modelLevels
   return thinkingLevels.value[activeProvider.value] || []
-})
-
-// Most recent CLI-reported context-window occupancy (e.g. "73.2%").
-// Populated from the ResultEvent's usage dict; undefined until the first
-// turn completes, and omitted if the CLI call fails.
-const latestContextPct = computed(() => {
-  const msgs = store.activeMessages
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    const pct = msgs[i]?.usage?.context_pct
-    if (pct) return pct
-  }
-  return ''
 })
 
 const inputPlaceholder = computed(() => {
   if (store.isStreaming) return 'Follow-up...'
-  // Model name is already shown in the header selector, so it's redundant
-  // here. Context % is the genuinely useful info that isn't on screen
-  // elsewhere, so surface it alone when available.
-  const ctx = latestContextPct.value
-  return ctx ? `Message (${ctx})` : 'Message'
+  return 'Message'
 })
 
 // ── Chat comment selection UX ─────────────────────────────────────────
@@ -2045,7 +2080,12 @@ const renderData = computed<{
     let finalIdx = -1
     for (let k = buffer.length - 1; k >= 0; k--) {
       const m = buffer[k]
-      if (m.role === 'assistant' && m.tool_name !== '_activity' && m.tool_name !== '_thinking') {
+      if (
+        m.role === 'assistant'
+        && m.tool_name !== '_activity'
+        && m.tool_name !== '_thinking'
+        && m.phase !== 'commentary'
+      ) {
         finalIdx = k
         break
       }
@@ -2296,7 +2336,12 @@ function send() {
   // here. The user sees the actual content in their bubble, not a placeholder.
   store.sendMessage(chat.value.chat_id, sendText, 'queue')
   inputText.value = ''
-  nextTick(autoResize)
+  // Sending implies following the reply: jump to the bottom even if the
+  // user had scrolled up, so their bubble and the response are in view.
+  nextTick(() => {
+    scrollToBottom()
+    autoResize()
+  })
 }
 
 // Compact label for a pending file comment — shows the file basename so a
@@ -2384,12 +2429,17 @@ function toggleModelPicker() {
 
 function tierAlias(model: string): TierAlias | null {
   const normalized = model.trim().toLowerCase()
-  return normalized === 'haiku' || normalized === 'sonnet' || normalized === 'opus'
+  return normalized === 'haiku' || normalized === 'sonnet' || normalized === 'opus' || normalized === 'fable'
     ? normalized
     : null
 }
 
+function canonicalTier(model: string): string {
+  return tierAlias(model) || model
+}
+
 function modelBucketForBucket(bucket: BucketKey): ModelBucketValue {
+  if (bucket === 'codex') return ''
   if (bucket === 'openrouter') return 'openrouter'
   return bucket === 'claude_personal' ? 'personal' : 'work'
 }
@@ -2400,6 +2450,8 @@ function bucketLabel(bucket: BucketKey): string {
 
 function bucketForSelectedModel(model: string): BucketKey {
   const response = modelsResponse.value
+  if (response?.alias_tiers?.codex?.[model]) return 'codex'
+  if ((response?.codex_models || []).includes(model)) return 'codex'
   const openrouterModels = response?.openrouter_models || []
   if (openrouterModels.includes(model) || (model.includes('/') && !model.includes(':'))) {
     return 'openrouter'
@@ -2412,6 +2464,7 @@ function bucketForSelectedModel(model: string): BucketKey {
 }
 
 function effectiveModelForBucket(model: string, bucket: BucketKey): string {
+  if (bucket === 'codex') return model
   const tier = tierAlias(model)
   if (!tier) return model
   if (bucket === 'openrouter') {
@@ -2424,6 +2477,7 @@ function effectiveModelForBucket(model: string, bucket: BucketKey): string {
 }
 
 function routeKindFor(model: string, bucket: BucketKey): RouteKind {
+  if (bucket === 'codex') return 'codex'
   const effective = effectiveModelForBucket(model, bucket)
   if (bucket === 'openrouter' || (effective.includes('/') && !effective.includes(':'))) {
     return 'openrouter'
@@ -2466,25 +2520,44 @@ async function selectBucket(bucket: BucketKey) {
   })
 }
 
-async function selectModel(value: string | string[]) {
+async function selectModel(value: string | string[], sectionKey = '') {
   const model = Array.isArray(value) ? value[0] : value
   if (!model || !chat.value) {
     showModelPicker.value = false
     return
   }
-  const targetBucket = bucketForSelectedModel(model)
+  const sectionBucket: Partial<Record<string, BucketKey>> = {
+    anthropic: 'claude_work',
+    codex: 'codex',
+    ollama: 'claude_personal',
+    openrouter: 'openrouter',
+  }
+  const targetBucket = sectionBucket[sectionKey] || bucketForSelectedModel(model)
   const modelBucket = modelBucketForBucket(targetBucket)
-  const sameModelAndRoute = model === chat.value.model && targetBucket === activeBucket.value
+  const sameModelAndRoute = canonicalTier(model) === canonicalTier(chat.value.model) && targetBucket === activeBucket.value
   if (sameModelAndRoute) {
     showModelPicker.value = false
     return
   }
   const targetRoute = routeKindFor(model, targetBucket)
   const currentRoute = routeKindFor(chat.value.model, activeBucket.value)
-  const updates = {
-    provider: 'claude' as const,
+  const updates: {
+    provider: ProviderKey
+    model: string
+    model_bucket: ModelBucketValue
+    thinking_level?: string
+  } = {
+    provider: (BUCKET_DEFS.find(def => def.key === targetBucket)?.provider || 'claude') as ProviderKey,
     model,
     model_bucket: modelBucket,
+  }
+  const targetLevels = modelsResponse.value?.model_reasoning_levels?.[model]
+  if (
+    chat.value.thinking_level
+    && targetLevels
+    && !targetLevels.includes(chat.value.thinking_level)
+  ) {
+    updates.thinking_level = ''
   }
   if (bucketLocked.value && targetRoute !== currentRoute) {
     const ok = window.confirm(
@@ -2731,6 +2804,14 @@ function insertImageRef(n: number) {
   gap: 6px;
 }
 
+.context-popup .context-description {
+  font-size: var(--text-sm);
+  color: var(--fg2);
+  line-height: 1.45;
+  margin: 0;
+  white-space: pre-wrap;
+}
+
 .context-popup .context-textarea {
   width: 100%;
   resize: vertical;
@@ -2847,7 +2928,8 @@ function insertImageRef(n: number) {
 .message-wrap {
   display: flex;
   flex-direction: column;
-  max-width: 85%;
+  width: 92%;
+  max-width: 92%;
   min-width: 0;
 }
 
@@ -2857,7 +2939,8 @@ function insertImageRef(n: number) {
 
 .message-wrap.assistant {
   align-self: flex-start;
-  max-width: 90%;
+  width: 98%;
+  max-width: 98%;
 }
 
 .message-row {
@@ -2865,6 +2948,7 @@ function insertImageRef(n: number) {
   align-items: flex-start;
   gap: 2px;
   min-width: 0;
+  width: 100%;
   max-width: 100%;
   position: relative;
 }
@@ -2874,6 +2958,7 @@ function insertImageRef(n: number) {
 }
 
 .message {
+  flex: 1;
   max-width: 100%;
   padding: 8px 12px;
   border-radius: var(--radius);
@@ -2891,6 +2976,7 @@ function insertImageRef(n: number) {
 .message.assistant {
   background: var(--bg2);
   border: 1px solid var(--border);
+  line-height: 1.6;
 }
 
 .message-actions {
@@ -2970,7 +3056,8 @@ function insertImageRef(n: number) {
   align-self: center;
   color: var(--fg2);
   font-size: var(--text-sm);
-  max-width: 90%;
+  width: 98%;
+  max-width: 98%;
 }
 
 .retry-btn {
@@ -3028,7 +3115,8 @@ function insertImageRef(n: number) {
 /* Reasoning trace (intermediate assistant text + tool calls grouped) */
 .trace-block {
   align-self: flex-start;
-  max-width: 90%;
+  width: 98%;
+  max-width: 98%;
   background: transparent;
   border: 1px dashed var(--border);
   border-left: 3px solid var(--accent2);
@@ -3208,7 +3296,8 @@ function insertImageRef(n: number) {
 /* Activity blocks (live streaming) */
 .activity-block {
   align-self: flex-start;
-  max-width: 90%;
+  width: 98%;
+  max-width: 98%;
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -4188,15 +4277,15 @@ details[open] > .activity-summary::before {
   .messages {
     padding: 8px 6px 16px 6px;
   }
-  .message-wrap { max-width: 94%; }
-  .message-wrap.assistant { max-width: 96%; }
+  .message-wrap { width: 96%; max-width: 96%; }
+  .message-wrap.assistant { width: 100%; max-width: 100%; }
 }
 @container chat-split (max-width: 400px) {
   .messages {
     padding: 6px 4px 12px 4px;
   }
   .message-wrap,
-  .message-wrap.assistant { max-width: 100%; }
+  .message-wrap.assistant { width: 100%; max-width: 100%; }
   .message { padding: 8px 10px; }
 }
 
@@ -4233,8 +4322,8 @@ details[open] > .activity-summary::before {
     width: min(320px, calc(100vw - 24px));
     max-width: none;
   }
-  .message-wrap { max-width: 92%; }
-  .message-wrap.assistant { max-width: 92%; }
+  .message-wrap { width: 96%; max-width: 96%; }
+  .message-wrap.assistant { width: 100%; max-width: 100%; }
   .message { padding: 10px 14px; }
   /* Keep input and placeholder at the same size so the text doesn't jump
      when the user starts typing. 16px is the iOS auto-zoom floor: any
@@ -4242,21 +4331,18 @@ details[open] > .activity-summary::before {
      slightly truncated placeholder. */
   .chat-input { font-size: 16px; padding-top: 6px; padding-bottom: 6px; }
   .chat-input::placeholder { font-size: 16px; }
-  /* Tighten vertical rhythm in the input bar on mobile. Reduce buttons
-     from 44px (--touch) to 36px so the whole bar is ~46px not ~54px.
-     36px is still a usable touch target; 44px was designed for standalone
-     tap targets, not inline grouped actions. */
+  /* Keep every composer action at the shared touch-target minimum. */
   .input-bar { padding-top: 5px; padding-bottom: 5px; }
-  .chat-input { min-height: 36px; }
+  .chat-input { min-height: var(--touch); }
   .stop-btn, .input-actions .send-btn {
-    min-width: 36px;
-    min-height: 36px;
-    width: 36px;
-    height: 36px;
+    min-width: var(--touch);
+    min-height: var(--touch);
+    width: var(--touch);
+    height: var(--touch);
     padding: 0;
   }
-  .image-btn { min-height: 36px; min-width: 36px; }
-  :deep(.voice-btn) { min-height: 36px; min-width: 36px; }
+  .image-btn { min-height: var(--touch); min-width: var(--touch); }
+  :deep(.voice-btn) { min-height: var(--touch); min-width: var(--touch); }
   /* Compact streaming bar on mobile */
   .streaming-bar { padding-top: 4px; padding-bottom: 4px; }
 }
@@ -4601,4 +4687,32 @@ details[open] > .activity-summary::before {
     max-height: 45vh;
   }
 }
+
+/* ── Loop banner ── */
+.loop-banner {
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  padding: 6px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.loop-banner-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.loop-banner-ico { color: var(--accent); font-weight: 700; flex-shrink: 0; }
+.loop-banner-text {
+  flex: 1;
+  font-size: var(--text-sm);
+  color: var(--fg2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.loop-banner-text strong { color: var(--fg); }
+.loop-banner-manage { text-decoration: none; }
 </style>

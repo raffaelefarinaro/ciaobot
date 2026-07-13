@@ -19,13 +19,13 @@
         </svg>
       </button>
       <template v-if="!collapsed">
-        <span
+        <button
+          type="button"
           class="brand wordmark wordmark--sm"
           :class="{ 'brand--refreshing': refreshing }"
           @click="onBrandClick"
           :title="refreshing ? 'Refreshing...' : 'Click to reload the latest app build'"
-          role="button"
-        >{{ refreshing ? 'sync...' : 'ciaobot' }}</span>
+        >{{ refreshing ? 'sync...' : 'ciaobot' }}</button>
         <div class="nav-links">
           <router-link
             to="/"
@@ -43,7 +43,7 @@
               <polyline points="8 18 8 21 11 18" />
             </svg>
           </router-link>
-          <router-link to="/schedules" class="nav-item touch-hit" active-class="nav-item--active" title="Schedules" aria-label="Schedules" data-tour="nav-schedules">
+          <router-link to="/schedules" class="nav-item touch-hit" active-class="nav-item--active" title="Automations" aria-label="Automations" data-tour="nav-schedules">
             <!-- Clock face with hour markers: more diagrammatic than calendar grid -->
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
@@ -74,11 +74,11 @@
 
     <template v-if="!collapsed && (mode === 'schedules')">
       <div class="sidebar-section-header">
-        <span class="sidebar-section-title">Schedules</span>
-        <button class="add-chip" @click="emit('new-schedule')" title="New schedule">+ New</button>
+        <span class="sidebar-section-title">Automations</span>
+        <button class="btn-small" @click="emit('new-schedule')" title="New automation">+ New</button>
       </div>
       <div class="schedules-list">
-        <div v-if="taskStore.schedules.length === 0" class="empty-hint">// no schedules yet</div>
+        <div v-if="taskStore.schedules.length === 0 && taskStore.loops.length === 0" class="empty-hint">// no automations yet</div>
 
         <template v-if="oneOffSchedules.length">
           <div class="schedule-group schedule-group--once">
@@ -92,7 +92,7 @@
                 :key="s.schedule_id"
                 :to="`/schedules/${s.schedule_id}`"
                 class="schedule-item schedule-item--once"
-                :class="{ 'schedule-item--missed': s.missed }"
+                :class="{ 'schedule-item--missed': s.missed, 'schedule-item--disabled': !s.enabled }"
                 active-class="active"
               >
                 <span class="schedule-time">{{ s.run_at_date?.slice(5) }} {{ s.daily_time_utc }}</span>
@@ -106,7 +106,7 @@
         <template v-if="userRoutines.length">
           <div class="schedule-group">
             <div class="schedule-group-header">
-              <span>Routines <span class="schedule-group-hint">recurring</span></span>
+              <span>Custom Routines</span>
               <span class="schedule-group-count">{{ userRoutines.length }}</span>
             </div>
             <div class="schedule-group-items">
@@ -115,12 +115,34 @@
                 :key="s.schedule_id"
                 :to="`/schedules/${s.schedule_id}`"
                 class="schedule-item"
-                :class="{ 'schedule-item--missed': s.missed }"
+                :class="{ 'schedule-item--missed': s.missed, 'schedule-item--disabled': !s.enabled }"
                 active-class="active"
               >
-                <span class="schedule-time">{{ s.frequency === 'manual' ? '·' : s.daily_time_utc }}</span>
+                <span class="schedule-time">{{ !s.enabled ? 'off' : s.frequency === 'manual' ? '·' : s.daily_time_utc }}</span>
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
                 <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
+              </router-link>
+            </div>
+          </div>
+        </template>
+
+        <template v-if="userLoops.length">
+          <div class="schedule-group">
+            <div class="schedule-group-header">
+              <span>Custom Loops</span>
+              <span class="schedule-group-count">{{ userLoops.length }}</span>
+            </div>
+            <div class="schedule-group-items">
+              <router-link
+                v-for="l in userLoops"
+                :key="l.loop_id"
+                :to="`/schedules/${l.loop_id}`"
+                class="schedule-item"
+                :class="{ 'schedule-item--disabled': !l.running }"
+                active-class="active"
+              >
+                <span class="schedule-time">{{ l.running ? `${l.interval_minutes}m` : 'off' }}</span>
+                <span class="schedule-label">{{ l.title || promptTitle(l.prompt) }}</span>
               </router-link>
             </div>
           </div>
@@ -129,7 +151,7 @@
         <template v-if="systemAutomations.length">
           <div class="schedule-group schedule-group--system">
             <div class="schedule-group-header">
-              <span>System <span class="schedule-group-hint">built-in</span></span>
+              <span>System Routines</span>
               <span class="schedule-group-count">{{ systemAutomations.length }}</span>
             </div>
             <div class="schedule-group-items">
@@ -138,12 +160,34 @@
                 :key="s.schedule_id"
                 :to="`/schedules/${s.schedule_id}`"
                 class="schedule-item"
-                :class="{ 'schedule-item--missed': s.missed }"
+                :class="{ 'schedule-item--missed': s.missed, 'schedule-item--disabled': !s.enabled }"
                 active-class="active"
               >
-                <span class="schedule-time">{{ s.frequency === 'manual' ? '·' : s.daily_time_utc }}</span>
+                <span class="schedule-time">{{ !s.enabled ? 'off' : s.frequency === 'manual' ? '·' : s.daily_time_utc }}</span>
                 <span class="schedule-label">{{ s.title || promptTitle(s.prompt) }}</span>
                 <span v-if="s.missed" class="missed-dot" title="Expected to run but didn't"></span>
+              </router-link>
+            </div>
+          </div>
+        </template>
+
+        <template v-if="systemLoops.length">
+          <div class="schedule-group schedule-group--system">
+            <div class="schedule-group-header">
+              <span>System Loops</span>
+              <span class="schedule-group-count">{{ systemLoops.length }}</span>
+            </div>
+            <div class="schedule-group-items">
+              <router-link
+                v-for="l in systemLoops"
+                :key="l.loop_id"
+                :to="`/schedules/${l.loop_id}`"
+                class="schedule-item"
+                :class="{ 'schedule-item--disabled': !l.running }"
+                active-class="active"
+              >
+                <span class="schedule-time">{{ l.running ? `${l.interval_minutes}m` : 'off' }}</span>
+                <span class="schedule-label">{{ l.title || promptTitle(l.prompt) }}</span>
               </router-link>
             </div>
           </div>
@@ -178,11 +222,11 @@
           Models
         </router-link>
         <router-link
-          to="/settings/instructions"
+          to="/settings/context"
           class="settings-nav-item"
-          :class="{ active: route.path === '/settings/instructions' }"
+          :class="{ active: route.path === '/settings/context' }"
         >
-          Instructions
+          Agent Context
         </router-link>
         <router-link
           to="/settings/workspaces"
@@ -208,6 +252,7 @@
           v-for="workspace in store.workspaceOptions"
           :key="workspace.name"
           :class="{ active: store.activeWorkspace === workspace.name }"
+          :aria-pressed="store.activeWorkspace === workspace.name"
           @click="store.switchWorkspace(workspace.name)"
         >
           {{ workspaceLabel(workspace.name) }}
@@ -222,16 +267,16 @@
         <div v-if="store.recentChats.length" class="recent-section">
           <div class="recent-label">Recent</div>
           <div class="recent-items">
-            <div
+            <button
+              type="button"
               v-for="chat in store.recentChats"
               :key="'recent-' + chat.chat_id"
               class="recent-item"
               :class="{ active: chat.chat_id === store.activeChatId, remote: chat.local === false }"
               @click="chat.local !== false && selectChat(chat.chat_id)"
+              :disabled="chat.local === false"
               :title="chat.local === false ? 'This chat lives on another instance' : ''"
             >
-              <span v-if="store.isChatStreaming(chat.chat_id)" class="spinner-dot" />
-              <span v-else-if="store.chatHasBackgroundAgents(chat.chat_id)" class="spinner-dot bg-agents" title="Background agents running" />
               <span
                 v-if="chat.title_status === 'pending'"
                 class="title-shimmer"
@@ -239,12 +284,14 @@
                 title="Generating title..."
               />
               <span v-else class="recent-title">{{ chat.title }}</span>
+              <span v-if="store.isChatStreaming(chat.chat_id)" class="spinner-dot" title="Working" />
+              <span v-else-if="store.chatHasBackgroundAgents(chat.chat_id)" class="spinner-dot bg-agents" title="Background agents running" />
               <span v-if="chat.local === false" class="remote-chip">remote</span>
               <span class="recent-project" v-if="store.projectFor(chat.chat_id)?.name">
                 {{ store.projectFor(chat.chat_id)?.name }}
               </span>
               <span v-if="store.chatUnread(chat.chat_id) > 0" class="badge">{{ store.chatUnread(chat.chat_id) }}</span>
-            </div>
+            </button>
           </div>
         </div>
 
@@ -260,12 +307,16 @@
               :class="{ 'is-system': project.is_auto }"
               @contextmenu.prevent="toggleProjectMenu($event, project)"
             >
-              <span
+              <button
+                type="button"
                 class="project-icon"
                 @click="toggleProject(project.project_id)"
                 :title="expandedProjects.has(project.project_id) ? 'Collapse' : 'Expand'"
-              >{{ expandedProjects.has(project.project_id) ? '▾' : '▸' }}</span>
-              <span
+                :aria-label="`${expandedProjects.has(project.project_id) ? 'Collapse' : 'Expand'} ${project.name}`"
+                :aria-expanded="expandedProjects.has(project.project_id)"
+              >{{ expandedProjects.has(project.project_id) ? '▾' : '▸' }}</button>
+              <button
+                type="button"
                 class="project-name"
                 v-if="editingProject !== project.project_id"
                 @click="openProject(project.project_id)"
@@ -275,7 +326,7 @@
                 <span v-if="project.is_auto" class="system-chip" title="Auto-managed project">auto</span>
                 <span v-if="store.projectIsStreaming(project.project_id)" class="spinner-dot" title="A chat in this project is working" />
                 <span v-if="store.projectUnread(project.project_id) > 0" class="badge">{{ store.projectUnread(project.project_id) }}</span>
-              </span>
+              </button>
               <input
                 v-else
                 class="edit-input"
@@ -292,6 +343,7 @@
                 :disabled="store.creatingChatProjectIds[project.project_id]"
                 @click.stop="addChat(project.project_id)"
                 title="New chat"
+                :aria-label="`New chat in ${project.name}`"
               >{{ store.creatingChatProjectIds[project.project_id] ? '...' : '+' }}</button>
             </div>
 
@@ -324,7 +376,12 @@
                 class="chat-item"
                 :class="{ active: chat.chat_id === store.activeChatId, remote: chat.local === false }"
                 @click="chat.local !== false && selectChat(chat.chat_id)"
+                @keydown.enter.self.prevent="chat.local !== false && selectChat(chat.chat_id)"
+                @keydown.space.self.prevent="chat.local !== false && selectChat(chat.chat_id)"
                 @contextmenu.prevent="toggleChatMenu($event, chat.chat_id)"
+                role="link"
+                :tabindex="chat.local === false ? -1 : 0"
+                :aria-disabled="chat.local === false"
                 :title="chat.local === false ? 'This chat lives on another instance' : ''"
               >
                 <span
@@ -489,6 +546,12 @@ const userRoutines = computed(() =>
 )
 const systemAutomations = computed(() =>
   taskStore.schedules.filter(s => s.frequency !== 'once' && s.scope === 'system'),
+)
+const userLoops = computed(() =>
+  taskStore.loops.filter(l => l.scope !== 'system'),
+)
+const systemLoops = computed(() =>
+  taskStore.loops.filter(l => l.scope === 'system'),
 )
 
 import type { ChatInfo, ProjectInfo } from '../lib/types'
@@ -786,6 +849,9 @@ async function confirmDeleteChat(chatId: string) {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* Keep the collapsed rail aligned with the expanded nav and pane headers. */
+  height: 61px;
+  flex-shrink: 0;
   padding: 8px;
   border-bottom: 1px solid var(--border);
 }
@@ -812,6 +878,11 @@ async function confirmDeleteChat(chatId: string) {
   font-size: calc(16px * var(--font-scale));
   cursor: pointer;
   transition: opacity 120ms var(--ease);
+  min-height: var(--touch);
+  align-items: center;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
 }
 .brand::before {
   content: none;
@@ -905,6 +976,8 @@ async function confirmDeleteChat(chatId: string) {
   display: flex;
   align-items: center;
   gap: 6px;
+  width: 100%;
+  min-height: var(--touch);
   padding: 6px 10px;
   cursor: pointer;
   font-size: var(--text-base);
@@ -913,6 +986,11 @@ async function confirmDeleteChat(chatId: string) {
   white-space: nowrap;
   border-bottom: 1px solid var(--border);
   border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  background: transparent;
+  text-align: left;
 }
 
 .recent-item:last-child {
@@ -984,15 +1062,37 @@ async function confirmDeleteChat(chatId: string) {
   justify-content: center;
   width: 30px;
   height: 30px;
+  position: relative;
+  isolation: isolate;
   color: var(--fg2);
   text-decoration: none;
-  border-radius: 6px;
-  transition: background 120ms var(--ease), color 120ms var(--ease);
+  transition: color 120ms var(--ease);
 }
 
-.nav-item:hover,
-.nav-item--active {
+/* `.touch-hit` expands the clickable box from 30px to 44px with padding.
+   Keep the visible hover/active surface at the intended 30px footprint. */
+.nav-item::before,
+.sidebar-bell :deep(.bell-btn)::before {
+  content: '';
+  position: absolute;
+  inset: calc((var(--touch) - var(--touch-hit-visual)) / 2);
+  z-index: -1;
+  border-radius: 6px;
+  background: transparent;
+  transition: background 120ms var(--ease);
+}
+
+.nav-item:hover {
   color: var(--fg);
+}
+
+.nav-item--active,
+.nav-item--active:hover {
+  color: var(--accent);
+}
+
+.nav-item:hover::before,
+.nav-item--active::before {
   background: var(--bg3);
 }
 
@@ -1002,12 +1102,13 @@ async function confirmDeleteChat(chatId: string) {
   justify-content: center;
   width: 30px;
   height: 30px;
+  position: relative;
+  isolation: isolate;
   color: var(--fg2);
   background: none;
   border: none;
-  border-radius: 6px;
   cursor: pointer;
-  transition: background 120ms var(--ease), color 120ms var(--ease);
+  transition: color 120ms var(--ease);
 }
 .sidebar-bell :deep(.bell-btn) svg {
   width: 18px;
@@ -1015,14 +1116,16 @@ async function confirmDeleteChat(chatId: string) {
 }
 .sidebar-bell :deep(.bell-btn:hover) {
   color: var(--fg);
+}
+.sidebar-bell :deep(.bell-btn:hover)::before {
   background: var(--bg3);
 }
 .sidebar-bell :deep(.bell-btn.has-unread) {
   color: var(--accent);
 }
 .sidebar-bell :deep(.bell-badge) {
-  top: -2px;
-  right: -2px;
+  top: 4px;
+  right: 4px;
   font-size: calc(10px * var(--font-scale));
   min-width: 14px;
   height: 14px;
@@ -1038,7 +1141,7 @@ async function confirmDeleteChat(chatId: string) {
 .workspace-toggle button {
   flex: 1 1 0;
   min-width: 0;
-  min-height: 32px;
+  min-height: var(--touch);
   padding: 6px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -1091,6 +1194,7 @@ async function confirmDeleteChat(chatId: string) {
   text-transform: uppercase;
   letter-spacing: 0.3px;
   background: var(--bg2);
+  min-height: var(--touch);
 }
 
 .project-header:hover {
@@ -1130,7 +1234,13 @@ async function confirmDeleteChat(chatId: string) {
 
 .project-icon {
   font-size: calc(10px * var(--font-scale));
-  width: 14px;
+  width: var(--touch);
+  height: var(--touch);
+  margin: -6px 0 -6px -10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
   cursor: pointer;
   text-align: center;
   user-select: none;
@@ -1143,6 +1253,16 @@ async function confirmDeleteChat(chatId: string) {
   text-overflow: ellipsis;
   white-space: nowrap;
   cursor: pointer;
+  min-height: var(--touch);
+  margin: -6px 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-transform: inherit;
+  letter-spacing: inherit;
 }
 .project-name:hover { color: var(--fg); }
 
@@ -1163,16 +1283,20 @@ async function confirmDeleteChat(chatId: string) {
   color: var(--fg2);
   cursor: pointer;
   font-size: calc(14px * var(--font-scale));
-  padding: 0 4px;
+  width: var(--touch);
+  height: var(--touch);
+  margin: -6px -10px -6px 0;
+  padding: 0;
   opacity: 0;
   transition: opacity 0.15s;
-  min-width: 18px;
+  min-width: var(--touch);
   text-align: center;
 }
 
 .project-header:hover .add-chat-btn {
   opacity: 1;
 }
+.add-chat-btn:focus-visible { opacity: 1; }
 
 .add-chat-btn:disabled {
   cursor: not-allowed;
@@ -1183,7 +1307,8 @@ async function confirmDeleteChat(chatId: string) {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 10px 6px 20px;
+  min-height: var(--touch);
+  padding: 0 4px 0 20px;
   cursor: pointer;
   font-size: var(--text-base);
   color: var(--fg2);
@@ -1274,7 +1399,9 @@ async function confirmDeleteChat(chatId: string) {
 .chat-actions-btn {
   flex-shrink: 0;
   margin-left: 2px;
-  padding: 0 6px;
+  width: var(--touch);
+  height: var(--touch);
+  padding: 0;
   background: none;
   border: none;
   color: var(--fg2);
@@ -1306,7 +1433,7 @@ async function confirmDeleteChat(chatId: string) {
 
 .add-project-btn {
   flex: 1;
-  min-height: 32px;
+  min-height: var(--touch);
   padding: 6px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -1330,8 +1457,8 @@ async function confirmDeleteChat(chatId: string) {
 
 .archive-btn {
   flex-shrink: 0;
-  width: 32px;
-  height: 32px;
+  width: var(--touch);
+  height: var(--touch);
   padding: 0;
   display: inline-flex;
   align-items: center;
@@ -1495,17 +1622,6 @@ async function confirmDeleteChat(chatId: string) {
   color: var(--fg2);
   font-weight: 600;
 }
-.add-chip {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--fg);
-  font-size: var(--text-xs);
-  padding: 3px 8px;
-  border-radius: 999px;
-  cursor: pointer;
-}
-.add-chip:hover { background: var(--bg3); }
-
 .schedules-list {
   display: flex;
   flex-direction: column;
@@ -1579,6 +1695,7 @@ async function confirmDeleteChat(chatId: string) {
   color: var(--fg2);
   font-size: var(--text-base);
   cursor: pointer;
+  min-height: var(--touch);
 }
 .schedule-item:hover { background: var(--bg3); color: var(--fg); }
 .schedule-item.active {
@@ -1603,6 +1720,7 @@ async function confirmDeleteChat(chatId: string) {
   min-width: 0;
 }
 .schedule-item--missed .schedule-time { color: var(--warning); }
+.schedule-item--disabled { opacity: 0.5; }
 .schedule-item .missed-dot {
   width: 6px;
   height: 6px;

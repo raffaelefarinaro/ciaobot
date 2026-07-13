@@ -10,9 +10,15 @@ from ciao import memory_injector as mi
 from ciao import memory_tool as mt
 
 
-def test_empty_files_produce_empty_block(tmp_path: Path) -> None:
+def test_empty_files_produce_seeding_nudge(tmp_path: Path) -> None:
+    """Cold start: with no entries the block must still nudge the model to
+    seed memory, otherwise a fresh install never surfaces the feature."""
     block = mi.build_memory_block(memory_dir=tmp_path)
-    assert block == ""
+    assert "ciao memory add" in block
+    assert "--target user" in block
+    # No section headers — there is nothing to render yet.
+    assert "MEMORY (your personal notes)" not in block
+    assert "USER PROFILE" not in block
 
 
 def test_block_renders_both_sections(tmp_path: Path) -> None:
@@ -75,6 +81,31 @@ def test_system_prompt_includes_ciaobot_diagnostics_notes() -> None:
     assert ".runtime/job_runs.jsonl" in append
     assert ".runtime/ciao.stderr.log" in append
     assert "GitHub issue" in append
+
+
+def test_system_prompt_includes_project_canonical_doc_notes() -> None:
+    """Vault-backed project chats should instruct agents to maintain canonical docs."""
+    payload = mi.system_prompt_payload("")
+    assert payload is not None
+    append = payload["append"]
+    assert "Project canonical docs" in append
+    assert "[Canonical doc:" in append
+    assert "log.md" in append
+
+
+def test_system_prompt_includes_memory_and_vault_notes() -> None:
+    """Agents should know bounded memory, vault search, and recall CLIs every session."""
+    payload = mi.system_prompt_payload("")
+    assert payload is not None
+    append = payload["append"]
+    assert "Memory and vault" in append
+    assert "ciao memory" in append
+    assert "ciao vault-search" in append
+    assert "ciao vault-index" in append
+    assert "ciao vault-lint" in append
+    assert "ciao sync-skills" in append
+    assert "ciao create-chat" in append
+    assert "Memory-Proposals.md" in append
 
 
 def test_system_prompt_payload_appends_to_claude_code_preset() -> None:

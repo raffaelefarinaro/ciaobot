@@ -7,6 +7,7 @@ import json
 import pytest
 
 from ciao.app_settings import AppSettings, AppSettingsStore
+from ciao.providers.codex import CodexSettings
 from ciao.providers.ollama import OllamaSettings
 from ciao.providers.openrouter import OpenRouterSettings
 
@@ -29,13 +30,17 @@ class FakeConfig:
             haiku_model="deepseek-v4-flash:cloud",
             sonnet_model="kimi-k2.7-code:cloud",
             opus_model="minimax-m3:cloud",
+            fable_model="glm-5.2:cloud",
         )
         self.openrouter = OpenRouterSettings(
             api_key="sk-or",
             haiku_model="anthropic/claude-haiku-4.5",
             sonnet_model="anthropic/claude-sonnet-4.5",
             opus_model="anthropic/claude-opus-4.8",
+            fable_model="anthropic/claude-fable-latest",
         )
+        # No env-backed defaults: empty = automatic catalog mapping.
+        self.codex = CodexSettings()
 
 
 def test_load_missing_file_gives_defaults(tmp_path):
@@ -145,13 +150,59 @@ def test_tier_model_overrides_apply_and_clear(tmp_path):
         {
             "ollama_sonnet_model": "qwen3:8b",
             "openrouter_opus_model": "anthropic/claude-opus-4.9",
+            "ollama_fable_model": "minimax-m3:cloud",
+            "openrouter_fable_model": "anthropic/claude-fable-5",
         }
     )
     store.apply_to_config(config)
+    assert store.tier_model_defaults() == {
+        "ollama": {
+            "haiku": "deepseek-v4-flash:cloud",
+            "sonnet": "kimi-k2.7-code:cloud",
+            "opus": "minimax-m3:cloud",
+            "fable": "glm-5.2:cloud",
+        },
+        "openrouter": {
+            "haiku": "anthropic/claude-haiku-4.5",
+            "sonnet": "anthropic/claude-sonnet-4.5",
+            "opus": "anthropic/claude-opus-4.8",
+            "fable": "anthropic/claude-fable-latest",
+        },
+    }
     assert config.ollama.sonnet_model == "qwen3:8b"
     assert config.openrouter.opus_model == "anthropic/claude-opus-4.9"
+    assert config.ollama.fable_model == "minimax-m3:cloud"
+    assert config.openrouter.fable_model == "anthropic/claude-fable-5"
 
-    store.update({"ollama_sonnet_model": "", "openrouter_opus_model": ""})
+    store.update({
+        "ollama_sonnet_model": "",
+        "openrouter_opus_model": "",
+        "ollama_fable_model": "",
+        "openrouter_fable_model": "",
+    })
     store.apply_to_config(config)
     assert config.ollama.sonnet_model == "kimi-k2.7-code:cloud"
     assert config.openrouter.opus_model == "anthropic/claude-opus-4.8"
+    assert config.ollama.fable_model == "glm-5.2:cloud"
+    assert config.openrouter.fable_model == "anthropic/claude-fable-latest"
+
+
+def test_codex_tier_pins_apply_and_clear(tmp_path):
+    store = AppSettingsStore(tmp_path / "app_settings.json")
+    config = FakeConfig()
+
+    store.update({"codex_sonnet_model": "gpt-5.6-sol", "codex_haiku_model": "gpt-5.6-terra"})
+    store.apply_to_config(config)
+    assert config.codex.sonnet_model == "gpt-5.6-sol"
+    assert config.codex.haiku_model == "gpt-5.6-terra"
+    assert config.codex.tier_overrides() == {
+        "haiku": "gpt-5.6-terra",
+        "sonnet": "gpt-5.6-sol",
+        "opus": "",
+        "fable": "",
+    }
+
+    # Clearing a pin restores the automatic (empty) default.
+    store.update({"codex_sonnet_model": "", "codex_haiku_model": ""})
+    store.apply_to_config(config)
+    assert config.codex == CodexSettings()

@@ -70,6 +70,7 @@ from ciao.web.routes_api import (
     gws_auth_url,
     gws_exchange_code,
     gws_disconnect,
+    provider_connection_action,
     provider_config_settings,
     settings_routines,
     setup_finish_endpoint,
@@ -79,6 +80,7 @@ from ciao.web.routes_api import (
     list_automation,
     list_completed_projects,
     list_projects,
+    list_loops,
     list_schedules,
     list_workspaces,
     project_chats,
@@ -96,8 +98,12 @@ from ciao.web.routes_api import (
     project_files_upload,
     run_schedule_now,
     schedule_detail,
+    create_loop,
+    loop_detail,
+    run_loop_now,
     startup_status_endpoint,
     active_chats_endpoint,
+    open_chat_endpoint,
     status_endpoint,
     upsert_workspace_setting,
     workspace_binary,
@@ -175,7 +181,8 @@ def create_app(config, app_settings=None) -> Starlette:
         Route("/api/chats/{chat_id}/speak", chat_speak, methods=["POST"]),
         Route("/api/chats/{chat_id}/images", chat_images, methods=["POST"]),
         Route("/api/images/{ref}", image_blob, methods=["GET"]),
-        # Workspace file viewer (read-only; bounded to config.workspace_root)
+        # Host file viewer/editor. Absolute paths are intentional; endpoints
+        # enforce type and size allowlists rather than a workspace sandbox.
         Route("/api/workspace-file", workspace_file, methods=["GET"]),
         Route("/api/workspace-file", workspace_file_write, methods=["POST"]),
         Route("/api/workspace-image", workspace_image, methods=["GET"]),
@@ -192,6 +199,11 @@ def create_app(config, app_settings=None) -> Starlette:
         Route("/api/schedules", create_schedule, methods=["POST"]),
         Route("/api/schedule-run/{schedule_id}", run_schedule_now, methods=["POST"]),
         Route("/api/schedules/{schedule_id}", schedule_detail, methods=["PATCH", "DELETE"]),
+        # Loops — in-chat interval automations (Automations page)
+        Route("/api/loops", list_loops, methods=["GET"]),
+        Route("/api/loops", create_loop, methods=["POST"]),
+        Route("/api/loop-run/{loop_id}", run_loop_now, methods=["POST"]),
+        Route("/api/loops/{loop_id}", loop_detail, methods=["PATCH", "DELETE"]),
         # Automation status (read-only) — Settings → Automation page
         Route("/api/automation", list_automation, methods=["GET"]),
         # Runtime issue report (dev mode only) — Settings → Debug card
@@ -214,6 +226,11 @@ def create_app(config, app_settings=None) -> Starlette:
         Route("/api/models", list_models, methods=["GET"]),
         Route("/api/settings/routines", settings_routines, methods=["GET", "PATCH"]),
         Route("/api/settings/providers", provider_config_settings, methods=["GET", "PATCH"]),
+        Route(
+            "/api/settings/providers/{provider}/{action}",
+            provider_connection_action,
+            methods=["POST"],
+        ),
         Route("/api/integrations/gws", gws_integration_settings, methods=["GET"]),
         Route("/api/integrations/gws/install", gws_install, methods=["POST"]),
         Route("/api/integrations/gws/client-secret", gws_save_client_secret, methods=["POST"]),
@@ -223,6 +240,7 @@ def create_app(config, app_settings=None) -> Starlette:
         Route("/api/status", status_endpoint, methods=["GET", "PATCH"]),
         Route("/api/startup-status", startup_status_endpoint, methods=["GET"]),
         Route("/api/active-chats", active_chats_endpoint, methods=["GET"]),
+        Route("/api/open-chat/{chat_id}", open_chat_endpoint, methods=["GET"]),
         Route("/api/setup-status", setup_status_endpoint, methods=["GET"]),
         Route("/api/package/status", package_status_endpoint, methods=["GET"]),
         Route("/api/package/changelog", package_changelog_endpoint, methods=["GET"]),

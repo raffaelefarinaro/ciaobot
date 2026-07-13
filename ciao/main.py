@@ -18,6 +18,7 @@ from typing import Callable, Literal
 from ciao.config import CiaoConfig
 from ciao.git_sync import sync_workspace
 from ciao.models import ChatContext
+from ciao.loops import LoopManager, LoopStore
 from ciao.schedules import ScheduleManager, ScheduleStore
 from ciao.sessions import StateStore
 from ciao.signals import RestartRequested
@@ -190,6 +191,30 @@ def _open_browser_when_ready(url: str) -> None:
     ).start()
 
 
+async def _wait_for_chat_drain(
+    pcm: ProjectChatManager,
+    *,
+    poll_interval: float = 0.5,
+    idle_polls_required: int = 3,
+) -> None:
+    """Wait until chat work stays idle across consecutive observations.
+
+    The stable-idle window closes the handoff race between a parent stream
+    ending and its background-subagent watcher or synthesis stream starting.
+    ``begin_restart_drain`` prevents unrelated new turns from extending the
+    wait after a restart has already been requested.
+    """
+    idle_polls = 0
+    required = max(1, idle_polls_required)
+    while idle_polls < required:
+        if pcm.active_chat_ids():
+            idle_polls = 0
+        else:
+            idle_polls += 1
+        if idle_polls < required:
+            await asyncio.sleep(max(0.0, poll_interval))
+
+
 async def _async_main() -> int:
     _ensure_homebrew_on_path()
     os.environ.setdefault("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "file")
@@ -259,6 +284,22 @@ async def _async_main() -> int:
             tracker.fail("connect_claude_code", f"not found: {e}")
 
     asyncio.create_task(check_claude_code())
+
+    tracker.start("connect_codex")
+
+    async def check_codex():
+        try:
+            from ciao.providers.codex import codex_login_status
+
+            status = await asyncio.to_thread(codex_login_status)
+            if status.get("ok"):
+                tracker.done("connect_codex", str(status.get("detail") or "connected"))
+            else:
+                tracker.fail("connect_codex", str(status.get("detail") or "not connected"))
+        except Exception as exc:
+            tracker.fail("connect_codex", f"not found: {exc}")
+
+    asyncio.create_task(check_codex())
 
     # Sync workspace before anything else
     if config.auto_sync_on_start:
@@ -330,11 +371,23 @@ async def _async_main() -> int:
     def _resolve_schedule_target(entry):
         # Empty entry.model / entry.mode means "use the current default".
         ctx = ChatContext(chat_id=0)
-        model = entry.model or state.get_selected_model(ctx)
         mode = entry.mode or state.get_mode(ctx)
-        # Schedule provider is optional ("" inherits target chat's provider
-        # for fixed-chat schedules or "claude" for new chats via web_project_id).
-        provider = entry.provider
+        target_chat = (
+            pcm.get_chat(entry.web_chat_id)
+            if getattr(entry, "web_chat_id", None)
+            else None
+        )
+        if target_chat is not None:
+            provider = target_chat.provider
+            model = entry.model or target_chat.model
+        elif getattr(entry, "web_project_id", None):
+            provider = entry.provider or pcm.schedule_default_provider(
+                entry.web_project_id
+            )
+            model = entry.model or pcm.schedule_default_model(entry.web_project_id)
+        else:
+            provider = entry.provider
+            model = entry.model or state.get_selected_model(ctx)
         return ("claude", model, mode, provider)
 
     schedule_manager = ScheduleManager(
@@ -344,10 +397,24 @@ async def _async_main() -> int:
         prepare_chat=_prepare_chat,
     )
 
+    # Loop manager: minute-interval re-dispatch into a fixed chat. Iterations
+    # run with the chat's own model/mode (no override), and skip (not queue)
+    # when the chat still has a turn in flight.
+    async def _dispatch_loop(entry):
+        return await pcm.dispatch_loop(entry, entry.prompt)
+
+    loop_manager = LoopManager(
+        store=LoopStore(config.state_path.parent),
+        dispatch=_dispatch_loop,
+        chat_busy=pcm.chat_stream_active,
+        chat_exists=lambda chat_id: pcm.get_chat(chat_id) is not None,
+    )
+
     # Create and wire up web app
     app = create_app(config, app_settings=app_settings)
     app.state.startup_tracker = tracker
     app.state.schedule_manager = schedule_manager
+    app.state.loop_manager = loop_manager
     app.state.state_store = state
     app.state.transcript_store = transcripts
     app.state.project_chat_manager = pcm
@@ -473,11 +540,15 @@ async def _async_main() -> int:
 
 
     schedule_manager.start()
+    # Loops with autostart begin running now; manually-started loops stay
+    # stopped until started from the Automations page. No catch-up pass:
+    # missed poll iterations from downtime are worthless, cadence just resumes.
+    loop_manager.start()
 
-    # Fire any schedules whose target time already passed today but which
-    # never triggered (e.g. due to a crash loop or the server being down
-    # at the scheduled minute). Runs once, asynchronously, so it doesn't
-    # block uvicorn from serving requests.
+    # Fire each schedule once when its latest expected occurrence was missed
+    # (for example while the server was down). This does not replay every
+    # skipped interval. Runs asynchronously so it doesn't block uvicorn from
+    # serving requests.
     async def _run_catch_up() -> None:
         try:
             fired = await schedule_manager.catch_up()
@@ -580,36 +651,65 @@ async def _async_main() -> int:
     tracker.done("server_starting")
 
     restart_flag: list[int | None] = [None]
+    restart_task: list[asyncio.Task | None] = [None]
 
     def request_restart(code: int) -> None:
         restart_flag[0] = code
-        asyncio.create_task(server.shutdown())
-        # asyncio.run's cleanup phase (cancel tasks, shut down the default
-        # executor) can wedge after uvicorn drains: leaked Claude SDK
-        # subprocess transports and synchronous urllib calls in the
-        # heartbeat thread both hold the loop open indefinitely. The service
-        # then appears alive but is unreachable. If we haven't exited cleanly
-        # within the grace window, force the restart ourselves: a plain
-        # os._exit would leave a foreground `ciao run` dead right after the
-        # setup wizard or a package update (only launchd's KeepAlive would
-        # bring the server back). Exec a fresh interpreter instead — the pid
-        # is unchanged, so launchd keeps tracking it, and the relaunch picks
-        # up new code and the current environment (e.g. the CIAO_WORKSPACE
-        # handoff written by the setup wizard's finish step).
-        def _force_exit() -> None:
-            time.sleep(15)
-            if code == 0:
-                # A clean-exit request (setup wizard handing the server over
-                # to launchd): dying is the point, don't relaunch.
-                os._exit(0)
-            logger.info("Cleanup did not finish; re-execing for the requested restart")
-            try:
-                os.execv(sys.executable, [sys.executable, "-m", "ciao.cli", *sys.argv[1:]])
-            except OSError:
-                os._exit(code)
-        threading.Thread(
-            target=_force_exit, daemon=True, name="ciao-restart-watchdog"
-        ).start()
+        existing = restart_task[0]
+        if existing is not None and not existing.done():
+            return
+
+        # Close admission synchronously with the request, before the drain
+        # task gets its first event-loop turn. Existing streams keep running
+        # and can flush messages that were already queued on them.
+        pcm.begin_restart_drain()
+
+        async def _restart_when_idle() -> None:
+            active = pcm.active_chat_ids()
+            if active:
+                logger.info(
+                    "Restart requested; waiting for %d active chat(s): %s",
+                    len(active),
+                    ", ".join(active),
+                )
+            await _wait_for_chat_drain(pcm)
+            logger.info("Chat work drained; proceeding with requested restart")
+
+            # asyncio.run's cleanup phase (cancel tasks, shut down the default
+            # executor) can wedge after uvicorn drains: leaked Claude SDK
+            # subprocess transports and synchronous urllib calls in the
+            # heartbeat thread both hold the loop open indefinitely. Start
+            # the watchdog only after chat work drains so it cannot cut the
+            # wait short. A plain os._exit would leave a foreground `ciao run`
+            # dead; exec a fresh interpreter instead so launchd keeps tracking
+            # the same pid and the relaunch picks up the current environment.
+            restart_code = restart_flag[0]
+            if restart_code is None:
+                restart_code = code
+
+            def _force_exit() -> None:
+                time.sleep(15)
+                if restart_code == 0:
+                    # A clean-exit request (setup wizard handing the server
+                    # over to launchd): dying is the point, don't relaunch.
+                    os._exit(0)
+                logger.info(
+                    "Cleanup did not finish; re-execing for the requested restart"
+                )
+                try:
+                    os.execv(
+                        sys.executable,
+                        [sys.executable, "-m", "ciao.cli", *sys.argv[1:]],
+                    )
+                except OSError:
+                    os._exit(restart_code)
+
+            threading.Thread(
+                target=_force_exit, daemon=True, name="ciao-restart-watchdog"
+            ).start()
+            await server.shutdown()
+
+        restart_task[0] = asyncio.create_task(_restart_when_idle())
 
     app.state.request_restart = request_restart
 

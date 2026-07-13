@@ -36,9 +36,10 @@ _FORBIDDEN_PATH_PREFIXES: tuple[str, ...] = (
     "memory-vault/",
     "secrets/",
     ".claude/",
+    ".agents/",
+    ".codex/",
     ".runtime/",
     ".mcp.json",
-    ".env",
 )
 
 _FORBIDDEN_PATH_GLOBS: tuple[str, ...] = (
@@ -119,6 +120,10 @@ def _forbidden_path_detail(rel: str) -> str:
     for prefix in _FORBIDDEN_PATH_PREFIXES:
         if rel == prefix.rstrip("/") or rel.startswith(prefix):
             return prefix
+    # Dotenv files carry secrets and must never ship — except the committed
+    # `.env.example` template, which is explicitly allowlisted for release.
+    if rel.startswith(".env") and rel != ".env.example":
+        return ".env"
     for pattern in _FORBIDDEN_PATH_GLOBS:
         if fnmatch.fnmatch(rel, pattern):
             return pattern

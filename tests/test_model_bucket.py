@@ -47,6 +47,42 @@ def _make_manager(tmp_path: Path) -> ProjectChatManager:
     )
 
 
+def test_codex_workspace_creates_codex_chat_with_account_default_model(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        workspaces={
+            "personal": WorkspaceConfig(
+                name="personal",
+                vault_root="personal",
+                default_provider="codex",
+                default_model="",
+                model_bucket="",
+            ),
+        },
+    )
+    manager = ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    )
+    project = manager.create_project("Codex", workspace="personal")
+
+    chat = manager.create_chat(project.project_id)
+
+    assert chat.provider == "codex"
+    assert chat.model == ""
+    assert chat.model_bucket == ""
+    assert manager._spawn_kind("codex", "gpt-test") == "codex"
+
+
 def test_personal_chat_preselects_personal_bucket_with_resolved_model(tmp_path):
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("p", workspace="personal")
@@ -177,6 +213,28 @@ def test_configured_workspace_provider_preselects_openrouter_bucket(tmp_path):
     env = pcm._build_extra_env(chat)
     assert env["ANTHROPIC_BASE_URL"] == "https://openrouter.ai/api"
     assert env["ANTHROPIC_AUTH_TOKEN"] == "sk-or"
+
+
+def test_openrouter_fable_alias_uses_fable_latest(tmp_path):
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    config = CiaoConfig(
+        pwa_auth_token="t",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        openrouter=OpenRouterSettings(api_key="sk-or"),
+    )
+    pcm = ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    )
+    project = pcm.create_project("openrouter-fable", workspace="personal")
+    chat = pcm.create_chat(project.project_id, model="fable", model_bucket="openrouter")
+
+    assert pcm._runtime_model_for_chat(chat) == "anthropic/claude-fable-latest"
 
 
 def test_anthropic_to_openrouter_switch_rejected_mid_chat(tmp_path):
@@ -355,4 +413,3 @@ def test_configured_workspace_provider_preselects_ollama_bucket_and_tier(tmp_pat
     assert chat.model_bucket == "ollama"
     assert chat.model == "minimax-m3:cloud"
     assert pcm._runtime_model_for_chat(chat) == "minimax-m3:cloud"
-

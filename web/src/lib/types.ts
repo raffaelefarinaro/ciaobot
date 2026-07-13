@@ -1,5 +1,5 @@
 export type WorkspaceName = string
-export type WorkspaceProvider = 'claude' | 'ollama' | 'openrouter'
+export type WorkspaceProvider = 'claude' | 'codex' | 'ollama' | 'openrouter'
 
 export interface WorkspaceProviderOption {
   value: WorkspaceProvider
@@ -50,9 +50,9 @@ export interface ChatInfo {
   project_id: string
   title: string
   model: string
-  // Routing key for the server: 'claude' uses the Claude SDK (incl.
-  // Ollama/OpenRouter env-injection).
-  provider: 'claude'
+  // Runtime provider. Claude also covers Ollama/OpenRouter env-injection;
+  // Codex uses the authenticated OpenAI CLI app-server session.
+  provider: 'claude' | 'codex'
   // Claude routing bucket. Legacy values: 'work'/'anthropic' pin Anthropic,
   // 'personal'/'ollama' pin Ollama routing. '' = auto from project workspace.
   // Only meaningful when provider is 'claude'.
@@ -96,6 +96,7 @@ export interface ChatMessage {
   is_error?: boolean
   effective_model?: string
   usage?: Record<string, string>
+  quota?: Record<string, unknown>
   images?: string[]
   // Monotonic per-chat user-turn index. Server-assigned; used to dedup
   // user_echo events replayed on WS reconnect against already-rendered
@@ -106,10 +107,14 @@ export interface ChatMessage {
   duration_ms?: number
   // Populated when tool_name === '_filecard'. Drives the inline preview card
   // rendered alongside the activity trace. `file_path` is whatever the agent
-  // told us; the workspace-file endpoint enforces the sandbox on click.
+  // told us; absolute host paths are intentionally supported by the viewer.
   file_path?: string
   action?: string
   tool?: string
+  // Codex-native assistant-message phase. Commentary stays in the reasoning
+  // trace; only final_answer is eligible for the terminal response bubble.
+  // Undefined keeps the legacy last-assistant-message inference.
+  phase?: 'commentary' | 'final_answer'
 }
 
 // Subagent transcripts from /api/chats/{id}/subagents. One entry per subagent
@@ -121,6 +126,7 @@ export interface ChatMessage {
 // bubbles by /messages, anchoring the panel to the dispatching turn.
 export interface SubagentTranscript {
   agent_id: string
+  parent_agent_id?: string
   messages: ChatMessage[]
   tool_use_id?: string
   description?: string
@@ -137,17 +143,23 @@ export type WsEvent =
   // subagent. Its value is the parent's tool_use_id for the Task dispatch,
   // so the client can look up the subagent's description and label the
   // line in the trace ("[Explore] $ Bash …").
-  | { type: 'text_delta'; text: string; parent_tool_use_id?: string }
+  | {
+      type: 'text_delta';
+      text: string;
+      parent_tool_use_id?: string;
+      phase?: 'commentary' | 'final_answer';
+    }
   | {
       type: 'tool_use';
       tool_name: string;
       tool_input?: string;
       tool_use_id?: string;
       parent_tool_use_id?: string;
+      request_id?: string;
       // Set by the backend when the tool mutates a file on disk. The PWA
       // renders this as a standalone inline preview card instead of folding
       // it into the generic _activity row. Path may be workspace-relative
-      // or absolute; the workspace-file endpoint is the security boundary.
+      // or absolute; the viewer enforces file-type and size allowlists.
       file_touch?: { file_path: string; action: string };
     }
   | { type: 'thinking'; text: string; parent_tool_use_id?: string }
@@ -156,7 +168,7 @@ export type WsEvent =
   // Emitted from partial stream events so the live trace can show a token
   // count as the model works; the authoritative totals still land on `result`.
   | { type: 'token_usage'; input_tokens: number; output_tokens: number }
-  | { type: 'result'; text: string; is_error: boolean; effective_model: string; usage: Record<string, string>; session_id: string; sent_at?: string; completed_at?: string; duration_ms?: number }
+  | { type: 'result'; text: string; is_error: boolean; effective_model: string; usage: Record<string, string>; quota?: Record<string, unknown>; session_id: string; sent_at?: string; completed_at?: string; duration_ms?: number }
   | { type: 'permission_request'; tool_name: string; tool_input?: string; message: string; request_id: string }
   | { type: 'chat_title'; chat_id: string; title: string }
   | { type: 'user_echo'; text: string; images?: string[]; turn_index?: number; sent_at?: string }
@@ -180,6 +192,7 @@ export type EventsWsMessage =
   | { type: 'project_created'; project: ProjectInfo }
   | { type: 'project_updated'; project: ProjectInfo }
   | { type: 'project_deleted'; project_id: string }
+  | { type: 'open_chat'; chat_id: string }
 
 export interface InAppToast {
   id: number
@@ -234,6 +247,7 @@ export interface Schedule {
   web_chat_id: string | null
   web_project_id: string | null
   model: string
+  provider?: 'claude' | 'codex'
   next_run: string | null
   last_expected_run: string | null
   missed: boolean
@@ -243,6 +257,24 @@ export interface Schedule {
   scope?: string
   editable?: boolean
   removable?: boolean
+}
+
+// In-chat loop: re-dispatches its prompt into one fixed chat every N minutes.
+export interface Loop {
+  loop_id: string
+  prompt: string
+  web_chat_id: string
+  created_at: string
+  interval_minutes: number
+  title: string
+  autostart: boolean
+  last_run_at: string
+  last_status: '' | 'running' | 'ok' | 'error' | 'busy' | 'missing-chat'
+  scope?: 'user' | 'system'
+  // Computed server-side
+  running: boolean
+  context_label: string
+  next_run: string | null
 }
 
 // ── Status & Models ─────────────────────────────────────────────────────
@@ -268,12 +300,24 @@ export interface ModelsResponse {
   ollama_local_models?: string[]
   // OpenRouter owner/model ids available as a backend.
   openrouter_models?: string[]
-  // Per-backend alias tier models (haiku/sonnet/opus) and which
+  // Account-visible Codex models and their app-server metadata.
+  codex_models?: string[]
+  codex_model_metadata?: Record<string, {
+    display_name: string
+    description: string
+    default_reasoning_effort: string
+    input_modalities: string[]
+  }>
+  model_reasoning_levels?: Record<string, string[]>
+  // Per-backend haiku/sonnet/opus/fable tier models and which
   // backends are configured/available.
   alias_tiers?: Record<string, Record<string, string>>
+  // Catalog-derived codex tier mapping before operator pins, used to
+  // label the "Automatic (…)" option while an override is active.
+  codex_tier_defaults?: Record<string, string>
   backends?: Record<string, boolean>
-  // Keyed by provider ('claude'); both Claude
-  // buckets share the SDK's effort levels.
+  // Keyed by runtime provider; Claude buckets share the SDK effort levels,
+  // while Codex is additionally narrowed by model_reasoning_levels.
   thinking_levels?: Record<string, string[]>
 }
 
@@ -288,14 +332,24 @@ export interface RoutineSettings {
   ollama_haiku_model: string
   ollama_sonnet_model: string
   ollama_opus_model: string
+  ollama_fable_model: string
   openrouter_haiku_model: string
   openrouter_sonnet_model: string
   openrouter_opus_model: string
+  openrouter_fable_model: string
+  // Codex per-tier pins; empty = automatic catalog mapping. Effective
+  // values come from /api/models (alias_tiers.codex).
+  codex_haiku_model: string
+  codex_sonnet_model: string
+  codex_opus_model: string
+  codex_fable_model: string
   // What actually runs right now, after defaults.
   title_model_effective: string
   insights_model_effective: string
 
   critique_models_effective: string
+  // Env-backed models used when a tier override is cleared.
+  tier_defaults?: Record<string, Record<string, string>>
   alias_tiers?: Record<string, Record<string, string>>
   transcription: {
     engine: 'cloud' | 'local'
@@ -329,10 +383,19 @@ export interface ProviderConnection {
   auth: string
   command: string
   detail?: string
+  version?: string
+  account?: string
+  protocol?: string
 }
 
 export interface ProviderConfigSettings {
   keys: Record<string, {
+    label: string
+    description: string
+    configured: boolean
+    auth_method?: string
+  }>
+  service_keys?: Record<string, {
     label: string
     description: string
     configured: boolean
@@ -478,6 +541,8 @@ export interface PromptAsset {
   level?: number
   status?: 'ok' | 'missing' | 'blocked' | string
   imports?: string[]
+  provider?: 'claude' | 'codex' | 'shared' | string
+  workspace?: string
 }
 
 export interface SubagentAsset {
@@ -504,7 +569,7 @@ export interface CommandAsset {
 }
 
 export interface AgentAssetsResponse {
-  instructions: PromptAsset[]
+  context: PromptAsset[]
   subagents: SubagentAsset[]
   commands: CommandAsset[]
   health?: WorkspaceHealthResponse

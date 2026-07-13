@@ -275,6 +275,8 @@ async def extract_and_append(
     vault_root: Path | None = None,
     trajectories_enabled: bool = True,
     memory_proposals_enabled: bool = True,
+    provider: str = "claude",
+    project_doc_path: str = "",
 ) -> None:
     """Call the model with the filtered transcript and append insights to the archive.
 
@@ -294,6 +296,12 @@ async def extract_and_append(
     to populate tools_used/skills_loaded/turns. ``trajectory_meta`` may
     carry ``context``, ``project_id``, ``chat_id``, ``task_summary``,
     ``workspace``; missing keys default to empty strings.
+
+    ``project_doc_path`` (workspace-root-relative or absolute) points at the
+    chat's canonical project doc; when set and the extracted insights carry
+    Decisions or Open loops, the doc is updated in place right away via
+    :mod:`ciao.project_doc_update` instead of waiting for the nightly
+    curation schedule.
     """
     output = ""
     try:
@@ -304,11 +312,14 @@ async def extract_and_append(
             logger.info("Archive %s already has insights, skipping", archive_path)
             return
 
-        from ciao.providers.routing import resolve_with_fallback
+        if provider == "codex":
+            effective_model, env, note = model, {}, None
+        else:
+            from ciao.providers.routing import resolve_with_fallback
 
-        effective_model, env, note = resolve_with_fallback(
-            model, config, default_model=config.insights_model
-        )
+            effective_model, env, note = resolve_with_fallback(
+                model, config, default_model=config.insights_model
+            )
         async with job_runs.track(
             "insights", "Session insights", model=effective_model,
             extra={"archive": archive_path.name, "session_id": session_id},
@@ -320,6 +331,8 @@ async def extract_and_append(
                 filtered_jsonl=filtered_jsonl,
                 model=effective_model,
                 env=env,
+                provider=provider,
+                cwd=workspace_root,
             )
             if output:
                 _append_section(archive_path, output)
@@ -327,6 +340,37 @@ async def extract_and_append(
             else:
                 run.status = "error"
                 run.error = "insights model returned no output (failed twice)"
+
+        # Canonical project doc: fold Decisions/Open loops into the chat's
+        # project doc while the insights are fresh. The nightly curation
+        # schedule remains the cross-chat consolidator.
+        if output and project_doc_path:
+            try:
+                from ciao.project_doc_update import update_project_doc
+
+                doc = Path(project_doc_path)
+                if not doc.is_absolute() and workspace_root is not None:
+                    doc = workspace_root / project_doc_path
+                async with job_runs.track(
+                    "project_doc_update", "Project doc update",
+                    model=effective_model,
+                    extra={"doc": str(doc), "archive": archive_path.name},
+                ) as run:
+                    wrote = await update_project_doc(
+                        doc_path=doc,
+                        insights_md=output,
+                        model=effective_model,
+                        env=env,
+                        provider=provider,
+                        cwd=workspace_root,
+                    )
+                    run.extra["wrote"] = wrote
+                    if not wrote:
+                        run.skip("no material changes for the project doc")
+            except Exception:  # noqa: BLE001 — never crash the loop
+                logger.exception(
+                    "Project doc update failed for %s", project_doc_path
+                )
     except Exception:  # noqa: BLE001 — fire-and-forget, never crash the loop
         logger.exception("Insights extraction failed for %s", archive_path)
     finally:
@@ -361,8 +405,9 @@ async def extract_and_append(
                 )
         # Memory proposals: scan the freshly-appended insights section and
         # write actionable candidates to ``Workspace/Memory-Proposals.md``.
-        # Auto-apply is intentionally off; the curator agent promotes
-        # proposals via the ``memory`` MCP tool on the next session.
+        # "User corrections" are auto-promoted to bounded memory (gated on
+        # the config's memory_enabled); everything else waits for the
+        # curator agent to promote via `ciao memory` on the next session.
         proposals_vault_root = vault_root or (
             workspace_root / "memory-vault" if workspace_root is not None else None
         )
@@ -374,7 +419,13 @@ async def extract_and_append(
                     "memory_proposals", "Memory proposals",
                     extra={"archive": archive_path.name},
                 ) as run:
-                    wrote = proposals_from_archive(archive_path, proposals_vault_root)
+                    wrote = proposals_from_archive(
+                        archive_path,
+                        proposals_vault_root,
+                        auto_promote_memory=bool(
+                            getattr(config, "memory_enabled", True)
+                        ),
+                    )
                     run.extra["wrote"] = bool(wrote)
             except Exception:  # noqa: BLE001 — fire-and-forget, never crash
                 logger.exception(
@@ -415,16 +466,25 @@ async def _run_model_with_retry(
     filtered_jsonl: str,
     model: str,
     env: dict[str, str],
+    provider: str = "claude",
+    cwd: Path | None = None,
 ) -> str:
     """Call the model; on failure, wait 30s and retry once."""
+    async def call() -> str:
+        if provider == "claude":
+            return await _call_model(filtered_jsonl, model, env)
+        return await _call_model(
+            filtered_jsonl, model, env, provider=provider, cwd=cwd
+        )
+
     try:
-        return await _call_model(filtered_jsonl, model, env)
+        return await call()
     except Exception as exc:  # noqa: BLE001
         logger.info("Insights model call failed (%s); retrying in %ds", exc, _RETRY_DELAY_S)
 
     await asyncio.sleep(_RETRY_DELAY_S)
     try:
-        return await _call_model(filtered_jsonl, model, env)
+        return await call()
     except Exception:
         logger.exception("Insights model call failed twice; skipping")
         return ""
@@ -434,20 +494,25 @@ async def _call_model(
     filtered_jsonl: str,
     model: str,
     env: dict[str, str],
+    *,
+    provider: str = "claude",
+    cwd: Path | None = None,
 ) -> str:
     from ciao.providers.oneshot import run_oneshot
 
     user_prompt = (
-        "Below is a Claude Code session transcript as line-oriented JSON.\n"
+        "Below is a coding-agent session transcript as line-oriented JSON.\n"
         "Each line is one message with a numeric `idx` you must cite.\n"
         "Extract durable signal per the system prompt's section schema.\n\n"
         f"{filtered_jsonl}"
     )
 
-    return await run_oneshot(
-        user_prompt,
-        system_prompt=_INSIGHTS_SYSTEM_PROMPT,
-        model=model,
-        env=env,
-        timeout_s=120.0,
-    )
+    kwargs = {
+        "system_prompt": _INSIGHTS_SYSTEM_PROMPT,
+        "model": model,
+        "env": env,
+        "timeout_s": 120.0,
+    }
+    if provider != "claude":
+        kwargs.update({"provider": provider, "cwd": cwd})
+    return await run_oneshot(user_prompt, **kwargs)

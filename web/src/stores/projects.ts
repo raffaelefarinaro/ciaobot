@@ -50,6 +50,7 @@ export const useProjectStore = defineStore('projects', () => {
   const sockets = ref<Record<string, WebSocket>>({})
   const streaming = ref<Record<string, boolean>>({})
   const streamingText = ref<Record<string, string>>({})
+  const streamingTextPhase = ref<Record<string, ChatMessage['phase']>>({})
   // Per-chat in-flight thinking buffer. Mirrors `streamingText` but for
   // `thinking_delta` events: we accumulate the model's reasoning text and
   // commit it as a `kind: 'thinking'` timeline entry the moment a visible
@@ -123,7 +124,9 @@ export const useProjectStore = defineStore('projects', () => {
   // It breaks contiguous 'tool' groups so the PWA can render a standalone
   // clickable card with a preview link instead of folding it into _activity.
   type StreamEntry =
-    | { kind: 'tool' | 'text' | 'thinking'; content: string }
+    | { kind: 'tool'; content: string }
+    | { kind: 'thinking'; content: string }
+    | { kind: 'text'; content: string; phase?: ChatMessage['phase'] }
     | { kind: 'filecard'; content: string; file_path: string; action: string; tool: string }
   const streamingTimeline = ref<Record<string, StreamEntry[]>>({})  // per-chat interleaved tool/text entries
   const unread = ref<Record<string, number>>({})  // per-chat unread assistant message count
@@ -154,9 +157,13 @@ export const useProjectStore = defineStore('projects', () => {
   // implicitly answers, regardless of whether they clicked an option).
   type ActiveQuestionOption = { label: string; description?: string }
   type ActiveQuestion = {
+    id: string
     question: string
     header: string
     multiSelect: boolean
+    allowOther: boolean
+    isSecret: boolean
+    requestId: string
     options: ActiveQuestionOption[]
   }
   const activeQuestions = ref<Record<string, ActiveQuestion[]>>({})
@@ -165,15 +172,25 @@ export const useProjectStore = defineStore('projects', () => {
   // picker's shape. Shared by the live `tool_use` handler and the reload-time
   // rebuild from a chat's persisted `pending_question`. Returns [] on anything
   // unparseable so callers can fall through to the generic trace path.
-  function parseQuestions(toolInput: string | null | undefined): ActiveQuestion[] {
+  function parseQuestions(
+    toolInput: string | null | undefined,
+    requestId = '',
+  ): ActiveQuestion[] {
     if (!toolInput) return []
     try {
       const parsed = JSON.parse(toolInput)
       if (!Array.isArray(parsed?.questions)) return []
-      return parsed.questions.map((q: Record<string, unknown>) => ({
+      const resolvedRequestId = requestId || String(parsed?.request_id ?? '')
+      return parsed.questions.map((q: Record<string, unknown>, index: number) => ({
+        id: String(q.id ?? index),
         question: String(q.question ?? ''),
         header: String(q.header ?? ''),
         multiSelect: Boolean(q.multiSelect),
+        allowOther: q.isOther === undefined
+          ? true
+          : Boolean(q.isOther) || !Array.isArray(q.options) || q.options.length === 0,
+        isSecret: Boolean(q.isSecret),
+        requestId: resolvedRequestId,
         options: Array.isArray(q.options)
           ? (q.options as Array<Record<string, unknown>>).map(o => ({
               label: String(o.label ?? ''),
@@ -548,6 +565,7 @@ export const useProjectStore = defineStore('projects', () => {
         content: message.content,
         tool_name: message.tool_name || '',
         is_error: Boolean(message.is_error),
+        phase: message.phase || '',
       }))
     )
   }
@@ -566,6 +584,7 @@ export const useProjectStore = defineStore('projects', () => {
       }
       const merged: ChatMessage = { ...sMsg }
       if (lMsg.usage && !sMsg.usage) merged.usage = lMsg.usage
+      if (lMsg.quota && !sMsg.quota) merged.quota = lMsg.quota
       if (lMsg.effective_model && !sMsg.effective_model) merged.effective_model = lMsg.effective_model
       if (lMsg.is_error !== undefined && sMsg.is_error === undefined) merged.is_error = lMsg.is_error
       if (lMsg.turn_index != null && sMsg.turn_index == null) merged.turn_index = lMsg.turn_index
@@ -780,11 +799,14 @@ export const useProjectStore = defineStore('projects', () => {
     //      isn't archived).
     //   3) First chat in the current workspace.
     const { router } = await import('../router')
-    const urlChatId = router.currentRoute.value.params.chatId as string | undefined
-    const chatExists = (id: string) => c.some(ch => ch.chat_id === id && !ch.archived)
-    if (urlChatId && chatExists(urlChatId)) {
+    const urlChatId = (router.currentRoute.value.params.chatId as string | undefined)
+      || (typeof window !== 'undefined'
+        ? window.location.pathname.match(/^\/chat\/([^/]+)/)?.[1]
+        : undefined)
+    if (urlChatId && chatExistsInList(urlChatId, c)) {
+      await ensureWorkspaceForChat(urlChatId)
       activeChatId.value = urlChatId
-    } else if (activeChatId.value && !chatExists(activeChatId.value)) {
+    } else if (activeChatId.value && !chatExistsInList(activeChatId.value, c)) {
       activeChatId.value = null
     }
     if (!activeChatId.value) {
@@ -845,6 +867,7 @@ export const useProjectStore = defineStore('projects', () => {
     streamingText.value[chatId] = ''
     streamingThinking.value[chatId] = ''
     streamingTimeline.value[chatId] = []
+    delete streamingTextPhase.value[chatId]
     delete liveUsage.value[chatId]
     delete streamStartedAt.value[chatId]
     delete projectStreaming.value[chatId]
@@ -1126,7 +1149,7 @@ export const useProjectStore = defineStore('projects', () => {
     updates: {
       model?: string
       mode?: string
-      provider?: 'claude'
+      provider?: 'claude' | 'codex'
       thinking_level?: string
       model_bucket?: string
     },
@@ -1138,7 +1161,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   async function handoverChat(
     chatId: string,
-    updates: { model: string; provider: 'claude'; model_bucket?: string },
+    updates: { model: string; provider: 'claude' | 'codex'; model_bucket?: string },
   ) {
     const visibleMessages = normalizeMessages(messages.value[chatId] || [])
     const c = await api.post<ChatInfo>(`/api/chats/${chatId}/handover`, {
@@ -1254,7 +1277,7 @@ export const useProjectStore = defineStore('projects', () => {
     // Fetch authoritative history from the SDK session on the server.
     // This catches schedule outputs, turns from other devices, etc.
     try {
-      const serverMsgs = await api.get<{ role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string }[]>(
+      const serverMsgs = await api.get<{ role: string; content: string; tool_name?: string; images?: string[]; turn_index?: number; sent_at?: string; duration_ms?: number; is_error?: boolean; file_path?: string; action?: string; tool?: string; phase?: 'commentary' | 'final_answer' }[]>(
         `/api/chats/${chatId}/messages`
       )
       if (!serverMsgs.length) {
@@ -1284,6 +1307,7 @@ export const useProjectStore = defineStore('projects', () => {
         file_path: m.file_path,
         action: m.action,
         tool: m.tool,
+        phase: m.phase,
       })))
       const normalizedLocal = normalizeMessages(messages.value[chatId] || [])
 
@@ -1349,6 +1373,25 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   // ── Chat switching ──────────────────────────────────────────────────
+
+  function chatExistsInList(chatId: string, list: ChatInfo[] = chats.value): boolean {
+    return list.some(ch => ch.chat_id === chatId && !ch.archived)
+  }
+
+  async function ensureWorkspaceForChat(chatId: string) {
+    const project = projectFor(chatId)
+    if (!project || project.workspace === activeWorkspace.value) return
+    if (activeChatId.value) disconnectWs(activeChatId.value)
+    activeWorkspace.value = project.workspace
+    persistState()
+  }
+
+  /** Deep-link / tray / notification navigation into a specific chat. */
+  async function openChatFromDeepLink(chatId: string) {
+    if (!chatExistsInList(chatId)) return
+    await ensureWorkspaceForChat(chatId)
+    await switchChat(chatId)
+  }
 
   async function switchChat(chatId: string) {
     // Always sync URL, even if activeChatId already matches (we may have
@@ -1424,6 +1467,7 @@ export const useProjectStore = defineStore('projects', () => {
       streamingText.value[chatId] = ''
       streamingThinking.value[chatId] = ''
       streamingTimeline.value[chatId] = []
+      delete streamingTextPhase.value[chatId]
     }
   }
 
@@ -1505,6 +1549,11 @@ export const useProjectStore = defineStore('projects', () => {
         // report OPEN, but no messages flow.
         void resumeActiveChat()
         void syncLatest()
+        const chatId = (() => {
+          if (typeof window === 'undefined') return undefined
+          return window.location.pathname.match(/^\/chat\/([^/]+)/)?.[1]
+        })()
+        if (chatId) void openChatFromDeepLink(chatId)
       } else if (activeChatId.value) {
         // Visibility → hidden: just notify the server of focus state.
         sendFocus(activeChatId.value)
@@ -1525,9 +1574,9 @@ export const useProjectStore = defineStore('projects', () => {
       navigator.serviceWorker.addEventListener('message', (ev) => {
         const data = ev.data
         if (data && data.type === 'open-chat' && data.chat_id) {
-          switchChat(data.chat_id)
+          void openChatFromDeepLink(data.chat_id)
         } else if (data && data.type === 'pending-target' && data.chat_id) {
-          switchChat(data.chat_id)
+          void openChatFromDeepLink(data.chat_id)
         }
       })
     }
@@ -1750,6 +1799,7 @@ export const useProjectStore = defineStore('projects', () => {
         if (subagents.value[msg.chat_id]) delete subagents.value[msg.chat_id]
         if (streaming.value[msg.chat_id]) delete streaming.value[msg.chat_id]
         if (streamingText.value[msg.chat_id]) delete streamingText.value[msg.chat_id]
+        delete streamingTextPhase.value[msg.chat_id]
         if (queuedMessages.value[msg.chat_id]) delete queuedMessages.value[msg.chat_id]
         if (unread.value[msg.chat_id]) {
           delete unread.value[msg.chat_id]
@@ -1762,6 +1812,9 @@ export const useProjectStore = defineStore('projects', () => {
         }
         break
       }
+      case 'open_chat':
+        void openChatFromDeepLink(msg.chat_id)
+        break
       case 'project_created': {
         const exists = projects.value.some(p => p.project_id === msg.project.project_id)
         if (!exists) projects.value.push(msg.project)
@@ -1918,6 +1971,7 @@ export const useProjectStore = defineStore('projects', () => {
     streaming.value[chatId] = true
     streamingText.value[chatId] = ''
     streamingThinking.value[chatId] = ''
+    delete streamingTextPhase.value[chatId]
     streamStartedAt.value[chatId] = Date.now()
     delete liveUsage.value[chatId]
 
@@ -1977,6 +2031,7 @@ export const useProjectStore = defineStore('projects', () => {
         pendingPermissions.value[chatId] = next
       } else {
         delete pendingPermissions.value[chatId]
+        delete activeQuestions.value[chatId]
       }
     }
     const ws = sockets.value[chatId]
@@ -1989,6 +2044,24 @@ export const useProjectStore = defineStore('projects', () => {
           reason,
         }),
       )
+    }
+  }
+
+  function respondQuestion(
+    chatId: string,
+    requestId: string,
+    answers: Record<string, string[]>,
+  ) {
+    delete activeQuestions.value[chatId]
+    const chat = chats.value.find(c => c.chat_id === chatId)
+    if (chat?.pending_question) chat.pending_question = ''
+    const ws = sockets.value[chatId]
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'question_response',
+        request_id: requestId,
+        answers,
+      }))
     }
   }
 
@@ -2256,10 +2329,15 @@ export const useProjectStore = defineStore('projects', () => {
 
   function _commitStreamingTextToTimeline(chatId: string) {
     const text = (streamingText.value[chatId] || '').trim()
-    if (!text) return
+    const phase = streamingTextPhase.value[chatId]
+    if (!text) {
+      delete streamingTextPhase.value[chatId]
+      return
+    }
     if (!streamingTimeline.value[chatId]) streamingTimeline.value[chatId] = []
-    streamingTimeline.value[chatId].push({ kind: 'text', content: text })
+    streamingTimeline.value[chatId].push({ kind: 'text', content: text, phase })
     streamingText.value[chatId] = ''
+    delete streamingTextPhase.value[chatId]
   }
 
   function _commitStreamingThinkingToTimeline(chatId: string) {
@@ -2443,6 +2521,17 @@ export const useProjectStore = defineStore('projects', () => {
         // Visible text starts: any pending thinking block has ended, lock it
         // into the timeline so the Reasoning bubble renders it after the turn.
         _commitStreamingThinkingToTimeline(chatId)
+        // Codex starts a new agent-message item when it moves from progress
+        // commentary to the terminal answer. Preserve that boundary instead
+        // of concatenating both items into the final response buffer.
+        if (
+          event.phase
+          && streamingText.value[chatId]
+          && streamingTextPhase.value[chatId] !== event.phase
+        ) {
+          _commitStreamingTextToTimeline(chatId)
+        }
+        if (event.phase) streamingTextPhase.value[chatId] = event.phase
         streamingText.value[chatId] = (streamingText.value[chatId] || '') + event.text
         break
 
@@ -2455,7 +2544,7 @@ export const useProjectStore = defineStore('projects', () => {
         // generic path on parse failure so the call still shows up in the
         // trace as a regular tool entry.
         if (event.tool_name === 'AskUserQuestion' && event.tool_input) {
-          const qs = parseQuestions(event.tool_input)
+          const qs = parseQuestions(event.tool_input, event.request_id || '')
           if (qs.length) {
             activeQuestions.value[chatId] = qs
             // Nudge the user when the tab is backgrounded so they don't
@@ -2556,6 +2645,12 @@ export const useProjectStore = defineStore('projects', () => {
         // trailing thinking/text deltas into the timeline so they render
         // in the correct order.
         _commitStreamingThinkingToTimeline(chatId)
+        // A completed/interrupted Codex turn may legitimately end after a
+        // commentary item with no final answer. Keep that text in the trace;
+        // never promote it into the response bubble via the defensive merge.
+        if (streamingTextPhase.value[chatId] === 'commentary') {
+          _commitStreamingTextToTimeline(chatId)
+        }
         // Flush accumulated timeline preserving order: tool runs → _activity
         // system msgs, thinking → _thinking system msgs (rendered in the
         // Reasoning trace, never as the final answer), intermediate text →
@@ -2604,11 +2699,17 @@ export const useProjectStore = defineStore('projects', () => {
             // Skip timeline text entries that are already represented in the
             // final merged text so the trace doesn't duplicate the answer bubble.
             const entryText = entry.content.trim()
-            if (text && entryText && text.indexOf(entryText) >= 0) continue
+            if (
+              entry.phase !== 'commentary'
+              && text
+              && entryText
+              && text.indexOf(entryText) >= 0
+            ) continue
             msgs.push({
               role: 'assistant',
               content: entry.content,
               timestamp: now,
+              phase: entry.phase,
             })
           }
         }
@@ -2624,7 +2725,9 @@ export const useProjectStore = defineStore('projects', () => {
             is_error: event.is_error,
             effective_model: event.effective_model,
             usage: event.usage,
+            quota: event.quota,
             duration_ms: event.duration_ms,
+            phase: 'final_answer',
           })
           const isActive = activeChatId.value === chatId &&
             (typeof document === 'undefined' || document.visibilityState === 'visible')
@@ -2637,6 +2740,7 @@ export const useProjectStore = defineStore('projects', () => {
         streaming.value[chatId] = false
         streamingText.value[chatId] = ''
         streamingThinking.value[chatId] = ''
+        delete streamingTextPhase.value[chatId]
         delete liveUsage.value[chatId]
         delete streamStartedAt.value[chatId]
         // Turn ended: the server has already resolved any still-pending gate
@@ -2681,6 +2785,7 @@ export const useProjectStore = defineStore('projects', () => {
         streaming.value[chatId] = false
         streamingText.value[chatId] = ''
         streamingThinking.value[chatId] = ''
+        delete streamingTextPhase.value[chatId]
         delete liveUsage.value[chatId]
         delete streamStartedAt.value[chatId]
         delete pendingPermissions.value[chatId]
@@ -2763,9 +2868,9 @@ export const useProjectStore = defineStore('projects', () => {
     fetchCompletedProjects, restoreProject,
     createChat, renameChat, updateChat, handoverChat, moveChat, deleteChat, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
-    switchChat, switchWorkspace,
+    switchChat, switchWorkspace, openChatFromDeepLink,
     syncLatest,
-    sendMessage, stopChat, respondPermission, transcribeVoice, speakMessage, uploadImages, uploadImageRefs, removePendingImage, clearPendingImages,
+    sendMessage, stopChat, respondPermission, respondQuestion, transcribeVoice, speakMessage, uploadImages, uploadImageRefs, removePendingImage, clearPendingImages,
     addPendingComment, removePendingComment, clearPendingComments,
     addPendingChatComment, removePendingChatComment, clearPendingChatComments, updatePendingChatComment,
     addPendingChatCommentImage, removePendingChatCommentImage,

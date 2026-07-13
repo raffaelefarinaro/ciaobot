@@ -6,13 +6,14 @@ import { shouldReconnectActiveChatOnStreamingStarted, useProjectStore } from './
 
 const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
+const apiPatch = vi.hoisted(() => vi.fn())
 const apiDel = vi.hoisted(() => vi.fn())
 
 vi.mock('../lib/api', () => ({
   api: {
     get: apiGet,
     post: apiPost,
-    patch: vi.fn(),
+    patch: apiPatch,
     del: apiDel,
   },
 }))
@@ -60,6 +61,8 @@ beforeEach(() => {
   fakeSockets = []
   localStorageData = {}
   apiGet.mockReset()
+  apiPost.mockReset()
+  apiPatch.mockReset()
   const storage = {
     getItem: vi.fn((key: string) => localStorageData[key] ?? null),
     setItem: vi.fn((key: string, value: string) => { localStorageData[key] = value }),
@@ -118,6 +121,155 @@ describe('queued message replay handling', () => {
     })
 
     expect(store.queuedMessages[chatId]).toBeUndefined()
+  })
+})
+
+describe('Codex structured questions', () => {
+  test('answers a native request inside the active websocket turn', () => {
+    const store = useProjectStore()
+    const chatId = 'codex-chat'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Codex',
+      model: 'gpt-test',
+      provider: 'codex',
+      mode: 'auto',
+      session_id: 'thread-1',
+      created_at: '',
+      archived: false,
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'tool_use',
+        tool_name: 'AskUserQuestion',
+        request_id: 'codex-1',
+        tool_input: JSON.stringify({
+          questions: [{
+            id: 'choice',
+            header: 'Choice',
+            question: 'Pick one',
+            isOther: false,
+            isSecret: false,
+            options: [{ label: 'A', description: 'first' }],
+          }],
+        }),
+      }),
+    })
+
+    expect(store.activeQuestions[chatId][0]).toMatchObject({
+      id: 'choice',
+      requestId: 'codex-1',
+      allowOther: false,
+      question: 'Pick one',
+    })
+
+    store.respondQuestion(chatId, 'codex-1', { choice: ['A'] })
+
+    expect(store.activeQuestions[chatId]).toBeUndefined()
+    expect(socket.send).toHaveBeenCalledWith(JSON.stringify({
+      type: 'question_response',
+      request_id: 'codex-1',
+      answers: { choice: ['A'] },
+    }))
+  })
+
+  test('surfaces approval requests and preserves Codex quota metadata', () => {
+    const store = useProjectStore()
+    const chatId = 'codex-gates'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Codex',
+      model: 'gpt-test',
+      provider: 'codex',
+      mode: 'normal',
+      session_id: 'thread-1',
+      created_at: '',
+      archived: false,
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'permission_request',
+      request_id: 'approval-1',
+      tool_name: 'Bash',
+      tool_input: 'touch safe.txt',
+      message: 'Approve?',
+    }) })
+
+    expect(store.pendingPermissions[chatId][0].request_id).toBe('approval-1')
+    store.respondPermission(chatId, 'approval-1', true)
+    expect(socket.send).toHaveBeenCalledWith(JSON.stringify({
+      type: 'permission_response',
+      request_id: 'approval-1',
+      approved: true,
+      reason: '',
+    }))
+
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'result',
+      text: 'done',
+      is_error: false,
+      effective_model: 'gpt-test',
+      usage: { input_tokens: '10' },
+      quota: { planType: 'plus', utilization: '0.2' },
+      session_id: 'thread-1',
+    }) })
+    expect(store.messages[chatId].at(-1)?.quota).toEqual({
+      planType: 'plus',
+      utilization: '0.2',
+    })
+  })
+})
+
+describe('Codex assistant message phases', () => {
+  test('keeps commentary in the trace and the final answer separate', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'codex-phases'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Codex phases',
+      model: 'gpt-test',
+      provider: 'codex',
+      mode: 'normal',
+      session_id: 'thread-1',
+      created_at: '',
+      archived: false,
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'text_delta',
+      text: "I'll check that now.",
+      phase: 'commentary',
+    }) })
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'text_delta',
+      text: 'Done.',
+      phase: 'final_answer',
+    }) })
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'result',
+      text: 'Done.',
+      is_error: false,
+      effective_model: 'gpt-test',
+      usage: {},
+      session_id: 'thread-1',
+    }) })
+
+    expect(store.messages[chatId].map(message => ({
+      content: message.content,
+      phase: message.phase,
+    }))).toEqual([
+      { content: "I'll check that now.", phase: 'commentary' },
+      { content: 'Done.', phase: 'final_answer' },
+    ])
   })
 })
 
@@ -221,6 +373,56 @@ describe('background agents indicator', () => {
     })
     expect(store.backgroundAgents['c-stale']).toBeUndefined()
     expect(store.backgroundAgents['c-live']).toBe(2)
+  })
+})
+
+describe('deep-link chat navigation', () => {
+  beforeEach(() => {
+    routerPush.mockReset()
+    apiPost.mockReset()
+    apiGet.mockResolvedValue([])
+  })
+
+  test('openChatFromDeepLink switches workspace before opening the chat', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p-personal', name: 'Proj Personal', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+      { project_id: 'p-work', name: 'Proj Work', workspace: 'work', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = [
+      { chat_id: 'c-personal', project_id: 'p-personal', title: 'Chat Personal', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+      { chat_id: 'c-work', project_id: 'p-work', title: 'Chat Work', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeWorkspace = 'personal'
+    store.activeChatId = 'c-personal'
+
+    await store.openChatFromDeepLink('c-work')
+
+    expect(store.activeWorkspace).toBe('work')
+    expect(store.activeChatId).toBe('c-work')
+    expect(routerPush).toHaveBeenCalledWith('/chat/c-work')
+  })
+
+  test('open_chat event over /ws/events navigates to the target chat', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = [
+      { chat_id: 'c1', project_id: 'p1', title: 'Chat 1', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+      { chat_id: 'c2', project_id: 'p1', title: 'Chat 2', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeChatId = 'c1'
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+
+    sock.onmessage?.({
+      data: JSON.stringify({ type: 'open_chat', chat_id: 'c2' }),
+    })
+    await vi.waitFor(() => {
+      expect(store.activeChatId).toBe('c2')
+    })
+    expect(routerPush).toHaveBeenCalledWith('/chat/c2')
   })
 })
 
@@ -365,11 +567,12 @@ describe('workspace and chat transitions', () => {
 
     expect(apiPost).toHaveBeenCalledWith('/api/projects/pg/chats', { title: 'Fix error' })
 
-    // The fix prompt (with the error log + gh-issue fallback) was sent over the WS.
+    // The fix prompt (with the error log + approval-gated GitHub-issue fallback) was sent over the WS.
     const sent = fakeSockets.flatMap(s => (s.send as any).mock.calls.map((c: any[]) => String(c[0])))
     const fixMsg = sent.find(m => m.includes('Error: boom'))
     expect(fixMsg).toBeTruthy()
-    expect(fixMsg).toContain('gh issue create --repo raffaelefarinaro/ciaobot')
+    expect(fixMsg).toContain('ask for my approval')
+    expect(fixMsg).toContain('gh auth login')
     expect(fixMsg).toContain('I clicked send')
   })
 

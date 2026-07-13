@@ -7,6 +7,7 @@
 
 // GitHub repo used for the product-bug fallback. Keep in sync with CLAUDE.md.
 export const CIAOBOT_REPO = 'raffaelefarinaro/ciaobot'
+export const CIAOBOT_ISSUES_URL = `https://github.com/${CIAOBOT_REPO}/issues/new`
 
 export interface FixPromptInput {
   // Raw error text / log to diagnose.
@@ -21,11 +22,9 @@ export function buildFixPrompt({ errorText, context }: FixPromptInput): string {
     '',
     'Diagnose the root cause from the error log below and fix it.',
     '',
-    `If the root cause is a bug in the Ciaobot product itself (its own source code) and you cannot fix it from here, do NOT apply a workaround. Instead, open a GitHub issue in \`${CIAOBOT_REPO}\` using the \`gh\` CLI, for example:`,
+    `If the root cause is a bug in the Ciaobot product itself (its own source code) and you cannot fix it from here, do NOT apply a workaround. Prepare a concise GitHub issue instead, with the evidence below. Before publishing anything publicly, ask for my approval.`,
     '',
-    '```bash',
-    `gh issue create --repo ${CIAOBOT_REPO} --title "[Agent] <short summary>" --body "<what failed, repro steps, relevant code locations, and the log below>"`,
-    '```',
+    `Tell me that submitting an issue requires a GitHub account. I can use ${CIAOBOT_ISSUES_URL} in a browser, where GitHub will let me sign in or create one; I do not need the \`gh\` CLI for that. If I specifically ask you to submit the approved issue with \`gh\`, confirm that it is authenticated first; otherwise ask me to run \`gh auth login\` and do not ask for my credentials.`,
     '',
     'Explain clearly what you found and what you did.',
     '',

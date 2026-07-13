@@ -42,14 +42,23 @@ class AppSettings:
     tts_local_voice: str = ""
     # Comma-separated list of models for the critique / adversarial-review skill.
     critique_models: str = ""
-    # Per-backend tier aliases used when a chat asks for haiku/sonnet/opus
+    # Per-backend tier aliases used when a chat asks for haiku/sonnet/opus/fable
     # while the workspace routes through Ollama or OpenRouter.
     ollama_haiku_model: str = ""
     ollama_sonnet_model: str = ""
     ollama_opus_model: str = ""
+    ollama_fable_model: str = ""
     openrouter_haiku_model: str = ""
     openrouter_sonnet_model: str = ""
     openrouter_opus_model: str = ""
+    openrouter_fable_model: str = ""
+    # Codex per-tier pins. Unlike Ollama/OpenRouter there is no env-backed
+    # default: empty string means the tier resolves through the automatic
+    # catalog mapping (luna→haiku, terra→sonnet, sol→opus/fable).
+    codex_haiku_model: str = ""
+    codex_sonnet_model: str = ""
+    codex_opus_model: str = ""
+    codex_fable_model: str = ""
 
 
 class AppSettingsStore:
@@ -104,6 +113,17 @@ class AppSettingsStore:
         self._save()
         return self.settings
 
+    def tier_model_defaults(self) -> dict[str, dict[str, str]]:
+        """Return the env-backed tier models captured before overrides."""
+        defaults = self._defaults or {}
+        return {
+            provider: {
+                tier: defaults.get(f"{provider}_{tier}_model", "")
+                for tier in ("haiku", "sonnet", "opus", "fable")
+            }
+            for provider in ("ollama", "openrouter")
+        }
+
     def apply_to_config(self, config) -> None:
         """Overlay settings onto the live ``CiaoConfig`` object.
 
@@ -125,9 +145,15 @@ class AppSettingsStore:
                 "ollama_haiku_model": config.ollama.haiku_model,
                 "ollama_sonnet_model": config.ollama.sonnet_model,
                 "ollama_opus_model": config.ollama.opus_model,
+                "ollama_fable_model": config.ollama.fable_model,
                 "openrouter_haiku_model": config.openrouter.haiku_model,
                 "openrouter_sonnet_model": config.openrouter.sonnet_model,
                 "openrouter_opus_model": config.openrouter.opus_model,
+                "openrouter_fable_model": config.openrouter.fable_model,
+                "codex_haiku_model": config.codex.haiku_model,
+                "codex_sonnet_model": config.codex.sonnet_model,
+                "codex_opus_model": config.codex.opus_model,
+                "codex_fable_model": config.codex.fable_model,
             }
         d = self._defaults
         s = self.settings
@@ -149,10 +175,19 @@ class AppSettingsStore:
             haiku_model=s.ollama_haiku_model or d["ollama_haiku_model"],
             sonnet_model=s.ollama_sonnet_model or d["ollama_sonnet_model"],
             opus_model=s.ollama_opus_model or d["ollama_opus_model"],
+            fable_model=s.ollama_fable_model or d["ollama_fable_model"],
         )
         config.openrouter = replace(
             config.openrouter,
             haiku_model=s.openrouter_haiku_model or d["openrouter_haiku_model"],
             sonnet_model=s.openrouter_sonnet_model or d["openrouter_sonnet_model"],
             opus_model=s.openrouter_opus_model or d["openrouter_opus_model"],
+            fable_model=s.openrouter_fable_model or d["openrouter_fable_model"],
+        )
+        config.codex = replace(
+            config.codex,
+            haiku_model=s.codex_haiku_model or d["codex_haiku_model"],
+            sonnet_model=s.codex_sonnet_model or d["codex_sonnet_model"],
+            opus_model=s.codex_opus_model or d["codex_opus_model"],
+            fable_model=s.codex_fable_model or d["codex_fable_model"],
         )
