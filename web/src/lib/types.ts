@@ -339,6 +339,8 @@ export interface RoutineSettings {
   insights_model_effective: string
 
   critique_models_effective: string
+  // Env-backed models used when a tier override is cleared.
+  tier_defaults?: Record<string, Record<string, string>>
   alias_tiers?: Record<string, Record<string, string>>
   transcription: {
     engine: 'cloud' | 'local'
@@ -530,6 +532,8 @@ export interface PromptAsset {
   level?: number
   status?: 'ok' | 'missing' | 'blocked' | string
   imports?: string[]
+  provider?: 'claude' | 'codex' | 'shared' | string
+  workspace?: string
 }
 
 export interface SubagentAsset {

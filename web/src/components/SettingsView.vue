@@ -249,6 +249,7 @@
               Ciaobot is an open-source project. Support and contributions are welcome:
               report issues, suggest features, or open a pull request on
               <a href="https://github.com/raffaelefarinaro/ciaobot" target="_blank" rel="noopener">GitHub</a>.
+              You can browse without an account; submitting an issue or pull request requires a free GitHub account, and GitHub will prompt you to sign in or create one.
             </p>
           </div>
         </div>
@@ -257,36 +258,6 @@
 
       <!-- MODELS TAB -->
       <template v-if="currentTab === 'models'">
-        <div v-if="providerKeys?.service_keys?.OPENAI_API_KEY" class="card">
-          <div class="settings-card-header">
-            <p class="section-title">OpenAI voice services</p>
-            <p class="hint">This key is used directly by Ciaobot for cloud transcription and speech. Codex authentication is managed by the Codex CLI under Providers.</p>
-          </div>
-          <div class="credential-row">
-            <div class="setting-row-main setting-row-main--inline">
-              <div class="routine-info">
-                <span class="routine-name">{{ providerKeys.service_keys.OPENAI_API_KEY.label }}</span>
-                <p class="hint hint--compact">{{ providerKeys.service_keys.OPENAI_API_KEY.description }}</p>
-              </div>
-              <span class="badge" :class="providerKeys.service_keys.OPENAI_API_KEY.configured ? 'badge--success' : 'badge--error'">
-                {{ providerKeys.service_keys.OPENAI_API_KEY.configured ? 'Configured' : 'Unconfigured' }}
-              </span>
-            </div>
-            <input
-              v-model="providerKeyInputs.OPENAI_API_KEY"
-              type="password"
-              class="routine-input"
-              :placeholder="providerKeys.service_keys.OPENAI_API_KEY.configured ? '•••••••••••• (Leave blank to keep existing, or type empty space to clear)' : 'Enter API Key'"
-              :disabled="providerKeysSaving"
-            />
-          </div>
-          <div class="action-row settings-actions">
-            <button class="btn-primary" @click="saveProviderKeys" :disabled="providerKeysSaving">
-              {{ providerKeysSaving ? 'Saving...' : 'Save voice key' }}
-            </button>
-          </div>
-        </div>
-
         <div v-if="!routinesLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
         <template v-else-if="routinesError">
           <div class="card"><p class="hint hint--warn">{{ routinesError }}</p></div>
@@ -568,7 +539,7 @@
               <div>
                 <p class="section-title">Providers</p>
                 <p class="hint">
-                  Claude Code and Codex manage their own login and credentials. Ciaobot verifies each CLI connection and protocol.
+                  Claude Code and Codex manage their own login and credentials. Ciaobot verifies each CLI connection.
                 </p>
               </div>
             </div>
@@ -581,7 +552,6 @@
                     <p class="hint hint--compact provider-connection-detail">
                       <span v-if="conn.version">{{ conn.version }}</span>
                       <span v-if="conn.account">{{ conn.account }}</span>
-                      <span v-if="conn.protocol">{{ conn.protocol }}</span>
                       <span v-if="!conn.version && conn.detail">{{ conn.detail }}</span>
                     </p>
                   </div>
@@ -598,6 +568,25 @@
                 </div>
               </div>
               <div v-if="providerConnectionResult" class="action-result">{{ providerConnectionResult }}</div>
+            </div>
+
+            <div v-for="(meta, key) in providerKeys.service_keys" :key="key" class="credential-row">
+              <div class="setting-row-main setting-row-main--inline">
+                <div class="routine-info">
+                  <span class="routine-name">{{ meta.label }}</span>
+                  <p class="hint hint--compact">{{ meta.description }}</p>
+                </div>
+                <span class="badge" :class="meta.configured ? 'badge--success' : 'badge--error'">
+                  {{ meta.configured ? 'Configured' : 'Unconfigured' }}
+                </span>
+              </div>
+              <input
+                type="password"
+                class="routine-input"
+                v-model="providerKeyInputs[key]"
+                :placeholder="meta.configured ? '•••••••••••• (Leave blank to keep existing, or type empty space to clear)' : 'Enter API Key'"
+                :disabled="providerKeysSaving"
+              />
             </div>
 
             <div v-for="(meta, key) in providerKeys.keys" :key="key" class="credential-row">
@@ -854,22 +843,22 @@
             </template>
           </div>
 
-          <!-- Provider alias tiers -->
+          <!-- Provider-neutral model routing -->
           <div v-if="tierProviderSections.length" class="card">
             <div class="settings-card-header">
-              <p class="section-title">Provider alias models</p>
+              <p class="section-title">Model Routing</p>
               <p class="hint">
-                Ciaobot uses Haiku, Sonnet, Opus, and Fable everywhere, then maps each tier to the provider's own model names.
+                Ciaobot maps Haiku, Sonnet, Opus, and Fable to provider-specific models. OpenAI routes run through Codex; Ollama and OpenRouter routes run through Claude Code.
               </p>
             </div>
             <div class="alias-provider-bar">
               <label class="settings-field alias-provider-field">
                 <span class="ws-label">Provider</span>
                 <select
-                  class="routine-input alias-provider-select"
+                  class="routine-select alias-provider-select"
                   :value="selectedTierProviderSection?.key || ''"
                   :disabled="routinesSaving"
-                  @change="selectedTierProvider = ($event.target as HTMLSelectElement).value as AliasProviderKey"
+                  @change="selectedTierProvider = ($event.target as HTMLSelectElement).value as RoutingProviderKey"
                 >
                   <option v-for="section in tierProviderSections" :key="section.key" :value="section.key">
                     {{ section.label }}<template v-if="!section.available"> (not configured)</template>
@@ -883,26 +872,40 @@
                   <span class="ws-label">{{ tier.label }}</span>
                   <ModelSelector
                     v-if="selectedTierProviderSection.configurable"
-                    :model-value="tierOverrideValue(selectedTierProviderSection.key as TierProviderKey, tier.key)"
-                    :sections="tierModelSections"
+                    :model-value="tierSelectorValue(selectedTierProviderSection.key as TierProviderKey, tier.key)"
+                    :sections="tierModelSectionsFor(selectedTierProviderSection.key as TierProviderKey, tier.key)"
                     :disabled="routinesSaving || !selectedTierProviderSection.available"
-                    :placeholder="`Default (${tierEffectiveValue(selectedTierProviderSection.key as TierProviderKey, tier.key) || 'automatic'})`"
-                    :empty-placeholder="`Default (${tierEffectiveValue(selectedTierProviderSection.key as TierProviderKey, tier.key) || 'automatic'})`"
                     @update:model-value="saveTierModel(selectedTierProviderSection.key as TierProviderKey, tier.key, $event)"
                   />
                   <input
                     v-else
-                    class="routine-input"
+                    class="routine-input routing-model-input"
                     :value="tierModelForProvider(selectedTierProviderSection.key, tier.key)"
+                    :aria-label="`${tier.label} ${selectedTierProviderSection.label} routing model`"
                     disabled
                   />
                 </label>
               </div>
-              <p v-if="!selectedTierProviderSection.configurable" class="hint hint--info tier-provider-note">
-                {{ selectedTierProviderSection.key === 'codex'
-                  ? 'Codex maps Haiku to Luna, Sonnet to Terra, and Opus to Sol — OpenAI\'s fast, balanced, and flagship families.'
-                  : 'Claude runs Haiku, Sonnet, Opus, and Fable natively.' }}
-              </p>
+              <template v-if="selectedTierProviderSection.key === 'codex' && selectedTierProviderSection.available">
+                <p class="hint hint--info tier-provider-note">
+                  OpenAI models are discovered from the signed-in Codex account. Ciaobot assigns the tiers automatically; chat and workspace model pickers can still select a concrete model directly.
+                </p>
+                <details v-if="selectedTierProviderSection.options.length" class="routing-model-catalog">
+                  <summary>Available OpenAI models ({{ selectedTierProviderSection.options.length }})</summary>
+                  <ul class="routing-model-catalog__list">
+                    <li v-for="model in selectedTierProviderSection.options" :key="model">
+                      <code>{{ model }}</code>
+                      <span v-if="selectedTierModelBadges[model]?.length" class="routing-model-catalog__badges">
+                        <span
+                          v-for="badge in selectedTierModelBadges[model]"
+                          :key="`${model}-${badge}`"
+                          class="badge badge--muted"
+                        >{{ badge }}</span>
+                      </span>
+                    </li>
+                  </ul>
+                </details>
+              </template>
               <p v-else-if="!selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
                 {{ tierProviderUnavailableHint }}
               </p>
@@ -1119,11 +1122,32 @@
       <!-- CONTEXT TAB -->
       <template v-if="currentTab === 'context'">
         <div class="card">
-          <div class="settings-card-header">
-            <p class="section-title">Context sources</p>
-            <p class="hint">
-              Workspace instruction files and Ciaobot-generated blocks currently on disk.
-            </p>
+          <div class="settings-card-header settings-card-header--context">
+            <div>
+              <p class="section-title">Context sources</p>
+              <p class="hint">
+                The instruction files, workspace memory, and Ciaobot context sent to the selected provider.
+              </p>
+            </div>
+            <div class="context-provider-field">
+              <span class="ws-label">Provider view</span>
+              <div class="instance-toggle context-provider-toggle" role="group" aria-label="Context provider view">
+                <button
+                  type="button"
+                  class="toggle-btn"
+                  :class="{ active: contextProvider === 'claude' }"
+                  :aria-pressed="contextProvider === 'claude'"
+                  @click="setContextProvider('claude')"
+                >Claude Code</button>
+                <button
+                  type="button"
+                  class="toggle-btn"
+                  :class="{ active: contextProvider === 'codex' }"
+                  :aria-pressed="contextProvider === 'codex'"
+                  @click="setContextProvider('codex')"
+                >Codex</button>
+              </div>
+            </div>
           </div>
 
           <div v-if="!agentAssetsLoaded" class="action-row"><span class="loading">Loading&hellip;</span></div>
@@ -1131,8 +1155,44 @@
             <p class="hint hint--warn">{{ agentAssetsError }}</p>
           </template>
           <template v-else>
-            <p v-if="!contextAssets.length" class="hint hint--section-empty">No context sources found.</p>
+            <p v-if="!contextAssets.length && !workspaceMemoryAssets.length" class="hint hint--section-empty">No context sources found.</p>
             <div v-else class="skill-list">
+              <details
+                v-if="workspaceMemoryAssets.length"
+                class="skill-row instruction-row memory-context-row"
+                :open="workspaceMemoryExpanded"
+                @toggle="workspaceMemoryExpanded = ($event.currentTarget as HTMLDetailsElement).open"
+              >
+                <summary class="skill-main memory-context-summary">
+                  <div class="skill-title-row command-title-row">
+                    <span class="skill-chevron">{{ workspaceMemoryExpanded ? '&#9662;' : '&#9656;' }}</span>
+                    <span class="skill-name">Workspace memory</span>
+                    <span class="skill-badges">
+                      <span class="badge badge--muted command-source">{{ projectStore.activeWorkspace }}</span>
+                      <span class="badge badge--muted command-source">{{ workspaceMemoryAssets.length }} sources</span>
+                    </span>
+                  </div>
+                  <p class="skill-description">
+                    Bounded memory injected at session start plus durable memory from the active workspace.
+                  </p>
+                </summary>
+                <div class="skill-detail memory-source-list">
+                  <details v-for="memory in workspaceMemoryAssets" :key="memory.id" class="memory-source">
+                    <summary>
+                      <span>{{ memorySourceTitle(memory) }}</span>
+                      <span class="badge badge--muted command-source">{{ memoryInjectionLabel(memory) }}</span>
+                    </summary>
+                    <p class="skill-description">{{ memory.description }}</p>
+                    <p v-if="memory.path" class="skill-meta">
+                      <span class="skill-meta-label">Path</span>
+                      <button class="inline-path-button" @click.stop="openAssetPath(memory.path)">{{ memory.path }}</button>
+                    </p>
+                    <pre v-if="memory.content" class="asset-code-preview"><code>{{ memory.content }}</code></pre>
+                    <p v-else class="hint hint--compact">This memory source is currently empty.</p>
+                  </details>
+                </div>
+              </details>
+
               <div
                 v-for="item in contextAssets"
                 :key="item.id"
@@ -1167,51 +1227,34 @@
                       <span class="skill-meta-label">Imports</span>
                       <code class="command-path">{{ item.imports.join(', ') }}</code>
                     </p>
-                    <pre v-if="item.content" class="asset-code-preview"><code>{{ item.content }}</code></pre>
-                    <p v-else-if="item.scope === 'bounded-memory'" class="hint hint--compact">Empty — the agent can add entries via <code>/remember</code> or <code>ciao memory</code>.</p>
+                    <div v-if="item.id === 'runtime-context-hook'" class="runtime-context-summary">
+                      <p class="hint hint--compact">Every user turn includes:</p>
+                      <ul>
+                        <li>
+                          <strong>Project context:</strong>
+                          {{ activeContextProject?.context || 'No saved project context for the active chat.' }}
+                        </li>
+                        <li>
+                          <strong>Project document:</strong>
+                          <button
+                            v-if="activeContextProject?.vault_doc_path"
+                            class="inline-path-button"
+                            @click.stop="openAssetPath(activeContextProject.vault_doc_path)"
+                          >{{ activeContextProject.vault_doc_path }}</button>
+                          <span v-else>The project README.md or canonical document, when one is available.</span>
+                        </li>
+                        <li><strong>Runtime:</strong> today, active workspace and project, Google profile, and working directory.</li>
+                        <li><strong>Relevant vault context:</strong> entity links matched from the current prompt.</li>
+                        <li><strong>Continuity:</strong> provider handover context when a chat has just switched providers.</li>
+                      </ul>
+                      <pre v-if="item.content" class="asset-code-preview"><code>{{ item.content }}</code></pre>
+                    </div>
+                    <pre v-else-if="item.content" class="asset-code-preview"><code>{{ item.content }}</code></pre>
                   </div>
                 </div>
               </div>
             </div>
           </template>
-        </div>
-
-        <div v-if="reviewQueueAssets.length" class="card">
-          <div class="settings-card-header">
-            <p class="section-title">Review queue</p>
-            <p class="hint">
-              Draft memory from archived chats. Not injected until you or the agent promotes them.
-            </p>
-          </div>
-
-          <div class="skill-list">
-            <div
-              v-for="item in reviewQueueAssets"
-              :key="item.id"
-              class="skill-row instruction-row"
-              :class="{ expanded: isContextExpanded(item) }"
-              @click="toggleContext(item)"
-            >
-              <div class="skill-main">
-                <div class="skill-title-row command-title-row">
-                  <span class="skill-chevron">{{ isContextExpanded(item) ? '&#9662;' : '&#9656;' }}</span>
-                  <span class="skill-name">{{ item.title }}</span>
-                  <span class="skill-badges">
-                    <span class="badge badge--muted command-source">not injected</span>
-                    <span v-if="item.editable" class="badge badge--success command-source">editable</span>
-                  </span>
-                </div>
-                <p class="skill-description">{{ item.description }}</p>
-                <div v-if="isContextExpanded(item)" class="skill-detail">
-                  <p v-if="item.path" class="skill-meta">
-                    <span class="skill-meta-label">Path</span>
-                    <button class="inline-path-button" @click.stop="openAssetPath(item.path)">{{ item.path }}</button>
-                  </p>
-                  <pre v-if="item.content" class="asset-code-preview"><code>{{ item.content }}</code></pre>
-                </div>
-              </div>
-            </div>
-          </div>
         </div>
       </template>
 
@@ -1608,12 +1651,34 @@ const emit = defineEmits<{ 'open-sidebar': [] }>()
 const route = useRoute()
 const fileViewer = useFileViewerStore()
 const productTour = useProductTourStore()
+const projectStore = useProjectStore()
 const currentTab = computed(() => (route.params.tab as string) || 'home')
 
 const expandedSkills = ref<Record<string, boolean>>({})
 const expandedCommands = ref<Record<string, boolean>>({})
 const expandedSubagents = ref<Record<string, boolean>>({})
 const expandedContext = ref<Record<string, boolean>>({})
+type ContextProvider = 'claude' | 'codex'
+const contextProvider = ref<ContextProvider>('claude')
+const workspaceMemoryExpanded = ref(false)
+
+function loadContextProvider() {
+  try {
+    const saved = localStorage.getItem('ciao-context-provider')
+    if (saved === 'claude' || saved === 'codex') contextProvider.value = saved
+  } catch (e) {
+    // Ignore localStorage restrictions.
+  }
+}
+
+function setContextProvider(provider: ContextProvider) {
+  contextProvider.value = provider
+  try {
+    localStorage.setItem('ciao-context-provider', provider)
+  } catch (e) {
+    // The selection still applies for this page when storage is unavailable.
+  }
+}
 
 // ── Appearance settings ────────────────────────────────────────────────────
 const activeTheme = ref('system')
@@ -1746,6 +1811,7 @@ const routinesResult = ref('')
 
 type AliasProviderKey = 'claude' | 'codex' | 'ollama' | 'openrouter'
 type TierProviderKey = Exclude<AliasProviderKey, 'claude' | 'codex'>
+type RoutingProviderKey = Exclude<AliasProviderKey, 'claude'>
 type TierKey = 'haiku' | 'sonnet' | 'opus' | 'fable'
 type RoutineModelKey = 'title_model' | 'insights_model'
 type RoutineProviderValue = 'automatic' | 'apple' | 'custom' | AliasProviderKey
@@ -1873,7 +1939,7 @@ const aliasProviderSections = computed<AliasProviderSection[]>(() => {
   const sections: AliasProviderSection[] = [
     {
       key: 'claude',
-      label: 'Claude',
+      label: 'Anthropic (via Claude Code)',
       options: settings.model_options.anthropic || [],
       configurable: false,
       available: true,
@@ -1882,7 +1948,7 @@ const aliasProviderSections = computed<AliasProviderSection[]>(() => {
   if (settings.backends?.ollama) {
     sections.push({
       key: 'ollama',
-      label: 'Ollama',
+      label: 'Ollama (via Claude Code)',
       options: parseModelList([
         ...(settings.model_options.ollama_local || []),
         ...(settings.model_options.ollama_cloud || []),
@@ -1894,7 +1960,7 @@ const aliasProviderSections = computed<AliasProviderSection[]>(() => {
   if (settings.backends?.openrouter) {
     sections.push({
       key: 'openrouter',
-      label: 'OpenRouter',
+      label: 'OpenRouter (via Claude Code)',
       options: parseModelList((settings.model_options.openrouter || []).join(',')),
       configurable: true,
       available: true,
@@ -1903,33 +1969,31 @@ const aliasProviderSections = computed<AliasProviderSection[]>(() => {
   return sections
 })
 
-// Tier-mapping sections for the Providers tab "Provider alias models" card.
-// Always includes Ollama and OpenRouter (even when unconfigured) so the
-// operator can see the option exists; unconfigured backends render disabled
-// with a "set the API key" hint instead of vanishing.
+// Provider-neutral routing overview for the Providers tab. OpenAI models and
+// their automatic tier mapping come from Codex discovery in `/api/models`;
+// Ollama and OpenRouter expose editable Claude Code tier routes. Unconfigured
+// backends stay visible with setup guidance instead of vanishing.
 const tierProviderSections = computed<AliasProviderSection[]>(() => {
   const settings = routines.value
   if (!settings) return []
+  const codexModels = parseModelList((
+    workspaceModels.value?.codex_models
+    || workspaceModels.value?.provider_models?.codex
+    || []
+  ).join(','))
   const ollamaAvailable = !!settings.backends?.ollama
   const openrouterAvailable = !!settings.backends?.openrouter
   return [
     {
-      key: 'claude',
-      label: 'Claude',
-      options: settings.model_options.anthropic || [],
-      configurable: false,
-      available: true,
-    },
-    {
       key: 'codex',
-      label: 'OpenAI Codex',
-      options: [],
+      label: 'OpenAI (via Codex)',
+      options: codexModels,
       configurable: false,
-      available: !!providerKeys.value?.connections?.codex?.ok,
+      available: codexModels.length > 0,
     },
     {
       key: 'ollama',
-      label: 'Ollama',
+      label: 'Ollama (via Claude Code)',
       options: ollamaAvailable
         ? parseModelList([
             ...(settings.model_options.ollama_local || []),
@@ -1941,7 +2005,7 @@ const tierProviderSections = computed<AliasProviderSection[]>(() => {
     },
     {
       key: 'openrouter',
-      label: 'OpenRouter',
+      label: 'OpenRouter (via Claude Code)',
       options: openrouterAvailable
         ? parseModelList((settings.model_options.openrouter || []).join(','))
         : [],
@@ -1951,7 +2015,7 @@ const tierProviderSections = computed<AliasProviderSection[]>(() => {
   ]
 })
 
-const selectedTierProvider = ref<AliasProviderKey>('claude')
+const selectedTierProvider = ref<RoutingProviderKey>('codex')
 const selectedTierProviderSection = computed(() =>
   tierProviderSections.value.find((section) => section.key === selectedTierProvider.value)
   || tierProviderSections.value[0]
@@ -1977,9 +2041,24 @@ const tierModelSections = computed<ModelSection[]>(() => {
   ]
 })
 
+const selectedTierModelBadges = computed<Record<string, string[]>>(() => {
+  const section = selectedTierProviderSection.value
+  if (!section?.options.length) return {}
+  const aliasTiers = section.key === 'codex'
+    ? workspaceModels.value?.alias_tiers
+    : routines.value?.alias_tiers
+  const localModels = section.key === 'ollama'
+    ? routines.value?.model_options.ollama_local || []
+    : []
+  return providerModelBadges(section.key, section.options, aliasTiers, localModels)
+})
+
 const tierProviderUnavailableHint = computed(() => {
   const section = selectedTierProviderSection.value
   if (!section || section.available) return ''
+  if (section.key === 'codex') {
+    return 'Sign in to Codex to discover the available OpenAI models and their tier routing.'
+  }
   if (section.key === 'ollama') {
     return 'Install local Ollama models or set the Ollama Cloud API key above to enable tier mapping.'
   }
@@ -1988,6 +2067,8 @@ const tierProviderUnavailableHint = computed(() => {
   }
   return 'Configure this provider to enable tier mapping.'
 })
+
+const DEFAULT_TIER_SELECTION = '__ciao_default__'
 
 function tierOverrideValue(provider: TierProviderKey, tier: TierKey): string {
   const key = tierSettingKeys[provider][tier]
@@ -1998,15 +2079,42 @@ function tierEffectiveValue(provider: TierProviderKey, tier: TierKey): string {
   return routines.value?.alias_tiers?.[provider]?.[tier] || ''
 }
 
+function tierDefaultValue(provider: TierProviderKey, tier: TierKey): string {
+  return routines.value?.tier_defaults?.[provider]?.[tier]
+    || tierEffectiveValue(provider, tier)
+}
+
+function tierDefaultLabel(provider: TierProviderKey, tier: TierKey): string {
+  const model = tierDefaultValue(provider, tier)
+  return model ? `Default (${model})` : 'Default'
+}
+
+function tierSelectorValue(provider: TierProviderKey, tier: TierKey): string {
+  return tierOverrideValue(provider, tier) || DEFAULT_TIER_SELECTION
+}
+
+function tierModelSectionsFor(provider: TierProviderKey, tier: TierKey): ModelSection[] {
+  return [
+    {
+      key: 'default',
+      label: 'Default',
+      models: [DEFAULT_TIER_SELECTION],
+      modelLabels: { [DEFAULT_TIER_SELECTION]: tierDefaultLabel(provider, tier) },
+    },
+    ...tierModelSections.value,
+  ]
+}
+
 async function saveTierModel(provider: TierProviderKey, tier: TierKey, value: string | string[]) {
-  const model = Array.isArray(value) ? value[0] || '' : value
+  const selected = Array.isArray(value) ? value[0] || '' : value
+  const model = selected === DEFAULT_TIER_SELECTION ? '' : selected
   const key = tierSettingKeys[provider][tier]
   await saveRoutines({ [key]: model.trim() })
 }
 
 function tierModelForProvider(provider: AliasProviderKey, tier: TierKey): string {
   if (provider === 'claude') return routines.value?.alias_tiers?.claude?.[tier] || tier
-  if (provider === 'codex') return routines.value?.alias_tiers?.codex?.[tier] || 'Not available'
+  if (provider === 'codex') return workspaceModels.value?.alias_tiers?.codex?.[tier] || 'Not available'
   return tierEffectiveValue(provider, tier) || ''
 }
 
@@ -2494,12 +2602,41 @@ const githubSkills = computed(() => {
   return skillsInventory.value?.skills.filter(s => s.label === 'github') || []
 })
 
+function contextAssetProvider(item: PromptAsset): 'claude' | 'codex' | 'shared' {
+  if (item.provider === 'claude' || item.provider === 'codex') return item.provider
+  if (/Claude|CLAUDE\.md/i.test(item.title) || /CLAUDE(?:\.local)?\.md/i.test(item.path)) return 'claude'
+  if (/Codex|AGENTS(?:\.override)?\.md/i.test(item.title) || /AGENTS(?:\.override)?\.md/i.test(item.path)) return 'codex'
+  return 'shared'
+}
+
+const workspaceMemoryAssets = computed(() => {
+  const items = agentAssets.value?.context || []
+  const bounded = items.filter(item => item.scope === 'bounded-memory')
+  const vault = items.filter(item => item.scope === 'vault')
+  const activeWorkspace = projectStore.activeWorkspace
+  const activeVault = vault.filter(item => !item.workspace || item.workspace === activeWorkspace)
+  return [...bounded, ...activeVault]
+})
+
+function memorySourceTitle(item: PromptAsset): string {
+  return item.scope === 'vault' ? 'Vault MEMORY.md' : item.title
+}
+
+function memoryInjectionLabel(item: PromptAsset): string {
+  if (item.scope === 'vault') return 'workspace vault'
+  if (item.description.includes('Injection disabled')) return 'disabled'
+  return 'session start'
+}
+
 const contextAssets = computed(() =>
-  (agentAssets.value?.context || []).filter(item => item.scope !== 'review'),
+  (agentAssets.value?.context || [])
+    .filter(item => !['review', 'vault', 'bounded-memory'].includes(item.scope || ''))
+    .filter(item => {
+      const provider = contextAssetProvider(item)
+      return provider === 'shared' || provider === contextProvider.value
+    }),
 )
-const reviewQueueAssets = computed(() =>
-  (agentAssets.value?.context || []).filter(item => item.scope === 'review'),
-)
+const activeContextProject = computed(() => projectStore.activeProject)
 const subagentAssets = computed(() => agentAssets.value?.subagents || [])
 const commandAssets = computed(() => agentAssets.value?.commands || [])
 const workspaceHealth = computed<WorkspaceHealthResponse | null>(() => agentAssets.value?.health || null)
@@ -2899,8 +3036,6 @@ function isStandalone(): boolean {
 }
 
 // ── Workspaces settings (Workspaces tab) ───────────────────────────────────
-const projectStore = useProjectStore()
-
 // Transient success feedback. Routes through the app-wide in-app toast (the
 // same auto-dismissing popup used for routine/chat notifications) instead of
 // leaving persistent inline text under the form.
@@ -3147,6 +3282,7 @@ async function removeWorkspace(name: string) {
 
 onMounted(async () => {
   loadAppearanceSettings()
+  loadContextProvider()
   fetchSkills()
   fetchCommands()
   fetchAgentAssets()
@@ -3571,6 +3707,37 @@ async function doPackageUpdate() {
   flex-wrap: wrap;
   justify-content: flex-end;
   flex: 0 0 auto;
+}
+.settings-card-header--context {
+  flex-direction: row;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+.settings-card-header--context > div:first-child {
+  min-width: 0;
+}
+.context-provider-field {
+  display: flex;
+  flex: 0 0 min(340px, 42%);
+  flex-direction: column;
+  gap: var(--space-1);
+}
+.context-provider-toggle {
+  margin: 0;
+}
+.context-provider-toggle .toggle-btn {
+  min-height: var(--touch);
+}
+@container (max-width: 640px) {
+  .settings-card-header--context {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .context-provider-field {
+    flex-basis: auto;
+    width: 100%;
+  }
 }
 .hint--compact {
   margin: 0;
@@ -4179,10 +4346,58 @@ async function doPackageUpdate() {
   margin-top: var(--space-3);
 }
 .alias-provider-field {
-  width: min(360px, 100%);
+  width: 100%;
 }
 .tier-provider-note {
   margin-top: var(--space-2);
+}
+.routing-model-catalog {
+  margin-top: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+}
+.routing-model-catalog summary {
+  display: flex;
+  align-items: center;
+  min-height: var(--touch);
+  padding: 0 var(--space-3);
+  color: var(--fg);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+.routing-model-catalog summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.routing-model-catalog__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0 var(--space-3) var(--space-3);
+  list-style: none;
+}
+.routing-model-catalog__list li {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+.routing-model-catalog__list code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.routing-model-catalog__badges {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-1);
 }
 .integration-warning {
   margin-top: var(--space-3);
@@ -4544,6 +4759,70 @@ async function doPackageUpdate() {
   font-size: var(--text-xs);
   line-height: 1.45;
   white-space: pre-wrap;
+}
+.memory-context-row {
+  display: block;
+}
+.memory-context-row > summary,
+.memory-source > summary {
+  list-style: none;
+}
+.memory-context-row > summary::-webkit-details-marker,
+.memory-source > summary::-webkit-details-marker {
+  display: none;
+}
+.memory-context-summary {
+  min-height: var(--touch);
+  cursor: pointer;
+}
+.memory-context-row[open] .memory-context-summary .skill-description {
+  display: block;
+  -webkit-line-clamp: unset;
+  overflow: visible;
+}
+.memory-source-list {
+  gap: var(--space-2);
+}
+.memory-source {
+  padding: 0 var(--space-3) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--bg2) 72%, transparent);
+}
+.memory-source > summary {
+  display: flex;
+  min-height: var(--touch);
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--fg);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.memory-source > summary .badge {
+  margin-left: auto;
+}
+.memory-source .skill-description {
+  display: block;
+  margin-top: 0;
+  -webkit-line-clamp: unset;
+  overflow: visible;
+}
+.memory-source .skill-meta {
+  margin-top: var(--space-2);
+}
+.runtime-context-summary ul {
+  margin: var(--space-2) 0 0;
+  padding-left: 20px;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  line-height: 1.55;
+}
+.runtime-context-summary li + li {
+  margin-top: var(--space-1);
+}
+.runtime-context-summary strong {
+  color: var(--fg);
 }
 .subsection-title--spaced {
   margin-bottom: var(--space-2);

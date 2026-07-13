@@ -156,6 +156,8 @@ describe('ModelSelector', () => {
       modelBadges: { fable: ['Fable'] },
     }]
     const wrapper = mountSelector({ sections })
+    await wrapper.setProps({ modelValue: 'fable' })
+    expect(wrapper.find('.model-selector__trigger').text()).toContain('gpt-5.6-sol-ultra')
     await wrapper.find('.model-selector__trigger').trigger('click')
     await wrapper.find('.model-selector__search').setValue('sol-ultra')
     await flushPromises()

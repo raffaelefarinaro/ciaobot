@@ -61,12 +61,18 @@ def test_agent_assets_lists_instruction_sources(tmp_path: Path) -> None:
     assert resp.status_code == 200
     data = resp.json()
     titles = {item["title"] for item in data["context"]}
-    assert "Claude Code project instructions" in titles
+    assert "Project CLAUDE.md" in titles
     assert "Workspace memory" in titles
     assert "Ciaobot system prompt append" in titles
     assert "Agent memory" in titles
     assert "User profile" in titles
     assert "Per-turn runtime context hook" in titles
+    by_title = {item["title"]: item for item in data["context"]}
+    assert by_title["Project CLAUDE.md"]["provider"] == "claude"
+    assert by_title["Workspace memory"]["provider"] == "shared"
+    runtime = by_title["Per-turn runtime context hook"]
+    assert "README.md or canonical project document" in runtime["content"]
+    assert "Project context" in runtime["description"]
 
 
 def test_agent_assets_lists_codex_global_and_project_instructions(
@@ -82,8 +88,10 @@ def test_agent_assets_lists_codex_global_and_project_instructions(
 
     assert resp.status_code == 200
     by_title = {item["title"]: item for item in resp.json()["context"]}
-    assert by_title["Codex global instructions"]["content"] == "# Global Codex\n"
-    assert by_title["Codex project instructions"]["content"] == "# Project Codex\n"
+    assert by_title["Global AGENTS.md"]["content"] == "# Global Codex\n"
+    assert by_title["Project AGENTS.md"]["content"] == "# Project Codex\n"
+    assert by_title["Global AGENTS.md"]["provider"] == "codex"
+    assert by_title["Project AGENTS.md"]["provider"] == "codex"
 
 
 def test_agent_assets_respects_codex_override_precedence(
@@ -100,7 +108,7 @@ def test_agent_assets_respects_codex_override_precedence(
     resp = _client(tmp_path).get("/api/agent-assets")
 
     assert resp.status_code == 200
-    codex = [item for item in resp.json()["context"] if item["title"].startswith("Codex ")]
+    codex = [item for item in resp.json()["context"] if item["provider"] == "codex"]
     assert {item["content"] for item in codex} == {"# Global override\n", "# Project override\n"}
 
 
@@ -154,6 +162,7 @@ def test_agent_assets_lists_instruction_import_children(tmp_path: Path) -> None:
     assert {"extra.md", "missing.md"}.issubset(paths)
     assert any(item["status"] == "ok" and item["parent_id"].startswith("file:") for item in imports)
     assert any(item["status"] == "missing" for item in imports)
+    assert all(item["provider"] == "claude" for item in imports)
 
 
 def test_create_subagent_writes_canonical_file_vault_mirror_and_claude_link(tmp_path: Path) -> None:

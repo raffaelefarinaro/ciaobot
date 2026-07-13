@@ -105,13 +105,18 @@ const selectedCount = computed(() =>
   props.multiple ? (effectiveValue.value as string[]).length : effectiveValue.value ? 1 : 0
 )
 
+function displayModelLabel(model: string): string {
+  const section = normalizedSections.value.find((item) => item.models.includes(model))
+  return section?.modelLabels?.[model] || model
+}
+
 const triggerLabel = computed(() => {
   if (props.multiple) {
     const models = effectiveValue.value as string[]
-    return models.length > 0 ? models.join(', ') : props.emptyPlaceholder
+    return models.length > 0 ? models.map(displayModelLabel).join(', ') : props.emptyPlaceholder
   }
   const v = effectiveValue.value as string
-  return v || props.placeholder
+  return v ? displayModelLabel(v) : props.placeholder
 })
 
 const activeModelSet = computed(() => {

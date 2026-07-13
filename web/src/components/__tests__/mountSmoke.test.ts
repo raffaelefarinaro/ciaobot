@@ -34,6 +34,20 @@ vi.mock('../../lib/api', () => {
     insights_model_effective: 'haiku',
 
     critique_models_effective: 'anthropic/claude-sonnet-4.5,anthropic/claude-haiku-4.5',
+    tier_defaults: {
+      ollama: {
+        haiku: 'deepseek-v4-flash:cloud',
+        sonnet: 'kimi-k2.7-code:cloud',
+        opus: 'minimax-m3:cloud',
+        fable: 'glm-5.2:cloud',
+      },
+      openrouter: {
+        haiku: 'anthropic/claude-haiku-4.5',
+        sonnet: 'anthropic/claude-sonnet-4.5',
+        opus: 'anthropic/claude-opus-4.8',
+        fable: 'anthropic/claude-fable-latest',
+      },
+    },
     alias_tiers: {
       ollama: {
         haiku: 'deepseek-v4-flash:cloud',
@@ -77,8 +91,34 @@ vi.mock('../../lib/api', () => {
     '/api/settings': {},
     '/api/settings/providers': {
       keys: {
-        ANTHROPIC_API_KEY: { label: 'Anthropic API key', description: '', configured: true },
-        OPENAI_API_KEY: { label: 'OpenAI API key', description: '', configured: false },
+        CIAO_OLLAMA_API_KEY: { label: 'Ollama Cloud API key', description: '', configured: true },
+      },
+      service_keys: {
+        OPENAI_API_KEY: {
+          label: 'OpenAI voice API key',
+          description: 'Used directly by Ciaobot for cloud transcription and speech, not for Codex login.',
+          configured: false,
+        },
+      },
+      connections: {
+        claude: {
+          name: 'claude',
+          ok: true,
+          auth: 'oauth',
+          command: 'ciao auth claude',
+          version: '2.1.205 (Claude Code)',
+          account: 'person@example.com',
+          protocol: 'Agent SDK ready',
+        },
+        codex: {
+          name: 'codex',
+          ok: true,
+          auth: 'chatgpt',
+          command: 'ciao auth codex',
+          version: 'codex-cli 0.144.0-alpha.4',
+          account: 'ChatGPT account',
+          protocol: 'app-server protocol compatible',
+        },
       },
       requires_restart: true,
       env_path: '/tmp/workspace/.env',
@@ -122,21 +162,104 @@ vi.mock('../../lib/api', () => {
       context: [
         {
           id: 'claude-code-project-instructions',
-          title: 'Claude Code project instructions',
+          title: 'Project CLAUDE.md',
           description: 'Project-local Claude Code instructions loaded by the CLI.',
           source: 'file',
           path: 'CLAUDE.md',
           editable: true,
           content: '# Instructions\n',
+          scope: 'project',
+          provider: 'claude',
+        },
+        {
+          id: 'codex-project-instructions',
+          title: 'Project AGENTS.md',
+          description: 'Project-local Codex instructions loaded by the CLI.',
+          source: 'file',
+          path: 'AGENTS.md',
+          editable: true,
+          content: '# Codex instructions\n',
+          scope: 'project',
+          provider: 'codex',
         },
         {
           id: 'ciaobot-system-prompt',
           title: 'Ciaobot system prompt append',
-          description: 'Generated instructions appended to Claude Code.',
+          description: 'Generated instructions appended for both providers.',
           source: 'generated',
           path: '',
           editable: false,
           content: '# Ciaobot System Instructions\n',
+          scope: 'generated',
+          provider: 'shared',
+        },
+        {
+          id: 'ciaobot-memory',
+          title: 'Agent memory',
+          description: 'Bounded memory injected at session start.',
+          source: 'file',
+          path: '/tmp/.ciao/memory.md',
+          editable: false,
+          content: 'Prefer concise answers.\n',
+          scope: 'bounded-memory',
+          provider: 'shared',
+        },
+        {
+          id: 'ciaobot-user',
+          title: 'User profile',
+          description: 'Bounded user profile injected at session start.',
+          source: 'file',
+          path: '/tmp/.ciao/user.md',
+          editable: false,
+          content: 'Name: Ada\n',
+          scope: 'bounded-memory',
+          provider: 'shared',
+        },
+        {
+          id: 'workspace-memory-personal',
+          title: 'Workspace memory (personal)',
+          description: 'Durable personal workspace memory.',
+          source: 'file',
+          path: 'memory-vault/personal/MEMORY.md',
+          editable: true,
+          content: '# Personal memory\n',
+          scope: 'vault',
+          provider: 'shared',
+          workspace: 'personal',
+        },
+        {
+          id: 'workspace-memory-work',
+          title: 'Workspace memory (work)',
+          description: 'Durable work workspace memory.',
+          source: 'file',
+          path: 'memory-vault/work/MEMORY.md',
+          editable: true,
+          content: '# Work memory\n',
+          scope: 'vault',
+          provider: 'shared',
+          workspace: 'work',
+        },
+        {
+          id: 'runtime-context-hook',
+          title: 'Per-turn runtime context hook',
+          description: 'Project context and runtime details sent with each turn.',
+          source: 'generated',
+          path: '',
+          editable: false,
+          content: '<ciao-runtime>\nworkspace=personal\n</ciao-runtime>',
+          scope: 'generated',
+          provider: 'shared',
+        },
+        {
+          id: 'memory-proposals',
+          title: 'Memory proposals',
+          description: 'Not injected.',
+          source: 'proposal-queue',
+          path: 'memory-vault/Workspace/Memory-Proposals.md',
+          editable: true,
+          content: '- [memory] proposal\n',
+          scope: 'review',
+          provider: 'shared',
         },
       ],
       subagents: [
@@ -165,7 +288,24 @@ vi.mock('../../lib/api', () => {
         },
       ],
     },
-    '/api/models': { providers: {}, default_provider: 'claude' },
+    '/api/models': {
+      models: ['haiku', 'sonnet', 'opus', 'fable'],
+      default: 'sonnet',
+      provider_models: {
+        codex: ['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol'],
+      },
+      provider_defaults: { codex: 'gpt-5.6-terra' },
+      codex_models: ['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol'],
+      alias_tiers: {
+        codex: {
+          haiku: 'gpt-5.6-luna',
+          sonnet: 'gpt-5.6-terra',
+          opus: 'gpt-5.6-sol',
+          fable: 'gpt-5.6-sol',
+        },
+      },
+      backends: { codex: true },
+    },
     '/api/projects': [],
     '/api/chats': [],
     '/api/tasks': { tasks: [] },
@@ -327,6 +467,47 @@ describe('component mount smoke', () => {
     expect(errors).toEqual([])
   })
 
+  it('SettingsView switches provider context and groups active-workspace memory', async () => {
+    localStorage.setItem('ciao-context-provider', 'claude')
+    const router = makeRouter()
+    await router.push('/settings/context')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    const visibleContextRows = () => wrapper.findAll('.skill-list > .instruction-row')
+      .map((row) => row.text())
+      .join('\n')
+
+    expect(wrapper.findAll('.memory-context-row')).toHaveLength(1)
+    expect(wrapper.findAll('.memory-source')).toHaveLength(3)
+    expect(visibleContextRows()).toContain('Project CLAUDE.md')
+    expect(visibleContextRows()).not.toContain('Project AGENTS.md')
+    expect(wrapper.text()).not.toContain('Review queue')
+    expect(wrapper.text()).not.toContain('Memory proposals')
+
+    const providerButtons = wrapper.findAll('.context-provider-toggle .toggle-btn')
+    expect(providerButtons.map((button) => button.text())).toEqual(['Claude Code', 'Codex'])
+    await providerButtons[1].trigger('click')
+    await nextTick()
+    expect(visibleContextRows()).toContain('Project AGENTS.md')
+    expect(visibleContextRows()).not.toContain('Project CLAUDE.md')
+
+    const runtimeRow = wrapper.findAll('.skill-list > .instruction-row')
+      .find((row) => row.text().includes('Per-turn runtime context hook'))
+    expect(runtimeRow).toBeTruthy()
+    await runtimeRow!.trigger('click')
+    await nextTick()
+    expect(runtimeRow!.text()).toContain('Project context:')
+    expect(runtimeRow!.text()).toContain('Project document:')
+    expect(runtimeRow!.text()).toContain('README.md or canonical document')
+    wrapper.unmount()
+  })
+
   it('SettingsView renders skills with custom and github labels on /settings/skills', async () => {
     const router = makeRouter()
     await router.push('/settings/skills')
@@ -410,7 +591,29 @@ describe('component mount smoke', () => {
     wrapper.unmount()
   })
 
-  it('SettingsView saves provider alias tier models', async () => {
+  it('SettingsView shows the OpenAI voice key without provider protocol labels', async () => {
+    const router = makeRouter()
+    await router.push('/settings/providers')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    const voiceKeyRow = wrapper.findAll('.credential-row')
+      .find((row) => row.text().includes('OpenAI voice API key'))
+    expect(voiceKeyRow).toBeTruthy()
+    expect(voiceKeyRow!.text()).toContain('cloud transcription and speech')
+    expect(voiceKeyRow!.find('input[type="password"]').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('Agent SDK ready')
+    expect(wrapper.text()).not.toContain('app-server protocol compatible')
+    expect(wrapper.text()).not.toContain('connection and protocol')
+    wrapper.unmount()
+  })
+
+  it('SettingsView shows OpenAI routing and saves configurable tier routes', async () => {
     const router = makeRouter()
     await router.push('/settings/providers')
     await router.isReady()
@@ -423,13 +626,45 @@ describe('component mount smoke', () => {
 
     const providerSelect = wrapper.find('.alias-provider-select')
     expect(providerSelect.exists()).toBe(true)
+    expect(providerSelect.classes()).toContain('routine-select')
+    expect(providerSelect.findAll('option').map((option) => option.text())).toEqual([
+      'OpenAI (via Codex)',
+      'Ollama (via Claude Code)',
+      'OpenRouter (via Claude Code)',
+    ])
+    expect(wrapper.text()).toContain('Model Routing')
+    expect(wrapper.text()).not.toContain('Claude Code model routing')
+    expect(wrapper.findAll('.routing-model-input').map((input) => (input.element as HTMLInputElement).value)).toEqual([
+      'gpt-5.6-luna',
+      'gpt-5.6-terra',
+      'gpt-5.6-sol',
+      'gpt-5.6-sol',
+    ])
+    expect(wrapper.find('.routing-model-catalog summary').text()).toBe('Available OpenAI models (3)')
+    expect(wrapper.findAll('.routing-model-catalog code').map((model) => model.text())).toEqual([
+      'gpt-5.6-luna',
+      'gpt-5.6-terra',
+      'gpt-5.6-sol',
+    ])
+    expect(wrapper.find('.routing-model-catalog').text()).toContain('Haiku')
+    expect(wrapper.find('.routing-model-catalog').text()).toContain('Sonnet')
+    expect(wrapper.find('.routing-model-catalog').text()).toContain('Opus')
+    expect(wrapper.find('.routing-model-catalog').text()).toContain('Fable')
+
     await providerSelect.setValue('ollama')
     await flushPromises()
     await nextTick()
 
-    // The tier model picker is now a searchable ModelSelector.
-    const tierSelector = wrapper.findAll('.tier-provider-section .model-selector')
-      .find((el) => el.find('.model-selector__trigger').exists())
+    const tierSelectors = wrapper.findAll('.tier-provider-section .model-selector')
+    expect(tierSelectors.map((selector) => selector.find('.model-selector__trigger').text())).toEqual([
+      'Default (deepseek-v4-flash:cloud)▾',
+      'Default (kimi-k2.7-code:cloud)▾',
+      'Default (minimax-m3:cloud)▾',
+      'Default (glm-5.2:cloud)▾',
+    ])
+
+    // Each searchable picker includes an explicit default option.
+    const tierSelector = tierSelectors[0]
     expect(tierSelector).toBeTruthy()
     await tierSelector!.find('.model-selector__trigger').trigger('click')
     await flushPromises()
@@ -443,6 +678,17 @@ describe('component mount smoke', () => {
 
     expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
       ollama_haiku_model: 'llama3.1:latest',
+    })
+
+    await tierSelector.find('.model-selector__trigger').trigger('click')
+    await flushPromises()
+    const defaultOption = tierSelector.findAll('.model-selector__item')
+      .find((el) => el.text() === 'Default (deepseek-v4-flash:cloud)')
+    expect(defaultOption).toBeTruthy()
+    await defaultOption!.trigger('click')
+    await flushPromises()
+    expect(api.patch).toHaveBeenLastCalledWith('/api/settings/routines', {
+      ollama_haiku_model: '',
     })
     wrapper.unmount()
   })

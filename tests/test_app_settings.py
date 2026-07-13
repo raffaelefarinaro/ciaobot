@@ -152,6 +152,20 @@ def test_tier_model_overrides_apply_and_clear(tmp_path):
         }
     )
     store.apply_to_config(config)
+    assert store.tier_model_defaults() == {
+        "ollama": {
+            "haiku": "deepseek-v4-flash:cloud",
+            "sonnet": "kimi-k2.7-code:cloud",
+            "opus": "minimax-m3:cloud",
+            "fable": "glm-5.2:cloud",
+        },
+        "openrouter": {
+            "haiku": "anthropic/claude-haiku-4.5",
+            "sonnet": "anthropic/claude-sonnet-4.5",
+            "opus": "anthropic/claude-opus-4.8",
+            "fable": "anthropic/claude-fable-latest",
+        },
+    }
     assert config.ollama.sonnet_model == "qwen3:8b"
     assert config.openrouter.opus_model == "anthropic/claude-opus-4.9"
     assert config.ollama.fable_model == "minimax-m3:cloud"

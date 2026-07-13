@@ -3680,6 +3680,7 @@ def _routines_payload(config, app_settings) -> dict:
         "insights_model_effective": insights_effective,
 
         "critique_models_effective": critique_effective,
+        "tier_defaults": app_settings.tier_model_defaults(),
         "alias_tiers": {
             "ollama": {
                 "haiku": config.ollama.haiku_model,
@@ -3693,12 +3694,6 @@ def _routines_payload(config, app_settings) -> dict:
                 "opus": config.openrouter.opus_model,
                 "fable": config.openrouter.fable_model,
             } if config.openrouter.available else {},
-            "codex": {
-                "haiku": "luna",
-                "sonnet": "terra",
-                "opus": "sol",
-                "fable": "sol",
-            },
         },
         "transcription": {
             "engine": config.transcription_engine,

@@ -66,6 +66,9 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     assert data["insights_model_effective"] == config.sonnet_model_for_workspace("personal")
     assert data["alias_tiers"]["ollama"]["sonnet"] == config.ollama.sonnet_model
     assert data["alias_tiers"]["ollama"]["fable"] == "glm-5.2:cloud"
+    assert "codex" not in data["alias_tiers"]
+    assert data["tier_defaults"]["ollama"]["sonnet"] == "kimi-k2.7-code:cloud"
+    assert data["tier_defaults"]["openrouter"]["fable"] == "anthropic/claude-fable-latest"
     assert data["model_options"]["ollama_cloud"] == [
         "kimi-k2.7-code:cloud",
         "deepseek-v4-flash:cloud",

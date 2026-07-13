@@ -106,6 +106,17 @@ class AppSettingsStore:
         self._save()
         return self.settings
 
+    def tier_model_defaults(self) -> dict[str, dict[str, str]]:
+        """Return the env-backed tier models captured before overrides."""
+        defaults = self._defaults or {}
+        return {
+            provider: {
+                tier: defaults.get(f"{provider}_{tier}_model", "")
+                for tier in ("haiku", "sonnet", "opus", "fable")
+            }
+            for provider in ("ollama", "openrouter")
+        }
+
     def apply_to_config(self, config) -> None:
         """Overlay settings onto the live ``CiaoConfig`` object.
 

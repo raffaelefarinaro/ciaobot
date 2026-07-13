@@ -41,6 +41,8 @@ class PromptAsset:
     level: int = 0
     status: str = "ok"
     imports: list[str] = field(default_factory=list)
+    provider: str = "shared"
+    workspace: str = ""
 
 
 @dataclass(slots=True)
@@ -294,6 +296,8 @@ def _prompt_file_asset(
     level: int = 0,
     status: str = "ok",
     content: str | None = None,
+    provider: str = "shared",
+    workspace: str = "",
 ) -> PromptAsset:
     root = Path(config.workspace_root)
     text = _read_text(path) if content is None and path.exists() else (content or "")
@@ -310,6 +314,8 @@ def _prompt_file_asset(
         level=level,
         status=status,
         imports=_IMPORT_RE.findall(text),
+        provider=provider,
+        workspace=workspace,
     )
 
 
@@ -318,7 +324,7 @@ def _collect_import_assets(
     parent: PromptAsset,
     parent_path: Path,
     config: Any,
-    seen: set[Path],
+    seen: set[tuple[str, Path]],
     depth: int = 0,
 ) -> list[PromptAsset]:
     if depth >= 4:
@@ -340,9 +346,10 @@ def _collect_import_assets(
             description = f"Referenced by {parent.title}, but outside the configured workspace/vault roots."
             content = ""
         resolved = path.resolve() if path.exists() else path
-        if resolved in seen:
+        seen_key = (parent.provider, resolved)
+        if seen_key in seen:
             continue
-        seen.add(resolved)
+        seen.add(seen_key)
         asset = _prompt_file_asset(
             path=path,
             config=config,
@@ -354,6 +361,8 @@ def _collect_import_assets(
             level=parent.level + 1,
             status=status,
             content=content,
+            provider=parent.provider,
+            workspace=parent.workspace,
         )
         out.append(asset)
         if status == "ok":
@@ -646,7 +655,7 @@ def list_command_assets(config: Any) -> list[CommandAsset]:
 def list_prompt_assets(config: Any) -> list[PromptAsset]:
     root = Path(config.workspace_root)
     prompts: list[PromptAsset] = []
-    seen: set[Path] = set()
+    seen: set[tuple[str, Path]] = set()
 
     system_prompt = system_prompt_payload("") or {}
     sys_prompt_asset = PromptAsset(
@@ -680,24 +689,28 @@ def list_prompt_assets(config: Any) -> list[PromptAsset]:
     codex_project = first_nonempty((root / "AGENTS.override.md", root / "AGENTS.md"))
 
     file_assets = [
-        (Path.home() / ".claude" / "CLAUDE.md", "Claude Code global instructions", "User-level Claude Code instructions loaded before project files.", "global"),
-        (root / "CLAUDE.md", "Claude Code project instructions", "Project-local Claude Code instructions loaded by the CLI.", "project"),
-        (root / "CLAUDE.local.md", "Claude Code local instructions", "Machine-local project instructions when present.", "local"),
-        (root / ".claude" / "CLAUDE.md", "Claude Code .claude instructions", "Project .claude instruction file when present.", "project"),
+        (Path.home() / ".claude" / "CLAUDE.md", "Global CLAUDE.md", "User-level instructions loaded by Claude Code before project files.", "global", "claude", ""),
+        (root / "CLAUDE.md", "Project CLAUDE.md", "Project instructions loaded by Claude Code.", "project", "claude", ""),
+        (root / "CLAUDE.local.md", "Local CLAUDE.local.md", "Machine-local project instructions loaded by Claude Code when present.", "local", "claude", ""),
+        (root / ".claude" / "CLAUDE.md", "Project .claude/CLAUDE.md", "Additional project instructions loaded by Claude Code when present.", "project", "claude", ""),
     ]
     if codex_global is not None:
         file_assets.insert(1, (
             codex_global,
-            "Codex global instructions",
-            f"User-level Codex instructions selected from {codex_home} before project files.",
+            f"Global {codex_global.name}",
+            f"User-level instructions selected by Codex from {codex_home} before project files.",
             "global",
+            "codex",
+            "",
         ))
     if codex_project is not None:
         file_assets.insert(3 if codex_global is not None else 2, (
             codex_project,
-            "Codex project instructions",
-            "Project-local AGENTS instructions selected by Codex CLI discovery.",
+            f"Project {codex_project.name}",
+            "Project instructions selected by Codex CLI discovery.",
             "project",
+            "codex",
+            "",
         ))
 
     ws_names = []
@@ -705,7 +718,7 @@ def list_prompt_assets(config: Any) -> list[PromptAsset]:
         ws_names = config.workspace_names()
 
     if not ws_names:
-        file_assets.append((Path(config.vault_root) / "MEMORY.md", "Workspace memory", "Durable workspace memory file under the configured vault root.", "vault"))
+        file_assets.append((Path(config.vault_root) / "MEMORY.md", "Workspace memory", "Durable memory file under the configured workspace vault root.", "vault", "shared", ""))
     else:
         for name in ws_names:
             ws_config = config.workspace(name)
@@ -722,22 +735,26 @@ def list_prompt_assets(config: Any) -> list[PromptAsset]:
                 ws_vault_root / "MEMORY.md",
                 title,
                 f"Durable workspace memory file under the configured {name} vault root.",
-                "vault"
+                "vault",
+                "shared",
+                name,
             ))
 
-    for path, title, description, scope in file_assets:
+    for path, title, description, scope, provider, workspace in file_assets:
         if path == root / "CLAUDE.md" and not added_sys_prompt:
             prompts.append(sys_prompt_asset)
             added_sys_prompt = True
 
         if path.exists():
-            seen.add(path.resolve())
+            seen.add((provider, path.resolve()))
             asset = _prompt_file_asset(
                 path=path,
                 config=config,
                 title=title,
                 description=description,
                 scope=scope,
+                provider=provider,
+                workspace=workspace,
             )
             prompts.append(asset)
             prompts.extend(_collect_import_assets(
@@ -753,11 +770,23 @@ def list_prompt_assets(config: Any) -> list[PromptAsset]:
     _insert_after_system_prompt(prompts, _bounded_memory_assets(config))
     prompts.extend(_memory_proposal_assets(config))
 
-    runtime_preview = "<ciao-runtime>\n" + "\n".join(_runtime_lines(root, os.environ.copy())) + "\n</ciao-runtime>"
+    runtime_preview = "\n".join([
+        "Every user turn receives:",
+        "- the active project's single saved context value, when set",
+        "- the active project name and a path to its README.md or canonical project document",
+        "- today's date, active workspace/project, GWS profile, and working directory",
+        "- vault entity links matched from the current prompt",
+        "- provider handover context when a chat has just switched providers",
+        "",
+        "Current runtime fields:",
+        "<ciao-runtime>",
+        *_runtime_lines(root, os.environ.copy()),
+        "</ciao-runtime>",
+    ])
     prompts.append(PromptAsset(
         id="runtime-context-hook",
         title="Per-turn runtime context hook",
-        description="Generated context injected before each user prompt; entity tags are added dynamically from vault matches.",
+        description="Project context, the project document path, runtime fields, matching vault entities, and any provider handover are sent with each user turn.",
         source="generated",
         path="",
         editable=False,
