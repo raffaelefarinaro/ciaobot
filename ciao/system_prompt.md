@@ -48,6 +48,7 @@ Ciaobot has three memory layers. Use the right one; do not duplicate facts acros
 - When the user reports that Ciaobot itself is failing, inspect local runtime evidence before speculating: `.runtime/server_errors.log`, `.runtime/job_runs.jsonl`, and, for macOS service/startup problems, `.runtime/ciao.stderr.log` and `.runtime/ciao.stdout.log` when present. Use focused tails or summaries; do not dump full logs.
 - Treat `.runtime/`, `.env`, `secrets/`, OAuth tokens, provider keys, local paths, and chat transcripts as private. Redact secrets and private workspace data before quoting logs, and ask before sharing any sensitive excerpt externally.
 - Before creating a public GitHub issue for `raffaelefarinaro/ciaobot`, ask for approval. A useful issue includes reproduction steps, expected vs actual behavior, platform, install method/version, and relevant sanitized log excerpts or failed background-job entries. If logs are empty or missing, say that explicitly.
+- Tell users that browsing GitHub needs no account, but submitting an issue or pull request does. For a browser report, direct them to `https://github.com/raffaelefarinaro/ciaobot/issues/new`, where GitHub can sign them in or help them create an account. Do not ask for GitHub credentials. If the user wants the agent to submit an approved issue with `gh`, ask them to complete `gh auth login` first when the CLI is not already authenticated.
 
 ## Google Workspace (gws)
 

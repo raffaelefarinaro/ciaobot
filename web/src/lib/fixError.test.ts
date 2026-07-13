@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildFixPrompt, CIAOBOT_REPO } from './fixError'
+import { buildFixPrompt, CIAOBOT_ISSUES_URL } from './fixError'
 
 describe('buildFixPrompt', () => {
   it('embeds the error log inside a fenced block', () => {
@@ -11,7 +11,9 @@ describe('buildFixPrompt', () => {
   it('instructs the GitHub-issue fallback for product bugs', () => {
     const prompt = buildFixPrompt({ errorText: 'x' })
     expect(prompt).toContain('bug in the Ciaobot product itself')
-    expect(prompt).toContain(`gh issue create --repo ${CIAOBOT_REPO}`)
+    expect(prompt).toContain('ask for my approval')
+    expect(prompt).toContain(CIAOBOT_ISSUES_URL)
+    expect(prompt).toContain('gh auth login')
   })
 
   it('includes context only when provided', () => {

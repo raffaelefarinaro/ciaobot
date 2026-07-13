@@ -567,11 +567,12 @@ describe('workspace and chat transitions', () => {
 
     expect(apiPost).toHaveBeenCalledWith('/api/projects/pg/chats', { title: 'Fix error' })
 
-    // The fix prompt (with the error log + gh-issue fallback) was sent over the WS.
+    // The fix prompt (with the error log + approval-gated GitHub-issue fallback) was sent over the WS.
     const sent = fakeSockets.flatMap(s => (s.send as any).mock.calls.map((c: any[]) => String(c[0])))
     const fixMsg = sent.find(m => m.includes('Error: boom'))
     expect(fixMsg).toBeTruthy()
-    expect(fixMsg).toContain('gh issue create --repo raffaelefarinaro/ciaobot')
+    expect(fixMsg).toContain('ask for my approval')
+    expect(fixMsg).toContain('gh auth login')
     expect(fixMsg).toContain('I clicked send')
   })
 
