@@ -551,9 +551,9 @@ describe('component mount smoke', () => {
     expect(instructionRow!.text()).toContain('CLAUDE.md and AGENTS.md are linked')
     await instructionRow!.trigger('click')
     await nextTick()
+    // Single row: AGENTS.md is linked to CLAUDE.md, one link covers both.
     expect(instructionRow!.findAll('.inline-path-button').map((button) => button.text())).toEqual([
-      'CLAUDE.md',
-      'AGENTS.md',
+      'CLAUDE.md / AGENTS.md',
     ])
     expect(instructionRow!.text()).toContain('AGENTS.md is linked to CLAUDE.md, so every CLI reads the same instructions.')
 

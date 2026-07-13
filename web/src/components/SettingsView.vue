@@ -2600,15 +2600,14 @@ function sourceFile(item: PromptAsset, label: string = item.path): ContextSource
 function contextSourceFiles(item: PromptAsset): ContextSourceFile[] {
   const inventory = agentAssets.value?.context || []
   if (item.id === 'cli-instruction-chain') {
-    // One row per linked workspace guide; both resolve to the same content.
-    return ['CLAUDE.md', 'AGENTS.md'].map((guide) => {
-      const expected = new RegExp(`(?:^|[\\\\/])${guide.replace('.', '\\.')}$`, 'i')
-      const candidates = inventory.filter(candidate =>
-        candidate.scope === 'project' && expected.test(candidate.path),
-      )
-      const preferred = candidates.find(candidate => !candidate.path.replaceAll('\\', '/').includes('/')) || candidates[0]
-      return preferred ? sourceFile(preferred)[0] : { label: guide, path: guide }
-    })
+    // AGENTS.md is linked to CLAUDE.md, so a single row covers both guides;
+    // the link opens the canonical CLAUDE.md.
+    const expected = /(?:^|[\\/])CLAUDE\.md$/i
+    const candidates = inventory.filter(candidate =>
+      candidate.scope === 'project' && expected.test(candidate.path),
+    )
+    const preferred = candidates.find(candidate => !candidate.path.replaceAll('\\', '/').includes('/')) || candidates[0]
+    return [{ label: 'CLAUDE.md / AGENTS.md', path: preferred?.path || 'CLAUDE.md' }]
   }
   if (item.id === 'ciaobot-system-prompt') {
     const configured = inventory.find(candidate => candidate.id === 'ciaobot-system-prompt')
