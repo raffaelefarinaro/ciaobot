@@ -10,9 +10,15 @@ from ciao import memory_injector as mi
 from ciao import memory_tool as mt
 
 
-def test_empty_files_produce_empty_block(tmp_path: Path) -> None:
+def test_empty_files_produce_seeding_nudge(tmp_path: Path) -> None:
+    """Cold start: with no entries the block must still nudge the model to
+    seed memory, otherwise a fresh install never surfaces the feature."""
     block = mi.build_memory_block(memory_dir=tmp_path)
-    assert block == ""
+    assert "ciao memory add" in block
+    assert "--target user" in block
+    # No section headers — there is nothing to render yet.
+    assert "MEMORY (your personal notes)" not in block
+    assert "USER PROFILE" not in block
 
 
 def test_block_renders_both_sections(tmp_path: Path) -> None:
