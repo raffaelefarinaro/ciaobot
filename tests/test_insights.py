@@ -429,3 +429,80 @@ def test_resolve_insights_model_falls_back_without_workspace() -> None:
     config = _config()
     config.insights_model_override = ""
     assert insights.resolve_insights_model(config) == config.insights_model
+
+
+# ── project doc update wiring ────────────────────────────────────────────
+
+
+_PROJECT_DOC = """---
+tags: [project]
+---
+# Demo Project
+
+## Open loops
+- Decide on storage.
+"""
+
+
+def test_extract_updates_project_doc_when_insights_carry_decisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "archive.md"
+    archive.write_text("# Existing\n", encoding="utf-8")
+    doc = tmp_path / "doc.md"
+    doc.write_text(_PROJECT_DOC, encoding="utf-8")
+
+    async def fake_call(filtered_jsonl: str, model: str, env: dict) -> str:
+        return "## Decisions\n- Chose sqlite over postgres because local-first. [idx=2]\n"
+
+    updated_doc = _PROJECT_DOC.replace(
+        "- Decide on storage.", "- ~~Decide on storage~~ Resolved: sqlite (local-first)."
+    ).strip()
+
+    async def fake_oneshot(prompt, *, system_prompt, model, env=None, timeout_s=120.0, **kwargs):
+        return updated_doc
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+
+    with patch.object(insights, "_call_model", side_effect=fake_call):
+        asyncio.run(insights.extract_and_append(
+            archive_path=archive,
+            filtered_jsonl="dummy",
+            config=_config(),
+            model="deepseek-v4-flash:cloud",
+            workspace_root=tmp_path,
+            vault_root=tmp_path / "vault",
+            project_doc_path="doc.md",
+        ))
+
+    assert "## Session insights" in archive.read_text(encoding="utf-8")
+    assert "sqlite (local-first)" in doc.read_text(encoding="utf-8")
+
+
+def test_extract_skips_project_doc_when_path_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = tmp_path / "archive.md"
+    archive.write_text("# Existing\n", encoding="utf-8")
+    doc = tmp_path / "doc.md"
+    doc.write_text(_PROJECT_DOC, encoding="utf-8")
+
+    async def fake_call(filtered_jsonl: str, model: str, env: dict) -> str:
+        return "## Decisions\n- Chose sqlite over postgres because local-first. [idx=2]\n"
+
+    async def fail_oneshot(prompt, **kwargs):
+        raise AssertionError("doc updater must not be called without a path")
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fail_oneshot)
+
+    with patch.object(insights, "_call_model", side_effect=fake_call):
+        asyncio.run(insights.extract_and_append(
+            archive_path=archive,
+            filtered_jsonl="dummy",
+            config=_config(),
+            model="deepseek-v4-flash:cloud",
+            workspace_root=tmp_path,
+            vault_root=tmp_path / "vault",
+        ))
+
+    assert doc.read_text(encoding="utf-8") == _PROJECT_DOC

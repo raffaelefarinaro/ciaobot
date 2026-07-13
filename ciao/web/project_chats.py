@@ -2335,6 +2335,14 @@ class ProjectChatManager:
                 if chat_meta is not None and chat_meta.provider == "codex"
                 else resolve_insights_model(config, workspace)
             )
+            # Auto projects (General, Claude Code CLI) are catch-alls whose
+            # docs would become junk drawers; only real projects get the
+            # archive-time canonical-doc update.
+            project_doc_path = (
+                project_meta.vault_doc_path
+                if project_meta and not project_meta.is_auto
+                else ""
+            )
             asyncio.create_task(
                 extract_and_append(
                     archive_path=outcome.path,
@@ -2347,6 +2355,7 @@ class ProjectChatManager:
                     workspace_root=config.workspace_root,
                     vault_root=config.vault_root,
                     provider=chat_meta.provider if chat_meta else "claude",
+                    project_doc_path=project_doc_path,
                 )
             )
         elif trajectories_enabled:

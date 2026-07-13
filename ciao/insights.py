@@ -276,6 +276,7 @@ async def extract_and_append(
     trajectories_enabled: bool = True,
     memory_proposals_enabled: bool = True,
     provider: str = "claude",
+    project_doc_path: str = "",
 ) -> None:
     """Call the model with the filtered transcript and append insights to the archive.
 
@@ -295,6 +296,12 @@ async def extract_and_append(
     to populate tools_used/skills_loaded/turns. ``trajectory_meta`` may
     carry ``context``, ``project_id``, ``chat_id``, ``task_summary``,
     ``workspace``; missing keys default to empty strings.
+
+    ``project_doc_path`` (workspace-root-relative or absolute) points at the
+    chat's canonical project doc; when set and the extracted insights carry
+    Decisions or Open loops, the doc is updated in place right away via
+    :mod:`ciao.project_doc_update` instead of waiting for the nightly
+    curation schedule.
     """
     output = ""
     try:
@@ -333,6 +340,37 @@ async def extract_and_append(
             else:
                 run.status = "error"
                 run.error = "insights model returned no output (failed twice)"
+
+        # Canonical project doc: fold Decisions/Open loops into the chat's
+        # project doc while the insights are fresh. The nightly curation
+        # schedule remains the cross-chat consolidator.
+        if output and project_doc_path:
+            try:
+                from ciao.project_doc_update import update_project_doc
+
+                doc = Path(project_doc_path)
+                if not doc.is_absolute() and workspace_root is not None:
+                    doc = workspace_root / project_doc_path
+                async with job_runs.track(
+                    "project_doc_update", "Project doc update",
+                    model=effective_model,
+                    extra={"doc": str(doc), "archive": archive_path.name},
+                ) as run:
+                    wrote = await update_project_doc(
+                        doc_path=doc,
+                        insights_md=output,
+                        model=effective_model,
+                        env=env,
+                        provider=provider,
+                        cwd=workspace_root,
+                    )
+                    run.extra["wrote"] = wrote
+                    if not wrote:
+                        run.skip("no material changes for the project doc")
+            except Exception:  # noqa: BLE001 — never crash the loop
+                logger.exception(
+                    "Project doc update failed for %s", project_doc_path
+                )
     except Exception:  # noqa: BLE001 — fire-and-forget, never crash the loop
         logger.exception("Insights extraction failed for %s", archive_path)
     finally:
