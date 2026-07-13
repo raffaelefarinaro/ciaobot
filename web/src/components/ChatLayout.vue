@@ -144,6 +144,7 @@
                 {{ action.isCreating ? 'Creating...' : `+ ${action.label} Chat` }}
               </button>
             </div>
+            <GettingStartedChecklist variant="home" @open-sidebar="sidebarCollapsed = false" />
           </div>
         </div>
       </template>
@@ -168,6 +169,7 @@ import FileViewerModal from './FileViewerModal.vue'
 import PinnedFilePanel from './PinnedFilePanel.vue'
 import PaneHeader from './PaneHeader.vue'
 import ProductTour from './ProductTour.vue'
+import GettingStartedChecklist from './GettingStartedChecklist.vue'
 
 const store = useProjectStore()
 const tourStore = useProductTourStore()

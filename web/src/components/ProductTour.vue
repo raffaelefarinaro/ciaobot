@@ -34,6 +34,13 @@
         />
         <p class="product-tour-body">{{ tour.currentStep.body }}</p>
         <p v-if="showMissingHint" class="product-tour-missing">{{ tour.currentStep.missingHint }}</p>
+        <button
+          v-if="tour.currentStep.action"
+          type="button"
+          class="product-tour-tryit"
+          :disabled="tour.preparing"
+          @click="tryIt(tour.currentStep.action)"
+        >{{ tour.currentStep.action.label }} →</button>
         <div class="product-tour-actions">
           <button type="button" class="product-tour-skip" @click="tour.skip()">Skip tour</button>
           <div class="product-tour-nav">
@@ -58,12 +65,23 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { useProductTourStore } from '../stores/productTour'
 import { useProjectStore } from '../stores/projects'
 import { shouldShowMissingHint, tourTargetSelector } from '../lib/productTour'
 
 const tour = useProductTourStore()
 const projectStore = useProjectStore()
+const router = useRouter()
+
+// "Try it" hands control to the user on the real page; the tour has done its
+// job and can be replayed from Settings → Home.
+async function tryIt(action: { label: string; route: string }) {
+  tour.finish()
+  if (router.currentRoute.value.path !== action.route) {
+    await router.push(action.route)
+  }
+}
 
 const targetRect = ref<DOMRect | null>(null)
 const cardEl = ref<HTMLElement | null>(null)
@@ -302,6 +320,26 @@ onBeforeUnmount(() => {
   border: 1px solid var(--border-strong);
   border-left: 3px solid var(--accent2);
   border-radius: var(--radius-sm);
+}
+
+.product-tour-tryit {
+  display: block;
+  width: 100%;
+  min-height: var(--touch);
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-elev));
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  color: var(--fg);
+  font-family: var(--font);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms var(--ease);
+}
+.product-tour-tryit:hover {
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-elev));
 }
 
 .product-tour-actions {

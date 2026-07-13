@@ -226,6 +226,9 @@
           </div>
         </div>
 
+        <!-- Getting started checklist -->
+        <GettingStartedChecklist variant="settings" @open-sidebar="emit('open-sidebar')" />
+
         <!-- Debug (dev mode only) -->
         <div v-if="localStatus?.dev_mode" class="card">
           <div class="settings-card-header">
@@ -1511,6 +1514,7 @@ import { useProductTourStore } from '../stores/productTour'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import RestartOverlay from './RestartOverlay.vue'
+import GettingStartedChecklist from './GettingStartedChecklist.vue'
 import { providerModelBadges, sectionsFromModelOptions, type ModelSection } from '../lib/modelSections'
 
 const emit = defineEmits<{ 'open-sidebar': [] }>()
