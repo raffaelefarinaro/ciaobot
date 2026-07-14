@@ -136,29 +136,33 @@ def test_open_url_without_token_falls_back_to_plain_url(
     ]
 
 
-def test_open_command_prefers_browser_app_mode(monkeypatch) -> None:
+def test_open_command_uses_browser_binary_for_app_mode(monkeypatch) -> None:
+    # Invoke the browser binary directly, NOT `open -a ... --args --app=`:
+    # `open` drops the args when the browser is already running, so the app
+    # window never opens (the "Open Ciaobot only focuses Chrome" bug).
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(menubar, "_installed_browser_app_names", lambda: ["Google Chrome"])
 
     assert menubar.open_command("http://localhost:8443/") == [
-        "open",
-        "-a",
-        "Google Chrome",
-        "--args",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         "--app=http://localhost:8443/",
     ]
 
 
-def test_launch_ui_opens_url_in_browser(monkeypatch) -> None:
-    # The UI opens in the browser (no native window). Opening the URL directly
-    # — including a /chat/<id> deep link — lands the page on the right chat.
-    run_calls: list = []
+def test_launch_ui_spawns_detached_browser(monkeypatch) -> None:
+    # The UI opens in the browser (no native window), launched detached so a
+    # cold browser start can't block the menu-bar callback. Opening the URL
+    # directly — including a /chat/<id> deep link — lands on the right chat.
+    popen_calls: list = []
     monkeypatch.setattr(menubar, "open_command", lambda url: ["open", url])
-    monkeypatch.setattr(menubar.subprocess, "run", lambda *a, **k: run_calls.append(a[0]))
+    monkeypatch.setattr(
+        menubar.subprocess, "Popen", lambda *a, **k: popen_calls.append((a[0], k))
+    )
 
     menubar.launch_ui("http://localhost:8443/chat/chat-abc", None)
 
-    assert run_calls == [["open", "http://localhost:8443/chat/chat-abc"]]
+    assert popen_calls and popen_calls[0][0] == ["open", "http://localhost:8443/chat/chat-abc"]
+    assert popen_calls[0][1].get("start_new_session") is True
 
 
 def _write_bundle(path: Path, *, bundle_id: str) -> None:
@@ -232,7 +236,7 @@ def test_start_at_login_status_is_on_when_launch_agents_are_enabled(tmp_path: Pa
     assert status.state == "on"
     assert status.available
     assert status.enabled
-    assert menubar.start_at_login_menu_label(status) == "Start Ciao at Login: On"
+    assert menubar.start_at_login_menu_label(status) == "Start at Login: On"
 
 
 def test_start_at_login_status_is_off_when_either_agent_is_disabled(tmp_path: Path) -> None:
@@ -247,7 +251,7 @@ def test_start_at_login_status_is_off_when_either_agent_is_disabled(tmp_path: Pa
     assert status.state == "off"
     assert status.available
     assert not status.enabled
-    assert menubar.start_at_login_menu_label(status) == "Start Ciao at Login: Off"
+    assert menubar.start_at_login_menu_label(status) == "Start at Login: Off"
 
 
 def test_start_at_login_status_is_missing_without_launch_agent_plists(

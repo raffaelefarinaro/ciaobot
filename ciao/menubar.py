@@ -174,14 +174,26 @@ def _installed_browser_app_names() -> list[str]:
 
 
 def browser_app_mode_command(url: str) -> list[str] | None:
-    """Open ``url`` in a browser app window without a separate PWA install."""
+    """argv to open ``url`` in a chrome-less browser app-mode window.
+
+    Invoke the browser binary directly rather than ``open -a NAME --args
+    --app=URL``: ``open`` drops ``--args`` when the browser is already running,
+    so it just focuses the browser and never opens the window (the reported
+    "clicking Open Ciaobot only opens Chrome" bug). Running the binary opens
+    the app window whether or not the browser is already running.
+
+    The caller MUST launch this detached (Popen) — on a cold start the binary
+    stays in the foreground as the browser's main process.
+    """
 
     if sys.platform != "darwin":
         return None
     names = _installed_browser_app_names()
     if not names:
         return None
-    return ["open", "-a", names[0], "--args", f"--app={url}"]
+    name = names[0]
+    binary = Path("/Applications") / f"{name}.app" / "Contents" / "MacOS" / name
+    return [str(binary), f"--app={url}"]
 
 
 def browser_pwa_duplicate_paths(app_name: str = "Ciaobot") -> list[Path]:
@@ -264,9 +276,17 @@ def launch_ui(url: str, workspace: Path | None = None) -> None:
     /chat/<id> deep link) means the page lands on the right chat. ``workspace``
     is accepted for call-site compatibility but no longer used (there is no
     native window to de-duplicate).
+
+    Launched detached: app-mode invokes the browser binary directly, and a
+    cold browser start would otherwise block this menu-bar callback.
     """
 
-    subprocess.run(open_command(url), check=False)
+    subprocess.Popen(
+        open_command(url),
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 def restart_server_command(uid: int | None = None) -> list[str]:
     resolved = os.getuid() if uid is None else uid
     return ["launchctl", "kickstart", "-k", f"gui/{resolved}/{SERVER_LAUNCHD_LABEL}"]
@@ -335,9 +355,9 @@ def start_at_login_status(
 
 def start_at_login_menu_label(status: StartAtLoginStatus) -> str:
     if status.state == "on":
-        return "Start Ciao at Login: On"
+        return "Start at Login: On"
     if status.state == "off":
-        return "Start Ciao at Login: Off"
+        return "Start at Login: Off"
     if status.state == "missing":
         return "Start at Login: not installed"
     return "Start at Login: unknown"
@@ -442,12 +462,18 @@ def _menubar_app_candidates() -> list[Path]:
 def _ensure_notification_bundle() -> None:
     """Make Notification Center attribute alerts to Ciaobot, not Python.
 
-    When launchd starts ``python -m ciao.cli menubar`` directly, macOS has no
-    app identity and groups alerts under "Python". Setup writes a
-    ``CiaobotMenuBar`` helper inside ``Ciaobot.app`` and the LaunchAgent
-    should exec the bundle-local ``python`` symlink so alerts stay under the
-    existing Ciaobot app. As a fallback, load that bundle explicitly when we
-    can find it.
+    launchd starts the menu bar via ``Ciaobot.app``'s ``CiaobotMenuBar``
+    helper, but that helper ``exec``s the real (Homebrew) ``python``, whose
+    Mach-O executable lives outside the bundle — so the process's *main*
+    bundle is ``Python.app`` and Notification Center shows the Python rocket.
+
+    NSUserNotification (what rumps posts through) attributes an alert to the
+    app whose bundle identifier is in the main bundle's info dictionary. So we
+    overwrite that in-memory identifier with Ciaobot's: Notification Center
+    then resolves it to the installed ``Ciaobot.app`` and uses its name and
+    icon. Loading the bundle as well makes its resources available. This must
+    run before the first notification is posted (it does — from
+    ``run_menubar`` before the rumps app starts).
     """
 
     if sys.platform != "darwin":
@@ -457,16 +483,33 @@ def _ensure_notification_bundle() -> None:
     except Exception:
         return
 
-    main = NSBundle.mainBundle()
-    if main is not None:
-        ident = main.bundleIdentifier()
-        if ident and ident not in ("org.python.python", "com.apple.python"):
-            return
+    app_root = next(iter(_menubar_app_candidates()), None)
+    target_id = (_bundle_identifier(app_root) if app_root else "") or "local.ciaobot.app"
 
-    for app_root in _menubar_app_candidates():
-        bundle = NSBundle.bundleWithPath_(str(app_root))
-        if bundle is not None and bundle.load():
-            return
+    main = NSBundle.mainBundle()
+    if main is None:
+        return
+    if main.bundleIdentifier() == target_id:
+        return  # already attributed to Ciaobot (e.g. a real bundled launch)
+
+    # Override the running process's main-bundle identity so alerts carry
+    # Ciaobot's name + icon instead of Python's.
+    try:
+        info = main.localizedInfoDictionary() or main.infoDictionary()
+        if info is not None:
+            info["CFBundleIdentifier"] = target_id
+            info["CFBundleName"] = "Ciaobot"
+    except Exception:
+        pass
+
+    # Load Ciaobot.app so its icon resource is registered for the alert.
+    if app_root is not None:
+        try:
+            bundle = NSBundle.bundleWithPath_(str(app_root))
+            if bundle is not None:
+                bundle.load()
+        except Exception:
+            pass
 
 
 def spin_icon_paths() -> list[str]:

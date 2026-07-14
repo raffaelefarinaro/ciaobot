@@ -54,19 +54,43 @@
 
         <template v-if="loop && !loopEditing">
           <button
+            v-if="loop.running"
             class="btn-small desktop-only"
             :class="{ 'btn-running': loop.running }"
             @click="onToggleLoopRunning"
-          >{{ loop.running ? 'Stop' : 'Start' }}</button>
-          <button class="btn-small desktop-only" @click="onRunLoopNow">Run now</button>
+          >Stop</button>
+          <button
+            v-else
+            class="btn-small desktop-only"
+            @click="onRunLoopNow"
+          >Run now</button>
           <button class="btn-small desktop-only" @click="startLoopEdit">Edit</button>
           <button class="btn-small btn-danger desktop-only" @click="onDeleteLoop">Delete</button>
+          <div class="desktop-overflow desktop-only" @keydown.escape.stop="actionsOpen = false">
+            <button
+              type="button"
+              class="btn-icon overflow-trigger"
+              aria-label="More loop actions"
+              :aria-expanded="actionsOpen"
+              @click="actionsOpen = !actionsOpen"
+            >•••</button>
+            <div v-if="actionsOpen" class="header-menu" role="menu">
+              <button v-if="loop.running" role="menuitem" @click="runHeaderAction(onRunLoopNow)">Run now</button>
+              <button v-else role="menuitem" @click="runHeaderAction(onToggleLoopRunning)">Start loop</button>
+            </div>
+          </div>
 
           <button
+            v-if="loop.running"
             class="btn-small mobile-primary"
             :class="{ 'btn-running': loop.running }"
             @click="onToggleLoopRunning"
-          >{{ loop.running ? 'Stop' : 'Start' }}</button>
+          >Stop</button>
+          <button
+            v-else
+            class="btn-small mobile-primary"
+            @click="onRunLoopNow"
+          >Run now</button>
           <div class="mobile-overflow" @keydown.escape.stop="actionsOpen = false">
             <button
               type="button"
@@ -76,7 +100,8 @@
               @click="actionsOpen = !actionsOpen"
             >•••</button>
             <div v-if="actionsOpen" class="header-menu" role="menu">
-              <button role="menuitem" @click="runHeaderAction(onRunLoopNow)">Run now</button>
+              <button v-if="loop.running" role="menuitem" @click="runHeaderAction(onRunLoopNow)">Run now</button>
+              <button v-else role="menuitem" @click="runHeaderAction(onToggleLoopRunning)">Start loop</button>
               <button role="menuitem" @click="runHeaderAction(startLoopEdit)">Edit</button>
               <button class="danger" role="menuitem" @click="runHeaderAction(onDeleteLoop)">Delete</button>
             </div>
@@ -230,7 +255,7 @@
         <div><strong>Status</strong><br />{{ loopStatusLabel(loop) }}</div>
         <div><strong>Last run</strong><br />{{ loop.last_run_at ? formatWhen(loop.last_run_at) : 'never' }}</div>
         <div><strong>Next run</strong><br />{{ loop.running ? (loop.next_run ? formatWhen(loop.next_run) : 'soon') : 'stopped' }}</div>
-        <div><strong>On server start</strong><br />{{ loop.autostart ? 'starts automatically' : 'stays stopped' }}</div>
+        <div><strong>After restart</strong><br />{{ loop.autostart ? 'resumes ticking' : 'stays stopped until started' }}</div>
       </div>
 
       <div v-if="loopEditing" class="edit-form">
@@ -1073,6 +1098,7 @@ function closeSchedule() {
 
 /* Close button */
 .desktop-only { display: inline-flex; }
+.desktop-overflow { position: relative; display: inline-flex; }
 .mobile-primary,
 .mobile-overflow { display: none; }
 

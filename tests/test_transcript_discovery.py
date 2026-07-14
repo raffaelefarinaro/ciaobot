@@ -204,6 +204,27 @@ def test_discover_archived_chats_pruning_ignores_active(tmp_path: Path) -> None:
     assert pcm.get_chat(chat.chat_id) is not None
 
 
+def test_new_session_refuses_to_resurrect_archived_chat(tmp_path: Path) -> None:
+    """new_session() on an archived chat must not clear its archived flag or
+    archive_path. Doing so left empty, active chats that reappeared in the
+    sidebar and menu bar tray ("archived chats came back"). Continuing an
+    archived chat is continue_archived_chat()'s job — it spawns a new chat."""
+    pcm = _make_manager(tmp_path)
+    proj = pcm.create_project("Work Project A", workspace="work")
+    chat = pcm.create_chat(proj.project_id, title="Routine Chat")
+    # Simulate the archived state a routine auto-archive leaves behind.
+    chat.archived = True
+    chat.archive_path = "memory-vault/Logs/Chats/chat-x/claude/t.md"
+
+    with pytest.raises(ValueError, match="archived"):
+        pcm.new_session(chat.chat_id)
+
+    same = pcm.get_chat(chat.chat_id)
+    assert same is not None
+    assert same.archived is True  # not resurrected
+    assert same.archive_path == "memory-vault/Logs/Chats/chat-x/claude/t.md"
+
+
 def test_continue_archived_chat(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     

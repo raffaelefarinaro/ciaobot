@@ -142,6 +142,7 @@
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
     <div class="messages" ref="messagesEl" data-tour="chat-messages" @click="handleHighlightClick">
+      <div class="messages-content">
       <template v-for="(item, i) in renderItems" :key="i">
         <!-- Reasoning trace: intermediate assistant text + tool calls grouped -->
         <div v-if="item.kind === 'trace'" class="trace-block" :class="{ open: openTraces[i] }">
@@ -412,6 +413,7 @@
           Comment
         </button>
       </Teleport>
+      </div>
     </div>
 
     <!-- Right-side comment sidebar: shows pending chat comments (and the
@@ -1065,11 +1067,6 @@ function checkScroll() {
   if (!el) return
   const threshold = 4
   isNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight <= threshold
-  // Bottom-align short chats via flex-end; once content overflows, switch
-  // back to normal top-aligned scrolling. margin-top:auto on :first-child
-  // can leave scrollable empty space above the transcript when streaming
-  // UI appears in a short split-view column.
-  el.classList.toggle('overflowing', el.scrollHeight > el.clientHeight + 1)
   onChatScrollReanchor()
 }
 
@@ -2942,23 +2939,22 @@ function insertImageRef(n: number) {
   width: 200px;
 }
 
-/* Messages */
+/* Messages: outer scroll container; inner content uses min-height:100% +
+   flex-end so short chats sit above the composer without breaking scroll. */
 .messages {
   flex: 1;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
   padding: 12px calc(12px + var(--safe-right)) 20px calc(12px + var(--safe-left));
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
   min-height: 0;
   position: relative;
 }
-/* Push short chats to the bottom so the input bar doesn't float far
-   below a single message. When content overflows, .overflowing drops
-   this and scrolling works normally from the top. */
-.messages:not(.overflowing) {
+.messages-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 100%;
   justify-content: flex-end;
 }
 
@@ -3020,7 +3016,7 @@ function insertImageRef(n: number) {
   display: flex;
   flex-shrink: 0;
   align-self: flex-start;
-  gap: 4px;
+  gap: 2px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s;
@@ -3046,25 +3042,62 @@ function insertImageRef(n: number) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: var(--touch, 44px);
-  height: var(--touch, 44px);
-  margin: 0;
-  padding: 0;
+  box-sizing: content-box;
+  --message-action-visual: 28px;
+  width: var(--message-action-visual);
+  height: var(--message-action-visual);
+  min-width: var(--message-action-visual);
+  min-height: var(--message-action-visual);
+  padding: calc((var(--touch, 44px) - var(--message-action-visual)) / 2);
+  margin: calc((var(--message-action-visual) - var(--touch, 44px)) / 2);
   border: none;
   border-radius: 6px;
   background: transparent;
   color: var(--fg2);
   cursor: pointer;
-  transition: color 0.12s, background 0.12s;
+  position: relative;
+  isolation: isolate;
+  transition: color 0.12s;
+}
+
+.message-action-btn::before {
+  content: '';
+  position: absolute;
+  inset: calc((var(--touch, 44px) - var(--message-action-visual)) / 2);
+  z-index: -1;
+  border-radius: 6px;
+  background: transparent;
+  pointer-events: none;
+  transition: background 0.12s;
+}
+
+.message-action-btn svg {
+  width: 14px;
+  height: 14px;
 }
 
 .message-action-btn:hover {
   color: var(--fg);
+}
+
+.message-action-btn:hover::before {
   background: color-mix(in srgb, var(--fg) 8%, transparent);
 }
 
 .message-action-btn:active {
   transform: scale(0.95);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .message-action-btn {
+    --message-action-visual: 24px;
+    padding: 0;
+    margin: 0;
+  }
+
+  .message-action-btn::before {
+    inset: 0;
+  }
 }
 
 .message-action-btn--busy {

@@ -11,10 +11,16 @@ import re
 import shutil
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Iterator
+
+try:  # pragma: no cover - Ciaobot targets Unix; fallback keeps imports portable.
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None  # type: ignore[assignment]
 
 import yaml
 
@@ -104,6 +110,21 @@ _HANDOVER_MAX_CHARS = 60_000
 _LEGACY_MODEL_BUCKETS = {"work", "personal"}
 _ANTHROPIC_MODEL_BUCKETS = {"work", "anthropic"}
 _OLLAMA_MODEL_BUCKETS = {"personal", "ollama"}
+
+
+@contextmanager
+def _state_file_lock(path: Path) -> Iterator[None]:
+    """Serialize read/merge/write cycles across overlapping server processes."""
+    lock_path = path.with_name(f"{path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _classify_file(path: Path) -> str:
@@ -749,6 +770,17 @@ class ProjectChatManager:
         self._path = path
         self._projects: dict[str, ProjectInfo] = {}
         self._chats: dict[str, ChatInfo] = {}
+        # Snapshot of this manager's own last-seen state.  It intentionally
+        # excludes records written by another process after this manager was
+        # created: _save() diffs against this snapshot and applies only local
+        # mutations to the latest on-disk registry.  That prevents an old
+        # process draining during an upgrade from erasing chats created by
+        # the replacement process.
+        self._last_local_payload: dict[str, Any] = {
+            "version": 1,
+            "projects": {},
+            "chats": {},
+        }
         self._providers: dict[str, ProviderService] = {}
         self._broker = ChatStreamBroker()
         self._events = EventsHub()
@@ -901,6 +933,7 @@ class ProjectChatManager:
             len(self._projects),
             len(self._chats),
         )
+        self._last_local_payload = self._state_payload()
 
     def _migrate_remove_claude_code_cli_project(self) -> None:
         """Remove the retired CLI-import project from persisted PWA state."""
@@ -926,10 +959,9 @@ class ProjectChatManager:
             )
             self._save()
 
-    def _save(self) -> None:
-        if not self._path:
-            return
-        payload = {
+    def _state_payload(self) -> dict[str, Any]:
+        """Serialize this manager's in-memory project/chat view."""
+        return {
             "version": 1,
             "projects": {
                 pid: {
@@ -974,10 +1006,112 @@ class ProjectChatManager:
                 for cid, c in self._chats.items()
             },
         }
+
+    @staticmethod
+    def _merge_local_map(
+        latest: dict[str, Any],
+        current: dict[str, Any],
+        baseline: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Apply this process's record/field delta onto the latest disk map.
+
+        A simple dictionary union is insufficient because it resurrects
+        records another process deleted.  Replacing whole records is also
+        unsafe because concurrent changes to different fields of one chat
+        would clobber each other.  Diffing against the process-local baseline
+        gives us the intended mutation set without requiring every caller to
+        mark dirty fields manually.
+        """
+        merged = {
+            str(key): dict(value)
+            for key, value in latest.items()
+            if isinstance(value, dict)
+        }
+
+        for key in baseline.keys() - current.keys():
+            merged.pop(key, None)
+
+        missing = object()
+        for key, record in current.items():
+            if not isinstance(record, dict):
+                continue
+            before = baseline.get(key)
+            if not isinstance(before, dict):
+                merged[key] = dict(record)
+                continue
+
+            changed = {
+                field: value
+                for field, value in record.items()
+                if before.get(field, missing) != value
+            }
+            removed_fields = before.keys() - record.keys()
+            if not changed and not removed_fields:
+                continue
+
+            target_source = merged.get(key)
+            if not isinstance(target_source, dict):
+                # A concurrent delete followed by a genuine local mutation
+                # revives the record with its complete prior shape rather
+                # than an invalid partial row.
+                target_source = before
+            target = dict(target_source)
+            target.update(changed)
+            for field in removed_fields:
+                target.pop(field, None)
+            merged[key] = target
+
+        return merged
+
+    def _read_latest_payload(self) -> dict[str, Any]:
+        if not self._path or not self._path.exists():
+            return {"version": 1, "revision": 0, "projects": {}, "chats": {}}
+        try:
+            payload = json.loads(self._path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.error("Refusing to overwrite unreadable chat registry %s: %s", self._path, exc)
+            raise
+        if not isinstance(payload, dict):
+            raise ValueError(f"Chat registry {self._path} is not a JSON object")
+        return payload
+
+    def _save(self) -> None:
+        if not self._path:
+            return
+        current = self._state_payload()
+        baseline = self._last_local_payload
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        tmp.replace(self._path)
+        with _state_file_lock(self._path):
+            latest = self._read_latest_payload()
+            latest_projects = latest.get("projects")
+            latest_chats = latest.get("chats")
+            baseline_projects = baseline.get("projects")
+            baseline_chats = baseline.get("chats")
+            current_projects = current.get("projects")
+            current_chats = current.get("chats")
+            payload = {
+                "version": 1,
+                "revision": int(latest.get("revision", 0) or 0) + 1,
+                "projects": self._merge_local_map(
+                    latest_projects if isinstance(latest_projects, dict) else {},
+                    current_projects if isinstance(current_projects, dict) else {},
+                    baseline_projects if isinstance(baseline_projects, dict) else {},
+                ),
+                "chats": self._merge_local_map(
+                    latest_chats if isinstance(latest_chats, dict) else {},
+                    current_chats if isinstance(current_chats, dict) else {},
+                    baseline_chats if isinstance(baseline_chats, dict) else {},
+                ),
+            }
+            tmp = self._path.with_name(
+                f".{self._path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+            )
+            try:
+                tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                tmp.replace(self._path)
+            finally:
+                tmp.unlink(missing_ok=True)
+        self._last_local_payload = current
 
     # ── Defaults and auto-discovery ──────────────────────────────────────
 
@@ -2514,6 +2648,14 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is None:
             return None
+        if chat.archived:
+            # Never resurrect an archived chat in place: this clears its
+            # archived flag and archive_path, leaving an empty active chat
+            # that reappears in the sidebar/menu bar (an archive "comes back"
+            # with no transcript). Continuing an archived chat is
+            # continue_archived_chat()'s job — it spawns a fresh chat and
+            # leaves the archived one untouched.
+            raise ValueError("Cannot start a new session in an archived chat")
         # Archive existing transcript
         ctx = ChatContext.for_web(chat_id)
         self._transcripts.archive_session(
