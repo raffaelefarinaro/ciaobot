@@ -303,22 +303,58 @@ def _window_launch_command(url: str, workspace: Path | None) -> list[str]:
     return cmd
 
 
+_WINDOW_INTERP_OK: dict[str, bool] = {}
+
+
+def _window_interpreter_ok(interp: str) -> bool:
+    """True if ``interp`` can import the window module (i.e. resolves ``ciao``).
+
+    Guards the native-window path: an interpreter that can't ``import
+    ciao.window`` — e.g. an app-bundle python symlink that resolves outside the
+    venv — would exit before drawing anything, so the window silently never
+    opens. When this is False the caller opens the URL in the browser instead,
+    so the app *always* opens. Result cached per interpreter path.
+    """
+
+    cached = _WINDOW_INTERP_OK.get(interp)
+    if cached is not None:
+        return cached
+    ok = False
+    try:
+        completed = subprocess.run(
+            [interp, "-c", "import ciao.window"],
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        ok = completed.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        ok = False
+    _WINDOW_INTERP_OK[interp] = ok
+    return ok
+
+
 def launch_ui(url: str, workspace: Path | None = None) -> None:
     """Open the Ciaobot UI without blocking the caller (menu bar callbacks).
 
     On macOS the URL opens in the native WebKit window (``ciao.window``);
     passing ``workspace`` lets it focus an already-open window instead of
-    stacking a duplicate.
+    stacking a duplicate. If the resolved interpreter can't load the window
+    module, fall back to opening the URL in the browser so the app still opens.
     """
 
     if sys.platform == "darwin":
-        subprocess.Popen(
-            _window_launch_command(url, workspace),
-            start_new_session=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return
+        cmd = _window_launch_command(url, workspace)
+        if _window_interpreter_ok(cmd[0]):
+            subprocess.Popen(
+                cmd,
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return
+        # Interpreter can't load ciao.window (misconfigured install): don't
+        # leave the user with nothing — open the URL in the browser.
     subprocess.run(open_command(url), check=False)
 
 

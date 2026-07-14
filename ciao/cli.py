@@ -397,6 +397,12 @@ def _write_app_shortcut(
     # workspace lets that process de-duplicate: if a Ciaobot window is already
     # open it focuses it instead of stacking another one (ciao.window's
     # single-instance lock).
+    #
+    # Resolve the bundle-local python symlink to its real target before running
+    # it: invoking Python *through* the Contents/MacOS/python symlink resolves
+    # sys.prefix to the base framework, not the venv, so `import webview`/`ciao`
+    # fail and the window never opens. If the window still can't start, fall
+    # back to `open` so double-clicking the app always opens the UI.
     executable.write_text(
         "#!/bin/sh\n"
         "start_agent() {\n"
@@ -431,9 +437,11 @@ def _write_app_shortcut(
         f'  url="http://localhost:{port}/"\n'
         "fi\n"
         'DIR="$(cd "$(dirname "$0")" && pwd)"\n'
+        'PY="$DIR/python"\n'
+        'if [ -L "$PY" ]; then PY="$(readlink "$PY")"; fi\n'
         "open_ciaobot_url() {\n"
         '  target="$1"\n'
-        f'  exec "$DIR/python" -m ciao.window "$target" --workspace "{workspace}"\n'
+        f'  "$PY" -m ciao.window "$target" --workspace "{workspace}" || open "$target"\n'
         "}\n"
         'open_ciaobot_url "$url"\n',
         encoding="utf-8",
