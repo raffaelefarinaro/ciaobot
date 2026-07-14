@@ -2836,6 +2836,19 @@ async def libreoffice_install_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "output": result.stdout})
 
 
+async def apfel_install_endpoint(request: Request) -> JSONResponse:
+    """Install apfel (Apple Intelligence CLI) via Homebrew. No server restart
+    needed — routines probe for the apfel binary fresh on each run, so titles
+    switch from the cloud fallback to on-device on the next run."""
+    from ciao.upgrade import upgrade_apfel
+
+    result = await upgrade_apfel()
+    if not result.success:
+        error = result.stderr.strip() or "Install failed."
+        return JSONResponse({"ok": False, "error": error}, status_code=500)
+    return JSONResponse({"ok": True, "output": result.stdout})
+
+
 async def workspace_binary(request: Request) -> Response:
     """Serve a read-only binary file (PDF, ZIP, office doc) from the workspace."""
     config = request.app.state.config

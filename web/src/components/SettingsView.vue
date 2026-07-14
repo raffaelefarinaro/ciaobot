@@ -339,9 +339,18 @@
                 <span class="routine-model-hint">
                   <template v-if="routineProviderValue('title_model') === 'apple'">
                     Runs on-device for free via <a :href="APFEL_REPO_URL" target="_blank" rel="noopener">apfel</a> (Apple Intelligence CLI).
-                    <span v-if="routines && routines.apfel_available === false" class="hint--warn">
-                      apfel is not installed on this machine — titles currently fall back to a cloud model.
-                    </span>
+                    <template v-if="routines && routines.apfel_available === false">
+                      <span class="hint--warn">
+                        apfel is not installed on this machine — titles currently fall back to a cloud model.
+                      </span>
+                      <button
+                        class="btn-primary btn-small voice-install-btn"
+                        :disabled="apfelInstalling"
+                        @click="installApfel"
+                      >
+                        {{ apfelInstalling ? 'Installing…' : 'Install apfel' }}
+                      </button>
+                    </template>
                   </template>
                   <template v-else>{{ routineModelSummary('title_model') }}</template>
                 </span>
@@ -2483,6 +2492,28 @@ async function installLocalVoice() {
     routinesResult.value = `Error installing engine: ${e?.message || e}`
   } finally {
     voiceInstalling.value = false
+  }
+}
+
+const apfelInstalling = ref(false)
+
+async function installApfel() {
+  apfelInstalling.value = true
+  routinesResult.value = 'Installing apfel (Apple Intelligence CLI)…'
+  try {
+    const res = await api.post<{ ok: boolean; output?: string; error?: string }>('/api/apfel/install', {})
+    if (res.ok) {
+      routinesResult.value = 'apfel installed — on-device titles apply from the next run.'
+      // No restart needed: routines probe for the apfel binary per run.
+      // Refresh so the "not installed" hint clears immediately.
+      await fetchRoutines()
+    } else {
+      routinesResult.value = `apfel install failed: ${res.error || 'unknown error'}`
+    }
+  } catch (e: any) {
+    routinesResult.value = `Error installing apfel: ${e?.message || e}`
+  } finally {
+    apfelInstalling.value = false
   }
 }
 
