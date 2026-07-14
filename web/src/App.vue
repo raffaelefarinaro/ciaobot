@@ -441,7 +441,13 @@ input:focus, textarea:focus, select:focus {
   gap: 12px;
 }
 
-.section-title,
+.section-title {
+  font-size: var(--text-xs);
+  color: var(--fg2);
+  letter-spacing: 0.5px;
+  margin: 0;
+  font-weight: 600;
+}
 .label-eyebrow {
   font-size: var(--text-xs);
   color: var(--fg2);

@@ -78,6 +78,9 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
   const libreofficeInstalling = ref(false)
   const libreofficeInstallError = ref('')
 
+  // Markdown wikilink resolution uses a vault-wide path index from the API.
+  const markdownPaths = ref<string[]>([])
+
   function _reset(): void {
     kind.value = 'text'
     line.value = null
@@ -126,6 +129,16 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     }
   }
 
+  async function loadMarkdownPaths(): Promise<string[]> {
+    try {
+      const res = await api.get<{ paths: string[] }>('/api/vault-markdown-paths')
+      markdownPaths.value = res.paths ?? []
+    } catch {
+      markdownPaths.value = []
+    }
+    return markdownPaths.value
+  }
+
   async function open(filePath: string, lineNumber: number | null = null, chat: string = ''): Promise<void> {
     if (!filePath) return
     _reset()
@@ -135,6 +148,8 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     chatId.value = chat
     loading.value = true
     loadToken.value++
+    const isMarkdownFile = /\.(md|markdown)$/i.test(filePath.replace(/:\d+$/, ''))
+    const pathsPromise = isMarkdownFile ? loadMarkdownPaths() : Promise.resolve([])
     try {
       kind.value = fileViewerKindForPath(filePath)
       if (kind.value === 'pdf') {
@@ -143,7 +158,10 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
         return
       }
       const url = `/api/workspace-file?path=${encodeURIComponent(filePath)}`
-      const resp = await fetch(url, { credentials: 'same-origin' })
+      const [resp] = await Promise.all([
+        fetch(url, { credentials: 'same-origin' }),
+        pathsPromise,
+      ])
       if (!resp.ok) {
         if (resp.status === 404) error.value = 'File not found.'
         else if (resp.status === 403) error.value = 'Forbidden — path is outside the workspace.'
@@ -367,10 +385,12 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     pptxNeedsLibreoffice,
     libreofficeInstalling,
     libreofficeInstallError,
+    markdownPaths,
     // actions
     open,
     openImage,
     close,
+    loadMarkdownPaths,
     setTab,
     loadHistory,
     setDiffSeqs,

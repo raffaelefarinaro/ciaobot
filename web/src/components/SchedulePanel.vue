@@ -2,7 +2,7 @@
   <div class="schedule-panel">
     <PaneHeader
       v-if="!schedule && !loop && !showNew"
-      title="Automations"
+      title="automations"
       @open-sidebar="emit('open-sidebar')"
     />
     <PaneHeader v-else @open-sidebar="emit('open-sidebar')">

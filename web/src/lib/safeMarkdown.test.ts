@@ -36,4 +36,19 @@ describe('safe markdown rendering', () => {
 
     expect(html).not.toContain('javascript:')
   })
+
+  it('resolves Obsidian wikilinks into file-link anchors', () => {
+    const html = renderFileMarkdown('See [[README|Rossmann MVP]] for context.', {
+      resolveImageSrc: (href) => href,
+      filePath: 'memory-vault/work/projects/active/rossmann/Shelf Recognition Spec.md',
+      markdownPaths: [
+        'memory-vault/work/projects/active/rossmann/README.md',
+        'memory-vault/work/projects/active/rossmann/Shelf Recognition Spec.md',
+      ],
+    })
+
+    expect(html).toContain('class="file-link wikilink"')
+    expect(html).toContain('data-file-path="memory-vault/work/projects/active/rossmann/README.md"')
+    expect(html).toContain('>Rossmann MVP</a>')
+  })
 })

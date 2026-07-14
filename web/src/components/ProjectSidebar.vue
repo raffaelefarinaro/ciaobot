@@ -25,14 +25,14 @@
           :class="{ 'brand--refreshing': refreshing }"
           @click="onBrandClick"
           :title="refreshing ? 'Refreshing...' : 'Click to reload the latest app build'"
-        >{{ refreshing ? 'sync...' : 'Ciaobot' }}</button>
+        >{{ refreshing ? 'sync...' : 'ciaobot' }}</button>
         <div class="nav-links">
           <router-link
             to="/"
             class="nav-item touch-hit"
             :class="{ 'nav-item--active': mode === 'chat' || mode === 'project' }"
-            title="Chats"
-            aria-label="Chats"
+            title="chats"
+            aria-label="chats"
           >
             <!-- Stacked message lines: sharper, more "log-window" than a speech bubble -->
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -43,7 +43,7 @@
               <polyline points="8 18 8 21 11 18" />
             </svg>
           </router-link>
-          <router-link to="/schedules" class="nav-item touch-hit" active-class="nav-item--active" title="Automations" aria-label="Automations" data-tour="nav-schedules">
+          <router-link to="/schedules" class="nav-item touch-hit" active-class="nav-item--active" title="automations" aria-label="automations" data-tour="nav-schedules">
             <!-- Clock face with hour markers: more diagrammatic than calendar grid -->
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
@@ -55,7 +55,7 @@
               <polyline points="12 8 12 12 15 14" />
             </svg>
           </router-link>
-          <router-link to="/settings" class="nav-item touch-hit" active-class="nav-item--active" title="Settings" aria-label="Settings">
+          <router-link to="/settings" class="nav-item touch-hit" active-class="nav-item--active" title="settings" aria-label="settings">
             <!-- Sliders / equalizer: more direct than a gear, mono-grid friendly -->
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
@@ -74,7 +74,7 @@
 
     <template v-if="!collapsed && (mode === 'schedules')">
       <div class="sidebar-section-header">
-        <span class="sidebar-section-title">Automations</span>
+        <span class="sidebar-section-title">automations</span>
         <button class="btn-small" @click="emit('new-schedule')" title="New automation">+ New</button>
       </div>
       <div class="schedules-list">
@@ -197,7 +197,7 @@
 
     <template v-if="!collapsed && mode === 'settings'">
       <div class="sidebar-section-header">
-        <span class="sidebar-section-title">Settings</span>
+        <span class="sidebar-section-title">settings</span>
       </div>
       <div class="settings-nav-list">
         <router-link
@@ -205,42 +205,42 @@
           class="settings-nav-item"
           :class="{ active: route.path === '/settings' }"
         >
-          Home
+          home
         </router-link>
         <router-link
           to="/settings/providers"
           class="settings-nav-item"
           :class="{ active: route.path === '/settings/providers' }"
         >
-          Providers
+          providers
         </router-link>
         <router-link
           to="/settings/models"
           class="settings-nav-item"
           :class="{ active: route.path === '/settings/models' }"
         >
-          Models
+          models
         </router-link>
         <router-link
           to="/settings/context"
           class="settings-nav-item"
           :class="{ active: route.path === '/settings/context' }"
         >
-          Agent Context
+          agent context
         </router-link>
         <router-link
           to="/settings/workspaces"
           class="settings-nav-item"
           :class="{ active: route.path === '/settings/workspaces' }"
         >
-          Workspaces
+          workspaces
         </router-link>
         <router-link
           to="/settings/skills"
           class="settings-nav-item"
           :class="{ active: route.path === '/settings/skills' }"
         >
-          Agent assets
+          agent assets
         </router-link>
       </div>
     </template>
@@ -265,7 +265,7 @@
       <div class="chats-scroll-area">
         <!-- Recent chats (max 5) -->
         <div v-if="store.recentChats.length" class="recent-section">
-          <div class="recent-label">Recent</div>
+          <div class="recent-label">recent</div>
           <div class="recent-items">
             <button
               type="button"
@@ -474,7 +474,7 @@
   <!-- Completed (archived) projects dialog -->
   <div v-if="archiveOpen" class="modal-overlay" @click.self="archiveOpen = false">
     <div class="modal modal--archive">
-      <h3>Completed projects</h3>
+      <h3>completed projects</h3>
       <p class="archive-hint">
         Click a project to open its canonical doc. Restoring moves it back to active; old chats stay archived.
       </p>
@@ -508,7 +508,7 @@
   <!-- Rename chat dialog -->
   <div v-if="renamingChat" class="modal-overlay" @click.self="renamingChat = null">
     <div class="modal">
-      <h3>Rename Chat</h3>
+      <h3>rename chat</h3>
       <input v-model="renameValue" @keyup.enter="doRenameChat" autofocus />
       <div class="modal-actions">
         <button @click="renamingChat = null">Cancel</button>
@@ -1003,7 +1003,6 @@ async function confirmDeleteChat(chatId: string) {
   font-size: var(--text-sm);
   color: var(--fg2);
   font-weight: 600;
-  text-transform: uppercase;
   letter-spacing: 0.3px;
 }
 
@@ -1640,7 +1639,6 @@ async function confirmDeleteChat(chatId: string) {
 }
 .sidebar-section-title {
   font-size: var(--text-xs);
-  text-transform: uppercase;
   letter-spacing: 0.5px;
   color: var(--fg2);
   font-weight: 600;

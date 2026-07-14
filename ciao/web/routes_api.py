@@ -2737,6 +2737,64 @@ async def workspace_file(request: Request) -> Response:
     )
 
 
+_VAULT_MD_EXCLUDE_DIRS = frozenset({"Logs", "Templates", ".obsidian"})
+
+
+async def vault_markdown_paths(request: Request) -> JSONResponse:
+    """Return workspace-relative paths to markdown files for wikilink resolution."""
+    config = request.app.state.config
+    workspace = config.workspace_root.resolve()
+    paths: list[str] = []
+    seen: set[str] = set()
+    for root in _allowed_roots(config):
+        if not root.is_dir():
+            continue
+        for md_path in root.rglob("*.md"):
+            try:
+                rel = md_path.relative_to(root)
+            except ValueError:
+                continue
+            if any(part.startswith(".") for part in rel.parts):
+                continue
+            if any(part in _VAULT_MD_EXCLUDE_DIRS for part in rel.parts):
+                continue
+            try:
+                resolved = md_path.resolve()
+            except OSError:
+                continue
+            try:
+                display = str(resolved.relative_to(workspace))
+            except ValueError:
+                display = str(resolved)
+            if display in seen:
+                continue
+            seen.add(display)
+            paths.append(display)
+        for md_path in root.rglob("*.markdown"):
+            try:
+                rel = md_path.relative_to(root)
+            except ValueError:
+                continue
+            if any(part.startswith(".") for part in rel.parts):
+                continue
+            if any(part in _VAULT_MD_EXCLUDE_DIRS for part in rel.parts):
+                continue
+            try:
+                resolved = md_path.resolve()
+            except OSError:
+                continue
+            try:
+                display = str(resolved.relative_to(workspace))
+            except ValueError:
+                display = str(resolved)
+            if display in seen:
+                continue
+            seen.add(display)
+            paths.append(display)
+    paths.sort()
+    return JSONResponse({"paths": paths})
+
+
 # Binary downloads (PDFs, ZIPs, office docs) live under their own endpoint so
 # the text and image viewers stay strictly typed. Same (unrestricted) path
 # contract as ``workspace_file``/``workspace_image``: any allowlisted-extension

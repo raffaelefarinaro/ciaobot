@@ -1,7 +1,7 @@
 <template>
   <div class="page">
     <header class="page-header">
-      <h2>Schedules</h2>
+      <h2>schedules</h2>
       <div class="header-actions">
         <router-link to="/" class="btn-small">Back to Chat</router-link>
         <button class="btn-small" @click="refresh" :disabled="store.loading">Refresh</button>
