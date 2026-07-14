@@ -263,7 +263,7 @@ class CiaoConfig:
     # Default to a male voice to match the Ciaobot avatar. OpenAI ``onyx`` and
     # Kokoro ``am_michael`` (``am_`` = American Male) are the male counterparts
     # of the former ``nova`` / ``af_heart`` defaults. Overridable in Settings /
-    # via CIAO_TTS_*_VOICE.
+    # via CIAO_TTS_CLOUD_VOICE and CIAO_TTS_LOCAL_VOICE.
     tts_cloud_voice: str = "onyx"
     tts_local_voice: str = "am_michael"
     claude_models: list[str] = field(default_factory=lambda: ["opus", "sonnet", "haiku"])
