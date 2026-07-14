@@ -248,6 +248,16 @@ export const useProjectStore = defineStore('projects', () => {
   let lastEventsFrameAt = 0
   const lastChatFrameAt: Record<string, number> = {}
   const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now())
+  // Per-chat WS auto-reconnect bookkeeping. A dropped per-chat socket used to
+  // recover only via the 15s syncLatest poll (up to 15s of stale messages /
+  // missed turn result). We now reconnect the *active* chat immediately on an
+  // unexpected close, with backoff. `intentionalCloses` marks a close made by
+  // disconnectWs so it is NOT auto-reconnected; `chatReconnectTimers` lets a
+  // pending reconnect be cancelled; attempts drive the backoff and reset once
+  // the socket proves live (first frame received).
+  const intentionalCloses = new Set<string>()
+  const chatReconnectTimers: Record<string, number> = {}
+  const chatReconnectAttempts: Record<string, number> = {}
 
   // ── Computed ─────────────────────────────────────────────────────────
 
@@ -1460,6 +1470,9 @@ export const useProjectStore = defineStore('projects', () => {
     ws.onmessage = (ev) => {
       // Any frame (including the server keepalive) proves the socket is live.
       lastChatFrameAt[chatId] = nowMs()
+      // A working socket clears the reconnect backoff so a later drop starts
+      // from a fast first retry again.
+      chatReconnectAttempts[chatId] = 0
       const event: WsEvent = JSON.parse(ev.data)
       handleEvent(chatId, event)
     }
@@ -1475,6 +1488,25 @@ export const useProjectStore = defineStore('projects', () => {
       streamingThinking.value[chatId] = ''
       streamingTimeline.value[chatId] = []
       delete streamingTextPhase.value[chatId]
+
+      // Auto-reconnect the chat the user is actually viewing when the socket
+      // drops unexpectedly (server per-turn churn, transient network blip),
+      // so live deltas and the final result resume within ~1s instead of
+      // waiting for the 15s poll or a manual reload. Intentional closes
+      // (disconnectWs, e.g. switching chats) are skipped.
+      if (intentionalCloses.delete(chatId)) return
+      if (typeof window === 'undefined' || typeof WebSocket === 'undefined') return
+      if (activeChatId.value !== chatId) return
+      const attempt = (chatReconnectAttempts[chatId] = (chatReconnectAttempts[chatId] || 0) + 1)
+      const delay = Math.min(1000 * attempt, 5000)
+      if (chatReconnectTimers[chatId]) window.clearTimeout(chatReconnectTimers[chatId])
+      chatReconnectTimers[chatId] = window.setTimeout(() => {
+        delete chatReconnectTimers[chatId]
+        // Only if still the viewed chat and not reconnected in the meantime.
+        if (activeChatId.value === chatId && !sockets.value[chatId]) {
+          void reloadAndReconnectChat(chatId)
+        }
+      }, delay)
     }
   }
 
@@ -1590,8 +1622,15 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   function disconnectWs(chatId: string) {
+    // Cancel any pending auto-reconnect and mark this as an intentional close
+    // so onclose does not schedule a new one.
+    if (chatReconnectTimers[chatId]) {
+      window.clearTimeout(chatReconnectTimers[chatId])
+      delete chatReconnectTimers[chatId]
+    }
     const ws = sockets.value[chatId]
     if (ws) {
+      intentionalCloses.add(chatId)
       ws.close()
       delete sockets.value[chatId]
     }
@@ -1633,9 +1672,11 @@ export const useProjectStore = defineStore('projects', () => {
         eventsWsFailureStreak = 0
       } else {
         eventsWsFailureStreak += 1
-        if (eventsWsFailureStreak === 5) {
+        if (eventsWsFailureStreak >= 5) {
           // Likely an auth rejection: probe the HTTP API so its 401
-          // handling can redirect this stale tab to /login.
+          // handling can redirect this stale tab to /login. Re-probe on every
+          // failure past the threshold (not just the 5th) so a tab that keeps
+          // flapping still gets redirected.
           void api.get('/api/projects').catch(() => {})
         }
       }
