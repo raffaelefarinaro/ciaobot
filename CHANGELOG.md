@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.4.20 - 2026-07-14
+
+### Added
+- feat(setup): auto-refresh Ciaobot.app on version upgrade (`9da52bd`)
+- Add read-aloud action to user messages. (`fb692f8`)
+- feat(macos): open the UI in the browser + web-push notifications (drop pywebview) (`f53dbc9`)
+
+### Changed
+- Use lowercase titles across the PWA and browser tab. (`7fd5c34`)
+- Merge pull request #90 from raffaelefarinaro/chore/sync-develop-v0.4.19 (`fe34016`)
+- Merge pull request #89 from raffaelefarinaro/guard-ciao-setup-workspace (`f91b9a5`)
+- Merge remote-tracking branch 'origin/develop' into codex/integrate-pr-91 (`3b643a2`)
+- Merge pull request #91 from raffaelefarinaro/fix-menubar-helper-venv (`d4524a0`)
+- Merge remote-tracking branch 'origin/develop' into codex/integrate-pr-92 (`922f2e5`)
+- Merge pull request #92 from raffaelefarinaro/polish-mac-icon-and-name (`a0c1979`)
+- Merge remote-tracking branch 'origin/develop' into codex/integrate-pr-93 (`2d30667`)
+- Merge pull request #93 from raffaelefarinaro/fix/chat-bubble-left-padding (`ba51cce`)
+- Merge remote-tracking branch 'origin/develop' into codex/fix-pr-88 (`b4efbd9`)
+- Merge pull request #88 from raffaelefarinaro/style/lowercase-app-titles (`293152d`)
+- Center the chat composer and fix short-chat scroll in split view. (`59ffa2e`)
+- Resolve Obsidian wikilinks in the vault file viewer. (`747d1af`)
+- Merge remote-tracking branch 'origin/develop' into goal-pwa-web-notifications (`8f6f495`)
+- Merge pull request #95 from raffaelefarinaro/goal-pwa-web-notifications (`998331a`)
+- Use defuddle for YouTube transcripts in web-research. (`2de1f1f`)
+
+### Fixed
+- fix(setup): guard ciao setup against hijacking the workspace (`490b320`)
+- fix(macos): menu-bar helper must resolve the venv python (tray wouldn't open) (`aa158be`)
+- fix(macos): margined app icon + present the window as "Ciaobot" (`3fc2b43`)
+- fix(web): add left padding to chat message bubbles (`7ff005c`)
+- fix(web): rebalance chat bubble horizontal padding (`5eff8a6`)
+- fix(web): align header icon hover highlights with sidebar (`40d26b4`)
+- fix(web): align FileViewerModal toolbar icons with app SVG set (`1d4ac16`)
+- fix: address review of #95 (macOS push enablement, device-local gate, PWA deletion, delivery-aware fallback) (`22b7a5a`)
+
+### Maintenance
+- docs: document /api/vault-markdown-paths in PWA_API.md (`4ad4006`)
+
 ## v0.4.19 - 2026-07-14
 
 ### Changed
