@@ -103,3 +103,39 @@ def test_notify_permission_swallows_callback_errors(tmp_path: Path) -> None:
     )
     # Must not raise.
     pcm._notify_permission(chat.chat_id, event)
+
+
+async def test_delayed_push_suppressed_when_chat_archived(tmp_path: Path) -> None:
+    """An auto-archive schedule that archives on completion must not notify:
+    _delayed_push skips a chat archived during the delay window (the run needed
+    no user action, so there's nothing to open)."""
+    pcm = _make_manager(tmp_path)
+    pcm._push_delay_seconds = 0
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="Morning briefing")
+    chat.last_activity_at = "2026-07-14T09:00:00Z"
+    chat.last_read_at = ""
+    chat.archived = True  # auto-archived on completion
+
+    calls: list[tuple[str, str, str]] = []
+    pcm.notify_result_cb = lambda cid, title, snippet: calls.append((cid, title, snippet))
+
+    await pcm._delayed_push(chat.chat_id, "Morning briefing", "done")
+    assert calls == []  # archived → no notification
+
+
+async def test_delayed_push_fires_for_active_unread_chat(tmp_path: Path) -> None:
+    """Control: a still-active, unread chat gets its push as before."""
+    pcm = _make_manager(tmp_path)
+    pcm._push_delay_seconds = 0
+    project = pcm.create_project("General", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="Live chat")
+    chat.last_activity_at = "2026-07-14T09:00:00Z"
+    chat.last_read_at = ""
+    chat.archived = False
+
+    calls: list[tuple[str, str, str]] = []
+    pcm.notify_result_cb = lambda cid, title, snippet: calls.append((cid, title, snippet))
+
+    await pcm._delayed_push(chat.chat_id, "Live chat", "reply")
+    assert calls == [(chat.chat_id, "Live chat", "reply")]
