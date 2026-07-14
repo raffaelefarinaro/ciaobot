@@ -59,12 +59,14 @@ cp ~/.notebooklm/storage_state.json .notebooklm-auth.json
 
 ### `opencli`: Website CLI
 
-CLI with 50+ website adapters (YouTube, LinkedIn, GitHub, etc.).
+CLI with 50+ website adapters (YouTube, LinkedIn, GitHub, etc.). Optional manual install for workspace-specific workflows — not used by the stock `web-research` skill (that uses defuddle).
 
 ```bash
 npm install -g @jackwener/opencli
 opencli list   # see available adapters
 ```
+
+Note: many adapters require the Browser Bridge Chrome extension and an logged-in Chrome session.
 
 ### `apfel`: Apple Intelligence CLI
 
