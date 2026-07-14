@@ -258,12 +258,14 @@ import { renderFileMarkdown } from '../lib/safeMarkdown'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { api } from '../lib/api'
 import PaneHeader from './PaneHeader.vue'
+import { useFileViewerStore } from '../stores/fileViewer'
 const ExcalidrawViewer = defineAsyncComponent(() => import('./ExcalidrawViewer.vue'))
 
 const props = defineProps<{ filePath: string }>()
 defineEmits<{ (e: 'close'): void }>()
 
 const projectsStore = useProjectStore()
+const fileViewer = useFileViewerStore()
 
 // ── Loading & rendering ──────────────────────────────────────────────
 const loading = ref(false)
@@ -281,6 +283,16 @@ const imageTimestamp = ref(Date.now())
 const pptxNeedsLibreoffice = ref(false)
 const libreofficeInstalling = ref(false)
 const libreofficeInstallError = ref('')
+const markdownPaths = ref<string[]>([])
+
+async function loadMarkdownPaths(): Promise<void> {
+  try {
+    const res = await api.get<{ paths: string[] }>('/api/vault-markdown-paths')
+    markdownPaths.value = res.paths ?? []
+  } catch {
+    markdownPaths.value = []
+  }
+}
 
 async function checkLibreofficeStatus(): Promise<void> {
   try {
@@ -354,6 +366,8 @@ const bodyOnly = computed(() => splitContent.value.body)
 const renderedMarkdown = computed(() => {
   const dir = docDir.value
   return renderFileMarkdown(bodyOnly.value, {
+    filePath: cleanPath.value,
+    markdownPaths: markdownPaths.value,
     resolveImageSrc: (href) => {
       if (href && !_ABSOLUTE_SRC_RE.test(href)) {
         const resolved = joinRelative(dir, href)
@@ -468,7 +482,11 @@ async function load(): Promise<void> {
   content.value = ''
   try {
     const url = `/api/workspace-file?path=${encodeURIComponent(cleanPath.value)}`
-    const resp = await fetch(url, { credentials: 'same-origin' })
+    const pathsPromise = isMarkdown.value ? loadMarkdownPaths() : Promise.resolve()
+    const [resp] = await Promise.all([
+      fetch(url, { credentials: 'same-origin' }),
+      pathsPromise,
+    ])
     if (!resp.ok) {
       if (resp.status === 404) error.value = 'File not found.'
       else if (resp.status === 403) error.value = 'Forbidden: path is outside the workspace.'
@@ -700,6 +718,22 @@ function scrollToHighlight(id: string): void {
 function onMdClick(e: MouseEvent): void {
   const target = e.target as HTMLElement | null
   if (!target) return
+
+  const fileLink = target.closest('a.file-link') as HTMLAnchorElement | null
+  if (fileLink) {
+    e.preventDefault()
+    e.stopPropagation()
+    const linkedPath = fileLink.getAttribute('data-file-path') || ''
+    const lineAttr = fileLink.getAttribute('data-line')
+    const linkedLine = lineAttr ? parseInt(lineAttr, 10) : null
+    if (/\.(png|jpe?g|gif|webp|svg|avif|bmp|ico)$/i.test(linkedPath)) {
+      void fileViewer.openImage(linkedPath)
+    } else {
+      void fileViewer.open(linkedPath, Number.isFinite(linkedLine as number) ? linkedLine : null)
+    }
+    return
+  }
+
   const highlight = target.closest('.comment-highlight') as HTMLElement | null
   if (!highlight) return
   const id = highlight.dataset.commentId

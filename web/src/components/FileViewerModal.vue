@@ -737,6 +737,23 @@ function deletePopupComment(): void {
 function onMdClick(e: MouseEvent): void {
   const target = e.target as HTMLElement | null
   if (!target) return
+
+  const fileLink = target.closest('a.file-link') as HTMLAnchorElement | null
+  if (fileLink) {
+    e.preventDefault()
+    e.stopPropagation()
+    const linkedPath = fileLink.getAttribute('data-file-path') || ''
+    const lineAttr = fileLink.getAttribute('data-line')
+    const linkedLine = lineAttr ? parseInt(lineAttr, 10) : null
+    const cid = store.chatId || ''
+    if (/\.(png|jpe?g|gif|webp|svg|avif|bmp|ico)$/i.test(linkedPath)) {
+      void store.openImage(linkedPath, cid)
+    } else {
+      void store.open(linkedPath, Number.isFinite(linkedLine as number) ? linkedLine : null, cid)
+    }
+    return
+  }
+
   const highlight = target.closest('.comment-highlight') as HTMLElement | null
   if (!highlight) return
   const id = highlight.dataset.commentId
@@ -950,6 +967,8 @@ const _ABSOLUTE_SRC_RE = /^(?:[a-z][a-z0-9+.-]*:|\/\/|\/)/i
 const renderedMarkdown = computed(() => {
   const dir = docDir.value
   return renderFileMarkdown(bodyOnly.value, {
+    filePath: store.path,
+    markdownPaths: store.markdownPaths,
     resolveImageSrc: (href) => {
       if (href && !_ABSOLUTE_SRC_RE.test(href)) {
         const resolved = joinRelative(dir, href)
@@ -1740,6 +1759,11 @@ if (typeof window !== 'undefined') {
 }
 .fv-md :deep(a:hover) {
   color: var(--accent-strong);
+}
+.fv-md :deep(.wikilink-unresolved) {
+  color: var(--fg-muted, #888);
+  text-decoration: underline dotted;
+  cursor: help;
 }
 .fv-md :deep(img) {
   max-width: 100%;
