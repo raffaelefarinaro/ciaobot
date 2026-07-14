@@ -173,6 +173,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 
 - `CLAUDE_EXECUTION_MODE`: `normal`, `plan`, `auto`, `bypass`. Legacy `CLAUDE_PERMISSION_MODE` still accepted.
 - `PWA_AUTH_REQUIRED`: set to `true` to require password protection for the PWA dashboard. Disabled by default.
+- `CIAO_ALLOWED_ORIGINS`: comma-separated extra hostnames/origins accepted for state-changing HTTP and WebSocket handshakes when the app is reached under a host it doesn't bind to (reverse proxy, tunnel, or host alias). Without it, such setups get their `/ws/*` upgrades rejected (403) and live updates stall. A proxy-supplied `X-Forwarded-Host` is honored automatically. Example: `app.example.com,ciao.tailnet.ts.net`.
 - `CIAO_DEV_MODE`: set to `true` to enable developer mode controls in the PWA dashboard (like the Deploy button).
 - `CIAO_VAULT_MODE`: onboarding mode for memory-vault folders. Either `scratch` (create folders and documentation from scratch) or `existing` (connect and adapt existing markdown folders).
 - `CIAO_BOOTSTRAP_WORKSPACE`: temp workspace root used when `PWA_AUTH_TOKEN` is absent. Defaults to `~/.ciao/bootstrap`; Ciaobot persists the generated bootstrap auth token under its `.runtime/` so first-run setup survives a restart.
