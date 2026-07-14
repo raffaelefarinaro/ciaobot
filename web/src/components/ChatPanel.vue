@@ -2972,7 +2972,7 @@ function insertImageRef(n: number) {
 .message {
   flex: 1;
   max-width: 100%;
-  padding: 8px 12px;
+  padding: 8px 12px 8px 16px;
   border-radius: var(--radius);
   font-size: var(--text-base);
   line-height: 1.5;
@@ -3450,7 +3450,7 @@ details[open] > .activity-summary::before {
 .message-content :deep(p) { margin: 4px 0; }
 .message-content :deep(ul),
 .message-content :deep(ol) {
-  padding-left: 22px;
+  padding-left: 26px;
   margin: 4px 0;
   list-style-position: outside;
 }
