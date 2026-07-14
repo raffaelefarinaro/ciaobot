@@ -260,8 +260,12 @@ class CiaoConfig:
     # kokoro-onnx, free/offline). Runtime-overridable from the PWA
     # Settings → Models tab.
     tts_engine: str = "cloud"
-    tts_cloud_voice: str = "nova"
-    tts_local_voice: str = "af_heart"
+    # Default to a male voice to match the Ciaobot avatar. OpenAI ``onyx`` and
+    # Kokoro ``am_michael`` (``am_`` = American Male) are the male counterparts
+    # of the former ``nova`` / ``af_heart`` defaults. Overridable in Settings /
+    # via CIAO_TTS_*_VOICE.
+    tts_cloud_voice: str = "onyx"
+    tts_local_voice: str = "am_michael"
     claude_models: list[str] = field(default_factory=lambda: ["opus", "sonnet", "haiku"])
     claude_default_model: str = "opus"
     # Per-workspace default models. Empty string falls back to
@@ -699,9 +703,9 @@ class CiaoConfig:
                 in {"cloud", "local"}
                 else "cloud"
             ),
-            tts_cloud_voice=source.get("CIAO_TTS_CLOUD_VOICE", "").strip() or "nova",
+            tts_cloud_voice=source.get("CIAO_TTS_CLOUD_VOICE", "").strip() or "onyx",
             tts_local_voice=source.get("CIAO_TTS_LOCAL_VOICE", "").strip()
-            or "af_heart",
+            or "am_michael",
             ollama_local_discovery=source.get(
                 "CIAO_OLLAMA_LOCAL_DISCOVERY", ""
             ).strip().lower()
