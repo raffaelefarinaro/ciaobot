@@ -4212,7 +4212,6 @@ details[open] > .activity-summary::before {
   border: none;
   cursor: pointer;
 }
-.model-picker-btn:hover { background: var(--bg3); }
 .model-picker-btn:active { transform: scale(0.96); }
 
 .archive-btn {
@@ -4230,7 +4229,7 @@ details[open] > .activity-summary::before {
   border: none;
   cursor: pointer;
 }
-.archive-btn:hover { background: var(--bg3); color: var(--fg); }
+.archive-btn:hover { color: var(--fg); }
 .archive-btn:active { transform: scale(0.96); }
 
 .model-picker-dropdown {

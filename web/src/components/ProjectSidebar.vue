@@ -879,7 +879,7 @@ async function confirmDeleteChat(chatId: string) {
   border-radius: var(--radius-sm);
   transition: color 120ms var(--ease), background 120ms var(--ease);
 }
-.toggle-btn:hover { color: var(--fg); background: var(--bg3); }
+.toggle-btn:hover { color: var(--fg); }
 .toggle-btn:active { transform: scale(0.94); }
 .toggle-btn--collapsed svg { transform: scaleX(-1); }
 
@@ -1109,19 +1109,6 @@ async function confirmDeleteChat(chatId: string) {
   transition: color 120ms var(--ease);
 }
 
-/* `.touch-hit` expands the clickable box from 30px to 44px with padding.
-   Keep the visible hover/active surface at the intended 30px footprint. */
-.nav-item::before,
-.sidebar-bell :deep(.bell-btn)::before {
-  content: '';
-  position: absolute;
-  inset: calc((var(--touch) - var(--touch-hit-visual)) / 2);
-  z-index: -1;
-  border-radius: 6px;
-  background: transparent;
-  transition: background 120ms var(--ease);
-}
-
 .nav-item:hover {
   color: var(--fg);
 }
@@ -1131,7 +1118,6 @@ async function confirmDeleteChat(chatId: string) {
   color: var(--accent);
 }
 
-.nav-item:hover::before,
 .nav-item--active::before {
   background: var(--bg3);
 }
@@ -1156,9 +1142,6 @@ async function confirmDeleteChat(chatId: string) {
 }
 .sidebar-bell :deep(.bell-btn:hover) {
   color: var(--fg);
-}
-.sidebar-bell :deep(.bell-btn:hover)::before {
-  background: var(--bg3);
 }
 .sidebar-bell :deep(.bell-btn.has-unread) {
   color: var(--accent);
