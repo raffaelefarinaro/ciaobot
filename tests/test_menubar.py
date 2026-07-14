@@ -113,6 +113,7 @@ def test_server_recovery_label_matches_reachability() -> None:
 
 def test_open_url_uses_setup_token(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(menubar, "_installed_browser_app_names", lambda: [])
+    monkeypatch.setattr(menubar, "_installed_ciaobot_pwa", lambda: None)
     token_path = tmp_path / ".runtime" / "setup-token"
     token_path.parent.mkdir(parents=True)
     token_path.write_text("tok123\n", encoding="utf-8")
@@ -128,6 +129,7 @@ def test_open_url_without_token_falls_back_to_plain_url(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr(menubar, "_installed_browser_app_names", lambda: [])
+    monkeypatch.setattr(menubar, "_installed_ciaobot_pwa", lambda: None)
 
     url = menubar.open_url(tmp_path, 8443)
     assert menubar.open_command(url) == [
@@ -141,12 +143,25 @@ def test_open_command_uses_browser_binary_for_app_mode(monkeypatch) -> None:
     # `open` drops the args when the browser is already running, so the app
     # window never opens (the "Open Ciaobot only focuses Chrome" bug).
     monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(menubar, "_installed_ciaobot_pwa", lambda: None)
     monkeypatch.setattr(menubar, "_installed_browser_app_names", lambda: ["Google Chrome"])
 
     assert menubar.open_command("http://localhost:8443/") == [
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         "--app=http://localhost:8443/",
     ]
+
+
+def test_open_command_prefers_installed_pwa(tmp_path: Path, monkeypatch) -> None:
+    # An installed PWA app shim is single-instance: opening it focuses the
+    # existing window instead of spawning a new one (the "Open Ciaobot opens a
+    # new window every click" bug). It wins over the raw-browser app-mode path.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    pwa = tmp_path / "Chrome Apps.localized" / "Ciaobot.app"
+    monkeypatch.setattr(menubar, "_installed_ciaobot_pwa", lambda: pwa)
+    monkeypatch.setattr(menubar, "_installed_browser_app_names", lambda: ["Google Chrome"])
+
+    assert menubar.open_command("http://localhost:8443/chat/abc") == ["open", str(pwa)]
 
 
 def test_launch_ui_spawns_detached_browser(monkeypatch) -> None:

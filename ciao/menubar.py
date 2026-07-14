@@ -259,9 +259,34 @@ def remove_browser_pwa_duplicates(app_name: str = "Ciaobot") -> list[Path]:
     return removed
 
 
-def open_command(url: str) -> list[str]:
-    """``open`` argv for a URL in an app-like window when possible."""
+def _installed_ciaobot_pwa() -> Path | None:
+    """Path to a browser-installed Ciaobot PWA app shim, if one exists.
 
+    Excludes our own native launcher bundle. A PWA app shim is single-instance,
+    which is what makes single-window launching possible (see open_command)."""
+
+    if sys.platform != "darwin":
+        return None
+    pwas = browser_pwa_duplicate_paths("Ciaobot")
+    return pwas[0] if pwas else None
+
+
+def open_command(url: str) -> list[str]:
+    """``open`` argv for the Ciaobot UI in an app-like window.
+
+    Prefer an installed Ciaobot PWA: its app shim is single-instance, so
+    ``open``-ing it *focuses the existing window* instead of spawning a new one.
+    That is the fix for "clicking Open Ciaobot opens a new window every time" —
+    ``--app=<url>`` on the raw browser binary always makes a fresh window, even
+    when the PWA is installed. Deep-link navigation (notification → chat) is
+    handled in-app by ``notify_open_chat`` over the WebSocket, so the URL is not
+    needed here while the PWA is running. Fall back to a raw app-mode window,
+    then the default browser, when no PWA is installed.
+    """
+
+    pwa = _installed_ciaobot_pwa()
+    if pwa is not None:
+        return ["open", str(pwa)]
     app_mode = browser_app_mode_command(url)
     if app_mode is not None:
         return app_mode
