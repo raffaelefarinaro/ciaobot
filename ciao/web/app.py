@@ -93,6 +93,7 @@ from ciao.web.routes_api import (
     voice_install_local_endpoint,
     libreoffice_status_endpoint,
     libreoffice_install_endpoint,
+    apfel_install_endpoint,
     project_restore,
     project_files_list,
     project_files_upload,
@@ -192,6 +193,7 @@ def create_app(config, app_settings=None) -> Starlette:
         Route("/api/workspace-open", workspace_open, methods=["POST"]),
         Route("/api/libreoffice-status", libreoffice_status_endpoint, methods=["GET"]),
         Route("/api/libreoffice-install", libreoffice_install_endpoint, methods=["POST"]),
+        Route("/api/apfel/install", apfel_install_endpoint, methods=["POST"]),
         # File snapshots — History and Diff tabs in the file viewer.
         Route("/api/file-history", file_history, methods=["GET"]),
         Route("/api/file-content", file_content, methods=["GET"]),

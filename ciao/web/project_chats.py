@@ -4206,6 +4206,16 @@ class ProjectChatManager:
             # Chat deleted during the window, or already read on some device.
             if chat is None:
                 return
+            if chat.archived:
+                # The chat was archived during the delay window — e.g. an
+                # auto-archive schedule whose run needed no user action. Nothing
+                # is left to open, so don't notify. archive_chat() also cancels
+                # the pending task; this guard makes suppression deterministic
+                # regardless of cancel/fire timing.
+                logger.debug(
+                    "Skipping push for %s: chat archived (auto-archived run)", chat_id
+                )
+                return
             if (chat.last_read_at or "") >= (chat.last_activity_at or ""):
                 logger.debug(
                     "Skipping push for %s: already read in window", chat_id

@@ -123,6 +123,24 @@ def _env_overrides(base_url: str, api_key: str) -> dict[str, str]:
     }
 
 
+def _local_daemon_env_overrides(base_url: str, api_key: str) -> dict[str, str]:
+    """Env overrides for a *local* inference server (Ollama daemon).
+
+    The claude CLI prepends a changing attribution header to every request,
+    which invalidates a local server's KV cache and slows inference by up to
+    ~90% (Unsloth write-up: https://unsloth.ai/docs/basics/claude-code). Disable
+    that header plus telemetry / non-essential traffic on local-daemon routes
+    only. No effect on cloud relays (ollama.com, OpenRouter), where there is no
+    local KV cache to preserve.
+    """
+    return {
+        **_env_overrides(base_url, api_key),
+        "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+        "CLAUDE_CODE_ENABLE_TELEMETRY": "0",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    }
+
+
 def _tier_remap_env(
     settings: OllamaSettings,
     *,
@@ -181,7 +199,7 @@ def ollama_env_for_model(model: str, settings: OllamaSettings) -> dict[str, str]
         # model for the CLI's internal tier/control-plane slots so Task
         # subagents and auto-mode classifier calls stay on the daemon.
         return {
-            **_env_overrides(settings.local_url, "ollama"),
+            **_local_daemon_env_overrides(settings.local_url, "ollama"),
             **_tier_remap_env(
                 settings,
                 haiku_model=model,
@@ -217,7 +235,7 @@ def routine_env_for_model(model: str, settings: OllamaSettings) -> dict[str, str
     if not model or model in _ANTHROPIC_ALIASES or model.startswith("claude-"):
         return {}
     if is_local_ollama_model(model, settings):
-        return _env_overrides(settings.local_url, "ollama")
+        return _local_daemon_env_overrides(settings.local_url, "ollama")
     if _looks_like_ollama_id(model):
         return _env_overrides(settings.base_url, settings.api_key)
     return {}
