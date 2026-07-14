@@ -100,7 +100,9 @@ describe('LoginView setup wizard tests', () => {
     expect(wrapper.find('#setup-workspace-browse').exists()).toBe(true)
     // scratch mode hides the vault input behind the derived-path hint
     expect(wrapper.find('#setup-vault').exists()).toBe(false)
-    expect(wrapper.find('#setup-push').exists()).toBe(true)
+    // No notification-email field: Web Push works out of the box with a
+    // default VAPID subject, so setup never asks for a contact.
+    expect(wrapper.find('#setup-push').exists()).toBe(false)
     expect(wrapper.text()).toContain('ciao auth claude')
     expect(wrapper.text()).toContain('Keep the terminal running ciao run open while you finish this setup')
     expect(wrapper.text()).toContain('close the terminal and open Ciaobot.app')
@@ -192,7 +194,7 @@ describe('LoginView setup wizard tests', () => {
     expect((wrapper.find('#setup-workspace').element as HTMLInputElement).value).toBe('/Users/me/ciaobot')
   })
 
-  it('enables Finish without a push contact and wraps a plain email on submit', async () => {
+  it('finishes setup without collecting a notification email', async () => {
     mockApiGet.mockResolvedValue({
       configured: false,
       bootstrap: true,
@@ -209,63 +211,29 @@ describe('LoginView setup wizard tests', () => {
     })
 
     const wrapper = await mountLoginView()
+    // No push-contact field is shown anymore.
+    expect(wrapper.find('#setup-push').exists()).toBe(false)
+
     const submitBtn = wrapper.find('button[type="submit"]')
-    // push contact is optional: workspace & vault defaults + ready provider suffice
     expect(submitBtn.element.hasAttribute('disabled')).toBe(false)
 
-    // a plain email is accepted and wrapped into a mailto: URI on submit
-    const pushInput = wrapper.find('#setup-push')
-    await pushInput.setValue('owner@example.com')
-    await nextTick()
-
-    // submit the form
     mockApiPost.mockResolvedValue({ ok: true })
     await wrapper.find('form').trigger('submit.prevent')
     await flushPromises()
 
+    // Web Push uses a default VAPID subject server-side, so setup never sends
+    // a push_contact.
     expect(mockApiPost).toHaveBeenCalledWith('/api/setup/finish', {
       workspace: '~/ciaobot',
       workspace_name: 'personal',
-      push_contact: 'mailto:owner@example.com',
       port: 8443,
       python: undefined,
       auth_required: false,
       provider: 'claude',
       restart: true,
     })
+    const payload = mockApiPost.mock.calls[0][1]
+    expect(payload).not.toHaveProperty('push_contact')
     expect(wrapper.text()).toContain('restarting')
-    expect(wrapper.text()).toContain('keep that terminal open until it says setup is complete and Ciaobot is moving to the background service')
-    expect(wrapper.text()).toContain('close the terminal and open Ciaobot.app')
-  })
-
-  it('strips mailto: for display and submits an empty push contact untouched', async () => {
-    mockApiGet.mockResolvedValue({
-      configured: false,
-      bootstrap: true,
-      mode: 'bootstrap',
-      providers: {
-        claude: { name: 'claude', ok: true, auth: 'oauth', command: 'ciao auth claude', detail: 'Ready' }
-      }
-    })
-
-    const wrapper = await mountLoginView()
-
-    // pasting a mailto: URI shows as a plain email
-    const pushInput = wrapper.find('#setup-push')
-    await pushInput.setValue('mailto:owner@example.com')
-    await nextTick()
-    expect((pushInput.element as HTMLInputElement).value).toBe('owner@example.com')
-
-    // clearing it submits an empty contact (push disabled until Settings)
-    await pushInput.setValue('')
-    await nextTick()
-    mockApiPost.mockResolvedValue({ ok: true })
-    await wrapper.find('form').trigger('submit.prevent')
-    await flushPromises()
-
-    expect(mockApiPost).toHaveBeenCalledWith(
-      '/api/setup/finish',
-      expect.objectContaining({ push_contact: '' })
-    )
   })
 })

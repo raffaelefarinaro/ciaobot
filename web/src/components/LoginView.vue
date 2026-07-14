@@ -107,21 +107,6 @@
             one and can add more later in Settings → Workspaces.</span>
         </div>
 
-        <div class="form-group">
-          <label for="setup-push">Notification Email (Optional)</label>
-          <input
-            id="setup-push"
-            v-model="pushContact"
-            type="text"
-            inputmode="email"
-            autocomplete="email"
-            class="form-input"
-            placeholder="you@example.com"
-            :disabled="loading"
-          />
-          <span class="hint">Optional — enables push notifications. The Web Push standard requires an operator contact; nothing is ever emailed to you. You can set it later in Settings.</span>
-        </div>
-
         <div class="advanced-section">
           <button
             id="setup-advanced-toggle"
@@ -356,7 +341,6 @@ const isBootstrap = ref(false)
 const bootstrapLoading = ref(true)
 const setupStatus = ref<any>(null)
 const workspace = ref('~/ciaobot')
-const pushContact = ref('')
 const port = ref(8443)
 const python = ref('')
 const provider = ref('claude')
@@ -499,23 +483,6 @@ async function fetchSetupStatus() {
   }
 }
 
-// The field reads as a plain email input: show "you@example.com" even when a
-// mailto: URI is pasted in (the prefix is re-added on submit). Full mailto:/
-// https: URIs typed by power users stay valid either way.
-watch(pushContact, (value) => {
-  if (value.toLowerCase().startsWith('mailto:')) {
-    pushContact.value = value.slice('mailto:'.length)
-  }
-})
-
-// Web Push VAPID subjects are mailto:/https: URIs: wrap a plain email on
-// submit, pass URIs through, and send '' to leave push unconfigured.
-function normalizedPushContact(): string {
-  const value = pushContact.value.trim()
-  if (!value || /^(mailto:|https:)/i.test(value)) return value
-  return `mailto:${value}`
-}
-
 const canFinish = computed(() => {
   if (!workspace.value.trim()) {
     return false
@@ -550,7 +517,8 @@ async function doFinish() {
       // inspects the chosen folder — empty scaffolds a fresh vault at
       // memory-vault/, existing notes are adapted in place by the
       // onboarding agent.
-      push_contact: normalizedPushContact(),
+      // push_contact is intentionally omitted: Web Push works out of the box
+      // with a default VAPID subject; no email is collected during setup.
       port: Number(port.value),
       python: python.value || undefined,
       auth_required: authRequired.value,

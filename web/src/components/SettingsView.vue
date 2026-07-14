@@ -148,22 +148,22 @@
           <div v-if="needsIosInstall" class="hint hint--warn">
             On iOS, push notifications only work after you "Add to Home Screen" and open the app from there.
           </div>
-          <div v-else-if="isMacDesktop()" class="hint">
-            On macOS, notifications come from the menu bar app — not the browser.
-            Open the face icon → <strong>Advanced → Notifications</strong> to turn them on or off,
-            and allow <strong>Ciaobot</strong> in System Settings → Notifications.
-            Use <strong>Ciaobot</strong> from Applications for the UI; skip Chrome&rsquo;s &ldquo;Install app&rdquo;.
-          </div>
           <div v-else-if="permissionDenied" class="hint hint--warn">
-            Notifications are blocked at the OS level. Re-enable them in your phone's Settings &rarr; Notifications &rarr; Ciaobot.
+            Notifications are blocked at the OS level. Re-enable them in System Settings &rarr; Notifications &rarr; Ciaobot (or your browser).
           </div>
           <div v-else-if="!pushSupportedFlag" class="loading">
-            Push notifications are not supported in this browser.
+            Push notifications are not supported here. On macOS, install Ciaobot as an app
+            (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr; &ldquo;Add to Dock&rdquo;) and enable them from there.
           </div>
           <div v-else class="action-row action-row--compact">
             <button :class="pushEnabledFlag ? 'btn-secondary' : 'btn-primary'" @click="togglePush" :disabled="pushPending">
               {{ pushPending ? 'Working...' : (pushEnabledFlag ? 'Disable on this device' : 'Enable on this device') }}
             </button>
+          </div>
+          <div v-if="isMacDesktop() && !pushEnabledFlag" class="hint">
+            For notifications that show as <strong>Ciaobot</strong> and open the right chat, install Ciaobot as an app
+            (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr; &ldquo;Add to Dock&rdquo;), then enable them here.
+            Until then, the menu bar shows them.
           </div>
           <div v-if="pushError" class="action-result">{{ pushError }}</div>
         </div>

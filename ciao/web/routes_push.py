@@ -11,12 +11,23 @@ async def push_public_key(request: Request) -> JSONResponse:
     return JSONResponse({"public_key": pm.public_key})
 
 
+def _is_loopback(request: Request) -> bool:
+    """True when the request came from this machine (localhost).
+
+    Distinguishes a subscription created by the local browser/PWA from one on
+    a remote device (a phone reaching the server over LAN/tunnel), so the menu
+    bar only stands down for a subscription that actually covers this Mac.
+    """
+    host = (request.client.host if request.client else "") or ""
+    return host in ("127.0.0.1", "::1", "localhost")
+
+
 async def push_subscribe(request: Request) -> JSONResponse:
     pm = request.app.state.push_manager
     data = await request.json()
     sub = data.get("subscription") or data
     try:
-        pm.add(sub)
+        pm.add(sub, local=_is_loopback(request))
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     return JSONResponse({"ok": True, "count": pm.count()})
