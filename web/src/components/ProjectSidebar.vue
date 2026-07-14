@@ -24,8 +24,9 @@
           class="brand wordmark wordmark--sm"
           :class="{ 'brand--refreshing': refreshing }"
           @click="onBrandClick"
-          :title="refreshing ? 'Refreshing...' : 'Click to reload the latest app build'"
-        >{{ refreshing ? 'sync...' : 'ciaobot' }}</button>
+          :title="refreshing ? 'Reloading...' : 'Click to reload the latest app build'"
+          :aria-busy="refreshing"
+        ><span class="brand-label">{{ brandLabel }}</span></button>
         <div class="nav-links">
           <router-link
             to="/"
@@ -519,7 +520,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch } from 'vue'
+import { ref, reactive, computed, watch, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
@@ -580,6 +581,31 @@ const editingProject = ref<string | null>(null)
 const renamingChat = ref<string | null>(null)
 const renameValue = ref('')
 const refreshing = ref(false)
+const BRAND_TEXT = 'ciaobot'
+const PIXEL_CHARS = '█▓▒░▄▀▐▌▆▅▃▂▪▫◆●○·'
+const brandLabel = ref(BRAND_TEXT)
+let brandPixelTimer: ReturnType<typeof setInterval> | null = null
+
+function startBrandPixelAnimation() {
+  stopBrandPixelAnimation()
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  brandPixelTimer = setInterval(() => {
+    brandLabel.value = BRAND_TEXT
+      .split('')
+      .map((char) => (Math.random() < 0.18 ? char : PIXEL_CHARS[Math.floor(Math.random() * PIXEL_CHARS.length)]))
+      .join('')
+  }, 80)
+}
+
+function stopBrandPixelAnimation() {
+  if (brandPixelTimer !== null) {
+    clearInterval(brandPixelTimer)
+    brandPixelTimer = null
+  }
+  brandLabel.value = BRAND_TEXT
+}
+
+onBeforeUnmount(stopBrandPixelAnimation)
 
 // Destination projects for "Move to..." — same workspace as the chat,
 // excluding the chat's current project. Backend rejects cross-workspace moves.
@@ -666,6 +692,7 @@ async function doMoveChat(targetProjectId: string) {
 async function onBrandClick() {
   if (refreshing.value) return
   refreshing.value = true
+  startBrandPixelAnimation()
   try {
     // Force the service worker to update without unregistering it,
     // so push subscriptions survive across builds.
@@ -899,7 +926,30 @@ async function confirmDeleteChat(chatId: string) {
 }
 .brand:hover { opacity: 0.85; }
 .brand:active { opacity: 0.7; }
-.brand--refreshing { opacity: 0.6; }
+.brand-label {
+  display: inline-block;
+  min-width: 7ch;
+  text-align: left;
+}
+.brand--refreshing {
+  opacity: 1;
+  color: var(--accent);
+  pointer-events: none;
+}
+.brand--refreshing .brand-label {
+  animation: brand-pixel-jitter 0.12s steps(2, end) infinite;
+  text-shadow:
+    1px 0 color-mix(in srgb, var(--accent) 75%, transparent),
+    -1px 0 color-mix(in srgb, var(--accent2) 55%, transparent),
+    0 1px color-mix(in srgb, var(--fg) 35%, transparent);
+}
+@keyframes brand-pixel-jitter {
+  0%, 100% { transform: translate(0, 0); }
+  50% { transform: translate(1px, -1px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .brand--refreshing .brand-label { animation: none; }
+}
 
 /* Pulsing dot used inline next to project / chat names to signal activity.
    A breathing scale+opacity pulse reads as "alive" at a glance, unlike a
