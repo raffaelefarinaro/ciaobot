@@ -223,8 +223,21 @@
                 <svg v-if="copiedMessageKey === `user-${i}`" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
                 <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
               </button>
+              <button
+                type="button"
+                class="message-action-btn"
+                :class="{ 'message-action-btn--busy': speakLoadingKey === `user-${i}` }"
+                :title="speakingMessageKey === `user-${i}` ? 'Stop' : 'Read aloud'"
+                :aria-label="speakingMessageKey === `user-${i}` ? 'Stop reading' : 'Read message aloud'"
+                :disabled="speakLoadingKey !== null && speakLoadingKey !== `user-${i}`"
+                @click="speakMessage(item.msg.content, `user-${i}`)"
+              >
+                <svg v-if="speakingMessageKey === `user-${i}`" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+                <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+              </button>
             </div>
           </div>
+          <p v-if="speakError?.key === `user-${i}`" class="speak-error">{{ speakError.message }}</p>
         </div>
         <!-- Final assistant message -->
         <div v-else-if="item.kind === 'assistant'" class="message-wrap assistant" :class="{ 'actions-tapped': tappedMessageKey === `assistant-${i}` }">
