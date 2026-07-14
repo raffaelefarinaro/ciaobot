@@ -39,37 +39,71 @@ def test_send_with_empty_subject_skips_webpush_but_still_logs(tmp_path: Path) ->
     assert manager.count() == 1
 
 
-def test_local_delivery_suppresses_native_fallback(tmp_path: Path, monkeypatch) -> None:
-    """A successful push to a *local* subscription means this machine already
-    got the banner via the PWA, so nothing is logged for the menu bar."""
+def test_local_notification_always_uses_native_banner(tmp_path: Path, monkeypatch) -> None:
+    """The local machine's notification always goes through the menu bar's
+    native banner, never Web Push — the push service's 2xx cannot confirm the
+    browser displayed it, so relying on it silently loses notifications."""
     import pywebpush
 
-    monkeypatch.setattr(pywebpush, "webpush", lambda **kwargs: None)  # succeeds
+    endpoints: list[str] = []
+    monkeypatch.setattr(
+        pywebpush,
+        "webpush",
+        lambda **kwargs: endpoints.append(kwargs["subscription_info"]["endpoint"]),
+    )
     manager = PushManager(tmp_path, subject="mailto:ciaobot@localhost")
     manager.add({"endpoint": "https://push.example/local"}, local=True)
 
     manager.send({"title": "t", "body": "hi", "chat_id": "c1"})
 
-    assert not (tmp_path / "notifications.jsonl").exists()  # no native fallback
+    assert len(_read_log(tmp_path)) == 1  # native banner queued for the menu bar
+    assert endpoints == []  # local subscription is NOT pushed to
 
 
-def test_remote_only_subscription_still_logs_for_local_menu_bar(tmp_path: Path, monkeypatch) -> None:
-    """A subscription on another device (e.g. a phone) must NOT stop this Mac's
-    native banner — the log entry is still written."""
+def test_remote_subscription_is_pushed_and_local_still_logs(tmp_path: Path, monkeypatch) -> None:
+    """A subscription on another device (e.g. a phone) IS delivered via Web
+    Push, while this Mac still gets its native banner via the log."""
     import pywebpush
 
-    monkeypatch.setattr(pywebpush, "webpush", lambda **kwargs: None)  # succeeds
+    endpoints: list[str] = []
+    monkeypatch.setattr(
+        pywebpush,
+        "webpush",
+        lambda **kwargs: endpoints.append(kwargs["subscription_info"]["endpoint"]),
+    )
     manager = PushManager(tmp_path, subject="mailto:ciaobot@localhost")
     manager.add({"endpoint": "https://push.example/phone"}, local=False)
 
     manager.send({"title": "t", "body": "hi", "chat_id": "c1"})
 
-    assert len(_read_log(tmp_path)) == 1  # local machine still gets a fallback
+    assert len(_read_log(tmp_path)) == 1  # local machine still gets a banner
+    assert endpoints == ["https://push.example/phone"]  # remote device pushed
 
 
-def test_failed_local_push_falls_back_to_log(tmp_path: Path, monkeypatch) -> None:
-    """A local subscription that exists but whose delivery fails must not
-    suppress the native fallback — otherwise the notification is lost."""
+def test_send_test_pushes_only_to_local_subscriptions(tmp_path: Path, monkeypatch) -> None:
+    """``send_test`` verifies the local browser displays a push, so it targets
+    local subscriptions (and reports how many the push service accepted)."""
+    import pywebpush
+
+    endpoints: list[str] = []
+    monkeypatch.setattr(
+        pywebpush,
+        "webpush",
+        lambda **kwargs: endpoints.append(kwargs["subscription_info"]["endpoint"]),
+    )
+    manager = PushManager(tmp_path, subject="mailto:ciaobot@localhost")
+    manager.add({"endpoint": "https://push.example/local"}, local=True)
+    manager.add({"endpoint": "https://push.example/phone"}, local=False)
+
+    result = manager.send_test({"title": "t", "body": "hi", "chat_id": ""})
+
+    assert endpoints == ["https://push.example/local"]  # only the local sub
+    assert result == {"local_subscriptions": 1, "accepted": 1}
+
+
+def test_remote_push_failure_does_not_lose_local_notification(tmp_path: Path, monkeypatch) -> None:
+    """A remote push that fails must not affect the local native banner, and a
+    non-404 failure must not prune the subscription."""
     import pywebpush
 
     def boom(**kwargs):
@@ -77,11 +111,11 @@ def test_failed_local_push_falls_back_to_log(tmp_path: Path, monkeypatch) -> Non
 
     monkeypatch.setattr(pywebpush, "webpush", boom)
     manager = PushManager(tmp_path, subject="mailto:ciaobot@localhost")
-    manager.add({"endpoint": "https://push.example/local"}, local=True)
+    manager.add({"endpoint": "https://push.example/phone"}, local=False)
 
     manager.send({"title": "t", "body": "hi", "chat_id": "c1"})
 
-    assert len(_read_log(tmp_path)) == 1  # failed delivery → native fallback
+    assert len(_read_log(tmp_path)) == 1  # local banner unaffected
     assert manager.count() == 1  # non-404 failure does not prune the sub
 
 
