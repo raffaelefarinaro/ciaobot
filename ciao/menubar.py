@@ -127,7 +127,7 @@ def server_recovery_label(status: ServerStatus) -> str:
 
 
 def open_url(workspace: Path, port: int) -> str:
-    """URL the menu bar opens; reuses the Ciaobot.app setup token when present."""
+    """URL the menu bar opens; reuses the launcher setup token when present."""
 
     token = ""
     token_path = workspace / ".runtime" / "setup-token"
@@ -140,9 +140,8 @@ def open_url(workspace: Path, port: int) -> str:
 
 
 # Bundle IDs of the native launcher this project installs itself (see
-# cli.py's _write_app_shortcut / _OUR_BUNDLE_IDS). A browser-installed PWA can
-# share the launcher's "Ciaobot.app" name, so browser_pwa_duplicate_paths()
-# excludes these IDs to avoid removing our own shell-script wrapper.
+# cli.py's _write_app_shortcut / _OUR_BUNDLE_IDS). Legacy launchers shared the
+# browser PWA's "Ciaobot.app" name, so duplicate cleanup excludes these IDs.
 _OUR_LAUNCHER_BUNDLE_IDS = frozenset({"local.ciao.app", "local.ciaobot.app"})
 
 
@@ -153,47 +152,6 @@ def _bundle_identifier(app_bundle: Path) -> str:
     except (OSError, ValueError):
         return ""
     return str(plist.get("CFBundleIdentifier") or "")
-
-
-_BROWSER_APP_MODE_CANDIDATES = (
-    "Google Chrome",
-    "Google Chrome Canary",
-    "Chromium",
-    "Microsoft Edge",
-    "Brave Browser",
-)
-
-
-def _installed_browser_app_names() -> list[str]:
-    applications = Path("/Applications")
-    return [
-        name
-        for name in _BROWSER_APP_MODE_CANDIDATES
-        if (applications / f"{name}.app").is_dir()
-    ]
-
-
-def browser_app_mode_command(url: str) -> list[str] | None:
-    """argv to open ``url`` in a chrome-less browser app-mode window.
-
-    Invoke the browser binary directly rather than ``open -a NAME --args
-    --app=URL``: ``open`` drops ``--args`` when the browser is already running,
-    so it just focuses the browser and never opens the window (the reported
-    "clicking Open Ciaobot only opens Chrome" bug). Running the binary opens
-    the app window whether or not the browser is already running.
-
-    The caller MUST launch this detached (Popen) — on a cold start the binary
-    stays in the foreground as the browser's main process.
-    """
-
-    if sys.platform != "darwin":
-        return None
-    names = _installed_browser_app_names()
-    if not names:
-        return None
-    name = names[0]
-    binary = Path("/Applications") / f"{name}.app" / "Contents" / "MacOS" / name
-    return [str(binary), f"--app={url}"]
 
 
 def browser_pwa_duplicate_paths(app_name: str = "Ciaobot") -> list[Path]:
@@ -246,7 +204,7 @@ def unregister_app_bundle(app_root: Path) -> None:
 
 
 def remove_browser_pwa_duplicates(app_name: str = "Ciaobot") -> list[Path]:
-    """Remove duplicate browser PWAs so only the native ``Ciaobot.app`` remains."""
+    """Remove browser PWAs matching ``app_name`` without touching our launcher."""
 
     removed: list[Path] = []
     for path in browser_pwa_duplicate_paths(app_name):
@@ -272,24 +230,23 @@ def _installed_ciaobot_pwa() -> Path | None:
 
 
 def open_command(url: str) -> list[str]:
-    """``open`` argv for the Ciaobot UI in an app-like window.
+    """``open`` argv for the Ciaobot UI.
 
     Prefer an installed Ciaobot PWA: its app shim is single-instance, so
-    ``open``-ing it *focuses the existing window* instead of spawning a new one.
-    That is the fix for "clicking Open Ciaobot opens a new window every time" —
-    ``--app=<url>`` on the raw browser binary always makes a fresh window, even
-    when the PWA is installed. Deep-link navigation (notification → chat) is
-    handled in-app by ``notify_open_chat`` over the WebSocket, so the URL is not
-    needed here while the PWA is running. Fall back to a raw app-mode window,
-    then the default browser, when no PWA is installed.
+    ``open``-ing it *focuses the existing window* instead of spawning a new one
+    (the "Open Ciaobot opens a new window every click" fix). Deep-link
+    navigation (notification → chat) is handled in-app by ``notify_open_chat``
+    over the WebSocket, so the URL is not needed here while the PWA runs.
+
+    With no PWA installed, open the URL in the default browser as a normal tab.
+    We deliberately do NOT open a chrome-less ``--app`` window: it read as a
+    separate app (own Dock entry) and lingered confusingly after the menu bar
+    was quit. Installing the PWA is the path to a real app window.
     """
 
     pwa = _installed_ciaobot_pwa()
     if pwa is not None:
         return ["open", str(pwa)]
-    app_mode = browser_app_mode_command(url)
-    if app_mode is not None:
-        return app_mode
     return ["open", url]
 
 
@@ -440,7 +397,7 @@ def stop_server_command(uid: int | None = None) -> list[str]:
 
     The server plist sets KeepAlive=true, so a plain kill would be relaunched
     immediately; `bootout` removes it from the launchd domain so it stays
-    down. Ciaobot.app reloads it (launchctl load -w) on the next launch.
+    down. Ciaobot Server.app reloads it (launchctl load -w) on the next launch.
     """
 
     resolved = os.getuid() if uid is None else uid
@@ -474,10 +431,10 @@ def _menubar_app_candidates() -> list[Path]:
 
     home_apps = Path.home() / "Applications"
     system_apps = Path("/Applications")
-    names = ("Ciaobot.app",)
+    names = ("Ciaobot Server.app", "Ciaobot.app")
     candidates: list[Path] = []
-    for root in (system_apps, home_apps):
-        for name in names:
+    for name in names:
+        for root in (system_apps, home_apps):
             candidate = root / name
             if candidate.is_dir():
                 candidates.append(candidate)
@@ -487,7 +444,7 @@ def _menubar_app_candidates() -> list[Path]:
 def _ensure_notification_bundle() -> None:
     """Make Notification Center attribute alerts to Ciaobot, not Python.
 
-    launchd starts the menu bar via ``Ciaobot.app``'s ``CiaobotMenuBar``
+    launchd starts the menu bar via ``Ciaobot Server.app``'s ``CiaobotMenuBar``
     helper, but that helper ``exec``s the real (Homebrew) ``python``, whose
     Mach-O executable lives outside the bundle — so the process's *main*
     bundle is ``Python.app`` and Notification Center shows the Python rocket.
@@ -495,7 +452,7 @@ def _ensure_notification_bundle() -> None:
     NSUserNotification (what rumps posts through) attributes an alert to the
     app whose bundle identifier is in the main bundle's info dictionary. So we
     overwrite that in-memory identifier with Ciaobot's: Notification Center
-    then resolves it to the installed ``Ciaobot.app`` and uses its name and
+    then resolves it to the installed launcher bundle and uses its name and
     icon. Loading the bundle as well makes its resources available. This must
     run before the first notification is posted (it does — from
     ``run_menubar`` before the rumps app starts).
@@ -523,11 +480,11 @@ def _ensure_notification_bundle() -> None:
         info = main.localizedInfoDictionary() or main.infoDictionary()
         if info is not None:
             info["CFBundleIdentifier"] = target_id
-            info["CFBundleName"] = "Ciaobot"
+            info["CFBundleName"] = "Ciaobot Server"
     except Exception:
         pass
 
-    # Load Ciaobot.app so its icon resource is registered for the alert.
+    # Load the launcher bundle so its icon resource is registered for the alert.
     if app_root is not None:
         try:
             bundle = NSBundle.bundleWithPath_(str(app_root))
@@ -1043,7 +1000,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                         "Wait for the work to finish, then restart the server."
                     ),
                     ok="OK",
-                    icon_path=icon_path("Ciaobot.icns"),
+                    icon_path=icon_path("CiaobotServer.icns"),
                 )
                 return
             if not rumps.alert(
@@ -1051,7 +1008,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                 message="No active chats are running. Restart the local server now?",
                 ok="Restart",
                 cancel="Cancel",
-                icon_path=icon_path("Ciaobot.icns"),
+                icon_path=icon_path("CiaobotServer.icns"),
             ):
                 return
         try:
@@ -1067,7 +1024,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                 title="Could not start server",
                 message=detail or "launchctl did not accept the request.",
                 ok="OK",
-                icon_path=icon_path("Ciaobot.icns"),
+                icon_path=icon_path("CiaobotServer.icns"),
             )
         refresh()
 
@@ -1090,7 +1047,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                     "Run setup again to recreate them."
                 ),
                 ok="OK",
-                icon_path=icon_path("Ciaobot.icns"),
+                icon_path=icon_path("CiaobotServer.icns"),
             )
             refresh()
             return
@@ -1101,7 +1058,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                 title="Could not update login item",
                 message=error or "launchctl did not accept the change.",
                 ok="OK",
-                icon_path=icon_path("Ciaobot.icns"),
+                icon_path=icon_path("CiaobotServer.icns"),
             )
         refresh()
 
@@ -1118,7 +1075,7 @@ def run_menubar(workspace: Path, port: int) -> int:
             ),
             ok="Update",
             cancel="Cancel",
-            icon_path=icon_path("Ciaobot.icns"),
+            icon_path=icon_path("CiaobotServer.icns"),
         ):
             return
 
@@ -1145,7 +1102,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                                 "Ciaobot updated",
                                 "",
                                 f"Version {latest} is installed.",
-                                icon=icon_path("Ciaobot.icns"),
+                                icon=icon_path("CiaobotServer.icns"),
                             )
                         except Exception:
                             pass
@@ -1179,7 +1136,7 @@ def run_menubar(workspace: Path, port: int) -> int:
             ),
             ok="Quit",
             cancel="Cancel",
-            icon_path=icon_path("Ciaobot.icns"),
+            icon_path=icon_path("CiaobotServer.icns"),
         ):
             return
         subprocess.run(stop_server_command(), check=False)
@@ -1343,7 +1300,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                         "",
                         str(notification.get("body") or "New notification"),
                         data=payload,
-                        icon=icon_path("Ciaobot.icns"),
+                        icon=icon_path("CiaobotServer.icns"),
                     )
                 except Exception:
                     # A notification failure should not prevent the normal menu

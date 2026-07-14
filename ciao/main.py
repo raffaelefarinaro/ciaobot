@@ -227,6 +227,21 @@ async def _async_main() -> int:
     _ensure_homebrew_on_path()
     os.environ.setdefault("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "file")
     config = CiaoConfig.from_env()
+
+    from ciao.instance_lock import WorkspaceInstanceLock
+
+    lock = WorkspaceInstanceLock(
+        config.state_path.parent,
+        workspace_root=config.workspace_root,
+        port=config.pwa_port,
+    )
+    with lock:
+        return await _run_server_locked(config)
+
+
+async def _run_server_locked(config: CiaoConfig) -> int:
+    """Server implementation; caller owns the workspace instance lock."""
+
     setup_error_logging(config.workspace_root)
 
     # Discover models installed on the local Ollama daemon (best-effort,
@@ -806,7 +821,7 @@ async def _async_main() -> int:
     asyncio.create_task(_heal_stale_install())
 
     # ── App bundle refresh on upgrade ────────────────────────
-    # `brew upgrade` swaps the Python package but doesn't rewrite Ciaobot.app,
+    # `brew upgrade` swaps the Python package but doesn't rewrite Ciaobot Server.app,
     # so its double-click launcher and menu-bar helper keep running the old
     # version's scripts until `ciao setup` is re-run by hand. When restarted
     # onto a new version (by the stale-install self-heal above), regenerate the
@@ -856,7 +871,14 @@ async def _async_main() -> int:
 def main() -> None:
     """CLI entrypoint."""
     logging.basicConfig(level=logging.INFO)
-    raise SystemExit(asyncio.run(_async_main()))
+    from ciao.instance_lock import WorkspaceAlreadyRunningError
+
+    try:
+        code = asyncio.run(_async_main())
+    except WorkspaceAlreadyRunningError as exc:
+        print(f"Ciaobot did not start: {exc}", file=sys.stderr)
+        code = 2
+    raise SystemExit(code)
 
 
 if __name__ == "__main__":

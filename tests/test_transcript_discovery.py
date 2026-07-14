@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import yaml
 from pathlib import Path
 import pytest
 
 from ciao.config import CiaoConfig
+from ciao.models import ChatContext
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager, ChatInfo
@@ -154,6 +156,191 @@ def test_discover_archived_chats_happy_path(tmp_path: Path) -> None:
     assert c3.title == "Work General Chat Title"
     assert c3.project_id == work_gen.project_id
     assert c3.archived is True
+
+
+def test_archived_chat_project_slug_resolves_to_display_name(tmp_path: Path) -> None:
+    folder = tmp_path / "memory-vault" / "work" / "projects" / "active" / "rossmann-mvp"
+    folder.mkdir(parents=True)
+    (folder / "README.md").write_text(
+        "---\ntitle: Rossmann MVP\ndescription: Shelf recognition\n---\n",
+        encoding="utf-8",
+    )
+    pcm = _make_manager(tmp_path)
+    project = next(
+        item for item in pcm.list_projects("work")
+        if item.vault_folder == "rossmann-mvp"
+    )
+
+    provider_dir = (
+        tmp_path / "memory-vault" / "Logs" / "Chats" / "chat-rossmann" / "claude"
+    )
+    provider_dir.mkdir(parents=True)
+    (provider_dir / "2026-07-14T08-49-56Z-session.md").write_text(
+        "---\n"
+        "provider: claude\n"
+        "context: Rossmann setup\n"
+        "selected_model: sonnet\n"
+        "session_id: session\n"
+        "started: 2026-07-14T08:49:56Z\n"
+        "ended: 2026-07-14T09:10:00Z\n"
+        "---\n\n"
+        "## Turn 1\n\n"
+        "### User\n\n"
+        "```text\n"
+        "[CIAO_CONTEXT_BEGIN]\n"
+        "[CONTEXT: work -- Workspace]\n"
+        '[Project: "rossmann-mvp"]\n'
+        "[CIAO_CONTEXT_END]\n\n"
+        "Continue the shelf recognition spec.\n"
+        "```\n",
+        encoding="utf-8",
+    )
+
+    pcm.list_projects()
+    recovered = pcm.get_chat("chat-rossmann")
+    assert recovered is not None
+    assert recovered.archived is True
+    assert recovered.project_id == project.project_id
+
+
+def test_recovers_orphaned_active_chat_with_surviving_provider_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = tmp_path / "memory-vault" / "work" / "projects" / "active" / "rossmann-mvp"
+    folder.mkdir(parents=True)
+    (folder / "README.md").write_text(
+        "---\ntitle: Rossmann MVP\ndescription: Shelf recognition\n---\n",
+        encoding="utf-8",
+    )
+    _make_manager(tmp_path)
+
+    runtime = tmp_path / ".runtime"
+    chat_id = "chat-orphaned"
+    session_id = "69382990-c198-4336-b709-67a7ff05a262"
+    transcript_dir = runtime / "transcripts" / chat_id
+    transcript_dir.mkdir(parents=True)
+    (transcript_dir / "claude.json").write_text(
+        json.dumps(
+            {
+                "provider": "claude",
+                "started_at": "2026-07-14T10:00:00Z",
+                "updated_at": "2026-07-14T10:05:00Z",
+                "selected_model": "sonnet",
+                "session_id": session_id,
+                "context_key": chat_id,
+                "context_label": "Continue Rossmann work",
+                "turns": [
+                    {
+                        "timestamp": "2026-07-14T10:00:00Z",
+                        "mode": "auto",
+                        "prompt": (
+                            "[CIAO_CONTEXT_BEGIN]\n"
+                            "[CONTEXT: work -- Workspace]\n"
+                            '[Project: "rossmann-mvp"]\n'
+                            "[CIAO_CONTEXT_END]\n\nContinue the spec."
+                        ),
+                        "response": "Continuing.",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = StateStore(runtime / "state.json", tmp_path, runtime / "media")
+    state.update_session(session_id, ChatContext.for_web(chat_id))
+    provider_sessions = tmp_path / "provider-sessions"
+    provider_sessions.mkdir()
+    (provider_sessions / f"{session_id}.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "ciao.web.project_chats._claude_projects_dir",
+        lambda _workspace: provider_sessions,
+    )
+
+    recovered_manager = _make_manager(tmp_path)
+    recovered = recovered_manager.get_chat(chat_id)
+    assert recovered is not None
+    assert recovered.archived is False
+    assert recovered.title == "Continue Rossmann work"
+    project = next(
+        item for item in recovered_manager.list_projects("work")
+        if item.vault_folder == "rossmann-mvp"
+    )
+    assert recovered.project_id == project.project_id
+    assert recovered.user_turn_count == 1
+
+
+def test_recovers_non_claude_orphan_when_audit_proves_it_was_active(
+    tmp_path: Path,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("Audited Project", workspace="work")
+    chat = pcm.create_chat(
+        project.project_id,
+        title="Audited Codex chat",
+        provider="codex",
+        model="gpt-5.4",
+    )
+    transcript_path = pcm._transcripts.current_path(
+        ChatContext.for_web(chat.chat_id), "codex"
+    )
+    transcript_path.parent.mkdir(parents=True, exist_ok=True)
+    transcript_path.write_text(
+        json.dumps(
+            {
+                "provider": "codex",
+                "started_at": "2026-07-14T11:00:00Z",
+                "updated_at": "2026-07-14T11:05:00Z",
+                "selected_model": "gpt-5.4",
+                "session_id": "thread-123",
+                "context_key": chat.chat_id,
+                "context_label": chat.title,
+                "turns": [
+                    {
+                        "mode": "auto",
+                        "prompt": (
+                            "[CIAO_CONTEXT_BEGIN]\n"
+                            "[CONTEXT: work -- Workspace]\n"
+                            '[Project: "Audited Project"]\n'
+                            "[CIAO_CONTEXT_END]\n\nContinue."
+                        ),
+                        "response": "Done.",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    registry_path = tmp_path / ".runtime" / "web_projects.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry["chats"].pop(chat.chat_id)
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
+
+    restarted = _make_manager(tmp_path)
+    recovered = restarted.get_chat(chat.chat_id)
+    assert recovered is not None
+    assert recovered.provider == "codex"
+    assert recovered.project_id == project.project_id
+
+
+def test_explicit_delete_removes_recovery_signals(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("Disposable", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="Delete me")
+    ctx = ChatContext.for_web(chat.chat_id)
+    transcript_path = pcm._transcripts.current_path(ctx, chat.provider)
+    transcript_path.parent.mkdir(parents=True, exist_ok=True)
+    transcript_path.write_text('{"turns": [{"prompt": "hello"}]}', encoding="utf-8")
+    pcm._state.update_session("session-to-delete", ctx)
+
+    assert pcm.delete_chat(chat.chat_id) is True
+    assert not transcript_path.exists()
+    assert pcm._state.peek_context(ctx) is None
+    assert pcm._state.peek_session_id(ctx) == ""
+    assert pcm._audited_chat_status(chat.chat_id) == "deleted"
+
+    restarted = _make_manager(tmp_path)
+    assert restarted.get_chat(chat.chat_id) is None
 
 
 def test_discover_archived_chats_pruning(tmp_path: Path) -> None:

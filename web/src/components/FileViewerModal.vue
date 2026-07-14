@@ -239,12 +239,28 @@
                 class="fv-meta-row fv-meta-links"
               >
                 <span class="fv-meta-links-label">{{ listExtra.key }}</span>
-                <span v-for="item in listExtra.items" :key="item" class="fv-meta-link">{{ item }}</span>
+                <template v-for="(item, i) in listExtra.items" :key="i">
+                  <a
+                    v-if="item.path"
+                    class="fv-meta-link file-link"
+                    href="#"
+                    @click.prevent="openRelated(item.path)"
+                  >{{ item.label }}</a>
+                  <span v-else class="fv-meta-link">{{ item.label }}</span>
+                </template>
               </div>
               <dl v-if="fmExtraEntries.length" class="fv-meta-extra">
                 <template v-for="entry in fmExtraEntries" :key="entry.key">
                   <dt>{{ entry.key }}</dt>
-                  <dd>{{ entry.value }}</dd>
+                  <dd>
+                    <a
+                      v-if="isUrl(entry.value)"
+                      :href="entry.value"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >{{ entry.value }}</a>
+                    <template v-else>{{ entry.value }}</template>
+                  </dd>
                 </template>
               </dl>
             </div>
@@ -396,6 +412,7 @@ import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
 import { parseFrontmatter } from '../lib/markdownFrontmatter'
 import { renderFileMarkdown } from '../lib/safeMarkdown'
+import { buildMarkdownIndex, resolveWikilinkTarget } from '../lib/wikilinks'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { createTerminalDiffLines, terminalDiffPrefix, type TerminalDiffKind } from '../lib/terminalDiff'
 const ExcalidrawViewer = defineAsyncComponent(() => import('./ExcalidrawViewer.vue'))
@@ -479,14 +496,45 @@ const fmProse = computed(() => {
   return ''
 })
 
+// `related`/`links` frontmatter items are [[wikilink]] references to other
+// vault notes — resolve them to file paths so the pills are clickable (same
+// resolution as body wikilinks). `aliases` are alternative names for THIS
+// note, not links, so they stay plain text.
+const _LINK_LIST_KEYS = new Set(['related', 'links'])
+const _wikiIndex = computed(() => buildMarkdownIndex(store.markdownPaths || []))
+const _wikiPathSet = computed(() => new Set(store.markdownPaths || []))
+
+function resolveListItem(raw: string): { label: string; path: string | null } {
+  const inner = raw.replace(/^\[\[(.+)\]\]$/, '$1').trim()
+  const [ref, alias] = inner.split('|')
+  const label = (alias ?? ref).trim()
+  const path = ref.trim()
+    ? resolveWikilinkTarget(ref.trim(), store.path, _wikiIndex.value, _wikiPathSet.value)
+    : null
+  return { label, path }
+}
+
 const fmListExtras = computed(() => {
-  const out: { key: string; items: string[] }[] = []
+  const out: { key: string; items: { label: string; path: string | null }[] }[] = []
   for (const key of ['aliases', 'related', 'links']) {
     const items = fmList(key)
-    if (items.length) out.push({ key, items })
+    if (!items.length) continue
+    const resolved = _LINK_LIST_KEYS.has(key)
+      ? items.map(resolveListItem)
+      : items.map((raw) => ({ label: raw, path: null }))
+    out.push({ key, items: resolved })
   }
   return out
 })
+
+function openRelated(path: string): void {
+  const cid = store.chatId || ''
+  if (/\.(png|jpe?g|gif|webp|svg|avif|bmp|ico)$/i.test(path)) {
+    void store.openImage(path, cid)
+  } else {
+    void store.open(path, null, cid)
+  }
+}
 
 const fmExtraEntries = computed(() => {
   const fm = frontmatter.value
@@ -512,6 +560,12 @@ function fmList(key: string): string[] {
   const v = frontmatter.value?.[key]
   if (v == null) return []
   return Array.isArray(v) ? v : [String(v)]
+}
+// A frontmatter value that is a bare http(s) URL (e.g. `url:`) renders as a
+// clickable link rather than plain text. Only http/https so the href can't be
+// a javascript:/data: scheme.
+function isUrl(value: string): boolean {
+  return /^https?:\/\/\S+$/.test(value.trim())
 }
 // Keep `fmTitle` in scope (read by linters as referenced for completeness
 // even though the chip itself uses fmName / basename for the heading).

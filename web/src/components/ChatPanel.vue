@@ -2943,6 +2943,8 @@ function insertImageRef(n: number) {
    flex-end so short chats sit above the composer without breaking scroll. */
 .messages {
   flex: 1;
+  display: flex;
+  flex-direction: column;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
@@ -2954,8 +2956,12 @@ function insertImageRef(n: number) {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  min-height: 100%;
-  justify-content: flex-end;
+  /* Pin the transcript to the bottom when it's shorter than the viewport, but
+     collapse to 0 and scroll normally when it overflows. `margin-top: auto`
+     is resolution-independent — unlike `min-height: 100%`, which resolved
+     against `.messages` (no explicit height) to 0 in some engines and left
+     short/streaming chats stuck at the top with dead space below. */
+  margin-top: auto;
 }
 
 .message-wrap {

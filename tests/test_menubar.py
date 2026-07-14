@@ -112,7 +112,6 @@ def test_server_recovery_label_matches_reachability() -> None:
 
 
 def test_open_url_uses_setup_token(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(menubar, "_installed_browser_app_names", lambda: [])
     monkeypatch.setattr(menubar, "_installed_ciaobot_pwa", lambda: None)
     token_path = tmp_path / ".runtime" / "setup-token"
     token_path.parent.mkdir(parents=True)
@@ -128,7 +127,6 @@ def test_open_url_uses_setup_token(tmp_path: Path, monkeypatch) -> None:
 def test_open_url_without_token_falls_back_to_plain_url(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setattr(menubar, "_installed_browser_app_names", lambda: [])
     monkeypatch.setattr(menubar, "_installed_ciaobot_pwa", lambda: None)
 
     url = menubar.open_url(tmp_path, 8443)
@@ -138,28 +136,23 @@ def test_open_url_without_token_falls_back_to_plain_url(
     ]
 
 
-def test_open_command_uses_browser_binary_for_app_mode(monkeypatch) -> None:
-    # Invoke the browser binary directly, NOT `open -a ... --args --app=`:
-    # `open` drops the args when the browser is already running, so the app
-    # window never opens (the "Open Ciaobot only focuses Chrome" bug).
+def test_open_command_without_pwa_opens_plain_url(monkeypatch) -> None:
+    # With no installed PWA, open the URL as a normal browser tab — not a
+    # chrome-less --app window (which read as a separate app and lingered
+    # after the menu bar was quit).
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(menubar, "_installed_ciaobot_pwa", lambda: None)
-    monkeypatch.setattr(menubar, "_installed_browser_app_names", lambda: ["Google Chrome"])
 
-    assert menubar.open_command("http://localhost:8443/") == [
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "--app=http://localhost:8443/",
-    ]
+    assert menubar.open_command("http://localhost:8443/") == ["open", "http://localhost:8443/"]
 
 
 def test_open_command_prefers_installed_pwa(tmp_path: Path, monkeypatch) -> None:
     # An installed PWA app shim is single-instance: opening it focuses the
     # existing window instead of spawning a new one (the "Open Ciaobot opens a
-    # new window every click" bug). It wins over the raw-browser app-mode path.
+    # new window every click" fix).
     monkeypatch.setattr(sys, "platform", "darwin")
     pwa = tmp_path / "Chrome Apps.localized" / "Ciaobot.app"
     monkeypatch.setattr(menubar, "_installed_ciaobot_pwa", lambda: pwa)
-    monkeypatch.setattr(menubar, "_installed_browser_app_names", lambda: ["Google Chrome"])
 
     assert menubar.open_command("http://localhost:8443/chat/abc") == ["open", str(pwa)]
 
@@ -192,7 +185,7 @@ def test_remove_browser_pwa_duplicates_skips_native_launcher(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr(menubar.Path, "home", lambda: tmp_path)
-    native = tmp_path / "Applications" / "Ciaobot.app"
+    native = tmp_path / "Applications" / "Ciaobot Server.app"
     _write_bundle(native, bundle_id="local.ciaobot.app")
     duplicate = tmp_path / "Applications" / "Chrome Apps.localized" / "Ciaobot.app"
     _write_bundle(duplicate, bundle_id="org.chromium.Chromium.app.abc123")
@@ -357,7 +350,7 @@ def test_icon_paths_resolve_to_packaged_faces() -> None:
     # ciao.stock/deploy (never in web/static, which the PWA build empties).
     assert Path(menubar.icon_path("face_template.png")).is_file()
     assert Path(menubar.icon_path("face_scared_template.png")).is_file()
-    assert Path(menubar.icon_path("Ciaobot.icns")).is_file()
+    assert Path(menubar.icon_path("CiaobotServer.icns")).is_file()
 
 
 def test_menubar_template_icons_are_packaged() -> None:

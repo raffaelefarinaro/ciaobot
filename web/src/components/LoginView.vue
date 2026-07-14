@@ -17,7 +17,7 @@
           <span class="banner-meta">// ciaobot is loading config ...</span>
         </p>
         <p class="line line--sys">
-          Ciaobot is finishing setup. If you started it with ciao run, keep that terminal open until it says setup is complete and Ciaobot is moving to the background service. Then close the terminal and open Ciaobot.app.
+          Ciaobot is finishing setup. If you started it with ciao run, keep that terminal open until it says setup is complete and Ciaobot is moving to the background service. Then close the terminal and open Ciaobot Server.app.
         </p>
         <div class="spinner-container">
           <span class="caret"></span>
@@ -34,7 +34,7 @@
         <section class="setup-run-note" aria-label="First launch instructions">
           <span class="run-note-kicker">First launch from Terminal</span>
           <p>
-            Keep the terminal running ciao run open while you finish this setup. When setup completes, Ciaobot moves to the background service, then you can close the terminal and open Ciaobot.app.
+            Keep the terminal running ciao run open while you finish this setup. When setup completes, Ciaobot moves to the background service, then you can close the terminal and open Ciaobot Server.app.
           </p>
         </section>
 

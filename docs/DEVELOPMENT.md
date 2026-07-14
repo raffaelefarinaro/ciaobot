@@ -12,7 +12,7 @@ ciao setup --workspace /tmp/ciao-workspace
 ciao run
 ```
 
-`ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies the editable `CLAUDE.md` workspace guide, links `AGENTS.md` to that same guide for Codex, copies `CIAO_CUSTOMIZATION.md`, renders the server and menu bar plists under `~/Library/LaunchAgents/`, and creates `~/Applications/Ciaobot.app`, which opens the local PWA. Existing custom `AGENTS.md` files are preserved. By default setup does not load launchd; add `--load-launchd` when you want it to run `launchctl`.
+`ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies the editable `CLAUDE.md` workspace guide, links `AGENTS.md` to that same guide for Codex, copies `CIAO_CUSTOMIZATION.md`, renders the server and menu bar plists under `~/Library/LaunchAgents/`, and creates `~/Applications/Ciaobot Server.app`, which starts the local service when needed and opens the `Ciaobot` PWA. Existing custom `AGENTS.md` files are preserved. By default setup does not load launchd; add `--load-launchd` when you want it to run `launchctl`.
 
 Common package CLI entry points:
 
@@ -103,6 +103,7 @@ ciao dev
 - Frontend: `http://localhost:5173`
 - Dev backend: `http://127.0.0.1:8543`
 - `ciao dev` intentionally avoids `localhost:8443` because editor/webview proxy processes can hijack that port and serve stale UI.
+- A development backend refuses to start when another Ciaobot backend already owns the same runtime directory. Stop the launchd service first, or use a separate `CIAO_RUNTIME_ROOT`; changing only the port is not sufficient because both servers would otherwise mutate the same project/chat registry.
 
 ## Testing
 

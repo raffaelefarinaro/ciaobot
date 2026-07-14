@@ -52,6 +52,25 @@ class StateStore:
             self.save()
         return self._contexts[key]
 
+    def peek_context(self, ctx: ChatContext) -> ContextState | None:
+        """Return existing context state without creating or persisting it."""
+
+        return self._contexts.get(ctx.key)
+
+    def peek_session_id(self, ctx: ChatContext) -> str:
+        """Return a saved session id without manufacturing a missing context."""
+
+        state = self.peek_context(ctx)
+        return state.session.session_id if state is not None else ""
+
+    def delete_context(self, ctx: ChatContext) -> bool:
+        """Remove persisted state for a conversation that was explicitly deleted."""
+
+        if self._contexts.pop(ctx.key, None) is None:
+            return False
+        self.save()
+        return True
+
     # ── Per-context methods ───────────────────────────────────────────────
 
     def set_active_model(self, model: str, ctx: ChatContext) -> None:

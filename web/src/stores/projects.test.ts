@@ -90,6 +90,63 @@ describe('streaming started reconnect guard', () => {
   })
 })
 
+describe('per-chat WS auto-reconnect', () => {
+  test('reconnects the active chat after an unexpected drop', async () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'c-drop'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    expect(fakeSockets.length).toBe(1)
+
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close() // simulate an unexpected server-side close
+      expect(fakeSockets.length).toBe(1) // reconnect is scheduled, not immediate
+      await vi.advanceTimersByTimeAsync(1200) // > 1s backoff
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(fakeSockets.length).toBe(2) // fresh socket opened (resync + reconnect)
+  })
+
+  test('does not reconnect after an intentional disconnect', async () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'c-intentional'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+
+    vi.useFakeTimers()
+    try {
+      store.disconnectWs(chatId) // e.g. switching chats
+      await vi.advanceTimersByTimeAsync(2000)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(fakeSockets.length).toBe(1) // no auto-reconnect
+  })
+
+  test('does not reconnect a chat the user is not viewing', async () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    store.activeChatId = 'other'
+    store.connectWs('c-background')
+
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close()
+      await vi.advanceTimersByTimeAsync(2000)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(fakeSockets.length).toBe(1) // background chat's socket stays closed
+  })
+})
+
 describe('queued message replay handling', () => {
   test('clears local queued chips when server history contains the flushed user turn', async () => {
     const store = useProjectStore()

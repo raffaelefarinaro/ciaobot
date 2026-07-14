@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Ciaobot Server</title>
+  <defs>
+    <clipPath id="tile">
+      <rect x="64" y="64" width="896" height="896" rx="210" />
+    </clipPath>
+  </defs>
+  <g clip-path="url(#tile)">
+    <rect x="64" y="64" width="896" height="896" fill="#1a1a2e" />
+    <path d="M64 720H960V960H64Z" fill="#1f2240" />
+    <path d="M64 64H960V80H64Z" fill="#2e3258" />
+  </g>
+  <image
+    href="../../web/static/icons/icon-512.png"
+    x="104"
+    y="112"
+    width="560"
+    height="560"
+    preserveAspectRatio="xMidYMid meet"
+    style="image-rendering:pixelated"
+  />
+  <rect x="438" y="558" width="410" height="252" rx="58" fill="#23264a" stroke="#ff4d6d" stroke-width="16" />
+  <path d="M526 626L590 684L526 742" fill="none" stroke="#ff4d6d" stroke-width="34" stroke-linecap="square" stroke-linejoin="miter" />
+  <path d="M638 742H766" fill="none" stroke="#e8e8f0" stroke-width="34" stroke-linecap="square" />
+</svg>

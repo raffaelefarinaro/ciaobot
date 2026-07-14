@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.4.24 - 2026-07-14
+
+### Added
+- feat(voice): default TTS to a male voice to match the avatar (`a662e33`)
+
+### Changed
+- Merge pull request #107 from raffaelefarinaro/chore/sync-develop-v0.4.22 (`f28bfca`)
+- Merge pull request #108 from raffaelefarinaro/fix/tray-single-window (`ebcf751`)
+- Merge pull request #109 from raffaelefarinaro/feat/male-tts-voice (`92454da`)
+- Merge pull request #110 from raffaelefarinaro/fix/tts-env-doc-comment (`8bf9f75`)
+- release: prepare v0.4.23 (`bf9ef5a`)
+- Merge pull request #111 from raffaelefarinaro/release/v0.4.23 (`d1bd16c`)
+- Merge pull request #112 from raffaelefarinaro/chore/sync-develop-v0.4.23 (`e0a7036`)
+- Merge pull request #113 from raffaelefarinaro/fix/frontmatter-clickable-url (`e01d037`)
+- Merge pull request #114 from raffaelefarinaro/fix/chat-ws-auto-reconnect (`860b539`)
+- Merge pull request #116 from raffaelefarinaro/fix/ws-origin-proxy-aware (`fc83dbc`)
+- Merge pull request #117 from raffaelefarinaro/fix/open-pwa-or-plain-browser (`616ef97`)
+- Merge pull request #118 from raffaelefarinaro/fix/related-wikilink-pills (`a210784`)
+- Distinguish PWA and server launcher (`40747b8`)
+- Merge pull request #120 from raffaelefarinaro/fix/chat-scroll-pin-margin (`f418194`)
+- Merge pull request #119 from raffaelefarinaro/codex/distinguish-ciaobot-pwa-server (`4ff61c5`)
+- Merge pull request #121 from raffaelefarinaro/codex/fix-chat-registry-recovery (`4028649`)
+
+### Fixed
+- fix(menubar): focus the installed PWA instead of spawning a new window (`229b49c`)
+- fix(config): don't trip env-var doc check with a CIAO_TTS_* glob in a comment (`ca452d0`)
+- fix(web): make bare-URL frontmatter values clickable in file viewers (`a3edafb`)
+- fix(web): auto-reconnect the active chat's WebSocket on an unexpected drop (`f61d1f4`)
+- fix(auth): proxy-aware WebSocket origin check (#115) (`9dc5a95`)
+- fix(menubar): open the installed PWA or a plain browser tab, drop app-mode (`6ee2727`)
+- fix(web): make RELATED/links frontmatter wikilink pills clickable (`7f87594`)
+- fix(web): pin short chats to the bottom (kill the empty-gap scroll bug) (`e128616`)
+- fix: prevent project chat registry loss (`aa50b73`)
+
 ## v0.4.23 - 2026-07-14
 
 ### Added

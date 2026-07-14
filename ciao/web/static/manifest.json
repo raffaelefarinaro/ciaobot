@@ -1,7 +1,7 @@
 {
-  "name": "ciaobot",
-  "short_name": "ciaobot",
-  "description": "ciaobot personal assistant dashboard",
+  "name": "Ciaobot",
+  "short_name": "Ciaobot",
+  "description": "Ciaobot personal assistant dashboard",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#F97316",

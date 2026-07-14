@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import mimetypes
@@ -157,6 +158,19 @@ _VAULT_FOLDER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 def _now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _project_reference_key(value: str) -> str:
+    """Normalize a display name or vault-folder slug for context matching."""
+
+    return re.sub(r"[\W_]+", "-", str(value).casefold()).strip("-")
+
+
+def _stable_vault_project_id(workspace: str, vault_folder: str) -> str:
+    """Return the convergent id for a newly discovered vault-backed project."""
+
+    identity = f"{workspace.casefold()}\0{vault_folder.casefold()}".encode("utf-8")
+    return f"proj-{hashlib.sha256(identity).hexdigest()[:12]}"
 
 
 def _iso_after(seconds: int) -> str:
@@ -857,6 +871,7 @@ class ProjectChatManager:
         self._migrate_drop_qn_prefix()
         self._ensure_defaults()
         self._discover_vault_projects()
+        self._recover_orphaned_active_chats()
         # Sweep any empty chats left over from a previous run (user closed the
         # tab before typing, server crashed mid-compose, etc.). An "empty"
         # chat has no messages, no SDK session, and still the default title —
@@ -1075,23 +1090,113 @@ class ProjectChatManager:
             raise ValueError(f"Chat registry {self._path} is not a JSON object")
         return payload
 
-    def _save(self) -> None:
+    @staticmethod
+    def _mutation_summary(
+        baseline: dict[str, Any], current: dict[str, Any]
+    ) -> dict[str, list[str]]:
+        before = {str(key): value for key, value in baseline.items()}
+        after = {str(key): value for key, value in current.items()}
+        return {
+            "added": sorted(after.keys() - before.keys()),
+            "updated": sorted(
+                key for key in after.keys() & before.keys() if after[key] != before[key]
+            ),
+            "deleted": sorted(before.keys() - after.keys()),
+        }
+
+    @staticmethod
+    def _has_mutations(summary: dict[str, list[str]]) -> bool:
+        return any(summary.get(kind) for kind in ("added", "updated", "deleted"))
+
+    def _append_registry_audit(
+        self,
+        *,
+        revision: int,
+        reason: str,
+        project_mutations: dict[str, list[str]],
+        chat_mutations: dict[str, list[str]],
+    ) -> None:
+        if not self._path:
+            return
+        if not (
+            self._has_mutations(project_mutations)
+            or self._has_mutations(chat_mutations)
+        ):
+            return
+        audit_path = self._path.with_name(f"{self._path.stem}.audit.jsonl")
+        event = {
+            "timestamp": _now_iso(),
+            "pid": os.getpid(),
+            "revision": revision,
+            "reason": reason,
+            "projects": project_mutations,
+            "chats": chat_mutations,
+        }
+        try:
+            with audit_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(event, sort_keys=True) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError:
+            # The registry remains authoritative. An audit failure must not
+            # turn a successful user mutation into a reported API failure.
+            logger.exception("Failed to append registry audit %s", audit_path)
+
+    def _audited_chat_status(self, chat_id: str) -> str:
+        """Return ``present``, ``deleted``, or ``unknown`` from the audit log."""
+
+        if not self._path:
+            return "unknown"
+        audit_path = self._path.with_name(f"{self._path.stem}.audit.jsonl")
+        if not audit_path.exists():
+            return "unknown"
+        status = "unknown"
+        try:
+            with audit_path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    changes = event.get("chats")
+                    if not isinstance(changes, dict):
+                        continue
+                    if chat_id in changes.get("deleted", []):
+                        status = "deleted"
+                    elif chat_id in changes.get("added", []) or chat_id in changes.get(
+                        "updated", []
+                    ):
+                        status = "present"
+        except OSError:
+            logger.exception("Failed to read registry audit %s", audit_path)
+        return status
+
+    def _save(self, *, reason: str = "registry_mutation") -> None:
         if not self._path:
             return
         current = self._state_payload()
         baseline = self._last_local_payload
+        baseline_projects = baseline.get("projects")
+        baseline_chats = baseline.get("chats")
+        current_projects = current.get("projects")
+        current_chats = current.get("chats")
+        project_mutations = self._mutation_summary(
+            baseline_projects if isinstance(baseline_projects, dict) else {},
+            current_projects if isinstance(current_projects, dict) else {},
+        )
+        chat_mutations = self._mutation_summary(
+            baseline_chats if isinstance(baseline_chats, dict) else {},
+            current_chats if isinstance(current_chats, dict) else {},
+        )
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with _state_file_lock(self._path):
             latest = self._read_latest_payload()
             latest_projects = latest.get("projects")
             latest_chats = latest.get("chats")
-            baseline_projects = baseline.get("projects")
-            baseline_chats = baseline.get("chats")
-            current_projects = current.get("projects")
-            current_chats = current.get("chats")
+            revision = int(latest.get("revision", 0) or 0) + 1
             payload = {
                 "version": 1,
-                "revision": int(latest.get("revision", 0) or 0) + 1,
+                "revision": revision,
                 "projects": self._merge_local_map(
                     latest_projects if isinstance(latest_projects, dict) else {},
                     current_projects if isinstance(current_projects, dict) else {},
@@ -1109,6 +1214,12 @@ class ProjectChatManager:
             try:
                 tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
                 tmp.replace(self._path)
+                self._append_registry_audit(
+                    revision=revision,
+                    reason=reason,
+                    project_mutations=project_mutations,
+                    chat_mutations=chat_mutations,
+                )
             finally:
                 tmp.unlink(missing_ok=True)
         self._last_local_payload = current
@@ -1162,7 +1273,7 @@ class ProjectChatManager:
                 None,
             )
             if general is None:
-                pid = f"proj-{_uuid8()}"
+                pid = _stable_vault_project_id(ws, "general")
                 general = ProjectInfo(
                     project_id=pid,
                     name="General",
@@ -1496,16 +1607,7 @@ class ProjectChatManager:
         if not isinstance(fm, dict):
             return None
 
-        # Determine workspace
-        workspace = "personal"
-        if "[CONTEXT: work" in text or "work -- Workspace" in text:
-            workspace = "work"
-
-        # Determine project name
-        project_name = "General"
-        project_match = re.search(r'\[Project:\s*["\']?(.*?)["\']?\]', text)
-        if project_match:
-            project_name = project_match.group(1).strip()
+        workspace, project_name = self._extract_context_target(text)
 
         title = fm.get("context") or fm.get("title") or "Archived Chat"
         model = fm.get("active_model") or fm.get("selected_model") or fm.get("last_effective_model") or "opus"
@@ -1535,26 +1637,74 @@ class ProjectChatManager:
             "ended_at": ended_at,
         }
 
+    def _extract_context_target(self, text: str) -> tuple[str, str]:
+        """Extract logical workspace and project reference from hidden context."""
+
+        known = self._workspace_names()
+        workspace = "personal" if "personal" in known else known[0]
+        context_match = re.search(r"\[CONTEXT:\s*([A-Za-z0-9._-]+)\b", text)
+        if context_match and context_match.group(1) in known:
+            workspace = context_match.group(1)
+        else:
+            for candidate in known:
+                if re.search(
+                    rf"(?:^|[/\\]){re.escape(candidate)}[/\\]projects[/\\]",
+                    text,
+                    flags=re.IGNORECASE,
+                ):
+                    workspace = candidate
+                    break
+
+        project_name = "General"
+        project_match = re.search(r'\[Project:\s*["\']?(.*?)["\']?\]', text)
+        if project_match:
+            project_name = project_match.group(1).strip()
+        else:
+            canonical_match = re.search(
+                r"(?:^|[/\\])projects[/\\]active[/\\]([^/\\\]\s]+)",
+                text,
+                flags=re.IGNORECASE,
+            )
+            if canonical_match:
+                project_name = canonical_match.group(1).strip()
+        return workspace, project_name
+
+    def _project_reference_map(self) -> dict[tuple[str, str], str]:
+        """Index both human project names and canonical vault-folder slugs."""
+
+        project_map: dict[tuple[str, str], str] = {}
+        for project in self._projects.values():
+            name_key = _project_reference_key(project.name)
+            if name_key:
+                project_map.setdefault((name_key, project.workspace), project.project_id)
+        # A canonical vault slug wins over a colliding display-name alias.
+        for project in self._projects.values():
+            folder_key = _project_reference_key(project.vault_folder)
+            if folder_key:
+                project_map[(folder_key, project.workspace)] = project.project_id
+        return project_map
+
+    def _resolve_project_reference(self, workspace: str, value: str) -> str:
+        project_id = self._project_reference_map().get(
+            (_project_reference_key(value), workspace), ""
+        )
+        if project_id:
+            return project_id
+        general = next(
+            (
+                project.project_id
+                for project in self._projects.values()
+                if project.workspace == workspace and project.name == "General"
+            ),
+            "",
+        )
+        return general
+
     def _discover_archived_chats(self) -> None:
         """Scan the vault's archived transcripts and import missing chats."""
         chats_root = self._config.vault_root / "Logs" / "Chats"
         if not chats_root.is_dir():
             return
-
-        # Map of (name, workspace) -> project_id for active projects
-        project_map = {}
-        for p in self._projects.values():
-            project_map[(p.name.lower(), p.workspace)] = p.project_id
-
-        # General project IDs
-        general_ids = {}
-        for ws in self._workspace_names():
-            gen = next(
-                (p for p in self._projects.values() if p.workspace == ws and p.name == "General"),
-                None
-            )
-            if gen:
-                general_ids[ws] = gen.project_id
 
         new_chats_discovered = False
         pruned_chats = False
@@ -1597,7 +1747,7 @@ class ProjectChatManager:
 
             ws = metadata["workspace"]
             proj_name = metadata["project_name"]
-            proj_id = project_map.get((proj_name.lower(), ws)) or general_ids.get(ws, "")
+            proj_id = self._resolve_project_reference(ws, proj_name)
 
             if not proj_id:
                 # If no project ID could be resolved, skip
@@ -1627,7 +1777,114 @@ class ProjectChatManager:
             logger.info("Imported archived chat %s under project %s", chat_id, proj_id)
 
         if new_chats_discovered or pruned_chats:
-            self._save()
+            self._save(reason="archived_transcript_discovery")
+
+    def _claude_session_exists(self, session_id: str) -> bool:
+        if not session_id:
+            return False
+        projects_dir = _claude_projects_dir(self._config.workspace_root)
+        if (projects_dir / f"{session_id}.jsonl").exists():
+            return True
+        try:
+            root = Path.home() / ".claude" / "projects"
+            return root.exists() and any(root.glob(f"*/{session_id}.jsonl"))
+        except OSError:
+            return False
+
+    def _recover_orphaned_active_chats(self) -> None:
+        """Rebuild missing active rows from surviving runtime transcripts.
+
+        Recovery is intentionally evidence-based. A Claude transcript must
+        still have its provider session blob, while other providers require an
+        audit record showing that the chat previously existed and was not
+        explicitly deleted. This avoids reviving old transcripts left behind
+        by versions that did not fully clean up deletions.
+        """
+
+        recovered = 0
+        for (
+            context_key,
+            provider_name,
+            transcript,
+        ) in self._transcripts.all_current_transcripts():
+            if not context_key.startswith("chat-") or context_key in self._chats:
+                continue
+            if not isinstance(transcript, dict):
+                continue
+            turns = transcript.get("turns")
+            if not isinstance(turns, list) or not turns:
+                continue
+
+            provider = str(transcript.get("provider") or provider_name or "claude")
+            session_id = str(transcript.get("session_id") or "")
+            audit_status = self._audited_chat_status(context_key)
+            if audit_status == "deleted":
+                continue
+            if provider == "claude":
+                if (
+                    not self._claude_session_exists(session_id)
+                    and audit_status != "present"
+                ):
+                    continue
+            elif audit_status != "present":
+                continue
+
+            prompts = "\n".join(
+                str(turn.get("prompt") or "")
+                for turn in turns
+                if isinstance(turn, dict)
+            )
+            workspace, project_ref = self._extract_context_target(prompts)
+            project_id = self._resolve_project_reference(workspace, project_ref)
+            if not project_id:
+                continue
+
+            valid_turns = [turn for turn in turns if isinstance(turn, dict)]
+            if not valid_turns:
+                continue
+            first_prompt = str(valid_turns[0].get("prompt") or "")
+            visible_prompt = re.sub(
+                r"(?s)^\[CIAO_CONTEXT_BEGIN\].*?\[CIAO_CONTEXT_END\]\s*",
+                "",
+                first_prompt,
+            ).strip()
+            title = str(transcript.get("context_label") or "").strip()
+            if not title or title == "New Chat":
+                title = _fallback_title(visible_prompt or "Recovered Chat")
+            created_at = str(transcript.get("started_at") or "") or _now_iso()
+            updated_at = str(transcript.get("updated_at") or created_at)
+            mode = str(valid_turns[-1].get("mode") or self._config.claude_mode)
+            if mode not in {"normal", "plan", "auto", "bypass"}:
+                mode = self._config.claude_mode
+
+            chat = ChatInfo(
+                chat_id=context_key,
+                project_id=project_id,
+                title=title,
+                model=str(
+                    transcript.get("selected_model")
+                    or self._config.claude_default_model
+                ),
+                provider=provider,
+                mode=mode,
+                session_id=session_id,
+                created_at=created_at,
+                archived=False,
+                last_activity_at=updated_at,
+                last_read_at=updated_at,
+                user_turn_count=len(valid_turns),
+            )
+            self._chats[context_key] = chat
+            recovered += 1
+            logger.warning(
+                "Recovered orphaned active chat %s under project %s from runtime transcript",
+                context_key,
+                project_id,
+            )
+            self._events.publish({"type": "chat_created", "chat": chat.to_dict()})
+
+        if recovered:
+            self._save(reason="orphaned_active_chat_recovery")
 
     def _discover_vault_projects(self) -> None:
         """Auto-discover projects from each workspace's ``projects/active/`` tree.
@@ -1740,7 +1997,7 @@ class ProjectChatManager:
                     })
                     continue
 
-                pid = f"proj-{_uuid8()}"
+                pid = _stable_vault_project_id(ws, stem)
                 project = ProjectInfo(
                     project_id=pid,
                     name=name,
@@ -2049,20 +2306,7 @@ class ProjectChatManager:
             return True
 
         # Default / "claude" provider
-        projects_dir = _claude_projects_dir(self._config.workspace_root)
-        if (projects_dir / f"{chat.session_id}.jsonl").exists():
-            return True
-
-        # Fallback search across all projects folders to handle workspace folder changes/mismatch
-        try:
-            claude_projects_root = Path.home() / ".claude" / "projects"
-            if claude_projects_root.exists():
-                if any(claude_projects_root.glob(f"*/{chat.session_id}.jsonl")):
-                    return True
-        except Exception:
-            pass
-
-        return False
+        return self._claude_session_exists(chat.session_id)
 
     def list_chats_dicts(self, project_id: str | None = None) -> list[dict]:
         """Return chat dicts with a ``local`` flag indicating session availability."""
@@ -2455,6 +2699,7 @@ class ProjectChatManager:
         chat = self._chats.pop(chat_id, None)
         if chat is None:
             return False
+        ctx = ChatContext.for_web(chat_id)
         task = self._retry_tasks.pop(chat_id, None)
         if task is not None and not task.done():
             task.cancel()
@@ -2467,12 +2712,16 @@ class ProjectChatManager:
             self._transcripts.delete_sdk_session_blob(
                 self._config.workspace_root, chat.session_id
             )
+        # Explicit deletion is a tombstone, not merely a sidebar mutation.
+        # Remove every recovery signal so startup repair cannot revive it.
+        self._state.delete_context(ctx)
+        self._transcripts.delete_current(ctx, chat.provider)
         self._unlink_chat_images(chat)
         # Drop file snapshots so we don't accumulate dead history forever.
         # Archive intentionally keeps them: archived chats are read-only but
         # their history viewer should still work.
         self._snapshots.delete_chat(chat_id)
-        self._save()
+        self._save(reason="user_chat_delete")
         self._events.publish({
             "type": "chat_deleted",
             "chat_id": chat_id,
