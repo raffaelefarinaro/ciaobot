@@ -8,20 +8,6 @@
 - Merge pull request #86 from raffaelefarinaro/harden-window-launch-and-release (`3392435`)
 - release: prepare v0.4.19 (`28b0b44`)
 
-## v0.4.19 - 2026-07-14
-
-### Changed
-- Merge pull request #82 from raffaelefarinaro/chore/sync-develop-v0.4.17 (`3153b2c`)
-- Merge pull request #83 from raffaelefarinaro/fix-window-venv-launch (`d6b7761`)
-- release: prepare v0.4.18 (`3b61568`)
-- Merge pull request #84 from raffaelefarinaro/release/v0.4.18 (`7e10414`)
-- Merge pull request #85 from raffaelefarinaro/chore/sync-develop-v0.4.18 (`4a937db`)
-- harden: guarantee the app opens + stop releases from stale local develop (`896d513`)
-- Merge pull request #86 from raffaelefarinaro/harden-window-launch-and-release (`3392435`)
-
-### Fixed
-- fix(macos): open the window via the venv python, not the app-bundle symlink (`8358a5d`)
-
 ## v0.4.18 - 2026-07-14
 
 ### Changed
