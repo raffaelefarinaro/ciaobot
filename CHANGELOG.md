@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.4.21 - 2026-07-14
+
+### Changed
+- Merge pull request #97 from raffaelefarinaro/chore/sync-develop-v0.4.20 (`dda4a3c`)
+- Animate the sidebar brand refresh with pixel scrambling instead of showing sync text. (`5037ddc`)
+- Shrink message copy/read controls so chat bubbles use more width. (`ef0bbe0`)
+- Merge branch 'develop' of https://github.com/raffaelefarinaro/ciaobot into develop (`134da85`)
+- Clarify loop controls so Stop and Run now are not shown together. (`80e76fc`)
+- Merge pull request #99 from raffaelefarinaro/fix-tray-open-app-mode (`d12d025`)
+- Shorten Start at Login tray label (`5a50994`)
+- Merge pull request #100 from raffaelefarinaro/fix-tray-open-app-mode (`d79879c`)
+- Merge pull request #102 from raffaelefarinaro/codex/fix-chat-registry-stale-writes (`e73eea5`)
+
+### Fixed
+- fix(macos): "Open Ciaobot" from the tray now actually opens the app window (`65b89b9`)
+- fix(web): restore chat scrolling with an inner messages wrapper. (`82e037b`)
+- fix(notify): reliable local banners + Ciaobot icon, not Python (`03817ff`)
+- fix(chats): stop new_session from resurrecting archived chats (`0be5194`)
+- fix chat registry stale writes (`77101eb`)
+
 ## v0.4.20 - 2026-07-14
 
 ### Added
