@@ -7,6 +7,7 @@ import html
 import http.cookiejar
 import json
 import os
+import plistlib
 import secrets
 import shutil
 import sqlite3
@@ -838,7 +839,64 @@ def setup_workspace(
     return written
 
 
+def _looks_like_source_checkout(path: Path) -> bool:
+    """True if ``path`` is the Ciaobot source repo or a git worktree of it.
+
+    ``ciao setup`` treats the target directory as the workspace and repoints
+    the LaunchAgents at it, so running it inside the code checkout silently
+    hijacks the real workspace. A workspace never contains the app's own
+    source tree, so the packaged markers are a safe signal.
+    """
+
+    if (path / "pyproject.toml").is_file() and (path / "ciao" / "__init__.py").is_file():
+        return True
+    return "/.claude/worktrees/" in path.as_posix()
+
+
+def _plist_workspace(launch_agents_dir: Path) -> Path | None:
+    """Workspace the server LaunchAgent currently points at, if set up."""
+
+    plist = launch_agents_dir.expanduser() / "com.ciao.server.plist"
+    try:
+        with plist.open("rb") as handle:
+            data = plistlib.load(handle)
+    except (OSError, ValueError):
+        return None
+    workspace = (data.get("EnvironmentVariables") or {}).get("CIAO_WORKSPACE")
+    if not workspace:
+        return None
+    try:
+        return Path(str(workspace)).expanduser().resolve()
+    except OSError:
+        return None
+
+
 def _setup_command(args: argparse.Namespace) -> int:
+    root = Path(args.workspace).expanduser().resolve()
+
+    # Guard against the two ways `ciao setup` silently hijacks the workspace:
+    # running it inside the source checkout, or re-pointing an already
+    # configured workspace to the current directory. --yes overrides.
+    if not args.yes:
+        if _looks_like_source_checkout(root):
+            print(
+                f"Error: {root} looks like the Ciaobot source checkout, not a "
+                "workspace.\ncd to your workspace folder and run `ciao setup` "
+                "there, or pass --workspace <path> (or --yes to override).",
+                file=sys.stderr,
+            )
+            return 1
+        existing = _plist_workspace(Path(args.launch_agents_dir))
+        if existing is not None and existing != root:
+            print(
+                f"Error: Ciaobot is already set up with workspace {existing}.\n"
+                f"Running setup here would move it to {root}.\nRe-run from the "
+                "existing workspace, pass --workspace, or add --yes to confirm "
+                "the move.",
+                file=sys.stderr,
+            )
+            return 1
+
     written = setup_workspace(
         args.workspace,
         auth_token=args.auth_token,
@@ -854,7 +912,6 @@ def _setup_command(args: argparse.Namespace) -> int:
         Path(args.launch_agents_dir).expanduser() / name
         for name in ("com.ciao.server.plist", "com.ciao.menubar.plist")
     ]
-    root = Path(args.workspace).expanduser().resolve()
     if args.load_launchd:
         rc = 0
         for plist in plists:
@@ -1383,6 +1440,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--load-launchd",
         action="store_true",
         help="Run launchctl unload/load after writing the LaunchAgent.",
+    )
+    setup_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip safety guards (setting up inside the source checkout, or "
+        "moving an already-configured workspace to this directory).",
     )
     setup_parser.set_defaults(func=_setup_command)
 
