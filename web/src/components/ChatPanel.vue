@@ -1065,6 +1065,11 @@ function checkScroll() {
   if (!el) return
   const threshold = 4
   isNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight <= threshold
+  // Bottom-align short chats via flex-end; once content overflows, switch
+  // back to normal top-aligned scrolling. margin-top:auto on :first-child
+  // can leave scrollable empty space above the transcript when streaming
+  // UI appears in a short split-view column.
+  el.classList.toggle('overflowing', el.scrollHeight > el.clientHeight + 1)
   onChatScrollReanchor()
 }
 
@@ -1744,10 +1749,14 @@ onMounted(async () => {
   notifyChatFocused(chat.value?.chat_id)
   messagesEl.value?.addEventListener('scroll', checkScroll, { passive: true })
   if (messagesEl.value && typeof ResizeObserver !== 'undefined') {
-    messagesResizeObserver = new ResizeObserver(() => stickToBottomIfNeeded())
+    messagesResizeObserver = new ResizeObserver(() => {
+      stickToBottomIfNeeded()
+      checkScroll()
+    })
     messagesResizeObserver.observe(messagesEl.value)
   }
   nextTick(() => {
+    autoResize()
     if (messagesEl.value) {
       messagesEl.value.scrollTop = messagesEl.value.scrollHeight
       checkScroll()
@@ -2260,9 +2269,12 @@ watch(() => store.activeChatId, () => {
 // can stop short of the absolute bottom with smooth scrolling, especially
 // inside flex containers where the anchor is a zero-height child.
 watch(
-  () => [store.activeMessages.length, store.currentStreamingText, store.currentActivity.length],
+  () => [store.activeMessages.length, store.currentStreamingText, store.currentActivity.length, store.isStreaming],
   () => {
-    nextTick(() => stickToBottomIfNeeded())
+    nextTick(() => {
+      stickToBottomIfNeeded()
+      checkScroll()
+    })
   },
   { deep: true }
 )
@@ -2944,10 +2956,10 @@ function insertImageRef(n: number) {
   position: relative;
 }
 /* Push short chats to the bottom so the input bar doesn't float far
-   below a single message. On overflow the auto margin resolves to 0
-   and scrolling works normally from the top. */
-.messages > :first-child {
-  margin-top: auto;
+   below a single message. When content overflows, .overflowing drops
+   this and scrolling works normally from the top. */
+.messages:not(.overflowing) {
+  justify-content: flex-end;
 }
 
 .message-wrap {
@@ -3844,8 +3856,10 @@ details[open] > .activity-summary::before {
   resize: none;
   min-height: 44px;
   max-height: 200px;
-  padding: 8px 12px;
-  line-height: 1.4;
+  /* Textareas top-align text; symmetric padding optically centers one
+     line inside the 44px touch target (14px × 1.25 line-height). */
+  padding: 13px 12px;
+  line-height: 1.25;
 }
 
 .archived-notice {
@@ -4371,7 +4385,7 @@ details[open] > .activity-summary::before {
      when the user starts typing. 16px is the iOS auto-zoom floor: any
      smaller and Safari zooms the page on focus, which is worse than a
      slightly truncated placeholder. */
-  .chat-input { font-size: 16px; padding-top: 6px; padding-bottom: 6px; }
+  .chat-input { font-size: 16px; padding: 12px 12px; line-height: 1.25; }
   .chat-input::placeholder { font-size: 16px; }
   /* Keep every composer action at the shared touch-target minimum. */
   .input-bar { padding-top: 5px; padding-bottom: 5px; }
