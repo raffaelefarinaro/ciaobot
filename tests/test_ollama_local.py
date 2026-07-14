@@ -68,6 +68,35 @@ def test_routine_env_prefers_local():
     assert env["ANTHROPIC_AUTH_TOKEN"] == "ollama"
 
 
+# ── KV-cache / telemetry env (local daemon only) ───────────────────────────
+
+_KV_CACHE_VARS = {
+    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "0",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+}
+
+
+def test_local_daemon_gets_kv_cache_env():
+    """The changing attribution header invalidates the local server KV cache;
+    disable it (+ telemetry) on local-daemon routes so inference stays fast."""
+    chat = ollama_env_for_model("gemma4:12b-it-qat", CLOUD)
+    routine = routine_env_for_model("gemma4:12b-it-qat", CLOUD)
+    for key, value in _KV_CACHE_VARS.items():
+        assert chat[key] == value
+        assert routine[key] == value
+
+
+def test_cloud_models_do_not_get_kv_cache_env():
+    """Cloud relays (ollama.com) have no local KV cache — the vars are a no-op
+    and must not be set, keeping the cloud path unchanged."""
+    chat = ollama_env_for_model("kimi-k2.7-code:cloud", CLOUD)
+    routine = routine_env_for_model("kimi-k2.7-code:cloud", CLOUD)
+    for key in _KV_CACHE_VARS:
+        assert key not in chat
+        assert key not in routine
+
+
 # ── Discovery ────────────────────────────────────────────────────────────
 
 
