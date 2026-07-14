@@ -130,6 +130,11 @@ class TranscriptStore:
     def current_path(self, ctx: ChatContext, provider: str = "claude") -> Path:
         return self._current_path(ctx, provider)
 
+    def delete_current(self, ctx: ChatContext, provider: str = "claude") -> None:
+        """Delete an in-progress normalized transcript after an explicit delete."""
+
+        self._delete_current(ctx, provider)
+
     def archive_dir(self, ctx: ChatContext, provider: str = "claude") -> Path:
         return self._archive_dir(ctx, provider)
 
