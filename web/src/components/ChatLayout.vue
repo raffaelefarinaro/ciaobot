@@ -180,6 +180,7 @@ import PinnedFilePanel from './PinnedFilePanel.vue'
 import PaneHeader from './PaneHeader.vue'
 import ProductTour from './ProductTour.vue'
 import OnboardingCard from './OnboardingCard.vue'
+import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
 
 const store = useProjectStore()
 const tourStore = useProductTourStore()
@@ -404,12 +405,45 @@ const generalWorkspaceActions = computed(() => {
 })
 
 function workspaceLabel(name: string): string {
-  if (!name) return 'Workspace'
+  if (!name) return 'workspace'
   return name
     .split(/[-_\s]+/)
     .filter(Boolean)
-    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
     .join(' ')
+    .toLowerCase()
+}
+
+const pageDocumentTitle = computed(() => {
+  if (viewMode.value === 'settings') {
+    return settingsTabTitle(route.params.tab as string | undefined)
+  }
+  if (viewMode.value === 'schedules') {
+    if (showNewSchedule.value) return 'new automation'
+    const scheduleId = route.params.scheduleId as string | undefined
+    if (scheduleId) {
+      const schedule = taskStore.schedules.find(s => s.schedule_id === scheduleId)
+      if (schedule?.title) return schedule.title
+      const loop = taskStore.loops.find(l => l.loop_id === scheduleId)
+      if (loop?.title) return loop.title
+    }
+    return 'automations'
+  }
+  if (projectIdParam.value) {
+    const project = store.projects.find(p => p.project_id === projectIdParam.value)
+    return project?.name || 'project'
+  }
+  if (store.activeChat?.title) return store.activeChat.title
+  return null
+})
+
+if (typeof document !== 'undefined') {
+  watch(
+    [pageDocumentTitle, () => store.totalUnread],
+    ([pageTitle, unread]) => {
+      document.title = formatDocumentTitle(pageTitle, unread)
+    },
+    { immediate: true },
+  )
 }
 
 async function createWorkspaceChat(action: { workspace: string; projectId: string; isCreating: boolean }) {
