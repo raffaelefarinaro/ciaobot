@@ -353,10 +353,10 @@ def _write_app_shortcut(
     # the launcher script below reads its current value live at click time.
     _ensure_setup_token(workspace)
     _remove_legacy_app_shortcuts(app_dir.expanduser())
-    if sys.platform == "darwin":
-        from ciao.menubar import remove_browser_pwa_duplicates
-
-        remove_browser_pwa_duplicates()
+    # NB: do NOT remove browser-installed PWAs here. Since we open the UI in
+    # the browser and rely on an installed PWA for identity + Web Push, a
+    # browser-installed "Ciaobot" app is now the desired vehicle, not a
+    # duplicate — and this runs on every upgrade via the app-bundle refresh.
     app_root = app_dir.expanduser() / "Ciaobot.app"
     contents = app_root / "Contents"
     macos = contents / "MacOS"

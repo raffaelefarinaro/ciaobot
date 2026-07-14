@@ -98,27 +98,6 @@ def fetch_active_chat_ids(port: int, *, timeout: float = 2.0) -> set[str]:
     return {str(chat_id) for chat_id in ids} if isinstance(ids, list) else set()
 
 
-def fetch_push_count(port: int, *, timeout: float = 2.0) -> int:
-    """Number of Web Push subscriptions the server has, or -1 if unknown.
-
-    The menu bar uses this to stand down from posting native banners when the
-    PWA is subscribed (Web Push delivers them with proper Ciaobot identity and
-    click-to-chat). On any error we return -1 so the caller keeps posting
-    native banners rather than dropping notifications.
-    """
-
-    url = f"http://localhost:{port}/api/push/status"
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, ValueError):
-        return -1
-    if not isinstance(payload, dict):
-        return -1
-    count = payload.get("count")
-    return count if isinstance(count, int) else -1
-
-
 def notify_open_chat(port: int, chat_id: str, *, timeout: float = 2.0) -> bool:
     """Tell an already-open PWA to navigate to ``chat_id`` via /ws/events."""
 
@@ -1281,15 +1260,12 @@ def run_menubar(workspace: Path, port: int) -> int:
             time.sleep(WORKING_POLL_SECONDS)
 
     def refresh(_timer=None) -> None:
-        # Drain the log tail so we never re-post the backlog. Native banners
-        # are a fallback only: when the PWA is subscribed to Web Push, it
-        # delivers banners with proper Ciaobot identity + click-to-chat, so we
-        # stand down to avoid duplicates and the bundle-less "Python" banner.
-        # count < 0 means "couldn't ask the server" — keep posting rather than
-        # silently drop notifications.
+        # notifications.jsonl is already a fallback-only queue: the server logs
+        # an entry only when Web Push did NOT reach a subscription on this
+        # machine. So post every new entry (respecting the toggle) — it's
+        # exactly the notifications the local browser/PWA won't show.
         new_notifications = notification_log.read_new(workspace)
-        native_enabled = notifications_enabled(workspace)
-        if new_notifications and native_enabled and fetch_push_count(port) <= 0:
+        if notifications_enabled(workspace):
             for notification in new_notifications:
                 chat_id = str(notification.get("chat_id") or "")
                 payload = {"chat_id": chat_id} if chat_id else None

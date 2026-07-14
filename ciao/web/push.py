@@ -108,14 +108,20 @@ class PushManager:
     def _save_subs(self) -> None:
         self._subs_path.write_text(json.dumps({"subscriptions": self._subs}, indent=2))
 
-    def add(self, subscription: dict[str, Any]) -> None:
+    def add(self, subscription: dict[str, Any], *, local: bool = False) -> None:
         endpoint = subscription.get("endpoint")
         if not endpoint:
             raise ValueError("subscription missing endpoint")
         with self._lock:
             self._subs = [s for s in self._subs if s.get("endpoint") != endpoint]
-            self._subs.append(subscription)
+            # `local` marks a subscription created from this machine (loopback
+            # client). Only a local subscription's successful delivery lets the
+            # menu bar stand down from its native-banner fallback.
+            self._subs.append({**subscription, "local": bool(local)})
             self._save_subs()
+
+    def local_count(self) -> int:
+        return sum(1 for s in self._subs if s.get("local"))
 
     def remove(self, endpoint: str) -> None:
         with self._lock:
@@ -153,35 +159,47 @@ class PushManager:
     # ── Send ────────────────────────────────────────────────────────────
 
     def send(self, payload: dict[str, Any]) -> None:
-        """Fire-and-forget send to all known subscriptions. Prunes dead endpoints."""
-        self._log_notification(payload)
-        if not self._subs:
-            return
-        if not self._subject:
-            # No CIAO_PUSH_CONTACT configured: the Web Push standard requires
-            # a VAPID subject, so skip delivery (the notification log above
-            # still feeds local companions like the menu bar app).
-            logger.debug("CIAO_PUSH_CONTACT unset; skipping Web Push delivery")
-            return
+        """Deliver via Web Push, logging a native-banner fallback only when
+        this machine did not receive it via a local push subscription.
+
+        notifications.jsonl is the menu bar's fallback queue: an entry is
+        written exactly when Web Push did NOT successfully reach a subscription
+        created from this machine (loopback). So the menu bar posts a native
+        banner precisely when the local browser/PWA won't — no duplicates, and
+        transient/persistent push failures (or no local subscription at all)
+        still surface as native banners rather than being silently dropped.
+        """
+        if not self._deliver_to_local(payload):
+            self._log_notification(payload)
+
+    def _deliver_to_local(self, payload: dict[str, Any]) -> bool:
+        """Push to every subscription; return True iff delivery succeeded to at
+        least one *local* (this-machine) subscription. Prunes dead endpoints."""
+        if not self._subs or not self._subject:
+            return False
         try:
             from pywebpush import WebPushException, webpush
         except Exception:
             logger.warning("pywebpush not installed, skipping push")
-            return
+            return False
 
         body = json.dumps(payload)
         claims = {"sub": self._subject}
         dead: list[str] = []
+        delivered_local = False
         for sub in list(self._subs):
+            info = {k: v for k, v in sub.items() if k != "local"}
             try:
                 webpush(
-                    subscription_info=sub,
+                    subscription_info=info,
                     data=body,
                     vapid_private_key=self._private_raw_b64,
                     vapid_claims=dict(claims),
                     ttl=60,
                     timeout=10,
                 )
+                if sub.get("local"):
+                    delivered_local = True
             except WebPushException as exc:  # type: ignore[misc]
                 status = getattr(getattr(exc, "response", None), "status_code", None)
                 if status in (404, 410):
@@ -194,3 +212,4 @@ class PushManager:
             with self._lock:
                 self._subs = [s for s in self._subs if s.get("endpoint") not in dead]
                 self._save_subs()
+        return delivered_local
