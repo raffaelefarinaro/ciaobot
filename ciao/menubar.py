@@ -462,12 +462,18 @@ def _menubar_app_candidates() -> list[Path]:
 def _ensure_notification_bundle() -> None:
     """Make Notification Center attribute alerts to Ciaobot, not Python.
 
-    When launchd starts ``python -m ciao.cli menubar`` directly, macOS has no
-    app identity and groups alerts under "Python". Setup writes a
-    ``CiaobotMenuBar`` helper inside ``Ciaobot.app`` and the LaunchAgent
-    should exec the bundle-local ``python`` symlink so alerts stay under the
-    existing Ciaobot app. As a fallback, load that bundle explicitly when we
-    can find it.
+    launchd starts the menu bar via ``Ciaobot.app``'s ``CiaobotMenuBar``
+    helper, but that helper ``exec``s the real (Homebrew) ``python``, whose
+    Mach-O executable lives outside the bundle — so the process's *main*
+    bundle is ``Python.app`` and Notification Center shows the Python rocket.
+
+    NSUserNotification (what rumps posts through) attributes an alert to the
+    app whose bundle identifier is in the main bundle's info dictionary. So we
+    overwrite that in-memory identifier with Ciaobot's: Notification Center
+    then resolves it to the installed ``Ciaobot.app`` and uses its name and
+    icon. Loading the bundle as well makes its resources available. This must
+    run before the first notification is posted (it does — from
+    ``run_menubar`` before the rumps app starts).
     """
 
     if sys.platform != "darwin":
@@ -477,16 +483,33 @@ def _ensure_notification_bundle() -> None:
     except Exception:
         return
 
-    main = NSBundle.mainBundle()
-    if main is not None:
-        ident = main.bundleIdentifier()
-        if ident and ident not in ("org.python.python", "com.apple.python"):
-            return
+    app_root = next(iter(_menubar_app_candidates()), None)
+    target_id = (_bundle_identifier(app_root) if app_root else "") or "local.ciaobot.app"
 
-    for app_root in _menubar_app_candidates():
-        bundle = NSBundle.bundleWithPath_(str(app_root))
-        if bundle is not None and bundle.load():
-            return
+    main = NSBundle.mainBundle()
+    if main is None:
+        return
+    if main.bundleIdentifier() == target_id:
+        return  # already attributed to Ciaobot (e.g. a real bundled launch)
+
+    # Override the running process's main-bundle identity so alerts carry
+    # Ciaobot's name + icon instead of Python's.
+    try:
+        info = main.localizedInfoDictionary() or main.infoDictionary()
+        if info is not None:
+            info["CFBundleIdentifier"] = target_id
+            info["CFBundleName"] = "Ciaobot"
+    except Exception:
+        pass
+
+    # Load Ciaobot.app so its icon resource is registered for the alert.
+    if app_root is not None:
+        try:
+            bundle = NSBundle.bundleWithPath_(str(app_root))
+            if bundle is not None:
+                bundle.load()
+        except Exception:
+            pass
 
 
 def spin_icon_paths() -> list[str]:

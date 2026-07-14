@@ -159,35 +159,53 @@ class PushManager:
     # ── Send ────────────────────────────────────────────────────────────
 
     def send(self, payload: dict[str, Any]) -> None:
-        """Deliver via Web Push, logging a native-banner fallback only when
-        this machine did not receive it via a local push subscription.
+        """Notify this machine via the always-on menu bar, and other devices
+        via Web Push.
 
-        notifications.jsonl is the menu bar's fallback queue: an entry is
-        written exactly when Web Push did NOT successfully reach a subscription
-        created from this machine (loopback). So the menu bar posts a native
-        banner precisely when the local browser/PWA won't — no duplicates, and
-        transient/persistent push failures (or no local subscription at all)
-        still surface as native banners rather than being silently dropped.
+        The local machine ALWAYS gets a native menu-bar banner (queued in
+        notifications.jsonl; the menu bar posts it when its Notifications
+        toggle is on). Web Push is used only to reach *remote* subscriptions
+        (other devices) — never the local browser.
+
+        Why not trust Web Push for the local browser: the push service returns
+        2xx as soon as it *accepts* the message, which is not the same as the
+        browser *displaying* it. A browser with notifications disabled at the
+        OS level (e.g. System Settings → Notifications → Chrome = off) silently
+        drops the push while the push service still reports success. Suppressing
+        the native banner on that unverifiable signal made notifications vanish
+        entirely. The menu bar is always running and reliable, so it owns the
+        local notification; Web Push is a best-effort channel for other devices.
         """
-        if not self._deliver_to_local(payload):
-            self._log_notification(payload)
+        self._log_notification(payload)
+        remote = [s for s in self._subs if not s.get("local")]
+        self._deliver(remote, payload)
 
-    def _deliver_to_local(self, payload: dict[str, Any]) -> bool:
-        """Push to every subscription; return True iff delivery succeeded to at
-        least one *local* (this-machine) subscription. Prunes dead endpoints."""
-        if not self._subs or not self._subject:
-            return False
+    def send_test(self, payload: dict[str, Any]) -> dict[str, int]:
+        """Push a test notification to *local* subscriptions so the user can
+        confirm the browser actually displays it — the one thing neither the
+        server nor the Web Notification API can detect (see ``send``). Returns
+        the local subscription count and how many the push service accepted."""
+        local = [s for s in self._subs if s.get("local")]
+        accepted = self._deliver(local, payload)
+        return {"local_subscriptions": len(local), "accepted": accepted}
+
+    def _deliver(self, subs: list[dict[str, Any]], payload: dict[str, Any]) -> int:
+        """Web Push to the given subscriptions. Returns how many the push
+        service *accepted* (2xx) — which is not a guarantee of display. Prunes
+        404/410 (permanently gone) endpoints from the stored set."""
+        if not subs or not self._subject:
+            return 0
         try:
             from pywebpush import WebPushException, webpush
         except Exception:
             logger.warning("pywebpush not installed, skipping push")
-            return False
+            return 0
 
         body = json.dumps(payload)
         claims = {"sub": self._subject}
         dead: list[str] = []
-        delivered_local = False
-        for sub in list(self._subs):
+        accepted = 0
+        for sub in list(subs):
             info = {k: v for k, v in sub.items() if k != "local"}
             try:
                 webpush(
@@ -198,8 +216,7 @@ class PushManager:
                     ttl=60,
                     timeout=10,
                 )
-                if sub.get("local"):
-                    delivered_local = True
+                accepted += 1
             except WebPushException as exc:  # type: ignore[misc]
                 status = getattr(getattr(exc, "response", None), "status_code", None)
                 if status in (404, 410):
@@ -212,4 +229,4 @@ class PushManager:
             with self._lock:
                 self._subs = [s for s in self._subs if s.get("endpoint") not in dead]
                 self._save_subs()
-        return delivered_local
+        return accepted
