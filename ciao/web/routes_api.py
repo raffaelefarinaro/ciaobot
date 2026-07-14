@@ -1868,7 +1868,10 @@ async def chat_detail(request: Request) -> JSONResponse:
 async def chat_new_session(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
-    chat = pcm.new_session(chat_id)
+    try:
+        chat = pcm.new_session(chat_id)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     if chat is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse(chat.to_dict(local=True))

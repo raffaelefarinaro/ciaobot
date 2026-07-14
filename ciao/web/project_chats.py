@@ -2514,6 +2514,14 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is None:
             return None
+        if chat.archived:
+            # Never resurrect an archived chat in place: this clears its
+            # archived flag and archive_path, leaving an empty active chat
+            # that reappears in the sidebar/menu bar (an archive "comes back"
+            # with no transcript). Continuing an archived chat is
+            # continue_archived_chat()'s job — it spawns a fresh chat and
+            # leaves the archived one untouched.
+            raise ValueError("Cannot start a new session in an archived chat")
         # Archive existing transcript
         ctx = ChatContext.for_web(chat_id)
         self._transcripts.archive_session(
