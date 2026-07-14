@@ -155,47 +155,6 @@ def _bundle_identifier(app_bundle: Path) -> str:
     return str(plist.get("CFBundleIdentifier") or "")
 
 
-_BROWSER_APP_MODE_CANDIDATES = (
-    "Google Chrome",
-    "Google Chrome Canary",
-    "Chromium",
-    "Microsoft Edge",
-    "Brave Browser",
-)
-
-
-def _installed_browser_app_names() -> list[str]:
-    applications = Path("/Applications")
-    return [
-        name
-        for name in _BROWSER_APP_MODE_CANDIDATES
-        if (applications / f"{name}.app").is_dir()
-    ]
-
-
-def browser_app_mode_command(url: str) -> list[str] | None:
-    """argv to open ``url`` in a chrome-less browser app-mode window.
-
-    Invoke the browser binary directly rather than ``open -a NAME --args
-    --app=URL``: ``open`` drops ``--args`` when the browser is already running,
-    so it just focuses the browser and never opens the window (the reported
-    "clicking Open Ciaobot only opens Chrome" bug). Running the binary opens
-    the app window whether or not the browser is already running.
-
-    The caller MUST launch this detached (Popen) — on a cold start the binary
-    stays in the foreground as the browser's main process.
-    """
-
-    if sys.platform != "darwin":
-        return None
-    names = _installed_browser_app_names()
-    if not names:
-        return None
-    name = names[0]
-    binary = Path("/Applications") / f"{name}.app" / "Contents" / "MacOS" / name
-    return [str(binary), f"--app={url}"]
-
-
 def browser_pwa_duplicate_paths(app_name: str = "Ciaobot") -> list[Path]:
     """Browser-installed PWAs (and legacy helpers) that duplicate ``Ciaobot.app``."""
 
@@ -272,24 +231,23 @@ def _installed_ciaobot_pwa() -> Path | None:
 
 
 def open_command(url: str) -> list[str]:
-    """``open`` argv for the Ciaobot UI in an app-like window.
+    """``open`` argv for the Ciaobot UI.
 
     Prefer an installed Ciaobot PWA: its app shim is single-instance, so
-    ``open``-ing it *focuses the existing window* instead of spawning a new one.
-    That is the fix for "clicking Open Ciaobot opens a new window every time" —
-    ``--app=<url>`` on the raw browser binary always makes a fresh window, even
-    when the PWA is installed. Deep-link navigation (notification → chat) is
-    handled in-app by ``notify_open_chat`` over the WebSocket, so the URL is not
-    needed here while the PWA is running. Fall back to a raw app-mode window,
-    then the default browser, when no PWA is installed.
+    ``open``-ing it *focuses the existing window* instead of spawning a new one
+    (the "Open Ciaobot opens a new window every click" fix). Deep-link
+    navigation (notification → chat) is handled in-app by ``notify_open_chat``
+    over the WebSocket, so the URL is not needed here while the PWA runs.
+
+    With no PWA installed, open the URL in the default browser as a normal tab.
+    We deliberately do NOT open a chrome-less ``--app`` window: it read as a
+    separate app (own Dock entry) and lingered confusingly after the menu bar
+    was quit. Installing the PWA is the path to a real app window.
     """
 
     pwa = _installed_ciaobot_pwa()
     if pwa is not None:
         return ["open", str(pwa)]
-    app_mode = browser_app_mode_command(url)
-    if app_mode is not None:
-        return app_mode
     return ["open", url]
 
 
