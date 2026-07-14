@@ -1,7 +1,7 @@
 <template>
   <div class="settings-pane">
     <RestartOverlay v-if="restarting" :message="restartMessage" />
-    <PaneHeader title="Settings" @open-sidebar="emit('open-sidebar')" />
+    <PaneHeader title="settings" @open-sidebar="emit('open-sidebar')" />
     <div class="pane-body">
 
       <!-- HOME TAB -->
@@ -9,7 +9,7 @@
         <!-- Actions -->
         <div class="card">
           <div class="settings-card-header">
-            <p class="section-title">App actions</p>
+            <p class="section-title">app actions</p>
             <p class="hint">Snapshot, sync, or restart this local Ciaobot instance.</p>
           </div>
           <div class="action-row action-row--spaced action-row--compact">
@@ -41,7 +41,7 @@
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
-              <p class="section-title">Workspace health</p>
+              <p class="section-title">workspace health</p>
               <p class="hint">Checks Claude Code discovery files, vault writability, and generated asset links.</p>
             </div>
             <span class="badge" :class="healthBadgeClass(workspaceHealth?.status || '')">
@@ -82,7 +82,7 @@
         <!-- Package update -->
         <div class="card">
           <div class="settings-card-header">
-            <p class="section-title">Package update</p>
+            <p class="section-title">package update</p>
             <p class="hint">Check the installed package version and upgrade this local app.</p>
           </div>
           <div v-if="packageLoading && !packageStatus" class="loading">
@@ -140,7 +140,7 @@
         <!-- Notifications -->
         <div class="card">
           <div class="settings-card-header">
-            <p class="section-title">Notifications</p>
+            <p class="section-title">notifications</p>
             <p class="hint">
               Get a notification when a chat replies and the app is not focused.
             </p>
@@ -148,22 +148,22 @@
           <div v-if="needsIosInstall" class="hint hint--warn">
             On iOS, push notifications only work after you "Add to Home Screen" and open the app from there.
           </div>
-          <div v-else-if="isMacDesktop()" class="hint">
-            On macOS, notifications come from the menu bar app — not the browser.
-            Open the face icon → <strong>Advanced → Notifications</strong> to turn them on or off,
-            and allow <strong>Ciaobot</strong> in System Settings → Notifications.
-            Use <strong>Ciaobot</strong> from Applications for the UI; skip Chrome&rsquo;s &ldquo;Install app&rdquo;.
-          </div>
           <div v-else-if="permissionDenied" class="hint hint--warn">
-            Notifications are blocked at the OS level. Re-enable them in your phone's Settings &rarr; Notifications &rarr; Ciaobot.
+            Notifications are blocked at the OS level. Re-enable them in System Settings &rarr; Notifications &rarr; Ciaobot (or your browser).
           </div>
           <div v-else-if="!pushSupportedFlag" class="loading">
-            Push notifications are not supported in this browser.
+            Push notifications are not supported here. On macOS, install Ciaobot as an app
+            (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr; &ldquo;Add to Dock&rdquo;) and enable them from there.
           </div>
           <div v-else class="action-row action-row--compact">
             <button :class="pushEnabledFlag ? 'btn-secondary' : 'btn-primary'" @click="togglePush" :disabled="pushPending">
               {{ pushPending ? 'Working...' : (pushEnabledFlag ? 'Disable on this device' : 'Enable on this device') }}
             </button>
+          </div>
+          <div v-if="isMacDesktop() && !pushEnabledFlag" class="hint">
+            For notifications that show as <strong>Ciaobot</strong> and open the right chat, install Ciaobot as an app
+            (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr; &ldquo;Add to Dock&rdquo;), then enable them here.
+            Until then, the menu bar shows them.
           </div>
           <div v-if="pushError" class="action-result">{{ pushError }}</div>
         </div>
@@ -171,7 +171,7 @@
         <!-- Appearance -->
         <div class="card">
           <div class="settings-card-header">
-            <p class="section-title">Appearance</p>
+            <p class="section-title">appearance</p>
             <p class="hint">Control the visual theme and type scale used across Ciaobot.</p>
           </div>
           <div class="setting-row setting-row--inline setting-row--flush">
@@ -226,7 +226,7 @@
         <!-- Debug (dev mode only) -->
         <div v-if="localStatus?.dev_mode" class="card">
           <div class="settings-card-header">
-            <p class="section-title">Debug</p>
+            <p class="section-title">debug</p>
             <p class="hint">Runtime issue log: server errors and failed background jobs. Send it to a chat so the agent can self-fix.</p>
           </div>
           <div class="action-row action-row--spaced">
@@ -241,7 +241,7 @@
         <!-- Open source -->
         <div class="card">
           <div class="settings-card-header">
-            <p class="section-title">Open source</p>
+            <p class="section-title">open source</p>
             <p class="hint">
               Ciaobot is an open-source project. Support and contributions are welcome:
               report issues, suggest features, or open a pull request on
@@ -263,7 +263,7 @@
           <!-- Internal routines -->
           <div class="card">
             <div class="settings-card-header">
-              <p class="section-title">Internal models</p>
+              <p class="section-title">internal models</p>
               <p class="hint">
                 These tasks use their own model setting, separate from the active chat model.
                 "Automatic" keeps the built-in default. Local Ollama models run on this machine.
@@ -440,7 +440,7 @@
           <!-- Voice: hear (dictation) and speak (read aloud) -->
           <div class="card">
             <div class="settings-card-header">
-              <p class="section-title">Voice</p>
+              <p class="section-title">voice</p>
               <p class="hint">Choose the engines used to hear you (dictation) and to speak messages aloud.</p>
             </div>
             <div class="routine-row routine-row--flush">
@@ -538,7 +538,7 @@
           <div class="card">
             <div class="settings-card-header">
               <div>
-                <p class="section-title">Providers</p>
+                <p class="section-title">providers</p>
                 <p class="hint">
                   Claude Code and Codex manage their own login and credentials. Ciaobot verifies each CLI connection.
                 </p>
@@ -623,7 +623,7 @@
             <div class="settings-card-header settings-card-header--split">
               <div>
                 <div class="settings-label-row">
-                  <p class="section-title">Google Workspace</p>
+                  <p class="section-title">google workspace</p>
                   <details class="field-info">
                     <summary aria-label="About Google Workspace integration" title="About Google Workspace integration">i</summary>
                     <div class="field-info-panel">
@@ -847,7 +847,7 @@
           <!-- Provider-neutral model routing -->
           <div v-if="tierProviderSections.length" class="card">
             <div class="settings-card-header">
-              <p class="section-title">Model Routing</p>
+              <p class="section-title">model routing</p>
               <p class="hint">
                 Ciaobot maps Haiku, Sonnet, Opus, and Fable to provider-specific models. OpenAI routes run through Codex; Ollama and OpenRouter routes run through Claude Code.
               </p>
@@ -908,7 +908,7 @@
           <div class="card">
             <div class="settings-card-header settings-card-header--split">
               <div>
-                <p class="section-title">Workspaces</p>
+                <p class="section-title">workspaces</p>
                 <p class="hint">
                   Logical chat spaces that route projects, chats, vault names, model defaults, and integration profiles.
                 </p>
@@ -1108,7 +1108,7 @@
         <div class="card">
           <div class="settings-card-header settings-card-header--context">
             <div>
-              <p class="section-title">Agent context</p>
+              <p class="section-title">agent context</p>
               <p class="hint">
                 How Ciaobot assembles context for every CLI. This guide is independent of the current chat, project, and workspace.
               </p>
@@ -1221,7 +1221,7 @@
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
-              <p class="section-title">Skills</p>
+              <p class="section-title">skills</p>
               <p class="hint">
                 Manage Ciaobot-specific custom skills and locked GitHub/package skills.
               </p>
@@ -1285,7 +1285,7 @@
           <template v-else-if="skillsInventory">
             <!-- Custom Skills Section -->
             <div class="skill-section">
-              <p class="subsection-title subsection-title--spaced">Custom Skills</p>
+              <p class="subsection-title subsection-title--spaced">custom skills</p>
               <p v-if="!customSkills.length" class="hint hint--section-empty">No custom skills created yet.</p>
               <div v-else class="skill-list skill-list--section">
                 <div
@@ -1311,7 +1311,7 @@
 
             <!-- GitHub Skills Section -->
             <div class="skill-section skill-section--spaced">
-              <p class="subsection-title subsection-title--spaced">GitHub / Package Skills</p>
+              <p class="subsection-title subsection-title--spaced">github / package skills</p>
               <p v-if="!githubSkills.length" class="hint hint--section-empty">No GitHub/package skills installed yet.</p>
               <div v-else class="skill-list">
                 <div
@@ -1349,7 +1349,7 @@
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
-              <p class="section-title">Subagents</p>
+              <p class="section-title">subagents</p>
               <p class="hint">
                 Shared subagents available to Claude Code and Codex. Custom definitions are saved in <code>subagents/</code>, mirrored into the vault, and synchronized into each CLI's native format.
               </p>
@@ -1446,7 +1446,7 @@
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
-              <p class="section-title">Commands</p>
+              <p class="section-title">commands</p>
               <p class="hint">
                 Shared commands available to Claude Code and Codex. Custom commands are saved in <code>commands/</code>, mirrored into the vault, and exposed to Codex through generated skill wrappers.
               </p>
@@ -3095,7 +3095,7 @@ function isStandalone(): boolean {
 // Transient success feedback. Routes through the app-wide in-app toast (the
 // same auto-dismissing popup used for routine/chat notifications) instead of
 // leaving persistent inline text under the form.
-function notifySaved(body: string, title = 'Settings') {
+function notifySaved(body: string, title = 'settings') {
   projectStore.pushToast({ chat_id: '', title, body })
 }
 const workspacesLoaded = ref(false)

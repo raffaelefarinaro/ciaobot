@@ -2,9 +2,12 @@ import DOMPurify from 'dompurify'
 import { Marked, marked } from 'marked'
 
 import { linkifyHtml } from './filePaths'
+import { linkifyWikilinksInMarkdown } from './wikilinks'
 
 type FileMarkdownOptions = {
   resolveImageSrc: (href: string) => string
+  filePath?: string
+  markdownPaths?: string[]
 }
 
 const MARKDOWN_OPTIONS = { breaks: true }
@@ -42,6 +45,9 @@ export function renderMarkdown(text: string, knownPaths: string[] = []): string 
 }
 
 export function renderFileMarkdown(text: string, options: FileMarkdownOptions): string {
+  const source = options.filePath && options.markdownPaths?.length
+    ? linkifyWikilinksInMarkdown(text, options.filePath, options.markdownPaths)
+    : text
   const renderer = {
     image({ href, title, text: alt }: { href: string; title: string | null; text: string }): string {
       const src = href ? options.resolveImageSrc(href) : ''
@@ -51,8 +57,8 @@ export function renderFileMarkdown(text: string, options: FileMarkdownOptions): 
   }
   const parser = new Marked({ ...MARKDOWN_OPTIONS, renderer })
   try {
-    return sanitizeHtml(parser.parse(text) as string)
+    return sanitizeHtml(parser.parse(source) as string)
   } catch {
-    return sanitizeHtml(text)
+    return sanitizeHtml(source)
   }
 }

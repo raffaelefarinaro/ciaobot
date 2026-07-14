@@ -7,6 +7,7 @@ import html
 import http.cookiejar
 import json
 import os
+import plistlib
 import secrets
 import shutil
 import sqlite3
@@ -322,11 +323,19 @@ def _write_menubar_helper(*, app_root: Path, python_path: str) -> Path:
     if bundle_python.exists() or bundle_python.is_symlink():
         bundle_python.unlink()
     bundle_python.symlink_to(python_path)
+    # Resolve the symlink to its real target before exec: invoking Python
+    # *through* the Contents/MacOS/python symlink makes CPython resolve
+    # sys.prefix to the base framework instead of the ciaobot venv, so
+    # `import ciao` fails and the menu bar crashes on launch (no tray icon).
+    # Running the resolved target keeps the venv while still living in the
+    # bundle for Notification Center identity.
     helper = macos / "CiaobotMenuBar"
     helper.write_text(
         "#!/bin/sh\n"
         'DIR="$(cd "$(dirname "$0")" && pwd)"\n'
-        'exec "$DIR/python" -m ciao.cli menubar\n',
+        'PY="$DIR/python"\n'
+        'if [ -L "$PY" ]; then PY="$(readlink "$PY")"; fi\n'
+        'exec "$PY" -m ciao.cli menubar\n',
         encoding="utf-8",
     )
     helper.chmod(0o755)
@@ -344,10 +353,10 @@ def _write_app_shortcut(
     # the launcher script below reads its current value live at click time.
     _ensure_setup_token(workspace)
     _remove_legacy_app_shortcuts(app_dir.expanduser())
-    if sys.platform == "darwin":
-        from ciao.menubar import remove_browser_pwa_duplicates
-
-        remove_browser_pwa_duplicates()
+    # NB: do NOT remove browser-installed PWAs here. Since we open the UI in
+    # the browser and rely on an installed PWA for identity + Web Push, a
+    # browser-installed "Ciaobot" app is now the desired vehicle, not a
+    # duplicate — and this runs on every upgrade via the app-bundle refresh.
     app_root = app_dir.expanduser() / "Ciaobot.app"
     contents = app_root / "Contents"
     macos = contents / "MacOS"
@@ -393,16 +402,10 @@ def _write_app_shortcut(
     # is gone we open the plain URL and rely on the session cookie -- matching
     # how the menu bar builds its "Open Ciaobot" URL (menubar.open_url).
     #
-    # Open the URL in the native WebKit window (ciao.window). Passing the
-    # workspace lets that process de-duplicate: if a Ciaobot window is already
-    # open it focuses it instead of stacking another one (ciao.window's
-    # single-instance lock).
-    #
-    # Resolve the bundle-local python symlink to its real target before running
-    # it: invoking Python *through* the Contents/MacOS/python symlink resolves
-    # sys.prefix to the base framework, not the venv, so `import webview`/`ciao`
-    # fail and the window never opens. If the window still can't start, fall
-    # back to `open` so double-clicking the app always opens the UI.
+    # Open the URL in the browser (default handler / installed PWA). We used to
+    # embed a pywebview native window here, but running the venv Python as a
+    # bundle-less app broke interactivity, identity, and notifications on macOS;
+    # the browser/PWA path is reliable and lets web push handle notifications.
     executable.write_text(
         "#!/bin/sh\n"
         "start_agent() {\n"
@@ -436,14 +439,7 @@ def _write_app_shortcut(
         "else\n"
         f'  url="http://localhost:{port}/"\n'
         "fi\n"
-        'DIR="$(cd "$(dirname "$0")" && pwd)"\n'
-        'PY="$DIR/python"\n'
-        'if [ -L "$PY" ]; then PY="$(readlink "$PY")"; fi\n'
-        "open_ciaobot_url() {\n"
-        '  target="$1"\n'
-        f'  "$PY" -m ciao.window "$target" --workspace "{workspace}" || open "$target"\n'
-        "}\n"
-        'open_ciaobot_url "$url"\n',
+        'open "$url"\n',
         encoding="utf-8",
     )
     executable.chmod(0o755)
@@ -452,7 +448,69 @@ def _write_app_shortcut(
         python_path=python_path or sys.executable,
     )
     _register_app_with_launchservices(app_root)
+    # Record the version that wrote this bundle so the server can refresh it
+    # automatically after an upgrade (see refresh_app_bundle_if_stale).
+    _write_app_bundle_marker(workspace)
     return app_root
+
+
+def _app_bundle_marker_path(workspace: Path) -> Path:
+    return workspace.expanduser() / ".runtime" / "app-bundle-version"
+
+
+def _write_app_bundle_marker(workspace: Path) -> None:
+    from ciao import __version__
+
+    marker = _app_bundle_marker_path(workspace)
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(__version__ + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _installed_app_dir() -> Path | None:
+    """Directory holding the installed ``Ciaobot.app``, if any."""
+
+    for base in (Path.home() / "Applications", Path("/Applications")):
+        if (base / "Ciaobot.app").is_dir():
+            return base
+    return None
+
+
+def refresh_app_bundle_if_stale(
+    workspace: Path, port: int, *, python_path: str | None = None
+) -> Path | None:
+    """Rewrite ``Ciaobot.app`` when the running version differs from the one
+    that last wrote it. Returns the app root when refreshed, else ``None``.
+
+    macOS only. Makes ``brew upgrade`` self-contained: the server, restarted
+    onto the new keg by the stale-install self-heal, regenerates the app
+    bundle (launcher + menu-bar helper + icon) so the double-click launcher
+    and tray helper aren't left on the previous version's scripts. Only the
+    app bundle is touched — the LaunchAgent plists point at the stable opt/
+    symlink and must not be rewritten under a running launchd.
+    """
+
+    if sys.platform != "darwin":
+        return None
+    from ciao import __version__
+
+    app_dir = _installed_app_dir()
+    if app_dir is None:
+        return None  # setup never created a bundle; nothing to refresh
+    try:
+        last = _app_bundle_marker_path(workspace).read_text(encoding="utf-8").strip()
+    except OSError:
+        last = ""
+    if last == __version__:
+        return None
+    return _write_app_shortcut(
+        workspace=workspace,
+        app_dir=app_dir,
+        port=port,
+        python_path=python_path,
+    )
 
 
 _LSREGISTER = (
@@ -838,7 +896,64 @@ def setup_workspace(
     return written
 
 
+def _looks_like_source_checkout(path: Path) -> bool:
+    """True if ``path`` is the Ciaobot source repo or a git worktree of it.
+
+    ``ciao setup`` treats the target directory as the workspace and repoints
+    the LaunchAgents at it, so running it inside the code checkout silently
+    hijacks the real workspace. A workspace never contains the app's own
+    source tree, so the packaged markers are a safe signal.
+    """
+
+    if (path / "pyproject.toml").is_file() and (path / "ciao" / "__init__.py").is_file():
+        return True
+    return "/.claude/worktrees/" in path.as_posix()
+
+
+def _plist_workspace(launch_agents_dir: Path) -> Path | None:
+    """Workspace the server LaunchAgent currently points at, if set up."""
+
+    plist = launch_agents_dir.expanduser() / "com.ciao.server.plist"
+    try:
+        with plist.open("rb") as handle:
+            data = plistlib.load(handle)
+    except (OSError, ValueError):
+        return None
+    workspace = (data.get("EnvironmentVariables") or {}).get("CIAO_WORKSPACE")
+    if not workspace:
+        return None
+    try:
+        return Path(str(workspace)).expanduser().resolve()
+    except OSError:
+        return None
+
+
 def _setup_command(args: argparse.Namespace) -> int:
+    root = Path(args.workspace).expanduser().resolve()
+
+    # Guard against the two ways `ciao setup` silently hijacks the workspace:
+    # running it inside the source checkout, or re-pointing an already
+    # configured workspace to the current directory. --yes overrides.
+    if not args.yes:
+        if _looks_like_source_checkout(root):
+            print(
+                f"Error: {root} looks like the Ciaobot source checkout, not a "
+                "workspace.\ncd to your workspace folder and run `ciao setup` "
+                "there, or pass --workspace <path> (or --yes to override).",
+                file=sys.stderr,
+            )
+            return 1
+        existing = _plist_workspace(Path(args.launch_agents_dir))
+        if existing is not None and existing != root:
+            print(
+                f"Error: Ciaobot is already set up with workspace {existing}.\n"
+                f"Running setup here would move it to {root}.\nRe-run from the "
+                "existing workspace, pass --workspace, or add --yes to confirm "
+                "the move.",
+                file=sys.stderr,
+            )
+            return 1
+
     written = setup_workspace(
         args.workspace,
         auth_token=args.auth_token,
@@ -854,7 +969,6 @@ def _setup_command(args: argparse.Namespace) -> int:
         Path(args.launch_agents_dir).expanduser() / name
         for name in ("com.ciao.server.plist", "com.ciao.menubar.plist")
     ]
-    root = Path(args.workspace).expanduser().resolve()
     if args.load_launchd:
         rc = 0
         for plist in plists:
@@ -1383,6 +1497,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--load-launchd",
         action="store_true",
         help="Run launchctl unload/load after writing the LaunchAgent.",
+    )
+    setup_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip safety guards (setting up inside the source checkout, or "
+        "moving an already-configured workspace to this directory).",
     )
     setup_parser.set_defaults(func=_setup_command)
 

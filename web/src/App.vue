@@ -337,12 +337,29 @@ a:hover {
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
 /* Compact control (30×30 layout) with a full --touch hit area. Padding expands
-   the border-box for taps; negative margin keeps flex/grid spacing tight. */
+   the border-box for taps; negative margin keeps flex/grid spacing tight.
+   ::before paints the visible hover surface at 30px so highlights don't bleed
+   into the expanded hit target (matches sidebar nav-item icons). */
 .touch-hit {
   box-sizing: content-box;
   --touch-hit-visual: 30px;
   padding: calc((var(--touch) - var(--touch-hit-visual)) / 2);
   margin: calc((var(--touch-hit-visual) - var(--touch)) / 2);
+  position: relative;
+  isolation: isolate;
+}
+.touch-hit::before {
+  content: '';
+  position: absolute;
+  inset: calc((var(--touch) - var(--touch-hit-visual)) / 2);
+  z-index: -1;
+  border-radius: var(--radius-sm, 6px);
+  background: transparent;
+  pointer-events: none;
+  transition: background 120ms var(--ease);
+}
+.touch-hit:hover::before {
+  background: var(--bg3);
 }
 
 /* Icon-only / round buttons need full touch targets */
@@ -424,7 +441,13 @@ input:focus, textarea:focus, select:focus {
   gap: 12px;
 }
 
-.section-title,
+.section-title {
+  font-size: var(--text-xs);
+  color: var(--fg2);
+  letter-spacing: 0.5px;
+  margin: 0;
+  font-weight: 600;
+}
 .label-eyebrow {
   font-size: var(--text-xs);
   color: var(--fg2);

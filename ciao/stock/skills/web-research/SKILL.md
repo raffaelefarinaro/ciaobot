@@ -14,8 +14,9 @@ Use this skill for web questions and URL verification.
 
 2. Read
 - For **GitHub URLs** (`github.com/...`, `gist.github.com/...`), use `gh` CLI instead of defuddle. It hits the API directly: cleaner output, fewer tokens, and it works on private repos. See the GitHub URL mapping below.
+- For **YouTube URLs** (`youtube.com/watch`, `youtu.be/...`, `youtube.com/shorts/...`), use `defuddle parse '<url>' --md`. Defuddle returns the video description plus a markdown transcript with timestamps and chapters when captions exist. Strip `&t=` / `#t=` from the URL if parsing fails.
 - For all other URLs, use `defuddle parse <url> --md`. This is the default for the rest of the web; it strips clutter and reduces token usage.
-- If defuddle returns empty or stub content (JS-rendered pages, SPAs, login-gated content, dashboards), fall back to Scrapling when it is installed (`command -v scrapling`):
+- If defuddle returns empty or stub content (JS-rendered pages, SPAs, login-gated content, dashboards, YouTube videos without captions), fall back to Scrapling when it is installed (`command -v scrapling`):
   1. `scrapling extract get '<url>' /tmp/page.md --impersonate chrome` — fast HTTP fetch with browser impersonation, then read the output file.
   2. If still empty or stub, `scrapling extract fetch '<url>' /tmp/page.md` — renders the page in a headless browser, so it handles JS-only content. Slower; use it only after step 1 fails.
 - If Scrapling is not installed or both attempts fail, say so clearly and ask the user to paste the content or try from a machine where they can access it. (Scrapling is an optional install: `pip install 'scrapling[fetchers]' && scrapling install`.)
@@ -54,6 +55,6 @@ For search across GitHub (code, issues, PRs, repos), use `gh search code|issues|
 This skill is guidance-only — it has no bash-executable component.
 - **Do NOT** pass a raw search query as the bash `command` argument.
 - Web search is handled automatically by the provider (OpenRouter web plugin) — just reason about what to search and results will appear.
-- For reading specific URLs, use `defuddle parse <url> --md` via Bash, not `fetch_url`.
+- For reading specific URLs, use `defuddle parse <url> --md` via Bash for web pages (including YouTube); use `gh` for GitHub — not `fetch_url`.
 - **Never use `curl`, `wget`, or raw Python HTTP requests for HTML pages in Bash.** These frequently return gzip-encoded bytes that cause `UnicodeDecodeError` when decoded as UTF-8. Use `defuddle` instead; it handles compression and encoding correctly.
 - **Do not use WebFetch for HTML pages.** It is reserved for non-HTML targets (API endpoints, raw files, binary content).

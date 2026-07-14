@@ -52,13 +52,17 @@ def test_push_contact_is_optional_without_private_default() -> None:
 
     from ciao.main import _push_subject_for_config, _push_subject_from_env
 
+    from ciao.main import DEFAULT_PUSH_SUBJECT
+
     assert _push_subject_from_env({"CIAO_PUSH_CONTACT": "mailto:admin@example.com"}) == "mailto:admin@example.com"
     assert (
         _push_subject_for_config(SimpleNamespace(bootstrap_mode=True))
         == "mailto:bootstrap@localhost"
     )
 
-    # Missing contact yields an empty subject (Web Push disabled), never a
-    # private fallback and never an error.
-    assert _push_subject_from_env({}) == ""
-    assert _push_subject_from_env({"CIAO_PUSH_CONTACT": "  "}) == ""
+    # Missing/blank contact falls back to the localhost placeholder so Web
+    # Push works out of the box — never a private/real default, never an error.
+    assert DEFAULT_PUSH_SUBJECT == "mailto:ciaobot@localhost"
+    assert _push_subject_from_env({}) == DEFAULT_PUSH_SUBJECT
+    assert _push_subject_from_env({"CIAO_PUSH_CONTACT": "  "}) == DEFAULT_PUSH_SUBJECT
+    assert "@localhost" in DEFAULT_PUSH_SUBJECT  # not a real/monitored address

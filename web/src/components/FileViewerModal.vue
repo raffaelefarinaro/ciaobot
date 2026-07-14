@@ -14,37 +14,57 @@
           <div class="fv-subtitle" :title="store.path">{{ store.path }}<span v-if="store.line"> :{{ store.line }}</span></div>
         </div>
         <div class="fv-actions">
-          <button class="fv-btn" :class="{ ok: copyState === 'ok' }" @click="copyPath" :title="copyState === 'ok' ? 'Copied!' : 'Copy path'">
-            {{ copyState === 'ok' ? '✓' : '⧉' }}
-          </button>
-          <button class="fv-btn" @click="downloadFile" title="Download" :disabled="store.loading || !!store.error">
-            ↓
+          <button
+            class="btn-icon"
+            :class="{ ok: copyState === 'ok' }"
+            @click="copyPath"
+            :title="copyState === 'ok' ? 'Copied!' : 'Copy path'"
+            :aria-label="copyState === 'ok' ? 'Copied' : 'Copy path'"
+          >
+            <svg v-if="copyState === 'ok'" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+            <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
           </button>
           <button
-            class="fv-btn"
+            class="btn-icon"
+            @click="downloadFile"
+            title="Download"
+            aria-label="Download"
+            :disabled="store.loading || !!store.error"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          </button>
+          <button
+            class="btn-icon"
             :class="{ ok: openExternalState === 'ok' }"
             @click="openExternally"
             title="Open in default app"
+            aria-label="Open in default app"
             :disabled="store.loading || !!store.error || openExternalState === 'loading'"
           >
-            {{ openExternalState === 'loading' ? '…' : '↗' }}
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
           </button>
           <button
             v-if="canPin"
-            class="fv-btn"
+            class="btn-icon"
             :class="{ active: isPinned }"
             :title="isPinned ? 'Unpin from sidebar' : 'Pin to sidebar'"
+            :aria-label="isPinned ? 'Unpin from sidebar' : 'Pin to sidebar'"
             @click="togglePin"
           >
-            {{ isPinned ? '📍' : '📌' }}
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a3 3 0 0 0-6 0z"/></svg>
           </button>
           <button
             v-if="canEdit && !store.editing"
-            class="fv-btn"
+            class="btn-icon"
             title="Edit"
+            aria-label="Edit"
             @click="store.startEditing"
-          >✎</button>
-          <button class="fv-btn" @click="store.close" title="Close (Esc)">×</button>
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4z"/></svg>
+          </button>
+          <button class="btn-icon" @click="store.close" title="Close (Esc)" aria-label="Close">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
         </div>
       </header>
 
@@ -717,6 +737,23 @@ function deletePopupComment(): void {
 function onMdClick(e: MouseEvent): void {
   const target = e.target as HTMLElement | null
   if (!target) return
+
+  const fileLink = target.closest('a.file-link') as HTMLAnchorElement | null
+  if (fileLink) {
+    e.preventDefault()
+    e.stopPropagation()
+    const linkedPath = fileLink.getAttribute('data-file-path') || ''
+    const lineAttr = fileLink.getAttribute('data-line')
+    const linkedLine = lineAttr ? parseInt(lineAttr, 10) : null
+    const cid = store.chatId || ''
+    if (/\.(png|jpe?g|gif|webp|svg|avif|bmp|ico)$/i.test(linkedPath)) {
+      void store.openImage(linkedPath, cid)
+    } else {
+      void store.open(linkedPath, Number.isFinite(linkedLine as number) ? linkedLine : null, cid)
+    }
+    return
+  }
+
   const highlight = target.closest('.comment-highlight') as HTMLElement | null
   if (!highlight) return
   const id = highlight.dataset.commentId
@@ -930,6 +967,8 @@ const _ABSOLUTE_SRC_RE = /^(?:[a-z][a-z0-9+.-]*:|\/\/|\/)/i
 const renderedMarkdown = computed(() => {
   const dir = docDir.value
   return renderFileMarkdown(bodyOnly.value, {
+    filePath: store.path,
+    markdownPaths: store.markdownPaths,
     resolveImageSrc: (href) => {
       if (href && !_ABSOLUTE_SRC_RE.test(href)) {
         const resolved = joinRelative(dir, href)
@@ -1489,8 +1528,26 @@ if (typeof window !== 'undefined') {
 }
 .fv-actions {
   display: flex;
-  gap: 4px;
+  gap: 2px;
   flex-shrink: 0;
+  align-items: center;
+}
+.fv-actions .btn-icon {
+  color: var(--fg2);
+}
+.fv-actions .btn-icon:hover {
+  color: var(--fg);
+}
+.fv-actions .btn-icon.active {
+  background: var(--accent);
+  color: var(--bg);
+}
+.fv-actions .btn-icon.ok {
+  color: var(--ok, #4ade80);
+}
+.fv-actions .btn-icon:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .fv-btn {
   background: transparent;
@@ -1506,13 +1563,6 @@ if (typeof window !== 'undefined') {
 .fv-btn:hover {
   background: var(--border);
   color: var(--fg);
-}
-.fv-btn.active {
-  background: var(--accent, #60a5fa);
-  color: var(--bg);
-}
-.fv-btn.ok {
-  color: var(--ok, #4ade80);
 }
 .fv-body-image {
   /* Centre standalone images and ditch the inner padding so the modal
@@ -1709,6 +1759,11 @@ if (typeof window !== 'undefined') {
 }
 .fv-md :deep(a:hover) {
   color: var(--accent-strong);
+}
+.fv-md :deep(.wikilink-unresolved) {
+  color: var(--fg-muted, #888);
+  text-decoration: underline dotted;
+  cursor: help;
 }
 .fv-md :deep(img) {
   max-width: 100%;

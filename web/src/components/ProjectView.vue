@@ -52,7 +52,7 @@
 
     <section class="card">
       <div class="card-header">
-        <h3>Project context</h3>
+        <h3>project context</h3>
         <div class="card-actions">
           <span v-if="contextStatus" class="status" :class="contextStatus">{{ contextStatusLabel }}</span>
           <button
@@ -72,7 +72,7 @@
 
     <section class="card">
       <div class="card-header">
-        <h3>Active chats ({{ activeChats.length }})</h3>
+        <h3>active chats ({{ activeChats.length }})</h3>
         <button class="btn-small" @click="newChat">+ New chat</button>
       </div>
       <div v-if="activeChats.length" class="chat-list">
@@ -103,7 +103,7 @@
 
     <section v-if="showFilesSection" class="card" @dragover.prevent="onDragOver" @dragleave="onDragLeave" @drop.prevent="onDrop" :class="{ 'drag-over': dragOver }">
       <div class="card-header">
-        <h3>Files ({{ files.length }})</h3>
+        <h3>files ({{ files.length }})</h3>
         <div class="card-actions">
           <span v-if="filesLoading" class="status">Loading…</span>
           <span v-else-if="uploading" class="status">Uploading…</span>
@@ -183,7 +183,7 @@
 
     <section class="card" v-if="archivedChats.length">
       <div class="card-header">
-        <h3>Archived ({{ archivedChats.length }})</h3>
+        <h3>archived ({{ archivedChats.length }})</h3>
       </div>
       <div class="chat-list">
         <div

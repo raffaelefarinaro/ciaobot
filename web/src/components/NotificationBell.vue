@@ -161,19 +161,18 @@ function formatTime(iso: string | undefined): string {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--bg-elev);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 999px;
+  background: transparent;
+  color: var(--fg2);
+  border: none;
+  border-radius: 6px;
   cursor: pointer;
   position: relative;
-  transition: transform 120ms var(--ease), background 120ms var(--ease);
+  transition: color 120ms var(--ease), transform 120ms var(--ease);
 }
 .bell-btn svg {
   width: 18px;
   height: 18px;
 }
-.bell-btn:hover { background: var(--bg3); }
 .bell-btn:active { transform: scale(0.94); }
 .bell-btn.has-unread { color: var(--accent, #4c8bf5); }
 

@@ -39,6 +39,52 @@ def test_send_with_empty_subject_skips_webpush_but_still_logs(tmp_path: Path) ->
     assert manager.count() == 1
 
 
+def test_local_delivery_suppresses_native_fallback(tmp_path: Path, monkeypatch) -> None:
+    """A successful push to a *local* subscription means this machine already
+    got the banner via the PWA, so nothing is logged for the menu bar."""
+    import pywebpush
+
+    monkeypatch.setattr(pywebpush, "webpush", lambda **kwargs: None)  # succeeds
+    manager = PushManager(tmp_path, subject="mailto:ciaobot@localhost")
+    manager.add({"endpoint": "https://push.example/local"}, local=True)
+
+    manager.send({"title": "t", "body": "hi", "chat_id": "c1"})
+
+    assert not (tmp_path / "notifications.jsonl").exists()  # no native fallback
+
+
+def test_remote_only_subscription_still_logs_for_local_menu_bar(tmp_path: Path, monkeypatch) -> None:
+    """A subscription on another device (e.g. a phone) must NOT stop this Mac's
+    native banner — the log entry is still written."""
+    import pywebpush
+
+    monkeypatch.setattr(pywebpush, "webpush", lambda **kwargs: None)  # succeeds
+    manager = PushManager(tmp_path, subject="mailto:ciaobot@localhost")
+    manager.add({"endpoint": "https://push.example/phone"}, local=False)
+
+    manager.send({"title": "t", "body": "hi", "chat_id": "c1"})
+
+    assert len(_read_log(tmp_path)) == 1  # local machine still gets a fallback
+
+
+def test_failed_local_push_falls_back_to_log(tmp_path: Path, monkeypatch) -> None:
+    """A local subscription that exists but whose delivery fails must not
+    suppress the native fallback — otherwise the notification is lost."""
+    import pywebpush
+
+    def boom(**kwargs):
+        raise RuntimeError("transient push failure")
+
+    monkeypatch.setattr(pywebpush, "webpush", boom)
+    manager = PushManager(tmp_path, subject="mailto:ciaobot@localhost")
+    manager.add({"endpoint": "https://push.example/local"}, local=True)
+
+    manager.send({"title": "t", "body": "hi", "chat_id": "c1"})
+
+    assert len(_read_log(tmp_path)) == 1  # failed delivery → native fallback
+    assert manager.count() == 1  # non-404 failure does not prune the sub
+
+
 def test_notification_log_is_trimmed(tmp_path: Path) -> None:
     manager = PushManager(tmp_path)
 

@@ -106,6 +106,7 @@ from ciao.web.routes_api import (
     open_chat_endpoint,
     status_endpoint,
     upsert_workspace_setting,
+    vault_markdown_paths,
     workspace_binary,
     workspace_file,
     workspace_file_write,
@@ -185,6 +186,7 @@ def create_app(config, app_settings=None) -> Starlette:
         # enforce type and size allowlists rather than a workspace sandbox.
         Route("/api/workspace-file", workspace_file, methods=["GET"]),
         Route("/api/workspace-file", workspace_file_write, methods=["POST"]),
+        Route("/api/vault-markdown-paths", vault_markdown_paths, methods=["GET"]),
         Route("/api/workspace-image", workspace_image, methods=["GET"]),
         Route("/api/workspace-binary", workspace_binary, methods=["GET"]),
         Route("/api/workspace-open", workspace_open, methods=["POST"]),

@@ -137,14 +137,22 @@ def _refresh_vault_index(workspace: Path, vault_root: Path | None = None) -> boo
         return False
 
 
-def _push_subject_from_env(env: dict[str, str] | None = None) -> str:
-    """Web Push VAPID subject, or "" when CIAO_PUSH_CONTACT is unset.
+# Web Push (RFC 8292) requires a VAPID "sub" contact URI, but the push
+# service never verifies or contacts it. For a localhost/personal app there's
+# no reason to make the user supply a real email, so default to a placeholder
+# and let CIAO_PUSH_CONTACT override it. This keeps web-push notifications
+# working out of the box (previously an unset contact silently disabled them).
+DEFAULT_PUSH_SUBJECT = "mailto:ciaobot@localhost"
 
-    An empty subject means Web Push delivery stays disabled until the
-    operator sets a contact in Settings; everything else keeps working.
+
+def _push_subject_from_env(env: dict[str, str] | None = None) -> str:
+    """Web Push VAPID subject; falls back to the localhost placeholder.
+
+    A real contact is optional (set CIAO_PUSH_CONTACT to override); the push
+    service only needs a syntactically valid mailto/https URI.
     """
     source = env if env is not None else os.environ
-    return source.get("CIAO_PUSH_CONTACT", "").strip()
+    return source.get("CIAO_PUSH_CONTACT", "").strip() or DEFAULT_PUSH_SUBJECT
 
 
 def _push_subject_for_config(config: CiaoConfig) -> str:
@@ -796,6 +804,27 @@ async def _async_main() -> int:
                 return
 
     asyncio.create_task(_heal_stale_install())
+
+    # ── App bundle refresh on upgrade ────────────────────────
+    # `brew upgrade` swaps the Python package but doesn't rewrite Ciaobot.app,
+    # so its double-click launcher and menu-bar helper keep running the old
+    # version's scripts until `ciao setup` is re-run by hand. When restarted
+    # onto a new version (by the stale-install self-heal above), regenerate the
+    # bundle once so upgrades are self-contained. App bundle only — never the
+    # LaunchAgent plists (they use the stable opt/ symlink).
+    async def _refresh_app_bundle() -> None:
+        try:
+            from ciao.cli import refresh_app_bundle_if_stale
+
+            refreshed = await asyncio.to_thread(
+                refresh_app_bundle_if_stale, config.workspace_root, config.pwa_port
+            )
+            if refreshed is not None:
+                logger.info("Refreshed %s for the current version.", refreshed)
+        except Exception:
+            logger.exception("App bundle refresh failed")
+
+    asyncio.create_task(_refresh_app_bundle())
 
     async def _shutdown_providers() -> None:
         # Disconnect every active provider before uvicorn finishes its

@@ -734,6 +734,10 @@ export const useProjectStore = defineStore('projects', () => {
       .reduce((sum, p) => sum + projectUnread(p.project_id), 0)
   }
 
+  const totalUnread = computed(() =>
+    chats.value.reduce((sum, c) => sum + (c.archived ? 0 : chatUnread(c.chat_id)), 0),
+  )
+
   // Cross-device read: optimistic local clear + POST to server. The server
   // publishes `chat_read` over /ws/events so other devices/tabs update too.
   async function markRead(chatId: string) {
@@ -927,23 +931,6 @@ export const useProjectStore = defineStore('projects', () => {
     } finally {
       latestSyncInFlight = false
     }
-  }
-
-  // Reflect total unread in document.title so the user notices results
-  // ready in chats they aren't viewing. Uses the same derivation as the
-  // bell (overlay OR server timestamps) so the count matches what the UI
-  // shows.
-  if (typeof document !== 'undefined') {
-    watch(
-      () => chats.value.reduce(
-        (sum, c) => sum + (c.archived ? 0 : chatUnread(c.chat_id)),
-        0,
-      ),
-      (total) => {
-        document.title = total > 0 ? `(${total}) Ciaobot` : 'Ciaobot'
-      },
-      { immediate: true }
-    )
   }
 
   // Reconcile the OS app-icon badge with the page's view of truth. The SW
@@ -1739,7 +1726,7 @@ export const useProjectStore = defineStore('projects', () => {
           if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
             pushToast({
               chat_id: msg.chat_id,
-              title: msg.title || 'Ciaobot',
+              title: msg.title || 'ciaobot',
               body: msg.snippet || 'New message',
             })
           }
@@ -1774,7 +1761,7 @@ export const useProjectStore = defineStore('projects', () => {
           if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
             pushToast({
               chat_id: msg.chat_id,
-              title: 'Ciaobot',
+              title: 'ciaobot',
               body: msg.remaining === 0 ? 'Background agents finished' : 'Background agent update',
             })
           }
@@ -2596,7 +2583,7 @@ export const useProjectStore = defineStore('projects', () => {
               const first = qs[0]
               pushToast({
                 chat_id: chatId,
-                title: 'Ciaobot has a question',
+                title: 'ciaobot has a question',
                 body: first?.question || first?.header || 'The model needs your input',
               })
             }
@@ -2862,7 +2849,7 @@ export const useProjectStore = defineStore('projects', () => {
         if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
           pushToast({
             chat_id: chatId,
-            title: 'Ciaobot needs approval',
+            title: 'ciaobot needs approval',
             body: `${event.tool_name}: ${event.message}`,
           })
         }
@@ -2906,7 +2893,7 @@ export const useProjectStore = defineStore('projects', () => {
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
-    chatUnread, chatNeedsInput, projectNeedsInput, projectUnread, workspaceUnread, clearUnread, markRead, markAllRead,
+    chatUnread, chatNeedsInput, projectNeedsInput, projectUnread, workspaceUnread, totalUnread, clearUnread, markRead, markAllRead,
     recentChats, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
     // Actions
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,

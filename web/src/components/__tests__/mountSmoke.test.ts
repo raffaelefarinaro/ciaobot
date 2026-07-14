@@ -589,7 +589,7 @@ describe('component mount smoke', () => {
     })
     await flushPromises()
     // Fresh mocked state: nothing completed, checklist visible with all items.
-    expect(wrapper.text()).toContain('Getting started')
+    expect(wrapper.text()).toContain('getting started')
     expect(wrapper.findAll('.onboarding-row').length).toBeGreaterThanOrEqual(5)
     wrapper.unmount()
   })
@@ -607,10 +607,10 @@ describe('component mount smoke', () => {
 
     expect(wrapper.text()).toContain('Skills')
     expect(wrapper.text()).toContain('airtable-projects')
-    expect(wrapper.text()).toContain('Custom Skills')
+    expect(wrapper.text()).toContain('custom skills')
     expect(wrapper.text()).toContain('brainstorming')
-    expect(wrapper.text()).toContain('GitHub / Package Skills')
-    expect(wrapper.text()).toContain('Commands')
+    expect(wrapper.text()).toContain('github / package skills')
+    expect(wrapper.text()).toContain('commands')
     expect(wrapper.text()).toContain('/remember')
     expect(wrapper.text()).toContain('Store a durable memory')
     wrapper.unmount()
@@ -728,7 +728,7 @@ describe('component mount smoke', () => {
       'Ollama (via Claude Code)',
       'OpenRouter (via Claude Code)',
     ])
-    expect(wrapper.text()).toContain('Model Routing')
+    expect(wrapper.text()).toContain('model routing')
     expect(wrapper.text()).not.toContain('Claude Code model routing')
     // Codex tiers are editable pins whose default reflects the automatic
     // catalog mapping.

@@ -223,8 +223,21 @@
                 <svg v-if="copiedMessageKey === `user-${i}`" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
                 <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
               </button>
+              <button
+                type="button"
+                class="message-action-btn"
+                :class="{ 'message-action-btn--busy': speakLoadingKey === `user-${i}` }"
+                :title="speakingMessageKey === `user-${i}` ? 'Stop' : 'Read aloud'"
+                :aria-label="speakingMessageKey === `user-${i}` ? 'Stop reading' : 'Read message aloud'"
+                :disabled="speakLoadingKey !== null && speakLoadingKey !== `user-${i}`"
+                @click="speakMessage(item.msg.content, `user-${i}`)"
+              >
+                <svg v-if="speakingMessageKey === `user-${i}`" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+                <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+              </button>
             </div>
           </div>
+          <p v-if="speakError?.key === `user-${i}`" class="speak-error">{{ speakError.message }}</p>
         </div>
         <!-- Final assistant message -->
         <div v-else-if="item.kind === 'assistant'" class="message-wrap assistant" :class="{ 'actions-tapped': tappedMessageKey === `assistant-${i}` }">
@@ -1052,6 +1065,11 @@ function checkScroll() {
   if (!el) return
   const threshold = 4
   isNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight <= threshold
+  // Bottom-align short chats via flex-end; once content overflows, switch
+  // back to normal top-aligned scrolling. margin-top:auto on :first-child
+  // can leave scrollable empty space above the transcript when streaming
+  // UI appears in a short split-view column.
+  el.classList.toggle('overflowing', el.scrollHeight > el.clientHeight + 1)
   onChatScrollReanchor()
 }
 
@@ -1731,10 +1749,14 @@ onMounted(async () => {
   notifyChatFocused(chat.value?.chat_id)
   messagesEl.value?.addEventListener('scroll', checkScroll, { passive: true })
   if (messagesEl.value && typeof ResizeObserver !== 'undefined') {
-    messagesResizeObserver = new ResizeObserver(() => stickToBottomIfNeeded())
+    messagesResizeObserver = new ResizeObserver(() => {
+      stickToBottomIfNeeded()
+      checkScroll()
+    })
     messagesResizeObserver.observe(messagesEl.value)
   }
   nextTick(() => {
+    autoResize()
     if (messagesEl.value) {
       messagesEl.value.scrollTop = messagesEl.value.scrollHeight
       checkScroll()
@@ -2247,9 +2269,12 @@ watch(() => store.activeChatId, () => {
 // can stop short of the absolute bottom with smooth scrolling, especially
 // inside flex containers where the anchor is a zero-height child.
 watch(
-  () => [store.activeMessages.length, store.currentStreamingText, store.currentActivity.length],
+  () => [store.activeMessages.length, store.currentStreamingText, store.currentActivity.length, store.isStreaming],
   () => {
-    nextTick(() => stickToBottomIfNeeded())
+    nextTick(() => {
+      stickToBottomIfNeeded()
+      checkScroll()
+    })
   },
   { deep: true }
 )
@@ -2931,10 +2956,10 @@ function insertImageRef(n: number) {
   position: relative;
 }
 /* Push short chats to the bottom so the input bar doesn't float far
-   below a single message. On overflow the auto margin resolves to 0
-   and scrolling works normally from the top. */
-.messages > :first-child {
-  margin-top: auto;
+   below a single message. When content overflows, .overflowing drops
+   this and scrolling works normally from the top. */
+.messages:not(.overflowing) {
+  justify-content: flex-end;
 }
 
 .message-wrap {
@@ -2972,7 +2997,7 @@ function insertImageRef(n: number) {
 .message {
   flex: 1;
   max-width: 100%;
-  padding: 8px 12px;
+  padding: 8px 8px 8px 20px;
   border-radius: var(--radius);
   font-size: var(--text-base);
   line-height: 1.5;
@@ -3450,15 +3475,15 @@ details[open] > .activity-summary::before {
 .message-content :deep(p) { margin: 4px 0; }
 .message-content :deep(ul),
 .message-content :deep(ol) {
-  padding-left: 22px;
+  padding-left: 1.35em;
   margin: 4px 0;
-  list-style-position: outside;
+  list-style-position: inside;
 }
 /* Collapse the leading/trailing margin of the first/last markdown block so
    the bubble padding isn't compounded by a paragraph margin. */
 .message-content :deep(:first-child) { margin-top: 0; }
 .message-content :deep(:last-child) { margin-bottom: 0; }
-.message-content :deep(li) { padding-left: 2px; }
+.message-content :deep(li) { padding-left: 0; }
 .message-content :deep(a) {
   color: var(--accent);
   text-decoration: underline;
@@ -3831,8 +3856,10 @@ details[open] > .activity-summary::before {
   resize: none;
   min-height: 44px;
   max-height: 200px;
-  padding: 8px 12px;
-  line-height: 1.4;
+  /* Textareas top-align text; symmetric padding optically centers one
+     line inside the 44px touch target (14px × 1.25 line-height). */
+  padding: 13px 12px;
+  line-height: 1.25;
 }
 
 .archived-notice {
@@ -4212,7 +4239,6 @@ details[open] > .activity-summary::before {
   border: none;
   cursor: pointer;
 }
-.model-picker-btn:hover { background: var(--bg3); }
 .model-picker-btn:active { transform: scale(0.96); }
 
 .archive-btn {
@@ -4230,7 +4256,7 @@ details[open] > .activity-summary::before {
   border: none;
   cursor: pointer;
 }
-.archive-btn:hover { background: var(--bg3); color: var(--fg); }
+.archive-btn:hover { color: var(--fg); }
 .archive-btn:active { transform: scale(0.96); }
 
 .model-picker-dropdown {
@@ -4359,7 +4385,7 @@ details[open] > .activity-summary::before {
      when the user starts typing. 16px is the iOS auto-zoom floor: any
      smaller and Safari zooms the page on focus, which is worse than a
      slightly truncated placeholder. */
-  .chat-input { font-size: 16px; padding-top: 6px; padding-bottom: 6px; }
+  .chat-input { font-size: 16px; padding: 12px 12px; line-height: 1.25; }
   .chat-input::placeholder { font-size: 16px; }
   /* Keep every composer action at the shared touch-target minimum. */
   .input-bar { padding-top: 5px; padding-bottom: 5px; }
