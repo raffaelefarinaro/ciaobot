@@ -111,7 +111,15 @@
               class="pfp-meta-row pfp-meta-links"
             >
               <span class="pfp-meta-links-label">{{ listExtra.key }}</span>
-              <span v-for="item in listExtra.items" :key="item" class="pfp-meta-link">{{ item }}</span>
+              <template v-for="(item, i) in listExtra.items" :key="i">
+                <a
+                  v-if="item.path"
+                  class="pfp-meta-link file-link"
+                  href="#"
+                  @click.prevent="openRelated(item.path)"
+                >{{ item.label }}</a>
+                <span v-else class="pfp-meta-link">{{ item.label }}</span>
+              </template>
             </div>
             <dl v-if="fmExtraEntries.length" class="pfp-meta-extra">
               <template v-for="entry in fmExtraEntries" :key="entry.key">
@@ -263,6 +271,7 @@ import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, r
 import { useProjectStore } from '../stores/projects'
 import { parseFrontmatter, type FrontmatterValue } from '../lib/markdownFrontmatter'
 import { renderFileMarkdown } from '../lib/safeMarkdown'
+import { buildMarkdownIndex, resolveWikilinkTarget } from '../lib/wikilinks'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { api } from '../lib/api'
 import PaneHeader from './PaneHeader.vue'
@@ -409,14 +418,43 @@ const fmProse = computed(() => {
   return ''
 })
 
+// `related`/`links` items are [[wikilink]] refs to other vault notes —
+// resolve to file paths so the pills are clickable (same as body wikilinks).
+// `aliases` are alternative names for this note, not links, so stay plain.
+const _LINK_LIST_KEYS = new Set(['related', 'links'])
+const _wikiIndex = computed(() => buildMarkdownIndex(markdownPaths.value || []))
+const _wikiPathSet = computed(() => new Set(markdownPaths.value || []))
+
+function resolveListItem(raw: string): { label: string; path: string | null } {
+  const inner = raw.replace(/^\[\[(.+)\]\]$/, '$1').trim()
+  const [ref, alias] = inner.split('|')
+  const label = (alias ?? ref).trim()
+  const path = ref.trim()
+    ? resolveWikilinkTarget(ref.trim(), cleanPath.value, _wikiIndex.value, _wikiPathSet.value)
+    : null
+  return { label, path }
+}
+
 const fmListExtras = computed(() => {
-  const out: { key: string; items: string[] }[] = []
+  const out: { key: string; items: { label: string; path: string | null }[] }[] = []
   for (const key of ['aliases', 'related', 'links']) {
     const items = fmList(key)
-    if (items.length) out.push({ key, items })
+    if (!items.length) continue
+    const resolved = _LINK_LIST_KEYS.has(key)
+      ? items.map(resolveListItem)
+      : items.map((raw) => ({ label: raw, path: null }))
+    out.push({ key, items: resolved })
   }
   return out
 })
+
+function openRelated(path: string): void {
+  if (/\.(png|jpe?g|gif|webp|svg|avif|bmp|ico)$/i.test(path)) {
+    void fileViewer.openImage(path)
+  } else {
+    void fileViewer.open(path, null)
+  }
+}
 
 const fmExtraEntries = computed(() => {
   const fm = frontmatter.value
