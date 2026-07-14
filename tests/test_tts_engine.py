@@ -45,8 +45,8 @@ def _pcm(tmp_path, **config_overrides):
 def test_tts_engine_defaults_to_cloud(tmp_path):
     config = _config(tmp_path=tmp_path)
     assert config.tts_engine == "cloud"
-    assert config.tts_cloud_voice == "nova"
-    assert config.tts_local_voice == "af_heart"
+    assert config.tts_cloud_voice == "onyx"
+    assert config.tts_local_voice == "am_michael"
 
 
 def test_tts_engine_env_selection(tmp_path):
@@ -150,7 +150,7 @@ async def test_synthesize_speech_local_success(tmp_path, monkeypatch):
         mime_type = "audio/wav"
 
         def __init__(self, voice_id):
-            assert voice_id == "af_heart"
+            assert voice_id == "am_michael"
 
         async def speak(self, text):
             assert "Hello" in text
