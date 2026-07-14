@@ -324,7 +324,10 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     menubar_info = (apps / "Ciaobot.app" / "Contents" / "Info.plist").read_text(encoding="utf-8")
     assert "<string>local.ciaobot.app</string>" in menubar_info
     menubar_script = menubar_app_exe.read_text(encoding="utf-8")
-    assert 'exec "$DIR/python" -m ciao.cli menubar' in menubar_script
+    # Resolves the bundle python symlink to the real venv interpreter so
+    # `import ciao` works (invoking the symlink resolves outside the venv).
+    assert 'if [ -L "$PY" ]; then PY="$(readlink "$PY")"; fi' in menubar_script
+    assert 'exec "$PY" -m ciao.cli menubar' in menubar_script
     assert (menubar_app_exe.parent / "python").is_symlink()
 
 

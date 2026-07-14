@@ -322,11 +322,19 @@ def _write_menubar_helper(*, app_root: Path, python_path: str) -> Path:
     if bundle_python.exists() or bundle_python.is_symlink():
         bundle_python.unlink()
     bundle_python.symlink_to(python_path)
+    # Resolve the symlink to its real target before exec: invoking Python
+    # *through* the Contents/MacOS/python symlink makes CPython resolve
+    # sys.prefix to the base framework instead of the ciaobot venv, so
+    # `import ciao` fails and the menu bar crashes on launch (no tray icon).
+    # Running the resolved target keeps the venv while still living in the
+    # bundle for Notification Center identity.
     helper = macos / "CiaobotMenuBar"
     helper.write_text(
         "#!/bin/sh\n"
         'DIR="$(cd "$(dirname "$0")" && pwd)"\n'
-        'exec "$DIR/python" -m ciao.cli menubar\n',
+        'PY="$DIR/python"\n'
+        'if [ -L "$PY" ]; then PY="$(readlink "$PY")"; fi\n'
+        'exec "$PY" -m ciao.cli menubar\n',
         encoding="utf-8",
     )
     helper.chmod(0o755)
