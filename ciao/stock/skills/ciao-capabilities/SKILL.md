@@ -69,7 +69,7 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 ### App and system surface
 
 - **Settings page**: provider keys, model lists, skill/agent inventory, the injected system prompt (read-only), and local package updates from the UI.
-- **macOS extras**: a menu bar companion (`ciao menubar`) with server status, a Start at Login status/toggle, and open/restart/logs actions (the Ciaobot face turns scared when the server is down), a `Ciaobot.app` shortcut, and LaunchAgents so everything starts on login.
+- **macOS extras**: a menu bar companion (`ciao menubar`) with server status, a Start at Login status/toggle, and open/restart/logs actions (the Ciaobot face turns scared when the server is down), a distinct `Ciaobot Server.app` recovery launcher, and LaunchAgents so everything starts on login.
 - **Local HTTP API**: the app exposes an API an in-chat agent can drive (create chats, subagents, commands) — recipes are in `PWA_API.md` in the Ciaobot GitHub repo (`raffaelefarinaro/ciaobot`); fetch it when you need the raw API surface. For the common cases, the shipped `create-chat` and `ciao-automations` skills already contain the working recipes.
 
 ### Privacy and trust posture

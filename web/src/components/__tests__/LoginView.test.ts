@@ -105,7 +105,7 @@ describe('LoginView setup wizard tests', () => {
     expect(wrapper.find('#setup-push').exists()).toBe(false)
     expect(wrapper.text()).toContain('ciao auth claude')
     expect(wrapper.text()).toContain('Keep the terminal running ciao run open while you finish this setup')
-    expect(wrapper.text()).toContain('close the terminal and open Ciaobot.app')
+    expect(wrapper.text()).toContain('close the terminal and open Ciaobot Server.app')
 
     // feature tour fills the 2-column grid: six tiles, no empty slot
     const tourItems = wrapper.findAll('.tour-list li')

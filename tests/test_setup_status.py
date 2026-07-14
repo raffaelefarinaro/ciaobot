@@ -280,7 +280,9 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     assert (notes / "MEMORY.md").is_file()
     assert not (workspace / "memory-vault" / "MEMORY.md").exists()
     assert (launch_agents / "com.ciao.server.plist").is_file()
-    assert (apps / "Ciaobot.app" / "Contents" / "MacOS" / "Ciaobot").is_file()
+    assert (
+        apps / "Ciaobot Server.app" / "Contents" / "MacOS" / "CiaobotServer"
+    ).is_file()
 
 
 def _finish_client(tmp_path) -> TestClient:

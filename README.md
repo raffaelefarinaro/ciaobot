@@ -23,7 +23,7 @@ What that looks like in practice:
 - **A vault you own** — durable knowledge as plain markdown with wikilinks and an `INDEX.md`, inspired by [Andrej Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f). Browse in [Obsidian](https://obsidian.md/) or any editor; sync via GitHub, Drive, or iCloud.
 - **Skills, subagents, and commands** — packaged defaults, extensible from Settings or workspace files (see [What ships by default](#what-ships-by-default)).
 - **Files and automations** — create, preview, edit, and restore vault files from the UI; run recurring routines on a cron you choose (schedules) or re-run a prompt inside one chat every N minutes (loops).
-- **Voice, notifications, and updates** — transcription, push alerts, model settings, and in-app package updates. On macOS: menu bar companion, `Ciaobot.app`, and background service after setup.
+- **Voice, notifications, and updates** — transcription, push alerts, model settings, and in-app package updates. On macOS: menu bar companion, `Ciaobot Server.app`, and background service after setup.
 - **Provider choice** — Claude Code or Codex with your existing login; Ollama, OpenRouter, and on-device models for lighter tasks (see [Providers](#providers)).
 
 Pick a workspace folder, choose a provider, and work — Ciaobot is the interface on top; the vault is yours to keep.
@@ -90,7 +90,7 @@ When your message mentions a name that appears in the vault index, the agent get
 **App surface**
 
 - Installable PWA with web-push notifications and in-app package updates.
-- macOS extras: menu bar companion, `Ciaobot.app`, and a background service that starts on login.
+- macOS extras: menu bar companion, `Ciaobot Server.app`, and a background service that starts on login.
 - First-run product tour plus a getting-started checklist whose steps deep-link into the real pages.
 - A local HTTP API an in-chat agent can drive (create chats, subagents, commands — see [PWA_API.md](PWA_API.md)).
 
@@ -134,7 +134,7 @@ Your own schedules live alongside these in the workspace (`.runtime/schedules.js
 
 ## Install
 
-**macOS ([Homebrew](https://brew.sh))** — recommended; includes `Ciaobot.app` and the background service:
+**macOS ([Homebrew](https://brew.sh))** — recommended; includes `Ciaobot Server.app` and the background service:
 
 ```bash
 brew install raffaelefarinaro/ciaobot/ciaobot
@@ -154,7 +154,7 @@ Then open `http://localhost:8443` and follow the setup wizard:
 - **Workspace folder** (default `~/ciaobot`) — your second brain (`memory-vault/`) plus app config and runtime state. Sync this folder (GitHub, Drive, iCloud, …) so your vault follows you across machines.
 - **Model provider** — Claude Code, Codex, or another configured backend.
 
-The wizard writes config, initializes the workspace as a git repo (with a `.gitignore` for secrets and runtime state), and on macOS installs LaunchAgents and `Ciaobot.app`.
+The wizard writes config, initializes the workspace as a git repo (with a `.gitignore` for secrets and runtime state), and on macOS installs LaunchAgents and `Ciaobot Server.app`.
 
 For scripted setups: `ciao setup --workspace <dir>`. If a setup link returns `invalid setup token`, mint a fresh one with `ciao setup-url --workspace <dir>`.
 

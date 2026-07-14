@@ -112,6 +112,8 @@ The PWA is information-dense but not cramped. Monospaced typography, compact lab
 
 The macOS tray is a native companion, not a miniature copy of the PWA. Preserve platform menu conventions and use it for glanceable status, quick navigation, unread state, and server recovery.
 
+The installed PWA owns the `Ciaobot` name and orange mascot tile. The native recovery launcher is named `Ciaobot Server` and uses the same mascot on a deep-indigo tile with a terminal prompt, so the two roles remain recognizable but cannot be mistaken for one another in Finder or Launchpad.
+
 ## Colors
 
 Dark mode is the primary visual expression. It uses layered indigo surfaces instead of neutral black, keeping long sessions comfortable while preserving clear hierarchy.

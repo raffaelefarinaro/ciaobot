@@ -127,7 +127,7 @@ def server_recovery_label(status: ServerStatus) -> str:
 
 
 def open_url(workspace: Path, port: int) -> str:
-    """URL the menu bar opens; reuses the Ciaobot.app setup token when present."""
+    """URL the menu bar opens; reuses the launcher setup token when present."""
 
     token = ""
     token_path = workspace / ".runtime" / "setup-token"
@@ -140,9 +140,8 @@ def open_url(workspace: Path, port: int) -> str:
 
 
 # Bundle IDs of the native launcher this project installs itself (see
-# cli.py's _write_app_shortcut / _OUR_BUNDLE_IDS). A browser-installed PWA can
-# share the launcher's "Ciaobot.app" name, so browser_pwa_duplicate_paths()
-# excludes these IDs to avoid removing our own shell-script wrapper.
+# cli.py's _write_app_shortcut / _OUR_BUNDLE_IDS). Legacy launchers shared the
+# browser PWA's "Ciaobot.app" name, so duplicate cleanup excludes these IDs.
 _OUR_LAUNCHER_BUNDLE_IDS = frozenset({"local.ciao.app", "local.ciaobot.app"})
 
 
@@ -205,7 +204,7 @@ def unregister_app_bundle(app_root: Path) -> None:
 
 
 def remove_browser_pwa_duplicates(app_name: str = "Ciaobot") -> list[Path]:
-    """Remove duplicate browser PWAs so only the native ``Ciaobot.app`` remains."""
+    """Remove browser PWAs matching ``app_name`` without touching our launcher."""
 
     removed: list[Path] = []
     for path in browser_pwa_duplicate_paths(app_name):
@@ -398,7 +397,7 @@ def stop_server_command(uid: int | None = None) -> list[str]:
 
     The server plist sets KeepAlive=true, so a plain kill would be relaunched
     immediately; `bootout` removes it from the launchd domain so it stays
-    down. Ciaobot.app reloads it (launchctl load -w) on the next launch.
+    down. Ciaobot Server.app reloads it (launchctl load -w) on the next launch.
     """
 
     resolved = os.getuid() if uid is None else uid
@@ -432,10 +431,10 @@ def _menubar_app_candidates() -> list[Path]:
 
     home_apps = Path.home() / "Applications"
     system_apps = Path("/Applications")
-    names = ("Ciaobot.app",)
+    names = ("Ciaobot Server.app", "Ciaobot.app")
     candidates: list[Path] = []
-    for root in (system_apps, home_apps):
-        for name in names:
+    for name in names:
+        for root in (system_apps, home_apps):
             candidate = root / name
             if candidate.is_dir():
                 candidates.append(candidate)
@@ -445,7 +444,7 @@ def _menubar_app_candidates() -> list[Path]:
 def _ensure_notification_bundle() -> None:
     """Make Notification Center attribute alerts to Ciaobot, not Python.
 
-    launchd starts the menu bar via ``Ciaobot.app``'s ``CiaobotMenuBar``
+    launchd starts the menu bar via ``Ciaobot Server.app``'s ``CiaobotMenuBar``
     helper, but that helper ``exec``s the real (Homebrew) ``python``, whose
     Mach-O executable lives outside the bundle — so the process's *main*
     bundle is ``Python.app`` and Notification Center shows the Python rocket.
@@ -453,7 +452,7 @@ def _ensure_notification_bundle() -> None:
     NSUserNotification (what rumps posts through) attributes an alert to the
     app whose bundle identifier is in the main bundle's info dictionary. So we
     overwrite that in-memory identifier with Ciaobot's: Notification Center
-    then resolves it to the installed ``Ciaobot.app`` and uses its name and
+    then resolves it to the installed launcher bundle and uses its name and
     icon. Loading the bundle as well makes its resources available. This must
     run before the first notification is posted (it does — from
     ``run_menubar`` before the rumps app starts).
@@ -481,11 +480,11 @@ def _ensure_notification_bundle() -> None:
         info = main.localizedInfoDictionary() or main.infoDictionary()
         if info is not None:
             info["CFBundleIdentifier"] = target_id
-            info["CFBundleName"] = "Ciaobot"
+            info["CFBundleName"] = "Ciaobot Server"
     except Exception:
         pass
 
-    # Load Ciaobot.app so its icon resource is registered for the alert.
+    # Load the launcher bundle so its icon resource is registered for the alert.
     if app_root is not None:
         try:
             bundle = NSBundle.bundleWithPath_(str(app_root))
@@ -1001,7 +1000,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                         "Wait for the work to finish, then restart the server."
                     ),
                     ok="OK",
-                    icon_path=icon_path("Ciaobot.icns"),
+                    icon_path=icon_path("CiaobotServer.icns"),
                 )
                 return
             if not rumps.alert(
@@ -1009,7 +1008,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                 message="No active chats are running. Restart the local server now?",
                 ok="Restart",
                 cancel="Cancel",
-                icon_path=icon_path("Ciaobot.icns"),
+                icon_path=icon_path("CiaobotServer.icns"),
             ):
                 return
         try:
@@ -1025,7 +1024,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                 title="Could not start server",
                 message=detail or "launchctl did not accept the request.",
                 ok="OK",
-                icon_path=icon_path("Ciaobot.icns"),
+                icon_path=icon_path("CiaobotServer.icns"),
             )
         refresh()
 
@@ -1048,7 +1047,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                     "Run setup again to recreate them."
                 ),
                 ok="OK",
-                icon_path=icon_path("Ciaobot.icns"),
+                icon_path=icon_path("CiaobotServer.icns"),
             )
             refresh()
             return
@@ -1059,7 +1058,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                 title="Could not update login item",
                 message=error or "launchctl did not accept the change.",
                 ok="OK",
-                icon_path=icon_path("Ciaobot.icns"),
+                icon_path=icon_path("CiaobotServer.icns"),
             )
         refresh()
 
@@ -1076,7 +1075,7 @@ def run_menubar(workspace: Path, port: int) -> int:
             ),
             ok="Update",
             cancel="Cancel",
-            icon_path=icon_path("Ciaobot.icns"),
+            icon_path=icon_path("CiaobotServer.icns"),
         ):
             return
 
@@ -1103,7 +1102,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                                 "Ciaobot updated",
                                 "",
                                 f"Version {latest} is installed.",
-                                icon=icon_path("Ciaobot.icns"),
+                                icon=icon_path("CiaobotServer.icns"),
                             )
                         except Exception:
                             pass
@@ -1137,7 +1136,7 @@ def run_menubar(workspace: Path, port: int) -> int:
             ),
             ok="Quit",
             cancel="Cancel",
-            icon_path=icon_path("Ciaobot.icns"),
+            icon_path=icon_path("CiaobotServer.icns"),
         ):
             return
         subprocess.run(stop_server_command(), check=False)
@@ -1301,7 +1300,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                         "",
                         str(notification.get("body") or "New notification"),
                         data=payload,
-                        icon=icon_path("Ciaobot.icns"),
+                        icon=icon_path("CiaobotServer.icns"),
                     )
                 except Exception:
                     # A notification failure should not prevent the normal menu
