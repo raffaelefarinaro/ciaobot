@@ -142,6 +142,7 @@
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
     <div class="messages" ref="messagesEl" data-tour="chat-messages" @click="handleHighlightClick">
+      <div class="messages-content">
       <template v-for="(item, i) in renderItems" :key="i">
         <!-- Reasoning trace: intermediate assistant text + tool calls grouped -->
         <div v-if="item.kind === 'trace'" class="trace-block" :class="{ open: openTraces[i] }">
@@ -412,6 +413,7 @@
           Comment
         </button>
       </Teleport>
+      </div>
     </div>
 
     <!-- Right-side comment sidebar: shows pending chat comments (and the
@@ -1065,11 +1067,6 @@ function checkScroll() {
   if (!el) return
   const threshold = 4
   isNearBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight <= threshold
-  // Bottom-align short chats via flex-end; once content overflows, switch
-  // back to normal top-aligned scrolling. margin-top:auto on :first-child
-  // can leave scrollable empty space above the transcript when streaming
-  // UI appears in a short split-view column.
-  el.classList.toggle('overflowing', el.scrollHeight > el.clientHeight + 1)
   onChatScrollReanchor()
 }
 
@@ -2942,23 +2939,22 @@ function insertImageRef(n: number) {
   width: 200px;
 }
 
-/* Messages */
+/* Messages: outer scroll container; inner content uses min-height:100% +
+   flex-end so short chats sit above the composer without breaking scroll. */
 .messages {
   flex: 1;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
   padding: 12px calc(12px + var(--safe-right)) 20px calc(12px + var(--safe-left));
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
   min-height: 0;
   position: relative;
 }
-/* Push short chats to the bottom so the input bar doesn't float far
-   below a single message. When content overflows, .overflowing drops
-   this and scrolling works normally from the top. */
-.messages:not(.overflowing) {
+.messages-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 100%;
   justify-content: flex-end;
 }
 
