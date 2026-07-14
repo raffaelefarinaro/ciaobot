@@ -328,6 +328,62 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     assert (menubar_app_exe.parent / "python").is_symlink()
 
 
+def _setup_argv(workspace: Path, launch_agents: Path, apps: Path, *, yes: bool = False) -> list[str]:
+    argv = [
+        "setup",
+        "--workspace", str(workspace),
+        "--launch-agents-dir", str(launch_agents),
+        "--app-dir", str(apps),
+        "--python", "/opt/ciao/bin/python",
+        "--port", "9443",
+    ]
+    if yes:
+        argv.append("--yes")
+    return argv
+
+
+def test_setup_refuses_source_checkout(tmp_path: Path, capsys) -> None:
+    # A directory that looks like the Ciaobot source repo must be rejected so
+    # setup can't hijack the real workspace by repointing the LaunchAgents.
+    checkout = tmp_path / "ciaobot"
+    (checkout / "ciao").mkdir(parents=True)
+    (checkout / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    (checkout / "ciao" / "__init__.py").write_text("", encoding="utf-8")
+
+    rc = cli.main(_setup_argv(checkout, tmp_path / "LaunchAgents", tmp_path / "Applications"))
+
+    assert rc == 1
+    assert "source checkout" in capsys.readouterr().err
+    assert not (checkout / ".env").exists()  # nothing scaffolded
+
+
+def test_setup_refuses_to_repoint_existing_workspace(tmp_path: Path, capsys) -> None:
+    launch_agents = tmp_path / "LaunchAgents"
+    apps = tmp_path / "Applications"
+    first = tmp_path / "ws-one"
+    second = tmp_path / "ws-two"
+
+    assert cli.main(_setup_argv(first, launch_agents, apps)) == 0
+    capsys.readouterr()
+
+    # A second setup pointed elsewhere must refuse rather than silently move it.
+    rc = cli.main(_setup_argv(second, launch_agents, apps))
+    assert rc == 1
+    assert "already set up" in capsys.readouterr().err
+    assert not (second / ".env").exists()
+
+
+def test_setup_yes_overrides_repoint_guard(tmp_path: Path) -> None:
+    launch_agents = tmp_path / "LaunchAgents"
+    apps = tmp_path / "Applications"
+    first = tmp_path / "ws-one"
+    second = tmp_path / "ws-two"
+
+    assert cli.main(_setup_argv(first, launch_agents, apps)) == 0
+    assert cli.main(_setup_argv(second, launch_agents, apps, yes=True)) == 0
+    assert (second / ".env").exists()
+
+
 def test_setup_removes_our_legacy_ciao_app_only(tmp_path: Path) -> None:
     apps = tmp_path / "Applications"
     ours = apps / "Ciao.app" / "Contents"
