@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import logging
 from pathlib import Path
 
 from itsdangerous import URLSafeTimedSerializer, BadSignature
@@ -10,6 +11,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
 from starlette.websockets import WebSocket
+
+logger = logging.getLogger(__name__)
 
 SESSION_COOKIE = "ciao_session"
 SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
@@ -65,6 +68,35 @@ def _split_host(value: str) -> tuple[str, int | None]:
         return host, None
 
 
+def _allowed_origin_hosts(request: Request | WebSocket) -> set[str]:
+    """Hostnames — beyond the bound ``Host`` — an origin may legitimately match.
+
+    Covers the reverse-proxy / tunnel / host-alias case where the browser
+    reaches the app under a public hostname while the server binds to (and sees
+    ``Host``) something else:
+
+    - ``X-Forwarded-Host``: the original host a proxy declares. Browsers cannot
+      set this on a WebSocket/fetch handshake, so it can't be forged by a
+      cross-site page — only a fronting proxy sets it.
+    - ``CIAO_ALLOWED_ORIGINS``: an explicit operator allowlist of hosts/origins.
+    """
+    from urllib.parse import urlsplit
+
+    hosts: set[str] = set()
+    forwarded = request.headers.get("x-forwarded-host", "")
+    for part in forwarded.split(","):
+        host, _port = _split_host(part.strip())
+        if host:
+            hosts.add(host.lower().rstrip("."))
+    state = getattr(getattr(request, "app", None), "state", None)
+    cfg = getattr(state, "config", None)
+    for entry in getattr(cfg, "pwa_allowed_origins", ()) or ():
+        host = urlsplit(entry).hostname if "//" in entry else _split_host(entry)[0]
+        if host:
+            hosts.add(host.lower().rstrip("."))
+    return hosts
+
+
 def _same_origin(request: Request | WebSocket, origin: str) -> bool:
     from urllib.parse import urlsplit
 
@@ -82,11 +114,13 @@ def _same_origin(request: Request | WebSocket, origin: str) -> bool:
 
     origin_host = parsed.hostname.lower()
     origin_port = parsed.port
-    if origin_host != request_host:
-        return False
-    if origin_port is not None and request_port is not None and origin_port != request_port:
-        return False
-    return True
+    if origin_host == request_host:
+        if origin_port is not None and request_port is not None and origin_port != request_port:
+            return False
+        return True
+    # Reached under a proxy-declared or operator-allowed host (port may differ
+    # across the proxy hop, so it isn't compared here).
+    return origin_host in _allowed_origin_hosts(request)
 
 
 def _state_change_origin_allowed(request: Request) -> bool:
@@ -111,6 +145,13 @@ async def authorize_websocket(websocket: WebSocket) -> bool:
     """
     origin = websocket.headers.get("origin")
     if origin and not _same_origin(websocket, origin):
+        logger.warning(
+            "WebSocket origin rejected: origin=%s host=%s x-forwarded-host=%s "
+            "(set CIAO_ALLOWED_ORIGINS if reaching Ciaobot under a proxy host)",
+            origin,
+            websocket.headers.get("host", ""),
+            websocket.headers.get("x-forwarded-host", ""),
+        )
         await websocket.close(code=4003, reason="forbidden origin")
         return False
     config = getattr(websocket.app.state, "config", None)

@@ -236,6 +236,12 @@ class CiaoConfig:
     state_path: Path
     media_root: Path
     pwa_auth_required: bool = False
+    # Extra origins accepted for state-changing HTTP + WebSocket handshakes when
+    # the app is reached under a host it doesn't bind to (reverse proxy / tunnel
+    # / host alias). Bare hostnames or full origins; from CIAO_ALLOWED_ORIGINS.
+    # A proxy-supplied X-Forwarded-Host is honored too (browsers can't forge it
+    # on a handshake, so it's safe against cross-site WS hijacking).
+    pwa_allowed_origins: tuple[str, ...] = ()
     dev_mode: bool = False
     vault_mode: str = "scratch"
     bootstrap_mode: bool = False
@@ -502,6 +508,12 @@ class CiaoConfig:
         pwa_auth_required_raw = source.get("PWA_AUTH_REQUIRED", "").strip().lower()
         pwa_auth_required = pwa_auth_required_raw in {"true", "1", "yes", "y"}
 
+        pwa_allowed_origins = tuple(
+            o.strip()
+            for o in source.get("CIAO_ALLOWED_ORIGINS", "").split(",")
+            if o.strip()
+        )
+
         pwa_auth_token = source.get("PWA_AUTH_TOKEN", "").strip()
         bootstrap_mode = not (
             (bool(pwa_auth_token) or not pwa_auth_required)
@@ -671,6 +683,7 @@ class CiaoConfig:
             state_path=state_path,
             media_root=media_root,
             pwa_auth_required=pwa_auth_required,
+            pwa_allowed_origins=pwa_allowed_origins,
             dev_mode=dev_mode,
             vault_mode=vault_mode,
             bootstrap_mode=bootstrap_mode,
