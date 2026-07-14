@@ -103,6 +103,7 @@ ciao dev
 - Frontend: `http://localhost:5173`
 - Dev backend: `http://127.0.0.1:8543`
 - `ciao dev` intentionally avoids `localhost:8443` because editor/webview proxy processes can hijack that port and serve stale UI.
+- A development backend refuses to start when another Ciaobot backend already owns the same runtime directory. Stop the launchd service first, or use a separate `CIAO_RUNTIME_ROOT`; changing only the port is not sufficient because both servers would otherwise mutate the same project/chat registry.
 
 ## Testing
 

@@ -117,13 +117,15 @@ skills/  subagents/  commands/ Canonical user-owned sources; `ciao sync-skills` 
 .agents/skills/                   Generated Codex skill projection and command/role wrappers.
 .codex/{config.toml,agents/}      Generated native Codex agent registrations and role instructions.
 memory-vault/                  Durable markdown memory: MEMORY.md, INDEX.md, entity folders, projects/{active,completed}/, Workspace/, Logs/Chats/.
-.runtime/                      Local state: schedules.json, web_projects.json, job_runs.jsonl, server_errors.log, snapshots/, transcripts/, state.json. Not committed.
+.runtime/                      Local state: schedules.json, web_projects.json, web_projects.audit.jsonl, server.lock, job_runs.jsonl, server_errors.log, snapshots/, transcripts/, state.json. Not committed.
 secrets/                       OAuth credentials (gitignored).
 ```
 
 ## Server and chat pipeline
 
 `ciao/` is a Starlette web server that mounts the PWA frontend, exposes a JSON API for projects/chats/schedules, and drives Claude Agent SDK sessions for each chat turn. Auth is a pre-shared token (`PWA_AUTH_TOKEN`) traded for a signed session cookie. Operational state lives in `.runtime/` under `CIAO_WORKSPACE`; durable memory lives under `CIAO_VAULT_ROOT` (default `<CIAO_WORKSPACE>/memory-vault`).
+
+One backend process owns a runtime directory at a time. `ciao/instance_lock.py` holds `.runtime/server.lock` for the process lifetime, so a normal server and `ciao dev` cannot run against the same registry concurrently. Project/chat writes use a short-lived registry lock, merge field-level local deltas onto the latest revision, and append mutation IDs to `.runtime/web_projects.audit.jsonl`. Vault-backed project IDs are deterministic for newly discovered `(workspace, vault_folder)` pairs. At startup, archive discovery resolves both display names and vault-folder slugs; missing active rows are reconstructed from normalized runtime transcripts only when a surviving provider session or a non-deleted audit record proves they were active. Explicit deletion clears provider state, normalized transcripts, and session state so recovery cannot revive it.
 
 Chat transcripts are streamed via WebSocket and archived to `Logs/Chats/<chat-id>/claude/` under the vault root (`transcripts.py`). The Claude Agent SDK is configured in `ciao/providers/claude.py` with a `fallback_model` chain (Opus to Sonnet to Haiku) and `setting_sources=["user", "project", "local"]` so `.claude/skills/`, `.claude/agents/`, and `.claude/commands/` auto-discover.
 
@@ -197,7 +199,7 @@ Every instance is identical (no primary/secondary, no cloud). Sync and branch ba
 
 Every configured workspace uses the same shape: a project is a folder under `<workspace.vault_root>/projects/active/<name>/` with a same-named main doc `<name>/<name>.md` (or `README.md`). On completion it moves to `<workspace.vault_root>/projects/completed/<name>/` via the PWA's "Complete" button (or `complete_project()`).
 
-Completed projects can be restored. The sidebar footer has an archive icon next to "+ New Project" that opens a modal listing the current workspace's completed projects (`ProjectChatManager.list_completed_projects()` scans the `projects/completed/` tree read-only). Each entry has a Restore button: `restore_project(workspace, stem)` moves the folder back to `projects/active/`, flips frontmatter `status: completed` back to `active`, and re-runs auto-discovery to recreate the PWA project. The recreated project gets a fresh id; the original chats stay archived. Routes: `GET /api/projects/completed` (optional `?workspace=`) and `POST /api/projects/completed/restore` (see `PWA_API.md`).
+Completed projects can be restored. The sidebar footer has an archive icon next to "+ New Project" that opens a modal listing the current workspace's completed projects (`ProjectChatManager.list_completed_projects()` scans the `projects/completed/` tree read-only). Each entry has a Restore button: `restore_project(workspace, stem)` moves the folder back to `projects/active/`, flips frontmatter `status: completed` back to `active`, and re-runs auto-discovery to recreate the PWA project. Auto-discovery derives a stable id from the workspace and folder slug; the original chats stay archived. Routes: `GET /api/projects/completed` (optional `?workspace=`) and `POST /api/projects/completed/restore` (see `PWA_API.md`).
 
 - **Folder name** is the slug used internally (`vault_folder`). Lowercase + kebab-case is preferred but not enforced; spaces, mixed case, and underscores all work. Avoid path separators and leading dots.
 - **PWA display name** comes from frontmatter `name:` (or `title:` if `name:` is absent), so it can be any human-friendly string with spaces (e.g. `name: AI Championship Project`). If both are missing, the folder name is used as the label.
