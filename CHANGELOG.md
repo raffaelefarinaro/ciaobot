@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.19 - 2026-07-14
+
+### Changed
+- Merge pull request #85 from raffaelefarinaro/chore/sync-develop-v0.4.18 (`4a937db`)
+- harden: guarantee the app opens + stop releases from stale local develop (`896d513`)
+- Merge pull request #86 from raffaelefarinaro/harden-window-launch-and-release (`3392435`)
+- release: prepare v0.4.19 (`28b0b44`)
+
 ## v0.4.18 - 2026-07-14
 
 ### Changed
