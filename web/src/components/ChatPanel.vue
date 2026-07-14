@@ -3020,7 +3020,7 @@ function insertImageRef(n: number) {
   display: flex;
   flex-shrink: 0;
   align-self: flex-start;
-  gap: 4px;
+  gap: 2px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s;
@@ -3046,25 +3046,62 @@ function insertImageRef(n: number) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: var(--touch, 44px);
-  height: var(--touch, 44px);
-  margin: 0;
-  padding: 0;
+  box-sizing: content-box;
+  --message-action-visual: 28px;
+  width: var(--message-action-visual);
+  height: var(--message-action-visual);
+  min-width: var(--message-action-visual);
+  min-height: var(--message-action-visual);
+  padding: calc((var(--touch, 44px) - var(--message-action-visual)) / 2);
+  margin: calc((var(--message-action-visual) - var(--touch, 44px)) / 2);
   border: none;
   border-radius: 6px;
   background: transparent;
   color: var(--fg2);
   cursor: pointer;
-  transition: color 0.12s, background 0.12s;
+  position: relative;
+  isolation: isolate;
+  transition: color 0.12s;
+}
+
+.message-action-btn::before {
+  content: '';
+  position: absolute;
+  inset: calc((var(--touch, 44px) - var(--message-action-visual)) / 2);
+  z-index: -1;
+  border-radius: 6px;
+  background: transparent;
+  pointer-events: none;
+  transition: background 0.12s;
+}
+
+.message-action-btn svg {
+  width: 14px;
+  height: 14px;
 }
 
 .message-action-btn:hover {
   color: var(--fg);
+}
+
+.message-action-btn:hover::before {
   background: color-mix(in srgb, var(--fg) 8%, transparent);
 }
 
 .message-action-btn:active {
   transform: scale(0.95);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .message-action-btn {
+    --message-action-visual: 24px;
+    padding: 0;
+    margin: 0;
+  }
+
+  .message-action-btn::before {
+    inset: 0;
+  }
 }
 
 .message-action-btn--busy {
