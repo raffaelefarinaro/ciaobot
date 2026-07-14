@@ -311,12 +311,18 @@ def _ensure_clean(root: Path, *, allow_dirty: bool) -> None:
 
 
 def _resolve_source_ref(root: Path, source: str) -> str:
-    local = _git(root, ["rev-parse", "--verify", source], check=False)
-    if local:
-        return source
+    # Prefer the freshly-fetched remote branch over a same-named local branch.
+    # _checkout_release_branch fetches origin/<source> right before this; a
+    # local `develop` that lagged origin would otherwise cut the release from a
+    # stale tree, silently shipping a version that omits already-merged PRs.
+    # Fall back to a local ref only when there is no remote (tags, SHAs,
+    # detached work).
     remote = _git(root, ["rev-parse", "--verify", f"origin/{source}"], check=False)
     if remote:
         return f"origin/{source}"
+    local = _git(root, ["rev-parse", "--verify", source], check=False)
+    if local:
+        return source
     raise ReleaseError(
         f"could not resolve release source branch {source!r}; "
         "fetch origin or check out the branch locally"

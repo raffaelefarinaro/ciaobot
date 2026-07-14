@@ -30,10 +30,16 @@ def _venv_python(venv_dir: Path) -> Path:
 
 def _installed_probe(require_stock: bool) -> str:
     return f"""
+import sys
 from pathlib import Path
 from importlib import resources
 
 import ciao
+import ciao.window  # menu bar "Open Ciaobot" launches this; must import
+if sys.platform == "darwin":
+    # The native window backend must ship on macOS, or the tray/app opens
+    # nothing. This is the regression class that left the window unopenable.
+    import webview  # noqa: F401
 from ciao.config import CiaoConfig
 from ciao.web.app import create_app
 from starlette.testclient import TestClient

@@ -171,6 +171,47 @@ def test_window_launch_command_uses_venv_python(tmp_path: Path) -> None:
     ]
 
 
+def test_window_interpreter_ok_true_for_real_python(monkeypatch) -> None:
+    menubar._WINDOW_INTERP_OK.clear()
+    # The test interpreter can import ciao.window.
+    assert menubar._window_interpreter_ok(sys.executable) is True
+    # Result is cached.
+    assert menubar._WINDOW_INTERP_OK[sys.executable] is True
+
+
+def test_window_interpreter_ok_false_for_broken_python(monkeypatch) -> None:
+    menubar._WINDOW_INTERP_OK.clear()
+    assert menubar._window_interpreter_ok("/nonexistent/python") is False
+
+
+def test_launch_ui_opens_browser_when_interpreter_broken(monkeypatch) -> None:
+    # The core guarantee: a launch interpreter that can't load the window
+    # module must NOT leave the user with nothing — fall back to the browser.
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(menubar, "_window_interpreter_ok", lambda interp: False)
+    monkeypatch.setattr(menubar, "open_command", lambda url: ["open", url])
+    popen_calls: list = []
+    run_calls: list = []
+    monkeypatch.setattr(menubar.subprocess, "Popen", lambda *a, **k: popen_calls.append(a))
+    monkeypatch.setattr(menubar.subprocess, "run", lambda *a, **k: run_calls.append(a))
+
+    menubar.launch_ui("http://localhost:8443/", None)
+
+    assert popen_calls == []  # native window not spawned
+    assert run_calls and run_calls[0][0] == ["open", "http://localhost:8443/"]
+
+
+def test_launch_ui_spawns_window_when_interpreter_ok(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(menubar, "_window_interpreter_ok", lambda interp: True)
+    popen_calls: list = []
+    monkeypatch.setattr(menubar.subprocess, "Popen", lambda *a, **k: popen_calls.append(a[0]))
+
+    menubar.launch_ui("http://localhost:8443/", None)
+
+    assert popen_calls and popen_calls[0][1:3] == ["-m", "ciao.window"]
+
+
 def _write_bundle(path: Path, *, bundle_id: str) -> None:
     contents = path / "Contents"
     contents.mkdir(parents=True)

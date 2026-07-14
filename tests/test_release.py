@@ -5,14 +5,44 @@ from pathlib import Path
 
 import pytest
 
+import ciao.release as release_mod
 from ciao.release import (
     CommitSummary,
     ReleaseError,
+    _resolve_source_ref,
     apply_release_files,
     bump_version,
     read_versions,
     render_changelog_section,
 )
+
+
+def test_resolve_source_prefers_remote_over_stale_local(tmp_path: Path, monkeypatch) -> None:
+    # Cutting a release must use the freshly-fetched origin/<source>, not a
+    # same-named local branch that may lag behind (which would silently ship a
+    # version missing already-merged PRs).
+    calls: list[list[str]] = []
+
+    def fake_git(root, args, check=False):
+        calls.append(args)
+        if args == ["rev-parse", "--verify", "origin/develop"]:
+            return "abc123"  # remote exists
+        return "def456"  # local also exists
+
+    monkeypatch.setattr(release_mod, "_git", fake_git)
+    assert _resolve_source_ref(tmp_path, "develop") == "origin/develop"
+    # The remote was checked first.
+    assert calls[0] == ["rev-parse", "--verify", "origin/develop"]
+
+
+def test_resolve_source_falls_back_to_local_when_no_remote(tmp_path: Path, monkeypatch) -> None:
+    def fake_git(root, args, check=False):
+        if args == ["rev-parse", "--verify", "origin/develop"]:
+            return ""  # no remote (e.g. a tag or local-only branch)
+        return "def456"
+
+    monkeypatch.setattr(release_mod, "_git", fake_git)
+    assert _resolve_source_ref(tmp_path, "develop") == "develop"
 
 
 def _write_release_tree(root: Path) -> None:
