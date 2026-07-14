@@ -331,6 +331,57 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     assert (menubar_app_exe.parent / "python").is_symlink()
 
 
+def test_refresh_app_bundle_skips_when_version_current(tmp_path: Path, monkeypatch) -> None:
+    import ciao
+
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.setattr(ciao, "__version__", "9.9.9")
+    monkeypatch.setattr(cli, "_installed_app_dir", lambda: tmp_path / "Applications")
+    marker = cli._app_bundle_marker_path(tmp_path)
+    marker.parent.mkdir(parents=True)
+    marker.write_text("9.9.9\n", encoding="utf-8")
+    calls: list = []
+    monkeypatch.setattr(cli, "_write_app_shortcut", lambda **k: calls.append(k))
+
+    assert cli.refresh_app_bundle_if_stale(tmp_path, 8443) is None
+    assert calls == []  # bundle already current — not rewritten
+
+
+def test_refresh_app_bundle_rewrites_when_stale(tmp_path: Path, monkeypatch) -> None:
+    import ciao
+
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.setattr(ciao, "__version__", "9.9.9")
+    app_dir = tmp_path / "Applications"
+    monkeypatch.setattr(cli, "_installed_app_dir", lambda: app_dir)
+    marker = cli._app_bundle_marker_path(tmp_path)
+    marker.parent.mkdir(parents=True)
+    marker.write_text("9.9.8\n", encoding="utf-8")  # previous version
+    calls: list = []
+    monkeypatch.setattr(
+        cli, "_write_app_shortcut", lambda **k: calls.append(k) or (k["app_dir"] / "Ciaobot.app")
+    )
+
+    result = cli.refresh_app_bundle_if_stale(tmp_path, 8443)
+    assert result == app_dir / "Ciaobot.app"
+    assert calls[0]["workspace"] == tmp_path and calls[0]["port"] == 8443
+
+
+def test_refresh_app_bundle_noop_without_installed_bundle(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.setattr(cli, "_installed_app_dir", lambda: None)
+    called: list = []
+    monkeypatch.setattr(cli, "_write_app_shortcut", lambda **k: called.append(k))
+
+    assert cli.refresh_app_bundle_if_stale(tmp_path, 8443) is None
+    assert called == []
+
+
+def test_refresh_app_bundle_noop_off_darwin(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(cli.sys, "platform", "linux")
+    assert cli.refresh_app_bundle_if_stale(tmp_path, 8443) is None
+
+
 def test_setup_removes_our_legacy_ciao_app_only(tmp_path: Path) -> None:
     apps = tmp_path / "Applications"
     ours = apps / "Ciao.app" / "Contents"
