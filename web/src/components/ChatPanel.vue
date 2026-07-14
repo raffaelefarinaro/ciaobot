@@ -2972,7 +2972,7 @@ function insertImageRef(n: number) {
 .message {
   flex: 1;
   max-width: 100%;
-  padding: 8px 12px 8px 16px;
+  padding: 8px 8px 8px 20px;
   border-radius: var(--radius);
   font-size: var(--text-base);
   line-height: 1.5;
@@ -3450,15 +3450,15 @@ details[open] > .activity-summary::before {
 .message-content :deep(p) { margin: 4px 0; }
 .message-content :deep(ul),
 .message-content :deep(ol) {
-  padding-left: 26px;
+  padding-left: 1.35em;
   margin: 4px 0;
-  list-style-position: outside;
+  list-style-position: inside;
 }
 /* Collapse the leading/trailing margin of the first/last markdown block so
    the bubble padding isn't compounded by a paragraph margin. */
 .message-content :deep(:first-child) { margin-top: 0; }
 .message-content :deep(:last-child) { margin-bottom: 0; }
-.message-content :deep(li) { padding-left: 2px; }
+.message-content :deep(li) { padding-left: 0; }
 .message-content :deep(a) {
   color: var(--accent);
   text-decoration: underline;
