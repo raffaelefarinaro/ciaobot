@@ -324,8 +324,62 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     menubar_info = (apps / "Ciaobot.app" / "Contents" / "Info.plist").read_text(encoding="utf-8")
     assert "<string>local.ciaobot.app</string>" in menubar_info
     menubar_script = menubar_app_exe.read_text(encoding="utf-8")
-    assert 'exec "$DIR/python" -m ciao.cli menubar' in menubar_script
+    # Resolves the bundle python symlink to the real venv interpreter so
+    # `import ciao` works (invoking the symlink resolves outside the venv).
+    assert 'if [ -L "$PY" ]; then PY="$(readlink "$PY")"; fi' in menubar_script
+    assert 'exec "$PY" -m ciao.cli menubar' in menubar_script
     assert (menubar_app_exe.parent / "python").is_symlink()
+
+
+def test_refresh_app_bundle_skips_when_version_current(tmp_path: Path, monkeypatch) -> None:
+    import ciao
+
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.setattr(ciao, "__version__", "9.9.9")
+    monkeypatch.setattr(cli, "_installed_app_dir", lambda: tmp_path / "Applications")
+    marker = cli._app_bundle_marker_path(tmp_path)
+    marker.parent.mkdir(parents=True)
+    marker.write_text("9.9.9\n", encoding="utf-8")
+    calls: list = []
+    monkeypatch.setattr(cli, "_write_app_shortcut", lambda **k: calls.append(k))
+
+    assert cli.refresh_app_bundle_if_stale(tmp_path, 8443) is None
+    assert calls == []  # bundle already current — not rewritten
+
+
+def test_refresh_app_bundle_rewrites_when_stale(tmp_path: Path, monkeypatch) -> None:
+    import ciao
+
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.setattr(ciao, "__version__", "9.9.9")
+    app_dir = tmp_path / "Applications"
+    monkeypatch.setattr(cli, "_installed_app_dir", lambda: app_dir)
+    marker = cli._app_bundle_marker_path(tmp_path)
+    marker.parent.mkdir(parents=True)
+    marker.write_text("9.9.8\n", encoding="utf-8")  # previous version
+    calls: list = []
+    monkeypatch.setattr(
+        cli, "_write_app_shortcut", lambda **k: calls.append(k) or (k["app_dir"] / "Ciaobot.app")
+    )
+
+    result = cli.refresh_app_bundle_if_stale(tmp_path, 8443)
+    assert result == app_dir / "Ciaobot.app"
+    assert calls[0]["workspace"] == tmp_path and calls[0]["port"] == 8443
+
+
+def test_refresh_app_bundle_noop_without_installed_bundle(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.setattr(cli, "_installed_app_dir", lambda: None)
+    called: list = []
+    monkeypatch.setattr(cli, "_write_app_shortcut", lambda **k: called.append(k))
+
+    assert cli.refresh_app_bundle_if_stale(tmp_path, 8443) is None
+    assert called == []
+
+
+def test_refresh_app_bundle_noop_off_darwin(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(cli.sys, "platform", "linux")
+    assert cli.refresh_app_bundle_if_stale(tmp_path, 8443) is None
 
 
 def _setup_argv(workspace: Path, launch_agents: Path, apps: Path, *, yes: bool = False) -> list[str]:

@@ -323,11 +323,19 @@ def _write_menubar_helper(*, app_root: Path, python_path: str) -> Path:
     if bundle_python.exists() or bundle_python.is_symlink():
         bundle_python.unlink()
     bundle_python.symlink_to(python_path)
+    # Resolve the symlink to its real target before exec: invoking Python
+    # *through* the Contents/MacOS/python symlink makes CPython resolve
+    # sys.prefix to the base framework instead of the ciaobot venv, so
+    # `import ciao` fails and the menu bar crashes on launch (no tray icon).
+    # Running the resolved target keeps the venv while still living in the
+    # bundle for Notification Center identity.
     helper = macos / "CiaobotMenuBar"
     helper.write_text(
         "#!/bin/sh\n"
         'DIR="$(cd "$(dirname "$0")" && pwd)"\n'
-        'exec "$DIR/python" -m ciao.cli menubar\n',
+        'PY="$DIR/python"\n'
+        'if [ -L "$PY" ]; then PY="$(readlink "$PY")"; fi\n'
+        'exec "$PY" -m ciao.cli menubar\n',
         encoding="utf-8",
     )
     helper.chmod(0o755)
@@ -453,7 +461,69 @@ def _write_app_shortcut(
         python_path=python_path or sys.executable,
     )
     _register_app_with_launchservices(app_root)
+    # Record the version that wrote this bundle so the server can refresh it
+    # automatically after an upgrade (see refresh_app_bundle_if_stale).
+    _write_app_bundle_marker(workspace)
     return app_root
+
+
+def _app_bundle_marker_path(workspace: Path) -> Path:
+    return workspace.expanduser() / ".runtime" / "app-bundle-version"
+
+
+def _write_app_bundle_marker(workspace: Path) -> None:
+    from ciao import __version__
+
+    marker = _app_bundle_marker_path(workspace)
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(__version__ + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _installed_app_dir() -> Path | None:
+    """Directory holding the installed ``Ciaobot.app``, if any."""
+
+    for base in (Path.home() / "Applications", Path("/Applications")):
+        if (base / "Ciaobot.app").is_dir():
+            return base
+    return None
+
+
+def refresh_app_bundle_if_stale(
+    workspace: Path, port: int, *, python_path: str | None = None
+) -> Path | None:
+    """Rewrite ``Ciaobot.app`` when the running version differs from the one
+    that last wrote it. Returns the app root when refreshed, else ``None``.
+
+    macOS only. Makes ``brew upgrade`` self-contained: the server, restarted
+    onto the new keg by the stale-install self-heal, regenerates the app
+    bundle (launcher + menu-bar helper + icon) so the double-click launcher
+    and tray helper aren't left on the previous version's scripts. Only the
+    app bundle is touched — the LaunchAgent plists point at the stable opt/
+    symlink and must not be rewritten under a running launchd.
+    """
+
+    if sys.platform != "darwin":
+        return None
+    from ciao import __version__
+
+    app_dir = _installed_app_dir()
+    if app_dir is None:
+        return None  # setup never created a bundle; nothing to refresh
+    try:
+        last = _app_bundle_marker_path(workspace).read_text(encoding="utf-8").strip()
+    except OSError:
+        last = ""
+    if last == __version__:
+        return None
+    return _write_app_shortcut(
+        workspace=workspace,
+        app_dir=app_dir,
+        port=port,
+        python_path=python_path,
+    )
 
 
 _LSREGISTER = (
