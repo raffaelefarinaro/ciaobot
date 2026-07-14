@@ -90,14 +90,16 @@ defineEmits<{ 'open-sidebar': [] }>()
   border-radius: 8px;
   flex-shrink: 0;
 }
-.header-hamburger:active { background: var(--bg3); }
+.header-hamburger:active { transform: scale(0.96); }
 .header-bell {
   flex-shrink: 0;
   display: none;
 }
-/* Unify header icon sizes with the sidebar (30px containers, 18px content). */
-:deep(.btn-icon),
-:deep(.model-picker-btn) {
+/* Unify header icon sizes with the sidebar (30px containers, 18px content).
+   ::before keeps hover/active fills at the 30px visual footprint. */
+.pane-header :deep(.btn-icon),
+.pane-header :deep(.model-picker-btn),
+.pane-header :deep(.archive-btn) {
   box-sizing: content-box;
   width: 30px;
   height: 30px;
@@ -106,19 +108,51 @@ defineEmits<{ 'open-sidebar': [] }>()
   padding: calc((var(--touch) - 30px) / 2);
   margin: calc((30px - var(--touch)) / 2);
   border-radius: 6px;
+  position: relative;
+  isolation: isolate;
 }
-:deep(.bell-btn) {
+.pane-header :deep(.btn-icon::before),
+.pane-header :deep(.model-picker-btn::before),
+.pane-header :deep(.archive-btn::before),
+.pane-header .header-bell :deep(.bell-btn::before) {
+  content: '';
+  position: absolute;
+  inset: calc((var(--touch) - 30px) / 2);
+  z-index: -1;
+  border-radius: 6px;
+  background: transparent;
+  pointer-events: none;
+  transition: background 120ms var(--ease);
+}
+.pane-header :deep(.btn-icon:hover),
+.pane-header :deep(.model-picker-btn:hover),
+.pane-header :deep(.archive-btn:hover),
+.pane-header .header-bell :deep(.bell-btn:hover) {
+  background: transparent;
+}
+.pane-header :deep(.btn-icon:hover::before),
+.pane-header :deep(.model-picker-btn:hover::before),
+.pane-header :deep(.archive-btn:hover::before),
+.pane-header .header-bell :deep(.bell-btn:hover::before) {
+  background: var(--bg3);
+}
+.pane-header :deep(.btn-icon.active::before),
+.pane-header :deep(.btn-icon[aria-pressed="true"]::before) {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+}
+.pane-header :deep(.bell-btn) {
   box-sizing: content-box;
   width: 30px;
   height: 30px;
   padding: calc((var(--touch) - 30px) / 2);
   margin: calc((30px - var(--touch)) / 2);
 }
-:deep(.bell-btn) svg {
+.pane-header :deep(.bell-btn) svg {
   width: 18px;
   height: 18px;
 }
-.header-bell :deep(.bell-btn) {
+.pane-header .header-bell :deep(.bell-btn) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -129,15 +163,19 @@ defineEmits<{ 'open-sidebar': [] }>()
   border: none;
   color: var(--fg2);
   cursor: pointer;
-  transition: background 120ms var(--ease), transform 120ms var(--ease);
+  transition: color 120ms var(--ease), transform 120ms var(--ease);
 }
-.header-bell :deep(.bell-btn:hover) {
-  background: var(--bg3);
+.pane-header .header-bell :deep(.bell-btn:hover) {
   color: var(--fg);
 }
-.header-bell :deep(.bell-btn:active) { transform: scale(0.96); }
-.header-bell :deep(.bell-btn.has-unread) { color: var(--accent); }
-.header-bell :deep(.bell-btn.has-unread:hover) { background: var(--bg3); }
+.pane-header .header-bell :deep(.bell-btn:active) { transform: scale(0.96); }
+.pane-header .header-bell :deep(.bell-btn.has-unread) { color: var(--accent); }
+.pane-header :deep(.btn-icon:active),
+.pane-header :deep(.model-picker-btn:active),
+.pane-header :deep(.archive-btn:active) {
+  transform: scale(0.96);
+  background: transparent;
+}
 @media (max-width: 768px) {
   .pane-header {
     height: auto;

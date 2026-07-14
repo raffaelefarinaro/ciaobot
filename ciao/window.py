@@ -93,13 +93,15 @@ def _focus_running_window(pid: int) -> bool:
     return True
 
 
-def _set_dock_icon() -> None:
-    """Show the Ciaobot icon in the Dock instead of the generic Python rocket.
+def _set_app_identity() -> None:
+    """Present the window as "Ciaobot" with its icon, not "Python"/rocket.
 
-    When the menu bar spawns ``python -m ciao.window`` the process has no app
-    bundle of its own, so macOS labels it "Python" with the rocket icon. Set
-    the running application's icon to the packaged ``Ciaobot.icns`` so the Dock
-    shows the real icon regardless of how the interpreter was launched.
+    The menu bar spawns ``python -m ciao.window``, a process with no app bundle
+    of its own, so macOS labels it "Python" with the generic rocket icon. Set
+    the running application's icon to the packaged ``Ciaobot.icns`` and override
+    the display name in the main bundle's info dictionary. Both are best-effort
+    (the name override in particular is a bundle-less-process workaround macOS
+    doesn't always honor) and must never break window startup.
     """
 
     if sys.platform != "darwin":
@@ -114,6 +116,16 @@ def _set_dock_icon() -> None:
             image = NSImage.alloc().initWithContentsOfFile_(str(icns))
         if image is not None:
             NSApplication.sharedApplication().setApplicationIconImage_(image)
+    except Exception:
+        pass
+    try:
+        from Foundation import NSBundle
+
+        bundle = NSBundle.mainBundle()
+        info = bundle.localizedInfoDictionary() or bundle.infoDictionary()
+        if info is not None:
+            info["CFBundleName"] = "Ciaobot"
+            info["CFBundleDisplayName"] = "Ciaobot"
     except Exception:
         pass
 
@@ -162,7 +174,7 @@ def run_window(url: str, workspace: str | os.PathLike[str] | None = None) -> int
 
     if ws is not None:
         _write_lock(ws)
-    _set_dock_icon()
+    _set_app_identity()
     try:
         webview.create_window(
             "Ciaobot",
