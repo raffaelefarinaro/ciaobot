@@ -236,7 +236,7 @@ def test_start_at_login_status_is_on_when_launch_agents_are_enabled(tmp_path: Pa
     assert status.state == "on"
     assert status.available
     assert status.enabled
-    assert menubar.start_at_login_menu_label(status) == "Start Ciao at Login: On"
+    assert menubar.start_at_login_menu_label(status) == "Start at Login: On"
 
 
 def test_start_at_login_status_is_off_when_either_agent_is_disabled(tmp_path: Path) -> None:
@@ -251,7 +251,7 @@ def test_start_at_login_status_is_off_when_either_agent_is_disabled(tmp_path: Pa
     assert status.state == "off"
     assert status.available
     assert not status.enabled
-    assert menubar.start_at_login_menu_label(status) == "Start Ciao at Login: Off"
+    assert menubar.start_at_login_menu_label(status) == "Start at Login: Off"
 
 
 def test_start_at_login_status_is_missing_without_launch_agent_plists(

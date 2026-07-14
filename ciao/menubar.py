@@ -355,9 +355,9 @@ def start_at_login_status(
 
 def start_at_login_menu_label(status: StartAtLoginStatus) -> str:
     if status.state == "on":
-        return "Start Ciao at Login: On"
+        return "Start at Login: On"
     if status.state == "off":
-        return "Start Ciao at Login: Off"
+        return "Start at Login: Off"
     if status.state == "missing":
         return "Start at Login: not installed"
     return "Start at Login: unknown"
