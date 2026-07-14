@@ -137,14 +137,22 @@ def _refresh_vault_index(workspace: Path, vault_root: Path | None = None) -> boo
         return False
 
 
-def _push_subject_from_env(env: dict[str, str] | None = None) -> str:
-    """Web Push VAPID subject, or "" when CIAO_PUSH_CONTACT is unset.
+# Web Push (RFC 8292) requires a VAPID "sub" contact URI, but the push
+# service never verifies or contacts it. For a localhost/personal app there's
+# no reason to make the user supply a real email, so default to a placeholder
+# and let CIAO_PUSH_CONTACT override it. This keeps web-push notifications
+# working out of the box (previously an unset contact silently disabled them).
+DEFAULT_PUSH_SUBJECT = "mailto:ciaobot@localhost"
 
-    An empty subject means Web Push delivery stays disabled until the
-    operator sets a contact in Settings; everything else keeps working.
+
+def _push_subject_from_env(env: dict[str, str] | None = None) -> str:
+    """Web Push VAPID subject; falls back to the localhost placeholder.
+
+    A real contact is optional (set CIAO_PUSH_CONTACT to override); the push
+    service only needs a syntactically valid mailto/https URI.
     """
     source = env if env is not None else os.environ
-    return source.get("CIAO_PUSH_CONTACT", "").strip()
+    return source.get("CIAO_PUSH_CONTACT", "").strip() or DEFAULT_PUSH_SUBJECT
 
 
 def _push_subject_for_config(config: CiaoConfig) -> str:

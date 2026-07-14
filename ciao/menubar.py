@@ -98,6 +98,27 @@ def fetch_active_chat_ids(port: int, *, timeout: float = 2.0) -> set[str]:
     return {str(chat_id) for chat_id in ids} if isinstance(ids, list) else set()
 
 
+def fetch_push_count(port: int, *, timeout: float = 2.0) -> int:
+    """Number of Web Push subscriptions the server has, or -1 if unknown.
+
+    The menu bar uses this to stand down from posting native banners when the
+    PWA is subscribed (Web Push delivers them with proper Ciaobot identity and
+    click-to-chat). On any error we return -1 so the caller keeps posting
+    native banners rather than dropping notifications.
+    """
+
+    url = f"http://localhost:{port}/api/push/status"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return -1
+    if not isinstance(payload, dict):
+        return -1
+    count = payload.get("count")
+    return count if isinstance(count, int) else -1
+
+
 def notify_open_chat(port: int, chat_id: str, *, timeout: float = 2.0) -> bool:
     """Tell an already-open PWA to navigate to ``chat_id`` via /ws/events."""
 
@@ -256,108 +277,17 @@ def open_command(url: str) -> list[str]:
     return ["open", url]
 
 
-def _python_with_ciao() -> str:
-    """Return a Python interpreter that can import ``ciao``.
-
-    In the packaged menu-bar app ``sys.executable`` can point at a stock
-    system Python that has no ``ciao`` on its path — observed as
-    ``python3.12: No module named 'ciao'`` when the app bundle launches a
-    plain interpreter, so ``python -m ciao.window`` (and the older
-    ``-m ciao.cli``) failed silently. This process already imported ``ciao``
-    from *some* environment, so derive that environment's interpreter from
-    the package location and prefer it; fall back to ``sys.executable``.
-    """
-
-    try:
-        import ciao as _ciao_pkg
-
-        pkg_dir = Path(_ciao_pkg.__file__).resolve().parent  # .../site-packages/ciao
-        # venv/keg layout: <prefix>/lib/pythonX.Y/site-packages/ciao, so the
-        # interpreter lives at <prefix>/bin/python (parents[3]). Also probe
-        # parents[2] for flatter layouts.
-        for prefix in (pkg_dir.parents[3], pkg_dir.parents[2]):
-            for name in ("python", "python3"):
-                candidate = prefix / "bin" / name
-                if candidate.exists():
-                    return str(candidate)
-    except Exception:
-        pass
-    return sys.executable
-
-
-def _window_launch_command(url: str, workspace: Path | None) -> list[str]:
-    """argv that opens ``url`` in the native window (single-instance aware).
-
-    Must run through :func:`_python_with_ciao` — the venv interpreter that can
-    import ``ciao``/``webview``. Do NOT route this through the app bundle's
-    ``Contents/MacOS/python`` symlink: invoking Python via that out-of-venv
-    symlink resolves ``sys.prefix`` to the base Homebrew framework instead of
-    the ciaobot keg venv, so ``import webview`` fails and the window never
-    opens. The Dock icon is set from inside the window instead (see
-    ciao.window._set_dock_icon).
-    """
-
-    cmd = [_python_with_ciao(), "-m", "ciao.window", url]
-    if workspace is not None:
-        cmd += ["--workspace", str(workspace)]
-    return cmd
-
-
-_WINDOW_INTERP_OK: dict[str, bool] = {}
-
-
-def _window_interpreter_ok(interp: str) -> bool:
-    """True if ``interp`` can import the window module (i.e. resolves ``ciao``).
-
-    Guards the native-window path: an interpreter that can't ``import
-    ciao.window`` — e.g. an app-bundle python symlink that resolves outside the
-    venv — would exit before drawing anything, so the window silently never
-    opens. When this is False the caller opens the URL in the browser instead,
-    so the app *always* opens. Result cached per interpreter path.
-    """
-
-    cached = _WINDOW_INTERP_OK.get(interp)
-    if cached is not None:
-        return cached
-    ok = False
-    try:
-        completed = subprocess.run(
-            [interp, "-c", "import ciao.window"],
-            capture_output=True,
-            timeout=15,
-            check=False,
-        )
-        ok = completed.returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        ok = False
-    _WINDOW_INTERP_OK[interp] = ok
-    return ok
-
-
 def launch_ui(url: str, workspace: Path | None = None) -> None:
-    """Open the Ciaobot UI without blocking the caller (menu bar callbacks).
+    """Open the Ciaobot UI in the browser without blocking the caller.
 
-    On macOS the URL opens in the native WebKit window (``ciao.window``);
-    passing ``workspace`` lets it focus an already-open window instead of
-    stacking a duplicate. If the resolved interpreter can't load the window
-    module, fall back to opening the URL in the browser so the app still opens.
+    Opens the URL in an app-mode browser window when a Chromium browser is
+    installed, else the default browser. Opening the URL directly (including a
+    /chat/<id> deep link) means the page lands on the right chat. ``workspace``
+    is accepted for call-site compatibility but no longer used (there is no
+    native window to de-duplicate).
     """
 
-    if sys.platform == "darwin":
-        cmd = _window_launch_command(url, workspace)
-        if _window_interpreter_ok(cmd[0]):
-            subprocess.Popen(
-                cmd,
-                start_new_session=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return
-        # Interpreter can't load ciao.window (misconfigured install): don't
-        # leave the user with nothing — open the URL in the browser.
     subprocess.run(open_command(url), check=False)
-
-
 def restart_server_command(uid: int | None = None) -> list[str]:
     resolved = os.getuid() if uid is None else uid
     return ["launchctl", "kickstart", "-k", f"gui/{resolved}/{SERVER_LAUNCHD_LABEL}"]
@@ -1351,24 +1281,30 @@ def run_menubar(workspace: Path, port: int) -> int:
             time.sleep(WORKING_POLL_SECONDS)
 
     def refresh(_timer=None) -> None:
+        # Drain the log tail so we never re-post the backlog. Native banners
+        # are a fallback only: when the PWA is subscribed to Web Push, it
+        # delivers banners with proper Ciaobot identity + click-to-chat, so we
+        # stand down to avoid duplicates and the bundle-less "Python" banner.
+        # count < 0 means "couldn't ask the server" — keep posting rather than
+        # silently drop notifications.
+        new_notifications = notification_log.read_new(workspace)
         native_enabled = notifications_enabled(workspace)
-        for notification in notification_log.read_new(workspace):
-            if not native_enabled:
-                continue
-            chat_id = str(notification.get("chat_id") or "")
-            payload = {"chat_id": chat_id} if chat_id else None
-            try:
-                rumps.notification(
-                    str(notification.get("title") or "Ciaobot"),
-                    "",
-                    str(notification.get("body") or "New notification"),
-                    data=payload,
-                    icon=icon_path("Ciaobot.icns"),
-                )
-            except Exception:
-                # A notification failure should not prevent the normal menu
-                # refresh (or leave a stale unread count) behind.
-                pass
+        if new_notifications and native_enabled and fetch_push_count(port) <= 0:
+            for notification in new_notifications:
+                chat_id = str(notification.get("chat_id") or "")
+                payload = {"chat_id": chat_id} if chat_id else None
+                try:
+                    rumps.notification(
+                        str(notification.get("title") or "Ciaobot"),
+                        "",
+                        str(notification.get("body") or "New notification"),
+                        data=payload,
+                        icon=icon_path("Ciaobot.icns"),
+                    )
+                except Exception:
+                    # A notification failure should not prevent the normal menu
+                    # refresh (or leave a stale unread count) behind.
+                    pass
 
         status = fetch_server_status(port)
         state["reachable"] = status.reachable

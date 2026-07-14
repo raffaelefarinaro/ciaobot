@@ -305,13 +305,10 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
         'start_agent "com.ciao.menubar" "$HOME/Library/LaunchAgents/com.ciao.menubar.plist"'
         in app_text
     )
-    # Opens the native Ciaobot window (WebKit via pywebview), resolving the
-    # bundle python symlink to the real venv interpreter and falling back to
-    # the browser if the window can't start.
-    assert 'if [ -L "$PY" ]; then PY="$(readlink "$PY")"; fi' in app_text
-    assert '"$PY" -m ciao.window "$target"' in app_text
-    assert '|| open "$target"' in app_text
-    assert 'open_ciaobot_url "$url"' in app_text
+    # Opens the UI in the browser (no native window). The launcher just opens
+    # the URL — reliable, and web push handles notifications.
+    assert 'open "$url"' in app_text
+    assert "ciao.window" not in app_text
     setup_token = token_file.read_text(encoding="utf-8").strip()
     assert setup_token
     # The literal token value must not appear in the script -- it is read live.

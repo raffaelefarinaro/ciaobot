@@ -402,16 +402,10 @@ def _write_app_shortcut(
     # is gone we open the plain URL and rely on the session cookie -- matching
     # how the menu bar builds its "Open Ciaobot" URL (menubar.open_url).
     #
-    # Open the URL in the native WebKit window (ciao.window). Passing the
-    # workspace lets that process de-duplicate: if a Ciaobot window is already
-    # open it focuses it instead of stacking another one (ciao.window's
-    # single-instance lock).
-    #
-    # Resolve the bundle-local python symlink to its real target before running
-    # it: invoking Python *through* the Contents/MacOS/python symlink resolves
-    # sys.prefix to the base framework, not the venv, so `import webview`/`ciao`
-    # fail and the window never opens. If the window still can't start, fall
-    # back to `open` so double-clicking the app always opens the UI.
+    # Open the URL in the browser (default handler / installed PWA). We used to
+    # embed a pywebview native window here, but running the venv Python as a
+    # bundle-less app broke interactivity, identity, and notifications on macOS;
+    # the browser/PWA path is reliable and lets web push handle notifications.
     executable.write_text(
         "#!/bin/sh\n"
         "start_agent() {\n"
@@ -445,14 +439,7 @@ def _write_app_shortcut(
         "else\n"
         f'  url="http://localhost:{port}/"\n'
         "fi\n"
-        'DIR="$(cd "$(dirname "$0")" && pwd)"\n'
-        'PY="$DIR/python"\n'
-        'if [ -L "$PY" ]; then PY="$(readlink "$PY")"; fi\n'
-        "open_ciaobot_url() {\n"
-        '  target="$1"\n'
-        f'  "$PY" -m ciao.window "$target" --workspace "{workspace}" || open "$target"\n'
-        "}\n"
-        'open_ciaobot_url "$url"\n',
+        'open "$url"\n',
         encoding="utf-8",
     )
     executable.chmod(0o755)

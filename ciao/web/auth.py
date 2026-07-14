@@ -189,6 +189,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/api/auth",
             "/api/startup-status",
             "/api/active-chats",
+            # Local menu bar reads this (no session) to decide whether to post
+            # native banners: if a Web Push subscription exists it stands down
+            # and lets the PWA deliver. Only exposes a count + the public key.
+            "/api/push/status",
             "/api/setup-status",
             "/api/setup/finish",
             "/api/setup/list-dirs",
