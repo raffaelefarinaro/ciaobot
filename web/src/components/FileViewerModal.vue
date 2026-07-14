@@ -244,7 +244,15 @@
               <dl v-if="fmExtraEntries.length" class="fv-meta-extra">
                 <template v-for="entry in fmExtraEntries" :key="entry.key">
                   <dt>{{ entry.key }}</dt>
-                  <dd>{{ entry.value }}</dd>
+                  <dd>
+                    <a
+                      v-if="isUrl(entry.value)"
+                      :href="entry.value"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >{{ entry.value }}</a>
+                    <template v-else>{{ entry.value }}</template>
+                  </dd>
                 </template>
               </dl>
             </div>
@@ -512,6 +520,12 @@ function fmList(key: string): string[] {
   const v = frontmatter.value?.[key]
   if (v == null) return []
   return Array.isArray(v) ? v : [String(v)]
+}
+// A frontmatter value that is a bare http(s) URL (e.g. `url:`) renders as a
+// clickable link rather than plain text. Only http/https so the href can't be
+// a javascript:/data: scheme.
+function isUrl(value: string): boolean {
+  return /^https?:\/\/\S+$/.test(value.trim())
 }
 // Keep `fmTitle` in scope (read by linters as referenced for completeness
 // even though the chip itself uses fmName / basename for the heading).
