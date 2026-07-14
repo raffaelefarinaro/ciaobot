@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.4.22 - 2026-07-14
+
+### Added
+- feat(settings): add an Install button for apfel (`c5e1408`)
+
+### Changed
+- Merge pull request #104 from raffaelefarinaro/chore/sync-develop-v0.4.21 (`21d24fa`)
+- perf(ollama): disable attribution header on local-daemon routes (#98) (`afd92fb`)
+- Merge pull request #105 from raffaelefarinaro/feat/notify-archive-apfel-perf (`d195bff`)
+
+### Fixed
+- fix(notify): suppress the push when a chat auto-archives on completion (`1e1ccb7`)
+
 ## v0.4.21 - 2026-07-14
 
 ### Changed
