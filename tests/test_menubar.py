@@ -185,7 +185,7 @@ def test_remove_browser_pwa_duplicates_skips_native_launcher(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr(menubar.Path, "home", lambda: tmp_path)
-    native = tmp_path / "Applications" / "Ciaobot.app"
+    native = tmp_path / "Applications" / "Ciaobot Server.app"
     _write_bundle(native, bundle_id="local.ciaobot.app")
     duplicate = tmp_path / "Applications" / "Chrome Apps.localized" / "Ciaobot.app"
     _write_bundle(duplicate, bundle_id="org.chromium.Chromium.app.abc123")
@@ -350,7 +350,7 @@ def test_icon_paths_resolve_to_packaged_faces() -> None:
     # ciao.stock/deploy (never in web/static, which the PWA build empties).
     assert Path(menubar.icon_path("face_template.png")).is_file()
     assert Path(menubar.icon_path("face_scared_template.png")).is_file()
-    assert Path(menubar.icon_path("Ciaobot.icns")).is_file()
+    assert Path(menubar.icon_path("CiaobotServer.icns")).is_file()
 
 
 def test_menubar_template_icons_are_packaged() -> None:

@@ -276,44 +276,60 @@ def _default_app_dir() -> Path:
 
 
 _OUR_BUNDLE_IDS = ("local.ciao.app", "local.ciaobot.app")
+_APP_BUNDLE_NAME = "Ciaobot Server.app"
+_APP_DISPLAY_NAME = "Ciaobot Server"
+_APP_EXECUTABLE_NAME = "CiaobotServer"
+_APP_ICON_NAME = "CiaobotServer"
+_LEGACY_APP_BUNDLE_NAMES = (
+    "Ciao.app",
+    "Ciaobot.app",
+    "Ciaobot Menu Bar.app",
+)
 
 
-def _remove_legacy_app_shortcuts(app_dir: Path) -> None:
-    """Remove stale launcher bundles we wrote earlier: the pre-rename
-    Ciao.app next to the target, and both names in ~/Applications when the
-    target moved to /Applications. Only bundles with our bundle id are
-    touched."""
+def _is_our_app_bundle(app_root: Path) -> bool:
+    """Whether ``app_root`` is a launcher bundle created by Ciaobot."""
 
-    candidates = {app_dir / "Ciao.app", app_dir / "Ciaobot Menu Bar.app"}
+    plist = app_root / "Contents" / "Info.plist"
+    try:
+        text = plist.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return "local.ciaobot.menubar" in text or any(
+        bundle_id in text for bundle_id in _OUR_BUNDLE_IDS
+    )
+
+
+def _remove_legacy_app_shortcuts(app_dir: Path) -> bool:
+    """Remove stale launcher bundles written before ``Ciaobot Server.app``.
+
+    Browser-installed PWAs may also be named ``Ciaobot.app``. Only bundles
+    carrying one of our native bundle identifiers are touched.
+    """
+
+    candidates = {app_dir / name for name in _LEGACY_APP_BUNDLE_NAMES}
     home_apps = Path.home() / "Applications"
     if app_dir != home_apps:
-        candidates.update({
-            home_apps / "Ciao.app",
-            home_apps / "Ciaobot.app",
-            home_apps / "Ciaobot Menu Bar.app",
-        })
+        candidates.update(home_apps / name for name in _LEGACY_APP_BUNDLE_NAMES)
+    removed = False
     for legacy in candidates:
-        plist = legacy / "Contents" / "Info.plist"
         try:
-            if not plist.is_file():
+            if not _is_our_app_bundle(legacy):
                 continue
-            text = plist.read_text(encoding="utf-8")
-            if not (
-                "local.ciaobot.menubar" in text
-                or any(bundle_id in text for bundle_id in _OUR_BUNDLE_IDS)
-            ):
-                continue
+            _unregister_app_with_launchservices(legacy)
             shutil.rmtree(legacy)
+            removed = True
         except OSError:
             print(f"Could not remove legacy app shortcut at {legacy}", file=sys.stderr)
+    return removed
 
 
 def _write_menubar_helper(*, app_root: Path, python_path: str) -> Path:
-    """Write the menu-bar LaunchAgent entrypoint inside ``Ciaobot.app``.
+    """Write the menu-bar entrypoint inside ``Ciaobot Server.app``.
 
     macOS Notification Center attributes alerts to the running process's app
-    bundle. The helper keeps the interpreter inside ``Ciaobot.app/Contents``
-    so native notifications show as Ciaobot instead of Python.
+    bundle. The helper keeps the interpreter inside the native launcher bundle
+    so notifications show as Ciaobot Server instead of Python.
     """
 
     macos = app_root / "Contents" / "MacOS"
@@ -348,23 +364,26 @@ def _write_app_shortcut(
     app_dir: Path,
     port: int,
     python_path: str | None = None,
+    launch_agents_dir: Path | None = None,
 ) -> Path:
     # Create the setup token file if absent so the first launch can log in;
     # the launcher script below reads its current value live at click time.
     _ensure_setup_token(workspace)
-    _remove_legacy_app_shortcuts(app_dir.expanduser())
+    migrated_legacy_bundle = _remove_legacy_app_shortcuts(app_dir.expanduser())
     # NB: do NOT remove browser-installed PWAs here. Since we open the UI in
     # the browser and rely on an installed PWA for identity + Web Push, a
     # browser-installed "Ciaobot" app is now the desired vehicle, not a
     # duplicate — and this runs on every upgrade via the app-bundle refresh.
-    app_root = app_dir.expanduser() / "Ciaobot.app"
+    app_root = app_dir.expanduser() / _APP_BUNDLE_NAME
     contents = app_root / "Contents"
     macos = contents / "MacOS"
     resources_dir = contents / "Resources"
     macos.mkdir(parents=True, exist_ok=True)
     resources_dir.mkdir(parents=True, exist_ok=True)
-    icns = resources.files("ciao.stock").joinpath("deploy", "Ciaobot.icns")
-    (resources_dir / "Ciaobot.icns").write_bytes(icns.read_bytes())
+    icns = resources.files("ciao.stock").joinpath(
+        "deploy", f"{_APP_ICON_NAME}.icns"
+    )
+    (resources_dir / f"{_APP_ICON_NAME}.icns").write_bytes(icns.read_bytes())
     (contents / "Info.plist").write_text(
         "\n".join(
             [
@@ -374,15 +393,17 @@ def _write_app_shortcut(
                 '<plist version="1.0">',
                 '<dict>',
                 '  <key>CFBundleName</key>',
-                '  <string>Ciaobot</string>',
+                f'  <string>{_APP_DISPLAY_NAME}</string>',
+                '  <key>CFBundleDisplayName</key>',
+                f'  <string>{_APP_DISPLAY_NAME}</string>',
                 '  <key>CFBundleExecutable</key>',
-                '  <string>Ciaobot</string>',
+                f'  <string>{_APP_EXECUTABLE_NAME}</string>',
                 '  <key>CFBundleIdentifier</key>',
                 '  <string>local.ciaobot.app</string>',
                 '  <key>CFBundlePackageType</key>',
                 '  <string>APPL</string>',
                 '  <key>CFBundleIconFile</key>',
-                '  <string>Ciaobot</string>',
+                f'  <string>{_APP_ICON_NAME}</string>',
                 '</dict>',
                 '</plist>',
                 '',
@@ -391,7 +412,7 @@ def _write_app_shortcut(
         encoding="utf-8",
     )
     token_file = _setup_token_path(workspace)
-    executable = macos / "Ciaobot"
+    executable = macos / _APP_EXECUTABLE_NAME
     # Start the server via launchd when it isn't running, then open the PWA;
     # otherwise clicking the app lands on "site can't be reached".
     #
@@ -448,6 +469,11 @@ def _write_app_shortcut(
         python_path=python_path or sys.executable,
     )
     _register_app_with_launchservices(app_root)
+    if migrated_legacy_bundle:
+        _migrate_menubar_launch_agent(
+            app_root,
+            launch_agents_dir=launch_agents_dir,
+        )
     # Record the version that wrote this bundle so the server can refresh it
     # automatically after an upgrade (see refresh_app_bundle_if_stale).
     _write_app_bundle_marker(workspace)
@@ -470,19 +496,22 @@ def _write_app_bundle_marker(workspace: Path) -> None:
 
 
 def _installed_app_dir() -> Path | None:
-    """Directory holding the installed ``Ciaobot.app``, if any."""
+    """Directory holding our current or legacy native launcher bundle."""
 
-    for base in (Path.home() / "Applications", Path("/Applications")):
-        if (base / "Ciaobot.app").is_dir():
-            return base
+    for name in (_APP_BUNDLE_NAME, *_LEGACY_APP_BUNDLE_NAMES):
+        for base in (Path.home() / "Applications", Path("/Applications")):
+            candidate = base / name
+            if candidate.is_dir() and _is_our_app_bundle(candidate):
+                return base
     return None
 
 
 def refresh_app_bundle_if_stale(
     workspace: Path, port: int, *, python_path: str | None = None
 ) -> Path | None:
-    """Rewrite ``Ciaobot.app`` when the running version differs from the one
-    that last wrote it. Returns the app root when refreshed, else ``None``.
+    """Rewrite ``Ciaobot Server.app`` when its recorded version is stale.
+
+    Returns the app root when refreshed, else ``None``.
 
     macOS only. Makes ``brew upgrade`` self-contained: the server, restarted
     onto the new keg by the stale-install self-heal, regenerates the app
@@ -526,7 +555,7 @@ def _register_app_with_launchservices(app_root: Path) -> None:
     app named by the plist's ``AssociatedBundleIdentifiers``. That mapping is
     resolved through LaunchServices, which does not always index a freshly
     written bundle before the agent loads — so the background item shows the
-    raw executable name ("python") instead of "Ciaobot". Registering the
+    raw executable name ("python") instead of "Ciaobot Server". Registering the
     bundle up front makes the association resolve immediately. Best-effort:
     non-macOS or a missing lsregister is a silent skip.
     """
@@ -541,6 +570,90 @@ def _register_app_with_launchservices(app_root: Path) -> None:
         )
     except OSError:
         pass
+
+
+def _unregister_app_with_launchservices(app_root: Path) -> None:
+    """Remove a retired native launcher from Launch Services, best-effort."""
+
+    if sys.platform != "darwin" or not os.path.exists(_LSREGISTER):
+        return
+    try:
+        subprocess.run(
+            [_LSREGISTER, "-u", str(app_root)],
+            check=False,
+            capture_output=True,
+        )
+    except OSError:
+        pass
+
+
+def _migrate_menubar_launch_agent(
+    app_root: Path,
+    *,
+    launch_agents_dir: Path | None = None,
+) -> bool:
+    """Point an existing menu-bar LaunchAgent at the renamed app bundle.
+
+    The native bundle is refreshed independently after package upgrades. When
+    that refresh migrates ``Ciaobot.app`` to ``Ciaobot Server.app``, the plist
+    and any loaded launchd job must stop referring to the retired helper path.
+    Custom test/install directories are rewritten but never loaded into the
+    user's real launchd domain.
+    """
+
+    default_launch_dir = Path.home() / "Library" / "LaunchAgents"
+    launch_dir = (launch_agents_dir or default_launch_dir).expanduser()
+    plist_path = launch_dir / "com.ciao.menubar.plist"
+    try:
+        with plist_path.open("rb") as handle:
+            plist = plistlib.load(handle)
+    except (OSError, ValueError):
+        return False
+
+    arguments = plist.get("ProgramArguments")
+    if not isinstance(arguments, list) or not arguments:
+        return False
+    old_executable = str(arguments[0])
+    new_executable = str(app_root / "Contents" / "MacOS" / "CiaobotMenuBar")
+    if old_executable == new_executable:
+        return False
+    if not any(
+        f"/{name}/Contents/MacOS/CiaobotMenuBar" in old_executable
+        for name in _LEGACY_APP_BUNDLE_NAMES
+    ):
+        return False
+
+    arguments[0] = new_executable
+    try:
+        plist_path.write_bytes(plistlib.dumps(plist, sort_keys=False))
+    except OSError:
+        return False
+
+    if sys.platform != "darwin" or launch_dir != default_launch_dir:
+        return True
+
+    domain = f"gui/{os.getuid()}"
+    label = f"{domain}/com.ciao.menubar"
+    try:
+        loaded = subprocess.run(
+            ["launchctl", "print", label],
+            check=False,
+            capture_output=True,
+        ).returncode == 0
+        if loaded:
+            subprocess.run(
+                ["launchctl", "bootout", label],
+                check=False,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["launchctl", "bootstrap", domain, str(plist_path)],
+                check=False,
+                capture_output=True,
+            )
+    except OSError:
+        pass
+    return True
 
 
 _WORKSPACE_GITIGNORE_ENTRIES = (
@@ -873,6 +986,7 @@ def setup_workspace(
         app_dir=app_root_dir,
         port=port,
         python_path=resolved_python,
+        launch_agents_dir=launch_dir,
     )
     menubar_executable = str(app_root / "Contents" / "MacOS" / "CiaobotMenuBar")
     for plist_name in ("com.ciao.server.plist", "com.ciao.menubar.plist"):
@@ -1491,7 +1605,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--app-dir",
         type=Path,
         default=None,
-        help="Directory where Ciaobot.app is written. Defaults to /Applications when writable, else ~/Applications.",
+        help=(
+            "Directory where Ciaobot Server.app is written. Defaults to "
+            "/Applications when writable, else ~/Applications."
+        ),
     )
     setup_parser.add_argument(
         "--load-launchd",

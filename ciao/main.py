@@ -806,7 +806,7 @@ async def _async_main() -> int:
     asyncio.create_task(_heal_stale_install())
 
     # ── App bundle refresh on upgrade ────────────────────────
-    # `brew upgrade` swaps the Python package but doesn't rewrite Ciaobot.app,
+    # `brew upgrade` swaps the Python package but doesn't rewrite Ciaobot Server.app,
     # so its double-click launcher and menu-bar helper keep running the old
     # version's scripts until `ciao setup` is re-run by hand. When restarted
     # onto a new version (by the stale-install self-heal above), regenerate the
