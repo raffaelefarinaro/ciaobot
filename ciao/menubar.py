@@ -174,14 +174,26 @@ def _installed_browser_app_names() -> list[str]:
 
 
 def browser_app_mode_command(url: str) -> list[str] | None:
-    """Open ``url`` in a browser app window without a separate PWA install."""
+    """argv to open ``url`` in a chrome-less browser app-mode window.
+
+    Invoke the browser binary directly rather than ``open -a NAME --args
+    --app=URL``: ``open`` drops ``--args`` when the browser is already running,
+    so it just focuses the browser and never opens the window (the reported
+    "clicking Open Ciaobot only opens Chrome" bug). Running the binary opens
+    the app window whether or not the browser is already running.
+
+    The caller MUST launch this detached (Popen) — on a cold start the binary
+    stays in the foreground as the browser's main process.
+    """
 
     if sys.platform != "darwin":
         return None
     names = _installed_browser_app_names()
     if not names:
         return None
-    return ["open", "-a", names[0], "--args", f"--app={url}"]
+    name = names[0]
+    binary = Path("/Applications") / f"{name}.app" / "Contents" / "MacOS" / name
+    return [str(binary), f"--app={url}"]
 
 
 def browser_pwa_duplicate_paths(app_name: str = "Ciaobot") -> list[Path]:
@@ -264,9 +276,17 @@ def launch_ui(url: str, workspace: Path | None = None) -> None:
     /chat/<id> deep link) means the page lands on the right chat. ``workspace``
     is accepted for call-site compatibility but no longer used (there is no
     native window to de-duplicate).
+
+    Launched detached: app-mode invokes the browser binary directly, and a
+    cold browser start would otherwise block this menu-bar callback.
     """
 
-    subprocess.run(open_command(url), check=False)
+    subprocess.Popen(
+        open_command(url),
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 def restart_server_command(uid: int | None = None) -> list[str]:
     resolved = os.getuid() if uid is None else uid
     return ["launchctl", "kickstart", "-k", f"gui/{resolved}/{SERVER_LAUNCHD_LABEL}"]
