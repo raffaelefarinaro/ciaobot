@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.4.23 - 2026-07-14
+
+### Added
+- feat(voice): default TTS to a male voice to match the avatar (`a662e33`)
+
+### Changed
+- Merge pull request #107 from raffaelefarinaro/chore/sync-develop-v0.4.22 (`f28bfca`)
+- Merge pull request #108 from raffaelefarinaro/fix/tray-single-window (`ebcf751`)
+- Merge pull request #109 from raffaelefarinaro/feat/male-tts-voice (`92454da`)
+- Merge pull request #110 from raffaelefarinaro/fix/tts-env-doc-comment (`8bf9f75`)
+
+### Fixed
+- fix(menubar): focus the installed PWA instead of spawning a new window (`229b49c`)
+- fix(config): don't trip env-var doc check with a CIAO_TTS_* glob in a comment (`ca452d0`)
+
 ## v0.4.22 - 2026-07-14
 
 ### Added
