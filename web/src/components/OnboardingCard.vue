@@ -7,7 +7,7 @@
   >
     <div class="onboarding-header">
       <div>
-        <p class="section-title">{{ variant === 'home' ? 'Getting started' : 'Onboarding' }}</p>
+        <p class="section-title">{{ variant === 'home' ? 'getting started' : 'onboarding' }}</p>
         <p class="hint">
           <template v-if="variant === 'home'">
             Learn the app by doing — each step opens the page where it happens.

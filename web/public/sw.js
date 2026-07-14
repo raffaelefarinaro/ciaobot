@@ -142,9 +142,9 @@ self.addEventListener('push', (event) => {
   try {
     data = event.data ? event.data.json() : {}
   } catch {
-    data = { title: 'Ciaobot', body: event.data ? event.data.text() : '' }
+    data = { title: 'ciaobot', body: event.data ? event.data.text() : '' }
   }
-  const title = data.title || 'Ciaobot'
+  const title = data.title || 'ciaobot'
   const chatId = data.chat_id || ''
   const options = {
     body: data.body || '',
@@ -155,8 +155,8 @@ self.addEventListener('push', (event) => {
     vibrate: [120, 60, 120],
     data: { chat_id: chatId },
     actions: [
-      { action: 'open', title: 'Open' },
-      { action: 'dismiss', title: 'Dismiss' },
+      { action: 'open', title: 'open' },
+      { action: 'dismiss', title: 'dismiss' },
     ],
   }
   event.waitUntil(
