@@ -116,7 +116,15 @@
             <dl v-if="fmExtraEntries.length" class="pfp-meta-extra">
               <template v-for="entry in fmExtraEntries" :key="entry.key">
                 <dt>{{ entry.key }}</dt>
-                <dd>{{ entry.value }}</dd>
+                <dd>
+                  <a
+                    v-if="isUrl(entry.value)"
+                    :href="entry.value"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >{{ entry.value }}</a>
+                  <template v-else>{{ entry.value }}</template>
+                </dd>
               </template>
             </dl>
           </div>
@@ -429,6 +437,11 @@ function fmString(key: string): string {
   const v = frontmatter.value?.[key]
   if (v == null) return ''
   return Array.isArray(v) ? v.join(', ') : String(v)
+}
+// Render a bare http(s) frontmatter value (e.g. `url:`) as a clickable link.
+// Only http/https so the href can't be a javascript:/data: scheme.
+function isUrl(value: string): boolean {
+  return /^https?:\/\/\S+$/.test(value.trim())
 }
 function fmList(key: string): string[] {
   const v = frontmatter.value?.[key]
