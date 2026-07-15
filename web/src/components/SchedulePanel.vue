@@ -144,13 +144,34 @@
           <strong>Next run</strong><br />{{ nextRunLabel(schedule) }}
         </div>
         <div><strong>Last triggered</strong><br />{{ schedule.last_triggered_on || 'never' }}</div>
+        <div><strong>Workspace</strong><br />{{ workspaceDisplayName(schedule.workspace) }}</div>
         <div><strong>Model</strong><br />{{ modelLabel(schedule) }}</div>
-        <div><strong>Provider</strong><br />{{ schedule.provider || 'inherit target' }}</div>
+        <div><strong>Provider</strong><br />{{ providerLabel(schedule) }}</div>
         <div><strong>Archive</strong><br />{{ archiveLabel(schedule.archive_policy) }}</div>
+      </div>
+
+      <div v-if="schedule.scope === 'system'" class="system-workspace-control">
+        <div class="form-group">
+          <label>Run this routine in</label>
+          <select :value="schedule.workspace" @change="onSystemWorkspaceChange">
+            <option v-for="workspace in projectStore.workspaceOptions" :key="workspace.name" :value="workspace.name">
+              {{ workspaceDisplayName(workspace.name) }}
+            </option>
+          </select>
+        </div>
+        <p class="hint">The routine automatically inherits this workspace's provider and default model.</p>
       </div>
 
       <div v-if="editing" class="edit-form">
         <div class="form-grid">
+          <div class="form-group">
+            <label>Workspace</label>
+            <select v-model="editData.workspace" @change="onEditWorkspaceChange">
+              <option v-for="workspace in projectStore.workspaceOptions" :key="workspace.name" :value="workspace.name">
+                {{ workspaceDisplayName(workspace.name) }}
+              </option>
+            </select>
+          </div>
           <div v-if="editData.frequency !== 'manual'" class="form-group">
             <label>Time</label>
             <input v-model="editData.time" type="time" />
@@ -181,8 +202,8 @@
             <ModelSelector
               :model-value="editData.model"
               :sections="scheduleModelSections"
-              placeholder="Default ({{ store.models?.default || '—' }})"
-              empty-placeholder="Default ({{ store.models?.default || '—' }})"
+              :placeholder="editInheritedModelLabel"
+              :empty-placeholder="editInheritedModelLabel"
               @select="selectScheduleModel"
             />
           </div>
@@ -305,7 +326,7 @@
     </div>
 
     <!-- Overview homepage: shown when nothing is selected but automations exist -->
-    <div v-else-if="store.schedules.length || store.loops.length" class="scroll-body overview-body">
+    <div v-else-if="workspaceSchedules.length || workspaceLoops.length" class="scroll-body overview-body">
       <div class="ov-card">
         <div class="ov-head">
           <span class="ov-dot"></span>
@@ -325,14 +346,14 @@
         </p>
       </div>
 
-      <div v-if="store.loops.length" class="ov-card">
+      <div v-if="workspaceLoops.length" class="ov-card">
         <div class="ov-head">
           <span class="ov-dot"></span>
           Loops
           <span class="ov-hint">{{ runningLoops.length }} running</span>
         </div>
         <router-link
-          v-for="l in store.loops"
+          v-for="l in workspaceLoops"
           :key="l.loop_id"
           :to="`/schedules/${l.loop_id}`"
           class="ov-item"
@@ -402,6 +423,7 @@ import NewLoopForm from './NewLoopForm.vue'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
+import { loopInWorkspace, scheduleInWorkspace } from '../lib/automationWorkspace'
 
 const props = defineProps<{ showNew?: boolean }>()
 const emit = defineEmits<{ (e: 'created'): void; (e: 'open-sidebar'): void; (e: 'close'): void }>()
@@ -419,6 +441,7 @@ const startingBySchedule = ref<Set<string>>(new Set())
 // schedule_id -> chat_id while the linked chat is still streaming
 const runningBySchedule = ref<Record<string, string>>({})
 const editData = ref({
+  workspace: '',
   time: '',
   prompt: '',
   timezone: 'Europe/Zurich',
@@ -522,18 +545,29 @@ watch(
 
 // Overview (homepage): soonest upcoming runs and missed runs (expected to
 // fire, no trigger recorded — flagged server-side via the `missed` field).
+const workspaceSchedules = computed(() =>
+  store.schedules.filter(s => scheduleInWorkspace(s, projectStore.activeWorkspace)),
+)
+const workspaceLoops = computed(() =>
+  store.loops.filter(l => loopInWorkspace(
+    l,
+    projectStore.activeWorkspace,
+    projectStore.chats,
+    projectStore.projects,
+  )),
+)
 const upcomingSchedules = computed(() =>
-  store.schedules
+  workspaceSchedules.value
     .filter(s => s.next_run)
     .sort((a, b) => (a.next_run! < b.next_run! ? -1 : 1))
     .slice(0, 5),
 )
-const missedSchedules = computed(() => store.schedules.filter(s => s.missed))
-const runningLoops = computed(() => store.loops.filter(l => l.running))
+const missedSchedules = computed(() => workspaceSchedules.value.filter(s => s.missed))
+const runningLoops = computed(() => workspaceLoops.value.filter(l => l.running))
 
 const loopChatGroups = computed(() => {
   const groups: { label: string; items: { key: string; label: string }[] }[] = []
-  for (const p of projectStore.projects) {
+  for (const p of projectStore.projects.filter(p => p.workspace === projectStore.activeWorkspace)) {
     const items = projectStore.projectChats(p.project_id).map(c => ({
       key: c.chat_id,
       label: c.title,
@@ -640,6 +674,21 @@ function formatWhen(iso: string | null): string {
 const scheduleModelSections = computed(() => sectionsFromModelsResponse(store.models))
 const editModelProvider = ref<'claude' | 'codex' | ''>('')
 
+const editWorkspaceConfig = computed(() =>
+  projectStore.workspaceOptions.find(workspace => workspace.name === editData.value.workspace),
+)
+const editInheritedModelLabel = computed(() => {
+  const workspace = editWorkspaceConfig.value
+  const provider = projectStore.workspaceProviderOptions.find(
+    option => option.value === workspace?.default_provider,
+  )?.label || workspace?.default_provider || 'provider'
+  const model = workspace?.default_model
+    || (workspace?.default_provider === 'codex' ? '' : projectStore.workspaceAppDefaultModel)
+    || store.models?.default
+    || ''
+  return model ? `Inherit ${provider} / ${model}` : `Inherit ${provider} default`
+})
+
 function selectScheduleModel(value: string | string[], sectionKey: string) {
   editData.value.model = Array.isArray(value) ? value[0] || '' : value
   editModelProvider.value = sectionKey === 'codex' ? 'codex' : 'claude'
@@ -647,13 +696,15 @@ function selectScheduleModel(value: string | string[], sectionKey: string) {
 
 const contextGroups = computed(() => {
   const groups: { label: string; items: { key: string; label: string }[] }[] = []
-  const projItems = projectStore.projects.map(p => ({
+  const workspace = editData.value.workspace || schedule.value?.workspace || projectStore.activeWorkspace
+  const projects = projectStore.projects.filter(p => p.workspace === workspace)
+  const projItems = projects.map(p => ({
     key: `proj:${p.project_id}`,
-    label: `${p.name} (${p.workspace})`,
+    label: p.name,
   }))
   if (projItems.length) groups.push({ label: 'Projects (new chat per run)', items: projItems })
   const webItems: { key: string; label: string }[] = []
-  for (const p of projectStore.projects) {
+  for (const p of projects) {
     const pChats = projectStore.projectChats(p.project_id)
     for (const c of pChats) {
       webItems.push({ key: `web:${c.chat_id}`, label: `${p.name} / ${c.title}` })
@@ -688,9 +739,34 @@ function nextRunLabel(s: Schedule): string {
 }
 
 function modelLabel(s: Schedule): string {
-  if (s.model) return s.model
-  const def = store.models?.default
-  return def ? `Default (${def})` : 'Default'
+  if (s.model) return `${s.model} (override)`
+  const source = s.web_chat_id
+    ? 'target chat'
+    : workspaceDisplayName(s.workspace)
+  return s.effective_model
+    ? `${s.effective_model} (inherited from ${source})`
+    : `Provider default (inherited from ${source})`
+}
+
+function workspaceDisplayName(workspace?: string): string {
+  return workspace
+    ? workspace.charAt(0).toUpperCase() + workspace.slice(1)
+    : 'Workspace'
+}
+
+function providerLabel(s: Schedule): string {
+  const inheritedProvider = s.web_chat_id
+    ? s.effective_provider
+    : projectStore.workspaceOptions.find(workspace => workspace.name === s.workspace)?.default_provider
+      || s.effective_provider
+  const providerValue = s.web_chat_id ? inheritedProvider : s.provider || inheritedProvider || 'claude'
+  const label = projectStore.workspaceProviderOptions.find(
+    option => option.value === providerValue,
+  )?.label || providerValue
+  if (s.web_chat_id) return `${label} (inherited from target chat)`
+  return s.provider
+    ? `${label} (override)`
+    : `${label} (inherited from ${workspaceDisplayName(s.workspace)})`
 }
 
 function frequencyLabel(s: Schedule): string {
@@ -762,9 +838,32 @@ function contextKeyFor(s: Schedule): string {
   return `${s.chat_id}`
 }
 
+function defaultProjectContext(workspace: string): string {
+  const projects = projectStore.projects.filter(project => project.workspace === workspace)
+  const general = projects.find(project => project.is_auto && project.name === 'General') || projects[0]
+  return general ? `proj:${general.project_id}` : ''
+}
+
+function onEditWorkspaceChange() {
+  editData.value.contextKey = defaultProjectContext(editData.value.workspace)
+  if (!editData.value.model) editModelProvider.value = ''
+}
+
+async function onSystemWorkspaceChange(event: Event) {
+  if (!schedule.value) return
+  const workspace = (event.target as HTMLSelectElement).value
+  const scheduleId = schedule.value.schedule_id
+  await store.updateSchedule(scheduleId, { workspace })
+  if (projectStore.activeWorkspace !== workspace) {
+    await projectStore.switchWorkspace(workspace)
+  }
+  await router.push(`/schedules/${scheduleId}`)
+}
+
 function startEdit() {
   if (!schedule.value) return
   editData.value = {
+    workspace: schedule.value.workspace || projectStore.activeWorkspace,
     time: schedule.value.daily_time_utc,
     prompt: schedule.value.prompt,
     timezone: schedule.value.timezone_name,
@@ -783,6 +882,7 @@ async function saveEdit() {
   if (!schedule.value) return
   const d = editData.value
   const updates: Record<string, unknown> = {
+    workspace: d.workspace,
     time: d.frequency === 'manual' ? '' : d.time,
     prompt: d.prompt,
     timezone: d.timezone,
@@ -922,6 +1022,15 @@ function closeSchedule() {
   color: var(--fg2);
 }
 .meta-grid strong { color: var(--fg); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.5px; }
+.system-workspace-control {
+  display: grid;
+  grid-template-columns: minmax(180px, 320px) 1fr;
+  align-items: end;
+  gap: var(--space-3);
+  padding: 0 0 var(--space-4);
+  margin-bottom: var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
 .context-unavailable { color: var(--warning); font-weight: 600; }
 .context-help {
   display: block;
@@ -998,6 +1107,10 @@ function closeSchedule() {
 .empty-state .empty-hint { color: var(--fg3); font-size: var(--text-sm); }
 
 .hint { font-size: var(--text-xs); color: var(--fg2); margin: 0; }
+
+@media (max-width: 640px) {
+  .system-workspace-control { grid-template-columns: 1fr; }
+}
 
 /* ── New-automation type toggle ────────────────────────────────── */
 .type-toggle { display: flex; gap: 8px; margin-bottom: 8px; }

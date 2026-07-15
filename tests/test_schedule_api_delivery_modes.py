@@ -161,6 +161,52 @@ def test_create_schedule_preserves_configured_workspace(tmp_path: Path) -> None:
     assert response.json()["workspace"] == "client"
 
 
+def test_create_schedule_keeps_empty_model_as_dynamic_inheritance(
+    tmp_path: Path,
+) -> None:
+    client = _make_client(tmp_path)
+
+    response = client.post(
+        "/api/schedules",
+        json={
+            "time": "01:00",
+            "prompt": "inherit workspace routing",
+            "frequency": "daily",
+            "web_project_id": "proj-personal",
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["model"] == ""
+    assert response.json()["provider"] == ""
+
+
+def test_patch_schedule_empty_model_restores_dynamic_inheritance(
+    tmp_path: Path,
+) -> None:
+    client = _make_client(tmp_path)
+    created = client.post(
+        "/api/schedules",
+        json={
+            "time": "01:00",
+            "prompt": "override then inherit",
+            "frequency": "daily",
+            "model": "opus",
+            "provider": "claude",
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    updated = client.patch(
+        f"/api/schedules/{created.json()['schedule_id']}",
+        json={"model": "", "provider": ""},
+    )
+
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["model"] == ""
+    assert updated.json()["provider"] == ""
+
+
 def test_patch_schedule_preserves_configured_workspace(tmp_path: Path) -> None:
     client = _make_client(tmp_path, workspaces=("home", "client"))
     created = client.post(

@@ -31,6 +31,7 @@ SYSTEM_STATE_FIELDS = {
     "enabled",
     "last_triggered_on",
     "last_dispatched_at",
+    "workspace",
 }
 
 

@@ -3201,6 +3201,66 @@ class ProjectChatManager:
         workspace = project.workspace if project else None
         return self._config.default_provider_for_workspace(workspace)
 
+    def _schedule_workspace_hint(self, entry: object) -> str:
+        """Return the persisted or legacy-inferred workspace for a schedule."""
+        workspace = (getattr(entry, "workspace", "") or "").strip().lower()
+        if self._is_known_workspace(workspace):
+            return workspace
+
+        schedule_id = getattr(entry, "schedule_id", "") or ""
+        legacy_workspace = (
+            "work" if schedule_id.startswith("sched-work") else "personal"
+        )
+        if self._is_known_workspace(legacy_workspace):
+            return legacy_workspace
+
+        names = self._config.workspace_names()
+        return names[0] if names else legacy_workspace
+
+    def schedule_workspace(self, entry: object) -> str:
+        """Resolve the workspace that owns a schedule's execution context."""
+        web_chat_id = getattr(entry, "web_chat_id", None)
+        if web_chat_id:
+            chat = self._chats.get(web_chat_id)
+            project = self._projects.get(chat.project_id) if chat else None
+            if project is not None:
+                return project.workspace
+
+        web_project_id = getattr(entry, "web_project_id", None)
+        if web_project_id:
+            project = self._projects.get(web_project_id)
+            if project is not None:
+                return project.workspace
+
+        return self._schedule_workspace_hint(entry)
+
+    def schedule_effective_routing(self, entry: object) -> tuple[str, str, str]:
+        """Resolve provider/model inheritance for one schedule dispatch.
+
+        A fixed-chat schedule inherits the chat. Project and system schedules
+        inherit the workspace selected by their target or ``workspace`` field.
+        Empty persisted values remain dynamic and are resolved on every run.
+        """
+        web_chat_id = getattr(entry, "web_chat_id", None)
+        target_chat = self._chats.get(web_chat_id) if web_chat_id else None
+        workspace = self.schedule_workspace(entry)
+        if target_chat is not None:
+            return (
+                target_chat.provider,
+                getattr(entry, "model", "") or target_chat.model,
+                workspace,
+            )
+
+        provider = (
+            getattr(entry, "provider", "")
+            or self._config.default_provider_for_workspace(workspace)
+        )
+        model = (
+            getattr(entry, "model", "")
+            or self._config.default_model_for_workspace(workspace)
+        )
+        return provider, model, workspace
+
     def refresh_workspaces(self) -> None:
         self._ensure_defaults()
         self._discover_vault_projects()
@@ -5542,14 +5602,10 @@ class ProjectChatManager:
         matching General project.
         """
         # Prefer the explicit workspace field; it survives the per-device id
-        # regeneration that makes web_project_id go stale. Fall back to the
-        # "sched-work*" naming convention for entries created before the field
-        # existed (work schedules whose id lacks that prefix, e.g. the morning
-        # action briefing, would otherwise misroute to personal).
-        workspace = (getattr(entry, "workspace", "") or "").strip().lower()
-        if not self._is_known_workspace(workspace):
-            schedule_id = getattr(entry, "schedule_id", "") or ""
-            workspace = "work" if schedule_id.startswith("sched-work") else "personal"
+        # regeneration that makes web_project_id go stale. Legacy entries use
+        # the historical id-prefix fallback, while stock ``default`` routines
+        # resolve to the first configured workspace.
+        workspace = self._schedule_workspace_hint(entry)
         for p in self._projects.values():
             if p.workspace == workspace and p.name == "General":
                 logger.info(

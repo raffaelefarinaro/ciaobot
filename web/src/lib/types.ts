@@ -246,8 +246,11 @@ export interface Schedule {
   run_at_date: string | null
   web_chat_id: string | null
   web_project_id: string | null
+  workspace: WorkspaceName
   model: string
   provider?: 'claude' | 'codex'
+  effective_model?: string
+  effective_provider?: 'claude' | 'codex'
   next_run: string | null
   last_expected_run: string | null
   missed: boolean
