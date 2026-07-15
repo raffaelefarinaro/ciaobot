@@ -4,6 +4,7 @@
 
 ### Added
 - feat(web): add 'Continue this chat' to the transcript file preview (`f19337d`)
+- feat(automations): user-facing routine descriptions; new generic Workspace hygiene routine; macOS notifications reframed to lead with the menu bar; onboarding checklist close affordance; drop the operator-only self-improvement review from the shipped set (`518cf4f`)
 
 ### Changed
 - Merge pull request #123 from raffaelefarinaro/chore/sync-develop-v0.4.24 (`328cbba`)
