@@ -150,6 +150,8 @@
         <div><strong>Archive</strong><br />{{ archiveLabel(schedule.archive_policy) }}</div>
       </div>
 
+      <p v-if="schedule.description && !editing" class="schedule-description">{{ schedule.description }}</p>
+
       <div v-if="schedule.scope === 'system'" class="system-workspace-control">
         <div class="form-group">
           <label>Run this routine in</label>
@@ -1057,6 +1059,17 @@ function closeSchedule() {
 }
 .prompt-heading .prompt-label { margin-bottom: 0; }
 .prompt-actions { display: flex; gap: var(--space-2); }
+
+.schedule-description {
+  font-size: var(--text-sm);
+  color: var(--fg);
+  line-height: 1.55;
+  margin: 4px 0 0;
+  padding: 10px 12px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
 
 .full-prompt {
   font-size: var(--text-base);
