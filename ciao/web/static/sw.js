@@ -244,6 +244,19 @@ self.addEventListener('fetch', (event) => {
         }
         return response
       })
-      .catch(() => caches.match(event.request).then((cached) => cached || Response.error()))
+      .catch(async () => {
+        // SPA navigations (e.g. /chat/<id>) aren't cached under their own URL
+        // — only the app shell is. When the network is momentarily
+        // unavailable (server restart, flaky connection), fall back to the
+        // cached shell so client-side routing still loads the page, instead
+        // of returning a hard network error (blank/broken chat).
+        if (event.request.mode === 'navigate') {
+          const shell =
+            (await caches.match('/index.html')) || (await caches.match('/'))
+          if (shell) return shell
+        }
+        const cached = await caches.match(event.request)
+        return cached || Response.error()
+      })
   )
 })

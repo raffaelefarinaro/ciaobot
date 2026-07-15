@@ -155,6 +155,11 @@
               >
                 <span class="schedule-time">{{ l.running ? `${l.interval_minutes}m` : 'off' }}</span>
                 <span class="schedule-label">{{ l.title || promptTitle(l.prompt) }}</span>
+                <span
+                  v-if="l.running && l.web_chat_id && store.isChatStreaming(l.web_chat_id)"
+                  class="spinner-dot"
+                  title="This loop is working"
+                />
               </router-link>
             </div>
           </div>
@@ -200,6 +205,11 @@
               >
                 <span class="schedule-time">{{ l.running ? `${l.interval_minutes}m` : 'off' }}</span>
                 <span class="schedule-label">{{ l.title || promptTitle(l.prompt) }}</span>
+                <span
+                  v-if="l.running && l.web_chat_id && store.isChatStreaming(l.web_chat_id)"
+                  class="spinner-dot"
+                  title="This loop is working"
+                />
               </router-link>
             </div>
           </div>
