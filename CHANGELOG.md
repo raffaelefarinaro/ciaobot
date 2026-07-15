@@ -11,6 +11,7 @@
 ### Fixed
 - fix(pwa): service worker falls back to the app shell on navigation (`5c83cb3`)
 - fix(web): remount the chat view when switching chats (`ecfcee7`)
+- fix(vault-lint): cut false positives — code spans, escaped brackets, templates, same-stem duplicates, .venv (#129) (`68d8be5`)
 
 ## v0.4.26 - 2026-07-15
 
