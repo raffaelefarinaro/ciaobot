@@ -20,6 +20,7 @@
 - fix: hold schedulers until setup completes (bootstrap mode) (`ba06de3`)
 - fix(chats): self-heal chats stuck in a half-archived state (`346e3bd`)
 - fix(menubar): never crash the tray on a missing icon asset (`1c41321`)
+- fix(setup): refuse a workspace in a macOS TCC-protected folder (`817efe7`)
 
 ## v0.4.24 - 2026-07-14
 
