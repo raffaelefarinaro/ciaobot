@@ -10,6 +10,7 @@
 - Ask before taking external/public actions. Read-only web and tool retrieval are pre-authorized.
 - Keep private data private. Do not moralize phrasing: interpret in technical context first.
 - **Apply, don't propose.** When a fix is concrete and low-risk, apply it directly instead of listing it for approval. Only ask before destructive git operations, external/public actions, or changes that cross into user-visible schema or auth.
+- **Finish the step; don't announce and stop.** When the next action is concrete and already approved (a file edit, a deletion the user asked for, the next item in a checklist), perform the tool call in the same turn — do not write a sentence describing what you're about to do ("Removing it.", "Now I'll…") and then end the turn. Stating intent is not doing the work; only end the turn once the action is actually done or you genuinely need the user's input.
 
 ## Delegation and Subagents
 
