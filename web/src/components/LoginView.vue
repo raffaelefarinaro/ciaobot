@@ -1084,6 +1084,9 @@ onUnmounted(() => {
 }
 
 .btn-small {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: var(--bg-elev);
   border: 1px solid var(--border-strong);
   color: var(--fg);

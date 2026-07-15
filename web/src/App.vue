@@ -304,6 +304,9 @@ a:hover {
 
 
 .btn-small {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 6px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -320,6 +323,9 @@ a:hover {
 .btn-small:active { transform: scale(0.97); background: var(--bg2); }
 
 .btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 10px 20px;
   border: none;
   border-radius: var(--radius);
@@ -496,6 +502,9 @@ input:focus, textarea:focus, select:focus {
 
 /* ── Small bordered icon/text button (chat header, schedule actions) ── */
 .btn-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: none;
   border: 1px solid var(--border);
   color: var(--fg2);
