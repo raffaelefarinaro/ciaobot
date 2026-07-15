@@ -37,7 +37,7 @@
             @close="closeProject"
             @open-sidebar="sidebarCollapsed = false"
           />
-          <ChatPanel v-else-if="store.activeChat" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+          <ChatPanel v-else-if="store.activeChat" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
           <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
             <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
           </div>
@@ -113,7 +113,7 @@
           @close="closeProject"
           @open-sidebar="sidebarCollapsed = false"
         />
-        <ChatPanel v-else-if="store.activeChat" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+        <ChatPanel v-else-if="store.activeChat" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
         <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
           <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
         </div>
