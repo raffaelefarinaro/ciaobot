@@ -4553,13 +4553,14 @@ class ProjectChatManager:
         task = asyncio.create_task(self._watch_subagent_completion(chat_id, project_id))
         self._pending_subagent_watchers[chat_id] = task
 
-    def _publish_subagent_count(self, chat_id: str, project_id: str, count: int) -> None:
+    def _publish_subagent_count(self, chat_id: str, project_id: str, count: int, nudged: bool = False) -> None:
         self._background_agents_last[chat_id] = count
         self._events.publish({
             "type": "chat_subagents_ready",
             "chat_id": chat_id,
             "project_id": project_id,
             "remaining": count,
+            "nudged": nudged,
         })
 
     async def _watch_subagent_completion(self, chat_id: str, project_id: str) -> None:
@@ -4603,7 +4604,7 @@ class ProjectChatManager:
                         path
                     ).running_background
                     if count != last_count:
-                        self._publish_subagent_count(chat_id, project_id, count)
+                        nudged = False
                         if count == 0 and last_count > 0:
                             chat_now = self._chats.get(chat_id)
                             if chat_now is not None:
@@ -4625,6 +4626,7 @@ class ProjectChatManager:
                                 self._schedule_push(
                                     chat_id, title, "Background agents finished"
                                 )
+                        self._publish_subagent_count(chat_id, project_id, count, nudged=nudged)
                         last_count = count
                     if count == 0:
                         break
@@ -4657,13 +4659,13 @@ class ProjectChatManager:
                 )
                 count, had_subagents = codex_collab_tree_counts(tree)
                 if count != last_count:
-                    self._publish_subagent_count(chat_id, project_id, count)
                     if count == 0 and last_count > 0:
                         chat.last_activity_at = _now_iso()
                         self._save()
                         self._schedule_push(
                             chat_id, chat.title or "Ciaobot", "Background agents finished"
                         )
+                    self._publish_subagent_count(chat_id, project_id, count, nudged=False)
                     last_count = count
                 if not had_subagents or count == 0:
                     break

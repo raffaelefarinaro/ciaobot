@@ -226,6 +226,15 @@ async def test_watch_subagent_completion_nudges_parent_synthesis(
         pcm, "_schedule_push", lambda *a, **k: pushes.append(a)
     )
 
+    published: list[dict] = []
+    original_publish = pcm._events.publish
+
+    def capture_publish(payload: dict) -> None:
+        published.append(payload)
+        original_publish(payload)
+
+    monkeypatch.setattr(pcm._events, "publish", capture_publish)
+
     try:
         await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
     finally:
@@ -234,6 +243,13 @@ async def test_watch_subagent_completion_nudges_parent_synthesis(
     assert len(steer_calls) == 1
     # The synthesis nudge replaces the bare "finished" push when delivered.
     assert pushes == []
+
+    ready_events = [ev for ev in published if ev.get("type") == "chat_subagents_ready"]
+    assert len(ready_events) == 2
+    assert ready_events[0]["remaining"] == 1
+    assert ready_events[0]["nudged"] is False
+    assert ready_events[1]["remaining"] == 0
+    assert ready_events[1]["nudged"] is True
 
 
 def test_chat_subagents_falls_back_to_nested_jsonl_and_progress_entries(
