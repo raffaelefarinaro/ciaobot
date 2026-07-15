@@ -547,26 +547,38 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     pcm.notify_question_cb = _notify_question
 
 
-    schedule_manager.start()
-    # Loops with autostart begin running now; manually-started loops stay
-    # stopped until started from the Automations page. No catch-up pass:
-    # missed poll iterations from downtime are worthless, cadence just resumes.
-    loop_manager.start()
+    # Bootstrap mode is the first-run setup wizard: the server runs against a
+    # throwaway ~/.ciao/bootstrap workspace until the user picks a real folder.
+    # Starting the schedulers here would dispatch system schedules (memory
+    # curation, skill evolution, weekly review) against that throwaway
+    # workspace mid-wizard — the user sees "chat completed" notifications for
+    # chats created in the wrong place. Hold every dispatcher until setup is
+    # done; the post-setup restart (no longer in bootstrap mode) starts them.
+    if getattr(config, "bootstrap_mode", False):
+        logger.info(
+            "Bootstrap mode: holding schedule/loop dispatch until setup completes."
+        )
+    else:
+        schedule_manager.start()
+        # Loops with autostart begin running now; manually-started loops stay
+        # stopped until started from the Automations page. No catch-up pass:
+        # missed poll iterations from downtime are worthless, cadence just resumes.
+        loop_manager.start()
 
-    # Fire each schedule once when its latest expected occurrence was missed
-    # (for example while the server was down). This does not replay every
-    # skipped interval. Runs asynchronously so it doesn't block uvicorn from
-    # serving requests.
-    async def _run_catch_up() -> None:
-        try:
-            fired = await schedule_manager.catch_up()
-            if fired:
-                logger.info("Schedule catch-up fired %d schedule(s): %s",
-                            len(fired), ", ".join(fired))
-        except Exception:
-            logger.exception("Schedule catch-up failed")
+        # Fire each schedule once when its latest expected occurrence was missed
+        # (for example while the server was down). This does not replay every
+        # skipped interval. Runs asynchronously so it doesn't block uvicorn from
+        # serving requests.
+        async def _run_catch_up() -> None:
+            try:
+                fired = await schedule_manager.catch_up()
+                if fired:
+                    logger.info("Schedule catch-up fired %d schedule(s): %s",
+                                len(fired), ", ".join(fired))
+            except Exception:
+                logger.exception("Schedule catch-up failed")
 
-    asyncio.create_task(_run_catch_up())
+        asyncio.create_task(_run_catch_up())
 
     # ── Branch backup ────────────────────────────────────────
     # Backs up the same repo the sync flow targets (the repo containing the

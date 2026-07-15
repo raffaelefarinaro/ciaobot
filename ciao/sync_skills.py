@@ -39,14 +39,14 @@ class SyncSkillsResult:
     codex_agents_pruned: int = 0
 
 
-# Marker dropped into skills copied from ciao.stock so stale copies can be
-# pruned when the packaged set changes or a workspace skill overrides them.
 # Bound the upstream `npx skills ...` calls. `npx -y` cold-downloads the
 # `skills` package and then does network git fetches; with no timeout a stall
 # (cold cache, slow/blocked network, an interactive prompt) hangs the
 # `update_skills` startup phase forever, which pins the boot overlay on
 # "booting" (overall_ready never flips). Bounded so the phase always ends.
 SKILLS_NPX_TIMEOUT = 180.0
+# Marker dropped into skills copied from ciao.stock so stale copies can be
+# pruned when the packaged set changes or a workspace skill overrides them.
 STOCK_SKILL_MARKER = ".ciao-stock-skill"
 STOCK_AGENT_MARKER_SUFFIX = ".ciao-stock-agent"
 CODEX_WRAPPER_MARKER = ".ciao-codex-wrapper"
