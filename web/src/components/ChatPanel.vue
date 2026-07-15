@@ -146,26 +146,18 @@
       <template v-for="(item, i) in renderItems" :key="i">
         <!-- Reasoning trace: intermediate assistant text + tool calls grouped -->
         <div v-if="item.kind === 'trace'" class="trace-block" :class="{ open: openTraces[i] }">
-          <div class="trace-summary" @click="toggleTrace(i)">
+          <button
+            type="button"
+            class="trace-summary"
+            :aria-expanded="Boolean(openTraces[i])"
+            @click="toggleTrace(i)"
+          >
             <span class="trace-chevron">{{ openTraces[i] ? '\u25BE' : '\u25B8' }}</span>
             <span class="trace-icon">&#129504;</span>
-            <span class="trace-label">Reasoning</span>
+            <span class="trace-label">Activity</span>
             <span class="trace-meta">{{ traceSummaryMeta(item.steps, item.subs) }}</span>
-          </div>
-          <div v-if="traceFiles(item.steps).length" class="trace-files">
-            <button
-              v-for="(f, fi) in traceFiles(item.steps)"
-              :key="fi"
-              type="button"
-              class="file-chip"
-              @click.stop="openFileCard(f.file_path)"
-              :title="f.file_path"
-            >
-              <span class="file-chip-icon" aria-hidden="true">{{ fileCardIcon(f.file_path) }}</span>
-              <span class="file-chip-name">{{ fileCardBasename(f.file_path) }}</span>
-              <span class="file-chip-open" aria-hidden="true">&#8599;</span>
-            </button>
-          </div>
+            <span class="sr-only">, {{ openTraces[i] ? 'expanded' : 'collapsed' }}</span>
+          </button>
           <div v-if="openTraces[i]" class="trace-body">
             <template v-for="(step, j) in item.steps" :key="j">
               <div v-if="step.tool_name === '_activity'" class="trace-tools">
@@ -202,6 +194,20 @@
               <div v-else class="trace-text" v-html="renderMarkdown(step.content)"></div>
             </template>
             <SubagentPanel v-if="item.subs?.length" :subagents="item.subs" />
+            <div v-if="item.outputs?.length" class="trace-files">
+              <button
+                v-for="(f, fi) in item.outputs"
+                :key="fi"
+                type="button"
+                class="file-chip"
+                @click.stop="openFileCard(f.file_path)"
+                :title="f.file_path"
+              >
+                <span class="file-chip-icon" aria-hidden="true">{{ fileCardIcon(f.file_path) }}</span>
+                <span class="file-chip-name">{{ fileCardBasename(f.file_path) }}</span>
+                <span class="file-chip-open" aria-hidden="true">&#8599;</span>
+              </button>
+            </div>
           </div>
         </div>
         <!-- User message -->
@@ -259,11 +265,28 @@
           <div class="message-row" @mousemove="onMessageRowMove" @click="toggleMessageActions(`assistant-${i}`, $event)">
             <div class="message assistant" :class="{ error: item.msg.is_error }">
               <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
-              <div v-if="item.msg.timestamp || item.msg.effective_model" class="message-meta">
+              <div v-if="item.outputs?.length" class="answer-outputs" role="group" aria-label="Outputs">
+                <span class="answer-outputs-label">Outputs</span>
+                <div class="answer-output-files">
+                  <button
+                    v-for="(f, fi) in item.outputs"
+                    :key="fi"
+                    type="button"
+                    class="file-chip"
+                    @click.stop="openFileCard(f.file_path)"
+                    :title="f.file_path"
+                  >
+                    <span class="file-chip-icon" aria-hidden="true">{{ fileCardIcon(f.file_path) }}</span>
+                    <span class="file-chip-name">{{ fileCardBasename(f.file_path) }}</span>
+                    <span class="file-chip-open" aria-hidden="true">&#8599;</span>
+                  </button>
+                </div>
+              </div>
+              <div v-if="item.msg.timestamp || item.msg.effective_model || formatTokenUsage(item.msg.usage)" class="message-meta">
                 <span v-if="item.msg.timestamp">{{ formatTime(item.msg.timestamp) }}</span>
                 <span v-if="item.msg.duration_ms"> &middot; {{ formatDuration(item.msg.duration_ms) }}</span>
                 <span v-if="item.msg.effective_model"> &middot; {{ item.msg.effective_model }}</span>
-                <span v-if="item.msg.usage?.input_tokens"> | in:{{ item.msg.usage.input_tokens }} out:{{ item.msg.usage.output_tokens }}</span>
+                <span v-if="formatTokenUsage(item.msg.usage)" class="tokens-group"> | <span v-html="formatTokenUsage(item.msg.usage)"></span></span>
               </div>
             </div>
             <div v-if="item.msg.content?.trim()" class="message-actions">
@@ -276,6 +299,20 @@
               >
                 <svg v-if="copiedMessageKey === `assistant-${i}`" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
                 <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              </button>
+              <button
+                v-if="!item.msg.is_error"
+                type="button"
+                class="message-action-btn"
+                :class="{ 'message-action-btn--busy': forkLoadingKey === `assistant-${i}` }"
+                :title="forkLoadingKey === `assistant-${i}` ? 'Forking…' : 'Fork conversation from here'"
+                aria-label="Fork conversation from here"
+                :disabled="forkLoadingKey !== null"
+                @click.stop="forkConversation(item.msg, `assistant-${i}`)"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="6" cy="5" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="18" cy="18" r="2"/><path d="M6 7v4a6 6 0 0 0 6 6h4"/><path d="M8 5h4a6 6 0 0 1 6 6v5"/>
+                </svg>
               </button>
               <button
                 type="button"
@@ -346,13 +383,19 @@
            streaming text) stays inside this block. The final answer bubble
            only appears after the result event. -->
       <div v-if="store.isStreaming" class="trace-block live" :class="{ open: liveTraceOpen }">
-        <div class="trace-summary" @click="toggleLiveTrace">
+        <button
+          type="button"
+          class="trace-summary"
+          :aria-expanded="liveTraceOpen"
+          @click="toggleLiveTrace"
+        >
           <span class="trace-chevron">{{ liveTraceOpen ? '\u25BE' : '\u25B8' }}</span>
           <span class="activity-spinner"></span>
           <span class="trace-icon">&#129504;</span>
           <span class="trace-label">{{ (store.currentTimeline.length || store.currentStreamingText) ? 'Working...' : 'Thinking...' }}</span>
           <span v-if="liveTraceMeta" class="trace-meta">{{ liveTraceMeta }}</span>
-        </div>
+          <span class="sr-only">, {{ liveTraceOpen ? 'expanded' : 'collapsed' }}</span>
+        </button>
         <div
           v-if="liveTraceOpen && (store.currentTimeline.length || store.currentStreamingText || store.currentStreamingThinking || liveSubagents.length)"
           class="trace-body"
@@ -766,12 +809,14 @@ import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
 import { formatTime, formatDuration } from '../lib/time'
+import { collectTraceOutputs, formatTokenUsage, traceSummaryMeta, type TraceOutput } from '../lib/chatActivity'
+import { buildForkSnapshot } from '../lib/chatFork'
 
 type RenderItem =
   | { kind: 'user'; msg: ChatMessage }
-  | { kind: 'assistant'; msg: ChatMessage }
+  | { kind: 'assistant'; msg: ChatMessage; outputs?: TraceOutput[] }
   | { kind: 'system'; msg: ChatMessage }
-  | { kind: 'trace'; steps: ChatMessage[]; subs?: SubagentTranscript[] }
+  | { kind: 'trace'; steps: ChatMessage[]; subs?: SubagentTranscript[]; outputs?: TraceOutput[] }
   | { kind: 'subagents'; subs: SubagentTranscript[] }
 
 type ChatComment = {
@@ -885,6 +930,7 @@ const thinkingLevels = ref<Record<string, string[]>>({})
 const openTraces = ref<Record<number, boolean>>({})
 const liveTraceOpen = ref(false)
 const copiedMessageKey = ref<string | null>(null)
+const forkLoadingKey = ref<string | null>(null)
 // On touch devices there is no hover, so a tap on the bubble reveals the
 // per-message action icons. Holds the key of the message whose actions are open.
 const tappedMessageKey = ref<string | null>(null)
@@ -1052,24 +1098,6 @@ const touchedFiles = computed<TouchedFile[]>(() => {
   // Most recent first.
   return Array.from(byPath.values()).sort((a, b) => b.index - a.index)
 })
-
-// Deduped files touched within a single reasoning trace (one turn), surfaced
-// as clickable chips under the trace summary so the user sees which files a
-// turn edited without expanding the trace or hunting in the project folder.
-function traceFiles(
-  steps: Array<{ tool_name?: string; file_path?: string; content?: string }> | undefined,
-): { file_path: string }[] {
-  const seen = new Set<string>()
-  const out: { file_path: string }[] = []
-  for (const s of steps || []) {
-    if (s.tool_name !== '_filecard') continue
-    const fp = s.file_path || s.content
-    if (!fp || seen.has(fp)) continue
-    seen.add(fp)
-    out.push({ file_path: fp })
-  }
-  return out
-}
 
 type ProviderKey = 'claude' | 'codex'
 type BucketKey = 'claude_work' | 'claude_personal' | 'openrouter' | 'codex'
@@ -1842,6 +1870,32 @@ async function copyMessageText(text: string, key: string): Promise<void> {
   }
 }
 
+async function forkConversation(message: ChatMessage, key: string): Promise<void> {
+  const sourceChatId = store.activeChatId
+  if (!sourceChatId || forkLoadingKey.value) return
+  const snapshot = buildForkSnapshot(store.activeMessages, message)
+  if (!snapshot) {
+    store.pushErrorToast(
+      'Could not fork conversation',
+      'This answer is no longer available as a fork point.',
+    )
+    return
+  }
+  forkLoadingKey.value = key
+  try {
+    await store.forkChat(sourceChatId, snapshot.messages, snapshot.turnIndex)
+    await nextTick()
+    inputEl.value?.focus()
+  } catch (error) {
+    store.pushErrorToast(
+      'Could not fork conversation',
+      error instanceof Error ? error.message : String(error),
+    )
+  } finally {
+    forkLoadingKey.value = null
+  }
+}
+
 // ── Read aloud ─────────────────────────────────────────────────────────
 const speakingMessageKey = ref<string | null>(null)
 const speakLoadingKey = ref<string | null>(null)
@@ -2008,32 +2062,7 @@ function formatTokens(n: number): string {
   return `${m < 10 ? m.toFixed(1) : Math.round(m)}M`
 }
 
-function traceSummaryMeta(steps: ChatMessage[], subs?: SubagentTranscript[]): string {
-  let toolCount = 0
-  let textCount = 0
-  let thinkingCount = 0
-  let fileCount = 0
-  for (const s of steps) {
-    if (s.tool_name === '_activity') {
-      toolCount += s.content.split('\n').filter(Boolean).length
-    } else if (s.tool_name === '_thinking') {
-      thinkingCount += 1
-    } else if (s.tool_name === '_filecard') {
-      fileCount += 1
-    } else if (s.role === 'assistant') {
-      textCount += 1
-    }
-  }
-  const parts: string[] = []
-  if (thinkingCount) parts.push(`${thinkingCount} thought${thinkingCount === 1 ? '' : 's'}`)
-  if (textCount) parts.push(`${textCount} note${textCount === 1 ? '' : 's'}`)
-  if (toolCount) parts.push(`${toolCount} tool call${toolCount === 1 ? '' : 's'}`)
-  if (fileCount) parts.push(`${fileCount} file${fileCount === 1 ? '' : 's'}`)
-  if (subs?.length) {
-    parts.push(`${subs.length} subagent${subs.length === 1 ? '' : 's'}`)
-  }
-  return parts.join(' · ') || 'steps'
-}
+
 
 // Image extensions get routed through openImage so the binary streams
 // directly instead of round-tripping through the text endpoint. Everything
@@ -2138,6 +2167,7 @@ const renderData = computed<{
 
   const flushTurn = (isFinal = false) => {
     if (!buffer.length) return
+    const turnOutputs = collectTraceOutputs(buffer)
     // Find index of the LAST assistant text message (the final answer).
     // _activity (tool calls) and _thinking (model reasoning) are part of
     // the trace, never the final user-facing reply.
@@ -2174,6 +2204,7 @@ const renderData = computed<{
         kind: 'trace',
         steps: buffer.slice(),
         ...(traceSubs.length ? { subs: traceSubs } : {}),
+        ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
       })
       buffer = []
       return
@@ -2194,12 +2225,17 @@ const renderData = computed<{
         kind: 'trace',
         steps: intermediate,
         ...(traceSubs.length ? { subs: traceSubs } : {}),
+        ...(!finalMsg && turnOutputs.length ? { outputs: turnOutputs } : {}),
       })
     } else if (traceSubs.length) {
       items.push({ kind: 'trace', steps: [], subs: traceSubs })
     }
     if (finalMsg) {
-      items.push({ kind: 'assistant', msg: finalMsg })
+      items.push({
+        kind: 'assistant',
+        msg: finalMsg,
+        ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
+      })
     }
     if (trailing.length) {
       items.push({ kind: 'trace', steps: trailing })
@@ -3245,6 +3281,10 @@ function insertImageRef(n: number) {
 
 .trace-summary {
   padding: 8px 12px;
+  min-height: var(--touch);
+  width: 100%;
+  border: 0;
+  background: transparent;
   cursor: pointer;
   color: var(--fg2);
   user-select: none;
@@ -3254,14 +3294,30 @@ function insertImageRef(n: number) {
   font-weight: 600;
   font-size: var(--text-sm);
   line-height: 1.4;
+  font-family: inherit;
+  text-align: left;
 }
 
 .trace-summary:hover { color: var(--fg); }
+.trace-summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 
 .trace-chevron { font-size: calc(10px * var(--font-scale)); color: var(--fg2); }
 .trace-icon { font-size: calc(14px * var(--font-scale)); }
 .trace-label { color: var(--fg2); }
-.trace-meta { color: var(--fg2); opacity: 0.7; font-weight: 400; margin-left: auto; font-size: var(--text-xs); }
+.trace-meta {
+  color: var(--fg2);
+  opacity: 0.7;
+  font-weight: 400;
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+}
 
 .trace-body {
   padding: 6px 12px 10px;
@@ -3323,22 +3379,44 @@ function insertImageRef(n: number) {
   gap: 2px;
 }
 
-/* Inline file card. Rendered inside the reasoning trace whenever the agent
+/* Inline file card. Rendered inside the activity trace whenever the agent
    calls Write/Edit/MultiEdit/NotebookEdit. Tapping opens the FileViewerModal
    for that path (security-checked server-side by /api/workspace-file). */
-/* Always-visible "edited files" chips under a trace summary, so the files a
-   turn changed are one click away without expanding the reasoning trace. */
+/* Always-visible output chips sit below a final answer. Interrupted turns
+   retain the chips inside Activity so file touches do not disappear. */
 .trace-files {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  padding: 6px 0 2px;
+  padding: 6px 12px 10px;
+}
+.answer-outputs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.answer-outputs-label {
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+.answer-output-files {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
 }
 .file-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   max-width: 100%;
+  min-height: var(--touch);
   padding: 3px 8px;
   font-size: var(--text-xs);
   color: var(--fg);
@@ -3649,6 +3727,14 @@ details[open] > .activity-summary::before {
 
 .message.user .message-meta {
   text-align: right;
+}
+.tokens-group {
+  white-space: nowrap;
+  display: inline-block;
+}
+.tokens-group :deep(.token-number) {
+  color: var(--fg);
+  font-weight: 500;
 }
 
 .message-images { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
