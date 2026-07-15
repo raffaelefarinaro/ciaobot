@@ -125,11 +125,15 @@ describe('LoginView setup wizard tests', () => {
     const wrapper = await mountLoginView()
     expect(wrapper.find('#setup-port').exists()).toBe(false)
     expect(wrapper.find('#setup-python').exists()).toBe(false)
+    expect(wrapper.find('#setup-auth-required').exists()).toBe(false)
+    expect(wrapper.find('#setup-api-fallback').exists()).toBe(false)
 
     await wrapper.find('#setup-advanced-toggle').trigger('click')
     await nextTick()
     expect(wrapper.find('#setup-port').exists()).toBe(true)
     expect(wrapper.find('#setup-python').exists()).toBe(true)
+    expect(wrapper.find('#setup-auth-required').exists()).toBe(true)
+    expect(wrapper.find('#setup-api-fallback').exists()).toBe(true)
     expect((wrapper.find('#setup-port').element as HTMLInputElement).value).toBe('8443')
   })
 

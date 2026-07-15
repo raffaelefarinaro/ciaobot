@@ -74,6 +74,7 @@ def _description_for(root: Path, name: str, *, prefer_custom: bool) -> str:
     candidates.extend(
         [
             root / ".claude" / "skills" / name / "SKILL.md",
+            root / ".agents" / "skills" / name / "SKILL.md",
         ]
     )
     for path in candidates:
@@ -130,6 +131,7 @@ def _content_for(root: Path, name: str, *, prefer_custom: bool) -> str:
     candidates.extend(
         [
             root / ".claude" / "skills" / name / "SKILL.md",
+            root / ".agents" / "skills" / name / "SKILL.md",
         ]
     )
     for path in candidates:
