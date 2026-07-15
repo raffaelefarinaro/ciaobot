@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.4.28 - 2026-07-15
+
+### Added
+- feat(web): show clickable edited-file chips under each reasoning trace (`c966ef2`)
+- feat(upgrade): self-restart when the installed package version changes (`be9037c`)
+
+### Changed
+- Merge pull request #131 from raffaelefarinaro/chore/sync-develop-v0.4.27 (`166e0c1`)
+
+### Fixed
+- fix(vault-lint): cut false positives (code spans, escaped, templates, dupes, .venv) (`d95cf2a`)
+- fix(titles): make apfel opt-in, default Automatic to provider haiku (`e1a239d`)
+
+### Maintenance
+- chore: sync develop with main after v0.4.27 (`9201872`)
+- docs(system-prompt): tell the agent to finish approved steps, not announce and stop (`6f71f1e`)
+
 ## v0.4.27 - 2026-07-15
 
 ### Added
