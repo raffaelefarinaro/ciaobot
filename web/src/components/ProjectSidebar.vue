@@ -1536,7 +1536,7 @@ async function confirmDeleteChat(chatId: string) {
 
 .add-project-btn {
   flex: 1;
-  min-height: var(--touch);
+  height: var(--touch);
   padding: 6px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
