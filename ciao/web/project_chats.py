@@ -872,6 +872,7 @@ class ProjectChatManager:
         self._ensure_defaults()
         self._discover_vault_projects()
         self._recover_orphaned_active_chats()
+        self._reconcile_half_archived_chats()
         # Sweep any empty chats left over from a previous run (user closed the
         # tab before typing, server crashed mid-compose, etc.). An "empty"
         # chat has no messages, no SDK session, and still the default title —
@@ -1885,6 +1886,59 @@ class ProjectChatManager:
 
         if recovered:
             self._save(reason="orphaned_active_chat_recovery")
+
+    def _reconcile_half_archived_chats(self) -> None:
+        """Heal chats stuck in a provably-impossible half-archived state.
+
+        A chat that was archived (its transcript moved to the vault and, for
+        Claude, its SDK session blob deleted) can end up back with
+        ``archived=False`` if an older ``web_projects.json`` was reloaded
+        after a crash/restart — the archive side effects already happened but
+        the registry flag reverted. ``new_session`` now refuses to resurrect
+        archived chats in place, so this can no longer be *created*, but
+        existing corrupt rows never self-correct: the chat reappears in the
+        sidebar and menu bar indefinitely (an "archived chat that came back").
+
+        The reconciled state is unambiguous, so the guard has no false
+        positives: a live chat always has a current transcript, and a fresh
+        ``new_session`` resets ``session_id`` to "" (excluded below). Only a
+        reverted archive leaves a non-empty ``session_id`` whose backing data
+        is already gone while an archive sits in the vault.
+        """
+        healed = 0
+        for chat_id, chat in self._chats.items():
+            if chat.archived or not chat.session_id:
+                continue
+            ctx = ChatContext.for_web(chat_id)
+            if self._transcripts.current_path(ctx, chat.provider).exists():
+                continue  # live transcript -> genuinely active, leave alone
+            archive_dir = self._transcripts.archive_dir(ctx, chat.provider)
+            if not archive_dir.is_dir() or not any(archive_dir.glob("*.md")):
+                continue  # never archived -> not the corrupt state
+            if chat.provider == "claude" and self._claude_session_exists(
+                chat.session_id
+            ):
+                continue  # session blob still present -> not archived
+            chat.archived = True
+            if not chat.archive_path:
+                latest = max(
+                    archive_dir.glob("*.md"), key=lambda p: p.name, default=None
+                )
+                if latest is not None:
+                    try:
+                        chat.archive_path = str(
+                            latest.relative_to(self._config.workspace_root)
+                        )
+                    except ValueError:
+                        chat.archive_path = str(latest)
+            healed += 1
+            logger.warning(
+                "Reconciled half-archived chat %s: archive present but "
+                "registry showed active; marking archived.",
+                chat_id,
+            )
+        if healed:
+            self._save(reason="half_archived_reconciliation")
 
     def _discover_vault_projects(self) -> None:
         """Auto-discover projects from each workspace's ``projects/active/`` tree.

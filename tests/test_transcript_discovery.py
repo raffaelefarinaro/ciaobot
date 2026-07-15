@@ -412,6 +412,66 @@ def test_new_session_refuses_to_resurrect_archived_chat(tmp_path: Path) -> None:
     assert same.archive_path == "memory-vault/Logs/Chats/chat-x/claude/t.md"
 
 
+def test_reconcile_heals_half_archived_chat(tmp_path: Path) -> None:
+    """A chat whose archive completed (vault md present, session blob gone,
+    no current transcript) but whose registry flag reverted to active is
+    provably corrupt. Load-time reconciliation must mark it archived again so
+    it stops reappearing in the sidebar and menu bar tray."""
+    pcm = _make_manager(tmp_path)
+    proj = pcm.create_project("Routines", workspace="work")
+    chat = pcm.create_chat(proj.project_id, title="Weekly customer intel sweep")
+    cid = chat.chat_id
+    ctx = ChatContext.for_web(cid)
+
+    # Simulate a completed archive: a vault transcript exists on disk.
+    archive_dir = pcm._transcripts.archive_dir(ctx, "claude")
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    (archive_dir / "2026-07-10T08-13-21Z-sess.md").write_text(
+        "# archived\n", encoding="utf-8"
+    )
+    # Corrupt the registry exactly as a reverted archive leaves it: session
+    # still set (never reset to ""), flag back to active, no archive_path,
+    # and no current transcript / session blob on disk.
+    chat.session_id = "fake-heal-session-id"
+    chat.archived = False
+    chat.archive_path = ""
+    pcm._save()
+
+    reloaded = _make_manager(tmp_path)
+    healed = reloaded.get_chat(cid)
+    assert healed is not None
+    assert healed.archived is True
+    assert healed.archive_path.endswith("2026-07-10T08-13-21Z-sess.md")
+
+
+def test_reconcile_leaves_live_chat_untouched(tmp_path: Path) -> None:
+    """A chat with a live current transcript is genuinely active and must not
+    be reconciled, even if an older archive exists for it (e.g. after
+    new_session started a fresh turn)."""
+    pcm = _make_manager(tmp_path)
+    proj = pcm.create_project("Routines", workspace="work")
+    chat = pcm.create_chat(proj.project_id, title="Active work")
+    cid = chat.chat_id
+    ctx = ChatContext.for_web(cid)
+
+    archive_dir = pcm._transcripts.archive_dir(ctx, "claude")
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    (archive_dir / "old.md").write_text("# old\n", encoding="utf-8")
+    current = pcm._transcripts.current_path(ctx, "claude")
+    current.parent.mkdir(parents=True, exist_ok=True)
+    current.write_text(
+        json.dumps({"turns": [{"prompt": "keep going"}]}), encoding="utf-8"
+    )
+    chat.session_id = "fake-live-session-id"
+    chat.archived = False
+    pcm._save()
+
+    reloaded = _make_manager(tmp_path)
+    still = reloaded.get_chat(cid)
+    assert still is not None
+    assert still.archived is False
+
+
 def test_continue_archived_chat(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     
