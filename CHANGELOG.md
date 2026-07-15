@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.4.26 - 2026-07-15
+
+### Added
+- feat(automations): user-facing routine descriptions + rework stock routine set (`8b15936`)
+
+### Changed
+- Merge pull request #125 from raffaelefarinaro/chore/sync-develop-v0.4.25 (`e021925`)
+
+### Fixed
+- fix(setup): refuse a workspace in a macOS TCC-protected folder (`669eeda`)
+- fix(automations,chat,menubar): 0.4.26 review-pass batch (`74cdbc5`)
+
+### Maintenance
+- chore: sync develop with main after v0.4.25 (`158da88`)
+
 ## v0.4.25 - 2026-07-15
 
 ### Added

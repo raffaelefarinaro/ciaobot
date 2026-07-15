@@ -776,3 +776,36 @@ def test_icon_if_present_returns_none_for_missing_asset(monkeypatch) -> None:
 
     # An asset that isn't packaged resolves to None rather than a dead path.
     assert menubar._icon_if_present("does-not-exist.icns") is None
+
+
+def test_read_open_chats_skips_orphaned_project(tmp_path: Path) -> None:
+    """The tray must not surface a chat whose project no longer resolves — the
+    PWA can't open it, so the two views stay consistent."""
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    (runtime / "web_projects.json").write_text(
+        json.dumps(
+            {
+                "projects": {"proj-1": {"name": "General", "workspace": "personal"}},
+                "chats": {
+                    "chat-ok": {
+                        "title": "Reachable",
+                        "project_id": "proj-1",
+                        "archived": False,
+                        "last_activity_at": "2026-07-15T10:00:00Z",
+                    },
+                    "chat-orphan": {
+                        "title": "Stranded",
+                        "project_id": "proj-gone",
+                        "archived": False,
+                        "last_activity_at": "2026-07-15T11:00:00Z",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    open_chats = menubar.read_open_chats(tmp_path)
+    ids = {c.chat_id for c in open_chats}
+    assert "chat-ok" in ids
+    assert "chat-orphan" not in ids

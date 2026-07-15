@@ -750,6 +750,12 @@ def read_open_chats(workspace: Path, *, limit: int = 10) -> list[OpenChat]:
     for chat_id, chat in chats.items():
         if chat.get("archived"):
             continue
+        # Skip chats whose project no longer resolves: the PWA can't show them
+        # (it nests chats under project → workspace), so the tray shouldn't
+        # surface something the user can't open. The server re-homes such
+        # orphans on load, but guard here too in case state is mid-migration.
+        if projects and str(chat.get("project_id") or "") not in projects:
+            continue
         open_chats.append(_open_chat_from_state(chat_id, chat, projects=projects))
     open_chats.sort(key=lambda chat: chat.last_activity_at, reverse=True)
     return open_chats[:limit]

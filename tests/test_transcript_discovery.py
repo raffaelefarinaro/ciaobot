@@ -536,3 +536,53 @@ def test_continue_archived_chat(tmp_path: Path) -> None:
     assert msgs[1]["role"] == "assistant"
     assert msgs[1]["content"] == "The capital of Italy is Rome."
     assert msgs[1]["timestamp"] == "2026-06-10T12:00:00Z"
+
+
+def test_rehome_orphaned_chat_to_general(tmp_path: Path) -> None:
+    """A chat whose project no longer exists is re-homed to a valid General on
+    load, so it's reachable in the PWA instead of stranded (tray-only)."""
+    pcm = _make_manager(tmp_path)
+    from ciao.web.project_chats import ChatInfo
+
+    cid = "chat-orphan-x"
+    pcm._chats[cid] = ChatInfo(
+        chat_id=cid,
+        project_id="proj-doesnotexist",
+        title="Stranded",
+        model="opus",
+        provider="claude",
+        mode="auto",
+    )
+    pcm._save()
+
+    reloaded = _make_manager(tmp_path)
+    chat = reloaded.get_chat(cid)
+    assert chat is not None
+    assert chat.project_id in reloaded._projects
+    assert reloaded._projects[chat.project_id].name == "General"
+
+
+def test_schedule_chat_titled_after_routine_name(tmp_path: Path) -> None:
+    """A named routine titles its dispatched chats after the routine, not a
+    truncated prompt sentence (no baked-in '...')."""
+    from ciao.schedules import ScheduleEntry
+
+    pcm = _make_manager(tmp_path)
+    general = next(
+        p for p in pcm.list_projects("personal") if p.name == "General"
+    )
+    entry = ScheduleEntry(
+        schedule_id="s1",
+        daily_time_utc="09:00",
+        prompt="Run a very long structural hygiene pass sentence that would be truncated",
+        chat_id=0,
+        created_at="2026-01-01T00:00:00Z",
+        web_project_id=general.project_id,
+        title="Workspace hygiene",
+        frequency="weekly",
+    )
+    chat_id = pcm.prepare_schedule_chat(entry, entry.prompt, "opus", "auto", "claude")
+    chat = pcm.get_chat(chat_id)
+    assert chat is not None
+    assert chat.title.startswith("Workspace hygiene - ")
+    assert "..." not in chat.title

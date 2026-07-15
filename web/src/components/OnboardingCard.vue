@@ -111,6 +111,11 @@ const showChecklist = computed(() => !progress.value.allDone)
 
 const visible = computed(() => {
   if (props.variant === 'home') {
+    // Don't render until provider status has loaded: progress.allDone depends
+    // on it, so showing before it resolves flashes the checklist for a frame
+    // on every home load (e.g. after closing a chat) even when it's dismissed
+    // or complete.
+    if (!store.providerStatusLoaded) return false
     return !store.dismissed && showChecklist.value
   }
   return !isOnboardingFinished(progress.value, productTour.isTourCompleted())
