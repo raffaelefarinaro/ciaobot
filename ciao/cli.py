@@ -1049,6 +1049,20 @@ def _setup_command(args: argparse.Namespace) -> int:
     # running it inside the source checkout, or re-pointing an already
     # configured workspace to the current directory. --yes overrides.
     if not args.yes:
+        from ciao.setup_status import tcc_protected_location
+
+        protected = tcc_protected_location(root)
+        if protected:
+            print(
+                f"Error: {root} is inside ~/{protected}, which macOS privacy "
+                "protection blocks the background launchd agent from reading "
+                "(the server and menu bar fail with 'Operation not permitted').\n"
+                "Choose a workspace outside ~/Desktop, ~/Documents, and "
+                "~/Downloads (e.g. ~/ciaobot), or grant Full Disk Access to the "
+                "interpreter and re-run with --yes.",
+                file=sys.stderr,
+            )
+            return 1
         if _looks_like_source_checkout(root):
             print(
                 f"Error: {root} looks like the Ciaobot source checkout, not a "

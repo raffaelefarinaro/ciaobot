@@ -725,3 +725,22 @@ def test_setup_mkdir_requires_bootstrap_mode(tmp_path) -> None:
 
     assert resp.status_code == 404
     assert not (tmp_path / "workspace").exists()
+
+
+def test_tcc_protected_location_flags_desktop(monkeypatch, tmp_path) -> None:
+    """A workspace inside ~/Desktop|Documents|Downloads must be flagged on
+    macOS (launchd agents get EPERM there) and cleared elsewhere."""
+    from ciao import setup_status
+
+    home = tmp_path / "home"
+    (home / "Desktop" / "Cowork").mkdir(parents=True)
+    (home / "projects" / "ws").mkdir(parents=True)
+    monkeypatch.setattr(setup_status.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(setup_status.sys, "platform", "darwin")
+
+    assert setup_status.tcc_protected_location(home / "Desktop" / "Cowork") == "Desktop"
+    assert setup_status.tcc_protected_location(home / "projects" / "ws") is None
+
+    # Non-macOS never flags (launchd/TCC is macOS-only).
+    monkeypatch.setattr(setup_status.sys, "platform", "linux")
+    assert setup_status.tcc_protected_location(home / "Desktop" / "Cowork") is None

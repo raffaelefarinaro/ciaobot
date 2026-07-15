@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import json
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -20,6 +21,27 @@ from pathlib import Path
 from typing import Mapping, Any
 
 from ciao.providers.codex import codex_login_status
+
+
+# macOS TCC (privacy) protects these home subfolders. A launchd-spawned
+# background agent has no access grant for them, so a workspace placed inside
+# one fails at runtime with EPERM ("Operation not permitted") reading its own
+# .runtime files — the server and menu bar die (exit 78). Steer setup away.
+_TCC_PROTECTED_DIRS = ("Desktop", "Documents", "Downloads")
+
+
+def tcc_protected_location(path: Path | str) -> str | None:
+    """Return the protected home folder (Desktop/Documents/Downloads) that
+    contains ``path`` on macOS, or None. Non-macOS platforms return None."""
+    if sys.platform != "darwin":
+        return None
+    resolved = Path(path).expanduser().resolve()
+    home = Path.home()
+    for name in _TCC_PROTECTED_DIRS:
+        base = (home / name).resolve()
+        if resolved == base or base in resolved.parents:
+            return name
+    return None
 
 
 def _check(
