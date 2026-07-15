@@ -91,7 +91,7 @@ export const useTaskStore = defineStore('tasks', () => {
     return await api.post<{ schedule_id: string; chat_id?: string }>(`/api/schedule-run/${scheduleId}`)
   }
 
-  async function updateSchedule(scheduleId: string, updates: { time?: string; prompt?: string; timezone?: string; days_of_week?: string[] | null; chat_id?: number; thread_id?: number | null; frequency?: string; day_of_month?: number | null; run_at_date?: string | null; web_chat_id?: string | null; web_project_id?: string | null; model?: string; provider?: 'claude' | 'codex'; enabled?: boolean; archive_policy?: ScheduleArchivePolicy }) {
+  async function updateSchedule(scheduleId: string, updates: { time?: string; prompt?: string; timezone?: string; days_of_week?: string[] | null; chat_id?: number; thread_id?: number | null; frequency?: string; day_of_month?: number | null; run_at_date?: string | null; web_chat_id?: string | null; web_project_id?: string | null; workspace?: string; model?: string; provider?: 'claude' | 'codex' | ''; enabled?: boolean; archive_policy?: ScheduleArchivePolicy }) {
     const s = await api.patch<Schedule>(`/api/schedules/${scheduleId}`, updates)
     const idx = schedules.value.findIndex(x => x.schedule_id === scheduleId)
     if (idx >= 0) schedules.value[idx] = s

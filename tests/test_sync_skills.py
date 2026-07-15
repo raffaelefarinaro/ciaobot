@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 import tomllib
 from types import SimpleNamespace
@@ -11,6 +12,30 @@ from ciao import sync_skills
 def _write(path: Path, text: str = "content\n") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def test_update_upstream_skills_passes_timeout(tmp_path: Path) -> None:
+    calls: list[dict] = []
+
+    def runner(args, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(returncode=0)
+
+    assert sync_skills._update_upstream_skills(
+        tmp_path, ["upstream"], runner=runner
+    ) is True
+    assert calls[0]["timeout"] == sync_skills.SKILLS_NPX_TIMEOUT
+
+
+def test_update_upstream_skills_survives_timeout(tmp_path: Path) -> None:
+    def runner(args, **kwargs):
+        # A stalled `npx -y skills update` would raise this once bounded; the
+        # startup phase must end (return False), not hang or propagate.
+        raise subprocess.TimeoutExpired(cmd=args, timeout=kwargs.get("timeout"))
+
+    assert sync_skills._update_upstream_skills(
+        tmp_path, ["upstream"], runner=runner
+    ) is False
 
 
 def test_sync_links_codex_guide_to_canonical_claude_guide(tmp_path: Path) -> None:

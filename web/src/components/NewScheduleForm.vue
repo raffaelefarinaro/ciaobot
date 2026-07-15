@@ -1,6 +1,10 @@
 <template>
   <form class="new-form" @submit.prevent="submit">
     <div class="form-grid">
+      <div class="form-group">
+        <label>Workspace</label>
+        <div class="inherited-value">{{ workspaceLabel }}</div>
+      </div>
       <div v-if="frequency !== 'manual'" class="form-group">
         <label>Time</label>
         <input v-model="time" type="time" required />
@@ -19,7 +23,7 @@
       <div class="form-group">
         <label>Deliver to</label>
         <select v-model="contextKey">
-          <option value="">Default (DM)</option>
+          <option value="" disabled>Select a target…</option>
           <optgroup v-for="group in contextGroups" :key="group.label" :label="group.label">
             <option v-for="ctx in group.items" :key="ctx.key" :value="ctx.key">
               {{ ctx.label || ctx.key }}
@@ -32,10 +36,11 @@
         <ModelSelector
           :model-value="model"
           :sections="scheduleModelSections"
-          placeholder="Default ({{ store.models?.default || '—' }})"
-          empty-placeholder="Default ({{ store.models?.default || '—' }})"
+          :placeholder="inheritedModelLabel"
+          :empty-placeholder="inheritedModelLabel"
           @select="selectScheduleModel"
         />
+        <p class="hint">Provider and model inherit from {{ workspaceLabel }} unless you choose an override.</p>
       </div>
     </div>
     <div class="form-group">
@@ -77,12 +82,12 @@
       <label>Prompt</label>
       <textarea v-model="prompt" placeholder="Schedule prompt" rows="2" required></textarea>
     </div>
-    <button class="btn-primary" :disabled="!prompt || (frequency !== 'manual' && !time) || (frequency === 'once' && !runAtDate)">Create Schedule</button>
+    <button class="btn-primary" :disabled="!prompt || !contextKey || (frequency !== 'manual' && !time) || (frequency === 'once' && !runAtDate)">Create Schedule</button>
   </form>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useTaskStore } from '../stores/tasks'
 import { useProjectStore } from '../stores/projects'
 import type { ScheduleArchivePolicy } from '../lib/types'
@@ -113,6 +118,25 @@ onMounted(() => {
 
 const scheduleModelSections = computed(() => sectionsFromModelsResponse(store.models))
 
+const activeWorkspaceConfig = computed(() =>
+  projectStore.workspaceOptions.find(w => w.name === projectStore.activeWorkspace),
+)
+const workspaceLabel = computed(() => {
+  const name = projectStore.activeWorkspace
+  return name ? name.charAt(0).toUpperCase() + name.slice(1) : 'Workspace'
+})
+const inheritedModelLabel = computed(() => {
+  const workspace = activeWorkspaceConfig.value
+  const provider = projectStore.workspaceProviderOptions.find(
+    option => option.value === workspace?.default_provider,
+  )?.label || workspace?.default_provider || 'provider'
+  const model = workspace?.default_model
+    || (workspace?.default_provider === 'codex' ? '' : projectStore.workspaceAppDefaultModel)
+    || store.models?.default
+    || ''
+  return model ? `Inherit ${provider} / ${model}` : `Inherit ${provider} default`
+})
+
 const selectedProvider = ref<'claude' | 'codex' | undefined>(undefined)
 
 function selectScheduleModel(value: string | string[], sectionKey: string) {
@@ -123,14 +147,17 @@ function selectScheduleModel(value: string | string[], sectionKey: string) {
 const contextGroups = computed(() => {
   const groups: { label: string; items: { key: string; label: string }[] }[] = []
   // Projects (new chat per run)
-  const projItems = projectStore.projects.map(p => ({
+  const projects = projectStore.projects.filter(
+    p => p.workspace === projectStore.activeWorkspace,
+  )
+  const projItems = projects.map(p => ({
     key: `proj:${p.project_id}`,
-    label: `${p.name} (${p.workspace})`,
+    label: p.name,
   }))
   if (projItems.length) groups.push({ label: 'Projects (new chat per run)', items: projItems })
   // Fixed web chats
   const webItems: { key: string; label: string }[] = []
-  for (const p of projectStore.projects) {
+  for (const p of projects) {
     for (const c of projectStore.projectChats(p.project_id)) {
       webItems.push({ key: `web:${c.chat_id}`, label: `${p.name} / ${c.title}` })
     }
@@ -138,6 +165,30 @@ const contextGroups = computed(() => {
   if (webItems.length) groups.push({ label: 'Fixed Web Chat', items: webItems })
   return groups
 })
+
+watch(
+  [
+    () => projectStore.activeWorkspace,
+    () => projectStore.projects.length,
+    () => projectStore.chats.length,
+  ],
+  () => {
+    const projects = projectStore.projects.filter(
+      p => p.workspace === projectStore.activeWorkspace,
+    )
+    const currentProjectId = contextKey.value.startsWith('proj:')
+      ? contextKey.value.slice(5)
+      : contextKey.value.startsWith('web:')
+        ? projectStore.chats.find(c => c.chat_id === contextKey.value.slice(4))?.project_id
+        : ''
+    if (currentProjectId && projects.some(p => p.project_id === currentProjectId)) return
+    const general = projects.find(p => p.is_auto && p.name === 'General') || projects[0]
+    contextKey.value = general ? `proj:${general.project_id}` : ''
+    model.value = ''
+    selectedProvider.value = undefined
+  },
+  { immediate: true },
+)
 
 async function submit() {
   let chatId: number | undefined
@@ -200,4 +251,15 @@ async function submit() {
 .days-row { display: flex; gap: 4px; flex-wrap: wrap; }
 
 textarea { resize: vertical; min-height: 50px; }
+
+.inherited-value {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg2);
+  color: var(--fg);
+}
 </style>

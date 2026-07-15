@@ -110,6 +110,7 @@ ciao dev
 ```bash
 source .venv/bin/activate
 pytest tests/                  # Python backend tests
+pytest tests/test_schedule_workspace_routing.py  # Workspace/provider/model inheritance for schedules
 pytest tests/test_dag.py       # DAG runner only (Node/Edge/run, per-node timing)
 ciao public-preflight scan <export-root> --private-patterns <file> # Public export private-data preflight
 ciao public-preflight export . /tmp/ciao-public-export # Copy allowlisted public tree

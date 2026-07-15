@@ -1796,7 +1796,7 @@ export const useProjectStore = defineStore('projects', () => {
           // having to switch chats or wait for the next sync interval.
           void reconcileAfterResult(msg.chat_id)
           void loadSubagents(msg.chat_id)
-        } else {
+        } else if (!(msg.remaining === 0 && msg.nudged)) {
           unread.value[msg.chat_id] = 1
           persistUnread()
           if (typeof document !== 'undefined' && document.visibilityState === 'visible') {

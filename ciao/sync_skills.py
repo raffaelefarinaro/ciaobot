@@ -39,6 +39,12 @@ class SyncSkillsResult:
     codex_agents_pruned: int = 0
 
 
+# Bound the upstream `npx skills ...` calls. `npx -y` cold-downloads the
+# `skills` package and then does network git fetches; with no timeout a stall
+# (cold cache, slow/blocked network, an interactive prompt) hangs the
+# `update_skills` startup phase forever, which pins the boot overlay on
+# "booting" (overall_ready never flips). Bounded so the phase always ends.
+SKILLS_NPX_TIMEOUT = 180.0
 # Marker dropped into skills copied from ciao.stock so stale copies can be
 # pruned when the packaged set changes or a workspace skill overrides them.
 STOCK_SKILL_MARKER = ".ciao-stock-skill"
@@ -175,7 +181,14 @@ def _update_upstream_skills(
             text=True,
             capture_output=True,
             check=False,
+            timeout=SKILLS_NPX_TIMEOUT,
         )
+    except subprocess.TimeoutExpired:
+        print(
+            f"WARN: skills update timed out after {SKILLS_NPX_TIMEOUT:.0f}s",
+            file=sys.stderr,
+        )
+        return False
     except OSError as exc:
         print(f"WARN: skills update failed: {exc}", file=sys.stderr)
         return False
@@ -229,7 +242,15 @@ def _restore_missing_upstream_skills(
                 text=True,
                 capture_output=True,
                 check=False,
+                timeout=SKILLS_NPX_TIMEOUT,
             )
+        except subprocess.TimeoutExpired:
+            print(
+                "WARN: skills restore timed out after "
+                f"{SKILLS_NPX_TIMEOUT:.0f}s for " + " ".join(source_names),
+                file=sys.stderr,
+            )
+            continue
         except OSError as exc:
             print(f"WARN: skills restore failed: {exc}", file=sys.stderr)
             continue

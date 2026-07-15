@@ -183,7 +183,7 @@ export type EventsWsMessage =
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean }
   | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string }
-  | { type: 'chat_subagents_ready'; chat_id: string; project_id: string; remaining: number }
+  | { type: 'chat_subagents_ready'; chat_id: string; project_id: string; remaining: number; nudged?: boolean }
   | { type: 'chat_read'; chat_id: string; last_read_at: string }
   | { type: 'chat_title'; chat_id: string; title: string; status?: 'pending' | 'ready' }
   | { type: 'chat_moved'; chat_id: string; project_id: string; old_project_id: string }
@@ -246,8 +246,11 @@ export interface Schedule {
   run_at_date: string | null
   web_chat_id: string | null
   web_project_id: string | null
+  workspace: WorkspaceName
   model: string
   provider?: 'claude' | 'codex'
+  effective_model?: string
+  effective_provider?: 'claude' | 'codex'
   next_run: string | null
   last_expected_run: string | null
   missed: boolean

@@ -131,6 +131,7 @@ def test_system_schedule_state_persists_separately(tmp_path: Path) -> None:
     entry.last_triggered_on = "2026-07-05"
     entry.last_dispatched_at = "2026-07-05T01:00:00"
     entry.enabled = False
+    entry.workspace = "work"
     store.replace(entry)
 
     runtime = json.loads((tmp_path / "schedules.json").read_text(encoding="utf-8")) if (tmp_path / "schedules.json").exists() else {"schedules": []}
@@ -139,9 +140,11 @@ def test_system_schedule_state_persists_separately(tmp_path: Path) -> None:
 
     assert runtime == {"schedules": []}
     assert state["schedules"]["system-memory-curation"]["last_triggered_on"] == "2026-07-05"
+    assert state["schedules"]["system-memory-curation"]["workspace"] == "work"
     assert reloaded is not None
     assert reloaded.enabled is False
     assert reloaded.last_triggered_on == "2026-07-05"
+    assert reloaded.workspace == "work"
 
 
 async def test_catch_up_fires_past_due_schedule(store: ScheduleStore):

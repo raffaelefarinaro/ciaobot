@@ -438,6 +438,34 @@ describe('background agents indicator', () => {
     expect(store.activeBackgroundAgents).toBe(0)
   })
 
+  test('suppresses toast and unread marker when nudged=true on completion', () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'c-nudge'
+    store.activeChatId = 'some-other-chat'
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    const fire = (remaining: number, nudged?: boolean) =>
+      sock.onmessage?.({
+        data: JSON.stringify({ type: 'chat_subagents_ready', chat_id: chatId, project_id: 'p1', remaining, nudged }),
+      })
+
+    fire(1)
+    expect(store.backgroundAgents[chatId]).toBe(1)
+
+    fire(0, true)
+    expect(store.toasts).toHaveLength(0)
+    expect(store.unread[chatId]).toBeUndefined()
+
+    store.backgroundAgents[chatId] = 1
+
+    fire(0, false)
+    expect(store.toasts).toHaveLength(1)
+    expect(store.toasts[0].body).toBe('Background agents finished')
+    expect(store.unread[chatId]).toBe(1)
+  })
+
   test('a new turn keeps the background-agents count (agents outlive turns)', () => {
     apiGet.mockResolvedValue([])
     const store = useProjectStore()

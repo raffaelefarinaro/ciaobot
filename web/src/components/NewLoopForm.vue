@@ -59,7 +59,7 @@ const startNow = ref(true)
 
 const chatGroups = computed(() => {
   const groups: { label: string; items: { key: string; label: string }[] }[] = []
-  for (const p of projectStore.projects) {
+  for (const p of projectStore.projects.filter(p => p.workspace === projectStore.activeWorkspace)) {
     const items = projectStore.projectChats(p.project_id).map(c => ({
       key: c.chat_id,
       label: c.title,
