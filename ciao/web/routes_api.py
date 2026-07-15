@@ -4137,6 +4137,22 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     workspace = str(body.get("workspace", "")).strip()
     if not workspace:
         return JSONResponse({"error": "workspace is required"}, status_code=400)
+    from ciao.setup_status import tcc_protected_location
+
+    protected = tcc_protected_location(workspace)
+    if protected:
+        return JSONResponse(
+            {
+                "error": (
+                    f"'{workspace}' is inside ~/{protected}, which macOS privacy "
+                    "protection blocks background services from reading — the "
+                    "Ciaobot server and menu bar would fail to start. Pick a "
+                    "folder outside ~/Desktop, ~/Documents, and ~/Downloads "
+                    "(for example ~/ciaobot)."
+                )
+            },
+            status_code=400,
+        )
     # Optional: an empty push contact leaves Web Push disabled until the
     # operator configures one in Settings.
     push_contact = str(body.get("push_contact", "")).strip()
