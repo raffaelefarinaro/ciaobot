@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.4.25 - 2026-07-15
+
+### Added
+- feat(web): add 'Continue this chat' to the transcript file preview (`f19337d`)
+
+### Changed
+- Merge pull request #123 from raffaelefarinaro/chore/sync-develop-v0.4.24 (`328cbba`)
+- web: align and vertically center PWA buttons (`557a1f5`)
+- ui: move setup screen checkboxes under advanced and position advanced at the bottom (`f3c283f`)
+- Route automations through workspace defaults (`613b8a7`)
+- web: suppress duplicate background agent finish toasts when nudge synthesis is active (`7712ff5`)
+- Merge branch 'fix/bootstrap-schedule-gate-and-skills-timeout' into develop (`d33a04b`)
+- Merge branch 'fix/bootstrap-schedule-gate-and-skills-timeout' into develop (half-archived self-heal) (`f441a8d`)
+- style: align height of add-project-btn with archive-btn in sidebar (`6ede4e2`)
+
+### Fixed
+- fix: preserve and restore locked package skills (`5c4b1b2`)
+- fix: hold schedulers until setup completes (bootstrap mode) (`ba06de3`)
+- fix(chats): self-heal chats stuck in a half-archived state (`346e3bd`)
+- fix(menubar): never crash the tray on a missing icon asset (`1c41321`)
+
 ## v0.4.24 - 2026-07-14
 
 ### Added
