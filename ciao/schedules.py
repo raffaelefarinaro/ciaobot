@@ -300,6 +300,8 @@ class ScheduleStore:
         provider: str = "",
         archive_policy: str = "manual",
         workspace: str = "",
+        title: str = "",
+        description: str = "",
     ) -> ScheduleEntry:
         entry = ScheduleEntry(
             schedule_id=f"sched-{uuid.uuid4().hex[:8]}",
@@ -320,6 +322,8 @@ class ScheduleStore:
             web_project_id=web_project_id or None,
             archive_policy=normalize_archive_policy(archive_policy),
             workspace=workspace or "",
+            title=title or "",
+            description=description or "",
         )
         data = self._load()
         data.setdefault("schedules", []).append(self._serialize_entry(entry))
@@ -502,6 +506,8 @@ class ScheduleManager:
         provider: str = "",
         archive_policy: str = "manual",
         workspace: str = "",
+        title: str = "",
+        description: str = "",
     ) -> ScheduleEntry:
         return self._store.create(
             daily_time_utc=daily_time_utc,
@@ -520,6 +526,8 @@ class ScheduleManager:
             run_at_date=run_at_date,
             archive_policy=archive_policy,
             workspace=workspace,
+            title=title,
+            description=description,
         )
 
     def delete(self, schedule_id: str) -> bool:

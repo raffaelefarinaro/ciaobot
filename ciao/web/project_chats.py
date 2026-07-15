@@ -873,6 +873,7 @@ class ProjectChatManager:
         self._discover_vault_projects()
         self._recover_orphaned_active_chats()
         self._reconcile_half_archived_chats()
+        self._rehome_orphaned_chats()
         # Sweep any empty chats left over from a previous run (user closed the
         # tab before typing, server crashed mid-compose, etc.). An "empty"
         # chat has no messages, no SDK session, and still the default title —
@@ -1939,6 +1940,43 @@ class ProjectChatManager:
             )
         if healed:
             self._save(reason="half_archived_reconciliation")
+
+    def _general_project_for(self, workspace: str) -> "ProjectInfo | None":
+        for project in self._projects.values():
+            if project.workspace == workspace and project.name == "General":
+                return project
+        return None
+
+    def _rehome_orphaned_chats(self) -> None:
+        """Re-parent chats whose project no longer exists onto a valid General.
+
+        A chat whose ``project_id`` doesn't resolve to a live project (e.g. it
+        was created in the throwaway bootstrap workspace before setup, or its
+        project/workspace was removed) is invisible in the PWA — which nests
+        chats under project → workspace — yet still shows in the menu bar,
+        which lists chats flat. That split leaves the chat unreachable for the
+        user. Re-home it to the General project of a configured workspace so it
+        becomes reachable (and archivable) instead of stranded.
+        """
+        workspaces = self._workspace_names()
+        if not workspaces:
+            return
+        fallback = self._general_project_for(workspaces[0])
+        rehomed = 0
+        for chat_id, chat in self._chats.items():
+            if chat.project_id in self._projects:
+                continue
+            target = fallback
+            if target is None:
+                continue
+            logger.warning(
+                "Re-homing orphaned chat %s (project %s no longer exists) -> %s",
+                chat_id, chat.project_id, target.project_id,
+            )
+            chat.project_id = target.project_id
+            rehomed += 1
+        if rehomed:
+            self._save(reason="orphaned_chat_rehome")
 
     def _discover_vault_projects(self) -> None:
         """Auto-discover projects from each workspace's ``projects/active/`` tree.
@@ -4672,14 +4710,16 @@ class ProjectChatManager:
                             # drain publishes the reply (and its own push); we
                             # only fall back to a bare push if the nudge could
                             # not be delivered.
+                            # Nudge the parent to synthesize a final report; its
+                            # completion pushes the real chat notification. We
+                            # intentionally do NOT send a separate generic
+                            # "Background agents finished" push — it stacked a
+                            # second, content-free notification on top of the
+                            # chat's own result push (user feedback). The in-app
+                            # subagent count below still updates the UI.
                             nudged = await self._nudge_synthesis_after_subagents(
                                 chat_id
                             )
-                            if not nudged:
-                                title = chat_now.title if chat_now else "Ciaobot"
-                                self._schedule_push(
-                                    chat_id, title, "Background agents finished"
-                                )
                         self._publish_subagent_count(chat_id, project_id, count, nudged=nudged)
                         last_count = count
                     if count == 0:
@@ -4716,9 +4756,9 @@ class ProjectChatManager:
                     if count == 0 and last_count > 0:
                         chat.last_activity_at = _now_iso()
                         self._save()
-                        self._schedule_push(
-                            chat_id, chat.title or "Ciaobot", "Background agents finished"
-                        )
+                        # No separate "Background agents finished" push — the
+                        # chat's own result notification covers it; the extra
+                        # generic ping was redundant (user feedback).
                     self._publish_subagent_count(chat_id, project_id, count, nudged=False)
                     last_count = count
                 if not had_subagents or count == 0:
@@ -5367,9 +5407,16 @@ class ProjectChatManager:
             if project is None:
                 logger.warning("Schedule target project %s not found, skipping", web_project_id)
                 return None
-            title_base = prompt.split("\n")[0].strip().rstrip(".")
-            if len(title_base) > 40:
-                title_base = title_base[:37] + "..."
+            # Prefer the routine's own name ("Workspace hygiene") over a
+            # truncated prompt sentence, so schedule chats read cleanly instead
+            # of "Run a structural hygiene pass on the... - Jul 15".
+            routine_name = (getattr(entry, "title", "") or "").strip()
+            if routine_name:
+                title_base = routine_name
+            else:
+                title_base = prompt.split("\n")[0].strip().rstrip(".")
+                if len(title_base) > 40:
+                    title_base = title_base[:37] + "..."
             date_str = datetime.now(UTC).strftime("%b %d")
             title = f"{title_base} - {date_str}"
             chat = self.create_chat(
@@ -5393,9 +5440,16 @@ class ProjectChatManager:
             if project is None:
                 logger.warning("System schedule %s has no default project, skipping", getattr(entry, "schedule_id", ""))
                 return None
-            title_base = prompt.split("\n")[0].strip().rstrip(".")
-            if len(title_base) > 40:
-                title_base = title_base[:37] + "..."
+            # Prefer the routine's own name ("Workspace hygiene") over a
+            # truncated prompt sentence, so schedule chats read cleanly instead
+            # of "Run a structural hygiene pass on the... - Jul 15".
+            routine_name = (getattr(entry, "title", "") or "").strip()
+            if routine_name:
+                title_base = routine_name
+            else:
+                title_base = prompt.split("\n")[0].strip().rstrip(".")
+                if len(title_base) > 40:
+                    title_base = title_base[:37] + "..."
             date_str = datetime.now(UTC).strftime("%b %d")
             title = f"{title_base} - {date_str}"
             chat = self.create_chat(

@@ -411,11 +411,19 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     async def _dispatch_loop(entry):
         return await pcm.dispatch_loop(entry, entry.prompt)
 
+    # A loop can only dispatch into a live, non-archived chat. Treat an
+    # archived (or deleted) target as not-dispatchable so LoopManager
+    # auto-stops the loop instead of erroring every interval with
+    # "Cannot send messages to an archived chat" (issue #126).
+    def _loop_target_dispatchable(chat_id: str) -> bool:
+        chat = pcm.get_chat(chat_id)
+        return chat is not None and not chat.archived
+
     loop_manager = LoopManager(
         store=LoopStore(config.state_path.parent),
         dispatch=_dispatch_loop,
         chat_busy=pcm.chat_stream_active,
-        chat_exists=lambda chat_id: pcm.get_chat(chat_id) is not None,
+        chat_exists=_loop_target_dispatchable,
     )
 
     # Create and wire up web app

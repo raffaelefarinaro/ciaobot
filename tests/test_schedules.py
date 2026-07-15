@@ -858,3 +858,21 @@ def test_user_schedule_description_round_trips(tmp_path: Path) -> None:
     reloaded = ScheduleStore(tmp_path).get(entry.schedule_id)
     assert reloaded is not None
     assert reloaded.description == "Human-friendly summary"
+
+
+def test_create_accepts_title_and_description(tmp_path: Path) -> None:
+    store = ScheduleStore(tmp_path)
+    entry = store.create(
+        daily_time_utc="09:00",
+        prompt="do a thing",
+        model="",
+        mode="auto",
+        chat_id=0,
+        frequency="daily",
+        title="My Routine",
+        description="Explains what it does",
+    )
+    reloaded = ScheduleStore(tmp_path).get(entry.schedule_id)
+    assert reloaded is not None
+    assert reloaded.title == "My Routine"
+    assert reloaded.description == "Explains what it does"

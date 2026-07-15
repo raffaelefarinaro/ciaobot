@@ -3395,6 +3395,8 @@ async def create_schedule(request: Request) -> JSONResponse:
         web_project_id=web_project_id,
         archive_policy=archive_policy,
         workspace=workspace if workspace in known_workspaces else "",
+        title=str(body.get("title", "")).strip(),
+        description=str(body.get("description", "")).strip(),
     )
     return JSONResponse(_enrich_schedule(entry, pcm), status_code=201)
 
@@ -3427,6 +3429,10 @@ async def schedule_detail(request: Request) -> JSONResponse:
     if entry is None:
         return JSONResponse({"error": "not found"}, status_code=404)
     body = await request.json()
+    if "title" in body:
+        entry.title = str(body["title"]).strip()
+    if "description" in body:
+        entry.description = str(body["description"]).strip()
     if "time" in body:
         entry.daily_time_utc = body["time"]
     if "prompt" in body:

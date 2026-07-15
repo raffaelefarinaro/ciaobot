@@ -165,6 +165,14 @@
       </div>
 
       <div v-if="editing" class="edit-form">
+        <div class="form-group">
+          <label>Name</label>
+          <input v-model="editData.title" type="text" placeholder="e.g. Weekly customer intel sweep" />
+        </div>
+        <div class="form-group">
+          <label>Description <span class="label-hint">(what this routine does, shown above the prompt)</span></label>
+          <textarea v-model="editData.description" rows="2" placeholder="Optional plain-language summary"></textarea>
+        </div>
         <div class="form-grid">
           <div class="form-group">
             <label>Workspace</label>
@@ -444,6 +452,8 @@ const startingBySchedule = ref<Set<string>>(new Set())
 const runningBySchedule = ref<Record<string, string>>({})
 const editData = ref({
   workspace: '',
+  title: '',
+  description: '',
   time: '',
   prompt: '',
   timezone: 'Europe/Zurich',
@@ -866,6 +876,8 @@ function startEdit() {
   if (!schedule.value) return
   editData.value = {
     workspace: schedule.value.workspace || projectStore.activeWorkspace,
+    title: schedule.value.title || '',
+    description: schedule.value.description || '',
     time: schedule.value.daily_time_utc,
     prompt: schedule.value.prompt,
     timezone: schedule.value.timezone_name,
@@ -885,6 +897,8 @@ async function saveEdit() {
   const d = editData.value
   const updates: Record<string, unknown> = {
     workspace: d.workspace,
+    title: d.title,
+    description: d.description,
     time: d.frequency === 'manual' ? '' : d.time,
     prompt: d.prompt,
     timezone: d.timezone,
