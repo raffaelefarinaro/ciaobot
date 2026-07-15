@@ -31,7 +31,8 @@ async def test_generate_chat_title_via_apfel_success(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
 
-    title = await _generate_chat_title("hello world", assistant_text="")
+    # apfel is opt-in: it only runs when explicitly selected as the title model.
+    title = await _generate_chat_title("hello world", assistant_text="", model="apfel")
     assert title == "Test Title Generated"
 
 

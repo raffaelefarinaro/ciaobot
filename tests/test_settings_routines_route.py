@@ -88,12 +88,24 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     assert data["speech"]["local_voice"] == "am_michael"
 
 
-def test_get_returns_apfel_effective_when_installed(monkeypatch, tmp_path):
+def test_get_title_effective_is_haiku_not_apfel_when_no_override(monkeypatch, tmp_path):
+    # apfel is opt-in, not the Automatic default: even with the binary on PATH,
+    # Automatic resolves to the workspace haiku tier (apfel fails when Apple
+    # Intelligence is disabled). See issue: "Automatic: apfel" mislabel.
     monkeypatch.setattr("shutil.which", lambda cmd: "/opt/homebrew/bin/apfel" if cmd == "apfel" else None)
     client, config = _make_client(tmp_path)
     data = client.get("/api/settings/routines").json()
     assert data["title_model"] == ""  # no override stored
-    assert data["title_model_effective"] == "apfel"
+    assert data["title_model_effective"] != "apfel"
+    assert data["title_model_effective"] == config.haiku_model_for_workspace("personal")
+
+
+def test_get_title_effective_is_apfel_when_explicitly_chosen(monkeypatch, tmp_path):
+    monkeypatch.setattr("shutil.which", lambda cmd: "/opt/homebrew/bin/apfel" if cmd == "apfel" else None)
+    client, config = _make_client(tmp_path)
+    resp = client.patch("/api/settings/routines", json={"title_model": "apfel"})
+    assert resp.status_code == 200
+    assert resp.json()["title_model_effective"] == "apfel"
 
 
 def test_patch_applies_to_live_config_and_persists(tmp_path):
