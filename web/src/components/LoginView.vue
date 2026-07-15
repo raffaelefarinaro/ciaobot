@@ -107,43 +107,7 @@
             one and can add more later in Settings → Workspaces.</span>
         </div>
 
-        <div class="advanced-section">
-          <button
-            id="setup-advanced-toggle"
-            type="button"
-            class="advanced-toggle"
-            :aria-expanded="advancedOpen"
-            :disabled="loading"
-            @click="advancedOpen = !advancedOpen"
-          >
-            <span class="advanced-caret">{{ advancedOpen ? '▾' : '▸' }}</span> Advanced
-          </button>
-          <div v-if="advancedOpen" class="form-grid">
-            <div class="form-group">
-              <label for="setup-port">Port</label>
-              <input
-                id="setup-port"
-                v-model.number="port"
-                type="number"
-                class="form-input"
-                placeholder="8443"
-                required
-                :disabled="loading"
-              />
-            </div>
-            <div class="form-group">
-              <label for="setup-python">Python Path (Optional)</label>
-              <input
-                id="setup-python"
-                v-model="python"
-                type="text"
-                class="form-input"
-                placeholder="blank for default"
-                :disabled="loading"
-              />
-            </div>
-          </div>
-        </div>
+
 
         <div class="form-group">
           <label>AI Provider Choice</label>
@@ -192,18 +156,66 @@
           </div>
         </div>
 
-        <div class="checkbox-row">
-          <label class="choice-label">
-            <input type="checkbox" v-model="authRequired" :disabled="loading" />
-            Require password for PWA access
-          </label>
-        </div>
-
-        <div class="checkbox-row">
-          <label class="choice-label">
-            <input type="checkbox" v-model="apiFallback" :disabled="loading" />
-            I will set provider keys manually in .env later
-          </label>
+        <div class="advanced-section">
+          <button
+            id="setup-advanced-toggle"
+            type="button"
+            class="advanced-toggle"
+            :aria-expanded="advancedOpen"
+            :disabled="loading"
+            @click="advancedOpen = !advancedOpen"
+          >
+            <span class="advanced-caret">{{ advancedOpen ? '▾' : '▸' }}</span> Advanced
+          </button>
+          <div v-if="advancedOpen" class="advanced-options">
+            <div class="form-grid">
+              <div class="form-group">
+                <label for="setup-port">Port</label>
+                <input
+                  id="setup-port"
+                  v-model.number="port"
+                  type="number"
+                  class="form-input"
+                  placeholder="8443"
+                  required
+                  :disabled="loading"
+                />
+              </div>
+              <div class="form-group">
+                <label for="setup-python">Python Path (Optional)</label>
+                <input
+                  id="setup-python"
+                  v-model="python"
+                  type="text"
+                  class="form-input"
+                  placeholder="blank for default"
+                  :disabled="loading"
+                />
+              </div>
+            </div>
+            <div class="checkbox-row">
+              <label class="choice-label">
+                <input
+                  id="setup-auth-required"
+                  type="checkbox"
+                  v-model="authRequired"
+                  :disabled="loading"
+                />
+                Require password for PWA access
+              </label>
+            </div>
+            <div class="checkbox-row">
+              <label class="choice-label">
+                <input
+                  id="setup-api-fallback"
+                  type="checkbox"
+                  v-model="apiFallback"
+                  :disabled="loading"
+                />
+                I will set provider keys manually in .env later
+              </label>
+            </div>
+          </div>
         </div>
 
         <div class="wizard-footer">
@@ -1002,6 +1014,12 @@ onUnmounted(() => {
   color: var(--accent);
 }
 
+.advanced-options {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .provider-choices {
   display: flex;
   flex-wrap: wrap;
@@ -1084,6 +1102,9 @@ onUnmounted(() => {
 }
 
 .btn-small {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   background: var(--bg-elev);
   border: 1px solid var(--border-strong);
   color: var(--fg);

@@ -4467,6 +4467,9 @@ details[open] > .activity-summary::before {
 .chat-comment-trigger-icon { font-size: var(--text-sm); line-height: 1; }
 
 .btn-sm {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   font-size: 12px;
   padding: 4px 10px;
   border-radius: 4px;

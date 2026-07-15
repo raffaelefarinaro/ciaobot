@@ -872,6 +872,7 @@ class ProjectChatManager:
         self._ensure_defaults()
         self._discover_vault_projects()
         self._recover_orphaned_active_chats()
+        self._reconcile_half_archived_chats()
         # Sweep any empty chats left over from a previous run (user closed the
         # tab before typing, server crashed mid-compose, etc.). An "empty"
         # chat has no messages, no SDK session, and still the default title —
@@ -1885,6 +1886,59 @@ class ProjectChatManager:
 
         if recovered:
             self._save(reason="orphaned_active_chat_recovery")
+
+    def _reconcile_half_archived_chats(self) -> None:
+        """Heal chats stuck in a provably-impossible half-archived state.
+
+        A chat that was archived (its transcript moved to the vault and, for
+        Claude, its SDK session blob deleted) can end up back with
+        ``archived=False`` if an older ``web_projects.json`` was reloaded
+        after a crash/restart — the archive side effects already happened but
+        the registry flag reverted. ``new_session`` now refuses to resurrect
+        archived chats in place, so this can no longer be *created*, but
+        existing corrupt rows never self-correct: the chat reappears in the
+        sidebar and menu bar indefinitely (an "archived chat that came back").
+
+        The reconciled state is unambiguous, so the guard has no false
+        positives: a live chat always has a current transcript, and a fresh
+        ``new_session`` resets ``session_id`` to "" (excluded below). Only a
+        reverted archive leaves a non-empty ``session_id`` whose backing data
+        is already gone while an archive sits in the vault.
+        """
+        healed = 0
+        for chat_id, chat in self._chats.items():
+            if chat.archived or not chat.session_id:
+                continue
+            ctx = ChatContext.for_web(chat_id)
+            if self._transcripts.current_path(ctx, chat.provider).exists():
+                continue  # live transcript -> genuinely active, leave alone
+            archive_dir = self._transcripts.archive_dir(ctx, chat.provider)
+            if not archive_dir.is_dir() or not any(archive_dir.glob("*.md")):
+                continue  # never archived -> not the corrupt state
+            if chat.provider == "claude" and self._claude_session_exists(
+                chat.session_id
+            ):
+                continue  # session blob still present -> not archived
+            chat.archived = True
+            if not chat.archive_path:
+                latest = max(
+                    archive_dir.glob("*.md"), key=lambda p: p.name, default=None
+                )
+                if latest is not None:
+                    try:
+                        chat.archive_path = str(
+                            latest.relative_to(self._config.workspace_root)
+                        )
+                    except ValueError:
+                        chat.archive_path = str(latest)
+            healed += 1
+            logger.warning(
+                "Reconciled half-archived chat %s: archive present but "
+                "registry showed active; marking archived.",
+                chat_id,
+            )
+        if healed:
+            self._save(reason="half_archived_reconciliation")
 
     def _discover_vault_projects(self) -> None:
         """Auto-discover projects from each workspace's ``projects/active/`` tree.
@@ -3201,6 +3255,66 @@ class ProjectChatManager:
         workspace = project.workspace if project else None
         return self._config.default_provider_for_workspace(workspace)
 
+    def _schedule_workspace_hint(self, entry: object) -> str:
+        """Return the persisted or legacy-inferred workspace for a schedule."""
+        workspace = (getattr(entry, "workspace", "") or "").strip().lower()
+        if self._is_known_workspace(workspace):
+            return workspace
+
+        schedule_id = getattr(entry, "schedule_id", "") or ""
+        legacy_workspace = (
+            "work" if schedule_id.startswith("sched-work") else "personal"
+        )
+        if self._is_known_workspace(legacy_workspace):
+            return legacy_workspace
+
+        names = self._config.workspace_names()
+        return names[0] if names else legacy_workspace
+
+    def schedule_workspace(self, entry: object) -> str:
+        """Resolve the workspace that owns a schedule's execution context."""
+        web_chat_id = getattr(entry, "web_chat_id", None)
+        if web_chat_id:
+            chat = self._chats.get(web_chat_id)
+            project = self._projects.get(chat.project_id) if chat else None
+            if project is not None:
+                return project.workspace
+
+        web_project_id = getattr(entry, "web_project_id", None)
+        if web_project_id:
+            project = self._projects.get(web_project_id)
+            if project is not None:
+                return project.workspace
+
+        return self._schedule_workspace_hint(entry)
+
+    def schedule_effective_routing(self, entry: object) -> tuple[str, str, str]:
+        """Resolve provider/model inheritance for one schedule dispatch.
+
+        A fixed-chat schedule inherits the chat. Project and system schedules
+        inherit the workspace selected by their target or ``workspace`` field.
+        Empty persisted values remain dynamic and are resolved on every run.
+        """
+        web_chat_id = getattr(entry, "web_chat_id", None)
+        target_chat = self._chats.get(web_chat_id) if web_chat_id else None
+        workspace = self.schedule_workspace(entry)
+        if target_chat is not None:
+            return (
+                target_chat.provider,
+                getattr(entry, "model", "") or target_chat.model,
+                workspace,
+            )
+
+        provider = (
+            getattr(entry, "provider", "")
+            or self._config.default_provider_for_workspace(workspace)
+        )
+        model = (
+            getattr(entry, "model", "")
+            or self._config.default_model_for_workspace(workspace)
+        )
+        return provider, model, workspace
+
     def refresh_workspaces(self) -> None:
         self._ensure_defaults()
         self._discover_vault_projects()
@@ -4493,13 +4607,14 @@ class ProjectChatManager:
         task = asyncio.create_task(self._watch_subagent_completion(chat_id, project_id))
         self._pending_subagent_watchers[chat_id] = task
 
-    def _publish_subagent_count(self, chat_id: str, project_id: str, count: int) -> None:
+    def _publish_subagent_count(self, chat_id: str, project_id: str, count: int, nudged: bool = False) -> None:
         self._background_agents_last[chat_id] = count
         self._events.publish({
             "type": "chat_subagents_ready",
             "chat_id": chat_id,
             "project_id": project_id,
             "remaining": count,
+            "nudged": nudged,
         })
 
     async def _watch_subagent_completion(self, chat_id: str, project_id: str) -> None:
@@ -4543,7 +4658,7 @@ class ProjectChatManager:
                         path
                     ).running_background
                     if count != last_count:
-                        self._publish_subagent_count(chat_id, project_id, count)
+                        nudged = False
                         if count == 0 and last_count > 0:
                             chat_now = self._chats.get(chat_id)
                             if chat_now is not None:
@@ -4565,6 +4680,7 @@ class ProjectChatManager:
                                 self._schedule_push(
                                     chat_id, title, "Background agents finished"
                                 )
+                        self._publish_subagent_count(chat_id, project_id, count, nudged=nudged)
                         last_count = count
                     if count == 0:
                         break
@@ -4597,13 +4713,13 @@ class ProjectChatManager:
                 )
                 count, had_subagents = codex_collab_tree_counts(tree)
                 if count != last_count:
-                    self._publish_subagent_count(chat_id, project_id, count)
                     if count == 0 and last_count > 0:
                         chat.last_activity_at = _now_iso()
                         self._save()
                         self._schedule_push(
                             chat_id, chat.title or "Ciaobot", "Background agents finished"
                         )
+                    self._publish_subagent_count(chat_id, project_id, count, nudged=False)
                     last_count = count
                 if not had_subagents or count == 0:
                     break
@@ -5542,14 +5658,10 @@ class ProjectChatManager:
         matching General project.
         """
         # Prefer the explicit workspace field; it survives the per-device id
-        # regeneration that makes web_project_id go stale. Fall back to the
-        # "sched-work*" naming convention for entries created before the field
-        # existed (work schedules whose id lacks that prefix, e.g. the morning
-        # action briefing, would otherwise misroute to personal).
-        workspace = (getattr(entry, "workspace", "") or "").strip().lower()
-        if not self._is_known_workspace(workspace):
-            schedule_id = getattr(entry, "schedule_id", "") or ""
-            workspace = "work" if schedule_id.startswith("sched-work") else "personal"
+        # regeneration that makes web_project_id go stale. Legacy entries use
+        # the historical id-prefix fallback, while stock ``default`` routines
+        # resolve to the first configured workspace.
+        workspace = self._schedule_workspace_hint(entry)
         for p in self._projects.values():
             if p.workspace == workspace and p.name == "General":
                 logger.info(

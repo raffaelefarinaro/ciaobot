@@ -78,8 +78,19 @@
         <span class="sidebar-section-title">automations</span>
         <button class="btn-small" @click="emit('new-schedule')" title="New automation">+ New</button>
       </div>
+      <div class="workspace-toggle" data-tour="automation-workspaces">
+        <button
+          v-for="workspace in store.workspaceOptions"
+          :key="workspace.name"
+          :class="{ active: store.activeWorkspace === workspace.name }"
+          :aria-pressed="store.activeWorkspace === workspace.name"
+          @click="selectAutomationWorkspace(workspace.name)"
+        >
+          {{ workspaceLabel(workspace.name) }}
+        </button>
+      </div>
       <div class="schedules-list">
-        <div v-if="taskStore.schedules.length === 0 && taskStore.loops.length === 0" class="empty-hint">// no automations yet</div>
+        <div v-if="workspaceSchedules.length === 0 && workspaceLoops.length === 0" class="empty-hint">// no automations in this workspace</div>
 
         <template v-if="oneOffSchedules.length">
           <div class="schedule-group schedule-group--once">
@@ -526,8 +537,9 @@ import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
 import { useFileViewerStore } from '../stores/fileViewer'
 import NotificationBell from './NotificationBell.vue'
+import { loopInWorkspace, scheduleInWorkspace } from '../lib/automationWorkspace'
 
-defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' }>()
+const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' }>()
 const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }>()
 
 const store = useProjectStore()
@@ -542,8 +554,20 @@ function promptTitle(prompt: string): string {
 }
 
 // Schedule list split: one-offs first (sorted by datetime), then recurring.
+const workspaceSchedules = computed(() =>
+  taskStore.schedules.filter(s => scheduleInWorkspace(s, store.activeWorkspace)),
+)
+const workspaceLoops = computed(() =>
+  taskStore.loops.filter(l => loopInWorkspace(
+    l,
+    store.activeWorkspace,
+    store.chats,
+    store.projects,
+  )),
+)
+
 const oneOffSchedules = computed(() => {
-  return taskStore.schedules
+  return workspaceSchedules.value
     .filter(s => s.frequency === 'once')
     .slice()
     .sort((a, b) => {
@@ -553,17 +577,24 @@ const oneOffSchedules = computed(() => {
     })
 })
 const userRoutines = computed(() =>
-  taskStore.schedules.filter(s => s.frequency !== 'once' && s.scope !== 'system'),
+  workspaceSchedules.value.filter(s => s.frequency !== 'once' && s.scope !== 'system'),
 )
 const systemAutomations = computed(() =>
-  taskStore.schedules.filter(s => s.frequency !== 'once' && s.scope === 'system'),
+  workspaceSchedules.value.filter(s => s.frequency !== 'once' && s.scope === 'system'),
 )
 const userLoops = computed(() =>
-  taskStore.loops.filter(l => l.scope !== 'system'),
+  workspaceLoops.value.filter(l => l.scope !== 'system'),
 )
 const systemLoops = computed(() =>
-  taskStore.loops.filter(l => l.scope === 'system'),
+  workspaceLoops.value.filter(l => l.scope === 'system'),
 )
+
+async function selectAutomationWorkspace(workspace: string) {
+  if (store.activeWorkspace !== workspace) {
+    await store.switchWorkspace(workspace)
+  }
+  if (props.mode === 'schedules') await router.push('/schedules')
+}
 
 import type { ChatInfo, ProjectInfo } from '../lib/types'
 function openProject(projectId: string) {
@@ -1505,7 +1536,7 @@ async function confirmDeleteChat(chatId: string) {
 
 .add-project-btn {
   flex: 1;
-  min-height: var(--touch);
+  height: var(--touch);
   padding: 6px;
   border: 1px solid var(--border);
   border-radius: var(--radius);

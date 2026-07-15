@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ciao.config import CiaoConfig
+from ciao.config import CiaoConfig, WorkspaceConfig
 from ciao.schedules import ScheduleEntry, ScheduleStore
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
@@ -103,3 +103,98 @@ def test_create_persists_workspace(tmp_path: Path) -> None:
     )
     [entry] = store.list()
     assert entry.workspace == "work"
+
+
+def test_system_schedule_default_inherits_first_workspace_routing(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        workspaces={
+            "personal": WorkspaceConfig(
+                name="personal",
+                vault_root="personal",
+                default_provider="codex",
+                default_model="",
+            ),
+            "work": WorkspaceConfig(
+                name="work",
+                vault_root="work",
+                default_provider="claude",
+                default_model="opus",
+            ),
+        },
+    )
+    pcm = ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    )
+    entry = ScheduleEntry(
+        schedule_id="system-memory-curation",
+        daily_time_utc="00:01",
+        prompt="curate",
+        chat_id=0,
+        created_at="1970-01-01T00:00:00Z",
+        scope="system",
+        workspace="default",
+    )
+
+    provider, model, workspace = pcm.schedule_effective_routing(entry)
+
+    assert workspace == "personal"
+    assert provider == "codex"
+    assert model == ""
+
+
+def test_schedule_inheritance_is_resolved_again_after_workspace_change(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    workspace = WorkspaceConfig(
+        name="personal",
+        vault_root="personal",
+        default_provider="codex",
+        default_model="",
+    )
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        workspaces={"personal": workspace},
+    )
+    pcm = ProjectChatManager(
+        config,
+        state_store=StateStore(config.state_path, tmp_path, config.media_root),
+        transcript_store=TranscriptStore(runtime, tmp_path / "transcripts"),
+        path=runtime / "web_projects.json",
+    )
+    project = pcm.create_project("Scheduled", workspace="personal")
+    entry = ScheduleEntry(
+        schedule_id="sched-dynamic",
+        daily_time_utc="08:00",
+        prompt="dynamic",
+        chat_id=0,
+        created_at="2026-07-15T00:00:00Z",
+        web_project_id=project.project_id,
+        workspace="personal",
+    )
+
+    assert pcm.schedule_effective_routing(entry) == ("codex", "", "personal")
+
+    workspace.default_provider = "claude"
+    workspace.default_model = "sonnet"
+
+    assert pcm.schedule_effective_routing(entry) == (
+        "claude",
+        "sonnet",
+        "personal",
+    )

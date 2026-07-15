@@ -20,8 +20,8 @@ EXPECTED_COMMANDS = {
 
 EXPECTED_SYSTEM_SCHEDULES = {
     "system-memory-curation",
+    "system-workspace-hygiene",
     "system-skill-evolution",
-    "system-weekly-review",
 }
 
 PRIVATE_MARKERS = {

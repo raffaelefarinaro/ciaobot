@@ -426,6 +426,16 @@ def icon_path(name: str) -> str:
     return str(resources.files("ciao.stock").joinpath("deploy", name))
 
 
+def _icon_if_present(name: str) -> str | None:
+    # rumps' _nsimage_from_file raises FileNotFoundError when handed a path
+    # that isn't on disk, which crashes the whole tray (and the quit dialog).
+    # An old wheel that didn't package the .icns files (fixed in pyproject
+    # package-data) or any path drift would otherwise take the menu bar down
+    # over a cosmetic icon. Degrade to no icon instead.
+    path = icon_path(name)
+    return path if os.path.exists(path) else None
+
+
 def _menubar_app_candidates() -> list[Path]:
     """Installed menu-bar app bundles, newest path first."""
 
@@ -915,7 +925,14 @@ def run_menubar(workspace: Path, port: int) -> int:
     spin_frames = spin_icon_paths()
     dot_frames = dot_pulse_icon_paths()
 
-    app = rumps.App("Ciaobot", icon=face, template=True, quit_button=None)
+    # Guard the initial icon too: a missing template PNG would otherwise crash
+    # the tray at construction before the run loop even starts.
+    app = rumps.App(
+        "Ciaobot",
+        icon=face if os.path.exists(face) else None,
+        template=True,
+        quit_button=None,
+    )
 
     @rumps.notifications
     def on_notification_click(info: object) -> None:
@@ -1000,7 +1017,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                         "Wait for the work to finish, then restart the server."
                     ),
                     ok="OK",
-                    icon_path=icon_path("CiaobotServer.icns"),
+                    icon_path=_icon_if_present("CiaobotServer.icns"),
                 )
                 return
             if not rumps.alert(
@@ -1008,7 +1025,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                 message="No active chats are running. Restart the local server now?",
                 ok="Restart",
                 cancel="Cancel",
-                icon_path=icon_path("CiaobotServer.icns"),
+                icon_path=_icon_if_present("CiaobotServer.icns"),
             ):
                 return
         try:
@@ -1024,7 +1041,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                 title="Could not start server",
                 message=detail or "launchctl did not accept the request.",
                 ok="OK",
-                icon_path=icon_path("CiaobotServer.icns"),
+                icon_path=_icon_if_present("CiaobotServer.icns"),
             )
         refresh()
 
@@ -1047,7 +1064,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                     "Run setup again to recreate them."
                 ),
                 ok="OK",
-                icon_path=icon_path("CiaobotServer.icns"),
+                icon_path=_icon_if_present("CiaobotServer.icns"),
             )
             refresh()
             return
@@ -1058,7 +1075,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                 title="Could not update login item",
                 message=error or "launchctl did not accept the change.",
                 ok="OK",
-                icon_path=icon_path("CiaobotServer.icns"),
+                icon_path=_icon_if_present("CiaobotServer.icns"),
             )
         refresh()
 
@@ -1075,7 +1092,7 @@ def run_menubar(workspace: Path, port: int) -> int:
             ),
             ok="Update",
             cancel="Cancel",
-            icon_path=icon_path("CiaobotServer.icns"),
+            icon_path=_icon_if_present("CiaobotServer.icns"),
         ):
             return
 
@@ -1102,7 +1119,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                                 "Ciaobot updated",
                                 "",
                                 f"Version {latest} is installed.",
-                                icon=icon_path("CiaobotServer.icns"),
+                                icon=_icon_if_present("CiaobotServer.icns"),
                             )
                         except Exception:
                             pass
@@ -1136,7 +1153,7 @@ def run_menubar(workspace: Path, port: int) -> int:
             ),
             ok="Quit",
             cancel="Cancel",
-            icon_path=icon_path("CiaobotServer.icns"),
+            icon_path=_icon_if_present("CiaobotServer.icns"),
         ):
             return
         subprocess.run(stop_server_command(), check=False)
@@ -1300,7 +1317,7 @@ def run_menubar(workspace: Path, port: int) -> int:
                         "",
                         str(notification.get("body") or "New notification"),
                         data=payload,
-                        icon=icon_path("CiaobotServer.icns"),
+                        icon=_icon_if_present("CiaobotServer.icns"),
                     )
                 except Exception:
                     # A notification failure should not prevent the normal menu

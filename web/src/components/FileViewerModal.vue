@@ -15,6 +15,15 @@
         </div>
         <div class="fv-actions">
           <button
+            v-if="continuableChatId"
+            class="fv-continue-btn"
+            @click="continueFromTranscript"
+            :disabled="isContinuing"
+            title="Start a new chat seeded with this transcript"
+          >
+            {{ isContinuing ? 'Continuing…' : 'Continue this chat' }}
+          </button>
+          <button
             class="btn-icon"
             :class="{ ok: copyState === 'ok' }"
             @click="copyPath"
@@ -419,6 +428,33 @@ const ExcalidrawViewer = defineAsyncComponent(() => import('./ExcalidrawViewer.v
 
 const store = useFileViewerStore()
 const projectsStore = useProjectStore()
+
+// Chat transcripts archived to the vault live at
+// memory-vault/Logs/Chats/<chat_id>/<provider>/<timestamp>-<session>.md.
+// When such a transcript is opened here (as a file, not from the chat view),
+// expose a "Continue this chat" action that reuses the same /continue flow the
+// archived chat panel offers, so the transcript preview isn't a dead end.
+const continuableChatId = computed(() => {
+  const m = (store.path || '').match(
+    /(?:^|\/)Logs\/Chats\/(chat-[^/]+)\/[^/]+\/[^/]+\.md$/,
+  )
+  return m ? m[1] : null
+})
+const isContinuing = ref(false)
+
+async function continueFromTranscript(): Promise<void> {
+  const chatId = continuableChatId.value
+  if (!chatId || isContinuing.value) return
+  isContinuing.value = true
+  try {
+    await projectsStore.continueArchivedChat(chatId)
+    store.close()
+  } catch (e: any) {
+    projectsStore.pushErrorToast('Could not continue chat', `${e?.message || e}`)
+  } finally {
+    isContinuing.value = false
+  }
+}
 
 // Edit mode only makes sense for text files inside a chat-scoped flow that
 // the snapshot store can record under. Image files and chat-less viewer
@@ -1601,6 +1637,25 @@ if (typeof window !== 'undefined') {
 }
 .fv-actions .btn-icon:disabled {
   opacity: 0.45;
+  cursor: not-allowed;
+}
+.fv-continue-btn {
+  margin-right: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--bg);
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.fv-continue-btn:hover {
+  filter: brightness(1.08);
+}
+.fv-continue-btn:disabled {
+  opacity: 0.6;
   cursor: not-allowed;
 }
 .fv-btn {

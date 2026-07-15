@@ -17,7 +17,17 @@
           </template>
         </p>
       </div>
-      <span v-if="showChecklist" class="onboarding-progress">{{ progress.doneCount }} / {{ progress.total }}</span>
+      <div class="onboarding-header-right">
+        <span v-if="showChecklist" class="onboarding-progress">{{ progress.doneCount }} / {{ progress.total }}</span>
+        <button
+          v-if="variant === 'home'"
+          type="button"
+          class="onboarding-close"
+          @click="store.dismiss()"
+          title="Hide checklist (bring it back from Settings → Home)"
+          aria-label="Hide checklist"
+        >×</button>
+      </div>
     </div>
 
     <div v-if="variant === 'settings'" class="onboarding-tour">
@@ -149,6 +159,28 @@ onMounted(() => {
   justify-content: space-between;
   gap: var(--space-3);
   margin-bottom: var(--space-3);
+}
+
+.onboarding-header-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.onboarding-close {
+  border: none;
+  background: transparent;
+  color: var(--fg3);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+.onboarding-close:hover {
+  color: var(--fg);
+  background: var(--bg2);
 }
 
 .onboarding-progress {

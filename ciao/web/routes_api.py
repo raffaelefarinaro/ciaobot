@@ -3251,6 +3251,14 @@ def _enrich_schedule(
 ) -> dict:
     """Serialize a ScheduleEntry and attach computed fields (context_label, next_run)."""
     entry_dict = asdict(entry)
+    if pcm is not None and hasattr(pcm, "schedule_effective_routing"):
+        provider, model, workspace = pcm.schedule_effective_routing(entry)
+        entry_dict["effective_provider"] = provider
+        entry_dict["effective_model"] = model
+        entry_dict["workspace"] = workspace
+    else:
+        entry_dict["effective_provider"] = entry.provider
+        entry_dict["effective_model"] = entry.model
     web_project_id = entry_dict.get("web_project_id")
     web_chat_id = entry_dict.get("web_chat_id")
     if web_project_id and pcm:
@@ -3319,18 +3327,11 @@ async def create_schedule(request: Request) -> JSONResponse:
     web_chat_id = body.get("web_chat_id")
     web_project_id = body.get("web_project_id")
 
-    # Resolve model/mode: explicit override wins; otherwise pick the
-    # per-workspace default for the schedule's project (so personal
-    # schedules can default to Ollama, work to Anthropic). Falls back
-    # to the globally-selected model when no project is attached.
+    # Persist only explicit overrides. Empty model/provider values mean
+    # "inherit the selected workspace" and are resolved afresh at dispatch
+    # time, so changing a workspace default also changes future runs.
     ctx = ChatContext(chat_id=0)
-    explicit_model = (body.get("model") or "").strip()
-    if explicit_model:
-        model = explicit_model
-    elif web_project_id:
-        model = pcm.schedule_default_model(web_project_id)
-    else:
-        model = state.get_selected_model(ctx)
+    model = (body.get("model") or "").strip()
     mode = state.get_mode(ctx)
 
     frequency = body.get("frequency", "weekly")
@@ -3458,15 +3459,9 @@ async def schedule_detail(request: Request) -> JSONResponse:
         pcm = request.app.state.project_chat_manager
         entry.workspace = ws if ws in _known_workspace_names(pcm) else ""
     if "model" in body:
-        # Empty string means "reset to current default"; otherwise use the
-        # provided value. Matches create_schedule semantics so a UI PATCH
-        # can't silently produce a schedule with model="" that then falls to
-        # whatever the dispatcher interprets as the default.
-        new_model = (body["model"] or "").strip()
-        if not new_model:
-            state = request.app.state.state_store
-            new_model = state.get_selected_model(ChatContext(chat_id=0))
-        entry.model = new_model
+        # Empty means "inherit workspace default" and must stay empty so the
+        # next dispatch observes any workspace configuration change.
+        entry.model = (body["model"] or "").strip()
     if "provider" in body:
         new_provider = (body["provider"] or "").strip()
         if new_provider and new_provider not in supported_providers():
@@ -4142,6 +4137,22 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     workspace = str(body.get("workspace", "")).strip()
     if not workspace:
         return JSONResponse({"error": "workspace is required"}, status_code=400)
+    from ciao.setup_status import tcc_protected_location
+
+    protected = tcc_protected_location(workspace)
+    if protected:
+        return JSONResponse(
+            {
+                "error": (
+                    f"'{workspace}' is inside ~/{protected}, which macOS privacy "
+                    "protection blocks background services from reading — the "
+                    "Ciaobot server and menu bar would fail to start. Pick a "
+                    "folder outside ~/Desktop, ~/Documents, and ~/Downloads "
+                    "(for example ~/ciaobot)."
+                )
+            },
+            status_code=400,
+        )
     # Optional: an empty push contact leaves Web Push disabled until the
     # operator configures one in Settings.
     push_contact = str(body.get("push_contact", "")).strip()

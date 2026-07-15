@@ -294,9 +294,11 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/work
 ```bash
 # Create a routine with archive behavior. archive_policy ∈ manual|auto.
 # `auto` runs a post-run classifier and archives only when the user does not need to see it.
-# GET /api/schedules enriches each entry with `next_run` (next fire, ISO or null),
+# GET /api/schedules enriches each entry with its resolved `workspace`,
+# `effective_provider`, `effective_model`, `next_run` (next fire, ISO or null),
 # `last_expected_run` (most recent due fire, ISO or null), and `missed` (true when a
-# due fire was never recorded — surfaced in the Schedules overview). At server
+# due fire was never recorded — surfaced in the Schedules overview). Empty persisted
+# model/provider values inherit the selected workspace on every dispatch. At server
 # startup, only the latest missed occurrence is dispatched; no backlog is replayed.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/schedules" \
   -H 'content-type: application/json' \
