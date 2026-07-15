@@ -98,6 +98,31 @@ def test_build_skill_inventory_reports_codex_install_target(tmp_path: Path) -> N
     assert inventory["skills"][0]["installed_targets"] == ["claude", "codex"]
 
 
+def test_build_skill_inventory_reads_agents_canonical_github_skill(tmp_path: Path) -> None:
+    _write_skill(tmp_path / ".agents" / "skills", "brainstorming", "Installed for Codex")
+    tmp_path.joinpath("skills-lock.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "skills": {
+                    "brainstorming": {
+                        "source": "owner/repo",
+                        "sourceType": "github",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    inventory = build_skill_inventory(tmp_path)
+
+    skill = inventory["skills"][0]
+    assert skill["description"] == "Installed for Codex"
+    assert "# brainstorming" in skill["content"]
+    assert skill["installed_targets"] == ["codex"]
+
+
 def test_build_skill_inventory_dedupes_custom_over_lock_entry(tmp_path: Path) -> None:
     _write_skill(tmp_path / "skills", "humanizer", "Local override")
     tmp_path.joinpath("skills-lock.json").write_text(

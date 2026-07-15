@@ -114,7 +114,7 @@ AGENTS.md                      Relative link to CLAUDE.md so Codex reads the sam
 CIAO_CUSTOMIZATION.md          Local customization surface.
 skills/  subagents/  commands/ Canonical user-owned sources; `ciao sync-skills` mirrors them into .claude/.
 .claude/{skills,agents,commands}/  Generated Claude symlinks/copies (packaged stock assets + user sources). Do not edit by hand.
-.agents/skills/                   Generated Codex skill projection and command/role wrappers.
+.agents/skills/                   Codex skill catalog and command/role wrappers. Locked packages installed by the upstream `skills` CLI are canonical here; Ciaobot-owned skills are linked here from `.claude/skills/`.
 .codex/{config.toml,agents/}      Generated native Codex agent registrations and role instructions.
 memory-vault/                  Durable markdown memory: MEMORY.md, INDEX.md, entity folders, projects/{active,completed}/, Workspace/, Logs/Chats/.
 .runtime/                      Local state: schedules.json, web_projects.json, web_projects.audit.jsonl, server.lock, job_runs.jsonl, server_errors.log, snapshots/, transcripts/, state.json. Not committed.
