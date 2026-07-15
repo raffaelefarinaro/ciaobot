@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.4.27 - 2026-07-15
+
+### Added
+- feat(web): pulse the active-work dot on a running loop (`a7c1eff`)
+
+### Changed
+- Merge pull request #128 from raffaelefarinaro/chore/sync-develop-v0.4.26 (`ead9055`)
+
+### Fixed
+- fix(pwa): service worker falls back to the app shell on navigation (`5c83cb3`)
+- fix(web): remount the chat view when switching chats (`ecfcee7`)
+
 ## v0.4.26 - 2026-07-15
 
 ### Added
