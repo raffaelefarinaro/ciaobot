@@ -825,3 +825,36 @@ def test_was_dispatched_since_handles_both_stamp_formats():
     # Empty / malformed stamps are treated as "no dispatch".
     assert was_dispatched_since(_entry(last_dispatched_at=""), when) is False
     assert was_dispatched_since(_entry(last_dispatched_at="garbage"), when) is False
+
+
+def test_system_routines_ship_descriptions_and_set(tmp_path: Path) -> None:
+    """Packaged system routines must carry a user-facing description, and the
+    shipped set is memory-curation + workspace-hygiene + skill-evolution
+    (the operator-only self-improvement review is no longer shipped)."""
+    store = ScheduleStore(tmp_path, include_system=True)
+    system = {e.schedule_id: e for e in store.list() if e.scope == "system"}
+    assert set(system) == {
+        "system-memory-curation",
+        "system-workspace-hygiene",
+        "system-skill-evolution",
+    }
+    assert "system-weekly-review" not in system
+    for entry in system.values():
+        assert entry.description, f"{entry.schedule_id} missing a description"
+
+
+def test_user_schedule_description_round_trips(tmp_path: Path) -> None:
+    store = ScheduleStore(tmp_path)
+    entry = store.create(
+        daily_time_utc="09:00",
+        prompt="do a thing",
+        model="",
+        mode="auto",
+        chat_id=0,
+        frequency="daily",
+    )
+    entry.description = "Human-friendly summary"
+    store.replace(entry)
+    reloaded = ScheduleStore(tmp_path).get(entry.schedule_id)
+    assert reloaded is not None
+    assert reloaded.description == "Human-friendly summary"

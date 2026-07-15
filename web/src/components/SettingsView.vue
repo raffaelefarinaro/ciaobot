@@ -155,16 +155,31 @@
             Push notifications are not supported here. On macOS, install Ciaobot as an app
             (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr; &ldquo;Add to Dock&rdquo;) and enable them from there.
           </div>
-          <div v-else class="action-row action-row--compact">
-            <button :class="pushEnabledFlag ? 'btn-secondary' : 'btn-primary'" @click="togglePush" :disabled="pushPending">
-              {{ pushPending ? 'Working...' : (pushEnabledFlag ? 'Disable on this device' : 'Enable on this device') }}
-            </button>
-          </div>
-          <div v-if="isMacDesktop() && !pushEnabledFlag" class="hint">
-            For notifications that show as <strong>Ciaobot</strong> and open the right chat, install Ciaobot as an app
-            (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr; &ldquo;Add to Dock&rdquo;), then enable them here.
-            Until then, the menu bar shows them.
-          </div>
+          <template v-else>
+            <!-- On macOS the menu-bar agent already posts chat-reply notifications
+                 out of the box (menubar_prefs defaults on, launchd RunAtLoad), so
+                 don't present web-push as a required action here — lead with the
+                 reassurance and offer the app-install path as an optional upgrade. -->
+            <p v-if="isMacDesktop() && !pushEnabledFlag" class="hint">
+              You're covered — the menu bar already shows a notification when a chat
+              replies and the app isn't focused. Nothing to enable.
+            </p>
+            <div class="action-row action-row--compact">
+              <button
+                :class="(!pushEnabledFlag && !isMacDesktop()) ? 'btn-primary' : 'btn-secondary'"
+                @click="togglePush"
+                :disabled="pushPending"
+              >
+                {{ pushPending ? 'Working...' : (pushEnabledFlag ? 'Disable on this device' : 'Enable on this device') }}
+              </button>
+            </div>
+            <p v-if="isMacDesktop() && !pushEnabledFlag" class="hint">
+              Optional upgrade: for notifications branded as <strong>Ciaobot</strong> that
+              open the exact chat (and keep working even if you quit the menu bar), install
+              Ciaobot as an app (Chrome/Edge &ldquo;Install Ciaobot&rdquo;, or Safari &rarr;
+              &ldquo;Add to Dock&rdquo;), then enable it here.
+            </p>
+          </template>
           <div v-if="pushError" class="action-result">{{ pushError }}</div>
         </div>
 

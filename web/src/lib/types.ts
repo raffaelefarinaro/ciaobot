@@ -257,6 +257,7 @@ export interface Schedule {
   enabled: boolean
   archive_policy: ScheduleArchivePolicy
   title?: string
+  description?: string
   scope?: string
   editable?: boolean
   removable?: boolean

@@ -3,6 +3,7 @@
     {
       "schedule_id": "system-memory-curation",
       "title": "Memory curation",
+      "description": "Keeps your second brain tidy: files durable learnings from recent chats, applies accepted memory proposals, and updates project notes when something changed. Reports only what it processed; does nothing on a quiet day.",
       "scope": "system",
       "editable": false,
       "removable": false,
@@ -22,8 +23,31 @@
       "prompt": "Curate recent archived chats, memory proposals, and durable learnings. Use the memory agent. Prefer existing session-insights sections and update the configured vault; append durable learnings to Workspace/Learnings.md (error resolutions, non-obvious workarounds, user corrections, outdated assumptions — not routine work). Promote durable cross-session facts into bounded memory: review pending batches in Workspace/Memory-Proposals.md and apply accepted entries with `ciao memory add --target memory` (preferences, environment facts, lessons learned) or `--target user` (user identity, communication style), then remove processed batches from the proposals file; when a memory file nears its char limit, consolidate with `ciao memory read|replace|remove` rather than skipping. Scan recently archived chats by project: when session-insights contain Decisions, Open loops, or material status changes for a vault-backed project, update that project's canonical doc (and log.md if present) — edit only when something actually changed. If nothing new to process since the last run, reply with a one-line no-op and stop. Report only processed counts plus changed files."
     },
     {
+      "schedule_id": "system-workspace-hygiene",
+      "title": "Workspace hygiene",
+      "description": "Weekly health check of your vault: rebuilds the index, repairs dead links, and flags orphaned or duplicate notes so your knowledge base stays navigable. Structural only — it never edits your instructions, agents, or settings.",
+      "scope": "system",
+      "editable": false,
+      "removable": false,
+      "enabled": true,
+      "frequency": "weekly",
+      "daily_time_utc": "01:01",
+      "days_of_week": ["sun"],
+      "day_of_month": null,
+      "run_at_date": null,
+      "timezone_name": "UTC",
+      "archive_policy": "auto",
+      "provider": "",
+      "model": "",
+      "workspace": "default",
+      "web_project_id": "",
+      "web_chat_id": null,
+      "prompt": "Run a structural hygiene pass on the workspace vault. Steps: 1) Run `ciao vault-index` to rebuild memory-vault/INDEX.md from current frontmatter and wikilinks. 2) Run `ciao vault-lint` to find broken wikilinks, orphaned notes, and near-duplicate entries. 3) Apply only low-risk, unambiguous fixes: repair or remove dead wikilinks, and fix obvious MEMORY.md drift (index entries pointing at files that moved or no longer exist). 4) Report — do NOT auto-fix — orphaned notes, duplicates, and entity pages whose frontmatter `updated` is older than 90 days, so the user can decide. Do not edit CLAUDE.md, agents, commands, or schedule prompts (that is not this routine's job). If the vault is already clean, reply with a one-line no-op and stop. Report counts of what was rebuilt/fixed and a short list of what needs the user's attention."
+    },
+    {
       "schedule_id": "system-skill-evolution",
       "title": "Skill evolution",
+      "description": "Weekly look at how your custom skills performed: reviews recent sessions for errors and corrections and drafts improvement proposals for skills that struggled. Proposals are saved for your review — nothing is applied automatically, and it does nothing if you have no custom skills.",
       "scope": "system",
       "editable": false,
       "removable": false,
@@ -41,27 +65,6 @@
       "web_project_id": "",
       "web_chat_id": null,
       "prompt": "Run `python3 -m ciao.skill_evolution` with the workspace default model. Summarize proposals written and any failed gates. Do not apply proposals automatically."
-    },
-    {
-      "schedule_id": "system-weekly-review",
-      "title": "Weekly self-improvement review",
-      "scope": "system",
-      "editable": false,
-      "removable": false,
-      "enabled": true,
-      "frequency": "weekly",
-      "daily_time_utc": "01:01",
-      "days_of_week": ["sun"],
-      "day_of_month": null,
-      "run_at_date": null,
-      "timezone_name": "UTC",
-      "archive_policy": "manual",
-      "provider": "",
-      "model": "",
-      "workspace": "default",
-      "web_project_id": "",
-      "web_chat_id": null,
-      "prompt": "Run the weekly self-improvement checklist from the installed ciao.stock package (`schedules/weekly-review-template.md`). If the past 7 days have no archived chats, no schedule misfires, and no actionable drift, reply with a one-line no-op and stop. Apply concrete low-risk local fixes and report anything that needs user approval."
     }
   ]
 }

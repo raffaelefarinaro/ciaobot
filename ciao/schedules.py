@@ -242,6 +242,11 @@ class ScheduleEntry:
     enabled: bool = True                 # False = paused, won't auto-fire but manual dispatch still works
     archive_policy: str = "manual"      # manual | auto
     title: str = ""
+    # Plain-language summary of what this routine does for the user, shown in
+    # the Automations UI above the raw prompt. Optional for user-created
+    # routines; the packaged system routines ship one so their (often
+    # command-style) prompts aren't the only thing the user sees.
+    description: str = ""
     scope: str = "user"
     editable: bool = True
     removable: bool = True
