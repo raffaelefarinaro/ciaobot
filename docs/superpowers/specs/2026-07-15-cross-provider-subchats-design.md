@@ -243,3 +243,7 @@ Provider-specific live smoke tests remain optional and separate from the determi
 ## Complexity estimate
 
 This is a medium-sized feature rather than a provider rewrite. A reliable first version is expected to take roughly two to three engineering weeks, including backend lifecycle and persistence, the agent-facing command, API routes, frontend streaming and presentation, restart behavior, documentation, and regression coverage.
+
+## Related design
+
+User-created branches of a normal conversation are specified separately in [Conversation Forks Design](2026-07-15-conversation-forks-design.md). Conversation forks create independent sidebar chats. Provider sub-chats remain read-only child conversations attached to a parent turn.
