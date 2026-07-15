@@ -763,3 +763,16 @@ def test_keep_timer_running_while_menu_open_registers_common_modes() -> None:
         menubar._keep_timer_running_while_menu_open(timer)
     finally:
         timer.stop()
+
+
+def test_icon_if_present_returns_none_for_missing_asset(monkeypatch) -> None:
+    """A missing icon must degrade to None, never a bogus path, so rumps'
+    _nsimage_from_file can't crash the tray (regression: an old wheel that
+    didn't package the .icns files took the whole menu bar down)."""
+    # A real, shipped asset resolves to its on-disk path.
+    present = menubar._icon_if_present("CiaobotServer.icns")
+    assert present is not None
+    assert present.endswith("CiaobotServer.icns")
+
+    # An asset that isn't packaged resolves to None rather than a dead path.
+    assert menubar._icon_if_present("does-not-exist.icns") is None
