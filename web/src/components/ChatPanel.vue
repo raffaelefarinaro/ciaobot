@@ -152,6 +152,20 @@
             <span class="trace-label">Reasoning</span>
             <span class="trace-meta">{{ traceSummaryMeta(item.steps, item.subs) }}</span>
           </div>
+          <div v-if="traceFiles(item.steps).length" class="trace-files">
+            <button
+              v-for="(f, fi) in traceFiles(item.steps)"
+              :key="fi"
+              type="button"
+              class="file-chip"
+              @click.stop="openFileCard(f.file_path)"
+              :title="f.file_path"
+            >
+              <span class="file-chip-icon" aria-hidden="true">{{ fileCardIcon(f.file_path) }}</span>
+              <span class="file-chip-name">{{ fileCardBasename(f.file_path) }}</span>
+              <span class="file-chip-open" aria-hidden="true">&#8599;</span>
+            </button>
+          </div>
           <div v-if="openTraces[i]" class="trace-body">
             <template v-for="(step, j) in item.steps" :key="j">
               <div v-if="step.tool_name === '_activity'" class="trace-tools">
@@ -1038,6 +1052,24 @@ const touchedFiles = computed<TouchedFile[]>(() => {
   // Most recent first.
   return Array.from(byPath.values()).sort((a, b) => b.index - a.index)
 })
+
+// Deduped files touched within a single reasoning trace (one turn), surfaced
+// as clickable chips under the trace summary so the user sees which files a
+// turn edited without expanding the trace or hunting in the project folder.
+function traceFiles(
+  steps: Array<{ tool_name?: string; file_path?: string; content?: string }> | undefined,
+): { file_path: string }[] {
+  const seen = new Set<string>()
+  const out: { file_path: string }[] = []
+  for (const s of steps || []) {
+    if (s.tool_name !== '_filecard') continue
+    const fp = s.file_path || s.content
+    if (!fp || seen.has(fp)) continue
+    seen.add(fp)
+    out.push({ file_path: fp })
+  }
+  return out
+}
 
 type ProviderKey = 'claude' | 'codex'
 type BucketKey = 'claude_work' | 'claude_personal' | 'openrouter' | 'codex'
@@ -3294,6 +3326,40 @@ function insertImageRef(n: number) {
 /* Inline file card. Rendered inside the reasoning trace whenever the agent
    calls Write/Edit/MultiEdit/NotebookEdit. Tapping opens the FileViewerModal
    for that path (security-checked server-side by /api/workspace-file). */
+/* Always-visible "edited files" chips under a trace summary, so the files a
+   turn changed are one click away without expanding the reasoning trace. */
+.trace-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 0 2px;
+}
+.file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 8px;
+  font-size: var(--text-xs);
+  color: var(--fg);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.file-chip:hover {
+  border-color: var(--accent);
+}
+.file-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-chip-open {
+  color: var(--fg3);
+  flex-shrink: 0;
+}
+
 .file-card {
   display: flex;
   align-items: center;

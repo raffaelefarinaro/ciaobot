@@ -800,30 +800,41 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     asyncio.create_task(_heal_voice_extras())
 
     # ── Stale-install self-heal ──────────────────────────────
-    # A bare `brew upgrade ciaobot` (outside the app's Update button) swaps the
-    # Cellar out from under this running process: the files it resolves —
-    # index.html, stock schedules — are deleted, so it serves 500s until
-    # relaunched. Poll for the vanished package directory and ask launchd to
-    # relaunch onto the current install (the plist's `/opt/homebrew/opt/...`
-    # symlink always points at the current keg). Mirrors the menu bar's
-    # relaunch_stale_process. Only versioned installs can hit this; pip and
-    # editable rewrite/keep files in place.
-    async def _heal_stale_install() -> None:
-        from ciao.package_version import detect_install_mode, running_install_present
+    # Two upgrade shapes leave this process running old code after a bare
+    # `brew upgrade ciaobot` / `pip install -U` outside the app's own Update
+    # button:
+    #  1. Homebrew swaps/deletes the Cellar keg — packaged files this process
+    #     resolves (index.html, stock schedules) vanish and requests 500
+    #     until relaunch. Detected by the vanished package directory (60s).
+    #  2. pip/uv rewrite site-packages in place — the files survive, but only
+    #     a fresh interpreter sees the new code. Detected by a version probe
+    #     (fresh subprocess via the upgrade-stable interpreter path) every
+    #     5 minutes, debounced to two consistent readings.
+    # request_restart drains active chats first; launchd / `ciao run` then
+    # relaunch onto the current install (the LaunchAgent uses the stable
+    # /opt/homebrew/opt/... symlink). Editable checkouts skip the version
+    # probe so a dev server doesn't bounce when release prep bumps
+    # __version__ in the working tree.
+    async def _watch_installed_version() -> None:
+        from ciao.package_version import InstallWatcher, detect_install_mode
 
-        if detect_install_mode() != "homebrew":
-            return
+        watcher = InstallWatcher()
+        probe_upgrades = detect_install_mode() in ("homebrew", "pip_venv")
+        tick = 0
         while True:
             await asyncio.sleep(60)
-            if not running_install_present():
+            tick += 1
+            reason = watcher.check_files()
+            if reason is None and probe_upgrades and tick % 5 == 0:
+                reason = await asyncio.to_thread(watcher.check_version)
+            if reason:
                 logger.warning(
-                    "Package files vanished (install swapped by an upgrade); "
-                    "requesting restart onto the current version."
+                    "%s; requesting restart onto the current version.", reason
                 )
                 request_restart(config.restart_exit_code)
                 return
 
-    asyncio.create_task(_heal_stale_install())
+    asyncio.create_task(_watch_installed_version())
 
     # ── App bundle refresh on upgrade ────────────────────────
     # `brew upgrade` swaps the Python package but doesn't rewrite Ciaobot Server.app,

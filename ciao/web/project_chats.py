@@ -466,7 +466,13 @@ async def _generate_chat_title_with_engine(
     else:
         user_prompt = f"User message:\n{user_snippet}\n\nTitle:"
 
-    if shutil.which("apfel") is not None:
+    # apfel (Apple Intelligence) is opt-in, not the Automatic default: only
+    # use it when it's the explicitly-selected title model. Preferring it
+    # whenever the binary is on PATH meant an installed-but-disabled apfel
+    # (Apple Intelligence off) failed on every title before falling through
+    # to the provider model — noisy, and it mislabeled Automatic as "apfel".
+    # Automatic resolves to the workspace haiku tier, which runs directly.
+    if model == "apfel" and shutil.which("apfel") is not None:
         try:
             proc = await asyncio.create_subprocess_exec(
                 "apfel",

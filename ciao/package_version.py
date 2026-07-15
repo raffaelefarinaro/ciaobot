@@ -330,6 +330,101 @@ def detect_install_mode() -> str:
     return "unknown"
 
 
+def _stable_executable() -> str:
+    """Interpreter path that survives versioned upgrades.
+
+    Homebrew: map ``.../Cellar/<pkg>/<version>/...`` to the
+    ``<prefix>/opt/<pkg>/...`` symlink that brew repoints on upgrade, so a
+    probe subprocess runs the *current* install even after the keg this
+    process started from was deleted. Other layouts return ``sys.executable``
+    unchanged (pip/uv rewrite the same venv in place).
+    """
+    import sys
+    from pathlib import Path
+
+    m = re.match(r"(.*)/Cellar/([^/]+)/[^/]+/(.*)$", sys.executable)
+    if m:
+        stable = Path(f"{m.group(1)}/opt/{m.group(2)}/{m.group(3)}")
+        if stable.exists():
+            return str(stable)
+    return sys.executable
+
+
+_VERSION_OUTPUT_RE = re.compile(r"[0-9][0-9A-Za-z.\-+]*")
+
+
+def installed_version(timeout_s: float = 10.0) -> str | None:
+    """Version of the package currently on disk, probed in a fresh process.
+
+    The running process pinned ``ciao.__version__`` at import time; after an
+    upgrade rewrote site-packages (pip/uv) or swapped the Homebrew keg, only a
+    fresh interpreter sees the new code. Runs isolated (``-I``) so a repo
+    checkout in cwd or PYTHONPATH can't shadow the installed package. Returns
+    ``None`` whenever the probe can't answer (interpreter missing, import
+    error, timeout, junk output) — callers must fail open, never restart on a
+    failed probe alone.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            [_stable_executable(), "-I", "-c", "import ciao; print(ciao.__version__)"],
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    out = result.stdout.strip()
+    return out if _VERSION_OUTPUT_RE.fullmatch(out) else None
+
+
+class InstallWatcher:
+    """Decide when a running server should restart onto a newer install.
+
+    Two independent signals, checked by the caller on its own schedule:
+
+    - :meth:`check_files` — the package directory this process imported from
+      no longer exists (brew swapped/deleted the keg). Definitive; restart
+      immediately.
+    - :meth:`check_version` — a fresh-subprocess probe reports a different
+      version than the running one on **two consecutive readings** (debounce:
+      a single flaky probe never triggers a restart). Covers in-place
+      pip/uv upgrades where the files survive but the process is stale.
+
+    Both return a human-readable restart reason, or ``None``.
+    """
+
+    def __init__(
+        self,
+        running_version: str = __version__,
+        *,
+        probe: Callable[[], str | None] | None = None,
+        present: Callable[[], bool] | None = None,
+    ) -> None:
+        self._running = running_version
+        self._probe = probe or installed_version
+        self._present = present or running_install_present
+        self._pending: str | None = None
+
+    def check_files(self) -> str | None:
+        if not self._present():
+            return "Package files vanished (install swapped by an upgrade)"
+        return None
+
+    def check_version(self) -> str | None:
+        probed = self._probe()
+        if not probed or probed == self._running:
+            self._pending = None
+            return None
+        if probed == self._pending:
+            return f"Installed package is now {probed} (running {self._running})"
+        self._pending = probed
+        return None
+
+
 def running_install_present() -> bool:
     """False when the running install's files were swapped out from under it.
 

@@ -302,3 +302,70 @@ def test_running_install_present_false_when_files_gone(monkeypatch, tmp_path) ->
 
     monkeypatch.setattr(ciao, "__file__", str(tmp_path / "gone" / "ciao" / "__init__.py"))
     assert running_install_present() is False
+
+
+# ── Stale-install watcher ────────────────────────────────────
+
+
+def test_install_watcher_files_vanished_restarts_immediately() -> None:
+    from ciao.package_version import InstallWatcher
+
+    w = InstallWatcher("0.4.27", probe=lambda: "0.4.27", present=lambda: False)
+    reason = w.check_files()
+    assert reason is not None and "vanished" in reason
+
+
+def test_install_watcher_version_bump_needs_two_consistent_probes() -> None:
+    from ciao.package_version import InstallWatcher
+
+    w = InstallWatcher("0.4.27", probe=lambda: "0.4.28", present=lambda: True)
+    assert w.check_files() is None
+    assert w.check_version() is None          # first differing reading: pending
+    reason = w.check_version()                # second consistent reading: restart
+    assert reason is not None and "0.4.28" in reason and "0.4.27" in reason
+
+
+def test_install_watcher_flaky_probe_never_restarts() -> None:
+    from ciao.package_version import InstallWatcher
+
+    readings = iter(["0.4.28", None, "0.4.28", "0.4.27", "0.4.28", "0.4.29"])
+    w = InstallWatcher("0.4.27", probe=lambda: next(readings), present=lambda: True)
+    # differ -> fail -> differ -> same-as-running -> differ -> different-differ:
+    # no two *consecutive consistent* readings, so never a restart.
+    for _ in range(6):
+        assert w.check_version() is None
+
+
+def test_installed_version_rejects_junk_output(monkeypatch) -> None:
+    import subprocess
+    from ciao import package_version
+
+    class R:
+        returncode = 0
+        stdout = "Traceback (most recent call last):\n..."
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: R())
+    assert package_version.installed_version() is None
+
+
+def test_installed_version_missing_interpreter_fails_open(monkeypatch) -> None:
+    import subprocess
+    from ciao import package_version
+
+    def boom(*a, **k):
+        raise FileNotFoundError("python is gone")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+    assert package_version.installed_version() is None
+
+
+def test_stable_executable_maps_cellar_to_opt(monkeypatch, tmp_path) -> None:
+    import sys
+    from ciao import package_version
+
+    opt = tmp_path / "opt" / "ciaobot" / "libexec" / "bin"
+    opt.mkdir(parents=True)
+    (opt / "python").write_text("", encoding="utf-8")
+    cellar = tmp_path / "Cellar" / "ciaobot" / "0.4.20" / "libexec" / "bin" / "python"
+    monkeypatch.setattr(sys, "executable", str(cellar))
+    assert package_version._stable_executable() == str(opt / "python")

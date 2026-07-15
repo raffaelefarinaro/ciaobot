@@ -3735,9 +3735,10 @@ def _routines_payload(config, app_settings) -> dict:
     ollama = config.ollama
     if config.title_model_override:
         title_effective = config.title_model_override
-    elif shutil.which("apfel") is not None:
-        title_effective = "apfel"
     else:
+        # Automatic resolves to the workspace haiku tier — apfel is opt-in
+        # (choose "Apple" explicitly), not the auto default just because the
+        # binary is on PATH (it fails when Apple Intelligence is disabled).
         title_effective = config.haiku_model_for_workspace("personal")
     from ciao.critique import critique_models_effective
 
