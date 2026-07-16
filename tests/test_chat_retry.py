@@ -313,3 +313,58 @@ async def test_rate_limit_does_not_trigger_tier_fallback(tmp_path: Path) -> None
     result_events = [e for e in events if e.get("type") == "result"]
     assert result_events
     assert result_events[-1].get("is_error") is True
+
+
+async def test_connection_error_marks_turn_for_fast_retry(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+
+    async def fake_stream_chat(chat_id, prompt, images=None):
+        yield ResultEvent(
+            type="result",
+            result="API Error: Unable to connect to API (ENOTFOUND)",
+            session_id="sess-retry",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "do the thing")
+    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status == "pending"
+    assert updated.retry_prompt == "do the thing"
+    assert updated.retry_attempts == 0
+    assert updated.retry_next_at
+    assert updated.retry_interval_seconds == 30
+    assert any(e.get("type") == "chat_retry" and e.get("status") == "pending" for e in events)
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_connection_error_exception_marks_turn_for_fast_retry(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+
+    async def fake_stream_chat(chat_id, prompt, images=None):
+        raise Exception("Unable to connect to API (ENOTFOUND)")
+        yield ResultEvent(type="result", result="not reached")  # type: ignore[unreachable]
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "do the thing")
+    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status == "pending"
+    assert updated.retry_prompt == "do the thing"
+    assert updated.retry_interval_seconds == 30
+    pcm.stop_chat_retry(chat.chat_id)

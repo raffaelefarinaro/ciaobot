@@ -90,6 +90,7 @@ _PROJECT_BINARY_EXTS = frozenset({
 _PROJECT_UPLOAD_EXTS = _PROJECT_TEXT_EXTS | _PROJECT_IMAGE_EXTS | _PROJECT_BINARY_EXTS
 _PROJECT_UPLOAD_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 _RETRY_INTERVAL_SECONDS = 60 * 60
+_RETRY_CONNECTION_INTERVAL_SECONDS = 30
 _RETRY_STATUSES = {"pending", "stopped", ""}
 
 # Injected into the parent turn when its background subagents all finish. The
@@ -276,6 +277,32 @@ def _is_retryable_quota_error(text: str) -> bool:
     if "429" not in low and "too many requests" not in low:
         return False
     return any(needle in low for needle in ("usage limit", "rate limit", "quota", "session"))
+
+
+def _is_retryable_connection_error(text: str) -> bool:
+    low = (text or "").lower()
+    connection_indicators = (
+        "enotfound",
+        "econnrefused",
+        "econnreset",
+        "etimedout",
+        "unable to connect",
+        "failed to fetch",
+        "network request failed",
+        "temporary failure in name resolution",
+        "dns resolution failed",
+        "socket timeout",
+        "gateway timeout",
+        "bad gateway",
+        "service unavailable",
+        "502 bad gateway",
+        "503 service unavailable",
+        "504 gateway timeout",
+        "connect timeout",
+        "connection timeout",
+        "connection timed out",
+    )
+    return any(indicator in low for indicator in connection_indicators)
 
 
 def _has_running_loop() -> bool:
@@ -4133,6 +4160,7 @@ class ProjectChatManager:
         image_refs: list[str] | None = None,
         reason: str = "manual",
         next_at: str | None = None,
+        interval_seconds: int | None = None,
     ) -> ChatInfo | None:
         """Mark a chat turn for hourly deferred retry."""
         chat = self._chats.get(chat_id)
@@ -4145,6 +4173,8 @@ class ProjectChatManager:
         chat.retry_prompt = clean_prompt
         chat.retry_image_refs = list(image_refs or [])
         chat.retry_last_error = reason
+        if interval_seconds is not None:
+            chat.retry_interval_seconds = interval_seconds
         chat.retry_next_at = next_at or _iso_after(chat.retry_interval_seconds)
         self._save()
         self._publish_retry(chat)
@@ -4214,6 +4244,7 @@ class ProjectChatManager:
         chat.retry_next_at = ""
         chat.retry_last_error = ""
         chat.retry_attempts = 0
+        chat.retry_interval_seconds = _RETRY_INTERVAL_SECONDS
         self._save()
         self._publish_retry(chat)
         task = self._retry_tasks.pop(chat.chat_id, None)
@@ -4569,20 +4600,31 @@ class ProjectChatManager:
                             if isinstance(event, ResultEvent):
                                 if event.is_error:
                                     had_error = True
-                                    if (
-                                        not had_provider_progress
-                                        and _is_retryable_quota_error(event.result or "")
-                                    ):
-                                        self.set_chat_retry(
-                                            chat_id,
-                                            current_prompt,
-                                            image_refs=self._image_refs(current_images),
-                                            reason=event.result or "quota limit",
-                                        )
-                                        stream.publish({
-                                            "type": "chat_retry",
-                                            "status": "pending",
-                                        })
+                                    if not had_provider_progress:
+                                        if _is_retryable_quota_error(event.result or ""):
+                                            self.set_chat_retry(
+                                                chat_id,
+                                                current_prompt,
+                                                image_refs=self._image_refs(current_images),
+                                                reason=event.result or "quota limit",
+                                                interval_seconds=_RETRY_INTERVAL_SECONDS,
+                                            )
+                                            stream.publish({
+                                                "type": "chat_retry",
+                                                "status": "pending",
+                                            })
+                                        elif _is_retryable_connection_error(event.result or ""):
+                                            self.set_chat_retry(
+                                                chat_id,
+                                                current_prompt,
+                                                image_refs=self._image_refs(current_images),
+                                                reason=event.result or "connection error",
+                                                interval_seconds=_RETRY_CONNECTION_INTERVAL_SECONDS,
+                                            )
+                                            stream.publish({
+                                                "type": "chat_retry",
+                                                "status": "pending",
+                                            })
                                 else:
                                     turn_assistant_text = event.result or ""
                     except Exception as exc:
@@ -4602,17 +4644,31 @@ class ProjectChatManager:
                                 error_msg = f"{error_msg}\n{stderr}"
                             stream.publish({"type": "error", "message": error_msg})
                             had_error = True
-                            if not had_provider_progress and _is_retryable_quota_error(error_msg):
-                                self.set_chat_retry(
-                                    chat_id,
-                                    current_prompt,
-                                    image_refs=self._image_refs(current_images),
-                                    reason=error_msg,
-                                )
-                                stream.publish({
-                                    "type": "chat_retry",
-                                    "status": "pending",
-                                })
+                            if not had_provider_progress:
+                                if _is_retryable_quota_error(error_msg):
+                                    self.set_chat_retry(
+                                        chat_id,
+                                        current_prompt,
+                                        image_refs=self._image_refs(current_images),
+                                        reason=error_msg,
+                                        interval_seconds=_RETRY_INTERVAL_SECONDS,
+                                    )
+                                    stream.publish({
+                                        "type": "chat_retry",
+                                        "status": "pending",
+                                    })
+                                elif _is_retryable_connection_error(error_msg):
+                                    self.set_chat_retry(
+                                        chat_id,
+                                        current_prompt,
+                                        image_refs=self._image_refs(current_images),
+                                        reason=error_msg,
+                                        interval_seconds=_RETRY_CONNECTION_INTERVAL_SECONDS,
+                                    )
+                                    stream.publish({
+                                        "type": "chat_retry",
+                                        "status": "pending",
+                                    })
                             break
 
                     if turn_assistant_text:

@@ -389,7 +389,11 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         )
         if result and "chat_id" in result:
             entry.last_run_chat_id = result["chat_id"]
-            schedule_store.replace(entry)
+            # Persist only if the entry still exists: a "once" schedule may have
+            # been consumed (replace-then-delete) before this background task
+            # resolves, and replace() upserts — writing here would resurrect it.
+            if schedule_store.get(entry.schedule_id) is not None:
+                schedule_store.replace(entry)
         return result
 
     def _prepare_chat(entry, prompt, model, mode, provider):

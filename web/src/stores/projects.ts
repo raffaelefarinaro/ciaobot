@@ -1480,20 +1480,11 @@ export const useProjectStore = defineStore('projects', () => {
     if (activeWorkspace.value === ws) return
     if (activeChatId.value) disconnectWs(activeChatId.value)
     activeWorkspace.value = ws
-    persistState()
     if (transition) {
+      persistState()
       await transitionToFirstChat()
     } else {
-      let nextChatId: string | null = null
-      const wsProjects = workspaceProjects.value
-      for (const p of wsProjects) {
-        const pChats = projectChats(p.project_id)
-        if (pChats.length > 0) {
-          nextChatId = pChats[0].chat_id
-          break
-        }
-      }
-      activeChatId.value = nextChatId
+      selectFirstChat()
       persistState()
     }
   }

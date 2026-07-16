@@ -145,17 +145,17 @@
         </div>
         <div>
           <strong>Last run</strong><br />
-          <router-link v-if="schedule.last_run_chat_id" :to="`/chat/${schedule.last_run_chat_id}`">
+          <component
+            :is="schedule.last_run_chat_id ? 'router-link' : 'span'"
+            :to="schedule.last_run_chat_id ? `/chat/${schedule.last_run_chat_id}` : undefined"
+          >
             {{ schedule.last_dispatched_at ? formatWhen(schedule.last_dispatched_at) : (schedule.last_triggered_on || 'never') }}
-            <span v-if="showRunning" class="spinner-dot" title="Running now" />
-          </router-link>
-          <span v-else-if="schedule.last_dispatched_at">
-            {{ formatWhen(schedule.last_dispatched_at) }}
-            <span v-if="showRunning" class="spinner-dot" title="Running now" />
-          </span>
-          <span v-else>
-            {{ schedule.last_triggered_on || 'never' }}
-          </span>
+            <span
+              v-if="showRunning && (schedule.last_dispatched_at || schedule.last_run_chat_id)"
+              class="spinner-dot"
+              title="Running now"
+            />
+          </component>
         </div>
         <div><strong>Workspace</strong><br />{{ workspaceDisplayName(schedule.workspace) }}</div>
         <div><strong>Model</strong><br />{{ modelLabel(schedule) }}</div>
@@ -302,15 +302,17 @@
         <div><strong>Status</strong><br />{{ loopStatusLabel(loop) }}</div>
         <div>
           <strong>Last run</strong><br />
-          <router-link v-if="loop.last_run_at && !loopContextUnavailable(loop)" :to="`/chat/${loop.web_chat_id}`">
-            {{ formatWhen(loop.last_run_at) }}
-            <span v-if="loop.last_status === 'running'" class="spinner-dot" title="Running now" />
-          </router-link>
-          <span v-else-if="loop.last_run_at">
-            {{ formatWhen(loop.last_run_at) }}
-            <span v-if="loop.last_status === 'running'" class="spinner-dot" title="Running now" />
-          </span>
-          <span v-else>never</span>
+          <component
+            :is="loop.last_run_at && !loopContextUnavailable(loop) ? 'router-link' : 'span'"
+            :to="loop.last_run_at && !loopContextUnavailable(loop) ? `/chat/${loop.web_chat_id}` : undefined"
+          >
+            {{ loop.last_run_at ? formatWhen(loop.last_run_at) : 'never' }}
+            <span
+              v-if="loop.last_run_at && loop.last_status === 'running'"
+              class="spinner-dot"
+              title="Running now"
+            />
+          </component>
         </div>
         <div><strong>Next run</strong><br />{{ loop.running ? (loop.next_run ? formatWhen(loop.next_run) : 'soon') : 'stopped' }}</div>
         <div><strong>After restart</strong><br />{{ loop.autostart ? 'resumes ticking' : 'stays stopped until started' }}</div>
