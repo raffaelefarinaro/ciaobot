@@ -474,6 +474,17 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     app.state.focused_chats = {}
     pcm._push_manager = app.state.push_manager
 
+    # Google Workspace token health + server-managed re-login (issue #145).
+    from ciao.gws_auth import GwsHealthMonitor, GwsReloginManager
+
+    app.state.gws_health_monitor = GwsHealthMonitor(
+        config,
+        push_manager=app.state.push_manager,
+        events_hub=pcm.events,
+        runtime_root=config.state_path.parent,
+    )
+    app.state.gws_relogin_manager = GwsReloginManager(config)
+
     # Wire push delivery into the broker drive task so a successful turn
     # notifies subscribed devices even when no WebSocket client is connected.
     def _notify_result(chat_id: str, title: str, snippet: str) -> None:
@@ -690,6 +701,44 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                 logger.exception("Branch backup push failed")
 
     asyncio.create_task(_branch_backup_loop())
+
+    # ── Google Workspace token health ────────────────────────
+    # Cheap periodic `auth status` ping per configured GWS profile. When a
+    # refresh token is revoked/expired the monitor fires ONE PWA notification
+    # plus an in-app status event (debounced until the token recovers), so
+    # GWS-dependent schedules don't fail silently (issue #145). The credential
+    # files are never read into logs; only the boolean validity is surfaced.
+    try:
+        _gws_health_interval = int(os.environ.get("CIAO_GWS_HEALTH_INTERVAL", "900"))
+    except ValueError:
+        _gws_health_interval = 900
+
+    async def _gws_health_loop() -> None:
+        if _gws_health_interval <= 0:
+            logger.info("GWS token health checks disabled (CIAO_GWS_HEALTH_INTERVAL=0).")
+            return
+        monitor = app.state.gws_health_monitor
+        # Small initial delay so a fresh boot settles before the first probe.
+        await asyncio.sleep(30)
+        while True:
+            try:
+                async with job_runs.track(
+                    "gws_health", "Google Workspace token health", category="system",
+                ) as run:
+                    summary = await asyncio.to_thread(monitor.check_once)
+                    run.extra["checked"] = summary.get("checked", [])
+                    if summary.get("invalid"):
+                        run.extra["invalid"] = summary["invalid"]
+                    if summary.get("notified"):
+                        run.extra["notified"] = summary["notified"]
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("GWS token health check failed")
+            await asyncio.sleep(_gws_health_interval)
+
+    if not getattr(config, "bootstrap_mode", False):
+        asyncio.create_task(_gws_health_loop())
 
 
     import uvicorn
