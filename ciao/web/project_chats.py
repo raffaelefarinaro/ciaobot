@@ -196,15 +196,9 @@ def _provider_label(provider: str) -> str:
     return labels.get(provider, provider or "Provider")
 
 
-def _normalize_handover_messages(messages: list[dict] | None) -> list[dict]:
-    """Sanitize visible chat rows for cross-provider handover.
-
-    The browser sends its normalized visible messages. Keep only the fields
-    needed to reconstruct UI history and provider context, then cap by count
-    and total characters so a long chat cannot explode the next prompt.
-    """
+def _clean_handover_messages(messages: list[dict] | None) -> list[dict]:
+    """Sanitize visible chat rows without applying history limits."""
     rows: list[dict] = []
-    total_chars = 0
     for raw in messages or []:
         if not isinstance(raw, dict):
             continue
@@ -241,13 +235,19 @@ def _normalize_handover_messages(messages: list[dict] | None) -> list[dict]:
         if tool:
             entry["tool"] = tool
         rows.append(entry)
-        total_chars += len(content)
-        while (
-            len(rows) > _HANDOVER_MAX_MESSAGES
-            or total_chars > _HANDOVER_MAX_CHARS
-        ) and rows:
-            removed = rows.pop(0)
-            total_chars -= len(str(removed.get("content", "")))
+    return rows
+
+
+def _normalize_handover_messages(messages: list[dict] | None) -> list[dict]:
+    """Sanitize and bound visible chat rows for provider handover."""
+    rows = _clean_handover_messages(messages)
+    total_chars = sum(len(str(row.get("content", ""))) for row in rows)
+    while (
+        len(rows) > _HANDOVER_MAX_MESSAGES
+        or total_chars > _HANDOVER_MAX_CHARS
+    ) and rows:
+        removed = rows.pop(0)
+        total_chars -= len(str(removed.get("content", "")))
     return rows
 
 
@@ -665,6 +665,14 @@ class ChatInfo:
     # `to_dict` so the PWA can rebuild its interactive picker after a reload
     # instead of showing the dead `{"questions": ...}` trace row.
     pending_question: str = ""
+    # Provider-neutral conversation fork lineage. Forks are normal chats with
+    # a fresh provider session; these fields only preserve their relationship
+    # to the source conversation and stable root-relative title numbering.
+    forked_from_chat_id: str = ""
+    forked_from_turn_index: int | None = None
+    fork_root_chat_id: str = ""
+    fork_index: int = 0
+    fork_base_title: str = ""
 
     def to_dict(self, *, local: bool | None = None) -> dict:
         d = {
@@ -683,6 +691,11 @@ class ChatInfo:
             "last_read_at": self.last_read_at,
             "title_status": self.title_status,
             "pending_question": self.pending_question,
+            "forked_from_chat_id": self.forked_from_chat_id,
+            "forked_from_turn_index": self.forked_from_turn_index,
+            "fork_root_chat_id": self.fork_root_chat_id,
+            "fork_index": self.fork_index,
+            "fork_base_title": self.fork_base_title,
             "retry": {
                 "status": self.retry_status,
                 "next_at": self.retry_next_at,
@@ -950,6 +963,11 @@ class ProjectChatManager:
                 ),
                 handover_context_pending=bool(cd.get("handover_context_pending", False)),
                 pending_question=cd.get("pending_question", ""),
+                forked_from_chat_id=cd.get("forked_from_chat_id", ""),
+                forked_from_turn_index=cd.get("forked_from_turn_index"),
+                fork_root_chat_id=cd.get("fork_root_chat_id", ""),
+                fork_index=int(cd.get("fork_index", 0) or 0),
+                fork_base_title=cd.get("fork_base_title", ""),
             )
         logger.info(
             "Restored %d project(s) and %d chat(s)",
@@ -1025,6 +1043,11 @@ class ProjectChatManager:
                     "handover_messages": c.handover_messages,
                     "handover_context_pending": c.handover_context_pending,
                     "pending_question": c.pending_question,
+                    "forked_from_chat_id": c.forked_from_chat_id,
+                    "forked_from_turn_index": c.forked_from_turn_index,
+                    "fork_root_chat_id": c.fork_root_chat_id,
+                    "fork_index": c.fork_index,
+                    "fork_base_title": c.fork_base_title,
                 }
                 for cid, c in self._chats.items()
             },
@@ -2719,6 +2742,126 @@ class ProjectChatManager:
         self._save()
         return new_chat
 
+    def fork_chat(
+        self,
+        chat_id: str,
+        *,
+        messages: list[dict],
+        turn_index: int,
+    ) -> ChatInfo:
+        """Create a fresh chat from visible history through one final answer."""
+        source = self._chats.get(chat_id)
+        if source is None:
+            raise KeyError("Source chat not found")
+        if source.project_id not in self._projects:
+            raise ValueError("Source project not found")
+        if not isinstance(turn_index, int) or isinstance(turn_index, bool) or turn_index < 0:
+            raise ValueError("Fork turn must be a non-negative integer")
+
+        clean_rows = _clean_handover_messages(messages)
+        if not clean_rows:
+            raise ValueError("Fork history must be non-empty")
+        if clean_rows[-1].get("role") != "assistant" or clean_rows[-1].get("is_error"):
+            raise ValueError("Fork history must end with a final assistant answer")
+        user_positions = [
+            index for index, row in enumerate(clean_rows) if row.get("role") == "user"
+        ]
+        expected_turn = len(user_positions) - 1
+        if expected_turn < 0 or turn_index != expected_turn:
+            raise ValueError("Fork turn does not match the selected answer")
+
+        selected_rows = clean_rows[user_positions[-1]:]
+        selected_chars = sum(
+            len(str(row.get("content", ""))) for row in selected_rows
+        )
+        if (
+            len(selected_rows) > _HANDOVER_MAX_MESSAGES
+            or selected_chars > _HANDOVER_MAX_CHARS
+        ):
+            raise ValueError("The selected turn is too large to fork")
+
+        rows = list(clean_rows)
+        total_chars = sum(len(str(row.get("content", ""))) for row in rows)
+        truncated = False
+        while (
+            len(rows) > _HANDOVER_MAX_MESSAGES
+            or total_chars > _HANDOVER_MAX_CHARS
+        ):
+            removed = rows.pop(0)
+            total_chars -= len(str(removed.get("content", "")))
+            truncated = True
+        if truncated:
+            rows.insert(0, {
+                "role": "system",
+                "content": (
+                    "Earlier conversation history was omitted when this fork "
+                    "was created."
+                ),
+            })
+
+        if source.fork_root_chat_id:
+            root_chat_id = source.fork_root_chat_id
+            base_title = source.fork_base_title or source.title
+        else:
+            root_chat_id = source.chat_id
+            base_title = source.title
+        next_index = 1 + max(
+            (
+                chat.fork_index
+                for chat in self._chats.values()
+                if chat.fork_root_chat_id == root_chat_id
+            ),
+            default=0,
+        )
+
+        fork = ChatInfo(
+            chat_id=f"chat-{_uuid8()}",
+            project_id=source.project_id,
+            title=f"{base_title} · Fork {next_index}",
+            model=source.model,
+            mode=source.mode,
+            provider=source.provider,
+            model_bucket=source.model_bucket,
+            thinking_level=source.thinking_level,
+            created_at=_now_iso(),
+            handover_messages=rows,
+            handover_context_pending=True,
+            forked_from_chat_id=source.chat_id,
+            forked_from_turn_index=turn_index,
+            fork_root_chat_id=root_chat_id,
+            fork_index=next_index,
+            fork_base_title=base_title,
+        )
+        copied_turn_index = 0
+        for row in rows:
+            if row.get("role") != "user":
+                continue
+            copied_refs: list[str] = []
+            for ref in row.get("images", []):
+                attachment = self.resolve_image_ref(str(ref))
+                if attachment is None:
+                    continue
+                duplicate = self.save_image_upload(
+                    attachment.path.read_bytes(), attachment.original_filename
+                )
+                copied_refs.append(duplicate.path.name)
+            if copied_refs:
+                row["images"] = copied_refs
+                fork.user_turn_images[str(copied_turn_index)] = copied_refs
+            else:
+                row.pop("images", None)
+            copied_turn_index += 1
+        fork.user_turn_count = copied_turn_index
+
+        self._chats[fork.chat_id] = fork
+        try:
+            self._save()
+        except Exception:
+            self._chats.pop(fork.chat_id, None)
+            self._unlink_chat_images(fork)
+            raise
+        return fork
+
     def handover_chat(
         self,
         chat_id: str,
@@ -2810,6 +2953,11 @@ class ProjectChatManager:
             self._transcripts.delete_sdk_session_blob(
                 self._config.workspace_root, chat.session_id
             )
+        # Clean up associated provider sub-chats
+        manager = getattr(self, "_provider_subchat_manager", None)
+        if manager is not None:
+            manager.delete_parent_subchats(chat_id)
+
         # Explicit deletion is a tombstone, not merely a sidebar mutation.
         # Remove every recovery signal so startup repair cannot revive it.
         self._state.delete_context(ctx)
@@ -2883,6 +3031,13 @@ class ProjectChatManager:
             self._transcripts.delete_sdk_session_blob(
                 self._config.workspace_root, chat.session_id
             )
+        # Cancel any active provider sub-chats
+        manager = getattr(self, "_provider_subchat_manager", None)
+        if manager is not None:
+            subchats = manager.list_records(chat_id)
+            for sc in subchats:
+                if sc.status not in ("completed", "cancelled", "failed", "interrupted"):
+                    asyncio.ensure_future(manager.cancel_subchat(sc.subchat_id))
         self._unlink_chat_images(chat)
         chat.archived = True
         if result is not None:
@@ -2890,6 +3045,7 @@ class ProjectChatManager:
                 chat.archive_path = str(result.relative_to(self._config.workspace_root))
             except ValueError:
                 chat.archive_path = str(result)
+            self._append_subchats_to_transcript(result, chat_id)
         self._save()
         if result is None:
             return None
@@ -2899,6 +3055,49 @@ class ProjectChatManager:
             turn_count=turn_count,
             filtered_jsonl=filtered_jsonl,
         )
+
+    def _append_subchats_to_transcript(self, result: Path, chat_id: str) -> None:
+        manager = getattr(self, "_provider_subchat_manager", None)
+        if manager is None:
+            return
+        records = manager.list_records(chat_id)
+        if not records:
+            return
+
+        lines = ["", "## Provider consultations", ""]
+        for r in records:
+            lines.append(f"### Consultation: {r.owner.label or r.owner.provider} ↔ {r.participant.label or r.participant.provider}")
+            lines.append(f"- **Participant Model**: {r.participant.model}")
+            lines.append(f"- **Status**: {r.status}")
+            lines.append(f"- **Duration**: {r.active_seconds:.1f}s")
+            lines.append(f"- **Messages**: {r.message_count}")
+            lines.append(f"- **Usage**: {r.input_tokens} in · {r.output_tokens} out")
+            lines.append("")
+            lines.append("**Transcript**:")
+            lines.append("")
+
+            events = manager.get_events(r.subchat_id)
+            for ev in events:
+                if ev.get("type") == "message":
+                    role = ev.get("role", "unknown").capitalize()
+                    content = ev.get("content", "")
+                    lines.append(f"**[{role}]**:")
+                    lines.append(content)
+                    lines.append("")
+                elif ev.get("type") == "tool_use":
+                    lines.append(f"*Called tool `{ev.get('tool_name')}`*")
+                    lines.append("")
+                elif ev.get("type") == "error":
+                    lines.append(f"*Error: {ev.get('message')}*")
+                    lines.append("")
+            lines.append("---")
+            lines.append("")
+
+        try:
+            with open(result, "a", encoding="utf-8") as f:
+                f.write("\n".join(lines))
+        except Exception:
+            logger.exception("Failed to append provider sub-chats to archived transcript %s", result)
 
     def run_archive_postprocess(
         self,
@@ -3076,6 +3275,20 @@ class ProjectChatManager:
         handover = self._format_handover_context(chat)
         if handover:
             parts.append(handover)
+
+        # Add a reminder about open provider consultations
+        manager = getattr(self, "_provider_subchat_manager", None)
+        if manager is not None:
+            active_sc = [r for r in manager.list_records(chat.chat_id) if r.status == "waiting_owner"]
+            if active_sc:
+                reminder_lines = ["[REMINDER: Active provider consultations waiting for owner input:"]
+                for sc in active_sc:
+                    reminder_lines.append(
+                        f"- Sub-chat ID: '{sc.subchat_id}'. "
+                        f"Participant: '{sc.participant.provider}' using model '{sc.participant.model}'."
+                    )
+                reminder_lines.append("Use the provider-consultation skill to send answers or close them.]")
+                parts.append("\n".join(reminder_lines))
 
         if not parts:
             return ""
@@ -3580,6 +3793,39 @@ class ProjectChatManager:
             tool_events=tool_events,
         )
 
+    def build_agent_request(
+        self,
+        chat: ChatInfo,
+        *,
+        prompt: str,
+        display_prompt: str = "",
+        images: list[ImageAttachment] | None = None,
+        resume_session: str | None = None,
+    ) -> AgentRequest:
+        """Resolve all routing parameters and construct an AgentRequest."""
+        prefix = self._build_prompt_prefix(chat)
+        if chat.provider == "codex":
+            provider_prompt = (
+                expand_slash_command(prompt, self._config.workspace_root) or prompt
+            )
+        else:
+            provider_prompt = prompt
+        full_prompt = prefix + provider_prompt if prefix else provider_prompt
+        final_display_prompt = prefix + display_prompt if prefix else display_prompt
+
+        return AgentRequest(
+            prompt=full_prompt,
+            model=self._runtime_model_for_chat(chat),
+            provider=chat.provider,
+            mode=self._effective_mode_for_chat(chat),
+            display_prompt=final_display_prompt,
+            resume_session=resume_session,
+            images=images or [],
+            extra_env=self._build_extra_env(chat),
+            disallowed_tools=self.disallowed_tools_for_chat(chat),
+            thinking_level=self._thinking_level_for_chat(chat),
+        )
+
     # ── Streaming chat ───────────────────────────────────────────────────
 
     async def stream_chat(
@@ -3595,29 +3841,16 @@ class ProjectChatManager:
             raise ValueError("Cannot send messages to an archived chat")
 
         provider = self._get_provider(chat_id)
-        prefix = self._build_prompt_prefix(chat)
-        provider_prompt = prompt
-        if chat.provider == "codex":
-            provider_prompt = (
-                expand_slash_command(prompt, self._config.workspace_root) or prompt
-            )
-        full_prompt = prefix + provider_prompt if prefix else provider_prompt
-        display_prompt = prefix + prompt if prefix else prompt
         handover_context_sent = bool(
             chat.handover_context_pending and chat.handover_messages
         )
 
-        request = AgentRequest(
-            prompt=full_prompt,
-            model=self._runtime_model_for_chat(chat),
-            provider=chat.provider,
-            mode=self._effective_mode_for_chat(chat),
-            display_prompt=display_prompt,
+        request = self.build_agent_request(
+            chat,
+            prompt=prompt,
+            display_prompt=prompt,
+            images=images,
             resume_session=chat.session_id or None,
-            images=images or [],
-            extra_env=self._build_extra_env(chat),
-            disallowed_tools=self.disallowed_tools_for_chat(chat),
-            thinking_level=self._thinking_level_for_chat(chat),
         )
 
         response_text = ""
@@ -3678,11 +3911,11 @@ class ProjectChatManager:
                 # written a partial transcript under its own session id,
                 # and the new model should not try to continue that.
                 retry_request = AgentRequest(
-                    prompt=full_prompt,
+                    prompt=request.prompt,
                     model=next_model,
                     provider=chat.provider,
                     mode=self._effective_mode_for_chat(chat),
-                    display_prompt=display_prompt,
+                    display_prompt=request.display_prompt,
                     resume_session=None,
                     # If the failure was image-related, strip the images
                     # so the next model at least has a chance to answer
@@ -3876,6 +4109,11 @@ class ProjectChatManager:
             for chat_id, task in self._pending_subagent_watchers.items()
             if not task.done()
         )
+        manager = getattr(self, "_provider_subchat_manager", None)
+        if manager is not None:
+            for r in manager._records.values():
+                if r.status in ("created", "running"):
+                    ids.add(r.parent_chat_id)
         return sorted(ids)
 
     def begin_restart_drain(self) -> None:

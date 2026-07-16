@@ -435,6 +435,13 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     app.state.transcript_store = transcripts
     app.state.project_chat_manager = pcm
 
+    from ciao.provider_subchats import ProviderSubchatManager
+    provider_subchat_manager = ProviderSubchatManager(
+        config, pcm, config.state_path.parent / "provider_subchats.json"
+    )
+    app.state.provider_subchat_manager = provider_subchat_manager
+    pcm._provider_subchat_manager = provider_subchat_manager
+
     # Git sync operates on the repo containing the vault root: the workspace
     # root for the default vault-inside-workspace layout (and as fallback),
     # or the vault's own repo when it lives elsewhere. Every instance works

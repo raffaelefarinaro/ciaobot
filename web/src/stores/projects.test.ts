@@ -721,3 +721,81 @@ describe('workspace and chat transitions', () => {
     expect(store.toasts.some(t => t.variant === 'error')).toBe(true)
   })
 })
+
+describe('conversation forks', () => {
+  test('creates a fork with the selected history and switches to it', async () => {
+    const store = useProjectStore()
+    const sourceId = 'chat-source'
+    const copied = [
+      { role: 'user' as const, content: 'Question', timestamp: '', turn_index: 0 },
+      { role: 'assistant' as const, content: 'Answer', timestamp: '' },
+    ]
+    store.chats = [{
+      chat_id: sourceId,
+      project_id: 'project-1',
+      title: 'Original',
+      model: 'opus',
+      provider: 'claude',
+      mode: 'auto',
+      session_id: 'session-source',
+      created_at: '',
+      archived: false,
+    }]
+    store.messages[sourceId] = [...copied, {
+      role: 'user',
+      content: 'Later question',
+      timestamp: '',
+      turn_index: 1,
+    }]
+    store.activeChatId = sourceId
+    apiGet.mockResolvedValue([])
+    apiPost.mockImplementation((path: string) => {
+      if (path === `/api/chats/${sourceId}/fork`) {
+        return Promise.resolve({
+          ...store.chats[0],
+          chat_id: 'chat-fork',
+          title: 'Original · Fork 1',
+          session_id: '',
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    const fork = await store.forkChat(sourceId, copied, 0)
+
+    expect(apiPost).toHaveBeenCalledWith(`/api/chats/${sourceId}/fork`, {
+      messages: copied,
+      turn_index: 0,
+    })
+    expect(fork.chat_id).toBe('chat-fork')
+    expect(store.activeChatId).toBe('chat-fork')
+    expect(store.messages['chat-fork']).toEqual(copied)
+  })
+})
+
+describe('provider sub-chats', () => {
+  test('loads provider sub-chats and events', async () => {
+    const store = useProjectStore()
+    const chatId = 'parent-chat-1'
+    const subchatId = 'sub-chat-1'
+
+    const records = [{ subchat_id: subchatId, parent_chat_id: chatId, status: 'created' }]
+    const events = [{ type: 'message', role: 'owner', content: 'test' }]
+
+    apiGet.mockImplementation((path: string) => {
+      if (path === `/api/chats/${chatId}/provider-subchats`) {
+        return Promise.resolve(records)
+      }
+      if (path === `/api/provider-subchats/${subchatId}/events`) {
+        return Promise.resolve(events)
+      }
+      return Promise.resolve([])
+    })
+
+    await store.loadProviderSubchats(chatId)
+    expect(store.providerSubchats[chatId]).toEqual(records)
+
+    await store.loadProviderSubchatEvents(subchatId)
+    expect(store.providerSubchatEvents[subchatId]).toEqual(events)
+  })
+})

@@ -1901,6 +1901,46 @@ async def chat_handover(request: Request) -> JSONResponse:
     return JSONResponse(chat.to_dict(local=pcm.is_session_local(chat)))
 
 
+async def chat_fork(request: Request) -> JSONResponse:
+    """Create an independent chat from history through one final answer."""
+    pcm = request.app.state.project_chat_manager
+    chat_id = request.path_params["chat_id"]
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "JSON body must be an object"}, status_code=400)
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return JSONResponse({"error": "messages must be a list"}, status_code=400)
+    turn_index = body.get("turn_index")
+    if (
+        not isinstance(turn_index, int)
+        or isinstance(turn_index, bool)
+        or turn_index < 0
+    ):
+        return JSONResponse(
+            {"error": "turn_index must be a non-negative integer"},
+            status_code=400,
+        )
+    try:
+        fork = pcm.fork_chat(
+            chat_id,
+            messages=[row for row in messages if isinstance(row, dict)],
+            turn_index=turn_index,
+        )
+    except KeyError:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    except ValueError as exc:
+        status = 404 if str(exc) == "Source project not found" else 400
+        return JSONResponse({"error": str(exc)}, status_code=status)
+    except Exception as exc:
+        logger.exception("Failed to fork chat %s", chat_id)
+        return JSONResponse({"error": f"Failed to fork chat: {exc}"}, status_code=500)
+    return JSONResponse(fork.to_dict(local=True))
+
+
 async def chat_continue(request: Request) -> JSONResponse:
     """Create a new active chat that continues from an archived chat."""
     pcm = request.app.state.project_chat_manager
@@ -1966,6 +2006,189 @@ async def chat_prompt(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
     return JSONResponse({"ok": True, "chat_id": chat_id})
+
+
+async def chat_provider_subchats_list(request: Request) -> JSONResponse:
+    """List all provider sub-chats for a parent chat."""
+    pcm = request.app.state.project_chat_manager
+    manager = request.app.state.provider_subchat_manager
+    chat_id = request.path_params["chat_id"]
+    chat = pcm._chats.get(chat_id)
+    if chat is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    records = manager.list_records(chat_id)
+    return JSONResponse([r.to_dict() for r in records])
+
+
+async def chat_provider_subchats_create(request: Request) -> JSONResponse:
+    """Create and optionally start a provider sub-chat."""
+    pcm = request.app.state.project_chat_manager
+    manager = request.app.state.provider_subchat_manager
+    chat_id = request.path_params["chat_id"]
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    parent_turn_index = body.get("parent_turn_index")
+    if not isinstance(parent_turn_index, int) or parent_turn_index < 0:
+        return JSONResponse({"error": "parent_turn_index must be a non-negative integer"}, status_code=400)
+
+    owner_data = body.get("owner")
+    participant_data = body.get("participant")
+    if not isinstance(owner_data, dict) or not isinstance(participant_data, dict):
+        return JSONResponse({"error": "owner and participant must be objects"}, status_code=400)
+
+    from ciao.provider_subchats import ProviderRoute
+    owner = ProviderRoute.from_dict(owner_data)
+    participant = ProviderRoute.from_dict(participant_data)
+
+    task_prompt = body.get("task_prompt", "")
+    user_authorized = bool(body.get("user_authorized", False))
+
+    try:
+        record = manager.create_subchat(
+            parent_chat_id=chat_id,
+            parent_turn_index=parent_turn_index,
+            owner=owner,
+            participant=participant,
+        )
+        if task_prompt:
+            res = await manager.run_consultation_turn(record.subchat_id, task_prompt, user_authorized=user_authorized)
+            return JSONResponse({
+                "record": record.to_dict(),
+                "result": res,
+            })
+    except KeyError:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    return JSONResponse({"record": record.to_dict()})
+
+
+async def provider_subchat_events(request: Request) -> JSONResponse:
+    """Read transcript events for a provider sub-chat."""
+    manager = request.app.state.provider_subchat_manager
+    subchat_id = request.path_params["subchat_id"]
+    record = manager.get_record(subchat_id)
+    if record is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    events = manager.get_events(subchat_id)
+    return JSONResponse(events)
+
+
+async def provider_subchat_message(request: Request) -> JSONResponse:
+    """Send a prompt (owner message) to the sub-chat."""
+    manager = request.app.state.provider_subchat_manager
+    subchat_id = request.path_params["subchat_id"]
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    message = body.get("message")
+    if not message:
+        return JSONResponse({"error": "message is required"}, status_code=400)
+    user_authorized = bool(body.get("user_authorized", False))
+    try:
+        res = await manager.run_consultation_turn(subchat_id, message, user_authorized=user_authorized)
+        return JSONResponse(res)
+    except KeyError:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+async def provider_subchat_close(request: Request) -> JSONResponse:
+    """Close a provider sub-chat, setting status to completed."""
+    manager = request.app.state.provider_subchat_manager
+    subchat_id = request.path_params["subchat_id"]
+    try:
+        manager.close_subchat(subchat_id)
+        record = manager.get_record(subchat_id)
+        if record is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse(record.to_dict())
+    except KeyError:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+
+async def provider_subchat_cancel(request: Request) -> JSONResponse:
+    """Cancel active provider sub-chat work."""
+    manager = request.app.state.provider_subchat_manager
+    subchat_id = request.path_params["subchat_id"]
+    try:
+        await manager.cancel_subchat(subchat_id)
+        record = manager.get_record(subchat_id)
+        if record is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse(record.to_dict())
+    except KeyError:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+
+async def provider_subchat_extend(request: Request) -> JSONResponse:
+    """Extend provider sub-chat limits."""
+    manager = request.app.state.provider_subchat_manager
+    subchat_id = request.path_params["subchat_id"]
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    user_authorized = bool(body.get("user_authorized", False))
+    try:
+        manager.extend_subchat(subchat_id, user_authorized=user_authorized)
+        record = manager.get_record(subchat_id)
+        if record is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse(record.to_dict())
+    except KeyError:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def provider_subchat_permission_response(request: Request) -> JSONResponse:
+    """Resolve a pending permission request in the sub-chat."""
+    manager = request.app.state.provider_subchat_manager
+    subchat_id = request.path_params["subchat_id"]
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    request_id = body.get("request_id")
+    approved = body.get("approved")
+    if not request_id or approved is None:
+        return JSONResponse({"error": "request_id and approved are required"}, status_code=400)
+    reason = body.get("reason", "")
+
+    accepted = manager.respond_permission(subchat_id, request_id=request_id, approved=approved, reason=reason)
+    if not accepted:
+        return JSONResponse({"error": "stale response or not found"}, status_code=409)
+    return JSONResponse({"ok": True})
+
+
+async def provider_subchat_question_response(request: Request) -> JSONResponse:
+    """Resolve a pending structured question in the sub-chat."""
+    manager = request.app.state.provider_subchat_manager
+    subchat_id = request.path_params["subchat_id"]
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    request_id = body.get("request_id")
+    answers = body.get("answers")
+    if not request_id or not isinstance(answers, dict):
+        return JSONResponse({"error": "request_id and answers (dict) are required"}, status_code=400)
+
+    accepted = manager.respond_question(subchat_id, request_id=request_id, answers=answers)
+    if not accepted:
+        return JSONResponse({"error": "stale response or not found"}, status_code=409)
+    return JSONResponse({"ok": True})
 
 
 async def chat_mark_read(request: Request) -> JSONResponse:

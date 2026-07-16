@@ -46,6 +46,8 @@ When your message mentions a name that appears in the vault index, the agent get
 - Projects group related chats and inject durable notes and context into every turn.
 - Comment on any passage of a reply — select text, attach a note, and it rides along with your next prompt; queue follow-ups while the agent is still working.
 - Per-chat model picker with provider thinking levels on top of per-workspace defaults.
+- Fork conversation: create a new independent chat in the same project starting from any completed agent answer, preserving history.
+- Provider consultations: spawn and communicate with a second provider route (the participant) as a read-only sub-chat attached to the originating turn.
 
 **Voice — dictation and read-aloud**
 
@@ -54,7 +56,7 @@ When your message mentions a name that appears in the vault index, the agent get
 
 **Files and documents**
 
-- Agent file touches surface as inline cards in the thread; click one for a viewer with history, diff, and restore.
+- Completed turns surface touched files as clickable `Outputs` chips below the final reply. Expand `Activity` to inspect the chronological notes, tool calls, and file cards; click a file for history, diff, and restore.
 - Pin a document beside the chat and add line-level comments on the preview (attached to your next message, like chat comments).
 - Rich previews: images inline, PDFs in a built-in viewer, PowerPoint (`.pptx`) converted to PDF for display (requires LibreOffice on the machine running Ciaobot).
 - Create, edit, and restore vault files from the UI, with snapshots behind every agent edit.

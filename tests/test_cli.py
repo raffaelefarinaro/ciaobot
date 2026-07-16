@@ -827,3 +827,57 @@ def test_create_chat_command_uses_active_workspace_without_name_clamp(
     assert ("GET", "http://test/api/projects?workspace=client", None) in calls
     assert all("workspace=personal" not in url for _, url, _ in calls)
     assert "Workspace: client" in capsys.readouterr().out
+
+
+def test_cli_provider_chat_commands_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = []
+    monkeypatch.setattr(cli, "_provider_chat_command", lambda args: called.append(args) or 0)
+
+    # 1. start
+    assert cli.main([
+        "provider-chat", "start",
+        "--chat-id", "chat-123",
+        "--provider", "codex",
+        "--model", "gpt-4",
+        "--message", "Analyze this",
+    ]) == 0
+    assert called[-1].subcommand == "start"
+    assert called[-1].chat_id == "chat-123"
+    assert called[-1].provider == "codex"
+    assert called[-1].model == "gpt-4"
+    assert called[-1].message == "Analyze this"
+
+    # 2. send
+    assert cli.main([
+        "provider-chat", "send",
+        "--subchat-id", "sub-123",
+        "--message", "Next instruction",
+    ]) == 0
+    assert called[-1].subcommand == "send"
+    assert called[-1].subchat_id == "sub-123"
+    assert called[-1].message == "Next instruction"
+
+    # 3. close
+    assert cli.main([
+        "provider-chat", "close",
+        "--subchat-id", "sub-123",
+    ]) == 0
+    assert called[-1].subcommand == "close"
+    assert called[-1].subchat_id == "sub-123"
+
+    # 4. cancel
+    assert cli.main([
+        "provider-chat", "cancel",
+        "--subchat-id", "sub-123",
+    ]) == 0
+    assert called[-1].subcommand == "cancel"
+    assert called[-1].subchat_id == "sub-123"
+
+    # 5. extend
+    assert cli.main([
+        "provider-chat", "extend",
+        "--subchat-id", "sub-123",
+    ]) == 0
+    assert called[-1].subcommand == "extend"
+    assert called[-1].subchat_id == "sub-123"
+

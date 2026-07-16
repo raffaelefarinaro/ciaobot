@@ -194,6 +194,7 @@
               <div v-else class="trace-text" v-html="renderMarkdown(step.content)"></div>
             </template>
             <SubagentPanel v-if="item.subs?.length" :subagents="item.subs" />
+            <ProviderSubchatPanel v-if="item.subchats?.length" :subchats="item.subchats" />
             <div v-if="item.outputs?.length" class="trace-files">
               <button
                 v-for="(f, fi) in item.outputs"
@@ -800,8 +801,9 @@ import VoiceRecorder from './VoiceRecorder.vue'
 // them, parsed server-side from the session JSONL), so each panel anchors
 // under the turn that spawned its agents.
 import SubagentPanel from './SubagentPanel.vue'
+import ProviderSubchatPanel from './ProviderSubchatPanel.vue'
 import { api } from '../lib/api'
-import type { Loop, ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
+import type { Loop, ModelsResponse, ChatMessage, SubagentTranscript, ProviderSubchatRecord } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
@@ -814,9 +816,9 @@ import { buildForkSnapshot } from '../lib/chatFork'
 
 type RenderItem =
   | { kind: 'user'; msg: ChatMessage }
-  | { kind: 'assistant'; msg: ChatMessage; outputs?: TraceOutput[] }
+  | { kind: 'assistant'; msg: ChatMessage; outputs?: TraceOutput[]; subchats?: ProviderSubchatRecord[] }
   | { kind: 'system'; msg: ChatMessage }
-  | { kind: 'trace'; steps: ChatMessage[]; subs?: SubagentTranscript[]; outputs?: TraceOutput[] }
+  | { kind: 'trace'; steps: ChatMessage[]; subs?: SubagentTranscript[]; outputs?: TraceOutput[]; subchats?: ProviderSubchatRecord[] }
   | { kind: 'subagents'; subs: SubagentTranscript[] }
 
 type ChatComment = {
@@ -2125,6 +2127,13 @@ const renderData = computed<{
       unanchoredSubs.push(sub)
     }
   }
+  const subchatsByTurn = new Map<number, ProviderSubchatRecord[]>()
+  for (const sc of store.providerSubchats[store.activeChatId || ''] || []) {
+    const list = subchatsByTurn.get(sc.parent_turn_index) || []
+    list.push(sc)
+    subchatsByTurn.set(sc.parent_turn_index, list)
+  }
+
   let currentTurnIndex: number | null = null
 
   const takeForegroundSubs = (turnIndex: number | null): SubagentTranscript[] => {
@@ -2198,6 +2207,7 @@ const renderData = computed<{
     // text. In that case the answer text is the real reply and must render as
     // a normal assistant bubble; the trailing tools just join the trace.
     const trailingHasThinking = trailing.some(m => m.tool_name === '_thinking')
+    const turnSubchats = currentTurnIndex !== null ? subchatsByTurn.get(currentTurnIndex) || [] : []
     if (trailingHasThinking && finalMsg) {
       const traceSubs = takeForegroundSubs(currentTurnIndex)
       items.push({
@@ -2205,6 +2215,7 @@ const renderData = computed<{
         steps: buffer.slice(),
         ...(traceSubs.length ? { subs: traceSubs } : {}),
         ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
+        ...(turnSubchats.length ? { subchats: turnSubchats } : {}),
       })
       buffer = []
       return
@@ -2226,15 +2237,22 @@ const renderData = computed<{
         steps: intermediate,
         ...(traceSubs.length ? { subs: traceSubs } : {}),
         ...(!finalMsg && turnOutputs.length ? { outputs: turnOutputs } : {}),
+        ...(turnSubchats.length ? { subchats: turnSubchats } : {}),
       })
-    } else if (traceSubs.length) {
-      items.push({ kind: 'trace', steps: [], subs: traceSubs })
+    } else if (traceSubs.length || turnSubchats.length) {
+      items.push({
+        kind: 'trace',
+        steps: [],
+        ...(traceSubs.length ? { subs: traceSubs } : {}),
+        ...(turnSubchats.length ? { subchats: turnSubchats } : {}),
+      })
     }
     if (finalMsg) {
       items.push({
         kind: 'assistant',
         msg: finalMsg,
         ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
+        ...(turnSubchats.length ? { subchats: turnSubchats } : {}),
       })
     }
     if (trailing.length) {

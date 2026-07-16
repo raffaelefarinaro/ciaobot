@@ -78,6 +78,11 @@ export interface ChatInfo {
   // Cleared by the server on the next user send.
   pending_question?: string
   retry?: ChatRetryInfo | null
+  forked_from_chat_id?: string
+  forked_from_turn_index?: number | null
+  fork_root_chat_id?: string
+  fork_index?: number
+  fork_base_title?: string
 }
 
 export interface ChatRetryInfo {
@@ -134,6 +139,38 @@ export interface SubagentTranscript {
   is_async?: boolean
   status?: 'running' | 'completed' | 'failed' | ''
   turn_index?: number
+}
+
+export interface ProviderRoute {
+  provider: string
+  model: string
+  model_bucket: string
+  label: string
+}
+
+export interface ProviderSubchatRecord {
+  subchat_id: string
+  parent_chat_id: string
+  parent_turn_index: number
+  workspace: string
+  project_id: string
+  owner: ProviderRoute
+  participant: ProviderRoute
+  participant_session_id: string
+  status: 'created' | 'running' | 'waiting_owner' | 'completed' | 'cancelled' | 'failed' | 'interrupted'
+  created_at: string
+  started_at: string
+  updated_at: string
+  completed_at: string
+  active_seconds: number
+  message_count: number
+  input_tokens: number
+  output_tokens: number
+  quota_limit_hit: boolean
+  last_error: string
+  limit_extended_at: string
+  limit_messages_extended: number
+  limit_seconds_extended: number
 }
 
 // ── WebSocket events ────────────────────────────────────────────────────
@@ -193,6 +230,10 @@ export type EventsWsMessage =
   | { type: 'project_updated'; project: ProjectInfo }
   | { type: 'project_deleted'; project_id: string }
   | { type: 'open_chat'; chat_id: string }
+  | { type: 'provider_subchat_created'; subchat_id: string; parent_chat_id: string; record: ProviderSubchatRecord }
+  | { type: 'provider_subchat_status'; subchat_id: string; parent_chat_id: string; status: string; record: ProviderSubchatRecord }
+  | { type: 'provider_subchat_event'; subchat_id: string; parent_chat_id: string; event: any }
+  | { type: 'provider_subchat_deleted'; subchat_id: string; parent_chat_id: string }
 
 export interface InAppToast {
   id: number
