@@ -23,11 +23,18 @@ When unsure between patch and minor, ask: "could a user notice something new or 
 
 Do these on `develop` (or a short prep branch merged into develop) **before** running prepare-release:
 
-1. **Dependencies.** The release tool already checks PyPI/npm and prints available updates as `[auto|manual] [safe|major]`; `auto`-flagged ones (e.g. the Claude Agent SDK) are bumped on `--apply`, the rest are only reported. Run a plan-only pass first (command below, no `--apply`) to see the list, then decide whether to adopt any `manual` updates in a separate commit before releasing. Don't blanket-upgrade majors as part of a release.
-2. **Docs.** Update anything the change touched: `README.md`, `docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`, `PWA_API.md` (any new/changed state-changing route **must** be documented here).
-3. **The capabilities skill.** For any new user-facing feature, update `ciao/stock/skills/ciao-capabilities/SKILL.md` — add the feature to the right section and add trigger keywords to its frontmatter `description`. Skim the CHANGELOG since the last release tag to catch features that shipped without a catalog entry.
-4. **This skill.** If the release flow, flags, or traps changed, update `ciao/stock/skills/ciao-release/SKILL.md` too.
-5. **CHANGELOG sanity.** The tool generates the entry from commits since the last tag. If commits landed on the release branch after `release: prepare`, append them to the entry before merging.
+1. **Survey open PRs and issues.** Before cutting, list what's outstanding — `gh pr list --state open` and `gh issue list --state open` on `raffaelefarinaro/ciaobot`. Surface them to the user and **ask** whether any open PRs should land in this release (merge into `develop` first) and whether any reported issues should be fixed before cutting. Never auto-merge PRs or auto-close issues — the user decides what's in scope for the release. Once decisions are made, merge the chosen PRs / land the fixes on `develop` before continuing.
+2. **Fresh review of the release surface.** Take a clean look at everything shipping since the last release tag — `git log --oneline <last-tag>..develop` and `git diff <last-tag>..develop`. Read it as a reviewer, not the author. Then run the quality/review skills on that diff **if they're available in this workspace** and act on their findings before cutting:
+   - `simplify` — reuse/simplification/efficiency cleanups (quality only).
+   - `code-review` — correctness/bug hunt; pass a higher effort for a release.
+   A release is the right moment to pay down small messes, not defer them. If neither skill is installed, do the review by hand.
+3. **Dependencies.** The release tool already checks PyPI/npm and prints available updates as `[auto|manual] [safe|major]`; `auto`-flagged ones (e.g. the Claude Agent SDK) are bumped on `--apply`, the rest are only reported. Run a plan-only pass first (command below, no `--apply`) to see the list, then decide whether to adopt any `manual` updates in a separate commit before releasing. Don't blanket-upgrade majors as part of a release.
+4. **Docs.** Update anything the change touched: `README.md`, `docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`, `PWA_API.md` (any new/changed state-changing route **must** be documented here).
+5. **The capabilities skill.** For any new user-facing feature, update `ciao/stock/skills/ciao-capabilities/SKILL.md` — add the feature to the right section and add trigger keywords to its frontmatter `description`. Skim the CHANGELOG since the last release tag to catch features that shipped without a catalog entry.
+6. **This skill.** If the release flow, flags, or traps changed, update `ciao/stock/skills/ciao-release/SKILL.md` too.
+7. **CHANGELOG sanity.** The tool generates the entry from commits since the last tag. If commits landed on the release branch after `release: prepare`, append them to the entry before merging.
+
+Once the release PR is open, give its diff one more fresh read before merging — the `release: prepare` commit adds version/CHANGELOG/dependency changes that weren't in your pre-cut review.
 
 ## Environment prerequisites
 
