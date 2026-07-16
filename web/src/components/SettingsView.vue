@@ -841,6 +841,11 @@
 
                     <!-- State 3: Authenticated -->
                     <template v-else>
+                      <p v-if="profile.needs_relogin" class="gws-action-hint hint--warn">
+                        This login has expired or been revoked<span v-if="profile.token_error"> ({{ profile.token_error }})</span>.
+                        Re-authenticate: click <strong>Disconnect Account</strong> then <strong>Connect Google Account</strong>,
+                        or ask the assistant to re-login (it uses the server-managed re-login endpoint).
+                      </p>
                       <div class="gws-btn-group">
                         <button
                           class="btn-small btn-danger"
@@ -2219,12 +2224,14 @@ const gwsIntegrationError = ref('')
 type GwsProfile = GwsIntegrationSettings['profiles'][number]
 
 function gwsProfileStatus(profile: GwsProfile): string {
+  if (profile.configured && profile.needs_relogin) return 'Login expired'
   if (profile.configured) return 'Authenticated'
   if (profile.client_secret_present) return 'Ready to auth'
   return 'Needs OAuth client'
 }
 
 function gwsProfileBadgeClass(profile: GwsProfile): string {
+  if (profile.configured && profile.needs_relogin) return 'badge--error'
   if (profile.configured) return 'badge--success'
   if (profile.client_secret_present) return 'badge--warn'
   return 'badge--error'

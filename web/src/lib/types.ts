@@ -234,6 +234,7 @@ export type EventsWsMessage =
   | { type: 'provider_subchat_status'; subchat_id: string; parent_chat_id: string; status: string; record: ProviderSubchatRecord }
   | { type: 'provider_subchat_event'; subchat_id: string; parent_chat_id: string; event: any }
   | { type: 'provider_subchat_deleted'; subchat_id: string; parent_chat_id: string }
+  | { type: 'gws_health'; profile: string; token_valid: boolean; token_error: string; title: string; body: string }
 
 export interface InAppToast {
   id: number
@@ -471,6 +472,11 @@ export interface GwsIntegrationProfile {
   wrapper_available: boolean
   helper_available: boolean
   email: string
+  // Cached token-health snapshot from the periodic monitor (issue #145).
+  // `token_valid` is null when no health check has run yet for this profile.
+  token_valid: boolean | null
+  token_error: string
+  needs_relogin: boolean
 }
 
 export interface GwsIntegrationSettings {

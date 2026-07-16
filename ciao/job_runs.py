@@ -104,6 +104,8 @@ REGISTRY: tuple[JobSpec, ...] = (
             "Updates installed agent skills."),
     JobSpec("branch_backup", "Device-branch backup", "system",
             "Pushes the per-device working branch for backup."),
+    JobSpec("gws_health", "Google Workspace token health", "system",
+            "Pings each configured Google profile's token and alerts on revocation."),
 )
 
 # StartupTracker phase name -> registry job id (phases not listed are skipped,

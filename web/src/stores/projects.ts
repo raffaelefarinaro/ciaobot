@@ -1993,6 +1993,15 @@ export const useProjectStore = defineStore('projects', () => {
         }
         break
       }
+      case 'gws_health': {
+        // A Google Workspace login went dead (revoked/expired token). The
+        // server debounces to one event per breakage; surface it as a
+        // persistent error toast whose "Fix" seeds a chat that can drive the
+        // server-managed re-login. The PWA push/menu-bar banner is the other
+        // channel (see push.py); this is the live in-app signal.
+        pushErrorToast(msg.title || 'Google Workspace login needs attention', msg.body || '')
+        break
+      }
     }
   }
 
