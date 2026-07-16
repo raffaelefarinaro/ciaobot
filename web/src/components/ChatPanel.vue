@@ -213,7 +213,7 @@
         </div>
         <!-- User message -->
         <div v-else-if="item.kind === 'user'" class="message-wrap user" :class="{ 'actions-tapped': tappedMessageKey === `user-${i}` }">
-          <div class="message-row" @mousemove="onMessageRowMove" @click="toggleMessageActions(`user-${i}`, $event)">
+          <div class="message-row" @click="toggleMessageActions(`user-${i}`, $event)">
             <div class="message user">
               <div class="message-content">
                 <div v-if="item.msg.images?.length" class="message-images">
@@ -263,7 +263,7 @@
         </div>
         <!-- Final assistant message -->
         <div v-else-if="item.kind === 'assistant'" class="message-wrap assistant" :class="{ 'actions-tapped': tappedMessageKey === `assistant-${i}` }">
-          <div class="message-row" @mousemove="onMessageRowMove" @click="toggleMessageActions(`assistant-${i}`, $event)">
+          <div class="message-row" @click="toggleMessageActions(`assistant-${i}`, $event)">
             <div class="message assistant" :class="{ error: item.msg.is_error }">
               <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
               <div v-if="item.outputs?.length" class="answer-outputs" role="group" aria-label="Outputs">
@@ -937,19 +937,6 @@ const forkLoadingKey = ref<string | null>(null)
 // On touch devices there is no hover, so a tap on the bubble reveals the
 // per-message action icons. Holds the key of the message whose actions are open.
 const tappedMessageKey = ref<string | null>(null)
-
-// Keep the action toolbar aligned with the pointer's vertical position within
-// the row. Written straight to a CSS variable to avoid per-message reactivity.
-function onMessageRowMove(e: MouseEvent): void {
-  const row = e.currentTarget as HTMLElement
-  const actions = row.querySelector('.message-actions') as HTMLElement | null
-  if (!actions) return
-  const rect = row.getBoundingClientRect()
-  const h = actions.offsetHeight
-  const max = Math.max(0, rect.height - h)
-  const y = Math.min(Math.max(e.clientY - rect.top - h / 2, 0), max)
-  row.style.setProperty('--actions-y', `${y}px`)
-}
 
 // Touch: tap a message to toggle its action icons. Ignored on hover-capable
 // devices (they use hover) and when the tap targets a link/button or a text
@@ -3058,8 +3045,8 @@ function insertImageRef(n: number) {
 .message-wrap {
   display: flex;
   flex-direction: column;
-  width: 92%;
-  max-width: 92%;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
 }
 
@@ -3069,8 +3056,6 @@ function insertImageRef(n: number) {
 
 .message-wrap.assistant {
   align-self: flex-start;
-  width: 98%;
-  max-width: 98%;
 }
 
 .message-row {
@@ -3101,25 +3086,52 @@ function insertImageRef(n: number) {
 .message.user {
   background: var(--bg3);
   color: var(--fg);
+  margin-left: 48px;
 }
 
 .message.assistant {
   background: var(--bg2);
   border: 1px solid var(--border);
   line-height: 1.6;
+  margin-right: 48px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .message.user {
+    margin-left: 32px;
+  }
+  .message.assistant {
+    margin-right: 32px;
+  }
 }
 
 .message-actions {
   display: flex;
+  flex-direction: column;
   flex-shrink: 0;
-  align-self: flex-start;
-  gap: 2px;
+  gap: 4px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s;
-  /* Follow the pointer's vertical position within the row; --actions-y is
-     updated on mousemove and clamped to the row height. Defaults to the top. */
-  transform: translateY(var(--actions-y, 0px));
+  position: absolute;
+  bottom: 0;
+}
+
+.message-wrap.user .message-actions {
+  left: 2px;
+}
+
+.message-wrap.assistant .message-actions {
+  right: 2px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .message-wrap.user .message-actions {
+    left: 4px;
+  }
+  .message-wrap.assistant .message-actions {
+    right: 4px;
+  }
 }
 
 .message-wrap:focus-within .message-actions,
