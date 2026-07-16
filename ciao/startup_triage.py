@@ -48,13 +48,22 @@ Steps:
 1. Group the log lines and failed job runs into distinct issues.
 2. Diagnose each one from local evidence first (`.runtime/server_errors.log`, \
 `.runtime/job_runs.jsonl`, `.runtime/ciao.stderr.log`, workspace config) — do not speculate.
-3. Fix what is fixable locally: workspace state, configuration, stuck runtime files, permissions.
-4. When the root cause is a bug in the Ciaobot app itself and the `gh` CLI is \
-authenticated, first search for an existing report \
+3. Check if the errors are typical environment or installation issues:
+   - Python version mismatch (Ciaobot requires Python 3.12+).
+   - Port conflicts (port 8543 already in use).
+   - macOS system library issues (e.g. `libexpat` symbol not found).
+   - SSL certificate failures (`SSLCertVerificationError` due to missing CA bundle).
+   - File permission errors or locked SQLite databases in the workspace.
+   If the error is an environment issue, fix it locally (or explain to the user how to fix it) and do NOT file a bug report.
+4. When the root cause is a bug in the Ciaobot app itself, find the installed version (by reading `ciao/__init__.py` or running `ciao --version`) and gather basic system details (OS, Python version). If the `gh` CLI is authenticated, search for an existing report \
 (`gh issue list --repo raffaelefarinaro/ciaobot --search "..."`), then file one if none exists \
 (`gh issue create --repo raffaelefarinaro/ciaobot --title "[Agent] ..." --body "..."`) \
-with the error excerpt, what triggered it, and the installed version. If `gh` is \
-unavailable, end with a short paste-ready issue report instead.
+with the system info, error excerpt, version, and reproduction steps. If `gh` is \
+unavailable/unauthenticated, file the report automatically and anonymously by running \
+`ciao report-bug --title "..." --details "<traceback + what triggered it>"` \
+(the `--system` field is auto-detected). If that command also fails, end with:
+   - A clickable pre-filled GitHub issue URL (https://github.com/raffaelefarinaro/ciaobot/issues/new?title=...&body=...) pre-filling the title and summary (properly URL-encoded).
+   - A separate, paste-ready detailed traceback and system info block for them to copy into the issue description.
 5. Close with a short summary: what was found, what was fixed, what was escalated.
 
 The error log is cleared automatically after this triage completes cleanly.\

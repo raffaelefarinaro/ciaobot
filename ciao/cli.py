@@ -1492,6 +1492,28 @@ def _resolve_project(
     return projects[0]["project_id"]
 
 
+def _report_bug_command(args: argparse.Namespace) -> int:
+    """Submit an anonymous bug report to the central Ciaobot inbox (Google Form).
+
+    Used by startup triage when ``gh`` is unavailable/unauthenticated so a real
+    app bug still reaches the maintainer without requiring the user to open
+    GitHub by hand.
+    """
+    from ciao.bug_report import gather_system_info, submit_bug_report
+
+    system = args.system or gather_system_info()
+    if submit_bug_report(args.title, args.details, system):
+        print("Bug report submitted anonymously. Thank you!")
+        return 0
+    print(
+        "Could not submit the bug report automatically. Paste this into a new "
+        "issue at https://github.com/raffaelefarinaro/ciaobot/issues :\n\n"
+        f"Title: {args.title}\n\n{args.details}\n\n---\nSystem: {system}",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def _create_chat_command(args: argparse.Namespace) -> int:
     workspace_root = Path(args.workspace_root).expanduser().resolve()
     _load_env_file(workspace_root / ".env")
@@ -2007,6 +2029,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Ciaobot server URL. Defaults to PWA_HOST/PWA_PORT.",
     )
     chat_parser.set_defaults(func=_create_chat_command)
+
+    report_bug_parser = subparsers.add_parser(
+        "report-bug",
+        help="Submit an anonymous bug report to the central Ciaobot inbox.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    report_bug_parser.add_argument("--title", required=True, help="Short bug title.")
+    report_bug_parser.add_argument(
+        "--details",
+        required=True,
+        help="Traceback, logs, and what triggered the bug.",
+    )
+    report_bug_parser.add_argument(
+        "--system",
+        help="System/version info. Auto-detected (OS, Python, Ciaobot version) when omitted.",
+    )
+    report_bug_parser.set_defaults(func=_report_bug_command)
 
     cleanup_parser = subparsers.add_parser(
         "cleanup-sdk-blobs",
