@@ -15,7 +15,6 @@ export function buildForkSnapshot(
   const selectedIndex = messages.indexOf(selected)
   if (selectedIndex < 0) return null
   const snapshot = messages.slice(0, selectedIndex + 1)
-  if (snapshot.at(-1) !== selected) return null
   const userTurns = snapshot.filter(message => message.role === 'user').length
   if (userTurns < 1) return null
   return {
