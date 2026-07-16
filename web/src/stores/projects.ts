@@ -177,6 +177,37 @@ export const useProjectStore = defineStore('projects', () => {
   }
   const activeQuestions = ref<Record<string, ActiveQuestion[]>>({})
 
+  // Signatures of AskUserQuestion pickers the user has already answered or
+  // dismissed this session, keyed by chat. Clearing `activeQuestions` on send
+  // is only client-side and optimistic; the server clears the persisted
+  // `pending_question` a beat later (native accept, or the next turn). Any
+  // `/api/chats` poll or WS reconnect in that window (`reconcileChatList`
+  // overwrites `chats.value` with the server snapshot, then `loadMessages` runs
+  // `rebuildPendingQuestion`) would otherwise resurrect the answered picker —
+  // and because `rebuildPendingQuestion` bails when a picker is already live, a
+  // later clean snapshot never removes it, so the card sticks. Remembering the
+  // resolved signature lets `rebuildPendingQuestion` refuse the stale rebuild.
+  const resolvedQuestions = ref<Record<string, Set<string>>>({})
+
+  // Stable identity for a picker, computable identically from the live
+  // `activeQuestions` entry (at resolve time) and from a rebuilt `pending_question`
+  // (at rebuild time). Native providers (Codex) carry a `requestId`; Claude's
+  // picker has none, so fall back to the question content.
+  function questionsSignature(qs: ActiveQuestion[] | undefined): string {
+    if (!qs || !qs.length) return ''
+    const rid = qs[0]?.requestId
+    if (rid) return `rid:${rid}`
+    return `q:${qs.map(q => `${q.id}${q.question}`).join('')}`
+  }
+
+  // Record the currently-active picker for `chatId` as resolved. Reads the live
+  // `activeQuestions` entry, so it must run before that entry is deleted.
+  function markResolvedQuestion(chatId: string) {
+    const sig = questionsSignature(activeQuestions.value[chatId])
+    if (!sig) return
+    ;(resolvedQuestions.value[chatId] ||= new Set<string>()).add(sig)
+  }
+
   // Parse the AskUserQuestion tool_input JSON (`{"questions": [...]}`) into the
   // picker's shape. Shared by the live `tool_use` handler and the reload-time
   // rebuild from a chat's persisted `pending_question`. Returns [] on anything
@@ -220,7 +251,11 @@ export const useProjectStore = defineStore('projects', () => {
     if (activeQuestions.value[chatId]?.length) return
     const chat = chats.value.find(c => c.chat_id === chatId)
     const qs = parseQuestions(chat?.pending_question)
-    if (qs.length) activeQuestions.value[chatId] = qs
+    if (!qs.length) return
+    // Don't resurrect a picker the user already answered/dismissed from a
+    // server snapshot that hasn't caught up yet.
+    if (resolvedQuestions.value[chatId]?.has(questionsSignature(qs))) return
+    activeQuestions.value[chatId] = qs
   }
   // Per-chat map from a Task/Agent dispatch's tool_use_id to a short subagent
   // label like "[Explore]". Populated when we see the parent's Task tool_use,
@@ -872,6 +907,9 @@ export const useProjectStore = defineStore('projects', () => {
     const validIds = new Set(nextChats.map(ch => ch.chat_id))
     for (const key of Object.keys(messages.value)) {
       if (!validIds.has(key)) delete messages.value[key]
+    }
+    for (const key of Object.keys(resolvedQuestions.value)) {
+      if (!validIds.has(key)) delete resolvedQuestions.value[key]
     }
     persistMessages()
 
@@ -2024,6 +2062,7 @@ export const useProjectStore = defineStore('projects', () => {
     // pending_question too, so a loadMessages racing this send (WS reconnect,
     // reconciliation) doesn't rebuild the picker from a now-stale value.
     if (activeQuestions.value[chatId]) {
+      markResolvedQuestion(chatId)
       delete activeQuestions.value[chatId]
     }
     const answeredChat = chats.value.find(c => c.chat_id === chatId)
@@ -2181,6 +2220,7 @@ export const useProjectStore = defineStore('projects', () => {
     requestId: string,
     answers: Record<string, string[]>,
   ) {
+    markResolvedQuestion(chatId)
     delete activeQuestions.value[chatId]
     const chat = chats.value.find(c => c.chat_id === chatId)
     if (chat?.pending_question) chat.pending_question = ''
@@ -2675,6 +2715,10 @@ export const useProjectStore = defineStore('projects', () => {
         if (event.tool_name === 'AskUserQuestion' && event.tool_input) {
           const qs = parseQuestions(event.tool_input, event.request_id || '')
           if (qs.length) {
+            // A fresh live question supersedes any earlier resolved-picker
+            // memory for this chat (keeps the set from growing and avoids a
+            // reused native request id being wrongly suppressed).
+            delete resolvedQuestions.value[chatId]
             activeQuestions.value[chatId] = qs
             // Nudge the user when the tab is backgrounded so they don't
             // miss a question that the model needs answered.
@@ -3002,7 +3046,7 @@ export const useProjectStore = defineStore('projects', () => {
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, switchWorkspace, openChatFromDeepLink,
     syncLatest,
-    sendMessage, stopChat, respondPermission, respondQuestion, transcribeVoice, speakMessage, uploadImages, uploadImageRefs, removePendingImage, clearPendingImages,
+    sendMessage, stopChat, respondPermission, respondQuestion, markResolvedQuestion, transcribeVoice, speakMessage, uploadImages, uploadImageRefs, removePendingImage, clearPendingImages,
     addPendingComment, removePendingComment, clearPendingComments,
     addPendingChatComment, removePendingChatComment, clearPendingChatComments, updatePendingChatComment,
     addPendingChatCommentImage, removePendingChatCommentImage,
