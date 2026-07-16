@@ -380,6 +380,31 @@ async def test_manual_schedule_runs_via_dispatch_now(store: ScheduleStore):
     assert dispatched == [entry.schedule_id]
 
 
+async def test_schedule_last_run_chat_id_is_recorded(store: ScheduleStore) -> None:
+    entry = store.create(
+        daily_time_utc="",
+        prompt="record chat id",
+        model="sonnet",
+        mode="auto",
+        chat_id=0,
+        frequency="manual",
+    )
+    def prepare_chat(entry, prompt, model, mode, provider):
+        return "chat-last-run-123"
+
+    mgr = ScheduleManager(
+        store=store,
+        dispatch_to_web=lambda *a, **kw: asyncio.sleep(0.01),
+        prepare_chat=prepare_chat,
+    )
+    result = await mgr.dispatch_now(entry.schedule_id)
+    assert result["chat_id"] == "chat-last-run-123"
+    
+    reloaded = store.get(entry.schedule_id)
+    assert reloaded is not None
+    assert reloaded.last_run_chat_id == "chat-last-run-123"
+
+
 async def test_dispatch_now_interactive_run_returns_immediately(store: ScheduleStore) -> None:
     entry = store.create(
         daily_time_utc="",

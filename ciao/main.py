@@ -383,10 +383,14 @@ async def _run_server_locked(config: CiaoConfig) -> int:
 
     # Schedule manager with web-only dispatch
     async def _dispatch_to_web(entry, model, mode, provider, *, target_chat_id=None):
-        return await pcm.dispatch_schedule(
+        result = await pcm.dispatch_schedule(
             entry, entry.prompt, model, mode, provider,
             target_chat_id=target_chat_id,
         )
+        if result and "chat_id" in result:
+            entry.last_run_chat_id = result["chat_id"]
+            schedule_store.replace(entry)
+        return result
 
     def _prepare_chat(entry, prompt, model, mode, provider):
         return pcm.prepare_schedule_chat(entry, prompt, model, mode, provider)

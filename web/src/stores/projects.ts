@@ -1475,12 +1475,27 @@ export const useProjectStore = defineStore('projects', () => {
     connectWs(chatId)
   }
 
-  async function switchWorkspace(ws: WorkspaceName) {
+  async function switchWorkspace(ws: WorkspaceName, options?: { transition?: boolean }) {
+    const transition = options?.transition !== false
     if (activeWorkspace.value === ws) return
     if (activeChatId.value) disconnectWs(activeChatId.value)
     activeWorkspace.value = ws
     persistState()
-    await transitionToFirstChat()
+    if (transition) {
+      await transitionToFirstChat()
+    } else {
+      let nextChatId: string | null = null
+      const wsProjects = workspaceProjects.value
+      for (const p of wsProjects) {
+        const pChats = projectChats(p.project_id)
+        if (pChats.length > 0) {
+          nextChatId = pChats[0].chat_id
+          break
+        }
+      }
+      activeChatId.value = nextChatId
+      persistState()
+    }
   }
 
   // ── WebSocket ───────────────────────────────────────────────────────
