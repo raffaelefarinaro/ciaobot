@@ -329,6 +329,7 @@
               </button>
             </div>
           </div>
+          <ProviderSubchatPanel v-if="item.subchats?.length" :subchats="item.subchats" />
           <p v-if="speakError?.key === `assistant-${i}`" class="speak-error">{{ speakError.message }}</p>
           <div v-if="item.msg.is_error" class="error-actions">
             <button
@@ -2231,20 +2232,24 @@ const renderData = computed<{
     }
 
     const traceSubs = takeForegroundSubs(currentTurnIndex)
+    // Consultations attach to the final answer when there is one, so they read
+    // as an attribute of the reply. Only when the turn produced no answer bubble
+    // (still in progress / interrupted) do they fall back to the activity trace.
+    const traceSubchats = finalMsg ? [] : turnSubchats
     if (intermediate.length) {
       items.push({
         kind: 'trace',
         steps: intermediate,
         ...(traceSubs.length ? { subs: traceSubs } : {}),
         ...(!finalMsg && turnOutputs.length ? { outputs: turnOutputs } : {}),
-        ...(turnSubchats.length ? { subchats: turnSubchats } : {}),
+        ...(traceSubchats.length ? { subchats: traceSubchats } : {}),
       })
-    } else if (traceSubs.length || turnSubchats.length) {
+    } else if (traceSubs.length || traceSubchats.length) {
       items.push({
         kind: 'trace',
         steps: [],
         ...(traceSubs.length ? { subs: traceSubs } : {}),
-        ...(turnSubchats.length ? { subchats: turnSubchats } : {}),
+        ...(traceSubchats.length ? { subchats: traceSubchats } : {}),
       })
     }
     if (finalMsg) {
