@@ -429,7 +429,7 @@ async def _generate_chat_title(
     provider: str = "claude",
 ) -> str | None:
     """Back-compat wrapper around :func:`_generate_chat_title_with_engine`."""
-    title, _engine = await _generate_chat_title_with_engine(
+    title, _engine, _detail = await _generate_chat_title_with_engine(
         user_text,
         assistant_text,
         model=model,
@@ -450,7 +450,7 @@ async def _generate_chat_title_with_engine(
     env: dict[str, str] | None = None,
     timeout_s: float = 15.0,
     provider: str = "claude",
-) -> tuple[str | None, str]:
+) -> tuple[str | None, str, str | None]:
     """Summarize the first user message into a short chat title.
 
     Prefers the local Apple Intelligence CLI (`apfel`) when available,
@@ -463,23 +463,25 @@ async def _generate_chat_title_with_engine(
     Falls back to a deterministic truncation when both paths fail so the
     sidebar never gets stuck on "New Chat".
 
-    Returns ``(title, engine)`` where engine names what actually produced
-    the title: ``"apfel"``, ``"<provider>:<model>"``, or ``"fallback"``
-    for the deterministic truncation (including reply-shaped model output
-    that _clean_title rejected).
+    Returns ``(title, engine, detail)`` where engine names what actually
+    produced the title: ``"apfel"``, ``"<provider>:<model>"``, or
+    ``"fallback"`` for the deterministic truncation (including reply-shaped
+    model output that _clean_title rejected). ``detail`` carries the
+    upstream error text when the engine failed outright (so ``job_runs``
+    can record the real cause instead of a generic string), else ``None``.
     """
     from ciao.providers.oneshot import run_oneshot
 
     user_snippet = (user_text or "").strip()[:1000]
     if not user_snippet:
-        return None, "fallback"
+        return None, "fallback", None
 
     # A bare "continue"/"ok"/"go on" as the first message gives the titler
     # nothing to summarize; asking a model to title it invites a
     # conversational reply that then sticks as the title. Skip straight to
     # the deterministic fallback (which just truncates the user text).
     if _is_contentless_prompt(user_snippet):
-        return _fallback_title(user_snippet), "fallback"
+        return _fallback_title(user_snippet), "fallback", None
 
     assistant_snippet = (assistant_text or "").strip()[:1000]
     if assistant_snippet:
@@ -516,7 +518,8 @@ async def _generate_chat_title_with_engine(
             if proc.returncode == 0:
                 text = stdout.decode().strip()
                 if text:
-                    return _titled(text, user_snippet, "apfel")
+                    title, engine = _titled(text, user_snippet, "apfel")
+                    return title, engine, None
             else:
                 logger.info(
                     "apfel title generation exited with %d: %s",
@@ -543,17 +546,23 @@ async def _generate_chat_title_with_engine(
             cwd=cwd,
         )
         if text:
-            return _titled(text, user_snippet, f"{provider}:{fallback_model}")
+            title, engine = _titled(text, user_snippet, f"{provider}:{fallback_model}")
+            return title, engine, None
     except Exception as exc:
+        # OneShotError carries a composed upstream detail (status / body /
+        # subtype); fall back to str(exc) for anything else. Surfacing it
+        # lets the titler / job_runs record the real cause instead of the
+        # opaque "One-shot query failed".
+        detail = (getattr(exc, "detail", None) or str(exc) or "").strip()
         logger.info(
             "Title generation via %s %s failed: %s",
             provider,
             fallback_model or "account default",
-            exc,
+            detail or exc,
         )
-        return _fallback_title(user_snippet), "fallback"
+        return _fallback_title(user_snippet), "fallback", (detail[:500] or None)
 
-    return _fallback_title(user_snippet), "fallback"
+    return _fallback_title(user_snippet), "fallback", None
 
 
 def _titled(raw: str, user_snippet: str, engine: str) -> tuple[str | None, str]:
@@ -5428,21 +5437,31 @@ class ProjectChatManager:
             # provider that needs an explicit dispatch hint here.
             if chat.provider == "codex" or codex_override:
                 title_kwargs["provider"] = "codex"
-            title, engine = await _generate_chat_title_with_engine(
+            title, engine, detail = await _generate_chat_title_with_engine(
                 user_text,
                 assistant_text,
                 **title_kwargs,
             )
             run.extra["engine"] = engine
+            if detail:
+                # Upstream failure text (status / body / subtype) — the
+                # "model vs. subscription vs. transient?" signal that was
+                # previously collapsed into a generic string.
+                run.extra["error_detail"] = detail
             if not title:
                 run.status = "error"
                 run.error = "title model returned no title (timeout/failure)"
                 return None
             if engine == "fallback":
                 # A title was set, but the selected engine did not produce
-                # it — surface the degradation instead of reporting ok.
+                # it — surface the degradation (with the upstream detail when
+                # available) instead of reporting ok.
                 run.status = "error"
-                run.error = "title engine failed; used deterministic fallback"
+                run.error = (
+                    f"title engine failed ({detail}); used deterministic fallback"
+                    if detail
+                    else "title engine failed; used deterministic fallback"
+                )
             elif title_model == "apfel" and engine != "apfel":
                 run.extra["note"] = f"apfel not installed; used {engine}"
 

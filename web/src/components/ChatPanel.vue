@@ -1239,7 +1239,12 @@ function dismissQuestions() {
   if (!id) return
   const requestId = activeQuestions.value[0]?.requestId || ''
   if (requestId) {
+    // respondQuestion records the resolution itself before clearing.
     store.respondQuestion(id, requestId, {})
+  } else {
+    // Claude picker has no round-trip; remember it as resolved so a stale
+    // server snapshot can't rebuild it after dismissal.
+    store.markResolvedQuestion(id)
   }
   delete store.activeQuestions[id]
   questionAnswers.value = {}
@@ -3713,6 +3718,36 @@ details[open] > .activity-summary::before {
   border: 0;
   border-top: 1px solid var(--border);
   margin: 1.25em 0;
+}
+
+/* Quoted "comment" context (see lib/commentContext.ts) rendered as a quote
+   card in the user's own bubble. The same tags are the boundary the model
+   reads; here they're just styled. */
+.message-content :deep(user-comment-reference) {
+  display: block;
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  background: var(--bg);
+  padding: 6px 10px;
+  margin: 6px 0;
+}
+.message-content :deep(reference-source) {
+  display: block;
+  font-size: 12px;
+  color: var(--fg2);
+  margin-bottom: 4px;
+}
+.message-content :deep(quoted-text) {
+  display: block;
+  white-space: pre-wrap;
+  color: var(--fg2);
+  font-style: italic;
+  border-left: 2px solid var(--border);
+  padding-left: 8px;
+  margin: 2px 0 6px;
+}
+.message-content :deep(user-comment) {
+  display: block;
 }
 
 /* File-path links produced by linkifyHtml/linkifyText. Subtle dotted

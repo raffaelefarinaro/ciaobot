@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 from dataclasses import dataclass
 import logging
@@ -97,6 +98,38 @@ _TURN_INTERRUPTED_MESSAGE = (
     "often a server restart). No output was lost from earlier steps; send "
     "\"continue\" to resume."
 )
+
+# The claude-agent-sdk reads the CLI subprocess stdout into a bounded decode
+# buffer (default 1 MiB, ``_DEFAULT_MAX_BUFFER_SIZE``) and raises a fatal,
+# stream-killing error when a single JSON message exceeds it — typically a
+# large tool result or assistant content block. Raise the ceiling well above
+# the default so legitimately large messages don't abort the turn. Override
+# with ``CIAO_CLAUDE_MAX_BUFFER_BYTES`` for unusually large payloads.
+try:
+    _SDK_MAX_BUFFER_BYTES = (
+        int(os.environ.get("CIAO_CLAUDE_MAX_BUFFER_BYTES") or 0)
+        or 32 * 1024 * 1024
+    )
+    if _SDK_MAX_BUFFER_BYTES <= 0:
+        _SDK_MAX_BUFFER_BYTES = 32 * 1024 * 1024
+except ValueError:
+    _SDK_MAX_BUFFER_BYTES = 32 * 1024 * 1024
+
+# Shown when even the raised buffer is exceeded (or any decode failure): the
+# SDK reader raises a fatal error that would otherwise kill the chat stream.
+_OVERSIZED_MESSAGE = (
+    "⚠️ The model produced a single message too large to decode "
+    "(usually an oversized tool result). The turn was stopped to keep the chat "
+    "alive — no earlier output was lost. Retry the turn; if it keeps happening, "
+    "narrow the step that produces the huge output (e.g. read less at once)."
+)
+
+
+def _is_oversized_message_error(exc: BaseException) -> bool:
+    """True for the SDK reader's fatal 'JSON message exceeded maximum buffer
+    size' / 'Failed to decode JSON' error, which otherwise kills the stream."""
+    msg = str(exc)
+    return "buffer size" in msg or "Failed to decode JSON" in msg
 
 
 def get_bundled_claude_path() -> str | None:
@@ -413,6 +446,10 @@ class ClaudeProvider(BaseSDKProvider):
             permission_mode=_sdk_permission_mode(request.mode),
             cwd=str(self.workspace_root),
             include_partial_messages=True,
+            # Raise the CLI-stdout decode buffer above the SDK's 1 MiB default
+            # so a single large tool result / content block doesn't kill the
+            # stream. See _SDK_MAX_BUFFER_BYTES and issue #137.
+            max_buffer_size=_SDK_MAX_BUFFER_BYTES,
             env=request.extra_env or {},
             # Per-workspace tool denylist (e.g. block claude.ai connector
             # MCPs for personal chats). Empty list = no denylist applied.
@@ -776,6 +813,30 @@ class ClaudeProvider(BaseSDKProvider):
             # working (CLIConnectionError triggers one retry).
             exc = consumer.exception()
             if exc is not None:
+                if _is_oversized_message_error(exc):
+                    # The SDK reader hit a single JSON message larger than the
+                    # decode buffer (or otherwise undecodable) and raised a
+                    # fatal error that would kill the chat stream. Surface a
+                    # recoverable error result — session id preserved for a
+                    # retry/resume — instead of an opaque stack trace. See #137.
+                    sid = self._session_id
+                    logger.error(
+                        "Claude turn hit an oversized/undecodable message for "
+                        "session %s; surfacing a recoverable error: %s",
+                        sid,
+                        exc,
+                    )
+                    try:
+                        await self.disconnect()
+                    except Exception:  # noqa: BLE001 — best-effort teardown
+                        pass
+                    yield ResultEvent(
+                        type="result",
+                        result=_OVERSIZED_MESSAGE,
+                        session_id=sid,
+                        is_error=True,
+                    )
+                    return
                 raise exc
         except _CLAUDE_OP_ERRORS:
             try:

@@ -35,7 +35,7 @@ from ciao.package_version import _github_repo, make_cached_package_status, updat
 SERVER_LAUNCHD_LABEL = "com.ciao.server"
 MENUBAR_LAUNCHD_LABEL = "com.ciao.menubar"
 LAUNCHD_LABELS = (SERVER_LAUNCHD_LABEL, MENUBAR_LAUNCHD_LABEL)
-POLL_SECONDS = 10.0
+POLL_SECONDS = 2.0
 
 # Spinning-head animation played while a chat is working. Frame count matches
 # the PNGs emitted by scripts/make_menubar_template_icons.py.

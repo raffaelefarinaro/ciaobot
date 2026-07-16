@@ -1145,17 +1145,11 @@ async def provider_config_settings(request: Request) -> JSONResponse:
 
 
 def _gws_profile_config_dir(config, profile: str) -> Path | None:
-    root = Path(config.workspace_root).resolve()
-    if profile == "personal":
-        return root / "secrets" / "gws-personal"
-    if profile == "work":
-        return root / "secrets" / "gws"
-    # Wizard-named workspaces carry their own profile names; each gets its
-    # own credentials directory alongside the legacy two.
-    safe = re.sub(r"[^a-z0-9_-]+", "-", profile.strip().lower()).strip("-")
-    if not safe:
-        return None
-    return root / "secrets" / f"gws-{safe}"
+    # Single source of truth lives in ciao.gws_auth so the health monitor and
+    # re-login manager map profiles to credential dirs the same way.
+    from ciao import gws_auth
+
+    return gws_auth.profile_config_dir(config, profile)
 
 
 def _gws_file_present(config_dir: Path | None, names: tuple[str, ...]) -> bool:
@@ -1185,25 +1179,12 @@ def _gws_profile_names(config) -> list[str]:
     return names
 
 
-def _extract_email_from_id_token(id_token: str | None) -> str:
-    if not id_token:
-        return ""
-    try:
-        import base64
-        import json
-        parts = id_token.split(".")
-        if len(parts) >= 2:
-            payload_b64 = parts[1]
-            payload_b64 += "=" * ((4 - len(payload_b64) % 4) % 4)
-            payload_json = base64.urlsafe_b64decode(payload_b64.encode("utf-8")).decode("utf-8")
-            payload = json.loads(payload_json)
-            return payload.get("email") or ""
-    except Exception:
-        pass
-    return ""
-
-
-def _gws_profile_payload(config, profile: str, usage: dict[str, list[str]]) -> dict:
+def _gws_profile_payload(
+    config,
+    profile: str,
+    usage: dict[str, list[str]],
+    health: dict | None = None,
+) -> dict:
     meta = _GWS_PROFILE_META.get(
         profile,
         {
@@ -1234,6 +1215,16 @@ def _gws_profile_payload(config, profile: str, usage: dict[str, list[str]]) -> d
             except Exception:
                 pass
 
+    # Cached token-health snapshot from the periodic monitor (issue #145).
+    # Read-only and cheap — never runs the `auth status` subprocess here.
+    token_valid: bool | None = None
+    token_error = ""
+    needs_relogin = False
+    if credentials_present and isinstance(health, dict) and "token_valid" in health:
+        token_valid = bool(health.get("token_valid"))
+        token_error = str(health.get("token_error") or "")
+        needs_relogin = not token_valid
+
     return {
         "name": profile,
         "label": meta["label"],
@@ -1249,14 +1240,23 @@ def _gws_profile_payload(config, profile: str, usage: dict[str, list[str]]) -> d
         "wrapper_available": wrapper_path.is_file(),
         "helper_available": helper_path.is_file(),
         "email": email,
+        "token_valid": token_valid,
+        "token_error": token_error,
+        "needs_relogin": needs_relogin,
     }
 
 
 def _gws_integration_payload(config) -> dict:
+    from ciao import gws_auth
+
     usage = _gws_profile_usage(config)
     binary_path = resolve_tool("gws") or ""
     wrapper_path = Path(config.workspace_root).resolve() / "scripts" / "gws-profile.sh"
     helper_path = Path(config.workspace_root).resolve() / "scripts" / "gws-auth-helper.py"
+    try:
+        health = gws_auth.read_health_cache(Path(config.state_path).parent)
+    except Exception:
+        health = {}
     return {
         "installed": bool(binary_path),
         "binary_path": binary_path,
@@ -1264,7 +1264,7 @@ def _gws_integration_payload(config) -> dict:
         "wrapper_path": str(wrapper_path) if wrapper_path.is_file() else "",
         "headless_helper_path": str(helper_path) if helper_path.is_file() else "",
         "profiles": [
-            _gws_profile_payload(config, profile, usage)
+            _gws_profile_payload(config, profile, usage, health.get(profile))
             for profile in _gws_profile_names(config)
         ],
     }
@@ -1396,58 +1396,23 @@ async def gws_auth_url(request: Request) -> JSONResponse:
     if config_dir is None:
         return JSONResponse({"error": "Could not determine config directory"}, status_code=500)
 
-    secret_path = config_dir / "client_secret.json"
-    if not secret_path.is_file():
-        return JSONResponse({"error": "client_secret.json not found for this profile"}, status_code=400)
+    from ciao import gws_auth
 
     try:
-        with open(secret_path, "r", encoding="utf-8") as f:
-            secret = json.load(f)
-        
-        installed = secret.get("installed") or secret.get("web")
-        if not installed:
-            return JSONResponse({"error": "client_secret.json missing 'installed' or 'web' section"}, status_code=400)
-
+        installed = gws_auth.load_client_secret(config_dir)
         client_id = installed.get("client_id")
-        redirect_uris = installed.get("redirect_uris", ["http://localhost"])
-        redirect_uri = redirect_uris[0]
-        
         if not client_id:
             return JSONResponse({"error": "client_secret.json missing client_id"}, status_code=400)
-
-        scopes = (
-            "https://www.googleapis.com/auth/gmail.modify "
-            "https://www.googleapis.com/auth/calendar "
-            "https://www.googleapis.com/auth/tasks "
-            "openid "
-            "https://www.googleapis.com/auth/userinfo.email "
-            "https://www.googleapis.com/auth/userinfo.profile"
+        redirect_uris = installed.get("redirect_uris", ["http://localhost"])
+        redirect_uri = redirect_uris[0]
+        auth_url = gws_auth.build_auth_url(
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            scopes=gws_auth.scopes_for_profile(profile),
         )
-        if profile == "work":
-            scopes = (
-                "https://www.googleapis.com/auth/drive "
-                "https://www.googleapis.com/auth/spreadsheets "
-                "https://www.googleapis.com/auth/gmail.modify "
-                "https://www.googleapis.com/auth/calendar "
-                "https://www.googleapis.com/auth/documents "
-                "https://www.googleapis.com/auth/presentations "
-                "https://www.googleapis.com/auth/tasks "
-                "openid "
-                "https://www.googleapis.com/auth/userinfo.email "
-                "https://www.googleapis.com/auth/userinfo.profile"
-            )
-
-        import urllib.parse
-        params = {
-            "scope": scopes,
-            "access_type": "offline",
-            "redirect_uri": redirect_uri,
-            "response_type": "code",
-            "client_id": client_id,
-            "prompt": "select_account consent",
-        }
-        auth_url = "https://accounts.google.com/o/oauth2/auth?" + urllib.parse.urlencode(params)
         return JSONResponse({"auth_url": auth_url})
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
         return JSONResponse({"error": f"Failed to generate authorization URL: {str(e)}"}, status_code=500)
 
@@ -1471,116 +1436,25 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
     if config_dir is None:
         return JSONResponse({"error": "Could not determine config directory"}, status_code=500)
 
-    secret_path = config_dir / "client_secret.json"
-    if not secret_path.is_file():
-        return JSONResponse({"error": "client_secret.json not found for this profile"}, status_code=400)
+    from ciao import gws_auth
 
     try:
-        with open(secret_path, "r", encoding="utf-8") as f:
-            secret = json.load(f)
-        
-        installed = secret.get("installed") or secret.get("web")
-        if not installed:
-            return JSONResponse({"error": "client_secret.json missing 'installed' or 'web' section"}, status_code=400)
-
-        client_id = installed.get("client_id")
-        client_secret = installed.get("client_secret")
+        installed = gws_auth.load_client_secret(config_dir)
         redirect_uris = installed.get("redirect_uris", ["http://localhost"])
         redirect_uri = redirect_uris[0]
-
-        if not client_id or not client_secret:
-            return JSONResponse({"error": "client_secret.json missing client_id or client_secret"}, status_code=400)
-
-        code = code_or_url.strip()
-        if "code=" in code or code.startswith("http"):
-            import urllib.parse
-            parsed = urllib.parse.urlparse(code)
-            query = urllib.parse.parse_qs(parsed.query)
-            if "error" in query:
-                return JSONResponse({"error": f"Google returned error: {query['error'][0]}"}, status_code=400)
-            if "code" not in query:
-                return JSONResponse({"error": "No authorization 'code' found in the redirect URL"}, status_code=400)
-            code = query["code"][0]
-
-        import urllib.request
-        import urllib.error
-        import urllib.parse
-        
-        data = urllib.parse.urlencode(
-            {
-                "code": code,
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "redirect_uri": redirect_uri,
-                "grant_type": "authorization_code",
-            }
-        ).encode("utf-8")
-
-        req = urllib.request.Request(
-            "https://oauth2.googleapis.com/token",
-            data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        code = gws_auth.extract_code_from_input(code_or_url)
+        # Token exchange + credential write happen off the event loop; the
+        # helper never logs the code, tokens, or secret.
+        await asyncio.to_thread(
+            gws_auth.exchange_and_store,
+            config,
+            profile,
+            code=code,
+            redirect_uri=redirect_uri,
         )
-
-        def _do_exchange():
-            with urllib.request.urlopen(req) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-
-        try:
-            tokens = await asyncio.to_thread(_do_exchange)
-        except urllib.error.HTTPError as e:
-            try:
-                err_body = e.read().decode("utf-8")
-                err_json = json.loads(err_body)
-                err_desc = err_json.get("error_description") or err_json.get("error") or "Unknown OAuth error"
-            except Exception:
-                err_desc = f"HTTP {e.code}"
-            return JSONResponse({"error": f"Token exchange failed: {err_desc}"}, status_code=400)
-        except Exception as e:
-            return JSONResponse({"error": f"Token exchange failed: {str(e)}"}, status_code=400)
-
-        refresh_token = tokens.get("refresh_token")
-        if not refresh_token:
-            return JSONResponse({
-                "error": "No refresh token returned. The account might already be authorized. "
-                         "Please revoke the old grant at https://myaccount.google.com/permissions and try again."
-            }, status_code=400)
-
-        email = _extract_email_from_id_token(tokens.get("id_token"))
-
-        creds = {
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "refresh_token": refresh_token,
-            "type": "authorized_user",
-        }
-        if email:
-            creds["email"] = email
-
-        creds_path = config_dir / "credentials.json"
-        
-        for name in ("credentials.enc", "token_cache.json"):
-            stale = config_dir / name
-            if stale.exists():
-                backup = config_dir / (name + ".old")
-                try:
-                    if backup.exists():
-                        backup.unlink()
-                    stale.rename(backup)
-                except Exception as e:
-                    logger.warning(f"Failed to move stale {name}: {e}")
-
-        creds_path.write_text(json.dumps(creds, indent=2), encoding="utf-8")
-        creds_path.chmod(0o600)
-
-        key_file = config_dir / ".encryption_key"
-        if key_file.exists():
-            try:
-                key_file.chmod(0o600)
-            except Exception as e:
-                logger.warning(f"Failed to fix .encryption_key permissions: {e}")
-
         return JSONResponse(_gws_integration_payload(config))
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     except Exception as e:
         return JSONResponse({"error": f"Authentication exchange failed: {str(e)}"}, status_code=500)
 
@@ -1617,6 +1491,80 @@ async def gws_disconnect(request: Request) -> JSONResponse:
 
     return JSONResponse(_gws_integration_payload(config))
 
+
+def _gws_relogin_manager(request: Request):
+    """Return the app's re-login manager, creating one on first use.
+
+    Lazily attached so route modules (and tests) that build a bare app with a
+    ``config`` on ``app.state`` still get a working manager without extra
+    wiring. ``main.py`` also attaches one at startup.
+    """
+    manager = getattr(request.app.state, "gws_relogin_manager", None)
+    if manager is None:
+        from ciao.gws_auth import GwsReloginManager
+
+        manager = GwsReloginManager(request.app.state.config)
+        request.app.state.gws_relogin_manager = manager
+    return manager
+
+
+async def gws_relogin_start(request: Request) -> JSONResponse:
+    """Start a server-managed OAuth re-login for a profile (issue #145).
+
+    Binds a loopback callback listener inside this long-lived process and
+    returns the Google consent URL. The listener survives across chat turns
+    (unlike ``gws auth login`` in a background bash task), captures the
+    redirect, and exchanges the code server-side. Never returns tokens.
+    """
+    try:
+        body = await request.json()
+        profile = body.get("profile")
+    except Exception:
+        return JSONResponse({"error": "Invalid request payload"}, status_code=400)
+
+    if profile not in _GWS_BUILTIN_PROFILES:
+        return JSONResponse({"error": f"Invalid profile: {profile}"}, status_code=400)
+
+    manager = _gws_relogin_manager(request)
+    try:
+        result = await asyncio.to_thread(manager.start, profile)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"error": f"Failed to start re-login: {str(e)}"}, status_code=500)
+    return JSONResponse(result)
+
+
+async def gws_relogin_status(request: Request) -> JSONResponse:
+    """Poll a pending re-login. Returns pending/completed/error/none."""
+    profile = request.query_params.get("profile", "")
+    if profile not in _GWS_BUILTIN_PROFILES:
+        return JSONResponse({"error": f"Invalid profile: {profile}"}, status_code=400)
+    manager = _gws_relogin_manager(request)
+    result = manager.status(profile)
+    # When a re-login just completed, refresh the health cache so Settings and
+    # the next status check see the profile as valid without waiting a cycle.
+    if result.get("status") == "completed":
+        monitor = getattr(request.app.state, "gws_health_monitor", None)
+        if monitor is not None:
+            try:
+                await asyncio.to_thread(monitor.check_once)
+            except Exception:
+                logger.exception("Post-relogin health refresh failed")
+    return JSONResponse(result)
+
+
+async def gws_relogin_cancel(request: Request) -> JSONResponse:
+    """Cancel a pending re-login and tear down its loopback listener."""
+    try:
+        body = await request.json()
+        profile = body.get("profile")
+    except Exception:
+        return JSONResponse({"error": "Invalid request payload"}, status_code=400)
+    if profile not in _GWS_BUILTIN_PROFILES:
+        return JSONResponse({"error": f"Invalid profile: {profile}"}, status_code=400)
+    manager = _gws_relogin_manager(request)
+    return JSONResponse(manager.cancel(profile))
 
 
 async def list_projects(request: Request) -> JSONResponse:

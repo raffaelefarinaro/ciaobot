@@ -181,6 +181,87 @@ describe('queued message replay handling', () => {
   })
 })
 
+describe('optimistic user bubble reconciliation', () => {
+  test('reconciles a bubble stranded behind a prior turn instead of duplicating it', async () => {
+    // Repro: the user sends while the client thinks it is idle, so an
+    // optimistic bubble (no turn_index) is rendered. The server queues the
+    // send behind a still-running turn whose activity/assistant blocks stream
+    // on top, then records + echoes the turn later with a fresh turn_index.
+    // The echo must reconcile the stranded bubble, not push a second copy.
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'chat-strand'
+    store.messages[chatId] = [
+      { role: 'user', content: 'queued question', timestamp: '', turn_index: undefined },
+      { role: 'assistant', content: 'prior turn reply', timestamp: '' },
+    ]
+
+    store.connectWs(chatId)
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: 'queued question',
+        turn_index: 1,
+        sent_at: '2026-07-16T13:07:59Z',
+      }),
+    })
+
+    const userMsgs = store.messages[chatId].filter(
+      m => m.role === 'user' && m.content === 'queued question',
+    )
+    expect(userMsgs.length).toBe(1)
+    expect(userMsgs[0].turn_index).toBe(1)
+  })
+
+  test('upgrades an optimistic bubble in place when nothing streamed between send and echo', async () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'chat-fast'
+    store.messages[chatId] = [
+      { role: 'assistant', content: 'earlier reply', timestamp: '' },
+      { role: 'user', content: 'hello', timestamp: '', turn_index: undefined },
+    ]
+
+    store.connectWs(chatId)
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'user_echo', text: 'hello', turn_index: 2 }),
+    })
+
+    const userMsgs = store.messages[chatId].filter(
+      m => m.role === 'user' && m.content === 'hello',
+    )
+    expect(userMsgs.length).toBe(1)
+    expect(userMsgs[0].turn_index).toBe(2)
+  })
+
+  test('loadMessages heals an orphaned optimistic bubble the live echo missed', async () => {
+    // Existing chats already carrying the duplicate must self-heal on reload:
+    // the server session holds the turn exactly once, so the shorter server
+    // history would otherwise be blocked by the never-shrink guard.
+    const store = useProjectStore()
+    const chatId = 'chat-heal'
+    store.messages[chatId] = [
+      { role: 'user', content: 'dup question', timestamp: '', turn_index: undefined },
+      { role: 'assistant', content: 'prior reply', timestamp: '' },
+      { role: 'user', content: 'dup question', timestamp: '2026-07-16T13:07:59Z', turn_index: 1 },
+      { role: 'assistant', content: 'answer', timestamp: '' },
+    ]
+    apiGet.mockResolvedValue([
+      { role: 'assistant', content: 'prior reply', sent_at: '' },
+      { role: 'user', content: 'dup question', sent_at: '2026-07-16T13:07:59Z', turn_index: 1 },
+      { role: 'assistant', content: 'answer', sent_at: '' },
+    ])
+
+    await store.loadMessages(chatId)
+
+    const userMsgs = store.messages[chatId].filter(
+      m => m.role === 'user' && m.content === 'dup question',
+    )
+    expect(userMsgs.length).toBe(1)
+    expect(userMsgs[0].turn_index).toBe(1)
+  })
+})
+
 describe('Codex structured questions', () => {
   test('answers a native request inside the active websocket turn', () => {
     const store = useProjectStore()
@@ -231,6 +312,103 @@ describe('Codex structured questions', () => {
       request_id: 'codex-1',
       answers: { choice: ['A'] },
     }))
+  })
+
+  test('does not resurrect an answered picker from a stale server snapshot', async () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'codex-stale'
+    // The persisted payload carries the request id, exactly as the backend
+    // embeds it into pending_question for native providers.
+    const pending = JSON.stringify({
+      request_id: 'codex-1',
+      questions: [{
+        id: 'choice',
+        header: 'Choice',
+        question: 'Pick one',
+        isOther: false,
+        options: [{ label: 'A', description: 'first' }],
+      }],
+    })
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Codex',
+      model: 'gpt-test',
+      provider: 'codex',
+      mode: 'auto',
+      session_id: 'thread-1',
+      created_at: '',
+      archived: false,
+      pending_question: pending,
+    }]
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'tool_use',
+        tool_name: 'AskUserQuestion',
+        request_id: 'codex-1',
+        tool_input: JSON.stringify({
+          questions: [{
+            id: 'choice',
+            header: 'Choice',
+            question: 'Pick one',
+            isOther: false,
+            options: [{ label: 'A', description: 'first' }],
+          }],
+        }),
+      }),
+    })
+    expect(store.activeQuestions[chatId]).toHaveLength(1)
+
+    store.respondQuestion(chatId, 'codex-1', { choice: ['A'] })
+    expect(store.activeQuestions[chatId]).toBeUndefined()
+
+    // A poll/reconnect races the server clear: the snapshot still carries the
+    // now-answered pending_question. loadMessages runs rebuildPendingQuestion,
+    // which must refuse to bring the picker back.
+    store.chats[0].pending_question = pending
+    await store.loadMessages(chatId)
+    expect(store.activeQuestions[chatId]).toBeUndefined()
+  })
+
+  test('rebuilds a genuinely new question after an earlier one was answered', async () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'codex-next'
+    const mkPayload = (rid: string) => JSON.stringify({
+      request_id: rid,
+      questions: [{ id: 'choice', header: 'Choice', question: 'Pick one', options: [{ label: 'A' }] }],
+    })
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Codex',
+      model: 'gpt-test',
+      provider: 'codex',
+      mode: 'auto',
+      session_id: 'thread-1',
+      created_at: '',
+      archived: false,
+    }]
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'tool_use',
+        tool_name: 'AskUserQuestion',
+        request_id: 'codex-1',
+        tool_input: mkPayload('codex-1'),
+      }),
+    })
+    store.respondQuestion(chatId, 'codex-1', { choice: ['A'] })
+    expect(store.activeQuestions[chatId]).toBeUndefined()
+
+    // A distinct later question (new request id) must still surface on rebuild.
+    store.chats[0].pending_question = mkPayload('codex-2')
+    await store.loadMessages(chatId)
+    expect(store.activeQuestions[chatId]?.[0]).toMatchObject({ requestId: 'codex-2' })
   })
 
   test('chatNeedsInput reflects live and persisted AskUserQuestion state', () => {

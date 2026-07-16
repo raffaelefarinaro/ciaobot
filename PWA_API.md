@@ -112,6 +112,9 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/integrations/gws/auth-url` | Generate Google OAuth authorization URL for a profile |
 | POST | `/api/integrations/gws/exchange` | Complete Google OAuth flow and exchange code for credentials |
 | POST | `/api/integrations/gws/disconnect` | Disconnect Google profile and clean up local credentials/client_secret |
+| POST | `/api/integrations/gws/relogin/start` | Start a server-managed OAuth re-login; returns the consent URL and keeps a loopback callback listener alive in-process |
+| GET | `/api/integrations/gws/relogin/status` | Poll a pending re-login (pending/completed/error/none) |
+| POST | `/api/integrations/gws/relogin/cancel` | Cancel a pending re-login and tear down its loopback listener |
 | GET | `/api/push/public-key` | Read VAPID public key |
 | POST | `/api/push/subscribe` | Store push subscription |
 | POST | `/api/push/unsubscribe` | Remove push subscription |
@@ -392,6 +395,28 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/loop
 # Deploy: snapshot, pull, build, restart. Don't call from inside the live PWA session
 # (CLAUDE.md "Never restart the ciao service yourself"); ask the operator to hit Deploy.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/admin/deploy"
+```
+
+**Google Workspace re-login (recover a revoked/expired token)**
+
+```bash
+# Check which profiles report a dead login (token_valid=false / needs_relogin=true).
+# The values come from the periodic health monitor's cache — no live probe here.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/integrations/gws"
+
+# Start a server-managed re-login. Returns { auth_url, state, port, expires_in }.
+# The loopback callback listener lives IN the engine process, so — unlike
+# `gws auth login` in a background bash task — it survives across chat turns and
+# actually captures the redirect. Open auth_url in a browser and sign in.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integrations/gws/relogin/start" \
+  -H 'content-type: application/json' -d '{"profile":"personal"}'
+
+# Poll until status is "completed" (or "error"). Never returns tokens.
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/integrations/gws/relogin/status?profile=personal"
+
+# Abort a pending attempt and free the loopback port.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integrations/gws/relogin/cancel" \
+  -H 'content-type: application/json' -d '{"profile":"personal"}'
 ```
 
 **Routine settings (Settings → Models tab)**

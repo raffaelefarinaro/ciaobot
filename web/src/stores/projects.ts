@@ -3,6 +3,7 @@ import { ref, computed, watch } from 'vue'
 import { api } from '../lib/api'
 import { getPendingBucket, normalizePendingBuckets, setPendingBucket } from '../lib/pendingBuckets'
 import { buildFixPrompt } from '../lib/fixError'
+import { formatChatComments, formatFileComments } from '../lib/commentContext'
 import type {
   ProjectInfo,
   ChatInfo,
@@ -109,7 +110,7 @@ export const useProjectStore = defineStore('projects', () => {
   type FileComment = PendingComment & { createdAt: string }
   const fileComments = ref<Record<string, FileComment[]>>({})
   // Chat comments: ephemeral references to text selected inside a chat bubble.
-  // Formatted as plain text "Referring to: ..." rather than XML blocks.
+  // Formatted as XML-tagged reference blocks (see lib/commentContext.ts).
   type PendingChatComment = {
     id: string
     selection: string
@@ -176,6 +177,37 @@ export const useProjectStore = defineStore('projects', () => {
   }
   const activeQuestions = ref<Record<string, ActiveQuestion[]>>({})
 
+  // Signatures of AskUserQuestion pickers the user has already answered or
+  // dismissed this session, keyed by chat. Clearing `activeQuestions` on send
+  // is only client-side and optimistic; the server clears the persisted
+  // `pending_question` a beat later (native accept, or the next turn). Any
+  // `/api/chats` poll or WS reconnect in that window (`reconcileChatList`
+  // overwrites `chats.value` with the server snapshot, then `loadMessages` runs
+  // `rebuildPendingQuestion`) would otherwise resurrect the answered picker —
+  // and because `rebuildPendingQuestion` bails when a picker is already live, a
+  // later clean snapshot never removes it, so the card sticks. Remembering the
+  // resolved signature lets `rebuildPendingQuestion` refuse the stale rebuild.
+  const resolvedQuestions = ref<Record<string, Set<string>>>({})
+
+  // Stable identity for a picker, computable identically from the live
+  // `activeQuestions` entry (at resolve time) and from a rebuilt `pending_question`
+  // (at rebuild time). Native providers (Codex) carry a `requestId`; Claude's
+  // picker has none, so fall back to the question content.
+  function questionsSignature(qs: ActiveQuestion[] | undefined): string {
+    if (!qs || !qs.length) return ''
+    const rid = qs[0]?.requestId
+    if (rid) return `rid:${rid}`
+    return `q:${qs.map(q => `${q.id}${q.question}`).join('')}`
+  }
+
+  // Record the currently-active picker for `chatId` as resolved. Reads the live
+  // `activeQuestions` entry, so it must run before that entry is deleted.
+  function markResolvedQuestion(chatId: string) {
+    const sig = questionsSignature(activeQuestions.value[chatId])
+    if (!sig) return
+    ;(resolvedQuestions.value[chatId] ||= new Set<string>()).add(sig)
+  }
+
   // Parse the AskUserQuestion tool_input JSON (`{"questions": [...]}`) into the
   // picker's shape. Shared by the live `tool_use` handler and the reload-time
   // rebuild from a chat's persisted `pending_question`. Returns [] on anything
@@ -219,7 +251,11 @@ export const useProjectStore = defineStore('projects', () => {
     if (activeQuestions.value[chatId]?.length) return
     const chat = chats.value.find(c => c.chat_id === chatId)
     const qs = parseQuestions(chat?.pending_question)
-    if (qs.length) activeQuestions.value[chatId] = qs
+    if (!qs.length) return
+    // Don't resurrect a picker the user already answered/dismissed from a
+    // server snapshot that hasn't caught up yet.
+    if (resolvedQuestions.value[chatId]?.has(questionsSignature(qs))) return
+    activeQuestions.value[chatId] = qs
   }
   // Per-chat map from a Task/Agent dispatch's tool_use_id to a short subagent
   // label like "[Explore]". Populated when we see the parent's Task tool_use,
@@ -872,6 +908,9 @@ export const useProjectStore = defineStore('projects', () => {
     for (const key of Object.keys(messages.value)) {
       if (!validIds.has(key)) delete messages.value[key]
     }
+    for (const key of Object.keys(resolvedQuestions.value)) {
+      if (!validIds.has(key)) delete resolvedQuestions.value[key]
+    }
     persistMessages()
 
     // Reconcile overlay: drop entries for deleted chats, and for chats that
@@ -1348,7 +1387,24 @@ export const useProjectStore = defineStore('projects', () => {
         tool: m.tool,
         phase: m.phase,
       })))
-      const normalizedLocal = normalizeMessages(messages.value[chatId] || [])
+      let normalizedLocal = normalizeMessages(messages.value[chatId] || [])
+
+      // Heal orphaned optimistic user bubbles. A send queued behind a still
+      // streaming turn can leave a turn_index-less copy that the live echo
+      // failed to reconcile (see the user_echo handler). The SDK session is
+      // authoritative and holds each turn exactly once, so drop any local
+      // null-turn_index user bubble whose text already appears as a server
+      // user turn before comparing lengths — otherwise the "never shrink
+      // history" guard below would preserve the duplicate forever.
+      const serverUserContent = new Set(
+        normalizedServer.filter(m => m.role === 'user').map(m => m.content),
+      )
+      if (serverUserContent.size) {
+        const pruned = normalizedLocal.filter(
+          m => !(m.role === 'user' && m.turn_index == null && serverUserContent.has(m.content)),
+        )
+        if (pruned.length !== normalizedLocal.length) normalizedLocal = pruned
+      }
 
       if (historySignature(normalizedServer) !== historySignature(normalizedLocal)) {
         // Guard: never replace a longer local history with a shorter server
@@ -1992,50 +2048,31 @@ export const useProjectStore = defineStore('projects', () => {
         }
         break
       }
+      case 'gws_health': {
+        // A Google Workspace login went dead (revoked/expired token). The
+        // server debounces to one event per breakage; surface it as a
+        // persistent error toast whose "Fix" seeds a chat that can drive the
+        // server-managed re-login. The PWA push/menu-bar banner is the other
+        // channel (see push.py); this is the live in-app signal.
+        pushErrorToast(msg.title || 'Google Workspace login needs attention', msg.body || '')
+        break
+      }
     }
   }
 
   // ── Send messages ───────────────────────────────────────────────────
 
-  // Render pendingComments as a clean block prefixed to the user's typed text.
-  // The model sees the file, line range, selected text, and comment in a
-  // readable markdown-style format that is also pleasant to read in the chat
-  // bubble. No XML tags.
+  // Render pending comments as XML-tagged reference blocks (see
+  // lib/commentContext.ts for the format and rationale). The model gets an
+  // unambiguous boundary around the file/line anchor, the verbatim selection,
+  // and the user's note; the same tags are whitelisted in the renderer and
+  // styled as quote cards so they read cleanly in the chat bubble too.
   function formatPendingComments(comments = pendingComments.value): string {
-    if (!comments.length) return ''
-    const blocks = comments.map((c, i) => {
-      const parts: string[] = [`--- Comment ${i + 1} on ${c.path} ---`]
-      if (c.lineStart) {
-        const range = c.lineEnd && c.lineEnd !== c.lineStart
-          ? `lines ${c.lineStart}-${c.lineEnd}`
-          : `line ${c.lineStart}`
-        parts.push(`(${range})`)
-      }
-      parts.push(
-        '',
-        'Selected:',
-        `> ${c.selection}`,
-        '',
-        'Comment:',
-        c.comment,
-      )
-      if (c.images?.length) {
-        parts.push('', 'Attachments:')
-        c.images.forEach((img, idx) => {
-          parts.push(`[Image ${idx + 1}] ${img}`)
-        })
-      }
-      return parts.join('\n')
-    })
-    return blocks.join('\n\n')
+    return formatFileComments(comments)
   }
 
   function formatPendingChatComments(comments = pendingChatComments.value): string {
-    if (!comments.length) return ''
-    const lines = comments.map((c) => {
-      return `Referring to: "${c.selection}"\nmy comment is: "${c.comment}"`
-    })
-    return lines.join('\n\n')
+    return formatChatComments(comments)
   }
 
   function sendMessage(chatId: string, text: string, mode: 'queue' | 'steer' = 'queue') {
@@ -2051,6 +2088,7 @@ export const useProjectStore = defineStore('projects', () => {
     // pending_question too, so a loadMessages racing this send (WS reconnect,
     // reconciliation) doesn't rebuild the picker from a now-stale value.
     if (activeQuestions.value[chatId]) {
+      markResolvedQuestion(chatId)
       delete activeQuestions.value[chatId]
     }
     const answeredChat = chats.value.find(c => c.chat_id === chatId)
@@ -2072,16 +2110,14 @@ export const useProjectStore = defineStore('projects', () => {
     const hasFile = fileBlock.length > 0
     const hasChat = chatBlock.length > 0
     const hasTyped = text.trim().length > 0
-    // Typed text goes first; attachments (file + chat comments) follow after a
-    // `----` separator so the model reads the user's prompt before context.
-    let composed = ''
-    if (hasTyped) composed += text.trim()
-    let attachments = ''
-    if (hasFile) attachments += fileBlock
-    if (hasChat) attachments += (attachments ? '\n\n' : '') + chatBlock
-    if (attachments) {
-      composed += (composed ? '\n\n----\n\n' : '') + attachments
-    }
+    // Reference blocks (quoted text + note) go FIRST, then the typed prompt,
+    // so the model reads the material being discussed before the instruction
+    // (Anthropic: placing the query at the end of the input improves quality).
+    let reference = ''
+    if (hasFile) reference += fileBlock
+    if (hasChat) reference += (reference ? '\n' : '') + chatBlock
+    let composed = reference
+    if (hasTyped) composed += (composed ? '\n\n' : '') + text.trim()
     const alreadyStreaming = isChatStreaming(chatId)
 
     if (alreadyStreaming) {
@@ -2210,6 +2246,7 @@ export const useProjectStore = defineStore('projects', () => {
     requestId: string,
     answers: Record<string, string[]>,
   ) {
+    markResolvedQuestion(chatId)
     delete activeQuestions.value[chatId]
     const chat = chats.value.find(c => c.chat_id === chatId)
     if (chat?.pending_question) chat.pending_question = ''
@@ -2592,19 +2629,37 @@ export const useProjectStore = defineStore('projects', () => {
             break
           }
           // Look for an optimistic user message with matching content but no
-          // assigned turn_index yet — upgrade it in place instead of pushing
-          // a duplicate.
+          // assigned turn_index yet — reconcile it instead of pushing a
+          // duplicate. A hydrated or already-echoed bubble always carries a
+          // turn_index, so a user entry with turn_index == null is necessarily
+          // an un-reconciled optimistic bubble we rendered at send time; that
+          // invariant lets us scan the whole tail safely.
+          //
+          // Two shapes:
+          //  - Fast path: the optimistic bubble is still the last thing in the
+          //    tail (nothing streamed between send and echo). Upgrade it in
+          //    place.
+          //  - Stranded: the send was queued server-side behind a still-running
+          //    turn, so that turn's assistant/activity blocks rendered before
+          //    the echo arrived. The optimistic bubble now sits *above* those
+          //    blocks. Drop the stale copy and fall through to push a fresh
+          //    bubble at the tail, matching the server's turn order. The old
+          //    "stop at the first assistant message" scan bailed here and left
+          //    the bubble orphaned, rendering the turn twice.
           let upgraded = false
+          let sawAssistant = false
           for (let i = msgs.length - 1; i >= 0; i--) {
             const m = msgs[i]
             if (m.role === 'user' && m.turn_index == null && m.content === trimmed) {
+              if (sawAssistant) {
+                msgs.splice(i, 1)
+                break
+              }
               m.turn_index = turnIndex
               upgraded = true
               break
             }
-            // Don't walk past the boundary of this turn — an assistant reply
-            // ends the previous turn, so we only scan back through the tail.
-            if (m.role === 'assistant') break
+            if (m.role === 'assistant') sawAssistant = true
           }
           if (upgraded) {
             if (queuedMessages.value[chatId]?.length) clearQueued(chatId)
@@ -2704,6 +2759,10 @@ export const useProjectStore = defineStore('projects', () => {
         if (event.tool_name === 'AskUserQuestion' && event.tool_input) {
           const qs = parseQuestions(event.tool_input, event.request_id || '')
           if (qs.length) {
+            // A fresh live question supersedes any earlier resolved-picker
+            // memory for this chat (keeps the set from growing and avoids a
+            // reused native request id being wrongly suppressed).
+            delete resolvedQuestions.value[chatId]
             activeQuestions.value[chatId] = qs
             // Nudge the user when the tab is backgrounded so they don't
             // miss a question that the model needs answered.
@@ -3031,7 +3090,7 @@ export const useProjectStore = defineStore('projects', () => {
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, switchWorkspace, openChatFromDeepLink,
     syncLatest,
-    sendMessage, stopChat, respondPermission, respondQuestion, transcribeVoice, speakMessage, uploadImages, uploadImageRefs, removePendingImage, clearPendingImages,
+    sendMessage, stopChat, respondPermission, respondQuestion, markResolvedQuestion, transcribeVoice, speakMessage, uploadImages, uploadImageRefs, removePendingImage, clearPendingImages,
     addPendingComment, removePendingComment, clearPendingComments,
     addPendingChatComment, removePendingChatComment, clearPendingChatComments, updatePendingChatComment,
     addPendingChatCommentImage, removePendingChatCommentImage,

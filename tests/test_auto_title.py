@@ -220,10 +220,12 @@ async def test_generate_title_skips_model_for_contentless_prompt(
         return "I don't have any prior context to continue from."
 
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", spy_oneshot)
-    title, engine = await _generate_chat_title_with_engine("continue", model="haiku")
+    title, engine, detail = await _generate_chat_title_with_engine("continue", model="haiku")
     assert called is False
     assert engine == "fallback"
     assert title == "continue"
+    # A contentless prompt is skipped, not a failure — no upstream detail.
+    assert detail is None
 
 
 @pytest.mark.asyncio
@@ -236,27 +238,31 @@ async def test_generate_title_reports_engine(monkeypatch: pytest.MonkeyPatch) ->
         return "Wedding Task Planning"
 
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", good_oneshot)
-    title, engine = await _generate_chat_title_with_engine(
+    title, engine, detail = await _generate_chat_title_with_engine(
         "Create google tasks for my wedding", model="haiku"
     )
-    assert (title, engine) == ("Wedding Task Planning", "claude:haiku")
+    assert (title, engine, detail) == ("Wedding Task Planning", "claude:haiku", None)
 
     async def reply_shaped_oneshot(*args, **kwargs):
         return "I'd be happy to help you create Google Tasks, but I need more info."
 
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", reply_shaped_oneshot)
-    title, engine = await _generate_chat_title_with_engine(
+    title, engine, detail = await _generate_chat_title_with_engine(
         "Create google tasks for my wedding", model="haiku"
     )
     assert engine == "fallback"
     assert title == "Create google tasks for my wedding"
+    # Reply-shaped output is a soft fallback, not an upstream failure.
+    assert detail is None
 
     async def failing_oneshot(*args, **kwargs):
         raise RuntimeError("provider unavailable")
 
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", failing_oneshot)
-    title, engine = await _generate_chat_title_with_engine(
+    title, engine, detail = await _generate_chat_title_with_engine(
         "Create google tasks for my wedding", model="haiku"
     )
     assert engine == "fallback"
     assert title == "Create google tasks for my wedding"
+    # A hard failure surfaces the upstream error text for job_runs.
+    assert detail == "provider unavailable"
