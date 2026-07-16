@@ -12,14 +12,14 @@
   },
   "dependencies": {
     "@excalidraw/excalidraw": "^0.18.1",
-    "dompurify": "^3.4.11",
+    "dompurify": "^3.4.12",
     "highlight.js": "^11.11.1",
     "marked": "^18.0.6",
     "marked-highlight": "^2.2.4",
     "pinia": "^3.0.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "vue": "^3.5.39",
+    "vue": "^3.5.40",
     "vue-router": "^4.5.0"
   },
   "devDependencies": {
