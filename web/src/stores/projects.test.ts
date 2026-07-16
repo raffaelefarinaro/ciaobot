@@ -626,6 +626,30 @@ describe('workspace and chat transitions', () => {
     expect(apiPost).toHaveBeenCalledWith('/api/chats/c-personal/read', {})
   })
 
+  test('switchWorkspace with transition false updates workspace and chat ID but does not redirect', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p-personal', name: 'Proj Personal', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+      { project_id: 'p-work', name: 'Proj Work', workspace: 'work', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = [
+      { chat_id: 'c-personal', project_id: 'p-personal', title: 'Chat Personal', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+      { chat_id: 'c-work', project_id: 'p-work', title: 'Chat Work', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeWorkspace = 'work'
+    store.activeChatId = 'c-work'
+
+    routerPush.mockClear()
+    apiPost.mockClear()
+
+    await store.switchWorkspace('personal', { transition: false })
+
+    expect(store.activeWorkspace).toBe('personal')
+    expect(store.activeChatId).toBe('c-personal')
+    expect(routerPush).not.toHaveBeenCalled()
+    expect(apiPost).not.toHaveBeenCalled()
+  })
+
   test('deleteChat on active chat transitions to first chat of current workspace', async () => {
     const store = useProjectStore()
     store.projects = [
