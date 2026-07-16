@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import logging
 from pathlib import Path
 import time
 import uuid
-from typing import Any, AsyncGenerator
+from typing import Any
 
 from ciao.config import CiaoConfig
-from ciao.models import AgentRequest, ImageAttachment
 from ciao.web.project_chats import ProjectChatManager, ChatInfo
 from ciao.provider_service import ProviderService
 
@@ -283,6 +282,12 @@ class ProviderSubchatManager:
             raise KeyError("Sub-chat not found")
         if record.status in ("completed", "cancelled", "failed", "interrupted"):
             raise ValueError("Sub-chat is in a terminal state")
+        if record.status == "running":
+            # A turn runs to completion synchronously up to the first await
+            # below, where status is flipped to "running"; a second concurrent
+            # call therefore observes it and is rejected rather than sharing the
+            # single ProviderService and corrupting the turn/token counters.
+            raise ValueError("Sub-chat is already processing a turn")
 
         if getattr(self.pcm, "_restart_draining", False):
             raise RuntimeError(
@@ -546,10 +551,13 @@ class ProviderSubchatManager:
         if service is None or service.provider is None:
             return False
         provider = service.provider
-        if hasattr(provider, "send_permission_response"):
-            return provider.send_permission_response(request_id, approved)
-        gate = provider.permission_gate
-        return gate.answer(request_id, approved=approved, reason=reason)
+        responder = getattr(provider, "send_permission_response", None)
+        if callable(responder):
+            return bool(responder(request_id, approved))
+        gate = getattr(provider, "permission_gate", None)
+        if gate is not None:
+            return gate.answer(request_id, approved=approved, reason=reason)
+        return False
 
     def respond_question(
         self,

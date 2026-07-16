@@ -601,7 +601,7 @@ const systemLoops = computed(() =>
 
 async function selectAutomationWorkspace(workspace: string) {
   if (store.activeWorkspace !== workspace) {
-    await store.switchWorkspace(workspace)
+    await store.switchWorkspace(workspace, { transition: false })
   }
   if (props.mode === 'schedules') await router.push('/schedules')
 }

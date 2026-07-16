@@ -1964,7 +1964,10 @@ export const useProjectStore = defineStore('projects', () => {
         const events = providerSubchatEvents.value[msg.subchat_id] || []
         events.push(msg.event)
         providerSubchatEvents.value[msg.subchat_id] = [...events]
-        void loadProviderSubchats(msg.parent_chat_id)
+        // Record metrics (status, token/message counts) arrive via
+        // `provider_subchat_status`; there is no need to re-fetch the whole
+        // list on every streamed event, which would flood the backend during
+        // active streaming.
         break
       }
       case 'provider_subchat_deleted': {

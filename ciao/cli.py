@@ -1562,7 +1562,6 @@ def _create_chat_command(args: argparse.Namespace) -> int:
 
 
 def _provider_chat_command(args: argparse.Namespace) -> int:
-    workspace_root = Path(".").expanduser().resolve()
     env_root = os.environ.get("CIAO_WORKSPACE") or "."
     workspace_root = Path(env_root).expanduser().resolve()
     _load_env_file(workspace_root / ".env")

@@ -130,7 +130,7 @@
       <div v-if="!schedule.enabled" class="disabled-banner">
         Disabled — won't run automatically. "Run now" still works.
       </div>
-      <div class="meta-grid">
+      <div v-if="!editing" class="meta-grid">
         <div v-if="schedule.frequency !== 'manual'">
           <strong>Time</strong><br />{{ schedule.daily_time_utc }} ({{ schedule.timezone_name }})
         </div>
@@ -289,7 +289,7 @@
       <div v-if="!loop.running" class="disabled-banner">
         Stopped — won't fire automatically. "Run now" still works.
       </div>
-      <div class="meta-grid">
+      <div v-if="!loopEditing" class="meta-grid">
         <div><strong>Every</strong><br />{{ loop.interval_minutes }} min</div>
         <div>
           <strong>Chat</strong><br />
@@ -885,16 +885,16 @@ function frequencyLabel(s: Schedule): string {
 }
 
 function contextLabel(s: Schedule): string {
-  if (s.context_label) return s.context_label
   if (s.web_project_id) {
     const proj = projectStore.projects.find(p => p.project_id === s.web_project_id)
-    return proj ? `${proj.name} (new chat per run)` : 'Unavailable project'
+    if (proj) return `${proj.name} (new chat per run)`
   }
   if (s.web_chat_id) {
     const chat = projectStore.chats.find(c => c.chat_id === s.web_chat_id)
-    return chat?.title || 'Unavailable chat'
+    if (chat) return chat.title || 'Untitled chat'
   }
-  return s.context_label || 'General'
+  if (s.context_label) return s.context_label
+  return 'General'
 }
 
 function contextUnavailable(s: Schedule): boolean {
@@ -953,18 +953,16 @@ function onEditWorkspaceChange() {
   editData.value.contextKey = defaultProjectContext(editData.value.workspace)
   if (!editData.value.model) editModelProvider.value = ''
 }
-
 async function onSystemWorkspaceChange(event: Event) {
   if (!schedule.value) return
   const workspace = (event.target as HTMLSelectElement).value
   const scheduleId = schedule.value.schedule_id
   await store.updateSchedule(scheduleId, { workspace })
   if (projectStore.activeWorkspace !== workspace) {
-    await projectStore.switchWorkspace(workspace)
+    await projectStore.switchWorkspace(workspace, { transition: false })
   }
   await router.push(`/schedules/${scheduleId}`)
 }
-
 function startEdit() {
   if (!schedule.value) return
   editData.value = {
