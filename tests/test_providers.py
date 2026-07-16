@@ -515,3 +515,83 @@ async def test_claude_run_streaming_surfaces_error_when_no_result(
     assert results[0].is_error is True
     assert results[0].result == _TURN_INTERRUPTED_MESSAGE
     assert results[0].session_id == "sess-mid"
+
+
+@pytest.mark.asyncio
+async def test_claude_run_streaming_recovers_from_oversized_message(
+    claude_provider: ClaudeProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single JSON message exceeding the SDK decode buffer raises a fatal
+    reader error that would kill the chat stream (issue #137). The provider
+    must catch it, stream the earlier events, and surface a recoverable error
+    ResultEvent (session id preserved) instead of propagating the crash."""
+    from claude_agent_sdk import AssistantMessage, ToolUseBlock
+
+    from ciao.models import ResultEvent, ToolUseEvent
+    from ciao.providers.claude import _OVERSIZED_MESSAGE
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.disconnected = False
+
+        async def connect(self, _payload):
+            return None
+
+        async def query(self, _payload):
+            return None
+
+        async def receive_response(self):
+            # One tool call streams fine, then the reader raises the SDK's
+            # fatal decode error — exactly the shape observed in #137.
+            yield AssistantMessage(
+                content=[ToolUseBlock(id="t1", name="Bash", input={"command": "ls"})],
+                model="opus",
+                session_id="sess-big",
+            )
+            raise Exception(
+                "Failed to decode JSON: JSON message exceeded maximum buffer "
+                "size of 1048576 bytes..."
+            )
+
+        async def disconnect(self):
+            self.disconnected = True
+
+        async def get_context_usage(self):
+            return {}
+
+    fake = FakeClient()
+
+    async def fake_ensure(_request):
+        claude_provider._connected = True
+        claude_provider._client = fake
+        claude_provider._session_id = "sess-big"
+        return fake
+
+    monkeypatch.setattr(claude_provider, "_ensure_connected", fake_ensure)
+    monkeypatch.setattr(claude_provider, "_prompt_payload", lambda _req: None)
+
+    request = AgentRequest(prompt="do a big thing", model="opus", mode="normal")
+    # Must not raise — the fatal reader error becomes a recoverable result.
+    events = [
+        event
+        async for event in claude_provider.run_streaming(request, lambda _handle: None)
+    ]
+
+    # Earlier tool activity still streamed through before the failure.
+    assert any(isinstance(e, ToolUseEvent) for e in events)
+
+    results = [e for e in events if isinstance(e, ResultEvent)]
+    assert len(results) == 1
+    assert results[0].is_error is True
+    assert results[0].result == _OVERSIZED_MESSAGE
+    assert results[0].session_id == "sess-big"
+    assert fake.disconnected is True
+
+
+def test_claude_options_raise_sdk_buffer_above_default() -> None:
+    """max_buffer_size must be passed to the SDK well above its 1 MiB default
+    so legitimately large messages don't abort the turn (issue #137)."""
+    from ciao.providers.claude import _SDK_MAX_BUFFER_BYTES
+
+    assert _SDK_MAX_BUFFER_BYTES > 1024 * 1024
