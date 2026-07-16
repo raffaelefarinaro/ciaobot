@@ -181,6 +181,87 @@ describe('queued message replay handling', () => {
   })
 })
 
+describe('optimistic user bubble reconciliation', () => {
+  test('reconciles a bubble stranded behind a prior turn instead of duplicating it', async () => {
+    // Repro: the user sends while the client thinks it is idle, so an
+    // optimistic bubble (no turn_index) is rendered. The server queues the
+    // send behind a still-running turn whose activity/assistant blocks stream
+    // on top, then records + echoes the turn later with a fresh turn_index.
+    // The echo must reconcile the stranded bubble, not push a second copy.
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'chat-strand'
+    store.messages[chatId] = [
+      { role: 'user', content: 'queued question', timestamp: '', turn_index: undefined },
+      { role: 'assistant', content: 'prior turn reply', timestamp: '' },
+    ]
+
+    store.connectWs(chatId)
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: 'queued question',
+        turn_index: 1,
+        sent_at: '2026-07-16T13:07:59Z',
+      }),
+    })
+
+    const userMsgs = store.messages[chatId].filter(
+      m => m.role === 'user' && m.content === 'queued question',
+    )
+    expect(userMsgs.length).toBe(1)
+    expect(userMsgs[0].turn_index).toBe(1)
+  })
+
+  test('upgrades an optimistic bubble in place when nothing streamed between send and echo', async () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'chat-fast'
+    store.messages[chatId] = [
+      { role: 'assistant', content: 'earlier reply', timestamp: '' },
+      { role: 'user', content: 'hello', timestamp: '', turn_index: undefined },
+    ]
+
+    store.connectWs(chatId)
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'user_echo', text: 'hello', turn_index: 2 }),
+    })
+
+    const userMsgs = store.messages[chatId].filter(
+      m => m.role === 'user' && m.content === 'hello',
+    )
+    expect(userMsgs.length).toBe(1)
+    expect(userMsgs[0].turn_index).toBe(2)
+  })
+
+  test('loadMessages heals an orphaned optimistic bubble the live echo missed', async () => {
+    // Existing chats already carrying the duplicate must self-heal on reload:
+    // the server session holds the turn exactly once, so the shorter server
+    // history would otherwise be blocked by the never-shrink guard.
+    const store = useProjectStore()
+    const chatId = 'chat-heal'
+    store.messages[chatId] = [
+      { role: 'user', content: 'dup question', timestamp: '', turn_index: undefined },
+      { role: 'assistant', content: 'prior reply', timestamp: '' },
+      { role: 'user', content: 'dup question', timestamp: '2026-07-16T13:07:59Z', turn_index: 1 },
+      { role: 'assistant', content: 'answer', timestamp: '' },
+    ]
+    apiGet.mockResolvedValue([
+      { role: 'assistant', content: 'prior reply', sent_at: '' },
+      { role: 'user', content: 'dup question', sent_at: '2026-07-16T13:07:59Z', turn_index: 1 },
+      { role: 'assistant', content: 'answer', sent_at: '' },
+    ])
+
+    await store.loadMessages(chatId)
+
+    const userMsgs = store.messages[chatId].filter(
+      m => m.role === 'user' && m.content === 'dup question',
+    )
+    expect(userMsgs.length).toBe(1)
+    expect(userMsgs[0].turn_index).toBe(1)
+  })
+})
+
 describe('Codex structured questions', () => {
   test('answers a native request inside the active websocket turn', () => {
     const store = useProjectStore()
