@@ -342,16 +342,16 @@ function contextKeyFor(schedule: Schedule): string {
 }
 
 function contextLabel(schedule: Schedule): string {
-  if (schedule.context_label) return schedule.context_label
   if (schedule.web_project_id) {
     const proj = projectStore.projects.find(p => p.project_id === schedule.web_project_id)
-    return proj ? `${proj.name} (new chat)` : schedule.web_project_id
+    if (proj) return `${proj.name} (new chat)`
   }
   if (schedule.web_chat_id) {
     const chat = projectStore.chats.find(c => c.chat_id === schedule.web_chat_id)
-    return chat?.title || schedule.web_chat_id
+    if (chat) return chat.title || 'Untitled chat'
   }
-  return schedule.context_label || 'General'
+  if (schedule.context_label) return schedule.context_label
+  return 'General'
 }
 
 function badgeVariant(schedule: Schedule): string {
