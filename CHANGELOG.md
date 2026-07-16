@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.4.29 - 2026-07-16
+
+### Added
+- feat(web): implement compact chat activity design and grouped token usage formatting (`6e0974f`)
+- feat: implement cross-provider sub-chats, conversation forks, and compact activity layout (`4272d37`)
+- feat: show last run time, link to chat, and pulsing indicators on automations (`c36dc50`)
+- feat: auto-retry connection errors and fix schedule/run detail issues (`f112f43`)
+
+### Changed
+- Merge pull request #133 from raffaelefarinaro/chore/sync-develop-v0.4.28 (`6499a40`)
+- refactor: sync workspace switcher, fix subchat concurrency check, and update static build (`a901749`)
+- refactor: simplify contextLabel helper in SchedulesView.vue (`43368d1`)
+- refactor: simplify fork snapshot logic in chatFork.ts (`b914caa`)
+- refactor: refine consultations attachment logic in ChatPanel.vue (`ad1c265`)
+- Merge origin/develop into develop (`ccc9641`)
+
+### Maintenance
+- docs: design cross-provider sub-chats (`c5290ee`)
+- docs: design conversation forks (`9eadf4d`)
+- docs: plan forks and provider consultations (`f167037`)
+- test: add test case for switchWorkspace with transition options (`72c1b79`)
+- build: update static files index.html (`9114edd`)
+- build: update static files index.html (`a93123b`)
+
 ## v0.4.28 - 2026-07-15
 
 ### Added

@@ -130,7 +130,7 @@
       <div v-if="!schedule.enabled" class="disabled-banner">
         Disabled — won't run automatically. "Run now" still works.
       </div>
-      <div class="meta-grid">
+      <div v-if="!editing" class="meta-grid">
         <div v-if="schedule.frequency !== 'manual'">
           <strong>Time</strong><br />{{ schedule.daily_time_utc }} ({{ schedule.timezone_name }})
         </div>
@@ -143,7 +143,20 @@
         <div v-if="schedule.frequency !== 'manual'">
           <strong>Next run</strong><br />{{ nextRunLabel(schedule) }}
         </div>
-        <div><strong>Last triggered</strong><br />{{ schedule.last_triggered_on || 'never' }}</div>
+        <div>
+          <strong>Last run</strong><br />
+          <component
+            :is="schedule.last_run_chat_id ? 'router-link' : 'span'"
+            :to="schedule.last_run_chat_id ? `/chat/${schedule.last_run_chat_id}` : undefined"
+          >
+            {{ schedule.last_dispatched_at ? formatWhen(schedule.last_dispatched_at) : (schedule.last_triggered_on || 'never') }}
+            <span
+              v-if="showRunning && (schedule.last_dispatched_at || schedule.last_run_chat_id)"
+              class="spinner-dot"
+              title="Running now"
+            />
+          </component>
+        </div>
         <div><strong>Workspace</strong><br />{{ workspaceDisplayName(schedule.workspace) }}</div>
         <div><strong>Model</strong><br />{{ modelLabel(schedule) }}</div>
         <div><strong>Provider</strong><br />{{ providerLabel(schedule) }}</div>
@@ -276,15 +289,31 @@
       <div v-if="!loop.running" class="disabled-banner">
         Stopped — won't fire automatically. "Run now" still works.
       </div>
-      <div class="meta-grid">
+      <div v-if="!loopEditing" class="meta-grid">
         <div><strong>Every</strong><br />{{ loop.interval_minutes }} min</div>
         <div>
           <strong>Chat</strong><br />
-          <span :class="{ 'context-unavailable': loopContextUnavailable(loop) }">{{ loopChatLabel(loop) }}</span>
+          <router-link v-if="!loopContextUnavailable(loop)" :to="`/chat/${loop.web_chat_id}`">
+            {{ loopChatLabel(loop) }}
+          </router-link>
+          <span v-else :class="{ 'context-unavailable': loopContextUnavailable(loop) }">{{ loopChatLabel(loop) }}</span>
           <span v-if="loopContextUnavailable(loop)" class="context-help">Edit this loop to choose an available chat.</span>
         </div>
         <div><strong>Status</strong><br />{{ loopStatusLabel(loop) }}</div>
-        <div><strong>Last run</strong><br />{{ loop.last_run_at ? formatWhen(loop.last_run_at) : 'never' }}</div>
+        <div>
+          <strong>Last run</strong><br />
+          <component
+            :is="loop.last_run_at && !loopContextUnavailable(loop) ? 'router-link' : 'span'"
+            :to="loop.last_run_at && !loopContextUnavailable(loop) ? `/chat/${loop.web_chat_id}` : undefined"
+          >
+            {{ loop.last_run_at ? formatWhen(loop.last_run_at) : 'never' }}
+            <span
+              v-if="loop.last_run_at && loop.last_status === 'running'"
+              class="spinner-dot"
+              title="Running now"
+            />
+          </component>
+        </div>
         <div><strong>Next run</strong><br />{{ loop.running ? (loop.next_run ? formatWhen(loop.next_run) : 'soon') : 'stopped' }}</div>
         <div><strong>After restart</strong><br />{{ loop.autostart ? 'resumes ticking' : 'stays stopped until started' }}</div>
       </div>
@@ -371,7 +400,37 @@
           <span class="ov-when" :class="{ 'ov-when--muted': !l.running }">
             {{ l.running ? `every ${l.interval_minutes}m` : 'stopped' }}
           </span>
-          <span class="ov-title">{{ l.title || promptTitle(l.prompt) }}</span>
+          <span class="ov-title">
+            {{ l.title || promptTitle(l.prompt) }}
+            <span
+              v-if="l.running && l.web_chat_id && projectStore.isChatStreaming(l.web_chat_id)"
+              class="spinner-dot"
+              title="This loop is working"
+            />
+          </span>
+        </router-link>
+      </div>
+      <div v-if="recentRuns.length" class="ov-card">
+        <div class="ov-head">
+          <span class="ov-dot"></span>
+          Recent runs
+          <span class="ov-hint">click to open chat</span>
+        </div>
+        <router-link
+          v-for="r in recentRuns"
+          :key="r.id"
+          :to="`/chat/${r.chatId}`"
+          class="ov-item"
+        >
+          <span class="ov-when">{{ formatWhen(r.lastRunAt) }}</span>
+          <span class="ov-title">
+            {{ r.title }}
+            <span
+              v-if="projectStore.isChatStreaming(r.chatId)"
+              class="spinner-dot"
+              title="Running now"
+            />
+          </span>
         </router-link>
       </div>
       <div v-if="missedSchedules.length" class="ov-card ov-card--alert">
@@ -576,6 +635,42 @@ const upcomingSchedules = computed(() =>
 )
 const missedSchedules = computed(() => workspaceSchedules.value.filter(s => s.missed))
 const runningLoops = computed(() => workspaceLoops.value.filter(l => l.running))
+
+const recentRuns = computed(() => {
+  const runs: Array<{
+    id: string
+    title: string
+    type: 'schedule' | 'loop'
+    lastRunAt: string
+    chatId: string
+  }> = []
+
+  for (const s of workspaceSchedules.value) {
+    if (s.last_dispatched_at && s.last_run_chat_id) {
+      runs.push({
+        id: s.schedule_id,
+        title: s.title || promptTitle(s.prompt),
+        type: 'schedule',
+        lastRunAt: s.last_dispatched_at,
+        chatId: s.last_run_chat_id,
+      })
+    }
+  }
+
+  for (const l of workspaceLoops.value) {
+    if (l.last_run_at && l.web_chat_id) {
+      runs.push({
+        id: l.loop_id,
+        title: l.title || promptTitle(l.prompt),
+        type: 'loop',
+        lastRunAt: l.last_run_at,
+        chatId: l.web_chat_id,
+      })
+    }
+  }
+
+  return runs.sort((a, b) => (a.lastRunAt > b.lastRunAt ? -1 : 1)).slice(0, 5)
+})
 
 const loopChatGroups = computed(() => {
   const groups: { label: string; items: { key: string; label: string }[] }[] = []
@@ -792,16 +887,16 @@ function frequencyLabel(s: Schedule): string {
 }
 
 function contextLabel(s: Schedule): string {
-  if (s.context_label) return s.context_label
   if (s.web_project_id) {
     const proj = projectStore.projects.find(p => p.project_id === s.web_project_id)
-    return proj ? `${proj.name} (new chat per run)` : 'Unavailable project'
+    if (proj) return `${proj.name} (new chat per run)`
   }
   if (s.web_chat_id) {
     const chat = projectStore.chats.find(c => c.chat_id === s.web_chat_id)
-    return chat?.title || 'Unavailable chat'
+    if (chat) return chat.title || 'Untitled chat'
   }
-  return s.context_label || 'General'
+  if (s.context_label) return s.context_label
+  return 'General'
 }
 
 function contextUnavailable(s: Schedule): boolean {
@@ -860,18 +955,16 @@ function onEditWorkspaceChange() {
   editData.value.contextKey = defaultProjectContext(editData.value.workspace)
   if (!editData.value.model) editModelProvider.value = ''
 }
-
 async function onSystemWorkspaceChange(event: Event) {
   if (!schedule.value) return
   const workspace = (event.target as HTMLSelectElement).value
   const scheduleId = schedule.value.schedule_id
   await store.updateSchedule(scheduleId, { workspace })
   if (projectStore.activeWorkspace !== workspace) {
-    await projectStore.switchWorkspace(workspace)
+    await projectStore.switchWorkspace(workspace, { transition: false })
   }
   await router.push(`/schedules/${scheduleId}`)
 }
-
 function startEdit() {
   if (!schedule.value) return
   editData.value = {
@@ -1304,5 +1397,27 @@ function closeSchedule() {
 }
 .btn-running:not(:disabled):hover {
   filter: brightness(1.08);
+}
+
+/* Pulsing dot used inline next to active runs. */
+.spinner-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: ciao-pulse 1.1s ease-in-out infinite;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
+@keyframes ciao-pulse {
+  0%, 100% { transform: scale(0.55); opacity: 0.35; }
+  50% { transform: scale(1); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner-dot { animation-duration: 2.2s; }
 }
 </style>

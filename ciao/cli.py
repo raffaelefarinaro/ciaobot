@@ -1561,6 +1561,158 @@ def _create_chat_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _provider_chat_command(args: argparse.Namespace) -> int:
+    env_root = os.environ.get("CIAO_WORKSPACE") or "."
+    workspace_root = Path(env_root).expanduser().resolve()
+    _load_env_file(workspace_root / ".env")
+
+    host = os.environ.get("PWA_HOST", "localhost")
+    if host in ("0.0.0.0", "127.0.0.1", "::", "::1", ""):
+        host = "localhost"
+    port = os.environ.get("PWA_PORT", "8443")
+    base_url = getattr(args, "base_url", None) or f"http://{host}:{port}"
+    auth_token = os.environ.get("PWA_AUTH_TOKEN", "")
+    if not auth_token:
+        print("Error: PWA_AUTH_TOKEN not found in environment or .env file.", file=sys.stderr)
+        return 1
+
+    cookie_jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+
+    auth = _make_json_request(
+        opener, f"{base_url}/api/auth", data={"token": auth_token}, method="POST"
+    )
+    if isinstance(auth, dict) and auth.get("_error"):
+        return 1
+
+    if args.subcommand == "start":
+        if os.environ.get("CIAO_PROVIDER_SUBCHAT_ID"):
+            print("Error: Nested provider sub-chats are not allowed.", file=sys.stderr)
+            return 1
+        chat_id = args.chat_id or os.environ.get("CIAO_CHAT_ID")
+        if not chat_id:
+            print("Error: --chat-id or CIAO_CHAT_ID env var required.", file=sys.stderr)
+            return 1
+        provider = args.provider or os.environ.get("CIAO_PROVIDER")
+        if not provider:
+            print("Error: --provider or CIAO_PROVIDER env var required.", file=sys.stderr)
+            return 1
+        model = args.model or os.environ.get("CIAO_MODEL")
+        if not model:
+            print("Error: --model or CIAO_MODEL env var required.", file=sys.stderr)
+            return 1
+
+        chat_detail = _make_json_request(opener, f"{base_url}/api/chats/{chat_id}")
+        if isinstance(chat_detail, dict) and chat_detail.get("_error"):
+            print(f"Error: Chat '{chat_id}' not found.", file=sys.stderr)
+            return 1
+
+        parent_turn_index = chat_detail.get("user_turn_count", 0)
+        owner = {
+            "provider": chat_detail.get("provider", "claude"),
+            "model": chat_detail.get("model", ""),
+            "label": chat_detail.get("provider", "claude").capitalize(),
+        }
+        participant = {
+            "provider": provider,
+            "model": model,
+            "label": provider.capitalize(),
+        }
+
+        payload = {
+            "parent_turn_index": parent_turn_index,
+            "owner": owner,
+            "participant": participant,
+            "task_prompt": args.message,
+            "user_authorized": True,
+        }
+
+        res = _make_json_request(
+            opener,
+            f"{base_url}/api/chats/{chat_id}/provider-subchats",
+            data=payload,
+            method="POST",
+        )
+        if isinstance(res, dict) and res.get("_error"):
+            return 1
+
+        record = res.get("record", {})
+        result = res.get("result", {})
+        output = {
+            "subchat_id": record.get("subchat_id", ""),
+            "status": result.get("status", record.get("status", "")),
+            "reply": result.get("reply", ""),
+            "usage": result.get("usage", {"input_tokens": 0, "output_tokens": 0}),
+            "error": result.get("error", record.get("last_error", "")),
+        }
+        print(json.dumps(output, indent=2))
+        return 0
+
+    elif args.subcommand == "send":
+        subchat_id = args.subchat_id or os.environ.get("CIAO_PROVIDER_SUBCHAT_ID")
+        if not subchat_id:
+            print("Error: --subchat-id or CIAO_PROVIDER_SUBCHAT_ID env var required.", file=sys.stderr)
+            return 1
+
+        payload = {
+            "message": args.message,
+            "user_authorized": True,
+        }
+        res = _make_json_request(
+            opener,
+            f"{base_url}/api/provider-subchats/{subchat_id}/messages",
+            data=payload,
+            method="POST",
+        )
+        if isinstance(res, dict) and res.get("_error"):
+            return 1
+
+        output = {
+            "subchat_id": subchat_id,
+            "status": res.get("status", ""),
+            "reply": res.get("reply", ""),
+            "usage": res.get("usage", {"input_tokens": 0, "output_tokens": 0}),
+            "error": res.get("error", ""),
+        }
+        print(json.dumps(output, indent=2))
+        return 0
+
+    elif args.subcommand in ("close", "cancel", "extend"):
+        subchat_id = args.subchat_id or os.environ.get("CIAO_PROVIDER_SUBCHAT_ID")
+        if not subchat_id:
+            print("Error: --subchat-id or CIAO_PROVIDER_SUBCHAT_ID env var required.", file=sys.stderr)
+            return 1
+
+        payload = {}
+        if args.subcommand == "extend":
+            payload["user_authorized"] = True
+
+        res = _make_json_request(
+            opener,
+            f"{base_url}/api/provider-subchats/{subchat_id}/{args.subcommand}",
+            data=payload,
+            method="POST",
+        )
+        if isinstance(res, dict) and res.get("_error"):
+            return 1
+
+        output = {
+            "subchat_id": subchat_id,
+            "status": res.get("status", ""),
+            "reply": "",
+            "usage": {
+                "input_tokens": res.get("input_tokens", 0),
+                "output_tokens": res.get("output_tokens", 0),
+            },
+            "error": res.get("last_error", ""),
+        }
+        print(json.dumps(output, indent=2))
+        return 0
+
+    print(f"Error: Unknown subcommand {args.subcommand}", file=sys.stderr)
+    return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ciao", description="Ciaobot local assistant CLI.")
     subparsers = parser.add_subparsers(dest="command")
@@ -1897,6 +2049,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sync_skills_parser.add_argument("--verbose", action="store_true")
     sync_skills_parser.set_defaults(func=_sync_skills_command)
+
+    provider_chat_parser = subparsers.add_parser(
+        "provider-chat",
+        help="Manage provider sub-chats.",
+    )
+    provider_chat_parser.add_argument(
+        "--base-url",
+        help="Ciaobot server URL. Defaults to PWA_HOST/PWA_PORT.",
+    )
+    p_subparsers = provider_chat_parser.add_subparsers(dest="subcommand", required=True)
+
+    start_p = p_subparsers.add_parser("start", help="Start a provider sub-chat.")
+    start_p.add_argument("--chat-id", help="Parent chat ID. Defaults to CIAO_CHAT_ID.")
+    start_p.add_argument("--provider", help="Participant provider.")
+    start_p.add_argument("--model", help="Participant model.")
+    start_p.add_argument("--message", required=True, help="Task message prompt.")
+    start_p.set_defaults(func=_provider_chat_command)
+
+    send_p = p_subparsers.add_parser("send", help="Send a message to a provider sub-chat.")
+    send_p.add_argument("--subchat-id", help="Sub-chat ID. Defaults to CIAO_PROVIDER_SUBCHAT_ID.")
+    send_p.add_argument("--message", required=True, help="Message prompt.")
+    send_p.set_defaults(func=_provider_chat_command)
+
+    close_p = p_subparsers.add_parser("close", help="Close a provider sub-chat.")
+    close_p.add_argument("--subchat-id", help="Sub-chat ID. Defaults to CIAO_PROVIDER_SUBCHAT_ID.")
+    close_p.set_defaults(func=_provider_chat_command)
+
+    cancel_p = p_subparsers.add_parser("cancel", help="Cancel active provider sub-chat work.")
+    cancel_p.add_argument("--subchat-id", help="Sub-chat ID. Defaults to CIAO_PROVIDER_SUBCHAT_ID.")
+    cancel_p.set_defaults(func=_provider_chat_command)
+
+    extend_p = p_subparsers.add_parser("extend", help="Extend provider sub-chat limits.")
+    extend_p.add_argument("--subchat-id", help="Sub-chat ID. Defaults to CIAO_PROVIDER_SUBCHAT_ID.")
+    extend_p.set_defaults(func=_provider_chat_command)
 
     return parser
 

@@ -31,6 +31,7 @@ SYSTEM_STATE_FIELDS = {
     "enabled",
     "last_triggered_on",
     "last_dispatched_at",
+    "last_run_chat_id",
     "workspace",
 }
 
@@ -226,6 +227,7 @@ class ScheduleEntry:
     # Used by schedule health checks to know that something happened today
     # even if the cron path didn't run.
     last_dispatched_at: str = ""
+    last_run_chat_id: str = ""
     days_of_week: list[str] | None = None  # e.g. ["sun"] or ["mon","wed","fri"]; used when frequency="weekly"
     thread_id: int | None = None           # target topic (None = DM)
     frequency: str = "weekly"              # "daily", "weekly", "monthly", "manual", "once"
@@ -598,6 +600,8 @@ class ScheduleManager:
         # once it has run, it's gone. Stamp the dispatch timestamp FIRST so
         # the replace-before-delete write actually lands for "once" entries.
         entry.last_dispatched_at = datetime.now(UTC).isoformat(timespec="seconds")
+        if chat_id:
+            entry.last_run_chat_id = chat_id
         if entry.frequency == "once":
             self._store.replace(entry)
             self._store.delete(entry.schedule_id)

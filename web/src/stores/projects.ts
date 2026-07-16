@@ -8,6 +8,7 @@ import type {
   ChatInfo,
   ChatMessage,
   SubagentTranscript,
+  ProviderSubchatRecord,
   WsEvent,
   EventsWsMessage,
   VoiceResult,
@@ -50,6 +51,10 @@ export const useProjectStore = defineStore('projects', () => {
   // Subagent transcripts keyed by chat_id. Loaded lazily on chat switch and
   // after each streaming turn (subagents can be spawned mid-turn).
   const subagents = ref<Record<string, SubagentTranscript[]>>({})
+  // Provider sub-chats keyed by parent chat_id.
+  const providerSubchats = ref<Record<string, ProviderSubchatRecord[]>>({})
+  // Provider sub-chat transcript events keyed by subchat_id.
+  const providerSubchatEvents = ref<Record<string, any[]>>({})
   const sockets = ref<Record<string, WebSocket>>({})
   const streaming = ref<Record<string, boolean>>({})
   const streamingText = ref<Record<string, string>>({})
@@ -1194,6 +1199,23 @@ export const useProjectStore = defineStore('projects', () => {
     return c
   }
 
+  async function forkChat(
+    chatId: string,
+    copiedMessages: ChatMessage[],
+    turnIndex: number,
+  ) {
+    const snapshot = normalizeMessages(copiedMessages)
+    const fork = await api.post<ChatInfo>(`/api/chats/${chatId}/fork`, {
+      messages: snapshot,
+      turn_index: turnIndex,
+    })
+    replaceChat(fork)
+    messages.value[fork.chat_id] = snapshot
+    persistMessages()
+    await switchChat(fork.chat_id)
+    return fork
+  }
+
   async function moveChat(chatId: string, targetProjectId: string) {
     // Server validates same-workspace + non-archived + project exists.
     // The chat_moved broadcast on /ws/events also reconciles other tabs.
@@ -1387,6 +1409,25 @@ export const useProjectStore = defineStore('projects', () => {
     } catch {
       // No session locally / SDK error — leave any prior data in place.
     }
+    void loadProviderSubchats(chatId)
+  }
+
+  async function loadProviderSubchats(chatId: string): Promise<void> {
+    try {
+      const r = await api.get<ProviderSubchatRecord[]>(`/api/chats/${chatId}/provider-subchats`)
+      providerSubchats.value[chatId] = Array.isArray(r) ? r : []
+    } catch {
+      // ignore
+    }
+  }
+
+  async function loadProviderSubchatEvents(subchatId: string): Promise<void> {
+    try {
+      const r = await api.get<any[]>(`/api/provider-subchats/${subchatId}/events`)
+      providerSubchatEvents.value[subchatId] = Array.isArray(r) ? r : []
+    } catch {
+      // ignore
+    }
   }
 
   // ── Chat switching ──────────────────────────────────────────────────
@@ -1434,12 +1475,18 @@ export const useProjectStore = defineStore('projects', () => {
     connectWs(chatId)
   }
 
-  async function switchWorkspace(ws: WorkspaceName) {
+  async function switchWorkspace(ws: WorkspaceName, options?: { transition?: boolean }) {
+    const transition = options?.transition !== false
     if (activeWorkspace.value === ws) return
     if (activeChatId.value) disconnectWs(activeChatId.value)
     activeWorkspace.value = ws
-    persistState()
-    await transitionToFirstChat()
+    if (transition) {
+      persistState()
+      await transitionToFirstChat()
+    } else {
+      selectFirstChat()
+      persistState()
+    }
   }
 
   // ── WebSocket ───────────────────────────────────────────────────────
@@ -1868,6 +1915,13 @@ export const useProjectStore = defineStore('projects', () => {
         }
         if (messages.value[msg.chat_id]) delete messages.value[msg.chat_id]
         if (subagents.value[msg.chat_id]) delete subagents.value[msg.chat_id]
+        if (providerSubchats.value[msg.chat_id]) {
+          const list = providerSubchats.value[msg.chat_id] || []
+          for (const sc of list) {
+            delete providerSubchatEvents.value[sc.subchat_id]
+          }
+          delete providerSubchats.value[msg.chat_id]
+        }
         if (streaming.value[msg.chat_id]) delete streaming.value[msg.chat_id]
         if (streamingText.value[msg.chat_id]) delete streamingText.value[msg.chat_id]
         delete streamingTextPhase.value[msg.chat_id]
@@ -1876,11 +1930,44 @@ export const useProjectStore = defineStore('projects', () => {
           delete unread.value[msg.chat_id]
           persistUnread()
         }
-        const ws = sockets.value[msg.chat_id]
-        if (ws) {
-          try { ws.close() } catch { /* ignore */ }
-          delete sockets.value[msg.chat_id]
+        break
+      }
+      case 'provider_subchat_created': {
+        const list = providerSubchats.value[msg.parent_chat_id] || []
+        if (!list.some(r => r.subchat_id === msg.subchat_id)) {
+          list.push(msg.record)
+          providerSubchats.value[msg.parent_chat_id] = list
         }
+        break
+      }
+      case 'provider_subchat_status': {
+        const list = providerSubchats.value[msg.parent_chat_id] || []
+        const idx = list.findIndex(r => r.subchat_id === msg.subchat_id)
+        if (idx !== -1) {
+          list[idx] = msg.record
+        } else {
+          list.push(msg.record)
+        }
+        providerSubchats.value[msg.parent_chat_id] = [...list]
+        break
+      }
+      case 'provider_subchat_event': {
+        const events = providerSubchatEvents.value[msg.subchat_id] || []
+        events.push(msg.event)
+        providerSubchatEvents.value[msg.subchat_id] = [...events]
+        // Record metrics (status, token/message counts) arrive via
+        // `provider_subchat_status`; there is no need to re-fetch the whole
+        // list on every streamed event, which would flood the backend during
+        // active streaming.
+        break
+      }
+      case 'provider_subchat_deleted': {
+        if (providerSubchats.value[msg.parent_chat_id]) {
+          providerSubchats.value[msg.parent_chat_id] = providerSubchats.value[msg.parent_chat_id].filter(
+            r => r.subchat_id !== msg.subchat_id
+          )
+        }
+        delete providerSubchatEvents.value[msg.subchat_id]
         break
       }
       case 'open_chat':
@@ -2928,7 +3015,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   return {
     // State
-    projects, chats, workspaces, workspaceProviderOptions, workspaceClaudeAiConnectors, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, subagents, unread,
+    projects, chats, workspaces, workspaceProviderOptions, workspaceClaudeAiConnectors, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, subagents, providerSubchats, providerSubchatEvents, unread,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
     projectStreaming, backgroundAgents, toasts, pendingPermissions, activeQuestions, creatingChatProjectIds,
     // Computed
@@ -2940,7 +3027,7 @@ export const useProjectStore = defineStore('projects', () => {
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
     createProject, updateProject, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
-    createChat, renameChat, updateChat, handoverChat, moveChat, deleteChat, archiveChat, continueArchivedChat, newSession,
+    createChat, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, switchWorkspace, openChatFromDeepLink,
     syncLatest,
@@ -2952,7 +3039,7 @@ export const useProjectStore = defineStore('projects', () => {
     fileCommentsFor, removeFileComment, updateFileComment,
     pinFile, unpinFile, pinnedFileFor,
     removeQueued, clearQueued,
-    loadMessages, loadSubagents,
+    loadMessages, loadSubagents, loadProviderSubchats, loadProviderSubchatEvents,
     connectWs, disconnectWs, connectEventsWs,
     pushToast, pushErrorToast, dismissToast, fixError,
   }

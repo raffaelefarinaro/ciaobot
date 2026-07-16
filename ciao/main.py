@@ -383,10 +383,18 @@ async def _run_server_locked(config: CiaoConfig) -> int:
 
     # Schedule manager with web-only dispatch
     async def _dispatch_to_web(entry, model, mode, provider, *, target_chat_id=None):
-        return await pcm.dispatch_schedule(
+        result = await pcm.dispatch_schedule(
             entry, entry.prompt, model, mode, provider,
             target_chat_id=target_chat_id,
         )
+        if result and "chat_id" in result:
+            entry.last_run_chat_id = result["chat_id"]
+            # Persist only if the entry still exists: a "once" schedule may have
+            # been consumed (replace-then-delete) before this background task
+            # resolves, and replace() upserts — writing here would resurrect it.
+            if schedule_store.get(entry.schedule_id) is not None:
+                schedule_store.replace(entry)
+        return result
 
     def _prepare_chat(entry, prompt, model, mode, provider):
         return pcm.prepare_schedule_chat(entry, prompt, model, mode, provider)
@@ -434,6 +442,13 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     app.state.state_store = state
     app.state.transcript_store = transcripts
     app.state.project_chat_manager = pcm
+
+    from ciao.provider_subchats import ProviderSubchatManager
+    provider_subchat_manager = ProviderSubchatManager(
+        config, pcm, config.state_path.parent / "provider_subchats.json"
+    )
+    app.state.provider_subchat_manager = provider_subchat_manager
+    pcm._provider_subchat_manager = provider_subchat_manager
 
     # Git sync operates on the repo containing the vault root: the workspace
     # root for the default vault-inside-workspace layout (and as fallback),
