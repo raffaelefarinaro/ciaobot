@@ -1,6 +1,7 @@
 import DOMPurify from 'dompurify'
 import { Marked, marked } from 'marked'
 
+import { COMMENT_TAGS } from './commentContext'
 import { linkifyHtml } from './filePaths'
 import { linkifyWikilinksInMarkdown } from './wikilinks'
 
@@ -14,6 +15,10 @@ const MARKDOWN_OPTIONS = { breaks: true }
 
 function sanitizeHtml(html: string): string {
   return DOMPurify.sanitize(html, {
+    // Allow the inert custom elements used to wrap quoted "comment" context
+    // (see lib/commentContext.ts) so they survive into the chat bubble and can
+    // be styled as quote cards, instead of being stripped to bare text.
+    ADD_TAGS: [...COMMENT_TAGS],
     ADD_ATTR: ['target', 'rel', 'loading', 'data-file-path', 'data-line'],
     FORBID_ATTR: ['style'],
   })

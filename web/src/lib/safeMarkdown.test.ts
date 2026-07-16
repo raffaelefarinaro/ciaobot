@@ -37,6 +37,38 @@ describe('safe markdown rendering', () => {
     expect(html).not.toContain('javascript:')
   })
 
+  it('preserves comment-context tags so they can be styled in the bubble', () => {
+    const html = renderMarkdown(
+      '<user-comment-reference><reference-source>a.md (line 3)</reference-source>' +
+      '<quoted-text>\nhello\n</quoted-text><user-comment>\nhi\n</user-comment></user-comment-reference>',
+    )
+
+    expect(html).toContain('<user-comment-reference>')
+    expect(html).toContain('<reference-source>')
+    expect(html).toContain('<quoted-text>')
+    expect(html).toContain('<user-comment>')
+    expect(html).toContain('hello')
+    expect(html).toContain('hi')
+  })
+
+  it('keeps the reference intact when quoted text spans blank lines', () => {
+    const html = renderMarkdown(
+      '<user-comment-reference><quoted-text>\npara one\n\npara two\n</quoted-text>' +
+      '<user-comment>\nnote\n</user-comment></user-comment-reference>',
+    )
+    expect(html).toContain('<user-comment-reference>')
+    expect(html).toContain('</user-comment-reference>')
+    expect(html).toContain('para one')
+    expect(html).toContain('para two')
+    expect(html).toContain('note')
+  })
+
+  it('still strips dangerous tags even with comment tags allowed', () => {
+    const html = renderMarkdown('<quoted-text><img src=x onerror=alert(1)></quoted-text>')
+    expect(html).not.toContain('onerror')
+    expect(html).toContain('<quoted-text>')
+  })
+
   it('resolves Obsidian wikilinks into file-link anchors', () => {
     const html = renderFileMarkdown('See [[README|Rossmann MVP]] for context.', {
       resolveImageSrc: (href) => href,
