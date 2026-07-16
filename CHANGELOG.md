@@ -1,5 +1,47 @@
 # Changelog
 
+## v0.5.0 - 2026-07-16
+
+### Added
+- feat(web): stack message action buttons vertically in bottom corners (`134bb05`)
+- feat(reporting): anonymous bug reporting via Google Form (`efc8aea`)
+- feat: allow editing text and markdown files directly in the sidebar (`1ec0746`)
+- feat(web): XML-tagged reference blocks for quoted comment context (`ad02317`)
+- feat(reporting): wire the Ciaobot Bug Reports Google Form (`a674356`)
+- feat(gws): detect dead Google logins and add server-managed re-login (#145) (`5ccc0d9`)
+
+### Changed
+- Merge pull request #135 from raffaelefarinaro/chore/sync-develop-v0.4.29 (`552c51b`)
+- Merge pull request #136 from raffaelefarinaro/docs/release-skill-and-capabilities (`1a4be33`)
+- Merge pull request #138 from raffaelefarinaro/feat/vertical-message-actions (`76cdc18`)
+- Merge pull request #139 from raffaelefarinaro/fix/137-oversized-sdk-message-buffer (`ef44b12`)
+- Merge remote-tracking branch 'origin/develop' into feat/anonymous-bug-reporting (`357927b`)
+- Merge pull request #140 from raffaelefarinaro/feat/anonymous-bug-reporting (`83fcbc7`)
+- Merge pull request #141 from raffaelefarinaro/feat/sidebar-file-editing (`9721de2`)
+- Merge pull request #142 from raffaelefarinaro/feat/xml-comment-context (`2efb126`)
+- Merge pull request #144 from raffaelefarinaro/fix/title-tier-dropdown (`eea0465`)
+- Merge remote-tracking branch 'origin/main' into develop (`a2f1459`)
+- perf(menubar): poll tray status every 2s instead of 10s (`7b7da1c`)
+- Merge pull request #149 from raffaelefarinaro/fix/143-oneshot-error-detail (`bb3a8ff`)
+- Merge pull request #147 from raffaelefarinaro/feat/faster-tray-poll (`4576c5b`)
+- Merge pull request #146 from raffaelefarinaro/fix/duplicate-optimistic-user-bubble (`8aa2323`)
+- Merge remote-tracking branch 'origin/fix/askuserquestion-picker-stuck' into develop (`9b5da37`)
+- Merge remote-tracking branch 'origin/fix/145-gws-token-health-relogin' into develop (`8fe22db`)
+
+### Fixed
+- fix(claude): survive oversized CLI JSON messages (#137) (`46da3a7`)
+- fix(settings): show model tier on Chat titles row under Automatic (`b4dbdc3`)
+- fix(web): stop duplicate user bubble from stranded optimistic send (`206c8fa`)
+- fix(oneshot): propagate upstream error detail + bounded retry (#143) (`6c405ba`)
+- fix(web): stop answered AskUserQuestion picker from sticking on screen (`fd83e16`)
+
+### Maintenance
+- docs(skills): add ciao-release skill and cover forks/consultations/retry in ciao-capabilities (`5cb1d87`)
+- docs(skills): expand ciao-release checklist (open PRs/issues, fresh review + simplify) (`7c3a89e`)
+- docs(skills): make ciao-release a project skill, not a stock skill (`04f67b7`)
+- build: rebuild frontend after merging main (sidebar editing) into develop (`b5464c6`)
+- chore(deps): safe patch bumps for 0.5.0 (scrapling 0.4.11, dompurify 3.4.12, vue 3.5.40) (`1614976`)
+
 ## v0.4.29 - 2026-07-16
 
 ### Added
