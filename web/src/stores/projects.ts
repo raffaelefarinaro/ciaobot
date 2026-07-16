@@ -3,6 +3,7 @@ import { ref, computed, watch } from 'vue'
 import { api } from '../lib/api'
 import { getPendingBucket, normalizePendingBuckets, setPendingBucket } from '../lib/pendingBuckets'
 import { buildFixPrompt } from '../lib/fixError'
+import { formatChatComments, formatFileComments } from '../lib/commentContext'
 import type {
   ProjectInfo,
   ChatInfo,
@@ -109,7 +110,7 @@ export const useProjectStore = defineStore('projects', () => {
   type FileComment = PendingComment & { createdAt: string }
   const fileComments = ref<Record<string, FileComment[]>>({})
   // Chat comments: ephemeral references to text selected inside a chat bubble.
-  // Formatted as plain text "Referring to: ..." rather than XML blocks.
+  // Formatted as XML-tagged reference blocks (see lib/commentContext.ts).
   type PendingChatComment = {
     id: string
     selection: string
@@ -1997,45 +1998,17 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Send messages ───────────────────────────────────────────────────
 
-  // Render pendingComments as a clean block prefixed to the user's typed text.
-  // The model sees the file, line range, selected text, and comment in a
-  // readable markdown-style format that is also pleasant to read in the chat
-  // bubble. No XML tags.
+  // Render pending comments as XML-tagged reference blocks (see
+  // lib/commentContext.ts for the format and rationale). The model gets an
+  // unambiguous boundary around the file/line anchor, the verbatim selection,
+  // and the user's note; the same tags are whitelisted in the renderer and
+  // styled as quote cards so they read cleanly in the chat bubble too.
   function formatPendingComments(comments = pendingComments.value): string {
-    if (!comments.length) return ''
-    const blocks = comments.map((c, i) => {
-      const parts: string[] = [`--- Comment ${i + 1} on ${c.path} ---`]
-      if (c.lineStart) {
-        const range = c.lineEnd && c.lineEnd !== c.lineStart
-          ? `lines ${c.lineStart}-${c.lineEnd}`
-          : `line ${c.lineStart}`
-        parts.push(`(${range})`)
-      }
-      parts.push(
-        '',
-        'Selected:',
-        `> ${c.selection}`,
-        '',
-        'Comment:',
-        c.comment,
-      )
-      if (c.images?.length) {
-        parts.push('', 'Attachments:')
-        c.images.forEach((img, idx) => {
-          parts.push(`[Image ${idx + 1}] ${img}`)
-        })
-      }
-      return parts.join('\n')
-    })
-    return blocks.join('\n\n')
+    return formatFileComments(comments)
   }
 
   function formatPendingChatComments(comments = pendingChatComments.value): string {
-    if (!comments.length) return ''
-    const lines = comments.map((c) => {
-      return `Referring to: "${c.selection}"\nmy comment is: "${c.comment}"`
-    })
-    return lines.join('\n\n')
+    return formatChatComments(comments)
   }
 
   function sendMessage(chatId: string, text: string, mode: 'queue' | 'steer' = 'queue') {
@@ -2072,16 +2045,14 @@ export const useProjectStore = defineStore('projects', () => {
     const hasFile = fileBlock.length > 0
     const hasChat = chatBlock.length > 0
     const hasTyped = text.trim().length > 0
-    // Typed text goes first; attachments (file + chat comments) follow after a
-    // `----` separator so the model reads the user's prompt before context.
-    let composed = ''
-    if (hasTyped) composed += text.trim()
-    let attachments = ''
-    if (hasFile) attachments += fileBlock
-    if (hasChat) attachments += (attachments ? '\n\n' : '') + chatBlock
-    if (attachments) {
-      composed += (composed ? '\n\n----\n\n' : '') + attachments
-    }
+    // Reference blocks (quoted text + note) go FIRST, then the typed prompt,
+    // so the model reads the material being discussed before the instruction
+    // (Anthropic: placing the query at the end of the input improves quality).
+    let reference = ''
+    if (hasFile) reference += fileBlock
+    if (hasChat) reference += (reference ? '\n' : '') + chatBlock
+    let composed = reference
+    if (hasTyped) composed += (composed ? '\n\n' : '') + text.trim()
     const alreadyStreaming = isChatStreaming(chatId)
 
     if (alreadyStreaming) {

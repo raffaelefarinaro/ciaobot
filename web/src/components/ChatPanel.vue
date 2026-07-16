@@ -3715,6 +3715,36 @@ details[open] > .activity-summary::before {
   margin: 1.25em 0;
 }
 
+/* Quoted "comment" context (see lib/commentContext.ts) rendered as a quote
+   card in the user's own bubble. The same tags are the boundary the model
+   reads; here they're just styled. */
+.message-content :deep(user-comment-reference) {
+  display: block;
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  background: var(--bg);
+  padding: 6px 10px;
+  margin: 6px 0;
+}
+.message-content :deep(reference-source) {
+  display: block;
+  font-size: 12px;
+  color: var(--fg2);
+  margin-bottom: 4px;
+}
+.message-content :deep(quoted-text) {
+  display: block;
+  white-space: pre-wrap;
+  color: var(--fg2);
+  font-style: italic;
+  border-left: 2px solid var(--border);
+  padding-left: 8px;
+  margin: 2px 0 6px;
+}
+.message-content :deep(user-comment) {
+  display: block;
+}
+
 /* File-path links produced by linkifyHtml/linkifyText. Subtle dotted
    underline so they're discoverable but don't look like external URLs. */
 .message-content :deep(a.file-link),
