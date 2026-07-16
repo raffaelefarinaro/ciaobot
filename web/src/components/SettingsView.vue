@@ -341,10 +341,10 @@
                   <option v-if="routineProviderValue('title_model') === 'custom'" value="custom">Custom model</option>
                 </select>
                 <select
-                  v-if="routineTierSelectable('title_model')"
+                  v-if="routineProviderValue('title_model') !== 'apple'"
                   class="routine-select routine-select--tier"
                   :value="routineTierValue('title_model')"
-                  :disabled="routinesSaving"
+                  :disabled="routinesSaving || !routineTierSelectable('title_model')"
                   @change="saveRoutineTier('title_model', ($event.target as HTMLSelectElement).value)"
                 >
                   <option v-for="tier in modelTiers" :key="`title-${tier.key}`" :value="tier.key">
