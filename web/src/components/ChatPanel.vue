@@ -1239,7 +1239,12 @@ function dismissQuestions() {
   if (!id) return
   const requestId = activeQuestions.value[0]?.requestId || ''
   if (requestId) {
+    // respondQuestion records the resolution itself before clearing.
     store.respondQuestion(id, requestId, {})
+  } else {
+    // Claude picker has no round-trip; remember it as resolved so a stale
+    // server snapshot can't rebuild it after dismissal.
+    store.markResolvedQuestion(id)
   }
   delete store.activeQuestions[id]
   questionAnswers.value = {}
