@@ -24,6 +24,19 @@
           </svg>
         </button>
         <button
+          v-if="kind === 'text' && !isEditingText"
+          class="btn-icon"
+          @click="startEditingText"
+          title="Edit"
+          aria-label="Edit"
+          :disabled="loading || !!error"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+            <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4z"></path>
+          </svg>
+        </button>
+        <button
           class="btn-icon"
           :class="{ ok: refreshed }"
           @click="refresh"
@@ -91,70 +104,89 @@
           style="flex: 1; min-height: 0; height: auto;"
         />
         <template v-else>
-          <!-- Metadata card synthesized from YAML frontmatter -->
-          <div v-if="frontmatter" class="pfp-meta-card">
-            <div class="pfp-meta-row">
-              <span v-if="fmType" class="pfp-meta-pill pfp-meta-pill-type">{{ fmType }}</span>
-              <span v-if="fmStatus" class="pfp-meta-pill" :class="`pfp-meta-pill-status-${fmStatus}`">{{ fmStatus }}</span>
-              <span v-if="fmName && fmName !== basename.replace(/\.md$/, '')" class="pfp-meta-name" :title="fmName">{{ fmName }}</span>
-              <span class="pfp-meta-spacer"></span>
-              <span v-if="fmUpdated" class="pfp-meta-date" :title="`Updated ${fmUpdated}`">↻ {{ fmUpdated }}</span>
-              <span v-else-if="fmCreated" class="pfp-meta-date" :title="`Created ${fmCreated}`">+ {{ fmCreated }}</span>
+          <!-- Text Editing Mode -->
+          <div v-if="isEditingText" class="pfp-edit-shell">
+            <textarea
+              class="pfp-edit-textarea"
+              v-model="editBuffer"
+              spellcheck="false"
+              ref="editTextAreaEl"
+            ></textarea>
+            <div v-if="editError" class="pfp-error">{{ editError }}</div>
+            <div class="pfp-edit-actions">
+              <button class="pfp-btn-sm" @click="cancelEditingText" :disabled="editSaving">Cancel</button>
+              <button class="pfp-btn-sm primary" @click="saveEdits" :disabled="editSaving">
+                {{ editSaving ? 'Saving…' : 'Save' }}
+              </button>
             </div>
-            <div v-if="fmTags.length" class="pfp-meta-row pfp-meta-tags">
-              <span v-for="t in fmTags" :key="t" class="pfp-meta-tag">#{{ t }}</span>
-            </div>
-            <p v-if="fmProse" class="pfp-meta-summary">{{ fmProse }}</p>
-            <div
-              v-for="listExtra in fmListExtras"
-              :key="listExtra.key"
-              class="pfp-meta-row pfp-meta-links"
-            >
-              <span class="pfp-meta-links-label">{{ listExtra.key }}</span>
-              <template v-for="(item, i) in listExtra.items" :key="i">
-                <a
-                  v-if="item.path"
-                  class="pfp-meta-link file-link"
-                  href="#"
-                  @click.prevent="openRelated(item.path)"
-                >{{ item.label }}</a>
-                <span v-else class="pfp-meta-link">{{ item.label }}</span>
-              </template>
-            </div>
-            <dl v-if="fmExtraEntries.length" class="pfp-meta-extra">
-              <template v-for="entry in fmExtraEntries" :key="entry.key">
-                <dt>{{ entry.key }}</dt>
-                <dd>
-                  <a
-                    v-if="isUrl(entry.value)"
-                    :href="entry.value"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >{{ entry.value }}</a>
-                  <template v-else>{{ entry.value }}</template>
-                </dd>
-              </template>
-            </dl>
           </div>
-          <div
-            v-if="isMarkdown"
-            class="pfp-md"
-            ref="mdEl"
-            v-html="renderedMarkdown"
-            @click="onMdClick"
-          ></div>
-          <pre
-            v-else
-            class="pfp-pre"
-            ref="preEl"
-            @click="onPreClick"
-          ><code ref="preCodeEl"><span
-            v-for="(line, i) in contentLines"
-            :key="i"
-            :class="{ 'comment-highlight': isHighlightedLine(i + 1), 'pre-line': true }"
-            :data-line="i + 1"
-            :data-comment-id="commentIdForLine(i + 1)"
-          >{{ line }}</span></code></pre>
+
+          <template v-else>
+            <!-- Metadata card synthesized from YAML frontmatter -->
+            <div v-if="frontmatter" class="pfp-meta-card">
+              <div class="pfp-meta-row">
+                <span v-if="fmType" class="pfp-meta-pill pfp-meta-pill-type">{{ fmType }}</span>
+                <span v-if="fmStatus" class="pfp-meta-pill" :class="`pfp-meta-pill-status-${fmStatus}`">{{ fmStatus }}</span>
+                <span v-if="fmName && fmName !== basename.replace(/\.md$/, '')" class="pfp-meta-name" :title="fmName">{{ fmName }}</span>
+                <span class="pfp-meta-spacer"></span>
+                <span v-if="fmUpdated" class="pfp-meta-date" :title="`Updated ${fmUpdated}`">↻ {{ fmUpdated }}</span>
+                <span v-else-if="fmCreated" class="pfp-meta-date" :title="`Created ${fmCreated}`">+ {{ fmCreated }}</span>
+              </div>
+              <div v-if="fmTags.length" class="pfp-meta-row pfp-meta-tags">
+                <span v-for="t in fmTags" :key="t" class="pfp-meta-tag">#{{ t }}</span>
+              </div>
+              <p v-if="fmProse" class="pfp-meta-summary">{{ fmProse }}</p>
+              <div
+                v-for="listExtra in fmListExtras"
+                :key="listExtra.key"
+                class="pfp-meta-row pfp-meta-links"
+              >
+                <span class="pfp-meta-links-label">{{ listExtra.key }}</span>
+                <template v-for="(item, i) in listExtra.items" :key="i">
+                  <a
+                    v-if="item.path"
+                    class="pfp-meta-link file-link"
+                    href="#"
+                    @click.prevent="openRelated(item.path)"
+                  >{{ item.label }}</a>
+                  <span v-else class="pfp-meta-link">{{ item.label }}</span>
+                </template>
+              </div>
+              <dl v-if="fmExtraEntries.length" class="pfp-meta-extra">
+                <template v-for="entry in fmExtraEntries" :key="entry.key">
+                  <dt>{{ entry.key }}</dt>
+                  <dd>
+                    <a
+                      v-if="isUrl(entry.value)"
+                      :href="entry.value"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >{{ entry.value }}</a>
+                    <template v-else>{{ entry.value }}</template>
+                  </dd>
+                </template>
+              </dl>
+            </div>
+            <div
+              v-if="isMarkdown"
+              class="pfp-md"
+              ref="mdEl"
+              v-html="renderedMarkdown"
+              @click="onMdClick"
+            ></div>
+            <pre
+              v-else
+              class="pfp-pre"
+              ref="preEl"
+              @click="onPreClick"
+            ><code ref="preCodeEl"><span
+              v-for="(line, i) in contentLines"
+              :key="i"
+              :class="{ 'comment-highlight': isHighlightedLine(i + 1), 'pre-line': true }"
+              :data-line="i + 1"
+              :data-comment-id="commentIdForLine(i + 1)"
+            >{{ line }}</span></code></pre>
+          </template>
         </template>
       </div>
 
@@ -292,6 +324,11 @@ const kind = ref<'text' | 'image' | 'excalidraw' | 'pdf'>('text')
 const refreshed = ref(false)
 const openExternalState = ref<'' | 'loading' | 'ok'>('')
 const isEditingExcalidraw = ref(false)
+const isEditingText = ref(false)
+const editBuffer = ref('')
+const editSaving = ref(false)
+const editError = ref('')
+const editTextAreaEl = ref<HTMLTextAreaElement>()
 const imageTimestamp = ref(Date.now())
 
 // .pptx preview needs LibreOffice (soffice) server-side to convert to PDF.
@@ -501,6 +538,9 @@ const contentLines = computed(() => {
 
 async function load(): Promise<void> {
   if (!props.filePath) return
+  isEditingText.value = false
+  editBuffer.value = ''
+  editError.value = ''
   const isImg = /\.(png|jpe?g|gif|webp|svg|bmp|ico)$/i.test(props.filePath)
   if (isImg) {
     kind.value = 'image'
@@ -551,6 +591,51 @@ async function load(): Promise<void> {
     error.value = e instanceof Error ? e.message : String(e)
   } finally {
     loading.value = false
+  }
+}
+
+function startEditingText(): void {
+  editBuffer.value = content.value
+  isEditingText.value = true
+  editError.value = ''
+  nextTick(() => {
+    editTextAreaEl.value?.focus()
+  })
+}
+
+function cancelEditingText(): void {
+  isEditingText.value = false
+  editBuffer.value = ''
+  editError.value = ''
+}
+
+async function saveEdits(): Promise<void> {
+  if (!isEditingText.value) return
+  editSaving.value = true
+  editError.value = ''
+  try {
+    const body = {
+      chat_id: projectsStore.activeChatId || '',
+      path: cleanPath.value,
+      content: editBuffer.value,
+    }
+    const resp = await fetch('/api/workspace-file', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!resp.ok) {
+      editError.value = `Save failed (HTTP ${resp.status}).`
+      return
+    }
+    content.value = editBuffer.value
+    isEditingText.value = false
+    editBuffer.value = ''
+  } catch (e) {
+    editError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    editSaving.value = false
   }
 }
 
@@ -1189,6 +1274,9 @@ watch(() => props.filePath, () => {
   lastSelectionText = ''
   lastSelectionLines = null
   lastSelectionRange = null
+  isEditingText.value = false
+  editBuffer.value = ''
+  editError.value = ''
 })
 </script>
 
@@ -1822,6 +1910,36 @@ watch(() => props.filePath, () => {
 .pfp-btn-sm.primary:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* Edit mode */
+.pfp-edit-shell {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 8px;
+}
+.pfp-edit-textarea {
+  flex: 1;
+  width: 100%;
+  resize: none;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  font-family: var(--font, monospace);
+  font-size: 13px;
+  line-height: 1.5;
+  outline: none;
+  box-sizing: border-box;
+}
+.pfp-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
 }
 
 /* ── Mobile fallback ─────────────────────────────────────────────── */
