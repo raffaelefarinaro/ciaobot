@@ -28,10 +28,13 @@ import urllib.request
 
 # Public Google Form submission endpoint + field entry ids. Filled in once the
 # maintainer's "Ciaobot Bug Reports" form exists; overridable via env.
-_DEFAULT_FORM_URL = ""
-_DEFAULT_ENTRY_TITLE = ""
-_DEFAULT_ENTRY_DETAILS = ""
-_DEFAULT_ENTRY_SYSTEM = ""
+_DEFAULT_FORM_URL = (
+    "https://docs.google.com/forms/d/e/"
+    "1FAIpQLSeLHUO-ty-TJKB4DhIjhgQztxK7bW98sd3z4-OVjncE0ACvbQ/formResponse"
+)
+_DEFAULT_ENTRY_TITLE = "entry.599669287"
+_DEFAULT_ENTRY_DETAILS = "entry.843962268"
+_DEFAULT_ENTRY_SYSTEM = "entry.765789486"
 
 _TIMEOUT_SECONDS = 15
 
