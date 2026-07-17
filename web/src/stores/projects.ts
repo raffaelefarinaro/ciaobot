@@ -614,13 +614,15 @@ export const useProjectStore = defineStore('projects', () => {
 
   function historySignature(chatMessages: ChatMessage[]): string {
     return JSON.stringify(
-      chatMessages.map((message) => ({
-        role: message.role,
-        content: message.content,
-        tool_name: message.tool_name || '',
-        is_error: Boolean(message.is_error),
-        phase: message.phase || '',
-      }))
+      chatMessages
+        .filter(m => m.tool_name !== '_thinking')
+        .map((message) => ({
+          role: message.role,
+          content: message.content,
+          tool_name: message.tool_name || '',
+          is_error: Boolean(message.is_error),
+          phase: message.phase || '',
+        }))
     )
   }
 
@@ -630,25 +632,80 @@ export const useProjectStore = defineStore('projects', () => {
   // the server version, overlay that metadata from matching local
   // messages so post-reconcile the context % (context_pct lives inside
   // usage) doesn't evaporate.
-  function mergeMetadata(server: ChatMessage[], local: ChatMessage[]): ChatMessage[] {
-    return server.map((sMsg, i) => {
-      const lMsg = local[i]
-      if (!lMsg || lMsg.role !== sMsg.role || lMsg.content !== sMsg.content) {
-        return sMsg
+  function mergeMessageFields(sMsg: ChatMessage, lMsg: ChatMessage): ChatMessage {
+    const merged: ChatMessage = { ...sMsg }
+    if (lMsg.usage && !sMsg.usage) merged.usage = lMsg.usage
+    if (lMsg.quota && !sMsg.quota) merged.quota = lMsg.quota
+    if (lMsg.effective_model && !sMsg.effective_model) merged.effective_model = lMsg.effective_model
+    if (lMsg.is_error !== undefined && sMsg.is_error === undefined) merged.is_error = lMsg.is_error
+    if (lMsg.turn_index != null && sMsg.turn_index == null) merged.turn_index = lMsg.turn_index
+    if (lMsg.duration_ms != null && sMsg.duration_ms == null) merged.duration_ms = lMsg.duration_ms
+    if (!merged.timestamp && lMsg.timestamp) merged.timestamp = lMsg.timestamp
+    return merged
+  }
+
+  function groupIntoTurns(msgsList: ChatMessage[]): { user: ChatMessage | null; responses: ChatMessage[] }[] {
+    const turns: { user: ChatMessage | null; responses: ChatMessage[] }[] = []
+    let currentTurn: { user: ChatMessage | null; responses: ChatMessage[] } = { user: null, responses: [] }
+    for (const m of msgsList) {
+      if (m.role === 'user') {
+        if (currentTurn.user || currentTurn.responses.length) {
+          turns.push(currentTurn)
+        }
+        currentTurn = { user: m, responses: [] }
+      } else {
+        currentTurn.responses.push(m)
       }
-      const merged: ChatMessage = { ...sMsg }
-      if (lMsg.usage && !sMsg.usage) merged.usage = lMsg.usage
-      if (lMsg.quota && !sMsg.quota) merged.quota = lMsg.quota
-      if (lMsg.effective_model && !sMsg.effective_model) merged.effective_model = lMsg.effective_model
-      if (lMsg.is_error !== undefined && sMsg.is_error === undefined) merged.is_error = lMsg.is_error
-      if (lMsg.turn_index != null && sMsg.turn_index == null) merged.turn_index = lMsg.turn_index
-      if (lMsg.duration_ms != null && sMsg.duration_ms == null) merged.duration_ms = lMsg.duration_ms
-      // Prefer a non-empty timestamp from either side: the server-supplied
-      // sent_at wins (authoritative across reloads); fall back to whatever
-      // the streaming handler stamped locally.
-      if (!merged.timestamp && lMsg.timestamp) merged.timestamp = lMsg.timestamp
-      return merged
-    })
+    }
+    if (currentTurn.user || currentTurn.responses.length) {
+      turns.push(currentTurn)
+    }
+    return turns
+  }
+
+  function mergeMetadata(server: ChatMessage[], local: ChatMessage[]): ChatMessage[] {
+    const serverTurns = groupIntoTurns(server)
+    const localTurns = groupIntoTurns(local)
+    const mergedMessages: ChatMessage[] = []
+
+    for (let i = 0; i < serverTurns.length; i++) {
+      const sTurn = serverTurns[i]
+      const lTurn = localTurns[i]
+      const matches = lTurn && (
+        (!sTurn.user && !lTurn.user) ||
+        (sTurn.user && lTurn.user && sTurn.user.content === lTurn.user.content)
+      )
+
+      if (!matches) {
+        if (sTurn.user) mergedMessages.push(sTurn.user)
+        mergedMessages.push(...sTurn.responses)
+      } else {
+        if (sTurn.user && lTurn.user) {
+          mergedMessages.push(mergeMessageFields(sTurn.user, lTurn.user))
+        }
+
+        const mergedResponses: ChatMessage[] = []
+        const sAssistantMsgs = sTurn.responses.filter(m => m.role === 'assistant' && !m.tool_name)
+        let sAsstIdx = 0
+
+        for (const lMsg of lTurn.responses) {
+          if (lMsg.role === 'assistant' && !lMsg.tool_name) {
+            const sMsg = sAssistantMsgs[sAsstIdx]
+            if (sMsg) {
+              mergedResponses.push(mergeMessageFields(sMsg, lMsg))
+              sAsstIdx++
+            }
+          } else {
+            mergedResponses.push(lMsg)
+          }
+        }
+        for (let j = sAsstIdx; j < sAssistantMsgs.length; j++) {
+          mergedResponses.push(sAssistantMsgs[j])
+        }
+        mergedMessages.push(...mergedResponses)
+      }
+    }
+    return mergedMessages
   }
 
   function restoreMessages() {
@@ -680,6 +737,14 @@ export const useProjectStore = defineStore('projects', () => {
       if (pc) pendingCommentsByChat.value = normalizePendingBuckets<PendingComment>(JSON.parse(pc), activeChatId.value)
       const pcc = localStorage.getItem('ciao-pending-chat-comments')
       if (pcc) pendingChatCommentsByChat.value = normalizePendingBuckets<PendingChatComment>(JSON.parse(pcc), activeChatId.value)
+      const ssa = localStorage.getItem('ciao-stream-started-at')
+      if (ssa) streamStartedAt.value = JSON.parse(ssa)
+    } catch { /* ignore */ }
+  }
+
+  function persistStreamStartedAt() {
+    try {
+      localStorage.setItem('ciao-stream-started-at', JSON.stringify(streamStartedAt.value))
     } catch { /* ignore */ }
   }
 
@@ -948,6 +1013,7 @@ export const useProjectStore = defineStore('projects', () => {
     delete streamingTextPhase.value[chatId]
     delete liveUsage.value[chatId]
     delete streamStartedAt.value[chatId]
+    persistStreamStartedAt()
     delete projectStreaming.value[chatId]
   }
 
@@ -1411,9 +1477,11 @@ export const useProjectStore = defineStore('projects', () => {
         // history. This can happen when the SDK session was reset (e.g. resume
         // failure caused a fresh session) and the new session file has fewer
         // messages than the frontend accumulated from streaming events.
-        if (normalizedServer.length < normalizedLocal.length) {
+        const serverUserCount = normalizedServer.filter(m => m.role === 'user').length
+        const localUserCount = normalizedLocal.filter(m => m.role === 'user').length
+        if (serverUserCount < localUserCount) {
           console.warn(
-            `[loadMessages] Server returned ${normalizedServer.length} messages but local has ${normalizedLocal.length}; keeping local to avoid data loss`,
+            `[loadMessages] Server returned ${serverUserCount} user turns but local has ${localUserCount}; keeping local to avoid data loss`,
           )
           return
         }
@@ -2157,6 +2225,7 @@ export const useProjectStore = defineStore('projects', () => {
     streamingThinking.value[chatId] = ''
     delete streamingTextPhase.value[chatId]
     streamStartedAt.value[chatId] = Date.now()
+    persistStreamStartedAt()
     delete liveUsage.value[chatId]
 
     const payload: Record<string, unknown> = { type: 'message', text: composed }
@@ -2593,6 +2662,7 @@ export const useProjectStore = defineStore('projects', () => {
     // bubble remains authoritative.
     if (streamingEventTypes.has(event.type) && !streamStartedAt.value[chatId]) {
       streamStartedAt.value[chatId] = Date.now()
+      persistStreamStartedAt()
     }
 
     switch (event.type) {
@@ -2950,6 +3020,7 @@ export const useProjectStore = defineStore('projects', () => {
         delete streamingTextPhase.value[chatId]
         delete liveUsage.value[chatId]
         delete streamStartedAt.value[chatId]
+        persistStreamStartedAt()
         // Turn ended: the server has already resolved any still-pending gate
         // futures as deny via cancel_all(). Drop the bubbles on our side too
         // so a late click can't race a brand-new turn.
@@ -2995,6 +3066,7 @@ export const useProjectStore = defineStore('projects', () => {
         delete streamingTextPhase.value[chatId]
         delete liveUsage.value[chatId]
         delete streamStartedAt.value[chatId]
+        persistStreamStartedAt()
         delete pendingPermissions.value[chatId]
         persistMessages()
         break

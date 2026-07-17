@@ -3769,65 +3769,48 @@ class ProjectChatManager:
         *,
         chat_id: str,
         request: AgentRequest,
-    ) -> _StreamOutcome:
-        """Run a single ``execute_streaming`` pass and collect its outcome.
+        outcome: _StreamOutcome,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        """Run a single ``execute_streaming`` pass and yield events in real-time.
 
         Extracted from :meth:`stream_chat` so the auto-fallback wrapper
         can re-invoke the same logic on a re-issued request without
         duplicating the event-collecting / session-persisting code. The
         caller is responsible for forwarding ``events`` to subscribers
         and for persisting the transcript turn — the helper just
-        aggregates the terminal state.
+        aggregates the terminal state into the mutable outcome container.
         """
         chat = self._chats.get(chat_id)
         if chat is None:
             raise ValueError(f"Chat '{chat_id}' not found")
         provider = self._get_provider(chat_id)
-        events: list[StreamEvent] = []
-        response_text = ""
-        had_error = False
-        effective_model = chat.model
-        usage: dict[str, str] = {}
-        quota: dict[str, str] = {}
-        cost_usd: float = 0.0
-        tool_events: list[dict[str, Any]] = []
 
         async for event in provider.execute_streaming(request):
-            events.append(event)
+            outcome.events.append(event)
+            yield event
             sdk_sid = provider.current_session_id
             if sdk_sid and sdk_sid != chat.session_id:
                 chat.session_id = sdk_sid
                 self._save()
             if isinstance(event, ResultEvent):
-                response_text = event.result
-                had_error = bool(event.is_error)
-                effective_model = event.effective_model or chat.model
-                if chat.provider == "codex" and not chat.model and effective_model:
-                    chat.model = effective_model
+                outcome.response_text = event.result
+                outcome.had_error = bool(event.is_error)
+                outcome.effective_model = event.effective_model or chat.model
+                if chat.provider == "codex" and not chat.model and outcome.effective_model:
+                    chat.model = outcome.effective_model
                     self._save()
-                usage = event.usage
-                quota = event.quota
-                cost_usd = event.cost_usd or 0.0
+                outcome.usage = event.usage
+                outcome.quota = event.quota
+                outcome.cost_usd = event.cost_usd or 0.0
                 if event.session_id and event.session_id != chat.session_id:
                     chat.session_id = event.session_id
                     self._save()
             elif isinstance(event, ToolUseEvent):
-                tool_events.append({
+                outcome.tool_events.append({
                     "id": event.tool_use_id or "",
                     "name": event.tool_name,
                     "input": {"summary": event.tool_input},
                 })
-
-        return _StreamOutcome(
-            events=events,
-            response_text=response_text,
-            had_error=had_error,
-            effective_model=effective_model,
-            usage=usage,
-            quota=quota,
-            cost_usd=cost_usd,
-            tool_events=tool_events,
-        )
 
     def build_agent_request(
         self,
@@ -3905,13 +3888,12 @@ class ProjectChatManager:
         # get the original error surfaced instead of a loop.
         retry_used = False
 
-        outcome = await self._drive_stream(
+        outcome = _StreamOutcome(effective_model=chat.model)
+        async for event in self._drive_stream(
             chat_id=chat_id,
             request=request,
-        )
-        # Replay each event from the first attempt to subscribers so the
-        # PWA sees the same stream shape, then decide whether to retry.
-        for event in outcome.events:
+            outcome=outcome,
+        ):
             yield event
         response_text = outcome.response_text
         had_error = outcome.had_error
@@ -3973,19 +3955,20 @@ class ProjectChatManager:
                         f"(no image support); retrying on {next_model}"
                     ),
                 )
-                outcome = await self._drive_stream(
+                retry_outcome = _StreamOutcome(effective_model=next_model)
+                async for event in self._drive_stream(
                     chat_id=chat_id,
                     request=retry_request,
-                )
-                for event in outcome.events:
+                    outcome=retry_outcome,
+                ):
                     yield event
-                response_text = outcome.response_text
-                had_error = outcome.had_error
-                effective_model = outcome.effective_model
-                usage = outcome.usage
-                quota = outcome.quota
-                cost_usd = outcome.cost_usd
-                tool_events = outcome.tool_events
+                response_text = retry_outcome.response_text
+                had_error = retry_outcome.had_error
+                effective_model = retry_outcome.effective_model
+                usage = retry_outcome.usage
+                quota = retry_outcome.quota
+                cost_usd = retry_outcome.cost_usd
+                tool_events = retry_outcome.tool_events
             else:
                 logger.info(
                     "Auto tier-fallback skipped: no neighbor tier configured for %s",
