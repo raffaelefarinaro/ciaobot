@@ -107,7 +107,7 @@
       </nav>
 
       <div class="fv-main">
-        <div class="fv-body" :class="{ 'fv-body-image': store.kind === 'image', 'fv-body-excalidraw': store.kind === 'excalidraw' }" ref="bodyEl">
+        <div class="fv-body" :class="{ 'fv-body-image': store.kind === 'image', 'fv-body-excalidraw': store.kind === 'excalidraw', 'fv-body-csv': isCsv }" ref="bodyEl">
           <div v-if="store.loading" class="fv-loading">Loading…</div>
           <div v-else-if="store.error" class="fv-error">{{ store.error }}</div>
           <img
@@ -129,6 +129,13 @@
                 :read-only="false"
                 @change="store.editBuffer = $event"
                 style="flex: 1; min-height: 0; height: auto;"
+              />
+              <CsvViewer
+                v-else-if="isCsv"
+                :content="store.editBuffer"
+                :read-only="false"
+                @change="store.editBuffer = $event"
+                style="flex: 1; min-height: 0;"
               />
               <textarea
                 v-else
@@ -280,6 +287,11 @@
               v-html="renderedMarkdown"
               @click="onMdClick"
             ></div>
+            <CsvViewer
+              v-else-if="isCsv"
+              :content="store.content"
+              :read-only="true"
+            />
             <pre v-else class="fv-pre" ref="preEl" @click="onPreClick"><code ref="preCodeEl"><span v-for="(line, i) in contentLines" :key="i" :class="{ 'comment-highlight': isHighlightedLine(i + 1), 'pre-line': true }" :data-line="i + 1" :data-comment-id="commentIdForLine(i + 1)">{{ line }}</span></code></pre>
             </template>
           </template>
@@ -424,7 +436,9 @@ import { renderFileMarkdown } from '../lib/safeMarkdown'
 import { buildMarkdownIndex, resolveWikilinkTarget } from '../lib/wikilinks'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { createTerminalDiffLines, terminalDiffPrefix, type TerminalDiffKind } from '../lib/terminalDiff'
+import { isCsvPath } from '../lib/csv'
 const ExcalidrawViewer = defineAsyncComponent(() => import('./ExcalidrawViewer.vue'))
+const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
 
 const store = useFileViewerStore()
 const projectsStore = useProjectStore()
@@ -1026,6 +1040,7 @@ const basename = computed(() => {
 })
 
 const isMarkdown = computed(() => /\.(md|markdown)$/i.test(store.path))
+const isCsv = computed(() => isCsvPath(store.path))
 
 // Directory portion of the current MD file, used to resolve relative image
 // references inside the markdown. Strips any `:line` suffix the viewer
@@ -1681,6 +1696,11 @@ if (typeof window !== 'undefined') {
   justify-content: center;
   padding: 0;
   background: var(--bg2, rgba(255, 255, 255, 0.04));
+}
+.fv-body-csv {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 .fv-img {
   max-width: 100%;

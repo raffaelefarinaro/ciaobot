@@ -67,7 +67,7 @@
       </template>
     </PaneHeader>
     <div class="pfp-main" ref="mainEl">
-      <div class="pfp-body" :class="{ 'pfp-body-excalidraw': kind === 'excalidraw' }" ref="bodyEl">
+      <div class="pfp-body" :class="{ 'pfp-body-excalidraw': kind === 'excalidraw', 'pfp-body-csv': isCsv }" ref="bodyEl">
         <div v-if="loading" class="pfp-loading">Loading…</div>
         <div v-else-if="error" class="pfp-error">{{ error }}</div>
         <img
@@ -106,7 +106,15 @@
         <template v-else>
           <!-- Text Editing Mode -->
           <div v-if="isEditingText" class="pfp-edit-shell">
+            <CsvViewer
+              v-if="isCsv"
+              :content="editBuffer"
+              :read-only="false"
+              @change="editBuffer = $event"
+              style="flex: 1; min-height: 0;"
+            />
             <textarea
+              v-else
               class="pfp-edit-textarea"
               v-model="editBuffer"
               spellcheck="false"
@@ -174,6 +182,11 @@
               v-html="renderedMarkdown"
               @click="onMdClick"
             ></div>
+            <CsvViewer
+              v-else-if="isCsv"
+              :content="content"
+              :read-only="true"
+            />
             <pre
               v-else
               class="pfp-pre"
@@ -305,10 +318,12 @@ import { parseFrontmatter, type FrontmatterValue } from '../lib/markdownFrontmat
 import { renderFileMarkdown } from '../lib/safeMarkdown'
 import { buildMarkdownIndex, resolveWikilinkTarget } from '../lib/wikilinks'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
+import { isCsvPath } from '../lib/csv'
 import { api } from '../lib/api'
 import PaneHeader from './PaneHeader.vue'
 import { useFileViewerStore } from '../stores/fileViewer'
 const ExcalidrawViewer = defineAsyncComponent(() => import('./ExcalidrawViewer.vue'))
+const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
 
 const props = defineProps<{ filePath: string }>()
 defineEmits<{ (e: 'close'): void }>()
@@ -392,6 +407,7 @@ const basename = computed(() => {
   return idx === -1 ? p : p.slice(idx + 1)
 })
 const isMarkdown = computed(() => /\.(md|markdown)$/i.test(cleanPath.value))
+const isCsv = computed(() => isCsvPath(cleanPath.value))
 
 const docDir = computed(() => {
   const idx = cleanPath.value.lastIndexOf('/')
@@ -1359,6 +1375,9 @@ watch(() => props.filePath, () => {
 }
 .pfp-body-excalidraw {
   padding: 0 !important;
+  overflow: hidden !important;
+}
+.pfp-body-csv {
   overflow: hidden !important;
 }
 .pfp-loading,
