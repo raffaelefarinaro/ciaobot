@@ -609,7 +609,7 @@ class CiaoConfig:
         )
         ollama_opus_model = (
             source.get("CIAO_OLLAMA_OPUS_MODEL", "").strip()
-            or "glm-5.2:cloud"
+            or "minimax-m3:cloud"
         )
         ollama_fable_model = (
             source.get("CIAO_OLLAMA_FABLE_MODEL", "").strip()
