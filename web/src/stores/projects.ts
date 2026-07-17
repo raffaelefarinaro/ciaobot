@@ -2650,6 +2650,9 @@ export const useProjectStore = defineStore('projects', () => {
     // renders as "streaming" without the client having called sendMessage.
     // `user_echo` is included so a fresh subscribe that only has the echo
     // buffered (turn just started, no deltas yet) still shows the indicator.
+    // `model_changed` is intentionally omitted: it is emitted after a
+    // successful capability fallback's terminal `result`, so including it
+    // here would flip streaming back on after the turn already ended.
     const streamingEventTypes = new Set(['text_delta', 'tool_use', 'thinking', 'status', 'user_echo', 'token_usage'])
     if (streamingEventTypes.has(event.type) && !streaming.value[chatId]) {
       streaming.value[chatId] = true
@@ -2905,8 +2908,31 @@ export const useProjectStore = defineStore('projects', () => {
         }
         break
 
-      case 'status':
+      case 'status': {
+        // Surface descriptive status notes (capability fallback "retrying
+        // on …") as system messages. Ephemeral control tokens stay silent
+        // so "thinking"/"stopped"/rate-limit markers do not pollute history.
+        const message = (event.message || '').trim()
+        const ephemeral = new Set(['thinking', 'stopped', 'rate_limit', 'model_rerouted'])
+        if (message && !ephemeral.has(message) && !message.startsWith('error:')) {
+          msgs.push({
+            role: 'system',
+            content: message,
+            timestamp: new Date().toISOString(),
+          })
+          messages.value[chatId] = normalizeMessages([...msgs])
+          persistMessages()
+        }
         break
+      }
+
+      case 'model_changed': {
+        const chat = chats.value.find(c => c.chat_id === chatId)
+        if (chat && event.model) {
+          chat.model = event.model
+        }
+        break
+      }
 
       case 'token_usage':
         // Cumulative, monotonic totals for the turn. Store the latest snapshot

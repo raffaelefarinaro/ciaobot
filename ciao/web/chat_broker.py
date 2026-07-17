@@ -14,6 +14,7 @@ from typing import AsyncIterator
 
 from ciao.models import (
     AssistantTextDelta,
+    ModelChangedEvent,
     PermissionRequestEvent,
     ResultEvent,
     StreamEvent,
@@ -138,6 +139,8 @@ def event_to_json(event: StreamEvent) -> dict | None:
         return payload
     if isinstance(event, SystemStatusEvent):
         return {"type": "status", "message": event.status or ""}
+    if isinstance(event, ModelChangedEvent):
+        return {"type": "model_changed", "model": event.model}
     if isinstance(event, TokenUsageEvent):
         return {
             "type": "token_usage",

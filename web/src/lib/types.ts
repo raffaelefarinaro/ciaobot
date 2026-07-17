@@ -201,6 +201,7 @@ export type WsEvent =
     }
   | { type: 'thinking'; text: string; parent_tool_use_id?: string }
   | { type: 'status'; message: string }
+  | { type: 'model_changed'; model: string }
   // Running token totals for the in-flight turn (cumulative, monotonic).
   // Emitted from partial stream events so the live trace can show a token
   // count as the model works; the authoritative totals still land on `result`.

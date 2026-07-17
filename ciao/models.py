@@ -188,6 +188,17 @@ class SystemStatusEvent(StreamEvent):
 
 
 @dataclass(slots=True)
+class ModelChangedEvent(StreamEvent):
+    """Emitted when the chat's model is switched during a capability fallback.
+
+    The PWA uses this to update the model pill and chat metadata in real time
+    so the user sees the switch without needing a page reload.
+    """
+
+    model: str = ""
+
+
+@dataclass(slots=True)
 class TokenUsageEvent(StreamEvent):
     """Running token usage for the in-flight turn.
 

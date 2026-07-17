@@ -162,6 +162,9 @@ async def test_capability_error_triggers_tier_fallback(tmp_path: Path) -> None:
     This is the screenshot scenario: the chat was sent to a model that
     cannot handle images, the provider returned a 400, and the engine
     silently retried on the next tier in the configured ladder.
+
+    The PWA must see exactly one ``result`` (the success), a ``status``
+    note about the retry, and a ``model_changed`` event after success.
     """
     pcm = _make_manager(tmp_path)
     # Pin OllamaSettings to the user's actual config (kimi5.2 = fable,
@@ -180,11 +183,11 @@ async def test_capability_error_triggers_tier_fallback(tmp_path: Path) -> None:
     pcm._save()
 
     seen_models: list[str] = []
-
-    from ciao.web.project_chats import _StreamOutcome
+    seen_image_counts: list[int] = []
 
     async def fake_drive(*, chat_id, request, outcome):
         seen_models.append(request.model)
+        seen_image_counts.append(len(request.images or []))
         if request.model == "kimi5.2:cloud":
             outcome.response_text = "API Error: 400 this model does not support image input"
             outcome.had_error = True
@@ -224,13 +227,27 @@ async def test_capability_error_triggers_tier_fallback(tmp_path: Path) -> None:
 
     pcm._drive_stream = fake_drive  # type: ignore[assignment]
 
-    stream = pcm.start_stream(chat.chat_id, "what is in the image?")
+    from ciao.models import ImageAttachment
+
+    stream = pcm.start_stream(
+        chat.chat_id,
+        "what is in the image?",
+        images=[
+            ImageAttachment(
+                path=tmp_path / "shot.png",
+                mime_type="image/png",
+                original_filename="shot.png",
+            )
+        ],
+    )
     events = await asyncio.wait_for(_consume(stream), timeout=2.0)
 
     # First attempt fired on kimi5.2; retry attempted on minimax-m3
     # (configured Ollama opus slot). Both must appear in the seen list.
     assert seen_models[0] == "kimi5.2:cloud"
     assert seen_models[-1] == "minimax-m3:cloud"
+    # Images must be preserved on the retry (not stripped).
+    assert seen_image_counts == [1, 1]
     # A status line was emitted between the two attempts so the PWA
     # shows the user what happened.
     status_events = [
@@ -239,12 +256,153 @@ async def test_capability_error_triggers_tier_fallback(tmp_path: Path) -> None:
         if e.get("type") == "status" and "retrying" in (e.get("message") or "").lower()
     ]
     assert status_events, f"expected a 'retrying' status event, got {events}"
-    # The terminal result is the second attempt's success.
+    # Exactly one result — the error from the first model is suppressed.
     result_events = [e for e in events if e.get("type") == "result"]
-    assert result_events
-    final = result_events[-1]
+    assert len(result_events) == 1, f"expected exactly one result, got {result_events}"
+    final = result_events[0]
     assert final.get("is_error") is False
     assert "Here is my answer" in final.get("text", "")
+    # Successful fallback notifies the PWA of the model switch.
+    model_changed = [e for e in events if e.get("type") == "model_changed"]
+    assert model_changed == [{"type": "model_changed", "model": "minimax-m3:cloud"}]
+    # And persists it on the chat so the next turn uses the working model.
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.model == "minimax-m3:cloud"
+
+
+async def test_capability_fallback_persists_model_change(tmp_path: Path) -> None:
+    """After a successful capability fallback, chat.model must stick."""
+    pcm = _make_manager(tmp_path)
+    pcm._config.ollama = pcm._config.ollama.__class__(
+        haiku_model="deepseek-v4-flash:cloud",
+        sonnet_model="kimi-k2.7-code:cloud",
+        opus_model="minimax-m3:cloud",
+        fable_model="kimi5.2:cloud",
+    )
+    project = pcm.create_project("tier-fallback-persist", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="persist-model")
+    chat.model = "kimi5.2:cloud"
+    pcm._save()
+
+    async def fake_drive(*, chat_id, request, outcome):
+        if request.model == "kimi5.2:cloud":
+            outcome.response_text = "API Error: 400 this model does not support image input"
+            outcome.had_error = True
+            outcome.effective_model = request.model
+            evt = ResultEvent(
+                type="result",
+                result=outcome.response_text,
+                session_id="sess-1",
+                is_error=True,
+                effective_model=request.model,
+                usage={},
+                quota={},
+                cost_usd=0.0,
+            )
+            outcome.events.append(evt)
+            yield evt
+            return
+        outcome.response_text = "ok"
+        outcome.had_error = False
+        outcome.effective_model = request.model
+        evt = ResultEvent(
+            type="result",
+            result="ok",
+            session_id="sess-2",
+            is_error=False,
+            effective_model=request.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+        outcome.events.append(evt)
+        yield evt
+
+    pcm._drive_stream = fake_drive  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "describe this")
+    await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.model == "minimax-m3:cloud"
+    # Reloading from disk must keep the persisted model.
+    pcm2 = _make_manager(tmp_path)
+    reloaded = pcm2.get_chat(chat.chat_id)
+    assert reloaded is not None
+    assert reloaded.model == "minimax-m3:cloud"
+
+
+async def test_capability_fallback_preserves_images(tmp_path: Path) -> None:
+    """Capability fallback must retry with the original images intact."""
+    pcm = _make_manager(tmp_path)
+    pcm._config.ollama = pcm._config.ollama.__class__(
+        haiku_model="deepseek-v4-flash:cloud",
+        sonnet_model="kimi-k2.7-code:cloud",
+        opus_model="minimax-m3:cloud",
+        fable_model="kimi5.2:cloud",
+    )
+    project = pcm.create_project("tier-fallback-images", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="preserve-images")
+    chat.model = "kimi5.2:cloud"
+    pcm._save()
+
+    retry_images: list | None = None
+
+    async def fake_drive(*, chat_id, request, outcome):
+        nonlocal retry_images
+        if request.model == "kimi5.2:cloud":
+            outcome.response_text = "API Error: 400 this model does not support image input"
+            outcome.had_error = True
+            outcome.effective_model = request.model
+            evt = ResultEvent(
+                type="result",
+                result=outcome.response_text,
+                session_id="sess-1",
+                is_error=True,
+                effective_model=request.model,
+                usage={},
+                quota={},
+                cost_usd=0.0,
+            )
+            outcome.events.append(evt)
+            yield evt
+            return
+        retry_images = list(request.images or [])
+        outcome.response_text = "I see a cat."
+        outcome.had_error = False
+        outcome.effective_model = request.model
+        evt = ResultEvent(
+            type="result",
+            result="I see a cat.",
+            session_id="sess-2",
+            is_error=False,
+            effective_model=request.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+        outcome.events.append(evt)
+        yield evt
+
+    pcm._drive_stream = fake_drive  # type: ignore[assignment]
+
+    from ciao.models import ImageAttachment
+
+    img = ImageAttachment(
+        path=tmp_path / "photo.jpg",
+        mime_type="image/jpeg",
+        original_filename="photo.jpg",
+    )
+    stream = pcm.start_stream(chat.chat_id, "what is this?", images=[img])
+    await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    assert retry_images is not None
+    assert len(retry_images) == 1
+    assert retry_images[0].path == img.path
+    assert retry_images[0].mime_type == "image/jpeg"
+    assert retry_images[0].original_filename == "photo.jpg"
 
 
 async def test_rate_limit_does_not_trigger_tier_fallback(tmp_path: Path) -> None:
@@ -262,8 +420,6 @@ async def test_rate_limit_does_not_trigger_tier_fallback(tmp_path: Path) -> None
     pcm._save()
 
     drive_calls: list[str] = []
-
-    from ciao.web.project_chats import _StreamOutcome
 
     async def fake_drive(*, chat_id, request, outcome):
         drive_calls.append(request.model)
@@ -294,6 +450,12 @@ async def test_rate_limit_does_not_trigger_tier_fallback(tmp_path: Path) -> None
     result_events = [e for e in events if e.get("type") == "result"]
     assert result_events
     assert result_events[-1].get("is_error") is True
+    # No model_changed when fallback does not run.
+    assert not any(e.get("type") == "model_changed" for e in events)
+    # Chat model stays on the original.
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.model == "kimi5.2:cloud"
 
 
 async def test_connection_error_marks_turn_for_fast_retry(tmp_path: Path) -> None:

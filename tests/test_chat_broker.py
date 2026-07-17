@@ -157,6 +157,17 @@ def test_event_to_json_thinking() -> None:
     }
 
 
+def test_event_to_json_model_changed() -> None:
+    from ciao.models import ModelChangedEvent
+
+    assert event_to_json(
+        ModelChangedEvent(type="model_changed", model="minimax-m3:cloud")
+    ) == {
+        "type": "model_changed",
+        "model": "minimax-m3:cloud",
+    }
+
+
 def test_event_to_json_threads_subagent_attribution_fields() -> None:
     """Stream events fired from inside a Task subagent must round-trip
     parent_tool_use_id (and tool_use_id for tool calls) so the client can

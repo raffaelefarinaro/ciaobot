@@ -34,6 +34,7 @@ from ciao.models import (
     BridgeMode,
     ChatContext,
     ImageAttachment,
+    ModelChangedEvent,
     PermissionRequestEvent,
     ResultEvent,
     StreamEvent,
@@ -3889,12 +3890,19 @@ class ProjectChatManager:
         retry_used = False
 
         outcome = _StreamOutcome(effective_model=chat.model)
+        held_result: ResultEvent | None = None
         async for event in self._drive_stream(
             chat_id=chat_id,
             request=request,
             outcome=outcome,
         ):
-            yield event
+            # Hold back the ResultEvent: if a capability fallback follows,
+            # the error result must NOT reach the PWA (it would prematurely
+            # end the turn). Non-result events are forwarded immediately.
+            if isinstance(event, ResultEvent):
+                held_result = event
+            else:
+                yield event
         response_text = outcome.response_text
         had_error = outcome.had_error
         effective_model = outcome.effective_model
@@ -3909,6 +3917,7 @@ class ProjectChatManager:
         # capable) and re-issue. Codex and any backend outside Claude /
         # Ollama / OpenRouter skip the retry — the user explicitly opted
         # out of broadening scope.
+        will_fallback = False
         if (
             had_error
             and not retry_used
@@ -3918,6 +3927,7 @@ class ProjectChatManager:
         ):
             next_model = next_tier_for_failure(request.model, self._config)
             if next_model and next_model != request.model:
+                will_fallback = True
                 logger.warning(
                     "Auto tier-fallback: %s failed (%s); retrying on %s",
                     request.model,
@@ -3935,15 +3945,11 @@ class ProjectChatManager:
                     mode=self._effective_mode_for_chat(chat),
                     display_prompt=request.display_prompt,
                     resume_session=None,
-                    # If the failure was image-related, strip the images
-                    # so the next model at least has a chance to answer
-                    # the text portion. For other capability errors
-                    # (context length, etc.) keep the payload intact.
-                    images=(
-                        []
-                        if "image" in response_text.lower()
-                        else (images or [])
-                    ),
+                    # Always keep images: the fallback model may support
+                    # vision (e.g. minimax-m3). If it also can't handle
+                    # images its error surfaces normally (retry_used
+                    # prevents a second fallback).
+                    images=images or [],
                     extra_env=self._build_extra_env(chat),
                     disallowed_tools=self.disallowed_tools_for_chat(chat),
                     thinking_level=self._thinking_level_for_chat(chat),
@@ -3951,8 +3957,8 @@ class ProjectChatManager:
                 yield SystemStatusEvent(
                     type="system",
                     status=(
-                        f"primary model could not handle this input "
-                        f"(no image support); retrying on {next_model}"
+                        f"primary model could not handle this input; "
+                        f"retrying on {next_model}"
                     ),
                 )
                 retry_outcome = _StreamOutcome(effective_model=next_model)
@@ -3969,11 +3975,29 @@ class ProjectChatManager:
                 quota = retry_outcome.quota
                 cost_usd = retry_outcome.cost_usd
                 tool_events = retry_outcome.tool_events
+                # Successful fallback: persist the model change so future
+                # turns in this chat use the working model, and notify the
+                # PWA so the model pill updates in real time.
+                if not had_error:
+                    chat.model = next_model
+                    self._save()
+                    yield ModelChangedEvent(
+                        type="model_changed",
+                        model=next_model,
+                    )
             else:
                 logger.info(
                     "Auto tier-fallback skipped: no neighbor tier configured for %s",
                     request.model,
                 )
+
+        # Yield the held-back result from the first model when no fallback
+        # was attempted (normal path or no eligible neighbor). When a
+        # fallback ran, its own ResultEvent was already yielded above and
+        # the first model's error result is intentionally suppressed so
+        # the PWA sees exactly one result per turn.
+        if not will_fallback and held_result is not None:
+            yield held_result
 
         # Record transcript turn
         if handover_context_sent and not had_error:
