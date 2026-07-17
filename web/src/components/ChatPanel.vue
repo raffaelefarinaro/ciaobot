@@ -744,16 +744,6 @@
     </div>
 
     <!-- Input -->
-    <!-- Streaming controls bar (separate row above input) -->
-    <div v-if="store.isStreaming && !chat.archived" class="streaming-bar">
-      <span class="streaming-spinner" aria-hidden="true">{{ spinnerFrame }}</span>
-      <span class="streaming-label">ciaobot is thinking</span>
-      <button class="stop-btn" @click="store.stopChat(chat.chat_id)">
-        <span class="stop-icon">&#9632;</span>
-        <span class="stop-text">stop</span>
-      </button>
-    </div>
-
     <!-- Background agents still running after the parent turn finished. -->
     <div
       v-if="store.activeBackgroundAgents > 0 && !chat.archived"
@@ -787,7 +777,7 @@
       </div>
     </div>
 
-    <div class="input-bar" data-tour="chat-input" :class="{ disabled: chat.archived, 'has-streaming-bar': store.isStreaming && !chat.archived }">
+    <div class="input-bar" data-tour="chat-input" :class="{ disabled: chat.archived }">
       <template v-if="chat.archived">
         <div class="archived-notice">
           <span>This chat is archived.</span>
@@ -819,13 +809,18 @@
             <input type="file" accept="image/*" multiple hidden @change="handleFileSelect" />
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
           </label>
+          <!-- While streaming: empty composer → stop; any draft → queue. -->
           <button
             class="send-btn"
-            :disabled="!inputText.trim() && !store.pendingImages.length && !store.pendingComments.length && !store.pendingChatComments.length"
-            :title="store.isStreaming ? 'Queue message (sends when current turn finishes)' : 'Send'"
-            :aria-label="store.isStreaming ? 'Queue message' : 'Send message'"
-            @click="send"
-          ><span class="send-glyph">{{ store.isStreaming ? '»' : '↵' }}</span></button>
+            :class="{ 'is-stop': showStopAction }"
+            :disabled="!showStopAction && !canSend"
+            :title="primaryActionTitle"
+            :aria-label="primaryActionLabel"
+            @click="primaryAction"
+          >
+            <span v-if="showStopAction" class="stop-icon" aria-hidden="true">&#9632;</span>
+            <span v-else class="send-glyph">{{ store.isStreaming ? '»' : '↵' }}</span>
+          </button>
         </div>
       </template>
     </div>
@@ -877,27 +872,11 @@ const inputText = ref('')
 const inputEl = ref<HTMLTextAreaElement>()
 const isContinuing = ref(false)
 
-// Braille spinner for the "ciaobot is thinking" indicator. We tick a
-// ref instead of using a CSS @keyframes since content can't be animated
-// reliably across browsers.
-const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-const spinnerIdx = ref(0)
-const spinnerFrame = computed(() => SPINNER_FRAMES[spinnerIdx.value])
-let spinnerTimer: ReturnType<typeof setInterval> | null = null
 // Ticks once a second while streaming so the live elapsed-time label in the
-// "Working..." trace meta advances. Kept separate from the 90ms spinner so we
-// don't recompute the meta string ten times a second.
+// "Working..." trace meta advances.
 const nowTs = ref(Date.now())
 let clockTimer: ReturnType<typeof setInterval> | null = null
 watch(() => store.isStreaming, (streaming) => {
-  if (streaming && !spinnerTimer) {
-    spinnerTimer = setInterval(() => {
-      spinnerIdx.value = (spinnerIdx.value + 1) % SPINNER_FRAMES.length
-    }, 90)
-  } else if (!streaming && spinnerTimer) {
-    clearInterval(spinnerTimer)
-    spinnerTimer = null
-  }
   if (streaming && !clockTimer) {
     nowTs.value = Date.now()
     clockTimer = setInterval(() => { nowTs.value = Date.now() }, 1000)
@@ -906,6 +885,33 @@ watch(() => store.isStreaming, (streaming) => {
     clockTimer = null
   }
 }, { immediate: true })
+
+const canSend = computed(() =>
+  !!(inputText.value.trim()
+    || store.pendingImages.length
+    || store.pendingComments.length
+    || store.pendingChatComments.length),
+)
+// Empty composer while a turn is in flight → stop; otherwise the same
+// button queues/sends the draft.
+const showStopAction = computed(() => store.isStreaming && !canSend.value)
+const primaryActionTitle = computed(() => {
+  if (showStopAction.value) return 'Stop'
+  if (store.isStreaming) return 'Queue message (sends when current turn finishes)'
+  return 'Send'
+})
+const primaryActionLabel = computed(() => {
+  if (showStopAction.value) return 'Stop generation'
+  if (store.isStreaming) return 'Queue message'
+  return 'Send message'
+})
+function primaryAction() {
+  if (showStopAction.value) {
+    store.stopChat(chat.value.chat_id)
+    return
+  }
+  send()
+}
 
 // Slash-command picker: populated once on mount from /api/commands.
 type SlashCommand = {
@@ -1894,7 +1900,6 @@ onBeforeUnmount(() => {
   messagesEl.value?.removeEventListener('scroll', checkScroll)
   messagesResizeObserver?.disconnect()
   messagesResizeObserver = null
-  if (spinnerTimer) { clearInterval(spinnerTimer); spinnerTimer = null }
   if (clockTimer) { clearInterval(clockTimer); clockTimer = null }
 })
 
@@ -4012,34 +4017,6 @@ details[open] > .activity-summary::before {
 .comment-chip-remove:hover { background: var(--bg2); color: var(--fg); }
 
 
-/* Streaming controls bar (above input) */
-.streaming-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  padding-left: calc(12px + var(--safe-left));
-  padding-right: calc(12px + var(--safe-right));
-  border-top: 1px solid var(--border);
-  background: var(--bg);
-  flex-shrink: 0;
-}
-
-.streaming-spinner {
-  color: var(--accent);
-  font-size: calc(14px * var(--font-scale));
-  line-height: 1;
-  width: 1ch;
-  flex-shrink: 0;
-  font-variant-numeric: tabular-nums;
-}
-
-.streaming-label {
-  font-size: var(--text-sm);
-  color: var(--fg2);
-  margin-right: auto;
-}
-
 /* Background agents running after the parent turn finished. */
 .bg-agents-bar {
   display: flex;
@@ -4158,11 +4135,6 @@ details[open] > .activity-summary::before {
   flex-shrink: 0;
 }
 
-.input-bar.has-streaming-bar {
-  border-top: none;
-  padding-top: 4px;
-}
-
 /* Buttons sit in a row at the bottom by default; once the textarea grows
    tall enough they stack vertically. */
 .input-actions {
@@ -4221,7 +4193,7 @@ details[open] > .activity-summary::before {
 .image-btn:hover { background: var(--bg3); color: var(--fg); border-color: var(--fg2); }
 .image-btn:active { background: var(--bg2); }
 
-.send-btn, .stop-btn {
+.send-btn {
   min-width: var(--touch);
   min-height: var(--touch);
   padding: 0 16px;
@@ -4235,11 +4207,19 @@ details[open] > .activity-summary::before {
   align-items: center;
   justify-content: center;
   transition: background 120ms var(--ease), transform 120ms var(--ease);
+  background: var(--accent);
+  color: white;
 }
-.send-btn { background: var(--accent); color: white; }
 .send-btn:hover { background: var(--accent-strong); }
 .send-btn:active { transform: scale(0.96); }
 .send-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+.send-btn.is-stop {
+  background: var(--error);
+  padding: 0;
+  width: var(--touch);
+  height: var(--touch);
+}
+.send-btn.is-stop:hover { background: var(--error); filter: brightness(1.08); }
 .send-glyph {
   font-size: 20px;
   font-weight: 700;
@@ -4247,20 +4227,10 @@ details[open] > .activity-summary::before {
   display: inline-block;
   transform: translateY(-1px);
 }
-.stop-btn {
-  background: var(--error);
-  color: white;
-  padding: 0;
-  width: var(--touch);
-  height: var(--touch);
-}
 .stop-icon {
   font-size: 14px;
   line-height: 1;
   display: inline-block;
-}
-.stop-text {
-  display: none;
 }
 
 /* Queued message chips */
@@ -4752,7 +4722,7 @@ details[open] > .activity-summary::before {
   /* Keep every composer action at the shared touch-target minimum. */
   .input-bar { padding-top: 5px; padding-bottom: 5px; }
   .chat-input { min-height: var(--touch); }
-  .stop-btn, .input-actions .send-btn {
+  .input-actions .send-btn {
     min-width: var(--touch);
     min-height: var(--touch);
     width: var(--touch);
@@ -4761,8 +4731,6 @@ details[open] > .activity-summary::before {
   }
   .image-btn { min-height: var(--touch); min-width: var(--touch); }
   :deep(.voice-btn) { min-height: var(--touch); min-width: var(--touch); }
-  /* Compact streaming bar on mobile */
-  .streaming-bar { padding-top: 4px; padding-bottom: 4px; }
 }
 
 /* Chat comment selection trigger + composer */
