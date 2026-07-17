@@ -1899,16 +1899,6 @@ export const useProjectStore = defineStore('projects', () => {
           // having to switch chats or wait for the next sync interval.
           void reconcileAfterResult(msg.chat_id)
           void loadSubagents(msg.chat_id)
-        } else if (!(msg.remaining === 0 && msg.nudged)) {
-          unread.value[msg.chat_id] = 1
-          persistUnread()
-          if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
-            pushToast({
-              chat_id: msg.chat_id,
-              title: 'ciaobot',
-              body: msg.remaining === 0 ? 'Background agents finished' : 'Background agent update',
-            })
-          }
         }
         // Keep sidebar ordering and last-activity timestamps in sync.
         api.get<ChatInfo[]>('/api/chats').then(c => { chats.value = c }).catch(() => { /* ignore */ })
