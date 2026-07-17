@@ -4,6 +4,10 @@ The upstream (Anthropic / Ollama / OpenRouter) is chosen by the caller
 through the ``env`` dict -- the same ``ANTHROPIC_BASE_URL`` /
 ``ANTHROPIC_AUTH_TOKEN`` env injection used for chats -- so this helper is
 backend-agnostic and needs no provider switch of its own.
+
+Calls are intentionally bare: custom system prompt, no filesystem
+settings/skills, no tools, no MCP discovery. Titles, insights, critique,
+and similar routines never need the agent tool surface.
 """
 
 from __future__ import annotations
@@ -112,11 +116,20 @@ async def _run_claude_oneshot(
     model: str,
     env: dict[str, str] | None,
 ) -> str:
+    # Titles / insights / critique never need agent tooling. Leaving
+    # ``tools`` unset keeps the CLI's default Claude Code tool schemas in
+    # the prompt (Bash/Read/Edit/…), which burns tokens for no benefit.
+    # ``tools=[]`` maps to ``--tools ""``; ``strict_mcp_config`` with the
+    # empty default ``mcp_servers`` also blocks project/user MCP discovery.
+    # ``setting_sources=[]`` / ``skills=[]`` already skip CLAUDE.md and
+    # skill listings (the useful half of Claude Code ``--bare``).
     options = ClaudeAgentOptions(
         model=model,
         system_prompt=system_prompt,
         setting_sources=[],
         skills=[],
+        tools=[],
+        strict_mcp_config=True,
         max_turns=1,
         env=env or {},
     )
