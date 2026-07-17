@@ -448,6 +448,63 @@ describe('Codex structured questions', () => {
     expect(store.chatNeedsInput(chatId)).toBe(false)
   })
 
+  test('parses alternate text/type AskUserQuestion payloads', () => {
+    // MiniMax (and possibly other Claude-compatible providers) emit
+    // `text` + `type: single_select` instead of `question`/`multiSelect`.
+    const store = useProjectStore()
+    const chatId = 'alt-schema-chat'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Alt',
+      model: 'minimax-m3:cloud',
+      provider: 'claude',
+      mode: 'auto',
+      session_id: 's1',
+      created_at: '',
+      archived: false,
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[fakeSockets.length - 1]
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'tool_use',
+        tool_name: 'AskUserQuestion',
+        tool_input: JSON.stringify({
+          questions: [
+            {
+              text: 'How do you want to handle the booking form?',
+              type: 'single_select',
+              options: [
+                { label: 'A. Link manually', value: 'manual' },
+                { label: 'B. Leave as-is', value: 'skip' },
+              ],
+            },
+            {
+              text: 'Which guests first?',
+              type: 'multi_select',
+              options: [{ label: 'All Yes', value: 'all_yes' }],
+            },
+          ],
+        }),
+      }),
+    })
+
+    expect(store.activeQuestions[chatId]).toHaveLength(2)
+    expect(store.activeQuestions[chatId][0]).toMatchObject({
+      question: 'How do you want to handle the booking form?',
+      multiSelect: false,
+    })
+    expect(store.activeQuestions[chatId][0].options.map(o => o.label)).toEqual([
+      'A. Link manually',
+      'B. Leave as-is',
+    ])
+    expect(store.activeQuestions[chatId][1]).toMatchObject({
+      question: 'Which guests first?',
+      multiSelect: true,
+    })
+  })
+
   test('surfaces approval requests and preserves Codex quota metadata', () => {
     const store = useProjectStore()
     const chatId = 'codex-gates'

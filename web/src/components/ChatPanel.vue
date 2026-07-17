@@ -619,7 +619,9 @@
           <span v-if="q.header" class="question-block-chip">{{ q.header }}</span>
           <span v-if="q.multiSelect" class="question-block-multi">multi-select</span>
         </div>
-        <div class="question-block-prompt">{{ q.question }}</div>
+        <div v-if="q.question || !q.header" class="question-block-prompt">
+          {{ questionPromptLabel(q, qi) }}
+        </div>
         <div class="question-options">
           <button
             v-for="opt in q.options"
@@ -1204,6 +1206,16 @@ const allQuestionsAnswered = computed(() => {
   return true
 })
 
+// Prefer the model's header/question; fall back to "Question N" so an empty
+// AskUserQuestion payload never renders as broken markdown (`****: …`) or a
+// blank prompt above the option list.
+function questionPromptLabel(
+  q: { header?: string; question?: string },
+  index: number,
+): string {
+  return (q.question || q.header || `Question ${index + 1}`).trim()
+}
+
 function submitQuestionAnswers() {
   if (!allQuestionsAnswered.value) return
   if (!chat.value || chat.value.archived) return
@@ -1221,7 +1233,7 @@ function submitQuestionAnswers() {
     if (other) parts.push(other)
     const answer = parts.length ? parts.join(', ') : '(no answer)'
     nativeAnswers[q.id] = parts
-    lines.push(`**${q.header || q.question}**: ${answer}`)
+    lines.push(`**${questionPromptLabel(q, i)}**: ${answer}`)
   }
   const requestId = qs[0]?.requestId || ''
   if (requestId) {

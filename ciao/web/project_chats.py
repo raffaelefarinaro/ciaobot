@@ -5281,7 +5281,16 @@ class ProjectChatManager:
             data = json.loads(question_json)
             questions = data.get("questions", [])
             if questions:
-                lines = [q.get("question", "") for q in questions if q.get("question")]
+                # AskUserQuestion uses `question`; some Claude-compatible
+                # providers emit `text` instead. Accept both so the push
+                # body is readable instead of dumping the raw JSON.
+                lines = []
+                for q in questions:
+                    if not isinstance(q, dict):
+                        continue
+                    prompt = q.get("question") or q.get("text") or ""
+                    if prompt:
+                        lines.append(str(prompt))
                 body = "\n".join(lines) if lines else question_json
         except Exception:
             pass

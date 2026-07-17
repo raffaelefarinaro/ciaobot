@@ -14,6 +14,7 @@ side is caught before it reaches the PWA.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -145,6 +146,40 @@ async def test_queued_messages_flush_as_single_user_echo(tmp_path: Path) -> None
         f"flushed echo turn_index mismatch: {flushed!r}"
     )
     assert flushed.get("images") == []
+
+
+def test_question_notification_prefers_text_prompt_alias(tmp_path: Path) -> None:
+    """Alternate AskUserQuestion shape uses `text` instead of `question`.
+
+    MiniMax (Claude path) has been observed to emit
+    ``{"text": "...", "type": "single_select", "options": [...]}``. Without
+    accepting ``text``, the push body falls through to the raw JSON blob.
+    """
+    pcm = _make_manager(tmp_path)
+    bodies: list[str] = []
+    pcm.notify_question_cb = lambda _chat_id, body: bodies.append(body)
+
+    payload = json.dumps(
+        {
+            "questions": [
+                {
+                    "text": "How do you want to handle the booking form?",
+                    "type": "single_select",
+                    "options": [{"label": "A. Link manually", "value": "manual"}],
+                },
+                {
+                    "question": "Which guests first?",
+                    "options": [{"label": "All Yes"}],
+                },
+            ]
+        },
+        ensure_ascii=False,
+    )
+    pcm._notify_question("chat-x", payload)
+
+    assert bodies == [
+        "How do you want to handle the booking form?\nWhich guests first?"
+    ]
 
 
 async def test_ask_user_question_pauses_turn_without_draining_as_queued(tmp_path: Path) -> None:

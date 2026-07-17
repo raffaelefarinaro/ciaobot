@@ -221,23 +221,31 @@ export const useProjectStore = defineStore('projects', () => {
       const parsed = JSON.parse(toolInput)
       if (!Array.isArray(parsed?.questions)) return []
       const resolvedRequestId = requestId || String(parsed?.request_id ?? '')
-      return parsed.questions.map((q: Record<string, unknown>, index: number) => ({
-        id: String(q.id ?? index),
-        question: String(q.question ?? ''),
-        header: String(q.header ?? ''),
-        multiSelect: Boolean(q.multiSelect),
-        allowOther: q.isOther === undefined
-          ? true
-          : Boolean(q.isOther) || !Array.isArray(q.options) || q.options.length === 0,
-        isSecret: Boolean(q.isSecret),
-        requestId: resolvedRequestId,
-        options: Array.isArray(q.options)
-          ? (q.options as Array<Record<string, unknown>>).map(o => ({
-              label: String(o.label ?? ''),
-              description: o.description ? String(o.description) : '',
-            }))
-          : [],
-      }))
+      // Claude Code's documented AskUserQuestion shape uses
+      // `question`/`header`/`multiSelect`. Some providers (seen with
+      // MiniMax via the Claude path) emit an alternate shape with
+      // `text`/`type: single_select|multi_select` instead — accept both
+      // so the picker prompt is never blank when the model did ask.
+      return parsed.questions.map((q: Record<string, unknown>, index: number) => {
+        const type = String(q.type ?? '').toLowerCase()
+        return {
+          id: String(q.id ?? index),
+          question: String(q.question ?? q.text ?? ''),
+          header: String(q.header ?? q.title ?? ''),
+          multiSelect: Boolean(q.multiSelect) || type === 'multi_select',
+          allowOther: q.isOther === undefined
+            ? true
+            : Boolean(q.isOther) || !Array.isArray(q.options) || q.options.length === 0,
+          isSecret: Boolean(q.isSecret),
+          requestId: resolvedRequestId,
+          options: Array.isArray(q.options)
+            ? (q.options as Array<Record<string, unknown>>).map(o => ({
+                label: String(o.label ?? o.value ?? ''),
+                description: o.description ? String(o.description) : '',
+              }))
+            : [],
+        }
+      })
     } catch {
       return []
     }
