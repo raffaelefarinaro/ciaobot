@@ -183,57 +183,44 @@ async def test_capability_error_triggers_tier_fallback(tmp_path: Path) -> None:
 
     from ciao.web.project_chats import _StreamOutcome
 
-    async def fake_drive(*, chat_id, request):
+    async def fake_drive(*, chat_id, request, outcome):
         seen_models.append(request.model)
         if request.model == "kimi5.2:cloud":
-            return _StreamOutcome(
-                events=[
-                    ResultEvent(
-                        type="result",
-                        result=(
-                            "API Error: 400 this model does not support image "
-                            "input (ref: test)"
-                        ),
-                        session_id="sess-1",
-                        is_error=True,
-                        effective_model="kimi5.2:cloud",
-                        usage={},
-                        quota={},
-                        cost_usd=0.0,
-                    )
-                ],
-                response_text=(
-                    "API Error: 400 this model does not support image input"
+            outcome.response_text = "API Error: 400 this model does not support image input"
+            outcome.had_error = True
+            outcome.effective_model = "kimi5.2:cloud"
+            evt = ResultEvent(
+                type="result",
+                result=(
+                    "API Error: 400 this model does not support image "
+                    "input (ref: test)"
                 ),
-                had_error=True,
+                session_id="sess-1",
+                is_error=True,
                 effective_model="kimi5.2:cloud",
                 usage={},
                 quota={},
                 cost_usd=0.0,
-                tool_events=[],
             )
+            outcome.events.append(evt)
+            yield evt
+            return
         # Second attempt on the next tier succeeds.
-        return _StreamOutcome(
-            events=[
-                ResultEvent(
-                    type="result",
-                    result="Here is my answer about the image.",
-                    session_id="sess-2",
-                    is_error=False,
-                    effective_model=request.model,
-                    usage={},
-                    quota={},
-                    cost_usd=0.0,
-                )
-            ],
-            response_text="Here is my answer about the image.",
-            had_error=False,
+        outcome.response_text = "Here is my answer about the image."
+        outcome.had_error = False
+        outcome.effective_model = request.model
+        evt = ResultEvent(
+            type="result",
+            result="Here is my answer about the image.",
+            session_id="sess-2",
+            is_error=False,
             effective_model=request.model,
             usage={},
             quota={},
             cost_usd=0.0,
-            tool_events=[],
         )
+        outcome.events.append(evt)
+        yield evt
 
     pcm._drive_stream = fake_drive  # type: ignore[assignment]
 
@@ -278,29 +265,23 @@ async def test_rate_limit_does_not_trigger_tier_fallback(tmp_path: Path) -> None
 
     from ciao.web.project_chats import _StreamOutcome
 
-    async def fake_drive(*, chat_id, request):
+    async def fake_drive(*, chat_id, request, outcome):
         drive_calls.append(request.model)
-        return _StreamOutcome(
-            events=[
-                ResultEvent(
-                    type="result",
-                    result="API Error: 429 Rate Limit Exceeded",
-                    session_id="sess-rl",
-                    is_error=True,
-                    effective_model=request.model,
-                    usage={},
-                    quota={},
-                    cost_usd=0.0,
-                )
-            ],
-            response_text="API Error: 429 Rate Limit Exceeded",
-            had_error=True,
+        outcome.response_text = "API Error: 429 Rate Limit Exceeded"
+        outcome.had_error = True
+        outcome.effective_model = request.model
+        evt = ResultEvent(
+            type="result",
+            result="API Error: 429 Rate Limit Exceeded",
+            session_id="sess-rl",
+            is_error=True,
             effective_model=request.model,
             usage={},
             quota={},
             cost_usd=0.0,
-            tool_events=[],
         )
+        outcome.events.append(evt)
+        yield evt
 
     pcm._drive_stream = fake_drive  # type: ignore[assignment]
 
