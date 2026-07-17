@@ -167,6 +167,35 @@ async def ws_chat(websocket: WebSocket) -> None:
                     )
                 continue
 
+            if msg_type == "queue_reorder":
+                pcm.reorder_queue(
+                    chat_id,
+                    entry_id=str(msg.get("entry_id", "")),
+                    before_id=str(msg.get("before_id")) if msg.get("before_id") else None,
+                )
+                continue
+
+            if msg_type == "queue_edit":
+                images: list[ImageAttachment] = []
+                for ref in msg.get("images", []):
+                    attachment = pcm.resolve_image_ref(ref)
+                    if attachment:
+                        images.append(attachment)
+                pcm.edit_queue(
+                    chat_id,
+                    entry_id=str(msg.get("entry_id", "")),
+                    text=str(msg.get("text", "")),
+                    images=images or None,
+                )
+                continue
+
+            if msg_type == "queue_remove":
+                pcm.remove_queue(
+                    chat_id,
+                    entry_id=str(msg.get("entry_id", "")),
+                )
+                continue
+
             if msg_type == "message":
                 text = msg.get("text", "")
                 if not text:
@@ -194,7 +223,10 @@ async def ws_chat(websocket: WebSocket) -> None:
                         except Exception:
                             logger.exception("steer_stream failed for %s", chat_id)
                     if not handled:
-                        handled = pcm.queue_message(chat_id, text, images=images or None)
+                        handled = pcm.queue_message(
+                            chat_id, text, images=images or None,
+                            entry_id=str(msg.get("entry_id")) if msg.get("entry_id") else None,
+                        )
                     if handled:
                         continue
                     # Else: the stream raced-finish between check and queue;

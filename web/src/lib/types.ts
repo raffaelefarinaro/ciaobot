@@ -210,13 +210,18 @@ export type WsEvent =
   | { type: 'permission_request'; tool_name: string; tool_input?: string; message: string; request_id: string }
   | { type: 'chat_title'; chat_id: string; title: string }
   | { type: 'user_echo'; text: string; images?: string[]; turn_index?: number; sent_at?: string }
-  | { type: 'queued'; text: string; images?: string[] }
+  | { type: 'queued'; id?: string; text: string; images?: string[] }
+  | { type: 'queue_state'; queue: Array<{ id: string; text: string; images?: string[] }> }
   | { type: 'steered'; text: string; images?: string[] }
   | { type: 'error'; message: string }
   | { type: 'chat_retry'; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number }
+  // Idle heartbeat from the broker / events hub. Clients treat it as a
+  // liveness signal only and must not mutate chat UI state.
+  | { type: 'keepalive' }
 
 // Global awareness events from /ws/events
 export type EventsWsMessage =
+  | { type: 'keepalive' }
   | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number> }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean }

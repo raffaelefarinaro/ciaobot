@@ -4038,6 +4038,7 @@ class ProjectChatManager:
         chat_id: str,
         text: str,
         images: list[ImageAttachment] | None = None,
+        entry_id: str | None = None,
     ) -> bool:
         """Append a user message to the active stream's pending queue.
 
@@ -4054,9 +4055,10 @@ class ProjectChatManager:
             ref = getattr(img, "ref", None) or getattr(img, "original_filename", None)
             if ref:
                 image_refs.append(str(ref))
-        stream.enqueue(text, image_refs)
+        resolved_id = stream.enqueue(text, image_refs, entry_id=entry_id)
         stream.publish({
             "type": "queued",
+            "id": resolved_id,
             "text": text,
             "images": image_refs,
         })
@@ -4120,6 +4122,57 @@ class ProjectChatManager:
             "text": text,
             "images": image_refs,
         })
+        return True
+
+    def reorder_queue(
+        self,
+        chat_id: str,
+        entry_id: str,
+        before_id: str | None = None,
+    ) -> bool:
+        """Move a queued message within the active stream's pending queue.
+
+        ``before_id`` is the id of the entry the moved entry should precede;
+        None moves it to the end. Returns True if the stream existed and the
+        entry was found.
+        """
+        stream = self._broker.get(chat_id)
+        if stream is None or stream.background:
+            return False
+        if not stream.reorder_pending(entry_id, before_id):
+            return False
+        stream.publish({"type": "queue_state", "queue": stream.pending})
+        return True
+
+    def edit_queue(
+        self,
+        chat_id: str,
+        entry_id: str,
+        text: str,
+        images: list[ImageAttachment] | None = None,
+    ) -> bool:
+        """Update an existing queued message."""
+        stream = self._broker.get(chat_id)
+        if stream is None or stream.background:
+            return False
+        image_refs: list[str] = []
+        for img in images or []:
+            ref = getattr(img, "ref", None) or getattr(img, "original_filename", None)
+            if ref:
+                image_refs.append(str(ref))
+        if not stream.edit_pending(entry_id, text, image_refs):
+            return False
+        stream.publish({"type": "queue_state", "queue": stream.pending})
+        return True
+
+    def remove_queue(self, chat_id: str, entry_id: str) -> bool:
+        """Remove a queued message."""
+        stream = self._broker.get(chat_id)
+        if stream is None or stream.background:
+            return False
+        if not stream.remove_pending(entry_id):
+            return False
+        stream.publish({"type": "queue_state", "queue": stream.pending})
         return True
 
     @property
@@ -4693,7 +4746,7 @@ class ProjectChatManager:
                     if question_paused:
                         break
 
-                    pending = stream.drain_pending()
+                    next_pending = stream.drain_one()
                     # A user-initiated stop produces an error-shaped ResultEvent
                     # (is_error=True). Treat that as intentional: consume the
                     # flag, reset had_error so the loop can start a new turn
@@ -4701,26 +4754,20 @@ class ProjectChatManager:
                     # nothing pending.
                     if stream.user_stopped:
                         stream.user_stopped = False
-                        if pending:
+                        if next_pending is not None:
                             had_error = False
-                    if not pending or had_error:
+                    if next_pending is None or had_error:
                         break
 
-                    combined_text = "\n\n".join(
-                        p["text"].strip()
-                        for p in pending
-                        if p.get("text", "").strip()
-                    )
-                    merged_image_refs: list[str] = []
+                    combined_text = next_pending.get("text", "").strip()
+                    merged_image_refs: list[str] = list(next_pending.get("images") or [])
                     merged_images: list[ImageAttachment] = []
-                    for p in pending:
-                        for ref in p.get("images") or []:
-                            attachment = self.resolve_image_ref(ref)
-                            if attachment:
-                                merged_images.append(attachment)
-                                merged_image_refs.append(ref)
+                    for ref in merged_image_refs:
+                        attachment = self.resolve_image_ref(ref)
+                        if attachment:
+                            merged_images.append(attachment)
                     if not combined_text:
-                        break
+                        continue
 
                     # Bump user-turn counter so image replay from history lines
                     # up. Capture turn_index2 first so we can attach it to the

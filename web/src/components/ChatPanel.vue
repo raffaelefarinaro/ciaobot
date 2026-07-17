@@ -680,15 +680,53 @@
 
     <!-- Queued messages (sent while a response was already streaming). -->
     <div v-if="store.currentQueued.length" class="queued-messages">
-      <div v-for="(q, i) in store.currentQueued" :key="i" class="queued-chip" title="Will be sent when current response finishes">
+      <div
+        v-for="(q, i) in store.currentQueued"
+        :key="q.id || i"
+        class="queued-chip"
+        title="Will be sent when current response finishes"
+      >
         <span class="queued-label">Queued</span>
         <div class="queued-body">
           <div v-if="q.images?.length" class="queued-images">
             <img v-for="img in q.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="queued-image-thumb" />
           </div>
-          <span class="queued-text">{{ q.text }}</span>
+          <template v-if="editingQueueId === q.id">
+            <textarea
+              v-model="editingQueueText"
+              class="queued-edit-input"
+              rows="2"
+              @keydown.enter.prevent="saveEditQueue(chat.chat_id, q.id)"
+              @keydown.esc="cancelEditQueue"
+            />
+          </template>
+          <span v-else class="queued-text">{{ q.text }}</span>
         </div>
-        <button class="queued-remove" @click="store.removeQueued(chat.chat_id, i)" title="Remove">&times;</button>
+        <div class="queued-actions">
+          <button
+            class="queued-action"
+            :disabled="i === 0"
+            title="Move up"
+            @click="store.reorderQueued(chat.chat_id, i, i - 1)"
+          >▲</button>
+          <button
+            class="queued-action"
+            :disabled="i === store.currentQueued.length - 1"
+            title="Move down"
+            @click="store.reorderQueued(chat.chat_id, i, i + 1)"
+          >▼</button>
+          <button
+            v-if="editingQueueId !== q.id"
+            class="queued-action"
+            title="Edit"
+            @click="startEditQueue(q)"
+          >✎</button>
+          <template v-else>
+            <button class="queued-action" title="Save" @click="saveEditQueue(chat.chat_id, q.id)">✓</button>
+            <button class="queued-action" title="Cancel" @click="cancelEditQueue">✕</button>
+          </template>
+          <button class="queued-remove" @click="store.removeQueued(chat.chat_id, i)" title="Remove">&times;</button>
+        </div>
       </div>
     </div>
 
@@ -913,6 +951,27 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const dragOver = ref(false)
 const chat = computed(() => store.activeChat!)
+
+// Inline editing state for queued messages. Keyed by queue entry id.
+const editingQueueId = ref<string | null>(null)
+const editingQueueText = ref('')
+
+function startEditQueue(entry: { id: string; text: string }) {
+  editingQueueId.value = entry.id
+  editingQueueText.value = entry.text
+}
+
+function cancelEditQueue() {
+  editingQueueId.value = null
+  editingQueueText.value = ''
+}
+
+function saveEditQueue(chatId: string, entryId: string) {
+  const text = editingQueueText.value.trim()
+  if (!text) return
+  store.editQueued(chatId, entryId, text)
+  cancelEditQueue()
+}
 
 // Loops bound to this chat (loop-driven chats get a banner with controls).
 const taskStore = useTaskStore()
@@ -4269,6 +4328,36 @@ details[open] > .activity-summary::before {
   flex-shrink: 0;
 }
 .queued-remove:hover { color: var(--fg); background: var(--bg2); }
+.queued-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.queued-action {
+  background: none;
+  border: none;
+  color: var(--fg2);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.queued-action:hover:not(:disabled) { color: var(--fg); background: var(--bg2); }
+.queued-action:disabled { opacity: 0.3; cursor: not-allowed; }
+.queued-edit-input {
+  width: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+  font-family: var(--font);
+  font-size: 13px;
+  resize: vertical;
+}
 
 /* AskUserQuestion picker. Same docking pattern as the permission card so
    the model's structured question doesn't get lost in the trace. */

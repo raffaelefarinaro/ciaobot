@@ -30,6 +30,12 @@ export function shouldReconnectActiveChatOnStreamingStarted(
   return !socket || socket.readyState > 1
 }
 
+/** Backoff for unexpected per-chat WS drops. `attempt` is 1-based. */
+export function chatWsReconnectDelayMs(attempt: number): number {
+  if (attempt <= 1) return 50
+  return Math.min(50 * 2 ** (attempt - 1), 2000)
+}
+
 export const useProjectStore = defineStore('projects', () => {
   const projects = ref<ProjectInfo[]>([])
   const chats = ref<ChatInfo[]>([])
@@ -150,10 +156,17 @@ export const useProjectStore = defineStore('projects', () => {
   // running" indicator so the user can see work is ongoing during the quiet
   // gap between the turn ending and the agents reporting back.
   const backgroundAgents = ref<Record<string, number>>({})
+  type QueuedMessage = { id: string; text: string; images?: string[] }
+  function makeQueuedId(): string {
+    if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+      return crypto.randomUUID()
+    }
+    return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+  }
   // Locally-tracked queued user messages (sent while a response was already
   // streaming). Cleared when the server echoes them back as a user_echo at
   // flush time, or on result when the queue ends up empty.
-  const queuedMessages = ref<Record<string, { text: string; images?: string[] }[]>>({})
+  const queuedMessages = ref<Record<string, QueuedMessage[]>>({})
   // Pending Auto-mode permission prompts keyed by chat_id. The chat bubble
   // renders Approve/Deny buttons for each entry; clicking sends a
   // `permission_response` on the per-chat WS and pops the entry optimistically.
@@ -285,15 +298,15 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── WebSocket liveness ──────────────────────────────────────────────
   // The server sends a `keepalive` frame on both /ws/chat and /ws/events
-  // every STREAM_KEEPALIVE_SECONDS (15s, see ciao/web/chat_broker.py). We use
+  // every STREAM_KEEPALIVE_SECONDS (5s, see ciao/web/chat_broker.py). We use
   // those frames purely as a liveness signal: a socket that reports
   // readyState OPEN but has received nothing for well over the keepalive
   // cadence is half-open (common after iOS/WKWebView suspend or a flaky
   // network) and will never fire `onclose`, so results/subagent events
   // published server-side never arrive and the UI looks hung until the user
   // sends a message. The watchdog below force-reconnects such sockets.
-  const WS_STALE_MS = 45000 // ~3 missed keepalives
-  const WS_LIVENESS_CHECK_MS = 10000
+  const WS_STALE_MS = 12000 // ~2 missed keepalives + margin
+  const WS_LIVENESS_CHECK_MS = 2000
   let lastEventsFrameAt = 0
   const lastChatFrameAt: Record<string, number> = {}
   const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now())
@@ -307,6 +320,10 @@ export const useProjectStore = defineStore('projects', () => {
   const intentionalCloses = new Set<string>()
   const chatReconnectTimers: Record<string, number> = {}
   const chatReconnectAttempts: Record<string, number> = {}
+  // After an unexpected drop or half-open recovery, keep the frozen Activity
+  // timeline on screen and rebuild it from the broker replay on the first
+  // non-keepalive frame so the UI does not blank mid-turn.
+  const pendingStreamResync = new Set<string>()
 
   // ── Computed ─────────────────────────────────────────────────────────
 
@@ -1653,31 +1670,36 @@ export const useProjectStore = defineStore('projects', () => {
       // from a fast first retry again.
       chatReconnectAttempts[chatId] = 0
       const event: WsEvent = JSON.parse(ev.data)
+      if (event.type === 'keepalive') return
+      // First real frame after a drop/half-open recovery: drop the frozen
+      // ephemeral timeline so broker replay rebuilds without duplicating it.
+      if (pendingStreamResync.delete(chatId)) {
+        streamingText.value[chatId] = ''
+        streamingThinking.value[chatId] = ''
+        streamingTimeline.value[chatId] = []
+        delete streamingTextPhase.value[chatId]
+      }
       handleEvent(chatId, event)
     }
 
     ws.onclose = () => {
       delete sockets.value[chatId]
       delete lastChatFrameAt[chatId]
-      // Clear local streaming state; the server broker keeps the SDK call
-      // running, and any reconnect will replay buffered events so the UI
-      // picks up right where it left off.
-      streaming.value[chatId] = false
-      streamingText.value[chatId] = ''
-      streamingThinking.value[chatId] = ''
-      streamingTimeline.value[chatId] = []
-      delete streamingTextPhase.value[chatId]
 
       // Auto-reconnect the chat the user is actually viewing when the socket
       // drops unexpectedly (server per-turn churn, transient network blip),
-      // so live deltas and the final result resume within ~1s instead of
+      // so live deltas and the final result resume within ~50ms instead of
       // waiting for the 15s poll or a manual reload. Intentional closes
       // (disconnectWs, e.g. switching chats) are skipped.
       if (intentionalCloses.delete(chatId)) return
       if (typeof window === 'undefined' || typeof WebSocket === 'undefined') return
       if (activeChatId.value !== chatId) return
+      // Keep the live Activity/timeline frozen across the gap. Clearing it
+      // here made mid-turn drops look like a hard disconnect even though the
+      // server broker was still running.
+      pendingStreamResync.add(chatId)
       const attempt = (chatReconnectAttempts[chatId] = (chatReconnectAttempts[chatId] || 0) + 1)
-      const delay = Math.min(1000 * attempt, 5000)
+      const delay = chatWsReconnectDelayMs(attempt)
       if (chatReconnectTimers[chatId]) window.clearTimeout(chatReconnectTimers[chatId])
       chatReconnectTimers[chatId] = window.setTimeout(() => {
         delete chatReconnectTimers[chatId]
@@ -1703,11 +1725,22 @@ export const useProjectStore = defineStore('projects', () => {
   // miss events the broker already flushed, so loadMessages first, then let
   // connectWs replay whatever the broker still buffers on top.
   async function reloadAndReconnectChat(chatId: string) {
+    pendingStreamResync.add(chatId)
     disconnectWs(chatId)
-    await loadMessages(chatId)
-    void loadSubagents(chatId)
+    // Re-attach immediately so an in-flight broker stream can replay while
+    // /messages catches up in parallel. Waiting on history first left the UI
+    // frozen for the full round-trip on every blip.
     connectWs(chatId)
     void markRead(chatId)
+    try {
+      await loadMessages(chatId)
+      if (streaming.value[chatId] && !queuedMessages.value[chatId]?.length && hasSettledHistory(chatId)) {
+        clearStreamingState(chatId)
+        pendingStreamResync.delete(chatId)
+      }
+    } finally {
+      void loadSubagents(chatId)
+    }
   }
 
   // Detect and recover half-open sockets (readyState OPEN, no keepalive for
@@ -1842,6 +1875,7 @@ export const useProjectStore = defineStore('projects', () => {
       lastEventsFrameAt = nowMs()
       let msg: EventsWsMessage
       try { msg = JSON.parse(ev.data) } catch { return }
+      if (msg.type === 'keepalive') return
       handleEventsMessage(msg)
     }
 
@@ -1849,15 +1883,20 @@ export const useProjectStore = defineStore('projects', () => {
       eventsSocket.value = null
       if (opened) {
         eventsWsFailureStreak = 0
-      } else {
-        eventsWsFailureStreak += 1
-        if (eventsWsFailureStreak >= 5) {
-          // Likely an auth rejection: probe the HTTP API so its 401
-          // handling can redirect this stale tab to /login. Re-probe on every
-          // failure past the threshold (not just the 5th) so a tab that keeps
-          // flapping still gets redirected.
-          void api.get('/api/projects').catch(() => {})
-        }
+        // A previously-live awareness socket should come back immediately so
+        // chat_streaming_done / result_ready are not delayed after a blip.
+        setTimeout(() => {
+          if (!eventsSocket.value) connectEventsWs()
+        }, 50)
+        return
+      }
+      eventsWsFailureStreak += 1
+      if (eventsWsFailureStreak >= 5) {
+        // Likely an auth rejection: probe the HTTP API so its 401
+        // handling can redirect this stale tab to /login. Re-probe on every
+        // failure past the threshold (not just the 5th) so a tab that keeps
+        // flapping still gets redirected.
+        void api.get('/api/projects').catch(() => {})
       }
       // Reconnect with exponential backoff on repeated handshake failures
       // (2s → 64s cap); cross-chat awareness is best-effort.
@@ -2190,12 +2229,15 @@ export const useProjectStore = defineStore('projects', () => {
       // Queue or steer: don't push to the main messages list yet. Queued
       // messages live in queuedMessages until the server echoes them; steered
       // ones arrive as a `steered` event which we fold into messages.
+      let queueId: string | undefined
       if (mode === 'queue') {
         if (!queuedMessages.value[chatId]) queuedMessages.value[chatId] = []
-        queuedMessages.value[chatId].push({ text: composed, images: imageRefs })
+        queueId = makeQueuedId()
+        queuedMessages.value[chatId].push({ id: queueId, text: composed, images: imageRefs })
       }
       const payload: Record<string, unknown> = { type: 'message', text: composed, mode }
       if (imageRefs) payload.images = imageRefs
+      if (queueId) payload.entry_id = queueId
       ws.send(JSON.stringify(payload))
       setPendingBucket<string>(pendingImagesByChat.value, chatId, [])
       persistPendingImages()
@@ -2261,8 +2303,52 @@ export const useProjectStore = defineStore('projects', () => {
   function removeQueued(chatId: string, index: number) {
     const list = queuedMessages.value[chatId]
     if (!list) return
+    const entry = list[index]
+    if (!entry) return
     list.splice(index, 1)
     if (!list.length) delete queuedMessages.value[chatId]
+    const ws = sockets.value[chatId]
+    if (ws?.readyState === WebSocket.OPEN && entry?.id) {
+      ws.send(JSON.stringify({ type: 'queue_remove', entry_id: entry.id }))
+    }
+  }
+
+  function removeQueuedById(chatId: string, entryId: string) {
+    const list = queuedMessages.value[chatId]
+    if (!list) return
+    const idx = list.findIndex(q => q.id === entryId)
+    if (idx === -1) return
+    list.splice(idx, 1)
+    if (!list.length) delete queuedMessages.value[chatId]
+  }
+
+  function reorderQueued(chatId: string, fromIndex: number, toIndex: number) {
+    const list = queuedMessages.value[chatId]
+    if (!list || fromIndex < 0 || fromIndex >= list.length) return
+    toIndex = Math.max(0, Math.min(toIndex, list.length - 1))
+    if (fromIndex === toIndex) return
+    const [moved] = list.splice(fromIndex, 1)
+    list.splice(toIndex, 0, moved)
+    queuedMessages.value[chatId] = [...list]
+    const ws = sockets.value[chatId]
+    if (ws?.readyState === WebSocket.OPEN && moved?.id) {
+      const beforeId = list[toIndex + 1]?.id || null
+      ws.send(JSON.stringify({ type: 'queue_reorder', entry_id: moved.id, before_id: beforeId }))
+    }
+  }
+
+  function editQueued(chatId: string, entryId: string, text: string, images?: string[]) {
+    const list = queuedMessages.value[chatId]
+    if (!list) return false
+    const entry = list.find(q => q.id === entryId)
+    if (!entry) return false
+    entry.text = text
+    entry.images = images
+    const ws = sockets.value[chatId]
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'queue_edit', entry_id: entryId, text, images }))
+    }
+    return true
   }
 
   function clearQueued(chatId: string) {
@@ -2763,22 +2849,46 @@ export const useProjectStore = defineStore('projects', () => {
 
       case 'queued': {
         // Server confirms the message was buffered. If we already pushed it
-        // locally for optimistic rendering, skip. Otherwise (e.g. another
-        // client queued it), add it so chips stay consistent.
+        // locally for optimistic rendering (matching id), skip. Otherwise (e.g.
+        // another client queued it), add it so chips stay consistent. Older
+        // servers may omit id, so fall back to content matching.
         const trimmed = (event.text || '').trim()
         if (!trimmed) break
-        // Defensive: if a user bubble with matching content is already in the
-        // timeline, the queue was already flushed. This catches buffer-replay
-        // scenarios (WS reconnect, post-reload subscribe) where a stale
-        // `queued` event arrives after `loadMessages` hydrated the real bubble
-        // but the matching `user_echo` is no longer in the broker buffer to
-        // clear the chip. Without this guard the chip sticks forever.
         if (queuedTextAlreadyRendered(msgs, trimmed)) break
         const list = queuedMessages.value[chatId] || []
-        if (!list.some(q => q.text === trimmed)) {
-          list.push({ text: trimmed, images: event.images?.length ? event.images : undefined })
-          queuedMessages.value[chatId] = list
+        const entryId = event.id || null
+        if (entryId && list.some(q => q.id === entryId)) {
+          // Already known; make sure text/images are in sync (defensive).
+          const existing = list.find(q => q.id === entryId)
+          if (existing) {
+            existing.text = trimmed
+            existing.images = event.images?.length ? event.images : undefined
+          }
+          break
         }
+        if (!entryId && list.some(q => q.text === trimmed)) break
+        list.push({
+          id: entryId || makeQueuedId(),
+          text: trimmed,
+          images: event.images?.length ? event.images : undefined,
+        })
+        queuedMessages.value[chatId] = list
+        break
+      }
+
+      case 'queue_state': {
+        // Authoritative queue order from the backend (e.g. after a reorder/edit
+        // from another client, or on reconnect). Rebuild local chips to match.
+        const incoming = event.queue || []
+        if (!incoming.length) {
+          delete queuedMessages.value[chatId]
+          break
+        }
+        queuedMessages.value[chatId] = incoming.map(q => ({
+          id: q.id || makeQueuedId(),
+          text: (q.text || '').trim(),
+          images: q.images?.length ? q.images : undefined,
+        }))
         break
       }
 
@@ -3193,7 +3303,7 @@ export const useProjectStore = defineStore('projects', () => {
     addFileCommentImage, removeFileCommentImage,
     fileCommentsFor, removeFileComment, updateFileComment,
     pinFile, unpinFile, pinnedFileFor,
-    removeQueued, clearQueued,
+    removeQueued, removeQueuedById, reorderQueued, editQueued, clearQueued,
     loadMessages, loadSubagents, loadProviderSubchats, loadProviderSubchatEvents,
     connectWs, disconnectWs, connectEventsWs,
     pushToast, pushErrorToast, dismissToast, fixError,

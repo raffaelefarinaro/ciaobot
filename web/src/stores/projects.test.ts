@@ -2,7 +2,7 @@
 
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { shouldReconnectActiveChatOnStreamingStarted, useProjectStore } from './projects'
+import { shouldReconnectActiveChatOnStreamingStarted, chatWsReconnectDelayMs, useProjectStore } from './projects'
 
 const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
@@ -91,6 +91,13 @@ describe('streaming started reconnect guard', () => {
 })
 
 describe('per-chat WS auto-reconnect', () => {
+  test('reconnect delay starts near-immediate then backs off', () => {
+    expect(chatWsReconnectDelayMs(1)).toBe(50)
+    expect(chatWsReconnectDelayMs(2)).toBe(100)
+    expect(chatWsReconnectDelayMs(3)).toBe(200)
+    expect(chatWsReconnectDelayMs(10)).toBe(2000)
+  })
+
   test('reconnects the active chat after an unexpected drop', async () => {
     apiGet.mockResolvedValue([])
     const store = useProjectStore()
@@ -103,12 +110,52 @@ describe('per-chat WS auto-reconnect', () => {
     try {
       fakeSockets[0].close() // simulate an unexpected server-side close
       expect(fakeSockets.length).toBe(1) // reconnect is scheduled, not immediate
-      await vi.advanceTimersByTimeAsync(1200) // > 1s backoff
+      await vi.advanceTimersByTimeAsync(60) // first retry ~50ms
     } finally {
       vi.useRealTimers()
     }
 
     expect(fakeSockets.length).toBe(2) // fresh socket opened (resync + reconnect)
+  })
+
+  test('keeps the live Activity timeline frozen across an unexpected drop', async () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'c-freeze'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'tool_use', tool_name: 'Read', tool_input: '{}' }),
+    })
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'text_delta', text: 'partial answer' }),
+    })
+    expect(store.streaming[chatId]).toBe(true)
+    expect(store.currentStreamingText).toBe('partial answer')
+    expect(store.currentTimeline.some(e => e.kind === 'tool' && e.content.includes('Read'))).toBe(true)
+
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close()
+      // Still frozen while reconnect is pending — no blank Activity flash.
+      expect(store.streaming[chatId]).toBe(true)
+      expect(store.currentStreamingText).toBe('partial answer')
+      expect(store.currentTimeline.some(e => e.kind === 'tool' && e.content.includes('Read'))).toBe(true)
+      await vi.advanceTimersByTimeAsync(60)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(fakeSockets.length).toBe(2)
+    // First real frame after reconnect clears the frozen buffer, then applies
+    // the replayed event (avoids duplicating the pre-drop timeline).
+    fakeSockets[1].onmessage?.({
+      data: JSON.stringify({ type: 'tool_use', tool_name: 'Bash', tool_input: '{}' }),
+    })
+    expect(store.streaming[chatId]).toBe(true)
+    expect(store.currentStreamingText).toBe('')
+    expect(store.currentTimeline.some(e => e.kind === 'tool' && e.content.includes('Bash'))).toBe(true)
+    expect(store.currentTimeline.some(e => e.kind === 'tool' && e.content.includes('Read'))).toBe(false)
   })
 
   test('does not reconnect after an intentional disconnect', async () => {
@@ -151,7 +198,7 @@ describe('queued message replay handling', () => {
   test('clears local queued chips when server history contains the flushed user turn', async () => {
     const store = useProjectStore()
     const chatId = 'chat-queue'
-    store.queuedMessages[chatId] = [{ text: 'msg A' }]
+    store.queuedMessages[chatId] = [{ id: 'q-1', text: 'msg A' }]
     apiGet.mockResolvedValue([
       { role: 'user', content: 'initial', sent_at: '', turn_index: 0 },
       { role: 'assistant', content: 'reply', sent_at: '' },
@@ -163,18 +210,18 @@ describe('queued message replay handling', () => {
     expect(store.queuedMessages[chatId]).toBeUndefined()
   })
 
-  test('ignores stale queued replay when the flushed combined user turn is already hydrated', () => {
+  test('ignores stale queued replay when the flushed user turn is already hydrated', () => {
     const store = useProjectStore()
     const chatId = 'chat-queue'
     store.messages[chatId] = [
       { role: 'user', content: 'initial', timestamp: '', turn_index: 0 },
       { role: 'assistant', content: 'reply', timestamp: '' },
-      { role: 'user', content: 'msg A\n\nmsg B', timestamp: '', turn_index: 1 },
+      { role: 'user', content: 'msg A', timestamp: '', turn_index: 1 },
     ]
 
     store.connectWs(chatId)
     fakeSockets[0].onmessage?.({
-      data: JSON.stringify({ type: 'queued', text: 'msg A' }),
+      data: JSON.stringify({ type: 'queued', id: 'q-1', text: 'msg A' }),
     })
 
     expect(store.queuedMessages[chatId]).toBeUndefined()

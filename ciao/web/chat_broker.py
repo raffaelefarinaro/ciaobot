@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from typing import AsyncIterator
 
 from ciao.models import (
@@ -35,7 +36,10 @@ logger = logging.getLogger(__name__)
 # keepalive frame every few seconds keeps the socket warm and makes a dead
 # socket surface promptly (the send raises, the forwarder stops). Clients
 # ignore the `keepalive` type but may use it as a liveness signal.
-STREAM_KEEPALIVE_SECONDS = 15.0
+#
+# Keep this short: the PWA's half-open watchdog treats ~2 missed keepalives as
+# stale, so 5s here → recovery in ~12s instead of ~45s with a 15s cadence.
+STREAM_KEEPALIVE_SECONDS = 5.0
 
 
 # Tool names that mutate a file on disk and carry the target path in their input.
@@ -179,6 +183,7 @@ class ChatStream:
         "_done",
         "prompt_text",
         "_pending",
+        "_pending_id_seq",
         "user_stopped",
         "background",
     )
@@ -190,10 +195,11 @@ class ChatStream:
         # Original user prompt (kept so auto-title can run after clients reconnect).
         self.prompt_text: str = prompt_text
         # Messages queued by the user while this stream was running. Flushed
-        # into a follow-up stream after this one finishes. Each entry is
-        # {"text": str, "images": list[str]} where images are ref strings
-        # (resolved back to ImageAttachments at flush time).
+        # one at a time into follow-up turns after this one finishes. Each
+        # entry is {"id": str, "text": str, "images": list[str]} where images
+        # are ref strings (resolved back to ImageAttachments at flush time).
         self._pending: list[dict] = []
+        self._pending_id_seq = 0
         # Set by `stop_chat()` when the user hits the Stop button. The drive
         # loop reads this to decide whether to still flush queued messages
         # after an interrupted turn (a user stop is intentional, not an
@@ -205,15 +211,77 @@ class ChatStream:
         # starts a real turn instead (the drain is cancelled first).
         self.background: bool = background
 
-    def enqueue(self, text: str, images: list[str] | None = None) -> None:
-        """Queue a user message to flush after this stream finishes."""
-        self._pending.append({"text": text, "images": list(images or [])})
+    def enqueue(
+        self,
+        text: str,
+        images: list[str] | None = None,
+        entry_id: str | None = None,
+    ) -> str:
+        """Queue a user message to flush after this stream finishes.
+
+        Returns the queue entry id. If ``entry_id`` is supplied by the client,
+        use it so the frontend and backend can reference the same item for
+        reorder/edit/remove. Otherwise generate one.
+        """
+        self._pending_id_seq += 1
+        resolved_id = entry_id or f"q-{self._pending_id_seq}-{uuid.uuid4().hex[:8]}"
+        self._pending.append({"id": resolved_id, "text": text, "images": list(images or [])})
+        return resolved_id
+
+    def drain_one(self) -> dict | None:
+        """Return and remove the next queued message, or None if empty."""
+        if not self._pending:
+            return None
+        return self._pending.pop(0)
 
     def drain_pending(self) -> list[dict]:
-        """Return and clear any queued messages."""
+        """Return and clear any queued messages. Kept for compatibility."""
         out = list(self._pending)
         self._pending.clear()
         return out
+
+    def reorder_pending(self, entry_id: str, before_id: str | None = None) -> bool:
+        """Move the entry with ``entry_id`` just before ``before_id``.
+
+        If ``before_id`` is None, move to the end. Returns True on success.
+        """
+        items = self._pending
+        src_idx = next((i for i, p in enumerate(items) if p.get("id") == entry_id), -1)
+        if src_idx == -1:
+            return False
+        item = items.pop(src_idx)
+        if before_id is None:
+            items.append(item)
+            return True
+        dst_idx = next((i for i, p in enumerate(items) if p.get("id") == before_id), -1)
+        if dst_idx == -1:
+            # Target vanished; keep the item at the end rather than dropping it.
+            items.append(item)
+            return False
+        items.insert(dst_idx, item)
+        return True
+
+    def edit_pending(self, entry_id: str, text: str, images: list[str] | None = None) -> bool:
+        """Update text and images of the queued entry with ``entry_id``."""
+        for item in self._pending:
+            if item.get("id") == entry_id:
+                item["text"] = text
+                item["images"] = list(images or [])
+                return True
+        return False
+
+    def remove_pending(self, entry_id: str) -> bool:
+        """Remove the queued entry with ``entry_id``."""
+        for i, item in enumerate(self._pending):
+            if item.get("id") == entry_id:
+                self._pending.pop(i)
+                return True
+        return False
+
+    @property
+    def pending(self) -> list[dict]:
+        """Read-only snapshot of queued messages in order."""
+        return list(self._pending)
 
     @property
     def has_pending(self) -> bool:
