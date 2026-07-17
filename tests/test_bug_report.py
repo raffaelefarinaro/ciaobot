@@ -106,3 +106,36 @@ def test_gather_system_info_has_version_and_python() -> None:
     info = bug_report.gather_system_info()
     assert "Ciaobot" in info
     assert "Python" in info
+
+
+def test_submit_rejects_non_string_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A leaked test double (e.g. a MagicMock) must never be POSTed to the form."""
+    from unittest.mock import MagicMock
+
+    _configure(monkeypatch)
+    monkeypatch.setattr(
+        bug_report.urllib.request,
+        "urlopen",
+        lambda *a, **k: pytest.fail("should not POST for non-string fields"),
+    )
+
+    mock = MagicMock()
+    # A MagicMock auto-attribute is not a str -> rejected before any POST.
+    assert bug_report.submit_bug_report(mock.title, mock.details, "sys") is False
+    # Empty/whitespace strings are rejected too.
+    assert bug_report.submit_bug_report("   ", "details", "sys") is False
+    assert bug_report.submit_bug_report("title", "", "sys") is False
+
+
+def test_submit_rejects_leaked_mock_repr(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An already-stringified mock repr must not be filed as a real report."""
+    _configure(monkeypatch)
+    monkeypatch.setattr(
+        bug_report.urllib.request,
+        "urlopen",
+        lambda *a, **k: pytest.fail("should not POST a leaked object repr"),
+    )
+
+    leaked = "<MagicMock id='139314758788368'>"
+    assert bug_report.submit_bug_report(leaked, "real details", "sys") is False
+    assert bug_report.submit_bug_report("real title", leaked, "sys") is False
