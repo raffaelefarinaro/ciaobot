@@ -377,6 +377,21 @@ def test_claude_rate_limit_event_emits_status_and_caches_quota(
     assert result_events[0].quota["status"] == "allowed_warning"
     assert result_events[0].quota["rateLimitType"] == "five_hour"
 
+    # If the status is just "allowed", it should not emit a SystemStatusEvent.
+    no_events = claude_provider._convert_message(
+        RateLimitEvent(
+            rate_limit_info=RateLimitInfo(
+                status="allowed",
+                rate_limit_type="five_hour",
+                resets_at=123,
+                utilization=0.1,
+            ),
+            uuid="uuid-2",
+            session_id="sess-1",
+        )
+    )
+    assert len(no_events) == 0
+
 
 def test_claude_convert_result_message(
     claude_provider: ClaudeProvider,

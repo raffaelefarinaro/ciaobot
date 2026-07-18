@@ -951,6 +951,8 @@ class ClaudeProvider(BaseSDKProvider):
                 self._rate_limit_store.update(msg.rate_limit_info)
             except Exception:  # noqa: BLE001 — never fail a turn on telemetry
                 logger.debug("rate_limit persistence failed", exc_info=True)
+            if self._pending_quota.get("status") == "allowed":
+                return []
             return [
                 SystemStatusEvent(
                     type="system",
