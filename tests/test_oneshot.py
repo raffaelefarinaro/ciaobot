@@ -201,3 +201,13 @@ async def test_run_oneshot_no_retry_when_disabled(monkeypatch) -> None:
             "hi", system_prompt="s", model="haiku", max_retries=0
         )
     assert calls[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_oneshot_disables_claude_auto_memory(monkeypatch) -> None:
+    captured: dict = {}
+    monkeypatch.setattr(oneshot, "query", _fake_query(captured))
+
+    await oneshot.run_oneshot("hello", system_prompt="sys", model="haiku")
+    options = captured["options"]
+    assert options.env.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY") == "1"

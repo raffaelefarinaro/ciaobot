@@ -262,6 +262,7 @@ The Ciaobot server injects the following environment variables into every spawne
 - `CIAO_MODEL_BUCKET`: the model bucket configured for the chat (e.g. `personal`, `work`, or empty).
 - `CIAO_CHAT_ID`: the ID of the active chat.
 - `GWS_PROFILE`: resolved from the active workspace's `gws_profile`, falling back to `GWS_PROFILE` / the default profile.
+- `CLAUDE_CODE_DISABLE_AUTO_MEMORY`: set to `1` to disable Claude Code's native auto-memory system since Ciaobot implements its own memory layer.
 
 These variables let package commands (like `ciao create-chat`) or custom skills auto-detect the current chat's context and preferences.
 

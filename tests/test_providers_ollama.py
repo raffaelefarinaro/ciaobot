@@ -289,6 +289,7 @@ def test_build_extra_env_leaves_anthropic_chat_alone(tmp_path: Path) -> None:
     assert "ANTHROPIC_AUTH_TOKEN" not in env
     assert "ANTHROPIC_BASE_URL" not in env
     assert env["GWS_PROFILE"] == "personal"
+    assert env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
 
 
 async def test_auto_title_uses_workspace_haiku_model(

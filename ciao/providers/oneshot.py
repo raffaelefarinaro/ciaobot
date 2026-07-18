@@ -258,11 +258,14 @@ async def run_oneshot(
             )
     elif provider == "claude":
         async def _attempt() -> str:
+            # Disable Claude Code's auto memory to avoid double memory layers
+            merged_env = dict(env or {})
+            merged_env.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
             return await _run_claude_oneshot(
                 prompt,
                 system_prompt=system_prompt,
                 model=model,
-                env=env,
+                env=merged_env,
             )
     else:
         raise ValueError(f"Unknown one-shot provider '{provider}'")

@@ -3757,6 +3757,8 @@ class ProjectChatManager:
                 routing_env_for_model(self._runtime_model_for_chat(chat), self._config)
             )
         env["CIAO_CHAT_ID"] = chat.chat_id
+        # Disable Claude Code's auto memory to avoid double memory layers
+        env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
         return env
 
     def _effective_mode_for_chat(self, chat: ChatInfo) -> BridgeMode:

@@ -502,6 +502,8 @@ class CiaoConfig:
             if dotenv_path.exists():
                 from dotenv import load_dotenv
                 load_dotenv(dotenv_path)
+            # Default to disabling Claude Code's auto memory inside Ciaobot
+            os.environ.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
 
         source = env if env is not None else os.environ
 
