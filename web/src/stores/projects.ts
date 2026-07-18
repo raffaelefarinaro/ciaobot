@@ -383,9 +383,14 @@ export const useProjectStore = defineStore('projects', () => {
     subagents.value[activeChatId.value || ''] || []
   )
 
-  const isStreaming = computed(() =>
-    streaming.value[activeChatId.value || ''] || false
-  )
+  // True while the active chat has a live turn. Includes `projectStreaming`
+  // (events-WS server truth) so a mid-turn `/messages` poll that hydrates
+  // progress text cannot tear down the Working... Activity and promote a
+  // half-written note into the reply bubble.
+  const isStreaming = computed(() => {
+    const chatId = activeChatId.value || ''
+    return Boolean(streaming.value[chatId] || projectStreaming.value[chatId])
+  })
 
   const currentStreamingText = computed(() =>
     streamingText.value[activeChatId.value || ''] || ''
@@ -1038,6 +1043,9 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   function hasSettledHistory(chatId: string): boolean {
+    // Server still streaming this chat — session files already contain
+    // mid-turn assistant progress text, which must not look "settled".
+    if (projectStreaming.value[chatId]) return false
     const localMessages = messages.value[chatId] || []
     const last = localMessages[localMessages.length - 1]
     if (!last) return false
@@ -1054,7 +1062,9 @@ export const useProjectStore = defineStore('projects', () => {
     delete liveUsage.value[chatId]
     delete streamStartedAt.value[chatId]
     persistStreamStartedAt()
-    delete projectStreaming.value[chatId]
+    // Leave `projectStreaming` alone — it is owned by the events websocket
+    // (snapshot / chat_streaming_started / done). Clearing it here made
+    // mid-turn history polls hide the live Activity.
   }
 
   async function syncLatest() {
@@ -1072,7 +1082,16 @@ export const useProjectStore = defineStore('projects', () => {
       if (!chatId || !chatStillOpen) return
 
       await loadMessages(chatId)
-      if (streaming.value[chatId] && !queuedMessages.value[chatId]?.length && hasSettledHistory(chatId)) {
+      // Only clear a stale local spinner when the server agrees the turn is
+      // done. Mid-turn Claude sessions already expose progress assistant
+      // text via /messages; treating that as settled promoted those notes
+      // into a reply bubble and collapsed Working... into Activity.
+      if (
+        streaming.value[chatId]
+        && !projectStreaming.value[chatId]
+        && !queuedMessages.value[chatId]?.length
+        && hasSettledHistory(chatId)
+      ) {
         clearStreamingState(chatId)
       }
       void loadSubagents(chatId)
@@ -1749,7 +1768,12 @@ export const useProjectStore = defineStore('projects', () => {
     void markRead(chatId)
     try {
       await loadMessages(chatId)
-      if (streaming.value[chatId] && !queuedMessages.value[chatId]?.length && hasSettledHistory(chatId)) {
+      if (
+        streaming.value[chatId]
+        && !projectStreaming.value[chatId]
+        && !queuedMessages.value[chatId]?.length
+        && hasSettledHistory(chatId)
+      ) {
         clearStreamingState(chatId)
         pendingStreamResync.delete(chatId)
       }

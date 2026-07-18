@@ -724,6 +724,48 @@ describe('latest status sync', () => {
     expect(store.streaming[chatId]).toBe(false)
     expect(store.streamingText[chatId]).toBe('')
   })
+
+  test('keeps Working live when /messages hydrates mid-turn progress text', async () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    const store = useProjectStore()
+    const chatId = 'c-midturn'
+    store.chats = [
+      { chat_id: chatId, project_id: 'p1', title: 'Mid turn', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeChatId = chatId
+    store.messages[chatId] = [
+      { role: 'user', content: 'yes make it more robust', timestamp: '', turn_index: 0 },
+    ]
+    store.streaming[chatId] = true
+    store.streamingText[chatId] = 'I\'m in the ciao repo'
+    // Server still running this turn — events WS truth.
+    store.projectStreaming[chatId] = true
+
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/chats') {
+        return Promise.resolve([
+          { chat_id: chatId, project_id: 'p1', title: 'Mid turn', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+        ])
+      }
+      if (path === `/api/chats/${chatId}/messages`) {
+        // Claude session files already contain progress notes mid-turn.
+        return Promise.resolve([
+          { role: 'user', content: 'yes make it more robust', sent_at: '2026-07-18T08:00:00Z', turn_index: 0 },
+          { role: 'assistant', content: 'Interesting — mismatch found.' },
+          { role: 'assistant', content: 'I\'m in the ciao repo, not ciaobot. Let me cd:' },
+        ])
+      }
+      if (path === `/api/chats/${chatId}/subagents`) return Promise.resolve([])
+      return Promise.resolve([])
+    })
+
+    await store.syncLatest()
+
+    expect(store.streaming[chatId]).toBe(true)
+    expect(store.projectStreaming[chatId]).toBe(true)
+    expect(store.isStreaming).toBe(true)
+    expect(store.streamingText[chatId]).toBe('I\'m in the ciao repo')
+  })
 })
 
 describe('background agents indicator', () => {
