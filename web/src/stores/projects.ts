@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, toRaw } from 'vue'
 import { api } from '../lib/api'
 import { getPendingBucket, normalizePendingBuckets, setPendingBucket } from '../lib/pendingBuckets'
 import { buildFixPrompt } from '../lib/fixError'
@@ -330,7 +330,7 @@ export const useProjectStore = defineStore('projects', () => {
   // disconnectWs so it is NOT auto-reconnected; `chatReconnectTimers` lets a
   // pending reconnect be cancelled; attempts drive the backoff and reset once
   // the socket proves live (first frame received).
-  const intentionalCloses = new Set<string>()
+  const intentionalCloses = new Set<WebSocket>()
   const chatReconnectTimers: Record<string, number> = {}
   const chatReconnectAttempts: Record<string, number> = {}
   // After an unexpected drop or half-open recovery, keep the frozen Activity
@@ -1693,11 +1693,13 @@ export const useProjectStore = defineStore('projects', () => {
     lastChatFrameAt[chatId] = nowMs()
 
     ws.onopen = () => {
+      if (toRaw(sockets.value[chatId]) !== ws) return
       lastChatFrameAt[chatId] = nowMs()
       sendFocus(chatId)
     }
 
     ws.onmessage = (ev) => {
+      if (toRaw(sockets.value[chatId]) !== ws) return
       // Any frame (including the server keepalive) proves the socket is live.
       lastChatFrameAt[chatId] = nowMs()
       // A working socket clears the reconnect backoff so a later drop starts
@@ -1717,15 +1719,21 @@ export const useProjectStore = defineStore('projects', () => {
     }
 
     ws.onclose = () => {
-      delete sockets.value[chatId]
-      delete lastChatFrameAt[chatId]
+      const isCurrent = toRaw(sockets.value[chatId]) === ws
+      if (isCurrent) {
+        delete sockets.value[chatId]
+        delete lastChatFrameAt[chatId]
+      }
+
+      const wasIntentional = intentionalCloses.delete(ws)
+      if (wasIntentional) return
+      if (!isCurrent) return
 
       // Auto-reconnect the chat the user is actually viewing when the socket
       // drops unexpectedly (server per-turn churn, transient network blip),
       // so live deltas and the final result resume within ~50ms instead of
       // waiting for the 15s poll or a manual reload. Intentional closes
       // (disconnectWs, e.g. switching chats) are skipped.
-      if (intentionalCloses.delete(chatId)) return
       if (typeof window === 'undefined' || typeof WebSocket === 'undefined') return
       if (activeChatId.value !== chatId) return
       // Keep the live Activity/timeline frozen across the gap. Clearing it
@@ -1879,9 +1887,9 @@ export const useProjectStore = defineStore('projects', () => {
       window.clearTimeout(chatReconnectTimers[chatId])
       delete chatReconnectTimers[chatId]
     }
-    const ws = sockets.value[chatId]
+    const ws = toRaw(sockets.value[chatId])
     if (ws) {
-      intentionalCloses.add(chatId)
+      intentionalCloses.add(ws)
       ws.close()
       delete sockets.value[chatId]
     }
@@ -1932,12 +1940,14 @@ export const useProjectStore = defineStore('projects', () => {
     let opened = false
 
     ws.onopen = () => {
+      if (toRaw(eventsSocket.value) !== ws) return
       opened = true
       eventsWsFailureStreak = 0
       lastEventsFrameAt = nowMs()
     }
 
     ws.onmessage = (ev) => {
+      if (toRaw(eventsSocket.value) !== ws) return
       // Any frame (including the server keepalive) proves the socket is live.
       lastEventsFrameAt = nowMs()
       let msg: EventsWsMessage
@@ -1947,7 +1957,12 @@ export const useProjectStore = defineStore('projects', () => {
     }
 
     ws.onclose = () => {
-      eventsSocket.value = null
+      const isCurrent = toRaw(eventsSocket.value) === ws
+      if (isCurrent) {
+        eventsSocket.value = null
+      }
+      if (!isCurrent) return
+
       if (opened) {
         eventsWsFailureStreak = 0
         // A previously-live awareness socket should come back immediately so
