@@ -610,3 +610,28 @@ def test_claude_options_raise_sdk_buffer_above_default() -> None:
     from ciao.providers.claude import _SDK_MAX_BUFFER_BYTES
 
     assert _SDK_MAX_BUFFER_BYTES > 1024 * 1024
+
+
+def test_claude_convert_system_message_suppresses_allowed_rate_limit(
+    claude_provider: ClaudeProvider,
+) -> None:
+    from claude_agent_sdk import SystemMessage
+
+    events1 = claude_provider._convert_message(
+        SystemMessage(
+            subtype="status",
+            data={"status": "Rate limit: allowed (five_hour)"},
+        )
+    )
+    assert len(events1) == 0
+
+    events2 = claude_provider._convert_message(
+        SystemMessage(
+            subtype="status",
+            data={"status": "Rate limit: allowed_warning (five_hour) 90% used"},
+        )
+    )
+    assert len(events2) == 1
+    assert events2[0].status == "Rate limit: allowed_warning (five_hour) 90% used"
+
+

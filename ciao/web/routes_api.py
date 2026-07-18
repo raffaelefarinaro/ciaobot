@@ -2561,6 +2561,9 @@ async def chat_messages(request: Request) -> JSONResponse:
         content = content.strip()
         if not content:
             continue
+        # Drop allowed rate limit status events so they do not pollute the chat history.
+        if m.type == "system" and "Rate limit: allowed" in content and "allowed_warning" not in content:
+            continue
         # Drop SDK-injected control slash commands (/model, /mode). Skipping
         # without incrementing user_idx keeps chat.user_turn_images aligned
         # with real user sends, which would otherwise shift by one per model

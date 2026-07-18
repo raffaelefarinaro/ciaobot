@@ -225,9 +225,31 @@ describe('ephemeral status events', () => {
       data: JSON.stringify({ type: 'status', message: 'retrying on sonnet' }),
     })
 
+    const msgsFinal = store.messages[chatId] || []
+    expect(msgsFinal.some(m => m.role === 'system' && m.content === 'requesting')).toBe(false)
+    expect(msgsFinal.some(m => m.role === 'system' && m.content === 'retrying on sonnet')).toBe(true)
+  })
+
+  test('does not render allowed rate limit status as a system message', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'c-ratelimit'
+    store.activeChatId = chatId
+    store.messages[chatId] = [
+      { role: 'user', content: 'hi', timestamp: '' },
+    ]
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'status', message: 'Rate limit: allowed (five_hour)' }),
+    })
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'status', message: 'Rate limit: allowed_warning (five_hour) 90.0% used' }),
+    })
+
     const msgs = store.messages[chatId] || []
-    expect(msgs.some(m => m.role === 'system' && m.content === 'requesting')).toBe(false)
-    expect(msgs.some(m => m.role === 'system' && m.content === 'retrying on sonnet')).toBe(true)
+    expect(msgs.some(m => m.role === 'system' && m.content.includes('Rate limit: allowed (five_hour)'))).toBe(false)
+    expect(msgs.some(m => m.role === 'system' && m.content.includes('Rate limit: allowed_warning'))).toBe(true)
   })
 })
 

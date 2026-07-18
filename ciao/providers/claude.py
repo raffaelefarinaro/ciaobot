@@ -1052,7 +1052,10 @@ class ClaudeProvider(BaseSDKProvider):
         data = msg.data or {}
 
         if subtype == "status":
-            return [SystemStatusEvent(type="system", status=data.get("status"))]
+            status_str = data.get("status") or ""
+            if "Rate limit: allowed" in status_str and "allowed_warning" not in status_str:
+                return []
+            return [SystemStatusEvent(type="system", status=status_str)]
 
         if subtype == "input_required":
             tool_name = data.get("tool_name", "") or data.get("tool", "")

@@ -641,6 +641,264 @@
             <div v-if="providerKeysResult" class="action-result">{{ providerKeysResult }}</div>
           </div>
 
+
+          <!-- Provider-neutral model routing -->
+          <div v-if="tierProviderSections.length" class="card">
+            <div class="settings-card-header">
+              <p class="section-title">model routing</p>
+              <p class="hint">
+                Ciaobot maps Haiku, Sonnet, Opus, and Fable to provider-specific models. OpenAI routes run through Codex; Ollama and OpenRouter routes run through Claude Code.
+              </p>
+            </div>
+            <div class="alias-provider-bar">
+              <label class="settings-field alias-provider-field">
+                <span class="ws-label">Provider</span>
+                <select
+                  class="routine-select alias-provider-select"
+                  :value="selectedTierProviderSection?.key || ''"
+                  :disabled="routinesSaving"
+                  @change="selectedTierProvider = ($event.target as HTMLSelectElement).value as RoutingProviderKey"
+                >
+                  <option v-for="section in tierProviderSections" :key="section.key" :value="section.key">
+                    {{ section.label }}<template v-if="!section.available"> (not configured)</template>
+                  </option>
+                </select>
+              </label>
+            </div>
+            <div v-if="selectedTierProviderSection" class="tier-provider-section">
+              <div class="settings-field-grid">
+                <label v-for="tier in modelTiers" :key="`${selectedTierProviderSection.key}-${tier.key}`" class="settings-field">
+                  <span class="ws-label">{{ tier.label }}</span>
+                  <ModelSelector
+                    v-if="selectedTierProviderSection.configurable"
+                    :model-value="tierSelectorValue(selectedTierProviderSection.key as TierProviderKey, tier.key)"
+                    :sections="tierModelSectionsFor(selectedTierProviderSection.key as TierProviderKey, tier.key)"
+                    :disabled="routinesSaving || !selectedTierProviderSection.available"
+                    @update:model-value="saveTierModel(selectedTierProviderSection.key as TierProviderKey, tier.key, $event)"
+                  />
+                  <input
+                    v-else
+                    class="routine-input routing-model-input"
+                    :value="tierModelForProvider(selectedTierProviderSection.key, tier.key)"
+                    :aria-label="`${tier.label} ${selectedTierProviderSection.label} routing model`"
+                    disabled
+                  />
+                </label>
+              </div>
+              <p v-if="selectedTierProviderSection.key === 'codex' && selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
+                OpenAI models are discovered from the signed-in Codex account. Ciaobot assigns the tiers automatically; pick a model above to pin a tier. A pin falls back to the automatic mapping if its model disappears from the account.
+              </p>
+              <p v-else-if="!selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
+                {{ tierProviderUnavailableHint }}
+              </p>
+            </div>
+          </div>
+        </template>
+      </template>
+
+      <!-- WORKSPACES TAB -->
+      <template v-if="currentTab === 'workspaces'">
+        <div v-if="!workspacesLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
+        <template v-else-if="workspacesError">
+          <div class="card"><p class="hint hint--warn">{{ workspacesError }}</p></div>
+        </template>
+        <template v-else>
+          <div class="card">
+            <div class="settings-card-header settings-card-header--split">
+              <div>
+                <p class="section-title">workspaces</p>
+                <p class="hint">
+                  Logical chat spaces that route projects, chats, vault names, model defaults, and integration profiles.
+                </p>
+              </div>
+              <button class="btn-small" @click="showNewWorkspace = !showNewWorkspace">
+                {{ showNewWorkspace ? 'Cancel' : '+ Add workspace' }}
+              </button>
+            </div>
+
+            <div v-if="showNewWorkspace" class="workspace-card workspace-card--new">
+              <div class="workspace-card-header">
+                <div>
+                  <p class="workspace-title">New workspace</p>
+                  <p class="hint hint--compact">Saved to <code>.runtime/workspaces.json</code> and applied immediately.</p>
+                </div>
+              </div>
+              <div class="settings-field-grid">
+                <label class="settings-field"><span class="ws-label">Name</span>
+                  <input class="routine-input" v-model="newWorkspaceForm.name" :disabled="workspacesSaving === 'new'" placeholder="letters, numbers, dashes, underscores" />
+                </label>
+                <label class="settings-field"><span class="ws-label">Vault name</span>
+                  <input class="routine-input" v-model="newWorkspaceForm.vault_root" :disabled="workspacesSaving === 'new'" placeholder="(defaults to name)" />
+                </label>
+                <label class="settings-field"><span class="ws-label">Provider</span>
+                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.default_provider" :disabled="workspacesSaving === 'new'">
+                    <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
+                      {{ provider.label }}
+                    </option>
+                  </select>
+                </label>
+                <label class="settings-field"><span class="ws-label">Default model</span>
+                  <ModelSelector
+                    v-model="newWorkspaceForm.default_model"
+                    :sections="newWorkspaceModelSections"
+                    :placeholder="workspaceInheritPlaceholder"
+                    :empty-placeholder="workspaceInheritPlaceholder"
+                    :disabled="workspacesSaving === 'new'"
+                  />
+                </label>
+                <label class="settings-field">
+                  <div class="settings-label-row">
+                    <span class="ws-label">Google profile</span>
+                    <details class="field-info">
+                      <summary aria-label="About GWS profiles" title="About GWS profiles">i</summary>
+                      <div class="field-info-panel">
+                        <p>
+                          Selects the Google Workspace profile used by this workspace. Manage profiles and credentials below.
+                        </p>
+                      </div>
+                    </details>
+                  </div>
+                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.gws_profile" :disabled="workspacesSaving === 'new'">
+                    <option value="">Default ({{ defaultGwsProfileName }})</option>
+                    <option v-for="profile in gwsProfileOptions" :key="`new-gws-${profile.name}`" :value="profile.name">
+                      {{ profile.label }} ({{ profile.email || profile.name }})
+                    </option>
+                    <option v-if="workspaceCustomGwsProfile(newWorkspaceForm.gws_profile)" :value="newWorkspaceForm.gws_profile">
+                      Custom: {{ newWorkspaceForm.gws_profile }}
+                    </option>
+                  </select>
+                </label>
+                <div v-if="newWorkspaceForm.default_provider !== 'codex'" class="settings-field settings-field--wide">
+                  <div class="settings-label-row">
+                    <span class="ws-label">Claude.ai MCPs</span>
+                    <details class="field-info">
+                      <summary aria-label="About Claude.ai MCP connectors" title="About Claude.ai MCP connectors">i</summary>
+                      <div class="field-info-panel">
+                        <p>
+                          Allows this workspace to use claude.ai account connectors, for example Airtable,
+                          Slack, Atlassian, BigQuery, Sentry, or similar tools.
+                        </p>
+                        <p>
+                          Turn this off for personal workspaces when your connected accounts point to work systems,
+                          so personal chats do not inherit work-only connectors.
+                        </p>
+                      </div>
+                    </details>
+                  </div>
+                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.claude_ai_mcps" :disabled="workspacesSaving === 'new'" aria-label="Claude.ai MCPs">
+                    <option value="on">On (connectors allowed)</option>
+                    <option value="off">Off (connectors blocked)</option>
+                  </select>
+                </div>
+
+              </div>
+              <div class="action-row settings-actions">
+                <button class="btn-primary" @click="createNewWorkspace" :disabled="workspacesSaving === 'new'">
+                  {{ workspacesSaving === 'new' ? 'Creating...' : 'Create workspace' }}
+                </button>
+              </div>
+            </div>
+
+            <div class="workspace-list">
+              <div
+                v-for="form in workspaceForms"
+                :key="form.name"
+                class="workspace-card"
+              >
+                <div class="workspace-card-header">
+                  <div>
+                    <p class="workspace-title">{{ form.name }}</p>
+                    <p class="hint hint--compact">{{ form.vault_root || form.name }} vault name</p>
+                  </div>
+                  <div class="workspace-actions">
+                    <button
+                      class="btn-small"
+                      @click="saveWorkspace(form.name)"
+                      :disabled="workspacesSaving === form.name"
+                    >
+                      {{ workspacesSaving === form.name ? 'Saving...' : 'Save' }}
+                    </button>
+                    <button
+                      v-if="workspaceForms.length > 1"
+                      class="btn-small btn-danger"
+                      @click="removeWorkspace(form.name)"
+                      :disabled="workspacesSaving === form.name"
+                    >Delete</button>
+                  </div>
+                </div>
+
+                <div class="settings-field-grid">
+                  <label class="settings-field"><span class="ws-label">Vault name</span>
+                    <input class="routine-input" v-model="form.vault_root" :disabled="workspacesSaving === form.name" placeholder="(defaults to workspace name)" />
+                  </label>
+                  <label class="settings-field"><span class="ws-label">Provider</span>
+                    <select class="routine-input workspace-select" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
+                      <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
+                        {{ provider.label }}
+                      </option>
+                    </select>
+                  </label>
+                  <label class="settings-field"><span class="ws-label">Default model</span>
+                    <ModelSelector
+                      v-model="form.default_model"
+                      :sections="workspaceModelSectionsForForm(form)"
+                      :placeholder="workspaceInheritPlaceholder"
+                      :empty-placeholder="workspaceInheritPlaceholder"
+                      :disabled="workspacesSaving === form.name"
+                    />
+                  </label>
+                  <label class="settings-field">
+                    <div class="settings-label-row">
+                      <span class="ws-label">Google profile</span>
+                      <details class="field-info">
+                        <summary aria-label="About GWS profiles" title="About GWS profiles">i</summary>
+                        <div class="field-info-panel">
+                          <p>
+                            Selects the Google Workspace profile used by this workspace. Manage profiles and credentials below.
+                          </p>
+                        </div>
+                      </details>
+                    </div>
+                    <select class="routine-input workspace-select" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
+                      <option value="">Default ({{ defaultGwsProfileName }})</option>
+                      <option v-for="profile in gwsProfileOptions" :key="`${form.name}-gws-${profile.name}`" :value="profile.name">
+                        {{ profile.label }} ({{ profile.email || profile.name }})
+                      </option>
+                      <option v-if="workspaceCustomGwsProfile(form.gws_profile)" :value="form.gws_profile">
+                        Custom: {{ form.gws_profile }}
+                      </option>
+                    </select>
+                  </label>
+                  <div v-if="form.default_provider !== 'codex'" class="settings-field settings-field--wide">
+                    <div class="settings-label-row">
+                      <span class="ws-label">Claude.ai MCPs</span>
+                      <details class="field-info">
+                        <summary aria-label="About Claude.ai MCP connectors" title="About Claude.ai MCP connectors">i</summary>
+                        <div class="field-info-panel">
+                          <p>
+                            Allows this workspace to use claude.ai account connectors, for example Airtable,
+                            Slack, Atlassian, BigQuery, Sentry, or similar tools.
+                          </p>
+                          <p>
+                            Turn this off for personal workspaces when your connected accounts point to work systems,
+                            so personal chats do not inherit work-only connectors.
+                          </p>
+                        </div>
+                      </details>
+                    </div>
+                    <select class="routine-input workspace-select" v-model="form.claude_ai_mcps" :disabled="workspacesSaving === form.name" aria-label="Claude.ai MCPs">
+                      <option value="on">On (connectors allowed)</option>
+                      <option value="off">Off (connectors blocked)</option>
+                    </select>
+                  </div>
+
+                </div>
+              </div>
+            </div>
+
+            <div v-if="workspacesResult" class="action-result">{{ workspacesResult }}</div>
+          </div>
+
           <!-- Google Workspace integration -->
           <div class="card">
             <div class="settings-card-header settings-card-header--split">
@@ -658,7 +916,7 @@
                       </p>
                       <p>
                         Use separate <strong>personal</strong> and <strong>work</strong> profiles so a personal chat never inherits work Drive or calendar access.
-                        Each workspace picks its profile under Settings &rarr; Workspaces.
+                        Each workspace picks its profile.
                       </p>
                       <p><strong>One-time setup per profile</strong></p>
                       <ol class="field-info-steps">
@@ -680,7 +938,7 @@
                 </div>
                 <p class="hint">
                   Connect Gmail, Calendar, Drive, Docs, Sheets, Slides, and Tasks through separate local <code>gws</code> profiles.
-                  Workspaces choose which profile to use in Settings &rarr; Workspaces.
+                  Workspaces choose which profile to use above.
                 </p>
               </div>
               <span
@@ -870,263 +1128,6 @@
                 Keep personal and work Google accounts in different profiles. A personal chat should not inherit work Drive, calendar, or connector access by accident.
               </p>
             </template>
-          </div>
-
-          <!-- Provider-neutral model routing -->
-          <div v-if="tierProviderSections.length" class="card">
-            <div class="settings-card-header">
-              <p class="section-title">model routing</p>
-              <p class="hint">
-                Ciaobot maps Haiku, Sonnet, Opus, and Fable to provider-specific models. OpenAI routes run through Codex; Ollama and OpenRouter routes run through Claude Code.
-              </p>
-            </div>
-            <div class="alias-provider-bar">
-              <label class="settings-field alias-provider-field">
-                <span class="ws-label">Provider</span>
-                <select
-                  class="routine-select alias-provider-select"
-                  :value="selectedTierProviderSection?.key || ''"
-                  :disabled="routinesSaving"
-                  @change="selectedTierProvider = ($event.target as HTMLSelectElement).value as RoutingProviderKey"
-                >
-                  <option v-for="section in tierProviderSections" :key="section.key" :value="section.key">
-                    {{ section.label }}<template v-if="!section.available"> (not configured)</template>
-                  </option>
-                </select>
-              </label>
-            </div>
-            <div v-if="selectedTierProviderSection" class="tier-provider-section">
-              <div class="settings-field-grid">
-                <label v-for="tier in modelTiers" :key="`${selectedTierProviderSection.key}-${tier.key}`" class="settings-field">
-                  <span class="ws-label">{{ tier.label }}</span>
-                  <ModelSelector
-                    v-if="selectedTierProviderSection.configurable"
-                    :model-value="tierSelectorValue(selectedTierProviderSection.key as TierProviderKey, tier.key)"
-                    :sections="tierModelSectionsFor(selectedTierProviderSection.key as TierProviderKey, tier.key)"
-                    :disabled="routinesSaving || !selectedTierProviderSection.available"
-                    @update:model-value="saveTierModel(selectedTierProviderSection.key as TierProviderKey, tier.key, $event)"
-                  />
-                  <input
-                    v-else
-                    class="routine-input routing-model-input"
-                    :value="tierModelForProvider(selectedTierProviderSection.key, tier.key)"
-                    :aria-label="`${tier.label} ${selectedTierProviderSection.label} routing model`"
-                    disabled
-                  />
-                </label>
-              </div>
-              <p v-if="selectedTierProviderSection.key === 'codex' && selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
-                OpenAI models are discovered from the signed-in Codex account. Ciaobot assigns the tiers automatically; pick a model above to pin a tier. A pin falls back to the automatic mapping if its model disappears from the account.
-              </p>
-              <p v-else-if="!selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
-                {{ tierProviderUnavailableHint }}
-              </p>
-            </div>
-          </div>
-        </template>
-      </template>
-
-      <!-- WORKSPACES TAB -->
-      <template v-if="currentTab === 'workspaces'">
-        <div v-if="!workspacesLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
-        <template v-else-if="workspacesError">
-          <div class="card"><p class="hint hint--warn">{{ workspacesError }}</p></div>
-        </template>
-        <template v-else>
-          <div class="card">
-            <div class="settings-card-header settings-card-header--split">
-              <div>
-                <p class="section-title">workspaces</p>
-                <p class="hint">
-                  Logical chat spaces that route projects, chats, vault names, model defaults, and integration profiles.
-                </p>
-              </div>
-              <button class="btn-small" @click="showNewWorkspace = !showNewWorkspace">
-                {{ showNewWorkspace ? 'Cancel' : '+ Add workspace' }}
-              </button>
-            </div>
-
-            <div v-if="showNewWorkspace" class="workspace-card workspace-card--new">
-              <div class="workspace-card-header">
-                <div>
-                  <p class="workspace-title">New workspace</p>
-                  <p class="hint hint--compact">Saved to <code>.runtime/workspaces.json</code> and applied immediately.</p>
-                </div>
-              </div>
-              <div class="settings-field-grid">
-                <label class="settings-field"><span class="ws-label">Name</span>
-                  <input class="routine-input" v-model="newWorkspaceForm.name" :disabled="workspacesSaving === 'new'" placeholder="letters, numbers, dashes, underscores" />
-                </label>
-                <label class="settings-field"><span class="ws-label">Vault name</span>
-                  <input class="routine-input" v-model="newWorkspaceForm.vault_root" :disabled="workspacesSaving === 'new'" placeholder="(defaults to name)" />
-                </label>
-                <label class="settings-field"><span class="ws-label">Provider</span>
-                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.default_provider" :disabled="workspacesSaving === 'new'">
-                    <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
-                      {{ provider.label }}
-                    </option>
-                  </select>
-                </label>
-                <label class="settings-field"><span class="ws-label">Default model</span>
-                  <ModelSelector
-                    v-model="newWorkspaceForm.default_model"
-                    :sections="newWorkspaceModelSections"
-                    :placeholder="workspaceInheritPlaceholder"
-                    :empty-placeholder="workspaceInheritPlaceholder"
-                    :disabled="workspacesSaving === 'new'"
-                  />
-                </label>
-                <label class="settings-field">
-                  <div class="settings-label-row">
-                    <span class="ws-label">Google profile</span>
-                    <details class="field-info">
-                      <summary aria-label="About GWS profiles" title="About GWS profiles">i</summary>
-                      <div class="field-info-panel">
-                        <p>
-                          Selects the Google Workspace profile used by this workspace. Manage profiles and credentials in the Providers tab.
-                        </p>
-                      </div>
-                    </details>
-                  </div>
-                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.gws_profile" :disabled="workspacesSaving === 'new'">
-                    <option value="">Default ({{ defaultGwsProfileName }})</option>
-                    <option v-for="profile in gwsProfileOptions" :key="`new-gws-${profile.name}`" :value="profile.name">
-                      {{ profile.label }} ({{ profile.email || profile.name }})
-                    </option>
-                    <option v-if="workspaceCustomGwsProfile(newWorkspaceForm.gws_profile)" :value="newWorkspaceForm.gws_profile">
-                      Custom: {{ newWorkspaceForm.gws_profile }}
-                    </option>
-                  </select>
-                </label>
-                <div v-if="newWorkspaceForm.default_provider !== 'codex'" class="settings-field settings-field--wide">
-                  <div class="settings-label-row">
-                    <span class="ws-label">Claude.ai MCPs</span>
-                    <details class="field-info">
-                      <summary aria-label="About Claude.ai MCP connectors" title="About Claude.ai MCP connectors">i</summary>
-                      <div class="field-info-panel">
-                        <p>
-                          Allows this workspace to use claude.ai account connectors, for example Airtable,
-                          Slack, Atlassian, BigQuery, Sentry, or similar tools.
-                        </p>
-                        <p>
-                          Turn this off for personal workspaces when your connected accounts point to work systems,
-                          so personal chats do not inherit work-only connectors.
-                        </p>
-                      </div>
-                    </details>
-                  </div>
-                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.claude_ai_mcps" :disabled="workspacesSaving === 'new'" aria-label="Claude.ai MCPs">
-                    <option value="on">On (connectors allowed)</option>
-                    <option value="off">Off (connectors blocked)</option>
-                  </select>
-                </div>
-
-              </div>
-              <div class="action-row settings-actions">
-                <button class="btn-primary" @click="createNewWorkspace" :disabled="workspacesSaving === 'new'">
-                  {{ workspacesSaving === 'new' ? 'Creating...' : 'Create workspace' }}
-                </button>
-              </div>
-            </div>
-
-            <div class="workspace-list">
-              <div
-                v-for="form in workspaceForms"
-                :key="form.name"
-                class="workspace-card"
-              >
-                <div class="workspace-card-header">
-                  <div>
-                    <p class="workspace-title">{{ form.name }}</p>
-                    <p class="hint hint--compact">{{ form.vault_root || form.name }} vault name</p>
-                  </div>
-                  <div class="workspace-actions">
-                    <button
-                      class="btn-small"
-                      @click="saveWorkspace(form.name)"
-                      :disabled="workspacesSaving === form.name"
-                    >
-                      {{ workspacesSaving === form.name ? 'Saving...' : 'Save' }}
-                    </button>
-                    <button
-                      v-if="workspaceForms.length > 1"
-                      class="btn-small btn-danger"
-                      @click="removeWorkspace(form.name)"
-                      :disabled="workspacesSaving === form.name"
-                    >Delete</button>
-                  </div>
-                </div>
-
-                <div class="settings-field-grid">
-                  <label class="settings-field"><span class="ws-label">Vault name</span>
-                    <input class="routine-input" v-model="form.vault_root" :disabled="workspacesSaving === form.name" placeholder="(defaults to workspace name)" />
-                  </label>
-                  <label class="settings-field"><span class="ws-label">Provider</span>
-                    <select class="routine-input workspace-select" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
-                      <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
-                        {{ provider.label }}
-                      </option>
-                    </select>
-                  </label>
-                  <label class="settings-field"><span class="ws-label">Default model</span>
-                    <ModelSelector
-                      v-model="form.default_model"
-                      :sections="workspaceModelSectionsForForm(form)"
-                      :placeholder="workspaceInheritPlaceholder"
-                      :empty-placeholder="workspaceInheritPlaceholder"
-                      :disabled="workspacesSaving === form.name"
-                    />
-                  </label>
-                  <label class="settings-field">
-                    <div class="settings-label-row">
-                      <span class="ws-label">Google profile</span>
-                      <details class="field-info">
-                        <summary aria-label="About GWS profiles" title="About GWS profiles">i</summary>
-                        <div class="field-info-panel">
-                          <p>
-                            Selects the Google Workspace profile used by this workspace. Manage profiles and credentials in the Providers tab.
-                          </p>
-                        </div>
-                      </details>
-                    </div>
-                    <select class="routine-input workspace-select" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
-                      <option value="">Default ({{ defaultGwsProfileName }})</option>
-                      <option v-for="profile in gwsProfileOptions" :key="`${form.name}-gws-${profile.name}`" :value="profile.name">
-                        {{ profile.label }} ({{ profile.email || profile.name }})
-                      </option>
-                      <option v-if="workspaceCustomGwsProfile(form.gws_profile)" :value="form.gws_profile">
-                        Custom: {{ form.gws_profile }}
-                      </option>
-                    </select>
-                  </label>
-                  <div v-if="form.default_provider !== 'codex'" class="settings-field settings-field--wide">
-                    <div class="settings-label-row">
-                      <span class="ws-label">Claude.ai MCPs</span>
-                      <details class="field-info">
-                        <summary aria-label="About Claude.ai MCP connectors" title="About Claude.ai MCP connectors">i</summary>
-                        <div class="field-info-panel">
-                          <p>
-                            Allows this workspace to use claude.ai account connectors, for example Airtable,
-                            Slack, Atlassian, BigQuery, Sentry, or similar tools.
-                          </p>
-                          <p>
-                            Turn this off for personal workspaces when your connected accounts point to work systems,
-                            so personal chats do not inherit work-only connectors.
-                          </p>
-                        </div>
-                      </details>
-                    </div>
-                    <select class="routine-input workspace-select" v-model="form.claude_ai_mcps" :disabled="workspacesSaving === form.name" aria-label="Claude.ai MCPs">
-                      <option value="on">On (connectors allowed)</option>
-                      <option value="off">Off (connectors blocked)</option>
-                    </select>
-                  </div>
-
-                </div>
-              </div>
-            </div>
-
-            <div v-if="workspacesResult" class="action-result">{{ workspacesResult }}</div>
           </div>
         </template>
       </template>

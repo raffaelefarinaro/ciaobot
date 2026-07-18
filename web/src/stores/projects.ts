@@ -3135,7 +3135,8 @@ export const useProjectStore = defineStore('projects', () => {
         // those belong in the Activity trace via tool_use, not as chat lines.
         const message = (event.message || '').trim()
         const ephemeral = new Set(['thinking', 'stopped', 'requesting', 'rate_limit', 'model_rerouted'])
-        if (message && !ephemeral.has(message) && !message.startsWith('error:')) {
+        const isAllowedRateLimit = message.includes('Rate limit: allowed') && !message.includes('allowed_warning')
+        if (message && !ephemeral.has(message) && !message.startsWith('error:') && !isAllowedRateLimit) {
           msgs.push({
             role: 'system',
             content: message,
