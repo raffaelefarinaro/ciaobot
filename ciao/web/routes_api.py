@@ -839,8 +839,7 @@ def _workspace_from_request(
         claude_ai_mcps = None
     return WorkspaceConfig(
         name=name,
-        vault_root=str(data.get("vault_root", existing.vault_root if existing else name)).strip()
-        or name,
+        vault_root=name,
         default_provider=provider,
         default_model=str(
             data.get("default_model", existing.default_model if existing else "")
@@ -1461,6 +1460,15 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
             code=code,
             redirect_uri=redirect_uri,
         )
+        # Refresh the cached token-validity state so the Settings UI clears
+        # the "Login expired" banner immediately instead of waiting up to
+        # ``CIAO_GWS_HEALTH_INTERVAL`` seconds. Mirrors gws_relogin_status.
+        monitor = getattr(request.app.state, "gws_health_monitor", None)
+        if monitor is not None:
+            try:
+                await asyncio.to_thread(monitor.check_once)
+            except Exception:
+                logger.exception("Post-exchange health refresh failed")
         return JSONResponse(_gws_integration_payload(config))
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)

@@ -86,11 +86,12 @@ def test_review_one_records_failure_on_exception(monkeypatch) -> None:
     assert "no upstream" in (result.error or "")
 
 
-def test_print_panel_uses_openrouter_default_when_key_set() -> None:
+def test_print_panel_uses_openrouter_default_when_key_set(monkeypatch) -> None:
     import sys
     from contextlib import redirect_stdout
     import io
 
+    monkeypatch.setattr(crt, "is_anthropic_available", lambda: False)
     monkeypatch_env = {"PWA_AUTH_TOKEN": "t", "OPENROUTER_API_KEY": "sk-or"}
     # CiaoConfig.from_env reads os.environ; patch it.
     import os
@@ -104,7 +105,7 @@ def test_print_panel_uses_openrouter_default_when_key_set() -> None:
         os.environ.clear()
         os.environ.update(old)
     assert rc == 0
-    assert "anthropic/claude-sonnet-latest" in buf.getvalue()
+    assert "anthropic/claude-opus-latest" in buf.getvalue()
 
 
 def test_resolve_critique_panel_uses_settings_override() -> None:
@@ -121,3 +122,39 @@ def test_resolve_critique_panel_cli_override_wins() -> None:
     config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
     config.critique_models = "model-a,model-b"
     assert crt.resolve_critique_panel(config, override="only-this") == ["only-this"]
+
+
+def test_default_critique_panel_prioritizes_anthropic(monkeypatch) -> None:
+    from ciao.config import CiaoConfig
+
+    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t", "OPENROUTER_API_KEY": "sk-or"})
+    # Mock is_anthropic_available to return True
+    monkeypatch.setattr(crt, "is_anthropic_available", lambda: True)
+
+    panel = crt.default_critique_panel(config)
+    assert panel == ["opus", "fable"]
+
+
+def test_default_critique_panel_uses_openrouter_when_anthropic_unavailable(monkeypatch) -> None:
+    from ciao.config import CiaoConfig
+
+    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t", "OPENROUTER_API_KEY": "sk-or"})
+    # Mock is_anthropic_available to return False
+    monkeypatch.setattr(crt, "is_anthropic_available", lambda: False)
+
+    panel = crt.default_critique_panel(config)
+    assert panel == ["anthropic/claude-opus-latest", "anthropic/claude-fable-latest"]
+
+
+def test_default_critique_panel_includes_ollama_when_available(monkeypatch) -> None:
+    from ciao.config import CiaoConfig
+
+    config = CiaoConfig.from_env({
+        "PWA_AUTH_TOKEN": "t",
+        "CIAO_OLLAMA_API_KEY": "sk-ollama",
+    })
+    monkeypatch.setattr(crt, "is_anthropic_available", lambda: True)
+
+    panel = crt.default_critique_panel(config)
+    assert "minimax-m3:cloud" in panel
+    assert "glm-5.2:cloud" in panel

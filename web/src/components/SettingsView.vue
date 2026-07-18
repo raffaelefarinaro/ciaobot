@@ -436,7 +436,7 @@
                         <span>&times;</span>
                       </button>
                     </div>
-                    <span v-else>Automatic default</span>
+                    <span v-else>Automatic default ({{ routines?.critique_models_effective || '' }})</span>
                   </div>
                   <button
                     type="button"
@@ -452,7 +452,7 @@
                   :model-value="selectedCritiqueModels"
                   :sections="critiqueModelSections"
                   placeholder="Select critique models"
-                  empty-placeholder="Automatic default"
+                  :empty-placeholder="`Automatic default (${routines?.critique_models_effective || ''})`"
                   :disabled="routinesSaving"
                   @update:model-value="setCritiqueModels"
                 />
@@ -808,7 +808,6 @@
                 <div class="workspace-card-header">
                   <div>
                     <p class="workspace-title">{{ form.name }}</p>
-                    <p class="hint hint--compact">{{ form.vault_root || form.name }} vault name</p>
                   </div>
                   <div class="workspace-actions">
                     <button
@@ -828,9 +827,6 @@
                 </div>
 
                 <div class="settings-field-grid">
-                  <label class="settings-field"><span class="ws-label">Vault name</span>
-                    <input class="routine-input" v-model="form.vault_root" :disabled="workspacesSaving === form.name" placeholder="(defaults to workspace name)" />
-                  </label>
                   <label class="settings-field"><span class="ws-label">Provider</span>
                     <select class="routine-input workspace-select" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
                       <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
@@ -3326,7 +3322,7 @@ async function saveWorkspace(name: string) {
   workspacesResult.value = ''
   try {
     await projectStore.updateWorkspace(name, {
-      vault_root: form.vault_root,
+      vault_root: name,
       default_provider: form.default_provider,
       default_model: form.default_model,
       gws_profile: form.gws_profile,
@@ -3354,7 +3350,7 @@ async function createNewWorkspace() {
   try {
     await projectStore.createWorkspace({
       name: form.name.trim(),
-      vault_root: form.vault_root,
+      vault_root: form.name.trim(),
       default_provider: form.default_provider,
       default_model: form.default_model,
       gws_profile: form.gws_profile,

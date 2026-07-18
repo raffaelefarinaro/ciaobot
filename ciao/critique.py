@@ -30,22 +30,61 @@ from ciao.providers.routing import routing_routine_env_for_model
 
 DEFAULT_TIMEOUT = 120  # seconds per model
 
+def is_anthropic_available() -> bool:
+    """True when Anthropic API key or Claude Code OAuth credentials are present."""
+    if os.environ.get("ANTHROPIC_API_KEY", "").strip():
+        return True
+    for p in [
+        Path.home() / ".claude-agent" / "credentials.json",
+        Path.home() / ".claude" / ".credentials.json",
+    ]:
+        try:
+            if p.is_file():
+                return True
+        except Exception:
+            pass
+    raw_cfg = os.environ.get("CLAUDE_CONFIG_PATH", "").strip()
+    config_path = Path(raw_cfg).expanduser() if raw_cfg else Path.home() / ".claude.json"
+    try:
+        if config_path.is_file():
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("oauthAccount"):
+                return True
+    except Exception:
+        pass
+    return False
+
 
 def default_critique_panel(config: CiaoConfig) -> list[str]:
     """Backend-aware default when Settings → Models has no critique override."""
-    if config.openrouter.available:
-        return [
-            "anthropic/claude-sonnet-latest",
-            "anthropic/claude-haiku-latest",
-            "anthropic/claude-opus-latest",
-        ]
-    if config.ollama.api_key and config.ollama.api_key != "ollama":
-        return [
-            config.ollama.sonnet_model,
-            config.ollama.haiku_model,
-            config.ollama.opus_model,
-        ]
-    return ["sonnet", "haiku", "opus"]
+    models = []
+
+    # Prioritize native Anthropic over OpenRouter for the Claude models
+    if is_anthropic_available():
+        models.extend(["opus", "fable"])
+    elif config.openrouter.available:
+        models.extend([config.openrouter.opus_model, config.openrouter.fable_model])
+    else:
+        # Fallback when neither is explicitly configured
+        models.extend(["opus", "fable"])
+
+    # Add Ollama models if Ollama is configured / available
+    oll = config.ollama
+    if bool(oll.local_models) or (bool(oll.api_key) and oll.api_key != "ollama"):
+        if oll.opus_model:
+            models.append(oll.opus_model)
+        if oll.fable_model:
+            models.append(oll.fable_model)
+
+    # Filter out empty strings or duplicates while preserving order
+    seen = set()
+    unique_models = []
+    for m in models:
+        if m and m not in seen:
+            seen.add(m)
+            unique_models.append(m)
+
+    return unique_models
 
 
 def resolve_critique_panel(config: CiaoConfig, *, override: str = "") -> list[str]:
