@@ -8,6 +8,7 @@ const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
 const apiPatch = vi.hoisted(() => vi.fn())
 const apiDel = vi.hoisted(() => vi.fn())
+const reloadWhenServerReady = vi.hoisted(() => vi.fn(() => Promise.resolve()))
 
 vi.mock('../lib/api', () => ({
   api: {
@@ -17,6 +18,14 @@ vi.mock('../lib/api', () => ({
     del: apiDel,
   },
 }))
+
+vi.mock('../lib/serverRestart', async () => {
+  const actual = await vi.importActual<typeof import('../lib/serverRestart')>('../lib/serverRestart')
+  return {
+    ...actual,
+    reloadWhenServerReady,
+  }
+})
 
 const routerPush = vi.hoisted(() => vi.fn())
 vi.mock('../router', () => ({
@@ -63,6 +72,7 @@ beforeEach(() => {
   apiGet.mockReset()
   apiPost.mockReset()
   apiPatch.mockReset()
+  reloadWhenServerReady.mockClear()
   const storage = {
     getItem: vi.fn((key: string) => localStorageData[key] ?? null),
     setItem: vi.fn((key: string, value: string) => { localStorageData[key] = value }),
@@ -803,6 +813,76 @@ describe('background agents indicator', () => {
     })
     expect(store.backgroundAgents['c-stale']).toBeUndefined()
     expect(store.backgroundAgents['c-live']).toBe(2)
+  })
+})
+
+describe('server restart overlay', () => {
+  test('server_restarting over /ws/events flips the global overlay', () => {
+    const store = useProjectStore()
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'server_restarting',
+        message: 'Ciaobot is waiting for active chats to finish before restarting',
+      }),
+    })
+    expect(store.serverRestarting).toBe(true)
+    expect(store.serverRestartMessage).toContain('waiting for active chats')
+    expect(reloadWhenServerReady).toHaveBeenCalled()
+  })
+
+  test('snapshot.restarting flips the overlay for late connectors', () => {
+    const store = useProjectStore()
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'snapshot',
+        active_streams: [],
+        restarting: true,
+      }),
+    })
+    expect(store.serverRestarting).toBe(true)
+  })
+
+  test('per-chat server_restarting undoes the optimistic send and skips the error bubble', () => {
+    const store = useProjectStore()
+    const chatId = 'c-restart'
+    store.messages[chatId] = [
+      { role: 'user', content: 'hello', timestamp: '2026-07-17T19:36:00Z' },
+    ]
+    store.streaming[chatId] = true
+    store.connectWs(chatId)
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'server_restarting',
+        message: 'Ciaobot is waiting for active chats to finish before restarting',
+      }),
+    })
+    expect(store.serverRestarting).toBe(true)
+    expect(store.messages[chatId]).toEqual([])
+    expect(store.streaming[chatId]).toBe(false)
+  })
+
+  test('legacy error drain message also opens the overlay without an error bubble', () => {
+    const store = useProjectStore()
+    const chatId = 'c-legacy'
+    store.messages[chatId] = [
+      { role: 'user', content: 'hello', timestamp: '2026-07-17T19:36:00Z' },
+    ]
+    store.streaming[chatId] = true
+    store.connectWs(chatId)
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'error',
+        message: 'Ciaobot is waiting for active chats to finish before restarting',
+      }),
+    })
+    expect(store.serverRestarting).toBe(true)
+    expect(store.messages[chatId]).toEqual([])
   })
 })
 

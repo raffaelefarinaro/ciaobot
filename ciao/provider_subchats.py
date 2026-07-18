@@ -290,9 +290,9 @@ class ProviderSubchatManager:
             raise ValueError("Sub-chat is already processing a turn")
 
         if getattr(self.pcm, "_restart_draining", False):
-            raise RuntimeError(
-                "Ciaobot is waiting for active chats to finish before restarting"
-            )
+            from ciao.web.project_chats import RestartDrainingError
+
+            raise RestartDrainingError()
 
         # Check limits
         limit_messages = 12 + record.limit_messages_extended

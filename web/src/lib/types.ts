@@ -216,6 +216,9 @@ export type WsEvent =
   | { type: 'queue_state'; queue: Array<{ id: string; text: string; images?: string[] }> }
   | { type: 'steered'; text: string; images?: string[] }
   | { type: 'error'; message: string }
+  // Server is draining for restart; client should show RestartOverlay, not
+  // treat this as a chat failure.
+  | { type: 'server_restarting'; message: string }
   | { type: 'chat_retry'; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number }
   // Idle heartbeat from the broker / events hub. Clients treat it as a
   // liveness signal only and must not mutate chat UI state.
@@ -224,7 +227,7 @@ export type WsEvent =
 // Global awareness events from /ws/events
 export type EventsWsMessage =
   | { type: 'keepalive' }
-  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number> }
+  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; restarting?: boolean }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean }
   | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string }
@@ -238,6 +241,7 @@ export type EventsWsMessage =
   | { type: 'project_updated'; project: ProjectInfo }
   | { type: 'project_deleted'; project_id: string }
   | { type: 'open_chat'; chat_id: string }
+  | { type: 'server_restarting'; message?: string }
   | { type: 'provider_subchat_created'; subchat_id: string; parent_chat_id: string; record: ProviderSubchatRecord }
   | { type: 'provider_subchat_status'; subchat_id: string; parent_chat_id: string; status: string; record: ProviderSubchatRecord }
   | { type: 'provider_subchat_event'; subchat_id: string; parent_chat_id: string; event: any }

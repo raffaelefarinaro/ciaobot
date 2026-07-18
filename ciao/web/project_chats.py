@@ -18,6 +18,17 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, AsyncGenerator, Iterator
 
+RESTART_DRAIN_MESSAGE = (
+    "Ciaobot is waiting for active chats to finish before restarting"
+)
+
+
+class RestartDrainingError(RuntimeError):
+    """Raised when a new turn is rejected because a server restart is draining."""
+
+    def __init__(self, message: str = RESTART_DRAIN_MESSAGE) -> None:
+        super().__init__(message)
+
 try:  # pragma: no cover - Ciaobot targets Unix; fallback keeps imports portable.
     import fcntl
 except ImportError:  # pragma: no cover
@@ -4213,8 +4224,18 @@ class ProjectChatManager:
         return sorted(ids)
 
     def begin_restart_drain(self) -> None:
-        """Stop admitting new turns while existing chat work finishes."""
+        """Stop admitting new turns while existing chat work finishes.
+
+        Publishes ``server_restarting`` so connected PWAs can show the restart
+        overlay instead of treating later turn rejections as chat errors.
+        """
+        if self._restart_draining:
+            return
         self._restart_draining = True
+        self._events.publish({
+            "type": "server_restarting",
+            "message": RESTART_DRAIN_MESSAGE,
+        })
 
     @property
     def background_agent_counts(self) -> dict[str, int]:
@@ -4398,9 +4419,7 @@ class ProjectChatManager:
             logger.debug("Chat %s already has an active stream; reusing", chat_id)
             return existing
         if self._restart_draining:
-            raise RuntimeError(
-                "Ciaobot is waiting for active chats to finish before restarting"
-            )
+            raise RestartDrainingError()
         if existing is not None and existing.background:
             # A between-turns drain stream is live. The user's send starts a
             # real turn: cancel the drain (its cleanup finishes the stream)

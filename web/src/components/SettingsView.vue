@@ -1,6 +1,5 @@
 <template>
   <div class="settings-pane">
-    <RestartOverlay v-if="restarting" :message="restartMessage" />
     <PaneHeader title="settings" @open-sidebar="emit('open-sidebar')" />
     <div class="pane-body">
 
@@ -1629,7 +1628,6 @@ import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
-import RestartOverlay from './RestartOverlay.vue'
 import OnboardingCard from './OnboardingCard.vue'
 import { providerModelBadges, sectionsFromModelOptions, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 
@@ -3476,53 +3474,12 @@ async function doSnapshot(confirmWarnings = false) {
   actionPending.value = null
 }
 
-const restarting = ref(false)
-const restartMessage = ref('')
-
-// Show the full-screen restart overlay, then wait for the server to come back
-// before reloading. Used by any action that triggers a server restart (model
-// installs, provider key changes) so the UI never lands on a half-booted
-// server and shows a "Failed to fetch" error.
-async function restartAndReload(message: string) {
-  restartMessage.value = message
-  restarting.value = true
-  await reloadWhenServerReady()
-}
-
-async function reloadWhenServerReady(timeoutMs = 120000) {
-  // The deploy endpoint returns ok immediately while the restart is only
-  // scheduled (~2s later). Reloading on a fixed timer races the server
-  // coming back up and lands on a dead/half-booted process -> grey screen.
-  // Instead, poll /api/startup-status (the same signal App.vue's boot overlay
-  // uses): wait for the server to go down, then reload once it reports
-  // overall_ready again. Fallback to a forced reload on timeout.
-  const start = Date.now()
-  let sawDown = false
-  while (true) {
-    try {
-      const res = await fetch('/api/startup-status')
-      if (res.ok) {
-        const data = await res.json()
-        if (!data.overall_ready) {
-          sawDown = true
-        } else if (sawDown) {
-          location.reload()
-          return
-        }
-      } else {
-        // server returned non-ok status (e.g. 502 Bad Gateway during restart)
-        sawDown = true
-      }
-    } catch {
-      // server is down mid-restart (network error / connection refused)
-      sawDown = true
-    }
-    if (Date.now() - start > timeoutMs) {
-      location.reload()
-      return
-    }
-    await new Promise(r => setTimeout(r, 1000))
-  }
+// Show the full-screen restart overlay (App.vue), then wait for the server to
+// come back before reloading. Used by any action that triggers a server
+// restart (model installs, provider key changes, deploy) so the UI never
+// lands on a half-booted server and shows a "Failed to fetch" error.
+function restartAndReload(message: string) {
+  projectStore.beginServerRestart(message)
 }
 
 async function doDeploy(confirmWarnings = false) {
@@ -3535,7 +3492,7 @@ async function doDeploy(confirmWarnings = false) {
     deploySteps.value = r.steps
     if (r.ok) {
       actionResult.value = 'Restart complete. Waiting for server to come back, then reloading...'
-      reloadWhenServerReady()
+      projectStore.beginServerRestart('Deploy complete. Restarting Ciaobot…')
     } else {
       actionResult.value = 'Restart failed. See steps above.'
     }

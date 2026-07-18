@@ -5,6 +5,11 @@ import { getPendingBucket, normalizePendingBuckets, setPendingBucket } from '../
 import { buildFixPrompt } from '../lib/fixError'
 import { formatChatComments, formatFileComments } from '../lib/commentContext'
 import { isPlausibleFilePath } from '../lib/filePaths'
+import {
+  DEFAULT_RESTART_MESSAGE,
+  isRestartDrainMessage,
+  reloadWhenServerReady,
+} from '../lib/serverRestart'
 import type {
   ProjectInfo,
   ChatInfo,
@@ -159,6 +164,11 @@ export const useProjectStore = defineStore('projects', () => {
   // running" indicator so the user can see work is ongoing during the quiet
   // gap between the turn ending and the agents reporting back.
   const backgroundAgents = ref<Record<string, number>>({})
+  // Full-screen restart overlay while the server drains active chats and
+  // relaunches. Driven by /ws/events `server_restarting` (and the same
+  // signal on the per-chat socket when a send is rejected mid-drain).
+  const serverRestarting = ref(false)
+  const serverRestartMessage = ref('')
   type QueuedMessage = { id: string; text: string; images?: string[] }
   function makeQueuedId(): string {
     if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -612,7 +622,7 @@ export const useProjectStore = defineStore('projects', () => {
       .filter((message) => {
         if (message.tool_name === '_activity') return Boolean(message.content)
         if (message.tool_name === '_filecard') {
-          return Boolean(message.file_path) && isPlausibleFilePath(message.file_path)
+          return Boolean(message.file_path) && isPlausibleFilePath(message.file_path || '')
         }
         if (message.role === 'system') return Boolean(message.content)
         return Boolean(message.content)
@@ -1855,6 +1865,34 @@ export const useProjectStore = defineStore('projects', () => {
 
   // ── Global events WS (cross-chat awareness) ─────────────────────────
 
+  function beginServerRestart(message?: string) {
+    if (serverRestarting.value) return
+    serverRestarting.value = true
+    serverRestartMessage.value = (message && message.trim()) || DEFAULT_RESTART_MESSAGE
+    void reloadWhenServerReady()
+  }
+
+  function undoOptimisticSend(chatId: string) {
+    // A send that was rejected for restart drain already pushed a local user
+    // bubble and flipped streaming on. Roll that back so the chat doesn't
+    // keep a phantom turn / "Fix this error" affordance.
+    const msgs = messages.value[chatId]
+    if (msgs && msgs.length > 0) {
+      const last = msgs[msgs.length - 1]
+      if (last.role === 'user') {
+        messages.value[chatId] = msgs.slice(0, -1)
+        persistMessages()
+      }
+    }
+    streaming.value[chatId] = false
+    streamingText.value[chatId] = ''
+    streamingThinking.value[chatId] = ''
+    delete streamingTextPhase.value[chatId]
+    delete liveUsage.value[chatId]
+    delete streamStartedAt.value[chatId]
+    persistStreamStartedAt()
+  }
+
   // Consecutive handshakes that closed without ever opening. A server that
   // rejects the upgrade (403 after a token rotation or restart) fails
   // identically on every attempt, so a fixed 2s retry becomes a request
@@ -1928,6 +1966,9 @@ export const useProjectStore = defineStore('projects', () => {
         // count left stale by a missed event (WS gap, server restart) heals
         // on reconnect.
         backgroundAgents.value = { ...(msg.background_agents || {}) }
+        if (msg.restarting) {
+          beginServerRestart()
+        }
         // Recovery: if we locally think the active chat is streaming but
         // the snapshot shows no stream is running for it, the turn ended
         // server-side while our events socket was disconnected (and the
@@ -1940,6 +1981,9 @@ export const useProjectStore = defineStore('projects', () => {
         }
         break
       }
+      case 'server_restarting':
+        beginServerRestart(msg.message)
+        break
       case 'chat_streaming_started':
         projectStreaming.value[msg.chat_id] = true
         // Note: backgroundAgents is NOT cleared here — agents from a prior
@@ -3217,6 +3261,11 @@ export const useProjectStore = defineStore('projects', () => {
       }
 
       case 'error': {
+        if (isRestartDrainMessage(event.message)) {
+          undoOptimisticSend(chatId)
+          beginServerRestart(event.message)
+          break
+        }
         _flushTimeline(chatId)
         msgs.push({
           role: 'system',
@@ -3233,6 +3282,12 @@ export const useProjectStore = defineStore('projects', () => {
         persistStreamStartedAt()
         delete pendingPermissions.value[chatId]
         persistMessages()
+        break
+      }
+
+      case 'server_restarting': {
+        undoOptimisticSend(chatId)
+        beginServerRestart(event.message)
         break
       }
 
@@ -3303,6 +3358,7 @@ export const useProjectStore = defineStore('projects', () => {
     projects, chats, workspaces, workspaceProviderOptions, workspaceClaudeAiConnectors, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, subagents, providerSubchats, providerSubchatEvents, unread,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
     projectStreaming, backgroundAgents, toasts, pendingPermissions, activeQuestions, creatingChatProjectIds,
+    serverRestarting, serverRestartMessage,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
@@ -3326,6 +3382,7 @@ export const useProjectStore = defineStore('projects', () => {
     removeQueued, removeQueuedById, reorderQueued, editQueued, clearQueued,
     loadMessages, loadSubagents, loadProviderSubchats, loadProviderSubchatEvents,
     connectWs, disconnectWs, connectEventsWs,
+    beginServerRestart,
     pushToast, pushErrorToast, dismissToast, fixError,
   }
 })

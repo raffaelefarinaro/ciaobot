@@ -5,8 +5,8 @@ from types import SimpleNamespace
 import pytest
 
 from ciao.main import _wait_for_chat_drain
-from ciao.web.chat_broker import ChatStream, ChatStreamBroker
-from ciao.web.project_chats import ProjectChatManager
+from ciao.web.chat_broker import ChatStream, ChatStreamBroker, EventsHub
+from ciao.web.project_chats import ProjectChatManager, RestartDrainingError
 
 
 class _SequencedManager:
@@ -42,6 +42,7 @@ def _bare_manager() -> ProjectChatManager:
     manager._background_agents_last = {}
     manager._pending_subagent_watchers = {}
     manager._restart_draining = False
+    manager._events = EventsHub()
     return manager
 
 
@@ -57,6 +58,21 @@ def test_active_chat_ids_include_unpolled_subagent_watchers() -> None:
     assert manager.active_chat_ids() == ["agents", "streaming", "watcher"]
 
 
+def test_begin_restart_drain_publishes_server_restarting() -> None:
+    manager = _bare_manager()
+    captured: list[dict] = []
+    manager._events.publish = captured.append  # type: ignore[method-assign]
+
+    manager.begin_restart_drain()
+    manager.begin_restart_drain()  # idempotent — one event only
+
+    assert manager._restart_draining is True
+    assert captured == [{
+        "type": "server_restarting",
+        "message": "Ciaobot is waiting for active chats to finish before restarting",
+    }]
+
+
 def test_restart_drain_rejects_new_turns_but_keeps_existing_stream() -> None:
     manager = _bare_manager()
     existing = ChatStream("already running")
@@ -64,5 +80,5 @@ def test_restart_drain_rejects_new_turns_but_keeps_existing_stream() -> None:
     manager.begin_restart_drain()
 
     assert manager.start_stream("running", "ignored") is existing
-    with pytest.raises(RuntimeError, match="waiting for active chats"):
+    with pytest.raises(RestartDrainingError, match="waiting for active chats"):
         manager.start_stream("idle", "new work")
