@@ -186,6 +186,10 @@
               v-else-if="isCsv"
               :content="content"
               :read-only="true"
+              :commentable="true"
+              :cell-comments="csvCellComments"
+              @cell-select="onCsvCellSelect"
+              @cell-activate="onCsvCellActivate"
             />
             <pre
               v-else
@@ -300,9 +304,9 @@
         class="pfp-comment-trigger"
         :style="{ top: selectionAnchor.top + 'px', left: selectionAnchor.left + 'px' }"
         @mousedown.prevent
-        @click="openCommentForSelection"
+        @click="isCsv ? openCommentForCsvCell() : openCommentForSelection()"
         type="button"
-        title="Comment on this selection"
+        :title="isCsv ? 'Comment on this cell' : 'Comment on this selection'"
       >
         <span class="pfp-comment-trigger-icon">💬</span>
         Comment
@@ -319,11 +323,13 @@ import { renderFileMarkdown } from '../lib/safeMarkdown'
 import { buildMarkdownIndex, resolveWikilinkTarget } from '../lib/wikilinks'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { isCsvPath } from '../lib/csv'
+import { formatCommentLocation } from '../lib/commentContext'
 import { api } from '../lib/api'
 import PaneHeader from './PaneHeader.vue'
 import { useFileViewerStore } from '../stores/fileViewer'
 const ExcalidrawViewer = defineAsyncComponent(() => import('./ExcalidrawViewer.vue'))
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
+import type { CsvCellComment, CsvCellRef } from './CsvViewer.vue'
 
 const props = defineProps<{ filePath: string }>()
 defineEmits<{ (e: 'close'): void }>()
@@ -742,10 +748,13 @@ function commentIdForLine(line: number): string | undefined {
   return lineCommentMap.value.get(line)
 }
 
-function commentLineLabel(c: { lineStart?: number | null; lineEnd?: number | null }): string {
-  if (!c.lineStart) return ''
-  if (!c.lineEnd || c.lineEnd === c.lineStart) return String(c.lineStart)
-  return `${c.lineStart}-${c.lineEnd}`
+function commentLineLabel(c: {
+  lineStart?: number | null
+  lineEnd?: number | null
+  colIndex?: number | null
+  colHeader?: string | null
+}): string {
+  return formatCommentLocation(c)
 }
 
 function truncate(s: string, n: number): string {
@@ -911,12 +920,29 @@ watch(
 // ── Selection → comment composer ─────────────────────────────────────
 type Anchor = { top: number; left: number }
 type LineRange = { start: number; end: number } | null
-type CommentDraft = { selection: string; text: string; lines: LineRange }
+type CellRef = { row: number; colIndex: number; colHeader: string } | null
+type CommentDraft = {
+  selection: string
+  text: string
+  lines: LineRange
+  cell: CellRef
+}
 const selectionAnchor = ref<Anchor | null>(null)
 const commentDraft = ref<CommentDraft | null>(null)
 let lastSelectionText = ''
 let lastSelectionLines: LineRange = null
 let lastSelectionRange: Range | null = null
+let lastCsvCell: CsvCellRef | null = null
+
+const csvCellComments = computed<CsvCellComment[]>(() =>
+  commentsForFile.value
+    .filter(c => c.lineStart != null && c.colIndex != null)
+    .map(c => ({
+      id: c.id,
+      row: c.lineStart as number,
+      colIndex: c.colIndex as number,
+    })),
+)
 
 const isCommentable = computed(() => !loading.value && !error.value && kind.value !== 'image' && kind.value !== 'pdf' && !projectsStore.isStreaming)
 
@@ -1068,11 +1094,63 @@ function openCommentForSelection(): void {
     selection: lastSelectionText,
     text: '',
     lines: lastSelectionLines,
+    cell: null,
   }
   commentDraftImages.value = []
   selectionAnchor.value = null
   lastSelectionRange = null
+  lastCsvCell = null
   window.getSelection()?.removeAllRanges()
+  nextTick(() => commentInputEl.value?.focus())
+}
+
+function anchorFromCellRect(rect: DOMRect): Anchor | null {
+  const main = mainEl.value
+  const body = bodyEl.value
+  if (!main || !body) return null
+  const mainRect = main.getBoundingClientRect()
+  const bodyRect = body.getBoundingClientRect()
+  const visible = rect.bottom > bodyRect.top
+    && rect.top < bodyRect.bottom
+    && rect.right > bodyRect.left
+    && rect.left < bodyRect.right
+  if (!visible) return null
+  const top = Math.min(Math.max(rect.bottom - mainRect.top + 6, 8), mainRect.height - 48)
+  const left = Math.min(Math.max(rect.right - mainRect.left - 96, 8), mainRect.width - 110)
+  return { top, left }
+}
+
+function onCsvCellSelect(cell: CsvCellRef, rect: DOMRect): void {
+  if (commentDraft.value) return
+  lastCsvCell = cell
+  lastSelectionText = cell.value
+  lastSelectionLines = { start: cell.row, end: cell.row }
+  lastSelectionRange = null
+  selectionAnchor.value = anchorFromCellRect(rect)
+}
+
+function onCsvCellActivate(cell: CsvCellRef): void {
+  const match = commentsForFile.value.find(
+    c => c.lineStart === cell.row && c.colIndex === cell.colIndex,
+  )
+  if (match) scrollToHighlight(match.id)
+}
+
+function openCommentForCsvCell(): void {
+  if (!selectionAnchor.value || !lastCsvCell) return
+  commentDraft.value = {
+    selection: lastCsvCell.value,
+    text: '',
+    lines: { start: lastCsvCell.row, end: lastCsvCell.row },
+    cell: {
+      row: lastCsvCell.row,
+      colIndex: lastCsvCell.colIndex,
+      colHeader: lastCsvCell.colHeader,
+    },
+  }
+  commentDraftImages.value = []
+  selectionAnchor.value = null
+  lastSelectionRange = null
   nextTick(() => commentInputEl.value?.focus())
 }
 
@@ -1082,6 +1160,7 @@ function cancelComment(): void {
   lastSelectionText = ''
   lastSelectionLines = null
   lastSelectionRange = null
+  lastCsvCell = null
 }
 
 function saveComment(): void {
@@ -1095,12 +1174,15 @@ function saveComment(): void {
     comment: note,
     lineStart: draft.lines?.start ?? null,
     lineEnd: draft.lines?.end ?? null,
+    colIndex: draft.cell?.colIndex ?? null,
+    colHeader: draft.cell?.colHeader ?? null,
     images: commentDraftImages.value.length ? commentDraftImages.value : undefined,
   })
   commentDraft.value = null
   commentDraftImages.value = []
   lastSelectionText = ''
   lastSelectionLines = null
+  lastCsvCell = null
 }
 
 async function handleDraftImageUpload(e: Event): Promise<void> {

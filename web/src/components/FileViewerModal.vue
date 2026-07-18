@@ -291,6 +291,10 @@
               v-else-if="isCsv"
               :content="store.content"
               :read-only="true"
+              :commentable="true"
+              :cell-comments="csvCellComments"
+              @cell-select="onCsvCellSelect"
+              @cell-activate="onCsvCellActivate"
             />
             <pre v-else class="fv-pre" ref="preEl" @click="onPreClick"><code ref="preCodeEl"><span v-for="(line, i) in contentLines" :key="i" :class="{ 'comment-highlight': isHighlightedLine(i + 1), 'pre-line': true }" :data-line="i + 1" :data-comment-id="commentIdForLine(i + 1)">{{ line }}</span></code></pre>
             </template>
@@ -400,9 +404,9 @@
           class="fv-comment-trigger"
           :style="{ top: selectionAnchor.top + 'px', left: selectionAnchor.left + 'px' }"
           @mousedown.prevent
-          @click="openCommentForSelection"
+          @click="isCsv ? openCommentForCsvCell() : openCommentForSelection()"
           type="button"
-          title="Comment on this selection"
+          :title="isCsv ? 'Comment on this cell' : 'Comment on this selection'"
         >
           <span class="fv-comment-trigger-icon">💬</span>
           Comment
@@ -437,8 +441,10 @@ import { buildMarkdownIndex, resolveWikilinkTarget } from '../lib/wikilinks'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { createTerminalDiffLines, terminalDiffPrefix, type TerminalDiffKind } from '../lib/terminalDiff'
 import { isCsvPath } from '../lib/csv'
+import { formatCommentLocation } from '../lib/commentContext'
 const ExcalidrawViewer = defineAsyncComponent(() => import('./ExcalidrawViewer.vue'))
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
+import type { CsvCellComment, CsvCellRef } from './CsvViewer.vue'
 
 const store = useFileViewerStore()
 const projectsStore = useProjectStore()
@@ -943,6 +949,7 @@ function highlightInMarkdown(root: HTMLElement, selection: string, commentId: st
 function applyHighlights(): void {
   if (!isCommentable.value) return
   if (store.kind === 'image') return
+  if (isCsv.value) return // cell highlights are driven by CsvViewer props
 
   if (isMarkdown.value) {
     const root = mdEl.value
@@ -975,10 +982,13 @@ function commentBasename(path: string): string {
   const idx = path.lastIndexOf('/')
   return idx === -1 ? path : path.slice(idx + 1)
 }
-function commentLineLabel(c: { lineStart?: number | null; lineEnd?: number | null }): string {
-  if (!c.lineStart) return ''
-  if (!c.lineEnd || c.lineEnd === c.lineStart) return String(c.lineStart)
-  return `${c.lineStart}-${c.lineEnd}`
+function commentLineLabel(c: {
+  lineStart?: number | null
+  lineEnd?: number | null
+  colIndex?: number | null
+  colHeader?: string | null
+}): string {
+  return formatCommentLocation(c)
 }
 
 const backdropEl = ref<HTMLElement>()
@@ -1019,12 +1029,30 @@ function togglePin(): void {
 //      focus) and show an inline composer at the same anchor.
 type Anchor = { top: number; left: number }
 type LineRange = { start: number; end: number } | null
-type CommentDraft = { selection: string; anchor: Anchor; text: string; lines: LineRange }
+type CellRef = { row: number; colIndex: number; colHeader: string } | null
+type CommentDraft = {
+  selection: string
+  anchor: Anchor
+  text: string
+  lines: LineRange
+  cell: CellRef
+}
 const selectionAnchor = ref<Anchor | null>(null)
 const commentDraft = ref<CommentDraft | null>(null)
 let lastSelectionText = ''
 let lastSelectionLines: LineRange = null
 let lastSelectionRange: Range | null = null
+let lastCsvCell: CsvCellRef | null = null
+
+const csvCellComments = computed<CsvCellComment[]>(() =>
+  activeFileComments.value
+    .filter(c => c.lineStart != null && c.colIndex != null)
+    .map(c => ({
+      id: c.id,
+      row: c.lineStart as number,
+      colIndex: c.colIndex as number,
+    })),
+)
 
 // Anything we render as text is fair game for commenting — the floating
 // trigger should appear in both the markdown branch and the <pre> branch.
@@ -1318,13 +1346,66 @@ function openCommentForSelection(): void {
     anchor: selectionAnchor.value,
     text: '',
     lines: lastSelectionLines,
+    cell: null,
   }
   commentDraftImages.value = []
   selectionAnchor.value = null
   lastSelectionRange = null
+  lastCsvCell = null
   // Clear the native selection — the sidebar now "owns" the highlighted
   // text, and leaving it selected makes the page look noisy.
   window.getSelection()?.removeAllRanges()
+  nextTick(() => sidebarDraftInputEl.value?.focus())
+}
+
+function anchorFromCellRect(rect: DOMRect): Anchor | null {
+  const modal = modalEl.value
+  const body = bodyEl.value
+  if (!modal || !body) return null
+  const modalRect = modal.getBoundingClientRect()
+  const bodyRect = body.getBoundingClientRect()
+  const visible = rect.bottom > bodyRect.top
+    && rect.top < bodyRect.bottom
+    && rect.right > bodyRect.left
+    && rect.left < bodyRect.right
+  if (!visible) return null
+  const top = Math.min(Math.max(rect.bottom - modalRect.top + 6, 8), modalRect.height - 48)
+  const left = Math.min(Math.max(rect.right - modalRect.left - 96, 8), modalRect.width - 110)
+  return { top, left }
+}
+
+function onCsvCellSelect(cell: CsvCellRef, rect: DOMRect): void {
+  if (commentDraft.value) return
+  lastCsvCell = cell
+  lastSelectionText = cell.value
+  lastSelectionLines = { start: cell.row, end: cell.row }
+  lastSelectionRange = null
+  selectionAnchor.value = anchorFromCellRect(rect)
+}
+
+function onCsvCellActivate(cell: CsvCellRef): void {
+  const match = activeFileComments.value.find(
+    c => c.lineStart === cell.row && c.colIndex === cell.colIndex,
+  )
+  if (match) scrollToHighlight(match.id)
+}
+
+function openCommentForCsvCell(): void {
+  if (!selectionAnchor.value || !lastCsvCell) return
+  commentDraft.value = {
+    selection: lastCsvCell.value,
+    anchor: selectionAnchor.value,
+    text: '',
+    lines: { start: lastCsvCell.row, end: lastCsvCell.row },
+    cell: {
+      row: lastCsvCell.row,
+      colIndex: lastCsvCell.colIndex,
+      colHeader: lastCsvCell.colHeader,
+    },
+  }
+  commentDraftImages.value = []
+  selectionAnchor.value = null
+  lastSelectionRange = null
   nextTick(() => sidebarDraftInputEl.value?.focus())
 }
 
@@ -1334,6 +1415,7 @@ function cancelComment(): void {
   lastSelectionText = ''
   lastSelectionLines = null
   lastSelectionRange = null
+  lastCsvCell = null
 }
 
 function saveComment(): void {
@@ -1347,6 +1429,8 @@ function saveComment(): void {
     comment: note,
     lineStart: draft.lines?.start ?? null,
     lineEnd: draft.lines?.end ?? null,
+    colIndex: draft.cell?.colIndex ?? null,
+    colHeader: draft.cell?.colHeader ?? null,
     images: commentDraftImages.value.length ? commentDraftImages.value : undefined,
   })
   commentDraft.value = null
@@ -1354,6 +1438,7 @@ function saveComment(): void {
   lastSelectionText = ''
   lastSelectionLines = null
   lastSelectionRange = null
+  lastCsvCell = null
 }
 
 async function handleDraftImageUpload(e: Event): Promise<void> {

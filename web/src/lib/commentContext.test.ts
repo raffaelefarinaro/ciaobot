@@ -65,6 +65,23 @@ describe('comment context formatting', () => {
     expect(out).toContain('Attachment [Image 2]: img-b')
   })
 
+  it('formats CSV cell anchors with row and column', () => {
+    const out = formatFileComments([
+      {
+        path: 'guests.csv',
+        selection: 'To do',
+        comment: 'mark as created',
+        lineStart: 12,
+        colIndex: 5,
+        colHeader: 'card_status',
+      },
+    ])
+    expect(out).toContain(
+      '<reference-source>guests.csv (row 12, column card_status [F])</reference-source>',
+    )
+    expect(out).toContain('<quoted-text>\nTo do\n</quoted-text>')
+  })
+
   it('joins multiple comments into separate reference blocks', () => {
     const out = formatFileComments([
       { path: 'a.md', selection: 's1', comment: 'c1', lineStart: 1 },

@@ -849,6 +849,7 @@ import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
 import { formatTime, formatDuration } from '../lib/time'
 import { collectTraceOutputs, formatTokenUsage, traceSummaryMeta, type TraceOutput } from '../lib/chatActivity'
 import { buildForkSnapshot } from '../lib/chatFork'
+import { formatCommentLocation } from '../lib/commentContext'
 
 type RenderItem =
   | { kind: 'user'; msg: ChatMessage }
@@ -2547,10 +2548,13 @@ function commentBasename(path: string): string {
 // Pretty line label: empty when no range, "42" for single line, "42-57"
 // for ranges. Mirrors the structured `lines="L42-L57"` attribute we send
 // to the model, minus the `L` prefix to keep the chip tight.
-function commentLineLabel(c: { lineStart?: number | null; lineEnd?: number | null }): string {
-  if (!c.lineStart) return ''
-  if (!c.lineEnd || c.lineEnd === c.lineStart) return String(c.lineStart)
-  return `${c.lineStart}-${c.lineEnd}`
+function commentLineLabel(c: {
+  lineStart?: number | null
+  lineEnd?: number | null
+  colIndex?: number | null
+  colHeader?: string | null
+}): string {
+  return formatCommentLocation(c)
 }
 
 // Retry support: error messages are system bubbles whose content starts

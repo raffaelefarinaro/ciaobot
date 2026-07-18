@@ -1,3 +1,5 @@
+import { excelColLetter } from './csv'
+
 // Formatting for "comment" context — text a user selects (in a chat reply or a
 // document preview) plus the note they attach — that rides along with their
 // next prompt to the agent.
@@ -25,6 +27,10 @@ export interface FileCommentInput {
   comment: string
   lineStart?: number | null
   lineEnd?: number | null
+  /** 0-indexed CSV column; when set, source uses a cell locator instead of line. */
+  colIndex?: number | null
+  /** CSV column header label (preferred over "Column N" in the locator). */
+  colHeader?: string | null
   images?: string[]
 }
 
@@ -67,18 +73,47 @@ function referenceBlock(source: string | null, selection: string, comment: strin
   return lines.join('\n')
 }
 
+/** Compact UI label for a file comment location (sidebar chips). */
+export function formatCommentLocation(c: {
+  lineStart?: number | null
+  lineEnd?: number | null
+  colIndex?: number | null
+  colHeader?: string | null
+}): string {
+  if (c.colIndex != null || (c.colHeader != null && c.colHeader !== '')) {
+    const header = (c.colHeader || '').trim() || `Column ${(c.colIndex ?? 0) + 1}`
+    if (c.lineStart) return `R${c.lineStart} · ${header}`
+    return header
+  }
+  if (!c.lineStart) return ''
+  if (!c.lineEnd || c.lineEnd === c.lineStart) return String(c.lineStart)
+  return `${c.lineStart}-${c.lineEnd}`
+}
+
+function formatReferenceSource(c: FileCommentInput): string {
+  let source = c.path
+  if (c.colIndex != null || (c.colHeader != null && c.colHeader !== '')) {
+    const header = (c.colHeader || '').trim() || `Column ${(c.colIndex ?? 0) + 1}`
+    const letter = excelColLetter(c.colIndex ?? 0)
+    if (c.lineStart) {
+      source += ` (row ${c.lineStart}, column ${header} [${letter}])`
+    } else {
+      source += ` (column ${header} [${letter}])`
+    }
+    return source
+  }
+  if (c.lineStart) {
+    source += c.lineEnd && c.lineEnd !== c.lineStart
+      ? ` (lines ${c.lineStart}-${c.lineEnd})`
+      : ` (line ${c.lineStart})`
+  }
+  return source
+}
+
 export function formatFileComments(comments: FileCommentInput[]): string {
   if (!comments.length) return ''
   return comments
-    .map((c) => {
-      let source = c.path
-      if (c.lineStart) {
-        source += c.lineEnd && c.lineEnd !== c.lineStart
-          ? ` (lines ${c.lineStart}-${c.lineEnd})`
-          : ` (line ${c.lineStart})`
-      }
-      return referenceBlock(source, c.selection, c.comment, c.images)
-    })
+    .map((c) => referenceBlock(formatReferenceSource(c), c.selection, c.comment, c.images))
     .join('\n')
 }
 

@@ -100,6 +100,8 @@ export const useProjectStore = defineStore('projects', () => {
     comment: string
     lineStart?: number | null
     lineEnd?: number | null
+    colIndex?: number | null
+    colHeader?: string | null
     images?: string[]
   }
   const pendingCommentsByChat = ref<Record<string, PendingComment[]>>({})
@@ -2493,6 +2495,8 @@ export const useProjectStore = defineStore('projects', () => {
     comment: string
     lineStart?: number | null
     lineEnd?: number | null
+    colIndex?: number | null
+    colHeader?: string | null
     images?: string[]
   }): string {
     const id = (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
@@ -2505,6 +2509,8 @@ export const useProjectStore = defineStore('projects', () => {
       comment: c.comment,
       lineStart: c.lineStart ?? null,
       lineEnd: c.lineEnd ?? c.lineStart ?? null,
+      colIndex: c.colIndex ?? null,
+      colHeader: c.colHeader ?? null,
       images: c.images,
     }
     if (activeChatId.value) {

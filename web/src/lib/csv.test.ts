@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'vitest'
-import { isCsvPath, parseCsv, serializeCsv } from './csv'
+import {
+  excelColLetter,
+  formatCsvCellAnchor,
+  isCsvPath,
+  parseCsv,
+  serializeCsv,
+} from './csv'
 
 describe('isCsvPath', () => {
   test('matches csv extensions and strips line suffixes', () => {
@@ -7,6 +13,20 @@ describe('isCsvPath', () => {
     expect(isCsvPath('memory-vault/a/b.CSV')).toBe(true)
     expect(isCsvPath('guests.csv:12')).toBe(true)
     expect(isCsvPath('notes.md')).toBe(false)
+  })
+})
+
+describe('excelColLetter / formatCsvCellAnchor', () => {
+  test('maps column indexes to Excel letters', () => {
+    expect(excelColLetter(0)).toBe('A')
+    expect(excelColLetter(5)).toBe('F')
+    expect(excelColLetter(25)).toBe('Z')
+    expect(excelColLetter(26)).toBe('AA')
+  })
+
+  test('builds an agent-facing cell locator', () => {
+    expect(formatCsvCellAnchor({ row: 12, colIndex: 5, colHeader: 'card_status' }))
+      .toBe('row 12, column card_status [F]')
   })
 })
 

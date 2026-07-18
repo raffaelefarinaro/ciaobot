@@ -1,5 +1,5 @@
 <template>
-  <div class="csv-viewer" :class="{ editing: !readOnly }">
+  <div class="csv-viewer" :class="{ editing: !readOnly }" ref="rootEl">
     <div v-if="parseError" class="csv-error">{{ parseError }}</div>
     <template v-else>
       <div v-if="!readOnly" class="csv-toolbar">
@@ -8,14 +8,15 @@
         <span class="csv-meta">{{ table.rows.length }} rows · {{ table.headers.length }} cols</span>
       </div>
       <div v-else-if="table.headers.length" class="csv-meta-bar">
-        {{ table.rows.length }} rows · {{ table.headers.length }} cols
+        <span>{{ table.rows.length }} rows · {{ table.headers.length }} cols</span>
+        <span class="csv-hint">Click a cell to comment</span>
       </div>
       <div v-if="!table.headers.length" class="csv-empty">Empty CSV.</div>
-      <div v-else class="csv-scroll">
+      <div v-else class="csv-scroll" ref="scrollEl">
         <table class="csv-table">
           <thead>
             <tr>
-              <th v-if="!readOnly" class="csv-row-num" scope="col">#</th>
+              <th v-if="!readOnly || commentable" class="csv-row-num" scope="col">#</th>
               <th
                 v-for="(header, colIdx) in table.headers"
                 :key="`h-${colIdx}`"
@@ -35,10 +36,19 @@
           </thead>
           <tbody>
             <tr v-for="(row, rowIdx) in table.rows" :key="`r-${rowIdx}`">
-              <td v-if="!readOnly" class="csv-row-num">{{ rowIdx + 1 }}</td>
+              <td v-if="!readOnly || commentable" class="csv-row-num">{{ rowIdx + 1 }}</td>
               <td
                 v-for="(cell, colIdx) in row"
                 :key="`c-${rowIdx}-${colIdx}`"
+                :class="{
+                  'csv-cell-wrap': true,
+                  'is-selected': isSelected(rowIdx, colIdx),
+                  'comment-highlight': !!commentIdForCell(rowIdx, colIdx),
+                }"
+                :data-row="rowIdx + 1"
+                :data-col="colIdx"
+                :data-comment-id="commentIdForCell(rowIdx, colIdx) || undefined"
+                @click="onCellClick(rowIdx, colIdx, $event)"
               >
                 <input
                   v-if="!readOnly"
@@ -70,25 +80,90 @@
 import { computed, ref, watch } from 'vue'
 import { parseCsv, serializeCsv, type CsvTable } from '../lib/csv'
 
+export type CsvCellRef = {
+  /** 1-indexed data row (matches the # column). */
+  row: number
+  /** 0-indexed column. */
+  colIndex: number
+  colHeader: string
+  value: string
+}
+
+export type CsvCellComment = {
+  id: string
+  row: number
+  colIndex: number
+}
+
 const props = withDefaults(
   defineProps<{
     content: string
     readOnly?: boolean
+    /** When true (preview), cells are clickable for commenting. */
+    commentable?: boolean
+    cellComments?: CsvCellComment[]
   }>(),
   {
     readOnly: true,
+    commentable: false,
+    cellComments: () => [],
   },
 )
 
 const emit = defineEmits<{
   (e: 'change', value: string): void
+  (e: 'cell-select', cell: CsvCellRef, rect: DOMRect): void
+  (e: 'cell-activate', cell: CsvCellRef): void
 }>()
 
+const rootEl = ref<HTMLElement>()
+const scrollEl = ref<HTMLElement>()
 const table = ref<CsvTable>({ headers: [], rows: [], hasHeader: false })
 const parseError = ref('')
 const lastEmitted = ref('')
+const selected = ref<{ rowIdx: number; colIdx: number } | null>(null)
 
 const contentKey = computed(() => props.content)
+
+const commentMap = computed(() => {
+  const map = new Map<string, string>()
+  for (const c of props.cellComments || []) {
+    const key = `${c.row}:${c.colIndex}`
+    if (!map.has(key)) map.set(key, c.id)
+  }
+  return map
+})
+
+function commentIdForCell(rowIdx: number, colIdx: number): string | undefined {
+  return commentMap.value.get(`${rowIdx + 1}:${colIdx}`)
+}
+
+function isSelected(rowIdx: number, colIdx: number): boolean {
+  return selected.value?.rowIdx === rowIdx && selected.value?.colIdx === colIdx
+}
+
+function cellRef(rowIdx: number, colIdx: number): CsvCellRef {
+  const header = table.value.headers[colIdx] || `Column ${colIdx + 1}`
+  const value = table.value.rows[rowIdx]?.[colIdx] ?? ''
+  return {
+    row: rowIdx + 1,
+    colIndex: colIdx,
+    colHeader: header,
+    value,
+  }
+}
+
+function onCellClick(rowIdx: number, colIdx: number, event: MouseEvent): void {
+  if (!props.readOnly || !props.commentable) return
+  selected.value = { rowIdx, colIdx }
+  const target = event.currentTarget as HTMLElement | null
+  const rect = target?.getBoundingClientRect()
+  const cell = cellRef(rowIdx, colIdx)
+  if (rect) emit('cell-select', cell, rect)
+  // Second click / activate on an already-commented cell opens the comment.
+  const existingId = commentIdForCell(rowIdx, colIdx)
+  if (existingId) emit('cell-activate', cell)
+}
 
 function loadFromContent(text: string): void {
   try {
@@ -105,6 +180,7 @@ watch(contentKey, (text) => {
   // Avoid clobbering in-progress edits when we just emitted this value.
   if (!props.readOnly && text === lastEmitted.value) return
   loadFromContent(text)
+  selected.value = null
 }, { immediate: true })
 
 function emitChange(): void {
@@ -160,6 +236,11 @@ function removeRow(rowIdx: number): void {
   table.value = { ...table.value, rows }
   emitChange()
 }
+
+defineExpose({
+  rootEl,
+  clearSelection: () => { selected.value = null },
+})
 </script>
 
 <style scoped>
@@ -191,11 +272,21 @@ function removeRow(rowIdx: number): void {
   flex-shrink: 0;
 }
 
+.csv-meta-bar {
+  justify-content: space-between;
+}
+
 .csv-meta,
 .csv-meta-bar {
   color: var(--fg2, var(--text-muted, #b4b4c4));
   font-size: var(--text-xs, 11px);
   letter-spacing: 0.02em;
+}
+
+.csv-hint {
+  color: var(--fg2, var(--text-muted, #b4b4c4));
+  font-size: var(--text-xs, 11px);
+  opacity: 0.8;
 }
 
 .csv-tool-btn {
@@ -266,6 +357,28 @@ function removeRow(rowIdx: number): void {
   padding: 0;
 }
 
+.csv-cell-wrap {
+  cursor: default;
+}
+
+.csv-viewer:not(.editing) .csv-cell-wrap {
+  cursor: pointer;
+}
+
+.csv-cell-wrap.is-selected {
+  outline: 2px solid var(--accent, #ff4d6d);
+  outline-offset: -2px;
+  background: color-mix(in srgb, var(--accent, #ff4d6d) 12%, transparent);
+}
+
+.csv-cell-wrap.comment-highlight {
+  background: color-mix(in srgb, var(--accent2, #6a47b8) 22%, transparent);
+}
+
+.csv-cell-wrap.comment-highlight.is-selected {
+  background: color-mix(in srgb, var(--accent, #ff4d6d) 18%, transparent);
+}
+
 .csv-cell {
   display: block;
   padding: 6px 9px;
@@ -318,7 +431,8 @@ function removeRow(rowIdx: number): void {
   background: var(--bg3, var(--bg2, #2a2e54));
 }
 
-.csv-viewer.editing .csv-table td.csv-row-num {
+.csv-viewer.editing .csv-table td.csv-row-num,
+.csv-viewer:not(.editing) .csv-table td.csv-row-num {
   position: sticky;
   left: 0;
   z-index: 1;

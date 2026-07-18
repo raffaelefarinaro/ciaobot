@@ -88,3 +88,25 @@ export function serializeCsv(table: CsvTable): string {
 export function isCsvPath(filePath: string): boolean {
   return /\.csv$/i.test(filePath.replace(/:\d+$/, ''))
 }
+
+/** 0-indexed column → Excel-style letter (0→A, 25→Z, 26→AA). */
+export function excelColLetter(colIndex: number): string {
+  let n = Math.max(0, Math.floor(colIndex))
+  let out = ''
+  do {
+    out = String.fromCharCode(65 + (n % 26)) + out
+    n = Math.floor(n / 26) - 1
+  } while (n >= 0)
+  return out
+}
+
+/** Agent-facing cell locator, e.g. `row 12, column superpower [G]`. */
+export function formatCsvCellAnchor(opts: {
+  row: number
+  colIndex: number
+  colHeader?: string | null
+}): string {
+  const header = (opts.colHeader || '').trim() || `Column ${opts.colIndex + 1}`
+  const letter = excelColLetter(opts.colIndex)
+  return `row ${opts.row}, column ${header} [${letter}]`
+}
