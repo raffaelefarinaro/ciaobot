@@ -87,6 +87,12 @@
           @click="selectAutomationWorkspace(workspace.name)"
         >
           {{ workspaceLabel(workspace.name) }}
+          <span
+            v-if="missedCountFor(workspace.name) > 0"
+            class="badge badge--missed"
+            :title="`${missedCountFor(workspace.name)} missed`"
+            :aria-label="`${missedCountFor(workspace.name)} missed`"
+          >{{ missedCountFor(workspace.name) }}</span>
         </button>
       </div>
       <div class="schedules-list">
@@ -604,6 +610,12 @@ async function selectAutomationWorkspace(workspace: string) {
     await store.switchWorkspace(workspace, { transition: false })
   }
   if (props.mode === 'schedules') await router.push('/schedules')
+}
+
+function missedCountFor(workspace: string): number {
+  return taskStore.schedules.filter(
+    s => s.missed && scheduleInWorkspace(s, workspace),
+  ).length
 }
 
 import type { ChatInfo, ProjectInfo } from '../lib/types'
@@ -1451,6 +1463,11 @@ async function confirmDeleteChat(chatId: string) {
   text-transform: none;
   letter-spacing: 0;
   vertical-align: middle;
+}
+.badge--missed {
+  margin-left: 0;
+  background: var(--warning);
+  color: var(--bg);
 }
 
 .chat-item:hover {
