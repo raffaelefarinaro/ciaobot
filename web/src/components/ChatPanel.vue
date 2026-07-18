@@ -2066,9 +2066,12 @@ const liveTraceMeta = computed(() => {
     const elapsed = nowTs.value - startedAt
     if (elapsed >= 0) parts.push(formatDuration(elapsed))
   }
-  // Live token count: cumulative output tokens reported so far this turn.
+  // Live token count: cumulative tokens reported so far this turn.
   const usage = store.currentLiveUsage
-  if (usage && usage.output > 0) parts.push(`${formatTokens(usage.output)} tok`)
+  if (usage) {
+    if (usage.input > 0) parts.push(`${formatTokens(usage.input)} in`)
+    if (usage.output > 0) parts.push(`${formatTokens(usage.output)} out`)
+  }
   return parts.join(' · ')
 })
 
