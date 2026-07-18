@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+import shlex
 import uuid
+from pathlib import Path
 from typing import AsyncIterator
 
 from ciao.models import (
@@ -60,6 +63,11 @@ _FILE_TOUCH_TOOLS: dict[str, tuple[str, ...]] = {
     "writeFile": ("path", "file_path"),
 }
 
+# Shell tools whose command text may create or overwrite files. Parsed
+# conservatively — false negatives are preferable to inventing paths from
+# descriptions like "Create the guest CSV".
+_SHELL_FILE_TOOLS = frozenset({"Bash", "bash", "run_command", "exec_command"})
+
 # Action labels surfaced on the inline file card. Keep these short — the
 # frontend renders them next to the basename.
 _FILE_TOUCH_ACTIONS: dict[str, str] = {
@@ -75,19 +83,131 @@ _FILE_TOUCH_ACTIONS: dict[str, str] = {
     "writeFile": "written",
 }
 
+_SHELL_REDIRECT_RE = re.compile(
+    r"(?:^|[\s;|&])(?:\d*)(>>?)\s*['\"]?([^\s'\"<>&|;]+)['\"]?"
+)
+_SHELL_HEREDOC_RE = re.compile(
+    r"(?:^|[\s;|&])(?:\w+)?\s*(>>?)\s*['\"]?([^\s'\"<>&|;]+)['\"]?\s*<<"
+)
+_SHELL_TOUCH_RE = re.compile(r"(?:^|[\s;|&])touch\s+([^\n;&|]+)")
+_SHELL_TEE_RE = re.compile(
+    r"(?:^|[\s;|&])tee(\s+-a)?\s+['\"]?([^\s'\"<>&|;]+)['\"]?"
+)
+_SHELL_COPY_RE = re.compile(r"(?:^|[\s;|&])(?:cp|mv|install)\s+([^\n;&|]+)")
 
-def extract_file_touch(tool_name: str, tool_input: object) -> dict | None:
-    """If this tool mutates a file, return `{file_path, action}`, else None.
+# Bare words after `>` are often English ("echo hi > There"), not files.
+# Require a path separator, a dotfile, an allow-listed extension, or a
+# conventional extensionless filename before promoting a shell target to an
+# Outputs chip. Dedicated Write/Edit tools still accept any explicit path.
+_SHELL_PATH_EXT_RE = re.compile(
+    r"\.(?:md|markdown|txt|py|ts|tsx|js|jsx|vue|css|html|json|yaml|yml|toml|"
+    r"sh|bash|zsh|rs|go|java|xml|sql|cfg|ini|log|csv|tsv|env|example|"
+    r"excalidraw|pdf|pptx|png|jpe?g|gif|webp|svg|avif|bmp|ico|lock|sum)$",
+    re.IGNORECASE,
+)
+_EXTENSIONLESS_SHELL_NAMES = frozenset({
+    "makefile",
+    "dockerfile",
+    "containerfile",
+    "license",
+    "licence",
+    "readme",
+    "changelog",
+    "gemfile",
+    "rakefile",
+    "procfile",
+    "vagrantfile",
+    "gitignore",
+    "dockerignore",
+    "editorconfig",
+    "npmrc",
+    "browserslist",
+})
+
+
+def _looks_like_shell_path(path: str) -> bool:
+    if not path or path in {".", "..", "-", "/dev/null", "/dev/stdout", "/dev/stderr"}:
+        return False
+    if path.startswith("/dev/") or path.startswith("-"):
+        return False
+    # Expansions / globs are too ambiguous to surface as Outputs chips.
+    if any(ch in path for ch in "*?$`\n"):
+        return False
+    base = path.rstrip("/").rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    if not base or base in {".", ".."}:
+        return False
+    if "/" in path or "\\" in path or path.startswith("."):
+        return True
+    if _SHELL_PATH_EXT_RE.search(base):
+        return True
+    if base.lower() in _EXTENSIONLESS_SHELL_NAMES:
+        return True
+    return False
+
+
+def _bash_command_text(tool_input: object) -> str:
+    if isinstance(tool_input, dict):
+        for key in ("command", "cmd"):
+            value = tool_input.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        return ""
+    if isinstance(tool_input, str):
+        return tool_input
+    return ""
+
+
+def _paths_from_shell_command(command: str) -> list[dict]:
+    """Best-effort paths a shell command creates or overwrites."""
+    results: list[dict] = []
+    seen: set[str] = set()
+
+    def add(raw: str, action: str) -> None:
+        path = raw.strip().strip("'\"")
+        if not _looks_like_shell_path(path) or path in seen:
+            return
+        seen.add(path)
+        results.append({"file_path": path, "action": action})
+
+    for match in _SHELL_HEREDOC_RE.finditer(command):
+        add(match.group(2), "created" if match.group(1) == ">" else "written")
+    for match in _SHELL_REDIRECT_RE.finditer(command):
+        add(match.group(2), "created" if match.group(1) == ">" else "written")
+    for match in _SHELL_TOUCH_RE.finditer(command):
+        try:
+            tokens = shlex.split(match.group(1))
+        except ValueError:
+            continue
+        for token in tokens:
+            if token.startswith("-"):
+                continue
+            add(token, "created")
+    for match in _SHELL_TEE_RE.finditer(command):
+        add(match.group(2), "written" if match.group(1) else "created")
+    for match in _SHELL_COPY_RE.finditer(command):
+        try:
+            tokens = [t for t in shlex.split(match.group(1)) if not t.startswith("-")]
+        except ValueError:
+            continue
+        if len(tokens) >= 2:
+            add(tokens[-1], "created")
+    return results
+
+
+def extract_file_touches(tool_name: str, tool_input: object) -> list[dict]:
+    """If this tool mutates files, return ``[{file_path, action}, …]``.
 
     Accepts both shapes of ``tool_input``:
 
     - ``dict``: the raw SDK input as persisted in the session JSONL. We pick
       the path out of ``file_path`` (Claude), ``path`` (Pi), or
-      ``notebook_path`` (NotebookEdit).
+      ``notebook_path`` (NotebookEdit). For shell tools we parse ``command``.
     - ``str``: the live stream summary produced by
       ``_summarize_tool_input`` in ``ciao/providers/claude.py``. For the
-      file-touch tools it already collapses the dict into the path string
-      itself, so the value passes through unchanged.
+      dedicated file-touch tools it already collapses the dict into the path
+      string itself. For Bash the summary is often a description, so callers
+      that have the raw input should prefer
+      ``ToolUseEvent.file_touches`` computed before summarisation.
 
     The classification is advisory: it tells the PWA "render an inline card
     for this write". The actual read goes through ``/api/workspace-file``.
@@ -95,22 +215,92 @@ def extract_file_touch(tool_name: str, tool_input: object) -> dict | None:
     on disk — so a card pointing at ``/etc/passwd`` would render but the
     extension allowlist still refuses to return its contents.
     """
+    if tool_name in _SHELL_FILE_TOOLS:
+        return _paths_from_shell_command(_bash_command_text(tool_input))
     if tool_name not in _FILE_TOUCH_TOOLS:
-        return None
+        return []
     action = _FILE_TOUCH_ACTIONS.get(tool_name, "touched")
     if isinstance(tool_input, dict):
         fields = _FILE_TOUCH_TOOLS[tool_name]
         for field in fields:
             path = tool_input.get(field)
             if isinstance(path, str) and path.strip():
-                return {"file_path": path.strip(), "action": action}
-        return None
+                return [{"file_path": path.strip(), "action": action}]
+        return []
     if isinstance(tool_input, str):
         path = tool_input.strip()
         if not path:
-            return None
-        return {"file_path": path, "action": action}
-    return None
+            return []
+        return [{"file_path": path, "action": action}]
+    return []
+
+
+def extract_file_touch(tool_name: str, tool_input: object) -> dict | None:
+    """If this tool mutates a file, return `{file_path, action}`, else None."""
+    touches = extract_file_touches(tool_name, tool_input)
+    return touches[0] if touches else None
+
+
+def refine_file_touch_actions(
+    touches: list[dict],
+    workspace_root: Path | None = None,
+) -> list[dict]:
+    """Upgrade ``written`` → ``created`` when the path does not yet exist.
+
+    Tool-use events fire before the CLI executes the write, so a missing
+    file at this moment means the tool is creating it.
+    """
+    if not touches:
+        return touches
+    root = workspace_root.resolve() if workspace_root is not None else None
+    refined: list[dict] = []
+    for touch in touches:
+        item = dict(touch)
+        action = item.get("action")
+        path_text = item.get("file_path")
+        if (
+            action in {"written", "touched"}
+            and isinstance(path_text, str)
+            and path_text.strip()
+        ):
+            path = Path(path_text.strip())
+            if not path.is_absolute() and root is not None:
+                path = root / path
+            try:
+                if not path.exists():
+                    item["action"] = "created"
+            except OSError:
+                pass
+        refined.append(item)
+    return refined
+
+
+def apply_file_touches_to_payload(
+    payload: dict,
+    *,
+    workspace_root: Path | None = None,
+) -> None:
+    """Normalise ``file_touch`` / ``file_touches`` on a tool_use WS payload."""
+    if payload.get("type") != "tool_use":
+        return
+    raw = payload.get("file_touches")
+    touches: list[dict]
+    if isinstance(raw, list) and raw:
+        touches = [t for t in raw if isinstance(t, dict) and t.get("file_path")]
+    elif isinstance(payload.get("file_touch"), dict):
+        touches = [payload["file_touch"]]
+    else:
+        return
+    touches = refine_file_touch_actions(touches, workspace_root)
+    if not touches:
+        payload.pop("file_touch", None)
+        payload.pop("file_touches", None)
+        return
+    payload["file_touch"] = touches[0]
+    if len(touches) > 1:
+        payload["file_touches"] = touches
+    else:
+        payload.pop("file_touches", None)
 
 
 def event_to_json(event: StreamEvent) -> dict | None:
@@ -132,9 +322,18 @@ def event_to_json(event: StreamEvent) -> dict | None:
             payload["parent_tool_use_id"] = event.parent_tool_use_id
         if event.request_id:
             payload["request_id"] = event.request_id
-        touch = extract_file_touch(event.tool_name, event.tool_input)
-        if touch:
-            payload["file_touch"] = touch
+        touches: list[dict] = []
+        if event.file_touches:
+            touches = [
+                t for t in event.file_touches
+                if isinstance(t, dict) and t.get("file_path")
+            ]
+        if not touches:
+            touches = extract_file_touches(event.tool_name, event.tool_input)
+        if touches:
+            payload["file_touch"] = touches[0]
+            if len(touches) > 1:
+                payload["file_touches"] = touches
         return payload
     if isinstance(event, ThinkingEvent):
         payload = {"type": "thinking", "text": event.text}

@@ -4413,7 +4413,7 @@ class ProjectChatManager:
             if chat_for_retry is not None and chat_for_retry.retry_status == "pending":
                 self._clear_chat_retry(chat_for_retry)
 
-        from ciao.web.chat_broker import event_to_json
+        from ciao.web.chat_broker import apply_file_touches_to_payload, event_to_json
 
         stream = ChatStream(prompt_text=prompt)
         self._broker.register(chat_id, stream)
@@ -4526,6 +4526,11 @@ class ProjectChatManager:
                             chat_id, current_prompt, images=current_images
                         ):
                             payload = event_to_json(event)
+                            if payload:
+                                apply_file_touches_to_payload(
+                                    payload,
+                                    workspace_root=self._config.workspace_root,
+                                )
                             if (
                                 payload
                                 and isinstance(event, ResultEvent)
@@ -4642,30 +4647,40 @@ class ProjectChatManager:
                                 break
                             if isinstance(event, ToolUseEvent):
                                 # Schedule a debounced file snapshot for
-                                # Write/Edit/MultiEdit/NotebookEdit. The
-                                # ToolUseEvent fires *before* the CLI executes
-                                # the tool, so a 1.5s delay lets the actual
-                                # write land first. Bursts collapse — only the
-                                # last edit per file in a quick cluster ends
-                                # up captured. payload["file_touch"] is the
-                                # already-normalised metadata set by
-                                # event_to_json.
-                                touch = payload.get("file_touch") if payload else None
-                                if isinstance(touch, dict):
+                                # Write/Edit/MultiEdit/NotebookEdit/Bash creates.
+                                # The ToolUseEvent fires *before* the CLI
+                                # executes the tool, so a 1.5s delay lets the
+                                # actual write land first. Bursts collapse —
+                                # only the last edit per file in a quick
+                                # cluster ends up captured.
+                                # payload["file_touch(es)"] is the already-
+                                # normalised metadata set by event_to_json +
+                                # apply_file_touches_to_payload.
+                                touches: list[dict] = []
+                                if payload:
+                                    multi = payload.get("file_touches")
+                                    if isinstance(multi, list) and multi:
+                                        touches = [
+                                            t for t in multi if isinstance(t, dict)
+                                        ]
+                                    elif isinstance(payload.get("file_touch"), dict):
+                                        touches = [payload["file_touch"]]
+                                for touch in touches:
                                     fp = touch.get("file_path") or ""
-                                    if fp:
-                                        try:
-                                            self._snapshots.schedule_capture(
-                                                chat_id=chat_id,
-                                                file_path=fp,
-                                                action=touch.get("action", "touched"),
-                                                tool=event.tool_name,
-                                            )
-                                        except Exception:
-                                            logger.exception(
-                                                "schedule_capture failed for %s",
-                                                fp,
-                                            )
+                                    if not fp:
+                                        continue
+                                    try:
+                                        self._snapshots.schedule_capture(
+                                            chat_id=chat_id,
+                                            file_path=fp,
+                                            action=touch.get("action", "touched"),
+                                            tool=event.tool_name,
+                                        )
+                                    except Exception:
+                                        logger.exception(
+                                            "schedule_capture failed for %s",
+                                            fp,
+                                        )
                             if isinstance(event, ResultEvent):
                                 if event.is_error:
                                     had_error = True
@@ -5224,7 +5239,7 @@ class ProjectChatManager:
         toast, delayed push). Each such turn gets its own background
         ChatStream so replay stays turn-shaped.
         """
-        from ciao.web.chat_broker import event_to_json
+        from ciao.web.chat_broker import apply_file_touches_to_payload, event_to_json
 
         provider_service = self._providers.get(chat_id)
         if provider_service is None:
@@ -5250,6 +5265,10 @@ class ProjectChatManager:
                 payload = event_to_json(event)
                 if payload is None:
                     continue
+                apply_file_touches_to_payload(
+                    payload,
+                    workspace_root=self._config.workspace_root,
+                )
                 if stream is None:
                     # Only open a visible stream when a real event arrives —
                     # most drains sit idle until cancelled by the next turn.

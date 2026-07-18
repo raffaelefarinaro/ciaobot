@@ -194,10 +194,10 @@ def _summarize_tool_input(name: str, tool_input: dict) -> str:
         path = tool_input.get("file_path", "")
         return path
     if name in ("Edit", "edit"):
-        path = tool_input.get("file_path", "")
+        path = tool_input.get("file_path") or tool_input.get("path") or ""
         return path
     if name in ("Write", "write"):
-        path = tool_input.get("file_path", "")
+        path = tool_input.get("file_path") or tool_input.get("path") or ""
         return path
     # Search
     if name in ("Grep", "grep"):
@@ -900,13 +900,23 @@ class ClaudeProvider(BaseSDKProvider):
             parent_id = getattr(msg, "parent_tool_use_id", None)
             for block in msg.content:
                 if isinstance(block, ToolUseBlock):
-                    summary = _summarize_tool_input(block.name, block.input or {})
+                    raw_input = block.input or {}
+                    if not isinstance(raw_input, dict):
+                        raw_input = {}
+                    # Compute file touches from the raw SDK input before
+                    # summarising. Bash summaries are often a short description
+                    # ("Create guest CSV"), which would hide created paths from
+                    # the PWA Outputs chips.
+                    from ciao.web.chat_broker import extract_file_touches
+                    touches = extract_file_touches(block.name, raw_input)
+                    summary = _summarize_tool_input(block.name, raw_input)
                     events.append(ToolUseEvent(
                         type="assistant",
                         tool_name=block.name,
                         tool_input=summary,
                         tool_use_id=getattr(block, "id", None),
                         parent_tool_use_id=parent_id,
+                        file_touches=touches or None,
                     ))
             if msg.session_id:
                 self._session_id = msg.session_id

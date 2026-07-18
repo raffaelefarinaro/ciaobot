@@ -206,6 +206,7 @@
               >
                 <span class="file-chip-icon" aria-hidden="true">{{ fileCardIcon(f.file_path) }}</span>
                 <span class="file-chip-name">{{ fileCardBasename(f.file_path) }}</span>
+                <span v-if="f.action === 'created'" class="file-chip-action">new</span>
                 <span class="file-chip-open" aria-hidden="true">&#8599;</span>
               </button>
             </div>
@@ -279,6 +280,7 @@
                   >
                     <span class="file-chip-icon" aria-hidden="true">{{ fileCardIcon(f.file_path) }}</span>
                     <span class="file-chip-name">{{ fileCardBasename(f.file_path) }}</span>
+                    <span v-if="f.action === 'created'" class="file-chip-action">new</span>
                     <span class="file-chip-open" aria-hidden="true">&#8599;</span>
                   </button>
                 </div>
@@ -3552,6 +3554,13 @@ function insertImageRef(n: number) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.file-chip-action {
+  flex-shrink: 0;
+  color: var(--accent);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-transform: lowercase;
 }
 .file-chip-open {
   color: var(--fg3);

@@ -386,10 +386,16 @@ class ProviderSubchatManager:
 
         try:
             async for event in service.execute_streaming(request):
-                from ciao.web.chat_broker import event_to_json
+                from ciao.web.chat_broker import apply_file_touches_to_payload, event_to_json
                 event_json = event_to_json(event)
                 if event_json is None:
                     continue
+                apply_file_touches_to_payload(
+                    event_json,
+                    workspace_root=getattr(
+                        getattr(self.pcm, "_config", None), "workspace_root", None
+                    ),
+                )
 
                 self.pcm._events.publish({
                     "type": "provider_subchat_event",

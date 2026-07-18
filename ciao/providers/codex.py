@@ -429,11 +429,15 @@ def _thread_item_tool_events(item: Mapping[str, Any]) -> list[ToolUseEvent]:
     item_type = str(item.get("type") or "")
     item_id = str(item.get("id") or "") or None
     if item_type == "commandExecution":
+        command = str(item.get("command") or "")[:2000]
+        from ciao.web.chat_broker import extract_file_touches
+        touches = extract_file_touches("Bash", {"command": command})
         return [ToolUseEvent(
             type="assistant",
             tool_name="Bash",
-            tool_input=str(item.get("command") or "")[:2000],
+            tool_input=command,
             tool_use_id=item_id,
+            file_touches=touches or None,
         )]
     if item_type == "fileChange":
         events: list[ToolUseEvent] = []
@@ -442,11 +446,14 @@ def _thread_item_tool_events(item: Mapping[str, Any]) -> list[ToolUseEvent]:
                 continue
             kind = str(change.get("kind") or "update").lower()
             name = "Write" if kind in {"add", "create"} else "Edit"
+            action = "created" if name == "Write" else "edited"
+            path = str(change.get("path") or "")[:2000]
             events.append(ToolUseEvent(
                 type="assistant",
                 tool_name=name,
-                tool_input=str(change.get("path") or "")[:2000],
+                tool_input=path,
                 tool_use_id=item_id,
+                file_touches=[{"file_path": path, "action": action}] if path else None,
             ))
         return events
     if item_type == "mcpToolCall":

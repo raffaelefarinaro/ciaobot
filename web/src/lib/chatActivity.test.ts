@@ -16,6 +16,23 @@ describe('collectTraceOutputs', () => {
       { tool_name: '_filecard', content: 'notes.md' },
     ])).toEqual([{ file_path: 'notes.md' }])
   })
+
+  it('preserves created/edited action labels for Outputs chips', () => {
+    expect(collectTraceOutputs([
+      { tool_name: '_filecard', file_path: 'new.csv', content: '', action: 'created' },
+      { tool_name: '_filecard', file_path: 'notes.md', content: '', action: 'edited' },
+    ])).toEqual([
+      { file_path: 'new.csv', action: 'created' },
+      { file_path: 'notes.md', action: 'edited' },
+    ])
+  })
+
+  it('drops implausible bare words that are not file paths', () => {
+    expect(collectTraceOutputs([
+      { tool_name: '_filecard', file_path: 'There', content: '', action: 'created' },
+      { tool_name: '_filecard', file_path: 'guests.csv', content: '', action: 'created' },
+    ])).toEqual([{ file_path: 'guests.csv', action: 'created' }])
+  })
 })
 
 describe('formatTokenUsage', () => {

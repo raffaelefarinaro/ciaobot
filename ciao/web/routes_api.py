@@ -43,7 +43,7 @@ from ciao.setup_status import setup_status
 from ciao.cli import _auth_command_for_provider
 from ciao.skills_inventory import build_skill_inventory
 from ciao.web.auth import SESSION_COOKIE, session_cookie_kwargs
-from ciao.web.chat_broker import extract_file_touch
+from ciao.web.chat_broker import extract_file_touches
 from ciao.web.project_chats import (
     _PROJECT_UPLOAD_MAX_BYTES,
     _normalize_handover_messages,
@@ -313,10 +313,12 @@ def _extract_assistant_blocks(raw: object) -> list[dict]:
             if not isinstance(tinput, dict):
                 tinput = {}
             summary = _summarize_tool_input(name, tinput)
-            touch = extract_file_touch(name, tinput)
+            touches = extract_file_touches(name, tinput)
             entry = {"kind": "tool_use", "name": name, "summary": summary}
-            if touch:
-                entry["file_touch"] = touch
+            if touches:
+                entry["file_touch"] = touches[0]
+                if len(touches) > 1:
+                    entry["file_touches"] = touches
             items.append(entry)
     return items
 
@@ -533,17 +535,23 @@ def _render_subagent_messages(msgs: Iterable[object]) -> list[dict]:
                 if blk["kind"] == "tool_use":
                     name = blk["name"] or "tool"
                     summary = blk.get("summary") or ""
-                    touch = blk.get("file_touch")
-                    if touch:
+                    touches = blk.get("file_touches")
+                    if not isinstance(touches, list) or not touches:
+                        touch = blk.get("file_touch")
+                        touches = [touch] if touch else []
+                    if touches:
                         flush_tools()
-                        rendered.append({
-                            "role": "system",
-                            "tool_name": "_filecard",
-                            "content": touch["file_path"],
-                            "file_path": touch["file_path"],
-                            "action": touch["action"],
-                            "tool": name,
-                        })
+                        for touch in touches:
+                            if not isinstance(touch, dict) or not touch.get("file_path"):
+                                continue
+                            rendered.append({
+                                "role": "system",
+                                "tool_name": "_filecard",
+                                "content": touch["file_path"],
+                                "file_path": touch["file_path"],
+                                "action": touch.get("action") or "touched",
+                                "tool": name,
+                            })
                         continue
                     line = f"{_tool_icon(name)} {name}"
                     if summary:
@@ -2313,13 +2321,19 @@ def _render_codex_thread(thread: dict, chat) -> list[dict]:
                         continue
                     file_path = str(change.get("path") or "")
                     if file_path:
+                        kind_name = str(change.get("kind") or "update").lower()
+                        action = (
+                            "created"
+                            if kind_name in {"add", "create"}
+                            else "edited"
+                        )
                         result.append({
                             "role": "system",
                             "tool_name": "_filecard",
                             "content": file_path,
                             "file_path": file_path,
-                            "action": str(change.get("kind") or "edited"),
-                            "tool": "Edit",
+                            "action": action,
+                            "tool": "Write" if action == "created" else "Edit",
                         })
                 continue
             if kind == "commandExecution":
@@ -2328,9 +2342,22 @@ def _render_codex_thread(thread: dict, chat) -> list[dict]:
                     label = " ".join(str(part) for part in command)
                 else:
                     label = str(command or "")
-                pending_tools.append(
-                    f"{_tool_icon('Bash')} Bash {label}".strip()
-                )
+                touches = extract_file_touches("Bash", {"command": label})
+                if touches:
+                    flush_tools()
+                    for touch in touches:
+                        result.append({
+                            "role": "system",
+                            "tool_name": "_filecard",
+                            "content": touch["file_path"],
+                            "file_path": touch["file_path"],
+                            "action": touch.get("action") or "touched",
+                            "tool": "Bash",
+                        })
+                else:
+                    pending_tools.append(
+                        f"{_tool_icon('Bash')} Bash {label}".strip()
+                    )
                 continue
             if kind in {"mcpToolCall", "dynamicToolCall"}:
                 name = str(item.get("tool") or item.get("name") or kind)
@@ -2497,17 +2524,23 @@ async def chat_messages(request: Request) -> JSONResponse:
                 if blk["kind"] == "tool_use":
                     name = blk["name"] or "tool"
                     summary = blk.get("summary") or ""
-                    touch = blk.get("file_touch")
-                    if touch:
+                    touches = blk.get("file_touches")
+                    if not isinstance(touches, list) or not touches:
+                        touch = blk.get("file_touch")
+                        touches = [touch] if touch else []
+                    if touches:
                         flush_tools()
-                        result.append({
-                            "role": "system",
-                            "tool_name": "_filecard",
-                            "content": touch["file_path"],
-                            "file_path": touch["file_path"],
-                            "action": touch["action"],
-                            "tool": name,
-                        })
+                        for touch in touches:
+                            if not isinstance(touch, dict) or not touch.get("file_path"):
+                                continue
+                            result.append({
+                                "role": "system",
+                                "tool_name": "_filecard",
+                                "content": touch["file_path"],
+                                "file_path": touch["file_path"],
+                                "action": touch.get("action") or "touched",
+                                "tool": name,
+                            })
                         continue
                     line = f"{_tool_icon(name)} {name}"
                     if summary:

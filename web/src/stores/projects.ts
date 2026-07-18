@@ -4,6 +4,7 @@ import { api } from '../lib/api'
 import { getPendingBucket, normalizePendingBuckets, setPendingBucket } from '../lib/pendingBuckets'
 import { buildFixPrompt } from '../lib/fixError'
 import { formatChatComments, formatFileComments } from '../lib/commentContext'
+import { isPlausibleFilePath } from '../lib/filePaths'
 import type {
   ProjectInfo,
   ChatInfo,
@@ -610,7 +611,9 @@ export const useProjectStore = defineStore('projects', () => {
       })
       .filter((message) => {
         if (message.tool_name === '_activity') return Boolean(message.content)
-        if (message.tool_name === '_filecard') return Boolean(message.file_path)
+        if (message.tool_name === '_filecard') {
+          return Boolean(message.file_path) && isPlausibleFilePath(message.file_path)
+        }
         if (message.role === 'system') return Boolean(message.content)
         return Boolean(message.content)
       })
@@ -2726,6 +2729,8 @@ export const useProjectStore = defineStore('projects', () => {
     chatId: string,
     payload: { file_path: string; action: string; tool: string },
   ) {
+    // Ignore shell false positives ("There") that are not real paths.
+    if (!isPlausibleFilePath(payload.file_path)) return
     if (!streamingTimeline.value[chatId]) streamingTimeline.value[chatId] = []
     streamingTimeline.value[chatId].push({
       kind: 'filecard',
@@ -2970,16 +2975,23 @@ export const useProjectStore = defineStore('projects', () => {
         _commitStreamingThinkingToTimeline(chatId)
         _commitStreamingTextToTimeline(chatId)
 
-        // File-mutating tool calls (Write/Edit/MultiEdit/NotebookEdit) get
-        // their own inline preview card. Backend tags these with `file_touch`
-        // in chat_broker.event_to_json. Subagent file writes also get a card,
-        // with the dispatch label preserved in the `tool` field for context.
-        if (event.file_touch?.file_path) {
-          _pushFileCard(chatId, {
-            file_path: event.file_touch.file_path,
-            action: event.file_touch.action || 'touched',
-            tool: event.tool_name,
-          })
+        // File-mutating tool calls (Write/Edit/MultiEdit/NotebookEdit/Bash
+        // creates) get their own inline preview card. Backend tags these with
+        // `file_touch` / `file_touches` in chat_broker.event_to_json. Subagent
+        // file writes also get a card, with the dispatch label preserved in
+        // the `tool` field for context.
+        const touches = event.file_touches?.length
+          ? event.file_touches
+          : (event.file_touch?.file_path ? [event.file_touch] : [])
+        if (touches.length) {
+          for (const touch of touches) {
+            if (!touch?.file_path) continue
+            _pushFileCard(chatId, {
+              file_path: touch.file_path,
+              action: touch.action || 'touched',
+              tool: event.tool_name,
+            })
+          }
           break
         }
 

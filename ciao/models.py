@@ -161,6 +161,11 @@ class ToolUseEvent(StreamEvent):
     set when this tool fires inside a Task subagent — its value matches
     the parent-level Task dispatch's ``tool_use_id``, so the client can
     look up the subagent's description and label the activity line.
+
+    ``file_touches`` is optional precomputed ``[{file_path, action}, …]``
+    from the raw tool input (before summarisation). Needed for Bash, where
+    the live ``tool_input`` summary is often a short description rather
+    than the command text that actually names the written paths.
     """
 
     tool_name: str = ""
@@ -170,6 +175,7 @@ class ToolUseEvent(StreamEvent):
     # Set for provider-native structured questions that must be answered
     # inside the active turn (Codex app-server request_user_input).
     request_id: str = ""
+    file_touches: list | None = None
 
 
 @dataclass(slots=True)

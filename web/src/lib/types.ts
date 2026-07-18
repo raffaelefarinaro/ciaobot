@@ -198,6 +198,8 @@ export type WsEvent =
       // it into the generic _activity row. Path may be workspace-relative
       // or absolute; the viewer enforces file-type and size allowlists.
       file_touch?: { file_path: string; action: string };
+      // Populated when one shell command creates/overwrites multiple files.
+      file_touches?: Array<{ file_path: string; action: string }>;
     }
   | { type: 'thinking'; text: string; parent_tool_use_id?: string }
   | { type: 'status'; message: string }
