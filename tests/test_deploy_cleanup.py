@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 
@@ -126,3 +127,125 @@ def test_root_npm_install_skips_without_root_package_json(tmp_path) -> None:
     assert result.returncode == 0
     assert "skipped" in result.stdout
     assert "package.json" in result.stdout
+
+
+# ── DNS-flap retry for deploy-path git pulls ───────────────────────────
+# The deploy snapshot step and the post-snapshot ``git pull`` both call
+# ``_git_pull_with_retry``. They used to hard-fail on a DNS resolver flap
+# (the same kind that intermittently trips ``branch_backup``). These tests
+# pin the classification logic and the retry behaviour. Using a small
+# shell script as the ``git`` binary keeps the test honest — it actually
+# exercises the subprocess path instead of mocking the whole runner.
+
+
+_TRANSIENT_STDERR = (
+    "fatal: unable to access 'https://github.com/x/y.git/': "
+    "Could not resolve host: github.com\n"
+)
+_AUTH_STDERR = (
+    "fatal: Authentication failed for 'https://github.com/x/y.git/'\n"
+)
+
+
+def test_is_transient_git_pull_error_matches_resolve_host() -> None:
+    from ciao.web.routes_helpers import _is_transient_git_pull_error
+
+    assert _is_transient_git_pull_error(_TRANSIENT_STDERR) is True
+    assert _is_transient_git_pull_error(
+        "fatal: unable to access 'https://github.com/x/y.git/': "
+        "Could not resolve host: github.com"
+    ) is True
+    # Case-insensitive.
+    assert _is_transient_git_pull_error("COULD NOT RESOLVE HOST: github.com") is True
+    # Different transient markers.
+    assert _is_transient_git_pull_error("fatal: unable to connect: connection timed out") is True
+    assert _is_transient_git_pull_error("fatal: unable to access ... network is unreachable") is True
+
+
+def test_is_transient_git_pull_error_ignores_real_failures() -> None:
+    from ciao.web.routes_helpers import _is_transient_git_pull_error
+
+    assert _is_transient_git_pull_error(_AUTH_STDERR) is False
+    assert _is_transient_git_pull_error(
+        "fatal: no upstream configured for branch 'develop'"
+    ) is False
+    assert _is_transient_git_pull_error("CONFLICT (content): Merge conflict in foo.md") is False
+    # Empty / missing stderr is not transient (lets the caller see the real rc).
+    assert _is_transient_git_pull_error("") is False
+
+
+async def test_git_pull_with_retry_recovers_from_dns_flap(tmp_path, monkeypatch) -> None:
+    """A first attempt that fails with 'Could not resolve host' should be
+    retried and succeed; total 2 subprocess invocations."""
+    from ciao.web import routes_helpers
+
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(list(args))
+        n = len(calls)
+        if n == 1:
+            return subprocess.CompletedProcess(
+                args=args, returncode=128,
+                stdout="", stderr=_TRANSIENT_STDERR,
+            )
+        return subprocess.CompletedProcess(
+            args=args, returncode=0,
+            stdout="Already up to date.\n", stderr="",
+        )
+
+    monkeypatch.setattr(routes_helpers.subprocess, "run", fake_run)
+    # Shrink the backoff so the test finishes in <100ms.
+    rc, out = await routes_helpers._git_pull_with_retry(
+        tmp_path, attempts=2, backoff_s=0.0,
+    )
+    assert rc == 0
+    assert "Already up to date" in out
+    assert len(calls) == 2, "expected exactly one retry after the transient failure"
+
+
+async def test_git_pull_with_retry_does_not_retry_auth_failure(tmp_path, monkeypatch) -> None:
+    """An auth failure is not transient; the helper returns immediately so
+    the deploy surfaces the real problem instead of waiting pointlessly."""
+    from ciao.web import routes_helpers
+
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(list(args))
+        return subprocess.CompletedProcess(
+            args=args, returncode=128,
+            stdout="", stderr=_AUTH_STDERR,
+        )
+
+    monkeypatch.setattr(routes_helpers.subprocess, "run", fake_run)
+    rc, out = await routes_helpers._git_pull_with_retry(
+        tmp_path, attempts=2, backoff_s=0.0,
+    )
+    assert rc == 128
+    assert "Authentication failed" in out
+    assert len(calls) == 1, "auth errors must not trigger a retry"
+
+
+async def test_git_pull_with_retry_gives_up_after_attempts(tmp_path, monkeypatch) -> None:
+    """If the transient error persists past the configured attempts, the
+    helper returns the last failure verbatim so the deploy reports a real
+    error instead of silently swallowing the problem."""
+    from ciao.web import routes_helpers
+
+    calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        calls.append(list(args))
+        return subprocess.CompletedProcess(
+            args=args, returncode=128,
+            stdout="", stderr=_TRANSIENT_STDERR,
+        )
+
+    monkeypatch.setattr(routes_helpers.subprocess, "run", fake_run)
+    rc, out = await routes_helpers._git_pull_with_retry(
+        tmp_path, attempts=2, backoff_s=0.0,
+    )
+    assert rc == 128
+    assert "Could not resolve host" in out
+    assert len(calls) == 2, "expected one initial attempt plus one retry"

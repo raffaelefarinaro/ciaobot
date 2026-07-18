@@ -51,6 +51,7 @@ from ciao.web.project_chats import (
 from ciao.web.routes_helpers import (
     _allowed_roots,
     _commit_and_push,
+    _git_pull_with_retry,
     _resolve_workspace_path,
 )
 
@@ -4709,16 +4710,19 @@ async def admin_deploy(request: Request) -> JSONResponse:
             status_code=500,
         )
 
-    # 1. Git pull (idempotent after snapshot, but catches any race push)
-    result = await asyncio.to_thread(
-        _run_step, ["git", "pull"], cwd=str(codebase_root), timeout=60,
-    )
-    steps.append(_record("git pull", result))
-    if result.returncode != 0:
+    # 1. Git pull (idempotent after snapshot, but catches any race push).
+    #    Uses the same retry helper as the snapshot step so a short DNS
+    #    resolver flap doesn't fail the whole deploy with a confusing
+    #    "Could not resolve host" error.
+    rc, pull_out = await _git_pull_with_retry(codebase_root)
+    if rc != 0:
+        out = (pull_out or "").strip()[:500]
+        steps.append({"step": "git pull", "ok": False, "output": out})
         return JSONResponse(
-            {"steps": steps, "ok": False, "error": f"git pull failed: {steps[-1]['output']}"},
+            {"steps": steps, "ok": False, "error": f"git pull failed: {out}"},
             status_code=500,
         )
+    steps.append({"step": "git pull", "ok": True, "output": (pull_out or "").strip()[:500]})
 
     # 2. pip install
     import sys
