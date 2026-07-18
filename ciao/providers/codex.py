@@ -282,6 +282,20 @@ def resolve_codex_binary(env: Mapping[str, str] | None = None) -> str | None:
     return None
 
 
+def _codex_path_env(binary: str) -> dict[str, str]:
+    """Return an env fragment that puts *binary*'s directory on ``PATH``.
+
+    When the binary was resolved from a fallback location (e.g. inside
+    ChatGPT.app), the child process needs the directory on ``PATH`` so
+    that ``codex`` can locate itself for internal sub-invocations.
+    """
+    bin_dir = str(Path(binary).resolve().parent)
+    current = os.environ.get("PATH", "")
+    if bin_dir in current.split(os.pathsep):
+        return {}
+    return {"PATH": bin_dir}
+
+
 def codex_login_status(
     env: Mapping[str, str] | None = None,
     *,
@@ -613,10 +627,12 @@ class CodexProvider(BaseSDKProvider):
     async def _ensure_peer(self, request: AgentRequest) -> StdioJsonRpcPeer:
         if self._peer is not None and self._peer.running:
             return self._peer
+        command = self._resolved_command()
+        env = {**_codex_path_env(command[0]), **(request.extra_env or {})}
         self._peer = StdioJsonRpcPeer(
-            self._resolved_command(),
+            command,
             cwd=self.workspace_root,
-            env=request.extra_env or {},
+            env=env,
             name="codex app-server",
         )
         await self._peer.start()
@@ -1130,7 +1146,10 @@ class CodexProvider(BaseSDKProvider):
         cached = _MODEL_CACHE.get(key)
         if cached and not force and time.monotonic() - cached[0] < _MODEL_CACHE_TTL:
             return [dict(item) for item in cached[1]]
-        peer = StdioJsonRpcPeer(command, cwd=workspace_root, name="codex model catalog")
+        peer = StdioJsonRpcPeer(
+            command, cwd=workspace_root, name="codex model catalog",
+            env=_codex_path_env(command[0]),
+        )
         try:
             await peer.start()
             await peer.request(
@@ -1183,7 +1202,10 @@ class CodexProvider(BaseSDKProvider):
             if not binary:
                 return None
             command = [binary, "app-server", "--stdio"]
-        peer = StdioJsonRpcPeer(command, cwd=workspace_root, name="codex history")
+        peer = StdioJsonRpcPeer(
+            command, cwd=workspace_root, name="codex history",
+            env=_codex_path_env(command[0]),
+        )
         try:
             await peer.start()
             await peer.request(
