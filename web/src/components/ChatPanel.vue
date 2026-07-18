@@ -345,8 +345,6 @@
             >Fix this error</button>
           </div>
         </div>
-        <!-- Background (async) subagents still running after the parent turn -->
-        <SubagentPanel v-else-if="item.kind === 'subagents'" :subagents="item.subs" />
         <!-- System message (errors, etc) -->
         <div v-else-if="item.kind === 'system'" class="message system">
           <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
@@ -444,16 +442,10 @@
             v-html="renderMarkdown(store.currentStreamingThinking)"
           ></div>
           <div v-if="store.currentStreamingText" class="trace-text trace-streaming" v-html="renderMarkdown(store.currentStreamingText)"></div>
-          <!-- Foreground subagents for the in-flight turn nest in the live trace;
-               background async agents render as a standalone panel below. -->
+          <!-- Subagents for the in-flight turn nest in the live trace -->
           <SubagentPanel v-if="liveSubagents.length" :subagents="liveSubagents" />
         </div>
-        </div>
-
-      <SubagentPanel
-        v-if="liveStandaloneSubagents.length"
-        :subagents="liveStandaloneSubagents"
-      />
+      </div>
 
       <div ref="scrollAnchor"></div>
 
@@ -858,7 +850,6 @@ type RenderItem =
   | { kind: 'assistant'; msg: ChatMessage; outputs?: TraceOutput[]; subchats?: ProviderSubchatRecord[] }
   | { kind: 'system'; msg: ChatMessage }
   | { kind: 'trace'; steps: ChatMessage[]; subs?: SubagentTranscript[]; outputs?: TraceOutput[]; subchats?: ProviderSubchatRecord[] }
-  | { kind: 'subagents'; subs: SubagentTranscript[] }
 
 type ChatComment = {
   id: string
@@ -2019,54 +2010,12 @@ async function speakMessage(text: string, key: string): Promise<void> {
 
 onBeforeUnmount(stopSpeaking)
 
-// System bubbles produced by _summarize_task_notification (routes_api.py)
-// announce a subagent completion ("🤖 Subagent completed: ..." / "🤖 Agent
-// \"X\" completed"). renderItems uses them as the chronological anchor for
-// the dispatching turn's SubagentPanel.
-function isSubagentCompletionNotice(content: string): boolean {
-  return /^\u{1F916} (Subagent|Agent\b)/u.test(content.trim())
-}
-
-// Pull the dispatched agent's own description out of a completion-notice
-// bubble (e.g. 'Agent "Curate recent chats and proposals" finished') so the
-// notice can be tied to its exact SubagentTranscript by name. turn_index
-// can't be used for this: it only increments on a message that ships to the
-// server as a fresh prompt, but a chat can advance server-side turns purely
-// via internal continuations (auto-drained queued follow-ups) with no
-// corresponding visible `role: 'user'` bubble — so the render walk's turn
-// counter can be several turns behind the async subagent's real turn_index
-// by the time its notice appears.
-function noticeSubagentName(content: string): string | null {
-  const m = content.match(/Agent "([^"]+)"/)
-  return m ? m[1] : null
-}
-
 // Subagent activity lines are tagged with the leading turnstile arrow by the
 // store's tool_use handler when an event arrives with parent_tool_use_id set.
 // Used to indent and de-emphasize them so the trace reads "parent → subagent
 // → parent" without the user mistaking subagent work for the parent's own.
 function isSubagentLine(line: string): boolean {
   return line.trimStart().startsWith('↳')  // ↳
-}
-
-// Foreground Task/Agent dispatches run inside the parent turn and belong in
-// the Reasoning trace. Background (`run_in_background`) agents outlive the
-// parent reply and get a standalone panel the user can keep watching.
-function isBackgroundSubagent(sub: SubagentTranscript): boolean {
-  return sub.is_async === true
-}
-
-function partitionSubagents(subs: SubagentTranscript[]): {
-  trace: SubagentTranscript[]
-  standalone: SubagentTranscript[]
-} {
-  const trace: SubagentTranscript[] = []
-  const standalone: SubagentTranscript[] = []
-  for (const sub of subs) {
-    if (isBackgroundSubagent(sub)) standalone.push(sub)
-    else trace.push(sub)
-  }
-  return { trace, standalone }
 }
 
 function handleFileLinkClick(e: MouseEvent): void {
@@ -2212,38 +2161,8 @@ const renderData = computed<{
     if (turnIndex === null) return []
     const subs = subsByTurn.get(turnIndex)
     if (!subs?.length) return []
-    const { trace, standalone } = partitionSubagents(subs)
-    if (standalone.length) subsByTurn.set(turnIndex, standalone)
-    else subsByTurn.delete(turnIndex)
-    return trace
-  }
-
-  const flushStandaloneSubagents = () => {
-    if (currentTurnIndex === null) return
-    const subs = subsByTurn.get(currentTurnIndex)
-    if (!subs?.length) return
-    const standalone = subs.filter(isBackgroundSubagent)
-    if (!standalone.length) return
-    items.push({ kind: 'subagents', subs: standalone })
-    const foreground = subs.filter(s => !isBackgroundSubagent(s))
-    if (foreground.length) subsByTurn.set(currentTurnIndex, foreground)
-    else subsByTurn.delete(currentTurnIndex)
-  }
-
-  // Place exactly the subagent a completion notice names, searching every
-  // turn bucket rather than just currentTurnIndex (see noticeSubagentName).
-  // Returns false if no match was found so the caller can fall back.
-  const flushStandaloneSubagentByName = (name: string): boolean => {
-    for (const [idx, subs] of subsByTurn.entries()) {
-      const match = subs.find(s => isBackgroundSubagent(s) && s.description === name)
-      if (!match) continue
-      items.push({ kind: 'subagents', subs: [match] })
-      const remaining = subs.filter(s => s !== match)
-      if (remaining.length) subsByTurn.set(idx, remaining)
-      else subsByTurn.delete(idx)
-      return true
-    }
-    return false
+    subsByTurn.delete(turnIndex)
+    return subs
   }
 
   const flushTurn = (isFinal = false) => {
@@ -2340,7 +2259,6 @@ const renderData = computed<{
   for (const msg of store.activeMessages) {
     if (msg.role === 'user') {
       flushTurn()
-      flushStandaloneSubagents()
       currentTurnIndex = typeof msg.turn_index === 'number'
         ? msg.turn_index
         : currentTurnIndex === null ? 0 : currentTurnIndex + 1
@@ -2352,18 +2270,6 @@ const renderData = computed<{
       && msg.tool_name !== '_filecard'
     ) {
       flushTurn()
-      // A subagent-completion notice marks where the background work ended:
-      // flush that exact subagent's standalone panel just before it so the
-      // chat reads chronologically (dispatch reply → background agent →
-      // completion notice → report) instead of dumping the panel after the
-      // report at the end of the turn. Match by name, not currentTurnIndex —
-      // a chat can advance several server-side turns via auto-drained queued
-      // follow-ups with no new `role: 'user'` bubble, leaving the render
-      // walk's turn counter behind the async subagent's real turn_index.
-      if (isSubagentCompletionNotice(msg.content)) {
-        const name = noticeSubagentName(msg.content)
-        if (!name || !flushStandaloneSubagentByName(name)) flushStandaloneSubagents()
-      }
       items.push({ kind: 'system', msg })
     } else {
       // assistant text, _activity tool block, _thinking note, or _filecard:
@@ -2372,32 +2278,22 @@ const renderData = computed<{
     }
   }
   flushTurn(true)
-  // While streaming, foreground subagents nest in the live trace; background
-  // async agents render as a standalone panel below it.
+  // While streaming, subagents nest in the live trace.
   if (store.isStreaming) {
     const all = [...subsByTurn.values()].flat().concat(unanchoredSubs)
-    const { trace, standalone } = partitionSubagents(all)
-    return { items, liveSubs: trace, liveStandaloneSubs: standalone }
+    return { items, liveSubs: all, liveStandaloneSubs: [] }
   }
-  flushStandaloneSubagents()
   // Anything still unplaced (turn not in history yet, or no turn info):
-  // foreground leftovers fold into a trace block; background ones stay standalone.
+  // leftovers fold into a trace block.
   const leftovers = [...subsByTurn.values()].flat().concat(unanchoredSubs)
-  const { trace, standalone } = partitionSubagents(leftovers)
-  if (standalone.length) {
-    items.push({ kind: 'subagents', subs: standalone })
-  }
-  if (trace.length) {
-    items.push({ kind: 'trace', steps: [], subs: trace })
+  if (leftovers.length) {
+    items.push({ kind: 'trace', steps: [], subs: leftovers })
   }
   return { items, liveSubs: [], liveStandaloneSubs: [] }
 })
 
 const renderItems = computed<RenderItem[]>(() => renderData.value.items)
 const liveSubagents = computed<SubagentTranscript[]>(() => renderData.value.liveSubs)
-const liveStandaloneSubagents = computed<SubagentTranscript[]>(
-  () => renderData.value.liveStandaloneSubs,
-)
 
 // Watcher: keep highlights in sync with the pending list and message DOM.
 watch(

@@ -130,7 +130,13 @@ async def _run_claude_oneshot(
         skills=[],
         tools=[],
         strict_mcp_config=True,
-        max_turns=1,
+        # ``max_turns=2`` (not 1) absorbs a stray ``stop_reason=tool_use`` the
+        # model occasionally emits under ``tools=[]`` — a known SDK quirk
+        # where the model starts to call a tool, gets nothing back, and the
+        # SDK aborts the turn. With 2 turns the model recovers and returns
+        # the actual text on the next iteration. Title / critique callers
+        # never loop, so this is one extra API call at most.
+        max_turns=2,
         env=env or {},
     )
     parts: list[str] = []

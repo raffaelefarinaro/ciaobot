@@ -379,7 +379,7 @@ const viewMode = computed<'chat' | 'project' | 'schedules' | 'settings'>(() => {
 const sidebarCollapsed = ref(false)
 const showNewSchedule = ref(false)
 const isMobile = ref(window.innerWidth < 768)
-let latestStatusSyncTimer: ReturnType<typeof window.setInterval> | null = null
+let latestStatusSyncTimer: ReturnType<typeof setInterval> | null = null
 
 // Current project id for pinned-file lookup.
 const currentProjectId = computed(() => {
@@ -515,14 +515,14 @@ window.addEventListener('resize', onResize)
 
 function startLatestStatusSync() {
   if (latestStatusSyncTimer) return
-  latestStatusSyncTimer = window.setInterval(() => {
+  latestStatusSyncTimer = setInterval(() => {
     void store.syncLatest()
   }, LATEST_STATUS_SYNC_MS)
 }
 
 function stopLatestStatusSync() {
   if (!latestStatusSyncTimer) return
-  window.clearInterval(latestStatusSyncTimer)
+  clearInterval(latestStatusSyncTimer)
   latestStatusSyncTimer = null
 }
 

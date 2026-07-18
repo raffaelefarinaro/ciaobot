@@ -154,7 +154,7 @@ def test_ciao_config_parses_ollama_env(monkeypatch) -> None:
     assert config.ollama.api_key == "ollama"  # default daemon-relay token
     # Default cheap free-tier title model when nothing is set.
     assert config.ollama.title_model == "gemma4:e2b-it-qat"
-    assert config.ollama.opus_model == "glm-5.2:cloud"
+    assert config.ollama.opus_model == "minimax-m3:cloud"
     assert config.ollama.fable_model == "glm-5.2:cloud"
     assert config.ollama.sonnet_model == "kimi-k2.7-code:cloud"
     assert config.ollama.haiku_model == "deepseek-v4-flash:cloud"

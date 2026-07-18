@@ -54,7 +54,7 @@ def build_dev_environment(
     if not web_dir.is_dir():
         raise RuntimeError(f"{web_dir} does not exist; run ciao dev from an app checkout.")
 
-    env = dict(base_env or os.environ)
+    env = dict(base_env if base_env is not None else os.environ)
     for key, value in _load_env_file(root / ".env").items():
         env.setdefault(key, value)
     if not env.get("PWA_AUTH_TOKEN"):

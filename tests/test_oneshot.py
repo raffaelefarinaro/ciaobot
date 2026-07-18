@@ -85,7 +85,10 @@ async def test_run_oneshot_disables_tools_and_filesystem_discovery(
     assert options.skills == []
     assert options.setting_sources == []
     assert options.strict_mcp_config is True
-    assert options.max_turns == 1
+    # ``max_turns=2`` (not 1) absorbs a stray ``stop_reason=tool_use`` the
+    # model occasionally emits under ``tools=[]`` — see the comment in
+    # ``_run_claude_oneshot`` for the full rationale.
+    assert options.max_turns == 2
 
 
 def test_result_error_detail_composes_available_fields() -> None:

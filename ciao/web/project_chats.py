@@ -547,6 +547,13 @@ async def _generate_chat_title_with_engine(
     # literally — that always fails ("There's an issue with the selected
     # model (apfel)"). Substitute the standard fallback model instead.
     fallback_model = model if model != "apfel" else "haiku"
+    # Defense in depth: Claude Code's fast-mode suffix ("[1m]") is a CLI
+    # routing hint, not a real Anthropic model id, so the API rejects
+    # ``claude-opus-4-8[1m]`` outright. ``run_oneshot`` already strips it,
+    # but doing it here too keeps the ``model=`` log line honest and
+    # protects any future caller that bypasses the helper.
+    if fallback_model.endswith("[1m]"):
+        fallback_model = fallback_model[: -len("[1m]")]
     try:
         text = await run_oneshot(
             user_prompt,
