@@ -194,6 +194,33 @@ describe('per-chat WS auto-reconnect', () => {
   })
 })
 
+describe('ephemeral status events', () => {
+  test('does not render Claude requesting status as a system message', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'c-requesting'
+    store.activeChatId = chatId
+    store.messages[chatId] = [
+      { role: 'user', content: 'hi', timestamp: '' },
+    ]
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'status', message: 'requesting' }),
+    })
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'status', message: 'requesting' }),
+    })
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'status', message: 'retrying on sonnet' }),
+    })
+
+    const msgs = store.messages[chatId] || []
+    expect(msgs.some(m => m.role === 'system' && m.content === 'requesting')).toBe(false)
+    expect(msgs.some(m => m.role === 'system' && m.content === 'retrying on sonnet')).toBe(true)
+  })
+})
+
 describe('queued message replay handling', () => {
   test('clears local queued chips when server history contains the flushed user turn', async () => {
     const store = useProjectStore()

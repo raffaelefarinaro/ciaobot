@@ -3029,9 +3029,11 @@ export const useProjectStore = defineStore('projects', () => {
       case 'status': {
         // Surface descriptive status notes (capability fallback "retrying
         // on …") as system messages. Ephemeral control tokens stay silent
-        // so "thinking"/"stopped"/rate-limit markers do not pollute history.
+        // so "thinking"/"stopped"/"requesting"/rate-limit markers do not
+        // pollute history. Claude emits "requesting" while tools are pending;
+        // those belong in the Activity trace via tool_use, not as chat lines.
         const message = (event.message || '').trim()
-        const ephemeral = new Set(['thinking', 'stopped', 'rate_limit', 'model_rerouted'])
+        const ephemeral = new Set(['thinking', 'stopped', 'requesting', 'rate_limit', 'model_rerouted'])
         if (message && !ephemeral.has(message) && !message.startsWith('error:')) {
           msgs.push({
             role: 'system',
