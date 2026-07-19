@@ -723,6 +723,13 @@ class ChatInfo:
     # `to_dict` so the PWA can rebuild its interactive picker after a reload
     # instead of showing the dead `{"questions": ...}` trace row.
     pending_question: str = ""
+    # User messages that were queued (mode="queue") while a turn was running
+    # and then parked when that turn paused on an AskUserQuestion. The pause
+    # tears down the stream (and its in-memory pending queue), so they are
+    # stashed here and re-seeded into the next stream — the user's answer turn
+    # — so they still flush as follow-ups instead of being silently dropped.
+    # Each entry is {"id": str, "text": str, "images": list[str]}.
+    pending_queue: list[dict] = field(default_factory=list)
     # Provider-neutral conversation fork lineage. Forks are normal chats with
     # a fresh provider session; these fields only preserve their relationship
     # to the source conversation and stable root-relative title numbering.
@@ -1026,6 +1033,7 @@ class ProjectChatManager:
                 ),
                 handover_context_pending=bool(cd.get("handover_context_pending", False)),
                 pending_question=cd.get("pending_question", ""),
+                pending_queue=list(cd.get("pending_queue", [])),
                 forked_from_chat_id=cd.get("forked_from_chat_id", ""),
                 forked_from_turn_index=cd.get("forked_from_turn_index"),
                 fork_root_chat_id=cd.get("fork_root_chat_id", ""),
@@ -1107,6 +1115,7 @@ class ProjectChatManager:
                     "handover_messages": c.handover_messages,
                     "handover_context_pending": c.handover_context_pending,
                     "pending_question": c.pending_question,
+                    "pending_queue": c.pending_queue,
                     "forked_from_chat_id": c.forked_from_chat_id,
                     "forked_from_turn_index": c.forked_from_turn_index,
                     "fork_root_chat_id": c.fork_root_chat_id,
@@ -3296,6 +3305,11 @@ class ProjectChatManager:
         chat.archive_path = ""
         chat.handover_messages = []
         chat.handover_context_pending = False
+        # A fresh session abandons any question the old one paused on, along
+        # with follow-ups parked for that answer turn — they must not leak
+        # into the new conversation.
+        chat.pending_question = ""
+        chat.pending_queue = []
         if chat.retry_status:
             self._clear_chat_retry(chat)
         self._state.reset_active_session(ctx)
@@ -4568,6 +4582,21 @@ class ProjectChatManager:
             # A new user turn answers (or supersedes) any paused question, so
             # the persisted picker state no longer applies.
             chat_meta.pending_question = ""
+            # Re-seed messages parked when a prior turn paused on a question
+            # (see the question_paused branch in _drive). They flush as
+            # follow-ups after this (the answer) turn, keeping the user's
+            # original queue order. Only ever populated after such a pause.
+            if chat_meta.pending_queue:
+                for entry in chat_meta.pending_queue:
+                    text = str(entry.get("text", ""))
+                    if not text:
+                        continue
+                    stream.enqueue(
+                        text,
+                        [str(ref) for ref in (entry.get("images") or [])],
+                        entry_id=entry.get("id") or None,
+                    )
+                chat_meta.pending_queue = []
             turn_index = chat_meta.user_turn_count
             chat_meta.user_turn_count = turn_index + 1
             if image_refs:
@@ -4890,6 +4919,18 @@ class ProjectChatManager:
                         last_assistant_text = turn_assistant_text
 
                     if question_paused:
+                        # The turn stopped on an AskUserQuestion the user must
+                        # answer in a fresh turn (Claude's SDK picker). Anything
+                        # they queued while this turn ran lives only on `stream`,
+                        # which the finally block tears down — so park it on the
+                        # chat. start_stream re-seeds it into the answer turn so
+                        # the follow-ups still flush instead of being dropped.
+                        parked = stream.drain_pending()
+                        if parked:
+                            cm_park = self._chats.get(chat_id)
+                            if cm_park is not None:
+                                cm_park.pending_queue = list(parked)
+                                self._save()
                         break
 
                     next_pending = stream.drain_one()

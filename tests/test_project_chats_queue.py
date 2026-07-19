@@ -225,6 +225,111 @@ async def test_ask_user_question_pauses_turn_without_draining_as_queued(tmp_path
     )
 
 
+async def test_queued_messages_survive_question_pause_and_flush_after_answer(
+    tmp_path: Path,
+) -> None:
+    """Messages queued mid-turn must not be dropped when the turn pauses on an
+    AskUserQuestion. They get parked on the chat and re-seeded into the answer
+    turn so they still flush as follow-ups (regression: queued messages
+    disappeared and were never sent after answering a question via the PWA).
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q3-park", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="park-test")
+
+    queued_ready = asyncio.Event()
+    turn_calls: list[str] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None):
+        turn_calls.append(prompt)
+        if prompt == "initial":
+            # Hold the first turn open until the test has queued follow-ups,
+            # then pause on a question — which tears the stream down.
+            await queued_ready.wait()
+            yield ToolUseEvent(
+                type="assistant",
+                tool_name="AskUserQuestion",
+                tool_input='{"questions":[{"question":"Which email?"}]}',
+            )
+            return
+        yield ResultEvent(
+            type="result",
+            result=f"done: {prompt}",
+            session_id="sess-park",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    captured: list[dict] = []
+
+    async def consume(stream) -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    consumer = asyncio.create_task(consume(stream))
+    await _wait_for(
+        lambda: any(e.get("type") == "user_echo" for e in captured),
+        timeout=2.0,
+    )
+
+    # Queue two follow-ups while the first turn is still running.
+    assert pcm.queue_message(chat.chat_id, "msg A") is True
+    assert pcm.queue_message(chat.chat_id, "msg B") is True
+
+    # Release the turn so it reaches the question and pauses.
+    queued_ready.set()
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    # The paused turn produced no result and the stream is gone...
+    assert not any(e.get("type") == "result" for e in captured), captured
+    assert pcm.get_active_stream(chat.chat_id) is None
+    # ...but the queued follow-ups were parked on the chat, not dropped.
+    parked = pcm._chats[chat.chat_id].pending_queue
+    assert [p["text"] for p in parked] == ["msg A", "msg B"], parked
+
+    # The user answers, starting a fresh turn. The parked follow-ups must
+    # re-seed and flush after it, in order.
+    captured2: list[dict] = []
+
+    async def consume2(stream) -> None:
+        async for ev in stream.subscribe():
+            captured2.append(ev)
+
+    stream2 = pcm.start_stream(chat.chat_id, "answer")
+    await asyncio.wait_for(consume2(stream2), timeout=5.0)
+
+    # answer + two flushed follow-ups.
+    assert turn_calls == ["initial", "answer", "msg A", "msg B"], turn_calls
+    echoes = [e["text"] for e in captured2 if e.get("type") == "user_echo"]
+    assert echoes == ["answer", "msg A", "msg B"], echoes
+    # The park buffer is consumed exactly once.
+    assert pcm._chats[chat.chat_id].pending_queue == []
+
+
+async def test_new_session_clears_parked_question_queue(tmp_path: Path) -> None:
+    """Starting a fresh session abandons a paused question and any follow-ups
+    parked for its answer turn — they must not leak into the new conversation.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q3-reset", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="reset-test")
+    pcm._chats[chat.chat_id].pending_question = '{"questions":[{"question":"x?"}]}'
+    pcm._chats[chat.chat_id].pending_queue = [
+        {"id": "q-1", "text": "stale follow-up", "images": []}
+    ]
+
+    pcm.new_session(chat.chat_id)
+
+    assert pcm._chats[chat.chat_id].pending_question == ""
+    assert pcm._chats[chat.chat_id].pending_queue == []
+
+
 async def test_ask_user_question_interrupts_live_provider(tmp_path: Path) -> None:
     """When a live provider is attached, AskUserQuestion must interrupt the
     CLI turn. A live probe (claude-agent-sdk 0.2.93) confirmed interrupt is the
