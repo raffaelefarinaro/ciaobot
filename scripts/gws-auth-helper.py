@@ -36,33 +36,27 @@ PROFILE_CONFIGS = {
     "work": REPO_ROOT / "secrets" / "gws",
 }
 
-# Scopes requested per profile (must match or exceed what gws needs).
-PERSONAL_SCOPES = (
+# Full scope set requested for every profile. OAuth has no "all scopes" wildcard,
+# so this enumerates every core Workspace service gws supports. Google only grants
+# what the account's GCP OAuth consent screen allows; in "testing" mode all of these
+# are available to the project's test users. Extra/enterprise services (admin-reports,
+# keep, classroom, chat, meet) are omitted because they need admin grants or special
+# API enablement and would fail consent on a normal account — pass --scopes to request
+# a custom set when you need them.
+FULL_SCOPES = (
     "https://www.googleapis.com/auth/gmail.modify "
     "https://www.googleapis.com/auth/calendar "
-    "https://www.googleapis.com/auth/tasks "
-    "openid "
-    "https://www.googleapis.com/auth/userinfo.email "
-    "https://www.googleapis.com/auth/userinfo.profile"
-)
-
-WORK_SCOPES = (
     "https://www.googleapis.com/auth/drive "
     "https://www.googleapis.com/auth/spreadsheets "
-    "https://www.googleapis.com/auth/gmail.modify "
-    "https://www.googleapis.com/auth/calendar "
     "https://www.googleapis.com/auth/documents "
     "https://www.googleapis.com/auth/presentations "
     "https://www.googleapis.com/auth/tasks "
+    "https://www.googleapis.com/auth/contacts "
+    "https://www.googleapis.com/auth/forms.body "
     "openid "
     "https://www.googleapis.com/auth/userinfo.email "
     "https://www.googleapis.com/auth/userinfo.profile"
 )
-
-PROFILE_SCOPES = {
-    "personal": PERSONAL_SCOPES,
-    "work": WORK_SCOPES,
-}
 
 
 def read_client_secret(config_dir: Path) -> dict:
@@ -194,6 +188,11 @@ def main() -> None:
         help="Full redirect URL from the browser. When given, skip the interactive "
         "prompt and exchange the code directly (for headless/non-TTY use).",
     )
+    parser.add_argument(
+        "--scopes",
+        help="Space-separated OAuth scopes to request instead of the full default set "
+        "(e.g. 'https://www.googleapis.com/auth/keep https://www.googleapis.com/auth/chat.messages').",
+    )
     args = parser.parse_args()
 
     config_dir = validate_profile(args.profile)
@@ -205,7 +204,7 @@ def main() -> None:
     redirect_uris = installed.get("redirect_uris", ["http://localhost"])
     redirect_uri = redirect_uris[0]
 
-    scopes = PROFILE_SCOPES[args.profile]
+    scopes = args.scopes.strip() if args.scopes else FULL_SCOPES
 
     print(f"\nProfile: {args.profile}")
     print(f"Config dir: {config_dir}")
