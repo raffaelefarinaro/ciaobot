@@ -12,7 +12,7 @@
         <h2>{{ title }}</h2>
       </slot>
     </div>
-    <div v-if="$slots.actions" class="header-actions">
+    <div v-if="$slots.actions" class="header-actions" :key="activeBgAgents">
       <slot name="actions" />
     </div>
     <NotificationBell class="header-bell" />
@@ -22,7 +22,7 @@
 <script setup lang="ts">
 import NotificationBell from './NotificationBell.vue'
 
-defineProps<{ title?: string }>()
+defineProps<{ title?: string; activeBgAgents?: number }>()
 defineEmits<{ 'open-sidebar': [] }>()
 </script>
 

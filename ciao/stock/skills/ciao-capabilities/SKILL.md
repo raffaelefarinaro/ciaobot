@@ -35,7 +35,7 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 
 - Chats are **archived into a markdown vault** (e.g. `memory-vault/Logs/Chats/`). From archived sessions Ciaobot extracts insights and drafts **memory proposals** — the user reviews and approves them before anything is promoted into durable memory (`MEMORY.md`). Nothing is memorized silently.
 - The vault is standard, open markdown: notes, project folders, `CLAUDE.md`, `MEMORY.md`, a generated `INDEX.md` from frontmatter and wikilinks. It is agent-agnostic and remains useful without Ciaobot.
-- Vault tooling: `ciao vault-search` (search before adding duplicate facts), `ciao vault-index` (rebuild the index after larger edits). Reading conventions live in the `vault-read` skill.
+- Vault tooling: search before adding duplicate facts, and refresh the index after larger edits. Reading conventions live in the `vault-read` skill. For the live list of typed Ciaobot tools (memory, vault, projects, chats, schedules, loops, files), call `capabilities_get` rather than reciting a static tool list.
 
 ### 3. Schedules, loops, and automations
 

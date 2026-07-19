@@ -105,7 +105,43 @@ def test_system_prompt_includes_memory_and_vault_notes() -> None:
     assert "ciao vault-lint" in append
     assert "ciao sync-skills" in append
     assert "ciao create-chat" in append
+    assert "ciao provider-chat" in append
     assert "Memory-Proposals.md" in append
+
+
+def test_mcp_system_prompt_strips_legacy_control_recipes() -> None:
+    memory_block = (
+        "Edit them with `ciao memory read|add|replace|remove (--target memory|user); "
+        "CLI edits persist immediately but only appear in this block on the next session."
+    )
+    legacy = mi.system_prompt_payload(memory_block)
+    mcp = mi.system_prompt_payload(memory_block, control_surface="mcp")
+    assert legacy is not None and mcp is not None
+    legacy_append = legacy["append"]
+    mcp_append = mcp["append"]
+
+    # The MCP path strips the legacy CLI/curl transport recipes entirely.
+    assert "ciao create-chat" not in mcp_append
+    assert "ciao provider-chat" not in mcp_append
+    assert "ciao vault-search" not in mcp_append
+    assert "ciao vault-lint" not in mcp_append
+    assert "ciao sync-skills" not in mcp_append
+    # Those recipes remain on the legacy path.
+    assert "ciao create-chat" in legacy_append
+    assert "ciao vault-lint" in legacy_append
+
+    # It no longer injects specific MCP tool-name equivalents; a single nudge to
+    # prefer the typed tools replaces the recipe block.
+    assert "prefer them over curl, the ciao CLI" in mcp_append
+    assert "Ciaobot MCP control plane" not in mcp_append
+    assert "memory_read" not in mcp_append
+
+    # The bounded-memory block preamble is rewritten to the MCP memory tools.
+    assert "Edit them with the Ciaobot MCP memory tools;" in mcp_append
+    assert "Tool edits persist immediately" in mcp_append
+
+    # Stripping recipes makes the MCP prompt strictly shorter than legacy.
+    assert len(mcp_append) < len(legacy_append)
 
 
 def test_system_prompt_payload_appends_to_claude_code_preset() -> None:

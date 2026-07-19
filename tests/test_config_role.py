@@ -14,6 +14,23 @@ def _config(**overrides: str) -> CiaoConfig:
     return CiaoConfig.from_env(env)
 
 
+def test_control_surface_defaults_to_mcp(tmp_path: Path) -> None:
+    config = _config(CIAO_WORKSPACE=str(tmp_path))
+    assert config.control_surface == "mcp"
+
+
+def test_control_surface_env_override(tmp_path: Path) -> None:
+    config = _config(CIAO_WORKSPACE=str(tmp_path), CIAO_CONTROL_SURFACE="legacy")
+    assert config.control_surface == "legacy"
+    config = _config(CIAO_WORKSPACE=str(tmp_path), CIAO_CONTROL_SURFACE="auto")
+    assert config.control_surface == "auto"
+
+
+def test_control_surface_invalid_falls_back_to_mcp(tmp_path: Path) -> None:
+    config = _config(CIAO_WORKSPACE=str(tmp_path), CIAO_CONTROL_SURFACE="bogus")
+    assert config.control_surface == "mcp"
+
+
 def test_vault_root_defaults_under_workspace_root(tmp_path: Path) -> None:
     config = _config(CIAO_WORKSPACE=str(tmp_path))
     assert config.workspace_root == tmp_path.resolve()

@@ -1539,16 +1539,37 @@ export const useProjectStore = defineStore('projects', () => {
         const serverUserCount = normalizedServer.filter(m => m.role === 'user').length
         const localUserCount = normalizedLocal.filter(m => m.role === 'user').length
         if (serverUserCount < localUserCount) {
-          console.warn(
-            `[loadMessages] Server returned ${serverUserCount} user turns but local has ${localUserCount}; keeping local to avoid data loss`,
-          )
-          return
+          const serverUsers = normalizedServer.filter(m => m.role === 'user')
+          const localUsers = normalizedLocal.filter(m => m.role === 'user')
+          let isPrefix = true
+          for (let i = 0; i < serverUsers.length; i++) {
+            if (serverUsers[i].content !== localUsers[i].content) {
+              isPrefix = false
+              break
+            }
+          }
+          const extraLocalUsers = localUsers.slice(serverUsers.length)
+          const allExtraAreOptimistic = extraLocalUsers.every(m => m.turn_index == null)
+          if (!isPrefix || !allExtraAreOptimistic) {
+            console.warn(
+              `[loadMessages] Server returned ${serverUserCount} user turns but local has ${localUserCount}; keeping local to avoid data loss`,
+            )
+            return
+          }
         }
         messages.value[chatId] = mergeMetadata(normalizedServer, normalizedLocal)
         persistMessages()
       } else if (historySignature(normalizedLocal) !== historySignature(messages.value[chatId] || [])) {
         messages.value[chatId] = normalizedLocal
         persistMessages()
+      }
+      if (
+        streaming.value[chatId]
+        && !projectStreaming.value[chatId]
+        && !queuedMessages.value[chatId]?.length
+        && hasSettledHistory(chatId)
+      ) {
+        clearStreamingState(chatId)
       }
       reconcileQueuedWithMessages(chatId)
     } catch {
@@ -1572,10 +1593,12 @@ export const useProjectStore = defineStore('projects', () => {
       // or tool-activity entry means the final state is rendered.
       if (!last) continue
       if (last.role === 'assistant' && !last.is_error) {
+        clearStreamingState(chatId)
         void loadSubagents(chatId)
         return
       }
       if (last.role === 'system' && last.tool_name !== '_activity') {
+        clearStreamingState(chatId)
         void loadSubagents(chatId)
         return
       }

@@ -1,34 +1,27 @@
 ---
 name: provider-consultation
-description: Start and communicate with a second provider route (the participant) as a read-only sub-chat attached to the originating turn. Use when the user explicitly asks to consult another model or provider.
+description: Start and communicate with a second provider route (the participant) as a read-only sub-chat attached to the originating turn. Use when the user explicitly asks to consult, handoff to, delegate to, or route tasks to another model or provider (e.g. Codex, Ollama, OpenRouter, Fable, etc.).
 allowed-tools:
-  - Bash
+  - mcp__ciaobot__consultation_start
+  - mcp__ciaobot__consultation_send
+  - mcp__ciaobot__consultation_close
+  - mcp__ciaobot__consultation_cancel
+  - mcp__ciaobot__consultation_extend
 ---
 
 # Provider Consultation
 
 You can spawn and communicate with a second provider route (the participant) as a read-only sub-chat attached to the originating turn. This is useful when the user explicitly asks to consult another model/provider (e.g. Codex/GPT-4 or another Claude model) for a specialized sub-task.
 
-## Usage
+> [!IMPORTANT]
+> Do **NOT** search for or invoke provider binaries such as `codex` or `ollama`. All cross-provider delegation flows through Ciaobot's `consultation_*` MCP tools.
 
-All commands must be executed via the `Bash` tool from the workspace root.
+## MCP usage
 
-```bash
-# Start a provider consultation
-ciao provider-chat start --chat-id <parent_chat_id> --provider <provider> --model <model> --message "<initial_prompt>"
-
-# Send follow-up messages to the participant
-ciao provider-chat send --subchat-id <subchat_id> --message "<prompt>"
-
-# Close/finalize the consultation
-ciao provider-chat close --subchat-id <subchat_id>
-
-# Cancel/abort active work
-ciao provider-chat cancel --subchat-id <subchat_id>
-
-# Extend consultation message/time limits
-ciao provider-chat extend --subchat-id <subchat_id>
-```
+- `consultation_start` initializes the participant and sends the first task.
+- `consultation_send` sends follow-up context or answers.
+- `consultation_close` finalizes a successful consultation; `consultation_cancel` aborts active work.
+- `consultation_extend` requires explicit user authorization.
 
 ## Protocol & Guidelines
 

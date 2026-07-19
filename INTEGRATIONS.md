@@ -126,6 +126,15 @@ Copy `.env.example` to `.env` and fill in the app-level settings first:
 
 **Runtime:** `CIAO_WORKSPACE`, `CIAO_PORT`
 
+**Ciaobot agent control plane:**
+
+- `CIAO_MCP_ENABLED`: enables the embedded authenticated MCP endpoint and managed-process integration. Default `true`.
+- `CIAO_CONTROL_SURFACE`: `legacy`, `mcp`, or `auto`. `legacy` preserves CLI/skill/direct-file adapters; `mcp` is fail-closed; `auto` reads the promoted per-provider result from `.runtime/control_surface_decision.json` and falls back to legacy. A chat-level setting can override it.
+- `CIAO_BENCHMARK_MODE`: internal evaluation flag. It keeps the HTTP/chat/provider stack live but suppresses autonomous schedules, loops, backup, GWS health, startup triage, skill refresh, voice repair, install watching, and bundle refresh so paired measurements are not contaminated. Do not enable it for a normal server.
+- `CIAO_MCP_SESSION_TOKEN`: internal, short-lived bearer capability injected only into a Ciaobot-managed Codex app-server process. Ciaobot sets it automatically and excludes it from model-created shell commands; operators must not configure or persist it.
+
+The endpoint is mounted at `http://127.0.0.1:<PWA_PORT>/mcp/`. Do not place a static token in `.mcp.json` or Codex config: Ciaobot generates a scoped short-lived token and configures its managed Claude Code/Codex child process. See [docs/MCP.md](docs/MCP.md).
+
 **Internal command markers:** `CIAO_COMMAND_BEGIN`, `CIAO_COMMAND_INSTRUCTIONS`, and `CIAO_COMMAND_END` are reserved transcript markers used when Ciaobot expands a Claude-style slash command for Codex. They are not environment variables and should not be configured.
 
 **Optional direct-service keys:** `OPENAI_API_KEY` for Ciaobot cloud voice features and `CIAO_OLLAMA_API_KEY` for Ollama Cloud. Claude Code and Codex own their authentication through their respective CLIs.
@@ -215,7 +224,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_REVIEW_MODELS`: comma-separated list of model IDs for the critique / adversarial-review skill (`ciao.critique`). Overrides the default panel. IDs use the native shape for their backend: `owner/model` for OpenRouter (e.g. `anthropic/claude-sonnet-4.5`), `:tag`/`:cloud` for Ollama, bare aliases for Anthropic. Runtime-overridable from the PWA (Settings → Models, persisted in `.runtime/app_settings.json` under `critique_models`).
 - `CIAO_ADVERSARIAL_MODELS`: legacy alias for `CIAO_REVIEW_MODELS`.
 - `CIAO_TRAJECTORY_RETENTION_MONTHS`: number of months of trajectory JSON files to keep under `~/.ciao/trajectories/`. Older `YYYY-MM/` directories are pruned by the skill-evolution pass. Default `6`.
-- `CIAO_MEMORY_ENABLED`: set to `false`/`0`/`no`/`off` to skip injecting `~/.ciao/memory.md` and `~/.ciao/user.md` into the system prompt and registering the `memory` MCP tool. Default enabled. Useful when debugging prompt-cache behavior or for one-off chats that should run with no persisted memory.
+- `CIAO_MEMORY_ENABLED`: set to `false`/`0`/`no`/`off` to skip injecting `~/.ciao/memory.md` and `~/.ciao/user.md` into the system prompt. Default enabled. The embedded Ciaobot MCP catalog still exists; memory operations enforce the configured bounded stores. Useful when debugging prompt-cache behavior or for one-off chats that should run with no injected persisted-memory snapshot.
 - `CIAO_MEMORY_CHAR_LIMIT`: soft cap (chars) on `~/.ciao/memory.md`. Default `2200`. The `memory` tool refuses `add` actions that would push the file past this limit and asks the agent to consolidate (merge or remove entries) first.
 - `CIAO_USER_CHAR_LIMIT`: soft cap (chars) on `~/.ciao/user.md`. Default `1375`. Same consolidation flow as `CIAO_MEMORY_CHAR_LIMIT`.
 - `CIAO_MEMORY_DIR`: override for the directory holding `memory.md` and `user.md`. Default `~/.ciao`. Used in tests to point at a tmp_path; not normally set in production.

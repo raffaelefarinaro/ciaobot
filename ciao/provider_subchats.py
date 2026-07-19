@@ -358,6 +358,7 @@ class ProviderSubchatManager:
             model=record.participant.model,
             mode=parent_chat.mode if parent_chat else "auto",
             thinking_level=parent_chat.thinking_level if parent_chat else "",
+            control_surface=parent_chat.control_surface if parent_chat else "",
         )
 
         instruction = (

@@ -116,3 +116,39 @@ def test_registry_audit_records_chat_create_and_delete(tmp_path: Path) -> None:
         and chat.chat_id in event["chats"]["deleted"]
         for event in events
     )
+
+
+def test_build_agent_request_falls_back_to_legacy_without_mcp_service(
+    tmp_path: Path,
+) -> None:
+    # The default control surface is mcp, but a manager with no MCP service must
+    # degrade gracefully to legacy instead of raising, so the app stays usable.
+    manager = _make_manager(tmp_path)
+    assert manager._config.control_surface == "mcp"
+    assert manager._mcp_service is None
+    project = manager.create_project("Fallback", workspace="work")
+    chat = manager.create_chat(project.project_id)
+    assert chat.control_surface == ""  # inherits the server default
+
+    request = manager.build_agent_request(chat, prompt="hi")
+    assert request.control_surface == "legacy"
+    assert request.mcp_required is False
+    assert request.mcp_url == ""
+    assert request.mcp_token == ""
+
+
+def test_chat_control_surface_round_trips_through_registry(tmp_path: Path) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("MCP evaluation", workspace="personal")
+    chat = manager.create_chat(project.project_id)
+    chat.control_surface = "mcp"
+    chat.user_turn_count = 1
+    manager._save(reason="test_control_surface")
+
+    persisted = _persisted_chats(tmp_path)[chat.chat_id]
+    assert persisted["control_surface"] == "mcp"
+
+    reloaded = _make_manager(tmp_path).get_chat(chat.chat_id)
+    assert reloaded is not None
+    assert reloaded.control_surface == "mcp"
+    assert reloaded.to_dict()["control_surface"] == "mcp"

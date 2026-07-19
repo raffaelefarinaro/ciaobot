@@ -594,6 +594,21 @@
               <div v-if="providerConnectionResult" class="action-result">{{ providerConnectionResult }}</div>
             </div>
 
+            <div v-if="mcpStatus" class="credential-row">
+              <div class="setting-row-main setting-row-main--inline">
+                <div class="routine-info">
+                  <span class="routine-name">Ciaobot MCP</span>
+                  <p class="hint hint--compact">
+                    {{ mcpStatus.tool_count }} scoped tools · {{ mcpStatus.active_sessions || 0 }} active managed session{{ (mcpStatus.active_sessions || 0) === 1 ? '' : 's' }}
+                  </p>
+                </div>
+                <span class="badge" :class="mcpStatus.enabled && mcpStatus.bound ? 'badge--success' : 'badge--error'">
+                  {{ mcpStatus.enabled && mcpStatus.bound ? 'Ready' : 'Unavailable' }}
+                </span>
+              </div>
+              <p v-if="mcpStatus.last_error" class="hint hint--warn">Last tool error: {{ mcpStatus.last_error }}</p>
+            </div>
+
             <div v-for="(meta, key) in providerKeys.service_keys" :key="key" class="credential-row">
               <div class="setting-row-main setting-row-main--inline">
                 <div class="routine-info">
@@ -1609,6 +1624,7 @@ import type {
   GwsIntegrationSettings,
   LocalStatus,
   ModelsResponse,
+  McpStatus,
   PromptAsset,
   ProviderConfigSettings,
   RoutineSettings,
@@ -2206,6 +2222,7 @@ const providerKeysLoaded = ref(false)
 const providerKeysError = ref('')
 const providerKeysSaving = ref(false)
 const providerKeysResult = ref('')
+const mcpStatus = ref<McpStatus | null>(null)
 const providerKeyInputs = ref<Record<string, string>>({})
 const providerConnectionPending = ref('')
 const providerConnectionResult = ref('')
@@ -2412,6 +2429,14 @@ async function fetchProviderKeys() {
     providerKeysError.value = `Failed to load provider keys: ${e?.message || e}`
   } finally {
     providerKeysLoaded.value = true
+  }
+}
+
+async function fetchMcpStatus() {
+  try {
+    mcpStatus.value = await api.get<McpStatus>('/api/mcp/status')
+  } catch {
+    mcpStatus.value = { enabled: false, bound: false, tool_count: 0 }
   }
 }
 
@@ -3396,6 +3421,7 @@ onMounted(async () => {
   fetchAutomation()
   fetchPackageStatus()
   fetchProviderKeys()
+  fetchMcpStatus()
   fetchWorkspaceModels()
   fetchGwsIntegration()
   fetchWorkspacesList()

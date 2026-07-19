@@ -25,6 +25,7 @@ What that looks like in practice:
 - **Files and automations** — create, preview, edit, and restore vault files from the UI; run recurring routines on a cron you choose (schedules) or re-run a prompt inside one chat every N minutes (loops).
 - **Voice, notifications, and updates** — transcription, push alerts, model settings, and in-app package updates. On macOS: menu bar companion, `Ciaobot Server.app`, and background service after setup.
 - **Provider choice** — Claude Code or Codex with your existing login; Ollama, OpenRouter, and on-device models for lighter tasks (see [Providers](#providers)).
+- **Agent-safe control plane** — an authenticated, chat-scoped MCP surface lets managed Claude Code and Codex processes operate Ciaobot memory, vault, projects, chats, schedules, loops, consultations, and file history without curl or direct runtime-JSON edits. MCP is the default transport, with the legacy CLI path retained as an automatic fallback. See [docs/MCP.md](docs/MCP.md).
 
 Pick a workspace folder, choose a provider, and work — Ciaobot is the interface on top; the vault is yours to keep.
 
@@ -185,6 +186,7 @@ I'm sharing it because the patterns may be useful to you. Ideas, bug reports, di
 | Doc | What's in it |
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design: repo and workspace layout, chat pipeline, memory, schedules, providers. |
+| [docs/MCP.md](docs/MCP.md) | Embedded MCP architecture, security, complete tool catalog, Claude/Codex process configuration, and paired evaluation. |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Git checkout, dev workflow, testing, change guidelines. |
 | [INTEGRATIONS.md](INTEGRATIONS.md) | Env vars, OAuth, MCP connectors, server runtime knobs. |
 | [PWA_API.md](PWA_API.md) | API endpoints, auth flow, state paths, agent recipes. |

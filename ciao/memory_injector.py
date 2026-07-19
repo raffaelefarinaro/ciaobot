@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import re
 from pathlib import Path
 
 from ciao.memory_tool import (
@@ -123,6 +124,7 @@ def system_prompt_payload(
     memory_block: str,
     *,
     base_system_prompt: dict | None = None,
+    control_surface: str = "legacy",
 ) -> dict | None:
     """Build a ``SystemPromptPreset`` dict that appends Ciaobot instructions and ``memory_block``.
 
@@ -136,9 +138,22 @@ def system_prompt_payload(
     parts = []
     if existing_append:
         parts.append(existing_append)
-    parts.append(_system_instructions())
+    instructions = _system_instructions()
+    if control_surface == "mcp":
+        instructions = _mcp_system_instructions(instructions)
+    parts.append(instructions)
     if memory_block:
-        parts.append(memory_block.strip())
+        block = memory_block.strip()
+        if control_surface == "mcp":
+            block = block.replace(
+                "Edit them with `ciao memory read|add|replace|remove "
+                "(--target memory|user);",
+                "Edit them with the Ciaobot MCP memory tools;",
+            ).replace(
+                "CLI edits persist immediately but only appear in this block on the next session.",
+                "Tool edits persist immediately but only appear in this block on the next session.",
+            )
+        parts.append(block)
 
     combined = "\n\n".join(parts).strip()
     return {
@@ -146,3 +161,48 @@ def system_prompt_payload(
         "preset": "claude_code",
         "append": combined,
     }
+
+
+def _mcp_system_instructions(instructions: str) -> str:
+    """Strip legacy transport recipes when the managed process has typed MCP tools.
+
+    The behavioral policy (security, approvals, workspace identity, memory
+    semantics, entity detection, canonical docs, gws security) is identical to
+    the legacy arm. Only the CLI/curl/direct-file recipes are removed: the typed
+    MCP tools are self-describing and the server-level instructions already state
+    the prefer-MCP policy, so repeating transport recipes in the prompt is noise.
+    """
+    # Drop the bounded-memory CLI recipe sentence.
+    text = instructions.replace(
+        " Edit with `ciao memory read|add|replace|remove --target memory|user --text \"…\"`.",
+        "",
+    )
+    # Drop the vault CLI fallback + hygiene recipe lines.
+    text = text.replace(
+        "- Direct CLI fallback: `ciao vault-search \"<query>\" --limit 5`; rebuild stale search/entity data with `ciao vault-index`.\n",
+        "",
+    ).replace(
+        "\n- Vault hygiene: `ciao vault-lint` for broken wikilinks, orphans, and near-duplicates.",
+        "",
+    )
+    # Replace the legacy "Other agent CLIs" recipe block with a single MCP nudge.
+    # The typed tools carry their own usage; gws security lives in its own section.
+    mcp_nudge = (
+        "Use the authenticated Ciaobot MCP tools; prefer them over curl, the "
+        "ciao CLI, or direct `.runtime` edits.\n\n"
+    )
+    text = re.sub(
+        r"\*\*Other agent CLIs\*\*.*?(?=\*\*Background memory routines\*\*)",
+        mcp_nudge,
+        text,
+        flags=re.DOTALL,
+    )
+    # Drop the diagnostics `.runtime` file-path recipe; keep the behavior.
+    text = text.replace(
+        "inspect local runtime evidence before speculating: `.runtime/server_errors.log`, "
+        "`.runtime/job_runs.jsonl`, and, for macOS service/startup problems, "
+        "`.runtime/ciao.stderr.log` and `.runtime/ciao.stdout.log` when present. "
+        "Use focused tails or summaries; do not dump full logs.",
+        "gather diagnostic evidence before speculating; keep excerpts focused.",
+    )
+    return text

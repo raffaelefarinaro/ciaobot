@@ -1026,7 +1026,7 @@ def _launch_provider_login(config, provider: str) -> tuple[bool, str]:
     rendered = shlex.join(command)
     if sys.platform != "darwin":
         return False, rendered
-    runtime_root = Path(config.runtime_root)
+    runtime_root = Path(config.state_path).parent
     runtime_root.mkdir(parents=True, exist_ok=True)
     script = runtime_root / f"provider-login-{provider}.command"
     script.write_text(
@@ -1725,6 +1725,7 @@ async def create_project_chat(request: Request) -> JSONResponse:
             mode=body.get("mode"),
             provider=body.get("provider"),
             model_bucket=body.get("model_bucket"),
+            control_surface=body.get("control_surface"),
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
@@ -1807,6 +1808,13 @@ async def chat_detail(request: Request) -> JSONResponse:
         return JSONResponse({"ok": ok})
     # PATCH
     body = await request.json()
+    if "control_surface" in body:
+        surface = str(body.get("control_surface") or "").strip()
+        if surface not in {"", "legacy", "mcp", "auto"}:
+            return JSONResponse(
+                {"error": "control_surface must be legacy, mcp, auto, or empty"},
+                status_code=400,
+            )
     level_error = await _unsupported_codex_level_error(
         request.app.state.config, pcm, chat_id, body
     )
@@ -1823,6 +1831,15 @@ async def chat_detail(request: Request) -> JSONResponse:
             thinking_level=body.get("thinking_level"),
             model_bucket=body.get("model_bucket"),
         )
+        if chat is not None and "control_surface" in body:
+            changed = chat.control_surface != surface
+            chat.control_surface = surface
+            if changed:
+                pcm._revoke_mcp_chat(chat_id)
+                provider_service = pcm._providers.pop(chat_id, None)
+                if provider_service is not None:
+                    asyncio.create_task(provider_service.disconnect())
+                pcm._save(reason="chat_control_surface")
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if chat is None:

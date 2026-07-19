@@ -8,6 +8,7 @@ from typing import Literal
 
 ExecutionMode = Literal["provider_prompt", "provider_cli_arg", "bot_handler"]
 BridgeMode = Literal["normal", "plan", "auto", "bypass"]
+ControlSurface = Literal["legacy", "mcp", "auto"]
 MessagePhase = Literal["commentary", "final_answer"]
 
 
@@ -124,6 +125,19 @@ class AgentRequest:
     # Provider-native thinking/reasoning level (see THINKING_LEVELS).
     # Empty = provider default, nothing is forwarded.
     thinking_level: str = ""
+    # Agent-facing Ciaobot control surface. ``mcp`` is the default managed
+    # connection, ``legacy`` preserves the CLI/skill path (hidden fallback),
+    # and ``auto`` lets the application select the measured winner/fallback.
+    # The engine always sets this explicitly on build_agent_request; the
+    # default here only keeps the dataclass consistent with the new default.
+    control_surface: ControlSurface = "mcp"
+    # Ephemeral managed-process MCP credentials. They are deliberately kept
+    # out of ``extra_env`` so normal model-created shell commands never see
+    # the bearer token. Providers translate these fields into their native
+    # MCP configuration immediately before spawning the process.
+    mcp_url: str = ""
+    mcp_token: str = ""
+    mcp_required: bool = False
 
 
 @dataclass(slots=True)

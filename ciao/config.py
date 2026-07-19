@@ -351,6 +351,16 @@ class CiaoConfig:
     memory_enabled: bool = True
     memory_char_limit: int = 2200
     user_char_limit: int = 1375
+    # Ciaobot's managed agent control plane. MCP is the default transport for
+    # both providers; the legacy CLI/direct-file path is retained as a hidden
+    # fallback (selectable via ``CIAO_CONTROL_SURFACE`` or the per-chat field)
+    # and is used automatically when the MCP server is unavailable.
+    mcp_enabled: bool = True
+    control_surface: str = "mcp"
+    # Internal evaluation mode.  It keeps the HTTP/chat stack identical while
+    # suppressing autonomous background work that would contaminate paired
+    # legacy-vs-MCP measurements.  Manual schedules/loops remain available.
+    benchmark_mode: bool = False
 
     def __post_init__(self) -> None:
         self.workspace_root = Path(self.workspace_root).expanduser().resolve()
@@ -360,6 +370,8 @@ class CiaoConfig:
         if not vault_root.is_absolute():
             vault_root = self.workspace_root / vault_root
         self.vault_root = vault_root.resolve()
+        if self.control_surface not in {"legacy", "mcp", "auto"}:
+            self.control_surface = "legacy"
         if not self.workspaces:
             self.workspaces = _legacy_workspaces(
                 default_model_personal=self.default_model_personal,
@@ -781,6 +793,18 @@ class CiaoConfig:
             user_char_limit=int(
                 source.get("CIAO_USER_CHAR_LIMIT", "").strip() or "1375"
             ),
+            mcp_enabled=source.get("CIAO_MCP_ENABLED", "true").strip().lower()
+            not in {"0", "false", "no", "off"},
+            control_surface=(
+                source.get("CIAO_CONTROL_SURFACE", "mcp").strip().lower()
+                if source.get("CIAO_CONTROL_SURFACE", "mcp").strip().lower()
+                in {"legacy", "mcp", "auto"}
+                else "mcp"
+            ),
+            benchmark_mode=source.get("CIAO_BENCHMARK_MODE", "false")
+            .strip()
+            .lower()
+            in {"1", "true", "yes", "on"},
         )
 
 

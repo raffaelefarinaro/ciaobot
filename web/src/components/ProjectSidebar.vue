@@ -31,9 +31,12 @@
           <router-link
             to="/"
             class="nav-item touch-hit"
-            :class="{ 'nav-item--active': mode === 'chat' || mode === 'project' }"
+            :class="{
+              'nav-item--active': mode === 'chat' || mode === 'project',
+              'nav-item--working': isAnyChatWorking
+            }"
             title="chats"
-            aria-label="chats"
+            :aria-label="isAnyChatWorking ? 'chats (assistant is working)' : 'chats'"
           >
             <!-- Stacked message lines: sharper, more "log-window" than a speech bubble -->
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -44,7 +47,17 @@
               <polyline points="8 18 8 21 11 18" />
             </svg>
           </router-link>
-          <router-link to="/schedules" class="nav-item touch-hit" active-class="nav-item--active" title="automations" aria-label="automations" data-tour="nav-schedules">
+          <router-link
+            to="/schedules"
+            class="nav-item touch-hit"
+            :class="{
+              'nav-item--active': mode === 'schedules',
+              'nav-item--warning': hasAutomationWarning
+            }"
+            title="automations"
+            :aria-label="hasAutomationWarning ? 'automations (attention required)' : 'automations'"
+            data-tour="nav-schedules"
+          >
             <!-- Clock face with hour markers: more diagrammatic than calendar grid -->
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                  stroke-width="2" stroke-linecap="square" stroke-linejoin="miter" aria-hidden="true">
@@ -614,7 +627,7 @@ async function selectAutomationWorkspace(workspace: string) {
 
 function missedCountFor(workspace: string): number {
   return taskStore.schedules.filter(
-    s => s.missed && scheduleInWorkspace(s, workspace),
+    s => s.enabled && s.missed && scheduleInWorkspace(s, workspace),
   ).length
 }
 
@@ -637,6 +650,17 @@ const refreshing = ref(false)
 const BRAND_TEXT = 'ciaobot'
 const PIXEL_CHARS = '█▓▒░▄▀▐▌▆▅▃▂▪▫◆●○·'
 const brandLabel = ref(BRAND_TEXT)
+
+const isAnyChatWorking = computed(() => {
+  return Object.values(store.streaming).some(Boolean) ||
+         Object.values(store.projectStreaming).some(Boolean) ||
+         Object.values(store.backgroundAgents).some(val => val > 0)
+})
+
+const hasAutomationWarning = computed(() => {
+  return taskStore.schedules.some(s => s.enabled && s.missed) ||
+         taskStore.loops.some(l => l.running && (l.last_status === 'error' || l.last_status === 'missing-chat'))
+})
 let brandPixelTimer: ReturnType<typeof setInterval> | null = null
 
 function startBrandPixelAnimation() {
@@ -1213,6 +1237,47 @@ async function confirmDeleteChat(chatId: string) {
 
 .nav-item:hover {
   color: var(--fg);
+}
+
+.nav-item--working svg {
+  animation: pulse-working 2.2s infinite ease-in-out;
+  color: var(--accent);
+}
+
+.nav-item--warning svg {
+  animation: pulse-warning 2.2s infinite ease-in-out;
+  color: var(--warning);
+}
+
+@keyframes pulse-working {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(0.92);
+  }
+}
+
+@keyframes pulse-warning {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+    filter: drop-shadow(0 0 0px var(--warning));
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(1.06);
+    filter: drop-shadow(0 0 1px var(--warning));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nav-item--working svg,
+  .nav-item--warning svg {
+    animation: none;
+  }
 }
 
 .nav-item--active,

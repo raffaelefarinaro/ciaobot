@@ -366,6 +366,47 @@ describe('optimistic user bubble reconciliation', () => {
     expect(userMsgs.length).toBe(1)
     expect(userMsgs[0].turn_index).toBe(1)
   })
+
+  test('loadMessages discards trailing optimistic user bubbles when server has settled without them', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-unsent'
+    store.messages[chatId] = [
+      { role: 'user', content: 'prior question', timestamp: '2026-07-16T13:07:59Z', turn_index: 1 },
+      { role: 'assistant', content: 'prior reply', timestamp: '' },
+      { role: 'user', content: 'unsent question', timestamp: '', turn_index: undefined },
+    ]
+    apiGet.mockResolvedValue([
+      { role: 'user', content: 'prior question', sent_at: '2026-07-16T13:07:59Z', turn_index: 1 },
+      { role: 'assistant', content: 'prior reply', sent_at: '' },
+    ])
+
+    await store.loadMessages(chatId)
+
+    const msgs = store.messages[chatId]
+    expect(msgs.length).toBe(2)
+    expect(msgs.some(m => m.content === 'unsent question')).toBe(false)
+  })
+
+  test('loadMessages keeps local history to avoid data loss if server has fewer completed user turns', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-dataloss'
+    store.messages[chatId] = [
+      { role: 'user', content: 'question 1', timestamp: '', turn_index: 1 },
+      { role: 'assistant', content: 'reply 1', timestamp: '' },
+      { role: 'user', content: 'question 2', timestamp: '', turn_index: 2 },
+      { role: 'assistant', content: 'reply 2', timestamp: '' },
+    ]
+    // Server session reset, only has question 2
+    apiGet.mockResolvedValue([
+      { role: 'user', content: 'question 2', sent_at: '', turn_index: 1 },
+      { role: 'assistant', content: 'reply 2', sent_at: '' },
+    ])
+
+    await store.loadMessages(chatId)
+
+    const msgs = store.messages[chatId]
+    expect(msgs.length).toBe(4) // Keeps local to avoid data loss
+  })
 })
 
 describe('Codex structured questions', () => {

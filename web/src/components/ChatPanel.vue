@@ -3,7 +3,7 @@
     <div v-if="dragOver" class="drop-overlay">Drop images here</div>
 
     <!-- Header -->
-    <PaneHeader @open-sidebar="$emit('open-sidebar')">
+    <PaneHeader :active-bg-agents="store.activeBackgroundAgents" @open-sidebar="$emit('open-sidebar')">
       <template #title>
         <div class="header-left">
           <button class="close-btn desktop-only" @click="$emit('close')" title="Close chat">&times;</button>
@@ -1340,16 +1340,38 @@ const activeBucket = computed<BucketKey>(() => {
   return ollamaModels.includes(c.model) ? 'claude_personal' : 'claude_work'
 })
 
-const chatModelSections = computed(() => sectionsFromModelsResponse(modelsResponse.value))
+const chatModelSections = computed(() => {
+  const baseSections = sectionsFromModelsResponse(modelsResponse.value)
+  return baseSections.map(section => {
+    if (section.key === 'anthropic') {
+      let label = 'Anthropic'
+      if (activeBucket.value === 'claude_personal') {
+        label = 'Claude (Ollama)'
+      } else if (activeBucket.value === 'openrouter') {
+        label = 'Claude (OpenRouter)'
+      } else {
+        label = 'Claude (Anthropic)'
+      }
+      return { ...section, label }
+    }
+    return section
+  })
+})
 
 const activeModelHighlights = computed(() => {
   const c = chat.value
   if (!c) return []
-  const tier = tierAlias(c.model)
-  if (tier && activeBucket.value === 'codex') {
-    return [modelsResponse.value?.alias_tiers?.codex?.[tier] || tier]
+  const resolvedModel = canonicalTier(c.model)
+  const tier = tierAlias(resolvedModel)
+  if (tier) {
+    if (activeBucket.value === 'codex') {
+      const nativeModel = modelsResponse.value?.alias_tiers?.codex?.[tier]
+      return nativeModel ? [tier, nativeModel] : [tier]
+    }
+    const provider = activeBucket.value === 'claude_personal' ? 'ollama' : activeBucket.value
+    const nativeModel = modelsResponse.value?.alias_tiers?.[provider]?.[tier]
+    return nativeModel ? [tier, nativeModel] : [tier]
   }
-  if (tier) return [tier]
   const effective = effectiveModelForBucket(c.model, activeBucket.value)
   return [effective || c.model]
 })
@@ -2532,8 +2554,21 @@ function tierAlias(model: string): TierAlias | null {
     : null
 }
 
+function tierForModel(model: string, bucket: BucketKey): TierAlias | null {
+  if (bucket === 'codex') return null
+  const provider = bucket === 'claude_personal' ? 'ollama' : bucket
+  const tiers = modelsResponse.value?.alias_tiers?.[provider] || {}
+  for (const [tier, target] of Object.entries(tiers)) {
+    if (target === model) return tier as TierAlias
+  }
+  return null
+}
+
 function canonicalTier(model: string): string {
-  return tierAlias(model) || model
+  const alias = tierAlias(model)
+  if (alias) return alias
+  const resolvedAlias = tierForModel(model, activeBucket.value)
+  return resolvedAlias || model
 }
 
 function modelBucketForBucket(bucket: BucketKey): ModelBucketValue {
@@ -2630,7 +2665,23 @@ async function selectModel(value: string | string[], sectionKey = '') {
     ollama: 'claude_personal',
     openrouter: 'openrouter',
   }
-  const targetBucket = sectionBucket[sectionKey] || bucketForSelectedModel(model)
+  let targetBucket = sectionBucket[sectionKey] || bucketForSelectedModel(model)
+
+  // Preserve active Claude routing bucket (Ollama/OpenRouter) when choosing a generic tier alias
+  if (sectionKey === 'anthropic') {
+    if (activeBucket.value === 'claude_personal' || activeBucket.value === 'openrouter') {
+      targetBucket = activeBucket.value
+    } else if (activeBucket.value === 'codex') {
+      // Switching from Codex: default to the workspace's configured model bucket
+      const activeProj = store.projects.find(p => p.project_id === chat.value?.project_id)
+      const ws = store.workspaceOptions.find(w => w.name === activeProj?.workspace)
+      if (ws?.model_bucket === 'personal' || ws?.model_bucket === 'ollama') {
+        targetBucket = 'claude_personal'
+      } else if (ws?.model_bucket === 'openrouter') {
+        targetBucket = 'openrouter'
+      }
+    }
+  }
   const modelBucket = modelBucketForBucket(targetBucket)
   const sameModelAndRoute = canonicalTier(model) === canonicalTier(chat.value.model) && targetBucket === activeBucket.value
   if (sameModelAndRoute) {

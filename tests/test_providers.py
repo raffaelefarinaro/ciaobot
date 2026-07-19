@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -35,6 +36,51 @@ def test_build_prompt_summarizes_images(tmp_path: Path) -> None:
     assert "[INCOMING IMAGES]" in prompt
     assert "image.png" in prompt
     assert "look here" in prompt
+
+
+@pytest.mark.asyncio
+async def test_claude_managed_process_receives_scoped_mcp_configuration(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+    config = SimpleNamespace(
+        memory_enabled=False,
+        memory_char_limit=2200,
+        user_char_limit=1375,
+        vault_root=tmp_path / "memory-vault",
+    )
+    provider = ClaudeProvider(tmp_path, config=config)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="auto",
+        provider="claude",
+        control_surface="mcp",
+        mcp_url="http://127.0.0.1:8443/mcp/",
+        mcp_token="secret-session-token",
+        mcp_required=True,
+    )
+
+    await provider._ensure_connected(request)
+
+    options = captured["options"]
+    assert options.strict_mcp_config is True
+    assert options.mcp_servers == {
+        "ciaobot": {
+            "type": "http",
+            "url": request.mcp_url,
+            "headers": {"Authorization": "Bearer secret-session-token"},
+        }
+    }
+    # The MCP path carries the slim prefer-typed-tools nudge, not the old block.
+    assert "prefer them over curl, the ciao CLI" in options.system_prompt["append"]
 
 
 def test_route_cli_stderr_demotes_known_benign_lines(caplog) -> None:
@@ -633,5 +679,3 @@ def test_claude_convert_system_message_suppresses_allowed_rate_limit(
     )
     assert len(events2) == 1
     assert events2[0].status == "Rate limit: allowed_warning (five_hour) 90% used"
-
-

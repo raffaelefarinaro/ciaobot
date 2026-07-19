@@ -20,6 +20,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import threading
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -82,15 +83,17 @@ class LoopStore:
 
     def __init__(self, runtime_root: Path) -> None:
         self._path = runtime_root / "loops.json"
+        self._lock = threading.RLock()
 
     def list(self) -> list[LoopEntry]:
-        items = [
-            self._entry_from_item(item)
-            for item in self._load().get("loops", [])
-            if isinstance(item, dict)
-        ]
-        items.sort(key=lambda item: item.created_at)
-        return items
+        with self._lock:
+            items = [
+                self._entry_from_item(item)
+                for item in self._load().get("loops", [])
+                if isinstance(item, dict)
+            ]
+            items.sort(key=lambda item: item.created_at)
+            return items
 
     def get(self, loop_id: str) -> LoopEntry | None:
         for item in self.list():
@@ -116,30 +119,33 @@ class LoopStore:
             title=title,
             autostart=autostart,
         )
-        data = self._load()
-        data.setdefault("loops", []).append(asdict(entry))
-        self._save(data)
+        with self._lock:
+            data = self._load()
+            data.setdefault("loops", []).append(asdict(entry))
+            self._save(data)
         return entry
 
     def replace(self, entry: LoopEntry) -> None:
-        data = self._load()
-        items = data.setdefault("loops", [])
-        for index, item in enumerate(items):
-            if item.get("loop_id") == entry.loop_id:
-                items[index] = asdict(entry)
-                self._save(data)
-                return
-        items.append(asdict(entry))
-        self._save(data)
+        with self._lock:
+            data = self._load()
+            items = data.setdefault("loops", [])
+            for index, item in enumerate(items):
+                if item.get("loop_id") == entry.loop_id:
+                    items[index] = asdict(entry)
+                    self._save(data)
+                    return
+            items.append(asdict(entry))
+            self._save(data)
 
     def delete(self, loop_id: str) -> bool:
-        data = self._load()
-        before = len(data.setdefault("loops", []))
-        data["loops"] = [item for item in data["loops"] if item.get("loop_id") != loop_id]
-        if len(data["loops"]) == before:
-            return False
-        self._save(data)
-        return True
+        with self._lock:
+            data = self._load()
+            before = len(data.setdefault("loops", []))
+            data["loops"] = [item for item in data["loops"] if item.get("loop_id") != loop_id]
+            if len(data["loops"]) == before:
+                return False
+            self._save(data)
+            return True
 
     def _load(self) -> dict:
         if not self._path.exists():
@@ -151,7 +157,9 @@ class LoopStore:
 
     def _save(self, payload: dict) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        tmp = self._path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(self._path)
 
     def _entry_from_item(self, item: dict) -> LoopEntry:
         known = {f.name for f in LoopEntry.__dataclass_fields__.values()}

@@ -670,6 +670,9 @@ class ChatInfo:
     # Empty = provider default. Reset on handover: levels aren't portable
     # across providers.
     thinking_level: str = ""
+    # Empty inherits the application default. Persisted so experimental MCP
+    # and legacy chats can coexist without process-global configuration.
+    control_surface: str = ""
     session_id: str = ""
     created_at: str = ""
     archived: bool = False
@@ -739,6 +742,7 @@ class ChatInfo:
             "model_bucket": self.model_bucket,
             "mode": self.mode,
             "thinking_level": self.thinking_level,
+            "control_surface": self.control_surface,
             "session_id": self.session_id,
             "created_at": self.created_at,
             "archived": self.archived,
@@ -870,6 +874,9 @@ class ProjectChatManager:
             "chats": {},
         }
         self._providers: dict[str, ProviderService] = {}
+        # Bound by main.py when the embedded MCP control plane is enabled.
+        # Tests and legacy-only instances intentionally leave it unset.
+        self._mcp_service = None
         self._broker = ChatStreamBroker()
         self._events = EventsHub()
         # Per-(chat, file) content snapshots taken on Write/Edit/MultiEdit/
@@ -991,6 +998,7 @@ class ProjectChatManager:
                 model_bucket=cd.get("model_bucket", ""),
                 mode=cd.get("mode", self._config.claude_mode),
                 thinking_level=cd.get("thinking_level", ""),
+                control_surface=cd.get("control_surface", ""),
                 session_id=cd.get("session_id", ""),
                 created_at=cd.get("created_at", ""),
                 archived=cd.get("archived", False),
@@ -1079,6 +1087,7 @@ class ProjectChatManager:
                     "model_bucket": c.model_bucket,
                     "mode": c.mode,
                     "thinking_level": c.thinking_level,
+                    "control_surface": c.control_surface,
                     "session_id": c.session_id,
                     "created_at": c.created_at,
                     "archived": c.archived,
@@ -2502,6 +2511,7 @@ class ProjectChatManager:
         mode: str | None = None,
         provider: str | None = None,
         model_bucket: str | None = None,
+        control_surface: str | None = None,
     ) -> ChatInfo:
         if project_id not in self._projects:
             raise ValueError(f"Project '{project_id}' not found")
@@ -2509,6 +2519,8 @@ class ProjectChatManager:
             raise ValueError(f"Unknown provider '{provider}'")
         if not self._model_bucket_allowed(model_bucket):
             raise ValueError(f"Unknown model bucket '{model_bucket}'")
+        if control_surface not in {None, "", "legacy", "mcp", "auto"}:
+            raise ValueError(f"Unknown control surface '{control_surface}'")
         # Sweep any other empty chats before creating a new one. Opening a
         # fresh "New Chat" signals the user has moved on from whatever they
         # had open and never sent, so we don't let empty shells pile up.
@@ -2543,6 +2555,7 @@ class ProjectChatManager:
             provider=chat_provider,
             model_bucket=chat_bucket,
             mode=mode or self._config.claude_mode,
+            control_surface=control_surface or "",
             created_at=_now_iso(),
         )
         if chat_provider == "codex" and canonical_tier(chat_model) == "fable":
@@ -2944,6 +2957,7 @@ class ProjectChatManager:
             raise ValueError("Model is required")
         if self._broker.get(chat_id) is not None:
             raise ValueError("Cannot hand over while a turn is running")
+        self._revoke_mcp_chat(chat_id)
 
         old_provider = chat.provider
         old_model = chat.model
@@ -2995,6 +3009,7 @@ class ProjectChatManager:
         chat = self._chats.pop(chat_id, None)
         if chat is None:
             return False
+        self._revoke_mcp_chat(chat_id)
         ctx = ChatContext.for_web(chat_id)
         task = self._retry_tasks.pop(chat_id, None)
         if task is not None and not task.done():
@@ -3048,6 +3063,7 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is None:
             return None
+        self._revoke_mcp_chat(chat_id)
         ctx = ChatContext.for_web(chat_id)
         # Capture turn count before archive_session consumes the in-memory
         # transcript; capture the filtered JSONL before blob deletion.
@@ -3257,6 +3273,7 @@ class ProjectChatManager:
             # continue_archived_chat()'s job — it spawns a fresh chat and
             # leaves the archived one untouched.
             raise ValueError("Cannot start a new session in an archived chat")
+        self._revoke_mcp_chat(chat_id)
         # Archive existing transcript
         ctx = ChatContext.for_web(chat_id)
         self._transcripts.archive_session(
@@ -3300,6 +3317,13 @@ class ProjectChatManager:
                 self._config, provider=provider_name
             )
         return self._providers[chat_id]
+
+    def _revoke_mcp_chat(self, chat_id: str) -> None:
+        service = self._mcp_service
+        registry = getattr(service, "registry", None)
+        revoke = getattr(registry, "revoke_chat", None)
+        if callable(revoke):
+            revoke(chat_id)
 
     def _build_prompt_prefix(self, chat: ChatInfo) -> str:
         """Build context prefix for a web chat message.
@@ -3832,6 +3856,37 @@ class ProjectChatManager:
                     "name": event.tool_name,
                     "input": {"summary": event.tool_input},
                 })
+                self._record_agent_tool_use(chat, request, event)
+
+    def _record_agent_tool_use(
+        self,
+        chat: ChatInfo,
+        request: AgentRequest,
+        event: ToolUseEvent,
+    ) -> None:
+        """Append provider-neutral tool telemetry for evaluation and support.
+
+        Inputs are deliberately excluded: command arguments can contain user
+        data or credentials.  The record is enough to compare tool selection,
+        call counts, provider, surface, and timing across implementations.
+        """
+        path = Path(self._config.state_path).parent / "agent_tool_calls.jsonl"
+        record = {
+            "timestamp": _now_iso(),
+            "chat_id": chat.chat_id,
+            "project_id": chat.project_id,
+            "provider": chat.provider,
+            "control_surface": request.control_surface,
+            "tool": event.tool_name,
+            "tool_use_id": event.tool_use_id or "",
+            "parent_tool_use_id": event.parent_tool_use_id or "",
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
+            logger.exception("Failed writing agent tool telemetry")
 
     def build_agent_request(
         self,
@@ -3853,6 +3908,50 @@ class ProjectChatManager:
         full_prompt = prefix + provider_prompt if prefix else provider_prompt
         final_display_prompt = prefix + display_prompt if prefix else display_prompt
 
+        surface = str(
+            getattr(chat, "control_surface", "")
+            or getattr(self._config, "control_surface", "legacy")
+            or "legacy"
+        )
+        if surface not in {"legacy", "mcp", "auto"}:
+            surface = "legacy"
+        # Auto uses the most recent promoted full-suite decision for this
+        # provider. Missing/invalid/tied decisions fail safely to legacy.
+        if surface == "auto":
+            from ciao.control_surfaces import resolve_auto_surface
+
+            resolved_surface = resolve_auto_surface(self._config, chat.provider)
+        else:
+            resolved_surface = surface
+        mcp_url = ""
+        mcp_token = ""
+        if resolved_surface == "mcp":
+            service = self._mcp_service
+            project = self._projects.get(chat.project_id)
+            if (
+                service is None
+                or not bool(getattr(self._config, "mcp_enabled", True))
+                or project is None
+            ):
+                # MCP is the default transport, so an unavailable server must
+                # not make the app unusable (bootstrap, CIAO_MCP_ENABLED=false).
+                # Degrade gracefully to legacy and log a WARNING; the SettingsView
+                # MCP status display and logs make the fallback observable.
+                logger.warning(
+                    "Ciaobot MCP unavailable for chat %s (service=%s, mcp_enabled=%s, "
+                    "project=%s); falling back to the legacy control surface.",
+                    chat.chat_id,
+                    service is not None,
+                    bool(getattr(self._config, "mcp_enabled", True)),
+                    project is not None,
+                )
+                resolved_surface = "legacy"
+            else:
+                role = "consultation" if chat.chat_id.startswith("sub-") else "chat"
+                mcp_url, mcp_token = service.credentials_for_chat(
+                    chat, project, role=role
+                )
+
         return AgentRequest(
             prompt=full_prompt,
             model=self._runtime_model_for_chat(chat),
@@ -3864,6 +3963,10 @@ class ProjectChatManager:
             extra_env=self._build_extra_env(chat),
             disallowed_tools=self.disallowed_tools_for_chat(chat),
             thinking_level=self._thinking_level_for_chat(chat),
+            control_surface=resolved_surface,  # type: ignore[arg-type]
+            mcp_url=mcp_url,
+            mcp_token=mcp_token,
+            mcp_required=resolved_surface == "mcp",
         )
 
     # ── Streaming chat ───────────────────────────────────────────────────

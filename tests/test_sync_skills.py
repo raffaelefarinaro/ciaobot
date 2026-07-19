@@ -212,7 +212,7 @@ def test_sync_workspace_skills_seeds_stock_commands_into_canonical_dir(tmp_path:
     assert remember.is_file()
     assert critique.is_file()
     assert interrogation.is_file()
-    assert "ciao memory add --target memory" in remember.read_text(encoding="utf-8")
+    assert "memory_add" in remember.read_text(encoding="utf-8")
     assert "1–3 targeted questions" in interrogation.read_text(encoding="utf-8")
     assert "adversarial-review skill" in critique.read_text(encoding="utf-8")
 
@@ -232,7 +232,7 @@ def test_sync_workspace_skills_migrates_legacy_stock_commands(tmp_path: Path) ->
     canonical = workspace / "commands" / "remember.md"
     assert canonical.is_file()
     text = canonical.read_text(encoding="utf-8")
-    assert "ciao memory add --target memory" in text
+    assert "memory_add" in text
     assert "# Old stock remember" not in text
     link = workspace / ".claude" / "commands" / "remember.md"
     assert link.is_symlink()
