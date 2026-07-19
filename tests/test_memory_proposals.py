@@ -79,6 +79,32 @@ def test_append_proposals_skips_empty(tmp_path: Path) -> None:
     assert not (vault / "personal" / "Workspace" / "Memory-Proposals.md").exists()
 
 
+def test_append_proposals_dedups_against_existing_file(tmp_path: Path) -> None:
+    """A proposal already recorded in the file is not stacked up again."""
+    vault = tmp_path / "vault"
+    proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
+
+    first = mp.append_proposals(proposals, vault, source_path=None)
+    assert first is not None
+    after_first = first.read_text(encoding="utf-8")
+
+    # Re-proposing the identical batch writes nothing new and returns None.
+    second = mp.append_proposals(proposals, vault, source_path=None)
+    assert second is None
+    assert first.read_text(encoding="utf-8") == after_first
+
+    # A genuinely new proposal still gets appended; the dup alongside it does not.
+    fresh = mp.MemoryProposal(
+        target="memory", text="A brand new durable fact.", source_section="Decisions"
+    )
+    third = mp.append_proposals([proposals[0], fresh], vault, source_path=None)
+    assert third is not None
+    text = third.read_text(encoding="utf-8")
+    assert "A brand new durable fact." in text
+    # The recurring proposal appears exactly once, not once per batch.
+    assert text.count(proposals[0].text) == 1
+
+
 def test_append_proposals_routes_by_workspace(tmp_path: Path) -> None:
     """Proposals from a 'work' chat archive go to vault/work/Workspace/Memory-Proposals.md."""
     vault = tmp_path / "vault"
