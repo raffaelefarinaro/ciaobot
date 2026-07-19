@@ -22,6 +22,33 @@ const TIER_LABELS: Record<string, string> = {
 
 const ANTHROPIC_MODELS = ['haiku', 'sonnet', 'opus', 'fable']
 
+// Order tier badges appear in, top to bottom.
+const TIER_ORDER = ['Haiku', 'Sonnet', 'Opus', 'Fable']
+
+/**
+ * Move tier-tagged models (Haiku, Sonnet, Opus, Fable) to the top of a
+ * provider list, in that fixed order. Untagged models keep their original
+ * relative order below. The input array is not mutated.
+ */
+export function sortModelsByTier(
+  models: string[],
+  modelBadges: Record<string, string[]> | undefined,
+): string[] {
+  const tierRank = (model: string): number => {
+    const badges = modelBadges?.[model] || []
+    let best = TIER_ORDER.length
+    for (const badge of badges) {
+      const idx = TIER_ORDER.indexOf(badge)
+      if (idx !== -1 && idx < best) best = idx
+    }
+    return best
+  }
+  return models
+    .map((model, index) => ({ model, index, rank: tierRank(model) }))
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .map((entry) => entry.model)
+}
+
 export function parseModelList(raw: string): string[] {
   const seen = new Set<string>()
   const models: string[] = []
@@ -102,7 +129,7 @@ export function sectionsFromModelsResponse(response: ModelsResponse | null): Mod
     sections.push({
       key: 'codex',
       label: 'OpenAI Codex',
-      models,
+      models: sortModelsByTier(models, modelBadges),
       modelBadges,
       modelLabels,
     })
@@ -112,20 +139,22 @@ export function sectionsFromModelsResponse(response: ModelsResponse | null): Mod
   const local = orderedUnique(response.ollama_local_models || [])
   const allOllama = orderedUnique([...local, ...ollamaModels])
   if (allOllama.length) {
+    const modelBadges = providerModelBadges('ollama', allOllama, response.alias_tiers, local)
     sections.push({
       key: 'ollama',
       label: 'Ollama',
-      models: allOllama,
-      modelBadges: providerModelBadges('ollama', allOllama, response.alias_tiers, local),
+      models: sortModelsByTier(allOllama, modelBadges),
+      modelBadges,
     })
   }
 
   if (openrouterModels.length) {
+    const modelBadges = providerModelBadges('openrouter', openrouterModels, response.alias_tiers)
     sections.push({
       key: 'openrouter',
       label: 'OpenRouter',
-      models: openrouterModels,
-      modelBadges: providerModelBadges('openrouter', openrouterModels, response.alias_tiers),
+      models: sortModelsByTier(openrouterModels, modelBadges),
+      modelBadges,
     })
   }
 
@@ -151,11 +180,12 @@ export function sectionsFromModelOptions(
   const local = orderedUnique(options.ollama_local || [])
   const ollama = orderedUnique([...local, ...(options.ollama_cloud || [])])
   if (ollama.length) {
+    const modelBadges = providerModelBadges('ollama', ollama, aliasTiers, local)
     sections.push({
       key: 'ollama',
       label: 'Ollama',
-      models: ollama,
-      modelBadges: providerModelBadges('ollama', ollama, aliasTiers, local),
+      models: sortModelsByTier(ollama, modelBadges),
+      modelBadges,
       disabled: !ollamaAvailable,
       hint: ollamaAvailable ? undefined : 'Set an Ollama API key or install local models to enable this section.',
     })
@@ -164,11 +194,12 @@ export function sectionsFromModelOptions(
   const openrouterAvailable = !!backends.openrouter
   const openrouter = orderedUnique(options.openrouter || [])
   if (openrouter.length) {
+    const modelBadges = providerModelBadges('openrouter', openrouter, aliasTiers)
     sections.push({
       key: 'openrouter',
       label: 'OpenRouter',
-      models: openrouter,
-      modelBadges: providerModelBadges('openrouter', openrouter, aliasTiers),
+      models: sortModelsByTier(openrouter, modelBadges),
+      modelBadges,
       disabled: !openrouterAvailable,
       hint: openrouterAvailable ? undefined : 'Set OPENROUTER_API_KEY to enable OpenRouter models.',
     })

@@ -1,8 +1,65 @@
 import { describe, expect, it } from 'vitest'
-import { sectionsFromModelOptions, sectionsFromModelsResponse } from './modelSections'
+import { sectionsFromModelOptions, sectionsFromModelsResponse, sortModelsByTier } from './modelSections'
 import type { ModelsResponse, RoutineSettings } from './types'
 
+describe('sortModelsByTier', () => {
+  it('orders tier-tagged models Haiku, Sonnet, Opus, Fable, keeping untagged below', () => {
+    const models = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.6-sol-ultra']
+    const modelBadges = {
+      'gpt-5.6-sol': ['Opus'],
+      'gpt-5.6-terra': ['Sonnet'],
+      'gpt-5.6-luna': ['Haiku'],
+      'gpt-5.6-sol-ultra': ['Fable'],
+    }
+    expect(sortModelsByTier(models, modelBadges)).toEqual([
+      'gpt-5.6-luna',
+      'gpt-5.6-terra',
+      'gpt-5.6-sol',
+      'gpt-5.6-sol-ultra',
+      'gpt-5.5',
+    ])
+  })
+
+  it('preserves original relative order among untagged models', () => {
+    const models = ['a', 'b', 'c']
+    expect(sortModelsByTier(models, {})).toEqual(['a', 'b', 'c'])
+  })
+
+  it('ranks a model by its highest tier when it carries several badges', () => {
+    const models = ['multi', 'plain']
+    const modelBadges = { multi: ['local', 'Opus'], plain: [] }
+    expect(sortModelsByTier(models, modelBadges)).toEqual(['multi', 'plain'])
+  })
+})
+
 describe('modelSections', () => {
+  it('sorts Codex models by tier so tagged models lead, untagged trail', () => {
+    const response: ModelsResponse = {
+      models: [],
+      default: 'opus',
+      provider_models: {},
+      provider_defaults: {},
+      ollama_models: [],
+      ollama_local_models: [],
+      openrouter_models: [],
+      codex_models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5'],
+      alias_tiers: {
+        codex: {
+          opus: 'gpt-5.6-sol',
+          sonnet: 'gpt-5.6-terra',
+          haiku: 'gpt-5.6-luna',
+          fable: 'gpt-5.6-sol',
+        },
+      },
+      backends: { anthropic: true },
+      thinking_levels: {},
+    }
+
+    const codex = sectionsFromModelsResponse(response).find((section) => section.key === 'codex')
+    expect(codex?.models).toEqual(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'fable', 'gpt-5.5'])
+  })
+
+
   it('keeps Anthropic to fixed aliases even when /api/models has a large model list', () => {
     const response: ModelsResponse = {
       models: [
