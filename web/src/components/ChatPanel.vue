@@ -1342,17 +1342,16 @@ const activeBucket = computed<BucketKey>(() => {
 
 const chatModelSections = computed(() => {
   const baseSections = sectionsFromModelsResponse(modelsResponse.value)
+  // The Anthropic section is always the real Anthropic subscription: its tier
+  // aliases route to Anthropic and picking one hands the chat over there. It is
+  // NOT relabeled per active bucket — when routing through Ollama/OpenRouter
+  // those tiers already appear as badges on that provider's concrete models
+  // (e.g. "minimax-m3:cloud · Opus"), so a "Claude (Ollama)" clone would just
+  // duplicate them. Keeping a single fixed "Claude (Anthropic)" section both
+  // removes that duplicate and preserves an explicit handover path to Anthropic.
   return baseSections.map(section => {
     if (section.key === 'anthropic') {
-      let label = 'Anthropic'
-      if (activeBucket.value === 'claude_personal') {
-        label = 'Claude (Ollama)'
-      } else if (activeBucket.value === 'openrouter') {
-        label = 'Claude (OpenRouter)'
-      } else {
-        label = 'Claude (Anthropic)'
-      }
-      return { ...section, label }
+      return { ...section, label: 'Claude (Anthropic)' }
     }
     return section
   })
@@ -1364,13 +1363,15 @@ const activeModelHighlights = computed(() => {
   const resolvedModel = canonicalTier(c.model)
   const tier = tierAlias(resolvedModel)
   if (tier) {
-    if (activeBucket.value === 'codex') {
-      const nativeModel = modelsResponse.value?.alias_tiers?.codex?.[tier]
-      return nativeModel ? [tier, nativeModel] : [tier]
-    }
+    // Only the Anthropic subscription bucket highlights the bare tier, because
+    // there the model literally IS the tier and lives in the "Claude
+    // (Anthropic)" section. For concrete-provider buckets (codex / ollama /
+    // openrouter) highlight only that provider's real model — the bare tier now
+    // belongs to the separate Anthropic handover section and must not light up.
+    if (activeBucket.value === 'claude_work') return [tier]
     const provider = activeBucket.value === 'claude_personal' ? 'ollama' : activeBucket.value
     const nativeModel = modelsResponse.value?.alias_tiers?.[provider]?.[tier]
-    return nativeModel ? [tier, nativeModel] : [tier]
+    return nativeModel ? [nativeModel] : [c.model]
   }
   const effective = effectiveModelForBucket(c.model, activeBucket.value)
   return [effective || c.model]
@@ -2665,23 +2666,11 @@ async function selectModel(value: string | string[], sectionKey = '') {
     ollama: 'claude_personal',
     openrouter: 'openrouter',
   }
-  let targetBucket = sectionBucket[sectionKey] || bucketForSelectedModel(model)
-
-  // Preserve active Claude routing bucket (Ollama/OpenRouter) when choosing a generic tier alias
-  if (sectionKey === 'anthropic') {
-    if (activeBucket.value === 'claude_personal' || activeBucket.value === 'openrouter') {
-      targetBucket = activeBucket.value
-    } else if (activeBucket.value === 'codex') {
-      // Switching from Codex: default to the workspace's configured model bucket
-      const activeProj = store.projects.find(p => p.project_id === chat.value?.project_id)
-      const ws = store.workspaceOptions.find(w => w.name === activeProj?.workspace)
-      if (ws?.model_bucket === 'personal' || ws?.model_bucket === 'ollama') {
-        targetBucket = 'claude_personal'
-      } else if (ws?.model_bucket === 'openrouter') {
-        targetBucket = 'openrouter'
-      }
-    }
-  }
+  // The Anthropic section is an explicit handover to the Anthropic
+  // subscription: picking a tier there always routes to claude_work, never the
+  // currently-active Ollama/OpenRouter/Codex bucket. To change tier while
+  // staying on a concrete provider, pick that provider's real model instead.
+  const targetBucket = sectionBucket[sectionKey] || bucketForSelectedModel(model)
   const modelBucket = modelBucketForBucket(targetBucket)
   const sameModelAndRoute = canonicalTier(model) === canonicalTier(chat.value.model) && targetBucket === activeBucket.value
   if (sameModelAndRoute) {
