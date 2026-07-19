@@ -681,14 +681,21 @@ const CARD_GAP = 8
 function updateCommentPositions(): void {
   if (!bodyEl.value) return
   const body = bodyEl.value
+  const bodyRect = body.getBoundingClientRect()
   const positions: Record<string, number> = {}
 
-  // Find the first highlight for each comment id and record its offsetTop
+  // Find the first highlight for each comment id and record its top relative
+  // to the scrollable body content. We use getBoundingClientRect instead of
+  // offsetTop because CSV cells live inside their own positioned overflow
+  // container (.csv-scroll), so their offsetParent is that inner scroller
+  // rather than the body — offsetTop would be measured against the wrong
+  // origin and the card would land at the top-left instead of beside its cell.
   const highlights = body.querySelectorAll('.comment-highlight[data-comment-id], .pre-line.comment-highlight[data-comment-id]')
   for (const el of Array.from(highlights)) {
     const id = (el as HTMLElement).dataset.commentId
     if (id && !(id in positions)) {
-      positions[id] = (el as HTMLElement).offsetTop
+      const rect = (el as HTMLElement).getBoundingClientRect()
+      positions[id] = rect.top - bodyRect.top + body.scrollTop
     }
   }
 
@@ -804,10 +811,56 @@ function attachScrollSync(): void {
   detachScrollSync()
   bodyEl.value.addEventListener('scroll', onBodyScroll, { passive: true })
   sidebarListEl.value?.addEventListener('scroll', syncSidebarToBody, { passive: true })
+  observeBody()
 }
 function detachScrollSync(): void {
   bodyEl.value?.removeEventListener('scroll', onBodyScroll)
   sidebarListEl.value?.removeEventListener('scroll', syncSidebarToBody)
+  unobserveBody()
+}
+
+// Re-measure comment anchors whenever the body's rendered content changes.
+// Async children (the lazily-loaded CsvViewer parses its content in its own
+// watcher, images decode, fonts settle) can paint their highlight elements
+// *after* the reposition watcher already ran, which would otherwise leave
+// every card stranded at the top-left fallback. The observers close that
+// race by re-running the measurement once the DOM actually settles.
+let bodyMutationObserver: MutationObserver | null = null
+let bodyResizeObserver: ResizeObserver | null = null
+let remeasureRaf = 0
+
+function scheduleRemeasure(): void {
+  if (remeasureRaf) return
+  remeasureRaf = requestAnimationFrame(() => {
+    remeasureRaf = 0
+    updateCommentPositions()
+    nextTick(() => layoutSidebarCards())
+  })
+}
+
+function observeBody(): void {
+  unobserveBody()
+  const body = bodyEl.value
+  if (!body) return
+  if (typeof MutationObserver !== 'undefined') {
+    bodyMutationObserver = new MutationObserver(() => scheduleRemeasure())
+    bodyMutationObserver.observe(body, { childList: true, subtree: true, characterData: true })
+  }
+  if (typeof ResizeObserver !== 'undefined') {
+    bodyResizeObserver = new ResizeObserver(() => scheduleRemeasure())
+    bodyResizeObserver.observe(body)
+  }
+}
+
+function unobserveBody(): void {
+  bodyMutationObserver?.disconnect()
+  bodyMutationObserver = null
+  bodyResizeObserver?.disconnect()
+  bodyResizeObserver = null
+  if (remeasureRaf) {
+    cancelAnimationFrame(remeasureRaf)
+    remeasureRaf = 0
+  }
 }
 
 // ── Mobile popup for reading a comment on tap ───────────────────────
@@ -1141,7 +1194,7 @@ watch(
 // at their desired tops before we measure heights and push them down to
 // resolve overlaps.
 watch(
-  () => `${store.loadToken}|${store.path}|${activeFileComments.value.map(c => c.id).join(',')}|${renderedMarkdown.value.length}`,
+  () => `${store.loadToken}|${store.path}|${activeFileComments.value.map(c => c.id).join(',')}|${renderedMarkdown.value.length}|${store.content.length}`,
   () => nextTick(() => {
     applyHighlights()
     nextTick(() => {
