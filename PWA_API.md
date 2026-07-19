@@ -91,6 +91,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/models` | List configured models |
 | GET, PATCH | `/api/status` | Read or update status |
 | GET | `/api/mcp/status` | Embedded Ciaobot MCP readiness, tool catalog, and active-session counts (no credentials) |
+| GET | `/api/mcp/usage` | Embedded Ciaobot MCP per-tool call/error counters (no credentials) |
 | GET | `/api/startup-status` | Read startup phase progress |
 | GET | `/api/active-chats` | List chat IDs with in-flight work (streaming or background subagents); drives the macOS menu bar spinner |
 | GET | `/api/setup-status` | Read first-run setup checks and provider readiness |
