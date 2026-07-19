@@ -2077,6 +2077,15 @@ export const useProjectStore = defineStore('projects', () => {
           if (!turnSettled || streaming.value[msg.chat_id]) {
             void reconcileAfterResult(msg.chat_id)
           }
+        } else if (streaming.value[msg.chat_id]) {
+          // Inactive chat finished. Its per-chat WS was detached when the user
+          // switched away, so the `result` event that normally clears the local
+          // optimistic `streaming` flag will never arrive — leaving
+          // isChatStreaming() (projectStreaming || streaming) true and the
+          // sidebar dot stuck "working" until a full reload. The server has
+          // declared the turn done, so clear the local streaming state now.
+          // The chat's final history is refetched on its next open.
+          clearStreamingState(msg.chat_id)
         }
         break
       }
@@ -2113,10 +2122,17 @@ export const useProjectStore = defineStore('projects', () => {
           delete backgroundAgents.value[msg.chat_id]
         }
         // A non-decreasing positive count is the initial "N running"
-        // announcement (or a subagent spawning children): just update the
-        // badge silently. Only a drop means an agent finished and produced
-        // output worth surfacing.
-        if (msg.remaining >= prevAgents && msg.remaining > 0) break
+        // announcement (or a subagent spawning children). It does not warrant
+        // a full history reconcile (no new agent output yet), but we do want
+        // the transcript panel to populate promptly so a freshly dispatched
+        // agent is visible without waiting up to 4s for the poll watcher's
+        // first tick. Pull subagents once (focused only) then return.
+        if (msg.remaining >= prevAgents && msg.remaining > 0) {
+          const focusedNow = activeChatId.value === msg.chat_id &&
+            (typeof document === 'undefined' || document.visibilityState === 'visible')
+          if (focusedNow) void loadSubagents(msg.chat_id)
+          break
+        }
         const isFocused = activeChatId.value === msg.chat_id &&
           (typeof document === 'undefined' || document.visibilityState === 'visible')
         if (isFocused) {
