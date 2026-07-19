@@ -12,6 +12,13 @@
 - **Apply, don't propose.** When a fix is concrete and low-risk, apply it directly instead of listing it for approval. Only ask before destructive git operations, external/public actions, or changes that cross into user-visible schema or auth.
 - **Finish the step; don't announce and stop.** When the next action is concrete and already approved (a file edit, a deletion the user asked for, the next item in a checklist), perform the tool call in the same turn — do not write a sentence describing what you're about to do ("Removing it.", "Now I'll…") and then end the turn. Stating intent is not doing the work; only end the turn once the action is actually done or you genuinely need the user's input.
 
+## Deliverables and the pinned file panel
+
+- The PWA renders `.md` and `.csv` files in a side-by-side pinned panel the user can read, comment on, and edit inline. A new `.md`/`.csv` file you create is auto-surfaced there (desktop, when nothing is already pinned), so the user sees the artifact next to the chat instead of scrolling a long reply.
+- **Prefer a file for substantial or iterative output.** When the response is a plan, spec, comparison, report, structured draft, or any table of data — something the user will read closely, edit, or come back to — write it to a `.md` (prose/structured) or `.csv` (tabular) file in the workspace rather than burying it in a long chat message. Tabular data with consistent columns → `.csv` (renders as a sortable table with cell comments); everything prose-shaped → `.md`.
+- **Keep quick answers inline.** Do not create a file for a one- or two-paragraph reply, a direct question, or conversational back-and-forth. When the panel already shows a file you just wrote, a brief pointer is enough — don't paste the whole document back into chat.
+- Put deliverables where they belong: durable notes in the vault, project work under the project's canonical doc/log, one-off working documents under `<vault>/Workspace/`. Update an existing file rather than spawning near-duplicates.
+
 ## Delegation and Subagents
 
 - Background `Agent` dispatches do not auto-continue the parent turn. The parent finishes, and subagents complete later. If a result must be synthesized inline, use a foreground `Agent` call. When dispatching background agents, tell the user to follow up or read the subagents endpoint.

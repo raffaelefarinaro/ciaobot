@@ -2863,6 +2863,43 @@ export const useProjectStore = defineStore('projects', () => {
     })
   }
 
+  // Collaboration-friendly, previewable artifacts worth auto-surfacing. Kept
+  // deliberately narrow: .md/.csv are the formats the pinned panel renders as
+  // an editable, comment-able canvas. Images/pdf/pptx preview too but are
+  // rarely something the user wants yanked open unprompted.
+  const _AUTO_PIN_EXT_RE = /\.(md|markdown|csv)$/i
+  // Bookkeeping files the agent writes as a side effect (memory, proposals,
+  // agent config) are not deliverables — surfacing them on every write is noise.
+  const _AUTO_PIN_SKIP_BASENAMES = new Set([
+    'memory.md', 'user.md', 'memory.local.md',
+    'memory-proposals.md', 'learnings.md', 'agents.md', 'claude.md',
+  ])
+
+  // Auto-surface a freshly written .md/.csv in the pinned side panel so the
+  // user sees a deliverable next to the chat without hunting for it. Fills the
+  // empty state only — never yanks a file the user already pinned — and only on
+  // desktop, where the split layout exists (mirrors FileViewerModal's canPin
+  // gate). localStorage-backed like every other pin; no backend state.
+  function _maybeAutoPin(
+    chatId: string,
+    touches: Array<{ file_path?: string; action?: string }>,
+  ): void {
+    if (typeof window === 'undefined' || window.innerWidth <= 768) return
+    if (pinnedFileFor(chatId)) return
+    // Freshest qualifying artifact wins (last touch in the batch).
+    for (let i = touches.length - 1; i >= 0; i--) {
+      const raw = touches[i]?.file_path
+      if (!raw) continue
+      const clean = raw.replace(/:\d+$/, '')
+      if (!_AUTO_PIN_EXT_RE.test(clean)) continue
+      const base = clean.split(/[\\/]/).pop()?.toLowerCase() || ''
+      if (_AUTO_PIN_SKIP_BASENAMES.has(base)) continue
+      if (!isPlausibleFilePath(raw)) continue
+      pinFile(chatId, raw)
+      return
+    }
+  }
+
   function _flushTimeline(chatId: string): StreamEntry[] {
     const entries = streamingTimeline.value[chatId] || []
     streamingTimeline.value[chatId] = []
@@ -3114,6 +3151,7 @@ export const useProjectStore = defineStore('projects', () => {
               tool: event.tool_name,
             })
           }
+          _maybeAutoPin(chatId, touches)
           break
         }
 
