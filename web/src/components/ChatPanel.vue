@@ -764,10 +764,11 @@
         @mousedown.prevent="applyCommand(cmd)"
         @mouseenter="commandHighlightIdx = i"
       >
-        <span class="commands-picker-name">/{{ cmd.name }}</span>
-        <span v-if="cmd.argument_hint" class="commands-picker-hint">{{ cmd.argument_hint }}</span>
-        <span v-if="cmd.description" class="commands-picker-desc">{{ cmd.description }}</span>
-        <span class="commands-picker-source">{{ cmd.source }}</span>
+        <div class="commands-picker-head">
+          <span class="commands-picker-name">/{{ cmd.name }}</span>
+          <span v-if="cmd.argument_hint" class="commands-picker-hint">{{ cmd.argument_hint }}</span>
+        </div>
+        <div v-if="cmd.description" class="commands-picker-desc">{{ cmd.description }}</div>
       </div>
     </div>
 
@@ -4033,15 +4034,20 @@ details[open] > .activity-summary::before {
 }
 .commands-picker-row {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  gap: 2px;
   padding: 6px 12px;
   cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
 }
 .commands-picker-row.active {
   background: var(--hover, rgba(128, 128, 128, 0.12));
+}
+.commands-picker-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+  overflow: hidden;
 }
 .commands-picker-name {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -4052,22 +4058,19 @@ details[open] > .activity-summary::before {
   color: var(--muted, #888);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.85em;
-  flex-shrink: 0;
-}
-.commands-picker-desc {
-  color: var(--muted, #888);
-  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.commands-picker-source {
-  font-size: 0.7em;
+.commands-picker-desc {
   color: var(--muted, #888);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  flex-shrink: 0;
-  opacity: 0.6;
+  font-size: 0.85em;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 /* Input bar */
