@@ -714,21 +714,18 @@
       <!-- USAGE TAB -->
       <template v-if="currentTab === 'usage'">
         <div class="card">
-          <div class="settings-card-header">
-            <div class="settings-label-row">
-              <p class="section-title">MCP tool usage</p>
-              <button class="btn-small" :disabled="!mcpUsageLoaded" @click="fetchMcpUsage">Refresh</button>
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <div class="settings-label-row">
+                <p class="section-title">MCP tool usage</p>
+                <button class="btn-small" :disabled="!mcpUsageLoaded" @click="fetchMcpUsage">Refresh</button>
+              </div>
+              <p class="hint">
+                How often each managed Ciaobot MCP tool has been called since telemetry began.
+                Every tool call &mdash; from any provider or chat &mdash; is counted here.
+              </p>
             </div>
-            <p class="hint">
-              How often each managed Ciaobot MCP tool has been called since telemetry began.
-              Every tool call &mdash; from any provider or chat &mdash; is counted here.
-            </p>
-          </div>
-
-          <div v-if="!mcpUsageLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
-          <p v-else-if="mcpUsageError" class="hint hint--warn">{{ mcpUsageError }}</p>
-          <template v-else-if="mcpUsage">
-            <div class="usage-summary">
+            <div v-if="mcpUsage" class="usage-summary usage-summary--header">
               <div class="usage-stat">
                 <span class="usage-stat-value">{{ mcpUsage.total_calls.toLocaleString() }}</span>
                 <span class="usage-stat-label">total calls</span>
@@ -744,7 +741,11 @@
                 <span class="usage-stat-label">errors</span>
               </div>
             </div>
+          </div>
 
+          <div v-if="!mcpUsageLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
+          <p v-else-if="mcpUsageError" class="hint hint--warn">{{ mcpUsageError }}</p>
+          <template v-else-if="mcpUsage">
             <p v-if="mcpUsage.total_calls === 0" class="hint hint--info">
               No tool calls recorded yet. Usage will appear here once chats start using MCP tools.
             </p>
@@ -5503,6 +5504,14 @@ async function doPackageUpdate() {
   flex-wrap: wrap;
   gap: var(--space-4);
   margin-bottom: var(--space-4);
+}
+/* When docked into the split card header, sit on the right and drop the
+   bottom margin (the header divider already provides the spacing). */
+.usage-summary--header {
+  margin-bottom: 0;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+  justify-content: flex-end;
 }
 .usage-stat {
   display: flex;
