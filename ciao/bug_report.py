@@ -38,6 +38,17 @@ _DEFAULT_ENTRY_SYSTEM = "entry.765789486"
 
 _TIMEOUT_SECONDS = 15
 
+# Telltale fragments of a leaked programmatic object repr (a unittest mock or a
+# debug pointer string). These never appear in a real human-written bug report;
+# catching them stops a test double that slipped through a caller from being
+# POSTed to the public form as if it were a genuine report.
+_LEAKED_MARKERS = ("<MagicMock", "<Mock ", "<unittest.mock", "object at 0x")
+
+
+def _looks_leaked(text: object) -> bool:
+    """True if *text* looks like a leaked object repr rather than a human string."""
+    return isinstance(text, str) and any(m in text for m in _LEAKED_MARKERS)
+
 
 def _form_config() -> tuple[str, str, str, str]:
     """Return ``(form_url, entry_title, entry_details, entry_system)`` from the
@@ -80,6 +91,23 @@ def submit_bug_report(title: str, details: str, system_info: str | None = None) 
         print(
             "Bug-report form is not configured "
             "(set CIAO_BUG_REPORT_FORM_URL and the entry ids); skipping submission.",
+            file=sys.stderr,
+        )
+        return False
+
+    # Guard the public inbox: a caller that passes a non-string (e.g. a unittest
+    # MagicMock from a unit test) or a leaked object repr would otherwise have its
+    # str() POSTed to the form and later filed as a nonsense GitHub issue.
+    if not isinstance(title, str) or not title.strip():
+        print("Bug report not submitted: title is missing or not a string.", file=sys.stderr)
+        return False
+    if not isinstance(details, str) or not details.strip():
+        print("Bug report not submitted: details are missing or not a string.", file=sys.stderr)
+        return False
+    if _looks_leaked(title) or _looks_leaked(details):
+        print(
+            "Bug report not submitted: title/details look like a leaked test "
+            "mock or object repr, not a real report. Refusing to spam the inbox.",
             file=sys.stderr,
         )
         return False

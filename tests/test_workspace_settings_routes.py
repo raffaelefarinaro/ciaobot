@@ -103,7 +103,7 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         "/api/workspaces",
         json={
             "name": "client-a",
-            "vault_root": "vaults/client-a",
+            "vault_root": "client-a",
             "default_provider": "claude",
             "default_model": "kimi-k2.7-code:cloud",
             "gws_profile": "work",
@@ -132,7 +132,7 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
     client_workspace = next(item for item in stored if item["name"] == "client-a")
     assert client_workspace == {
         "name": "client-a",
-        "vault_root": "vaults/client-a",
+        "vault_root": "client-a",
         "default_provider": "claude",
         "default_model": "kimi-k2.7-code:cloud",
         "disallowed_tools": ["mcp__claude_ai_Slack", "Bash"],
@@ -146,7 +146,7 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
     client, config, pcm = _client(tmp_path)
     client.post(
         "/api/workspaces",
-        json={"name": "client-a", "vault_root": "vaults/client-a"},
+        json={"name": "client-a", "vault_root": "client-a"},
     )
 
     patch = client.patch(
@@ -512,3 +512,87 @@ def test_gws_setup_endpoints(tmp_path, monkeypatch):
     profiles = {p["name"]: p for p in resp.json()["profiles"]}
     assert profiles["personal"]["configured"] is False
     assert profiles["personal"]["client_secret_present"] is False
+
+
+def test_gws_exchange_refreshes_health_monitor(tmp_path, monkeypatch):
+    """A successful code exchange must trigger GwsHealthMonitor.check_once
+    so the Settings UI clears the 'Login expired' banner immediately
+    instead of waiting for the next periodic check.
+    """
+    from ciao.web import routes_api
+
+    client, _config, _pcm = _client(tmp_path)
+
+    # Seed a client_secret so load_client_secret succeeds.
+    config_dir = routes_api._gws_profile_config_dir(_config, "personal")
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "client_secret.json").write_text(
+        json.dumps(
+            {
+                "installed": {
+                    "client_id": "cid",
+                    "client_secret": "csecret",
+                    "redirect_uris": ["http://localhost"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # Replace the network-bound exchange with a no-op so the test stays offline.
+    import ciao.gws_auth
+    monkeypatch.setattr(
+        ciao.gws_auth, "exchange_and_store",
+        lambda config, profile, *, code, redirect_uri: {"ok": True, "email": "x@y"},
+    )
+
+    class _FakeMonitor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def check_once(self) -> None:
+            self.calls += 1
+
+    monitor = _FakeMonitor()
+    client.app.state.gws_health_monitor = monitor
+
+    resp = client.post(
+        "/api/integrations/gws/exchange",
+        json={"profile": "personal", "code": "test-code"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert monitor.calls == 1
+
+    # If the exchange itself raises, the health monitor must NOT be called.
+    def boom(*args, **kwargs):
+        raise ValueError("simulated exchange failure")
+
+    monkeypatch.setattr(
+        ciao.gws_auth, "exchange_and_store", boom
+    )
+
+    resp = client.post(
+        "/api/integrations/gws/exchange",
+        json={"profile": "personal", "code": "test-code"},
+    )
+    assert resp.status_code == 400
+    assert monitor.calls == 1  # unchanged after failed exchange
+
+    # If the health monitor itself raises, the exchange still succeeds and
+    # the response is returned (best-effort refresh, never blocks the user).
+    def loud(_self) -> None:
+        raise RuntimeError("monitor blew up")
+
+    monitor_cls = type(monitor)
+    monkeypatch.setattr(monitor_cls, "check_once", loud)
+    monkeypatch.setattr(
+        ciao.gws_auth, "exchange_and_store",
+        lambda config, profile, *, code, redirect_uri: {"ok": True, "email": "x@y"},
+    )
+
+    resp = client.post(
+        "/api/integrations/gws/exchange",
+        json={"profile": "personal", "code": "test-code"},
+    )
+    assert resp.status_code == 200

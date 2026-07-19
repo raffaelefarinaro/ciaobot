@@ -18,6 +18,17 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, AsyncGenerator, Iterator
 
+RESTART_DRAIN_MESSAGE = (
+    "Ciaobot is waiting for active chats to finish before restarting"
+)
+
+
+class RestartDrainingError(RuntimeError):
+    """Raised when a new turn is rejected because a server restart is draining."""
+
+    def __init__(self, message: str = RESTART_DRAIN_MESSAGE) -> None:
+        super().__init__(message)
+
 try:  # pragma: no cover - Ciaobot targets Unix; fallback keeps imports portable.
     import fcntl
 except ImportError:  # pragma: no cover
@@ -34,6 +45,7 @@ from ciao.models import (
     BridgeMode,
     ChatContext,
     ImageAttachment,
+    ModelChangedEvent,
     PermissionRequestEvent,
     ResultEvent,
     StreamEvent,
@@ -535,6 +547,13 @@ async def _generate_chat_title_with_engine(
     # literally — that always fails ("There's an issue with the selected
     # model (apfel)"). Substitute the standard fallback model instead.
     fallback_model = model if model != "apfel" else "haiku"
+    # Defense in depth: Claude Code's fast-mode suffix ("[1m]") is a CLI
+    # routing hint, not a real Anthropic model id, so the API rejects
+    # ``claude-opus-4-8[1m]`` outright. ``run_oneshot`` already strips it,
+    # but doing it here too keeps the ``model=`` log line honest and
+    # protects any future caller that bypasses the helper.
+    if fallback_model.endswith("[1m]"):
+        fallback_model = fallback_model[: -len("[1m]")]
     try:
         text = await run_oneshot(
             user_prompt,
@@ -651,6 +670,9 @@ class ChatInfo:
     # Empty = provider default. Reset on handover: levels aren't portable
     # across providers.
     thinking_level: str = ""
+    # Empty inherits the application default. Persisted so experimental MCP
+    # and legacy chats can coexist without process-global configuration.
+    control_surface: str = ""
     session_id: str = ""
     created_at: str = ""
     archived: bool = False
@@ -701,6 +723,13 @@ class ChatInfo:
     # `to_dict` so the PWA can rebuild its interactive picker after a reload
     # instead of showing the dead `{"questions": ...}` trace row.
     pending_question: str = ""
+    # User messages that were queued (mode="queue") while a turn was running
+    # and then parked when that turn paused on an AskUserQuestion. The pause
+    # tears down the stream (and its in-memory pending queue), so they are
+    # stashed here and re-seeded into the next stream — the user's answer turn
+    # — so they still flush as follow-ups instead of being silently dropped.
+    # Each entry is {"id": str, "text": str, "images": list[str]}.
+    pending_queue: list[dict] = field(default_factory=list)
     # Provider-neutral conversation fork lineage. Forks are normal chats with
     # a fresh provider session; these fields only preserve their relationship
     # to the source conversation and stable root-relative title numbering.
@@ -720,6 +749,7 @@ class ChatInfo:
             "model_bucket": self.model_bucket,
             "mode": self.mode,
             "thinking_level": self.thinking_level,
+            "control_surface": self.control_surface,
             "session_id": self.session_id,
             "created_at": self.created_at,
             "archived": self.archived,
@@ -851,6 +881,9 @@ class ProjectChatManager:
             "chats": {},
         }
         self._providers: dict[str, ProviderService] = {}
+        # Bound by main.py when the embedded MCP control plane is enabled.
+        # Tests and legacy-only instances intentionally leave it unset.
+        self._mcp_service = None
         self._broker = ChatStreamBroker()
         self._events = EventsHub()
         # Per-(chat, file) content snapshots taken on Write/Edit/MultiEdit/
@@ -972,6 +1005,7 @@ class ProjectChatManager:
                 model_bucket=cd.get("model_bucket", ""),
                 mode=cd.get("mode", self._config.claude_mode),
                 thinking_level=cd.get("thinking_level", ""),
+                control_surface=cd.get("control_surface", ""),
                 session_id=cd.get("session_id", ""),
                 created_at=cd.get("created_at", ""),
                 archived=cd.get("archived", False),
@@ -999,6 +1033,7 @@ class ProjectChatManager:
                 ),
                 handover_context_pending=bool(cd.get("handover_context_pending", False)),
                 pending_question=cd.get("pending_question", ""),
+                pending_queue=list(cd.get("pending_queue", [])),
                 forked_from_chat_id=cd.get("forked_from_chat_id", ""),
                 forked_from_turn_index=cd.get("forked_from_turn_index"),
                 fork_root_chat_id=cd.get("fork_root_chat_id", ""),
@@ -1060,6 +1095,7 @@ class ProjectChatManager:
                     "model_bucket": c.model_bucket,
                     "mode": c.mode,
                     "thinking_level": c.thinking_level,
+                    "control_surface": c.control_surface,
                     "session_id": c.session_id,
                     "created_at": c.created_at,
                     "archived": c.archived,
@@ -1079,6 +1115,7 @@ class ProjectChatManager:
                     "handover_messages": c.handover_messages,
                     "handover_context_pending": c.handover_context_pending,
                     "pending_question": c.pending_question,
+                    "pending_queue": c.pending_queue,
                     "forked_from_chat_id": c.forked_from_chat_id,
                     "forked_from_turn_index": c.forked_from_turn_index,
                     "fork_root_chat_id": c.fork_root_chat_id,
@@ -2483,6 +2520,7 @@ class ProjectChatManager:
         mode: str | None = None,
         provider: str | None = None,
         model_bucket: str | None = None,
+        control_surface: str | None = None,
     ) -> ChatInfo:
         if project_id not in self._projects:
             raise ValueError(f"Project '{project_id}' not found")
@@ -2490,6 +2528,8 @@ class ProjectChatManager:
             raise ValueError(f"Unknown provider '{provider}'")
         if not self._model_bucket_allowed(model_bucket):
             raise ValueError(f"Unknown model bucket '{model_bucket}'")
+        if control_surface not in {None, "", "legacy", "mcp", "auto"}:
+            raise ValueError(f"Unknown control surface '{control_surface}'")
         # Sweep any other empty chats before creating a new one. Opening a
         # fresh "New Chat" signals the user has moved on from whatever they
         # had open and never sent, so we don't let empty shells pile up.
@@ -2524,6 +2564,7 @@ class ProjectChatManager:
             provider=chat_provider,
             model_bucket=chat_bucket,
             mode=mode or self._config.claude_mode,
+            control_surface=control_surface or "",
             created_at=_now_iso(),
         )
         if chat_provider == "codex" and canonical_tier(chat_model) == "fable":
@@ -2925,6 +2966,7 @@ class ProjectChatManager:
             raise ValueError("Model is required")
         if self._broker.get(chat_id) is not None:
             raise ValueError("Cannot hand over while a turn is running")
+        self._revoke_mcp_chat(chat_id)
 
         old_provider = chat.provider
         old_model = chat.model
@@ -2976,6 +3018,7 @@ class ProjectChatManager:
         chat = self._chats.pop(chat_id, None)
         if chat is None:
             return False
+        self._revoke_mcp_chat(chat_id)
         ctx = ChatContext.for_web(chat_id)
         task = self._retry_tasks.pop(chat_id, None)
         if task is not None and not task.done():
@@ -3029,6 +3072,7 @@ class ProjectChatManager:
         chat = self._chats.get(chat_id)
         if chat is None:
             return None
+        self._revoke_mcp_chat(chat_id)
         ctx = ChatContext.for_web(chat_id)
         # Capture turn count before archive_session consumes the in-memory
         # transcript; capture the filtered JSONL before blob deletion.
@@ -3238,6 +3282,7 @@ class ProjectChatManager:
             # continue_archived_chat()'s job — it spawns a fresh chat and
             # leaves the archived one untouched.
             raise ValueError("Cannot start a new session in an archived chat")
+        self._revoke_mcp_chat(chat_id)
         # Archive existing transcript
         ctx = ChatContext.for_web(chat_id)
         self._transcripts.archive_session(
@@ -3260,6 +3305,11 @@ class ProjectChatManager:
         chat.archive_path = ""
         chat.handover_messages = []
         chat.handover_context_pending = False
+        # A fresh session abandons any question the old one paused on, along
+        # with follow-ups parked for that answer turn — they must not leak
+        # into the new conversation.
+        chat.pending_question = ""
+        chat.pending_queue = []
         if chat.retry_status:
             self._clear_chat_retry(chat)
         self._state.reset_active_session(ctx)
@@ -3281,6 +3331,13 @@ class ProjectChatManager:
                 self._config, provider=provider_name
             )
         return self._providers[chat_id]
+
+    def _revoke_mcp_chat(self, chat_id: str) -> None:
+        service = self._mcp_service
+        registry = getattr(service, "registry", None)
+        revoke = getattr(registry, "revoke_chat", None)
+        if callable(revoke):
+            revoke(chat_id)
 
     def _build_prompt_prefix(self, chat: ChatInfo) -> str:
         """Build context prefix for a web chat message.
@@ -3738,6 +3795,8 @@ class ProjectChatManager:
                 routing_env_for_model(self._runtime_model_for_chat(chat), self._config)
             )
         env["CIAO_CHAT_ID"] = chat.chat_id
+        # Disable Claude Code's auto memory to avoid double memory layers
+        env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
         return env
 
     def _effective_mode_for_chat(self, chat: ChatInfo) -> BridgeMode:
@@ -3769,65 +3828,79 @@ class ProjectChatManager:
         *,
         chat_id: str,
         request: AgentRequest,
-    ) -> _StreamOutcome:
-        """Run a single ``execute_streaming`` pass and collect its outcome.
+        outcome: _StreamOutcome,
+    ) -> AsyncGenerator[StreamEvent, None]:
+        """Run a single ``execute_streaming`` pass and yield events in real-time.
 
         Extracted from :meth:`stream_chat` so the auto-fallback wrapper
         can re-invoke the same logic on a re-issued request without
         duplicating the event-collecting / session-persisting code. The
         caller is responsible for forwarding ``events`` to subscribers
         and for persisting the transcript turn — the helper just
-        aggregates the terminal state.
+        aggregates the terminal state into the mutable outcome container.
         """
         chat = self._chats.get(chat_id)
         if chat is None:
             raise ValueError(f"Chat '{chat_id}' not found")
         provider = self._get_provider(chat_id)
-        events: list[StreamEvent] = []
-        response_text = ""
-        had_error = False
-        effective_model = chat.model
-        usage: dict[str, str] = {}
-        quota: dict[str, str] = {}
-        cost_usd: float = 0.0
-        tool_events: list[dict[str, Any]] = []
 
         async for event in provider.execute_streaming(request):
-            events.append(event)
+            outcome.events.append(event)
+            yield event
             sdk_sid = provider.current_session_id
             if sdk_sid and sdk_sid != chat.session_id:
                 chat.session_id = sdk_sid
                 self._save()
             if isinstance(event, ResultEvent):
-                response_text = event.result
-                had_error = bool(event.is_error)
-                effective_model = event.effective_model or chat.model
-                if chat.provider == "codex" and not chat.model and effective_model:
-                    chat.model = effective_model
+                outcome.response_text = event.result
+                outcome.had_error = bool(event.is_error)
+                outcome.effective_model = event.effective_model or chat.model
+                if chat.provider == "codex" and not chat.model and outcome.effective_model:
+                    chat.model = outcome.effective_model
                     self._save()
-                usage = event.usage
-                quota = event.quota
-                cost_usd = event.cost_usd or 0.0
+                outcome.usage = event.usage
+                outcome.quota = event.quota
+                outcome.cost_usd = event.cost_usd or 0.0
                 if event.session_id and event.session_id != chat.session_id:
                     chat.session_id = event.session_id
                     self._save()
             elif isinstance(event, ToolUseEvent):
-                tool_events.append({
+                outcome.tool_events.append({
                     "id": event.tool_use_id or "",
                     "name": event.tool_name,
                     "input": {"summary": event.tool_input},
                 })
+                self._record_agent_tool_use(chat, request, event)
 
-        return _StreamOutcome(
-            events=events,
-            response_text=response_text,
-            had_error=had_error,
-            effective_model=effective_model,
-            usage=usage,
-            quota=quota,
-            cost_usd=cost_usd,
-            tool_events=tool_events,
-        )
+    def _record_agent_tool_use(
+        self,
+        chat: ChatInfo,
+        request: AgentRequest,
+        event: ToolUseEvent,
+    ) -> None:
+        """Append provider-neutral tool telemetry for evaluation and support.
+
+        Inputs are deliberately excluded: command arguments can contain user
+        data or credentials.  The record is enough to compare tool selection,
+        call counts, provider, surface, and timing across implementations.
+        """
+        path = Path(self._config.state_path).parent / "agent_tool_calls.jsonl"
+        record = {
+            "timestamp": _now_iso(),
+            "chat_id": chat.chat_id,
+            "project_id": chat.project_id,
+            "provider": chat.provider,
+            "control_surface": request.control_surface,
+            "tool": event.tool_name,
+            "tool_use_id": event.tool_use_id or "",
+            "parent_tool_use_id": event.parent_tool_use_id or "",
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
+            logger.exception("Failed writing agent tool telemetry")
 
     def build_agent_request(
         self,
@@ -3849,6 +3922,50 @@ class ProjectChatManager:
         full_prompt = prefix + provider_prompt if prefix else provider_prompt
         final_display_prompt = prefix + display_prompt if prefix else display_prompt
 
+        surface = str(
+            getattr(chat, "control_surface", "")
+            or getattr(self._config, "control_surface", "legacy")
+            or "legacy"
+        )
+        if surface not in {"legacy", "mcp", "auto"}:
+            surface = "legacy"
+        # Auto uses the most recent promoted full-suite decision for this
+        # provider. Missing/invalid/tied decisions fail safely to legacy.
+        if surface == "auto":
+            from ciao.control_surfaces import resolve_auto_surface
+
+            resolved_surface = resolve_auto_surface(self._config, chat.provider)
+        else:
+            resolved_surface = surface
+        mcp_url = ""
+        mcp_token = ""
+        if resolved_surface == "mcp":
+            service = self._mcp_service
+            project = self._projects.get(chat.project_id)
+            if (
+                service is None
+                or not bool(getattr(self._config, "mcp_enabled", True))
+                or project is None
+            ):
+                # MCP is the default transport, so an unavailable server must
+                # not make the app unusable (bootstrap, CIAO_MCP_ENABLED=false).
+                # Degrade gracefully to legacy and log a WARNING; the SettingsView
+                # MCP status display and logs make the fallback observable.
+                logger.warning(
+                    "Ciaobot MCP unavailable for chat %s (service=%s, mcp_enabled=%s, "
+                    "project=%s); falling back to the legacy control surface.",
+                    chat.chat_id,
+                    service is not None,
+                    bool(getattr(self._config, "mcp_enabled", True)),
+                    project is not None,
+                )
+                resolved_surface = "legacy"
+            else:
+                role = "consultation" if chat.chat_id.startswith("sub-") else "chat"
+                mcp_url, mcp_token = service.credentials_for_chat(
+                    chat, project, role=role
+                )
+
         return AgentRequest(
             prompt=full_prompt,
             model=self._runtime_model_for_chat(chat),
@@ -3860,6 +3977,10 @@ class ProjectChatManager:
             extra_env=self._build_extra_env(chat),
             disallowed_tools=self.disallowed_tools_for_chat(chat),
             thinking_level=self._thinking_level_for_chat(chat),
+            control_surface=resolved_surface,  # type: ignore[arg-type]
+            mcp_url=mcp_url,
+            mcp_token=mcp_token,
+            mcp_required=resolved_surface == "mcp",
         )
 
     # ── Streaming chat ───────────────────────────────────────────────────
@@ -3905,14 +4026,20 @@ class ProjectChatManager:
         # get the original error surfaced instead of a loop.
         retry_used = False
 
-        outcome = await self._drive_stream(
+        outcome = _StreamOutcome(effective_model=chat.model)
+        held_result: ResultEvent | None = None
+        async for event in self._drive_stream(
             chat_id=chat_id,
             request=request,
-        )
-        # Replay each event from the first attempt to subscribers so the
-        # PWA sees the same stream shape, then decide whether to retry.
-        for event in outcome.events:
-            yield event
+            outcome=outcome,
+        ):
+            # Hold back the ResultEvent: if a capability fallback follows,
+            # the error result must NOT reach the PWA (it would prematurely
+            # end the turn). Non-result events are forwarded immediately.
+            if isinstance(event, ResultEvent):
+                held_result = event
+            else:
+                yield event
         response_text = outcome.response_text
         had_error = outcome.had_error
         effective_model = outcome.effective_model
@@ -3927,6 +4054,7 @@ class ProjectChatManager:
         # capable) and re-issue. Codex and any backend outside Claude /
         # Ollama / OpenRouter skip the retry — the user explicitly opted
         # out of broadening scope.
+        will_fallback = False
         if (
             had_error
             and not retry_used
@@ -3936,6 +4064,7 @@ class ProjectChatManager:
         ):
             next_model = next_tier_for_failure(request.model, self._config)
             if next_model and next_model != request.model:
+                will_fallback = True
                 logger.warning(
                     "Auto tier-fallback: %s failed (%s); retrying on %s",
                     request.model,
@@ -3953,15 +4082,11 @@ class ProjectChatManager:
                     mode=self._effective_mode_for_chat(chat),
                     display_prompt=request.display_prompt,
                     resume_session=None,
-                    # If the failure was image-related, strip the images
-                    # so the next model at least has a chance to answer
-                    # the text portion. For other capability errors
-                    # (context length, etc.) keep the payload intact.
-                    images=(
-                        []
-                        if "image" in response_text.lower()
-                        else (images or [])
-                    ),
+                    # Always keep images: the fallback model may support
+                    # vision (e.g. minimax-m3). If it also can't handle
+                    # images its error surfaces normally (retry_used
+                    # prevents a second fallback).
+                    images=images or [],
                     extra_env=self._build_extra_env(chat),
                     disallowed_tools=self.disallowed_tools_for_chat(chat),
                     thinking_level=self._thinking_level_for_chat(chat),
@@ -3969,28 +4094,47 @@ class ProjectChatManager:
                 yield SystemStatusEvent(
                     type="system",
                     status=(
-                        f"primary model could not handle this input "
-                        f"(no image support); retrying on {next_model}"
+                        f"primary model could not handle this input; "
+                        f"retrying on {next_model}"
                     ),
                 )
-                outcome = await self._drive_stream(
+                retry_outcome = _StreamOutcome(effective_model=next_model)
+                async for event in self._drive_stream(
                     chat_id=chat_id,
                     request=retry_request,
-                )
-                for event in outcome.events:
+                    outcome=retry_outcome,
+                ):
                     yield event
-                response_text = outcome.response_text
-                had_error = outcome.had_error
-                effective_model = outcome.effective_model
-                usage = outcome.usage
-                quota = outcome.quota
-                cost_usd = outcome.cost_usd
-                tool_events = outcome.tool_events
+                response_text = retry_outcome.response_text
+                had_error = retry_outcome.had_error
+                effective_model = retry_outcome.effective_model
+                usage = retry_outcome.usage
+                quota = retry_outcome.quota
+                cost_usd = retry_outcome.cost_usd
+                tool_events = retry_outcome.tool_events
+                # Successful fallback: persist the model change so future
+                # turns in this chat use the working model, and notify the
+                # PWA so the model pill updates in real time.
+                if not had_error:
+                    chat.model = next_model
+                    self._save()
+                    yield ModelChangedEvent(
+                        type="model_changed",
+                        model=next_model,
+                    )
             else:
                 logger.info(
                     "Auto tier-fallback skipped: no neighbor tier configured for %s",
                     request.model,
                 )
+
+        # Yield the held-back result from the first model when no fallback
+        # was attempted (normal path or no eligible neighbor). When a
+        # fallback ran, its own ResultEvent was already yielded above and
+        # the first model's error result is intentionally suppressed so
+        # the PWA sees exactly one result per turn.
+        if not will_fallback and held_result is not None:
+            yield held_result
 
         # Record transcript turn
         if handover_context_sent and not had_error:
@@ -4031,6 +4175,7 @@ class ProjectChatManager:
         chat_id: str,
         text: str,
         images: list[ImageAttachment] | None = None,
+        entry_id: str | None = None,
     ) -> bool:
         """Append a user message to the active stream's pending queue.
 
@@ -4047,9 +4192,10 @@ class ProjectChatManager:
             ref = getattr(img, "ref", None) or getattr(img, "original_filename", None)
             if ref:
                 image_refs.append(str(ref))
-        stream.enqueue(text, image_refs)
+        resolved_id = stream.enqueue(text, image_refs, entry_id=entry_id)
         stream.publish({
             "type": "queued",
+            "id": resolved_id,
             "text": text,
             "images": image_refs,
         })
@@ -4115,6 +4261,57 @@ class ProjectChatManager:
         })
         return True
 
+    def reorder_queue(
+        self,
+        chat_id: str,
+        entry_id: str,
+        before_id: str | None = None,
+    ) -> bool:
+        """Move a queued message within the active stream's pending queue.
+
+        ``before_id`` is the id of the entry the moved entry should precede;
+        None moves it to the end. Returns True if the stream existed and the
+        entry was found.
+        """
+        stream = self._broker.get(chat_id)
+        if stream is None or stream.background:
+            return False
+        if not stream.reorder_pending(entry_id, before_id):
+            return False
+        stream.publish({"type": "queue_state", "queue": stream.pending})
+        return True
+
+    def edit_queue(
+        self,
+        chat_id: str,
+        entry_id: str,
+        text: str,
+        images: list[ImageAttachment] | None = None,
+    ) -> bool:
+        """Update an existing queued message."""
+        stream = self._broker.get(chat_id)
+        if stream is None or stream.background:
+            return False
+        image_refs: list[str] = []
+        for img in images or []:
+            ref = getattr(img, "ref", None) or getattr(img, "original_filename", None)
+            if ref:
+                image_refs.append(str(ref))
+        if not stream.edit_pending(entry_id, text, image_refs):
+            return False
+        stream.publish({"type": "queue_state", "queue": stream.pending})
+        return True
+
+    def remove_queue(self, chat_id: str, entry_id: str) -> bool:
+        """Remove a queued message."""
+        stream = self._broker.get(chat_id)
+        if stream is None or stream.background:
+            return False
+        if not stream.remove_pending(entry_id):
+            return False
+        stream.publish({"type": "queue_state", "queue": stream.pending})
+        return True
+
     @property
     def events(self) -> EventsHub:
         """Cross-chat awareness pub/sub (drives /ws/events)."""
@@ -4153,8 +4350,18 @@ class ProjectChatManager:
         return sorted(ids)
 
     def begin_restart_drain(self) -> None:
-        """Stop admitting new turns while existing chat work finishes."""
+        """Stop admitting new turns while existing chat work finishes.
+
+        Publishes ``server_restarting`` so connected PWAs can show the restart
+        overlay instead of treating later turn rejections as chat errors.
+        """
+        if self._restart_draining:
+            return
         self._restart_draining = True
+        self._events.publish({
+            "type": "server_restarting",
+            "message": RESTART_DRAIN_MESSAGE,
+        })
 
     @property
     def background_agent_counts(self) -> dict[str, int]:
@@ -4338,9 +4545,7 @@ class ProjectChatManager:
             logger.debug("Chat %s already has an active stream; reusing", chat_id)
             return existing
         if self._restart_draining:
-            raise RuntimeError(
-                "Ciaobot is waiting for active chats to finish before restarting"
-            )
+            raise RestartDrainingError()
         if existing is not None and existing.background:
             # A between-turns drain stream is live. The user's send starts a
             # real turn: cancel the drain (its cleanup finishes the stream)
@@ -4353,7 +4558,7 @@ class ProjectChatManager:
             if chat_for_retry is not None and chat_for_retry.retry_status == "pending":
                 self._clear_chat_retry(chat_for_retry)
 
-        from ciao.web.chat_broker import event_to_json
+        from ciao.web.chat_broker import apply_file_touches_to_payload, event_to_json
 
         stream = ChatStream(prompt_text=prompt)
         self._broker.register(chat_id, stream)
@@ -4377,6 +4582,21 @@ class ProjectChatManager:
             # A new user turn answers (or supersedes) any paused question, so
             # the persisted picker state no longer applies.
             chat_meta.pending_question = ""
+            # Re-seed messages parked when a prior turn paused on a question
+            # (see the question_paused branch in _drive). They flush as
+            # follow-ups after this (the answer) turn, keeping the user's
+            # original queue order. Only ever populated after such a pause.
+            if chat_meta.pending_queue:
+                for entry in chat_meta.pending_queue:
+                    text = str(entry.get("text", ""))
+                    if not text:
+                        continue
+                    stream.enqueue(
+                        text,
+                        [str(ref) for ref in (entry.get("images") or [])],
+                        entry_id=entry.get("id") or None,
+                    )
+                chat_meta.pending_queue = []
             turn_index = chat_meta.user_turn_count
             chat_meta.user_turn_count = turn_index + 1
             if image_refs:
@@ -4466,6 +4686,11 @@ class ProjectChatManager:
                             chat_id, current_prompt, images=current_images
                         ):
                             payload = event_to_json(event)
+                            if payload:
+                                apply_file_touches_to_payload(
+                                    payload,
+                                    workspace_root=self._config.workspace_root,
+                                )
                             if (
                                 payload
                                 and isinstance(event, ResultEvent)
@@ -4582,30 +4807,40 @@ class ProjectChatManager:
                                 break
                             if isinstance(event, ToolUseEvent):
                                 # Schedule a debounced file snapshot for
-                                # Write/Edit/MultiEdit/NotebookEdit. The
-                                # ToolUseEvent fires *before* the CLI executes
-                                # the tool, so a 1.5s delay lets the actual
-                                # write land first. Bursts collapse — only the
-                                # last edit per file in a quick cluster ends
-                                # up captured. payload["file_touch"] is the
-                                # already-normalised metadata set by
-                                # event_to_json.
-                                touch = payload.get("file_touch") if payload else None
-                                if isinstance(touch, dict):
+                                # Write/Edit/MultiEdit/NotebookEdit/Bash creates.
+                                # The ToolUseEvent fires *before* the CLI
+                                # executes the tool, so a 1.5s delay lets the
+                                # actual write land first. Bursts collapse —
+                                # only the last edit per file in a quick
+                                # cluster ends up captured.
+                                # payload["file_touch(es)"] is the already-
+                                # normalised metadata set by event_to_json +
+                                # apply_file_touches_to_payload.
+                                touches: list[dict] = []
+                                if payload:
+                                    multi = payload.get("file_touches")
+                                    if isinstance(multi, list) and multi:
+                                        touches = [
+                                            t for t in multi if isinstance(t, dict)
+                                        ]
+                                    elif isinstance(payload.get("file_touch"), dict):
+                                        touches = [payload["file_touch"]]
+                                for touch in touches:
                                     fp = touch.get("file_path") or ""
-                                    if fp:
-                                        try:
-                                            self._snapshots.schedule_capture(
-                                                chat_id=chat_id,
-                                                file_path=fp,
-                                                action=touch.get("action", "touched"),
-                                                tool=event.tool_name,
-                                            )
-                                        except Exception:
-                                            logger.exception(
-                                                "schedule_capture failed for %s",
-                                                fp,
-                                            )
+                                    if not fp:
+                                        continue
+                                    try:
+                                        self._snapshots.schedule_capture(
+                                            chat_id=chat_id,
+                                            file_path=fp,
+                                            action=touch.get("action", "touched"),
+                                            tool=event.tool_name,
+                                        )
+                                    except Exception:
+                                        logger.exception(
+                                            "schedule_capture failed for %s",
+                                            fp,
+                                        )
                             if isinstance(event, ResultEvent):
                                 if event.is_error:
                                     had_error = True
@@ -4684,9 +4919,21 @@ class ProjectChatManager:
                         last_assistant_text = turn_assistant_text
 
                     if question_paused:
+                        # The turn stopped on an AskUserQuestion the user must
+                        # answer in a fresh turn (Claude's SDK picker). Anything
+                        # they queued while this turn ran lives only on `stream`,
+                        # which the finally block tears down — so park it on the
+                        # chat. start_stream re-seeds it into the answer turn so
+                        # the follow-ups still flush instead of being dropped.
+                        parked = stream.drain_pending()
+                        if parked:
+                            cm_park = self._chats.get(chat_id)
+                            if cm_park is not None:
+                                cm_park.pending_queue = list(parked)
+                                self._save()
                         break
 
-                    pending = stream.drain_pending()
+                    next_pending = stream.drain_one()
                     # A user-initiated stop produces an error-shaped ResultEvent
                     # (is_error=True). Treat that as intentional: consume the
                     # flag, reset had_error so the loop can start a new turn
@@ -4694,26 +4941,20 @@ class ProjectChatManager:
                     # nothing pending.
                     if stream.user_stopped:
                         stream.user_stopped = False
-                        if pending:
+                        if next_pending is not None:
                             had_error = False
-                    if not pending or had_error:
+                    if next_pending is None or had_error:
                         break
 
-                    combined_text = "\n\n".join(
-                        p["text"].strip()
-                        for p in pending
-                        if p.get("text", "").strip()
-                    )
-                    merged_image_refs: list[str] = []
+                    combined_text = next_pending.get("text", "").strip()
+                    merged_image_refs: list[str] = list(next_pending.get("images") or [])
                     merged_images: list[ImageAttachment] = []
-                    for p in pending:
-                        for ref in p.get("images") or []:
-                            attachment = self.resolve_image_ref(ref)
-                            if attachment:
-                                merged_images.append(attachment)
-                                merged_image_refs.append(ref)
+                    for ref in merged_image_refs:
+                        attachment = self.resolve_image_ref(ref)
+                        if attachment:
+                            merged_images.append(attachment)
                     if not combined_text:
-                        break
+                        continue
 
                     # Bump user-turn counter so image replay from history lines
                     # up. Capture turn_index2 first so we can attach it to the
@@ -5170,7 +5411,7 @@ class ProjectChatManager:
         toast, delayed push). Each such turn gets its own background
         ChatStream so replay stays turn-shaped.
         """
-        from ciao.web.chat_broker import event_to_json
+        from ciao.web.chat_broker import apply_file_touches_to_payload, event_to_json
 
         provider_service = self._providers.get(chat_id)
         if provider_service is None:
@@ -5196,6 +5437,10 @@ class ProjectChatManager:
                 payload = event_to_json(event)
                 if payload is None:
                     continue
+                apply_file_touches_to_payload(
+                    payload,
+                    workspace_root=self._config.workspace_root,
+                )
                 if stream is None:
                     # Only open a visible stream when a real event arrives —
                     # most drains sit idle until cancelled by the next turn.
@@ -5274,7 +5519,16 @@ class ProjectChatManager:
             data = json.loads(question_json)
             questions = data.get("questions", [])
             if questions:
-                lines = [q.get("question", "") for q in questions if q.get("question")]
+                # AskUserQuestion uses `question`; some Claude-compatible
+                # providers emit `text` instead. Accept both so the push
+                # body is readable instead of dumping the raw JSON.
+                lines = []
+                for q in questions:
+                    if not isinstance(q, dict):
+                        continue
+                    prompt = q.get("question") or q.get("text") or ""
+                    if prompt:
+                        lines.append(str(prompt))
                 body = "\n".join(lines) if lines else question_json
         except Exception:
             pass

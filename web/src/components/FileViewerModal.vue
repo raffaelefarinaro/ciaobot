@@ -107,7 +107,7 @@
       </nav>
 
       <div class="fv-main">
-        <div class="fv-body" :class="{ 'fv-body-image': store.kind === 'image', 'fv-body-excalidraw': store.kind === 'excalidraw' }" ref="bodyEl">
+        <div class="fv-body" :class="{ 'fv-body-image': store.kind === 'image', 'fv-body-excalidraw': store.kind === 'excalidraw', 'fv-body-csv': isCsv }" ref="bodyEl">
           <div v-if="store.loading" class="fv-loading">Loading…</div>
           <div v-else-if="store.error" class="fv-error">{{ store.error }}</div>
           <img
@@ -129,6 +129,13 @@
                 :read-only="false"
                 @change="store.editBuffer = $event"
                 style="flex: 1; min-height: 0; height: auto;"
+              />
+              <CsvViewer
+                v-else-if="isCsv"
+                :content="store.editBuffer"
+                :read-only="false"
+                @change="store.editBuffer = $event"
+                style="flex: 1; min-height: 0;"
               />
               <textarea
                 v-else
@@ -280,6 +287,15 @@
               v-html="renderedMarkdown"
               @click="onMdClick"
             ></div>
+            <CsvViewer
+              v-else-if="isCsv"
+              :content="store.content"
+              :read-only="true"
+              :commentable="true"
+              :cell-comments="csvCellComments"
+              @cell-select="onCsvCellSelect"
+              @cell-activate="onCsvCellActivate"
+            />
             <pre v-else class="fv-pre" ref="preEl" @click="onPreClick"><code ref="preCodeEl"><span v-for="(line, i) in contentLines" :key="i" :class="{ 'comment-highlight': isHighlightedLine(i + 1), 'pre-line': true }" :data-line="i + 1" :data-comment-id="commentIdForLine(i + 1)">{{ line }}</span></code></pre>
             </template>
           </template>
@@ -388,9 +404,9 @@
           class="fv-comment-trigger"
           :style="{ top: selectionAnchor.top + 'px', left: selectionAnchor.left + 'px' }"
           @mousedown.prevent
-          @click="openCommentForSelection"
+          @click="isCsv ? openCommentForCsvCell() : openCommentForSelection()"
           type="button"
-          title="Comment on this selection"
+          :title="isCsv ? 'Comment on this cell' : 'Comment on this selection'"
         >
           <span class="fv-comment-trigger-icon">💬</span>
           Comment
@@ -424,7 +440,11 @@ import { renderFileMarkdown } from '../lib/safeMarkdown'
 import { buildMarkdownIndex, resolveWikilinkTarget } from '../lib/wikilinks'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { createTerminalDiffLines, terminalDiffPrefix, type TerminalDiffKind } from '../lib/terminalDiff'
+import { isCsvPath } from '../lib/csv'
+import { formatCommentLocation } from '../lib/commentContext'
 const ExcalidrawViewer = defineAsyncComponent(() => import('./ExcalidrawViewer.vue'))
+const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
+import type { CsvCellComment, CsvCellRef } from './CsvViewer.vue'
 
 const store = useFileViewerStore()
 const projectsStore = useProjectStore()
@@ -661,14 +681,21 @@ const CARD_GAP = 8
 function updateCommentPositions(): void {
   if (!bodyEl.value) return
   const body = bodyEl.value
+  const bodyRect = body.getBoundingClientRect()
   const positions: Record<string, number> = {}
 
-  // Find the first highlight for each comment id and record its offsetTop
+  // Find the first highlight for each comment id and record its top relative
+  // to the scrollable body content. We use getBoundingClientRect instead of
+  // offsetTop because CSV cells live inside their own positioned overflow
+  // container (.csv-scroll), so their offsetParent is that inner scroller
+  // rather than the body — offsetTop would be measured against the wrong
+  // origin and the card would land at the top-left instead of beside its cell.
   const highlights = body.querySelectorAll('.comment-highlight[data-comment-id], .pre-line.comment-highlight[data-comment-id]')
   for (const el of Array.from(highlights)) {
     const id = (el as HTMLElement).dataset.commentId
     if (id && !(id in positions)) {
-      positions[id] = (el as HTMLElement).offsetTop
+      const rect = (el as HTMLElement).getBoundingClientRect()
+      positions[id] = rect.top - bodyRect.top + body.scrollTop
     }
   }
 
@@ -784,10 +811,56 @@ function attachScrollSync(): void {
   detachScrollSync()
   bodyEl.value.addEventListener('scroll', onBodyScroll, { passive: true })
   sidebarListEl.value?.addEventListener('scroll', syncSidebarToBody, { passive: true })
+  observeBody()
 }
 function detachScrollSync(): void {
   bodyEl.value?.removeEventListener('scroll', onBodyScroll)
   sidebarListEl.value?.removeEventListener('scroll', syncSidebarToBody)
+  unobserveBody()
+}
+
+// Re-measure comment anchors whenever the body's rendered content changes.
+// Async children (the lazily-loaded CsvViewer parses its content in its own
+// watcher, images decode, fonts settle) can paint their highlight elements
+// *after* the reposition watcher already ran, which would otherwise leave
+// every card stranded at the top-left fallback. The observers close that
+// race by re-running the measurement once the DOM actually settles.
+let bodyMutationObserver: MutationObserver | null = null
+let bodyResizeObserver: ResizeObserver | null = null
+let remeasureRaf = 0
+
+function scheduleRemeasure(): void {
+  if (remeasureRaf) return
+  remeasureRaf = requestAnimationFrame(() => {
+    remeasureRaf = 0
+    updateCommentPositions()
+    nextTick(() => layoutSidebarCards())
+  })
+}
+
+function observeBody(): void {
+  unobserveBody()
+  const body = bodyEl.value
+  if (!body) return
+  if (typeof MutationObserver !== 'undefined') {
+    bodyMutationObserver = new MutationObserver(() => scheduleRemeasure())
+    bodyMutationObserver.observe(body, { childList: true, subtree: true, characterData: true })
+  }
+  if (typeof ResizeObserver !== 'undefined') {
+    bodyResizeObserver = new ResizeObserver(() => scheduleRemeasure())
+    bodyResizeObserver.observe(body)
+  }
+}
+
+function unobserveBody(): void {
+  bodyMutationObserver?.disconnect()
+  bodyMutationObserver = null
+  bodyResizeObserver?.disconnect()
+  bodyResizeObserver = null
+  if (remeasureRaf) {
+    cancelAnimationFrame(remeasureRaf)
+    remeasureRaf = 0
+  }
 }
 
 // ── Mobile popup for reading a comment on tap ───────────────────────
@@ -929,6 +1002,7 @@ function highlightInMarkdown(root: HTMLElement, selection: string, commentId: st
 function applyHighlights(): void {
   if (!isCommentable.value) return
   if (store.kind === 'image') return
+  if (isCsv.value) return // cell highlights are driven by CsvViewer props
 
   if (isMarkdown.value) {
     const root = mdEl.value
@@ -961,10 +1035,13 @@ function commentBasename(path: string): string {
   const idx = path.lastIndexOf('/')
   return idx === -1 ? path : path.slice(idx + 1)
 }
-function commentLineLabel(c: { lineStart?: number | null; lineEnd?: number | null }): string {
-  if (!c.lineStart) return ''
-  if (!c.lineEnd || c.lineEnd === c.lineStart) return String(c.lineStart)
-  return `${c.lineStart}-${c.lineEnd}`
+function commentLineLabel(c: {
+  lineStart?: number | null
+  lineEnd?: number | null
+  colIndex?: number | null
+  colHeader?: string | null
+}): string {
+  return formatCommentLocation(c)
 }
 
 const backdropEl = ref<HTMLElement>()
@@ -1005,12 +1082,30 @@ function togglePin(): void {
 //      focus) and show an inline composer at the same anchor.
 type Anchor = { top: number; left: number }
 type LineRange = { start: number; end: number } | null
-type CommentDraft = { selection: string; anchor: Anchor; text: string; lines: LineRange }
+type CellRef = { row: number; colIndex: number; colHeader: string } | null
+type CommentDraft = {
+  selection: string
+  anchor: Anchor
+  text: string
+  lines: LineRange
+  cell: CellRef
+}
 const selectionAnchor = ref<Anchor | null>(null)
 const commentDraft = ref<CommentDraft | null>(null)
 let lastSelectionText = ''
 let lastSelectionLines: LineRange = null
 let lastSelectionRange: Range | null = null
+let lastCsvCell: CsvCellRef | null = null
+
+const csvCellComments = computed<CsvCellComment[]>(() =>
+  activeFileComments.value
+    .filter(c => c.lineStart != null && c.colIndex != null)
+    .map(c => ({
+      id: c.id,
+      row: c.lineStart as number,
+      colIndex: c.colIndex as number,
+    })),
+)
 
 // Anything we render as text is fair game for commenting — the floating
 // trigger should appear in both the markdown branch and the <pre> branch.
@@ -1026,6 +1121,7 @@ const basename = computed(() => {
 })
 
 const isMarkdown = computed(() => /\.(md|markdown)$/i.test(store.path))
+const isCsv = computed(() => isCsvPath(store.path))
 
 // Directory portion of the current MD file, used to resolve relative image
 // references inside the markdown. Strips any `:line` suffix the viewer
@@ -1098,7 +1194,7 @@ watch(
 // at their desired tops before we measure heights and push them down to
 // resolve overlaps.
 watch(
-  () => `${store.loadToken}|${store.path}|${activeFileComments.value.map(c => c.id).join(',')}|${renderedMarkdown.value.length}`,
+  () => `${store.loadToken}|${store.path}|${activeFileComments.value.map(c => c.id).join(',')}|${renderedMarkdown.value.length}|${store.content.length}`,
   () => nextTick(() => {
     applyHighlights()
     nextTick(() => {
@@ -1303,13 +1399,66 @@ function openCommentForSelection(): void {
     anchor: selectionAnchor.value,
     text: '',
     lines: lastSelectionLines,
+    cell: null,
   }
   commentDraftImages.value = []
   selectionAnchor.value = null
   lastSelectionRange = null
+  lastCsvCell = null
   // Clear the native selection — the sidebar now "owns" the highlighted
   // text, and leaving it selected makes the page look noisy.
   window.getSelection()?.removeAllRanges()
+  nextTick(() => sidebarDraftInputEl.value?.focus())
+}
+
+function anchorFromCellRect(rect: DOMRect): Anchor | null {
+  const modal = modalEl.value
+  const body = bodyEl.value
+  if (!modal || !body) return null
+  const modalRect = modal.getBoundingClientRect()
+  const bodyRect = body.getBoundingClientRect()
+  const visible = rect.bottom > bodyRect.top
+    && rect.top < bodyRect.bottom
+    && rect.right > bodyRect.left
+    && rect.left < bodyRect.right
+  if (!visible) return null
+  const top = Math.min(Math.max(rect.bottom - modalRect.top + 6, 8), modalRect.height - 48)
+  const left = Math.min(Math.max(rect.right - modalRect.left - 96, 8), modalRect.width - 110)
+  return { top, left }
+}
+
+function onCsvCellSelect(cell: CsvCellRef, rect: DOMRect): void {
+  if (commentDraft.value) return
+  lastCsvCell = cell
+  lastSelectionText = cell.value
+  lastSelectionLines = { start: cell.row, end: cell.row }
+  lastSelectionRange = null
+  selectionAnchor.value = anchorFromCellRect(rect)
+}
+
+function onCsvCellActivate(cell: CsvCellRef): void {
+  const match = activeFileComments.value.find(
+    c => c.lineStart === cell.row && c.colIndex === cell.colIndex,
+  )
+  if (match) scrollToHighlight(match.id)
+}
+
+function openCommentForCsvCell(): void {
+  if (!selectionAnchor.value || !lastCsvCell) return
+  commentDraft.value = {
+    selection: lastCsvCell.value,
+    anchor: selectionAnchor.value,
+    text: '',
+    lines: { start: lastCsvCell.row, end: lastCsvCell.row },
+    cell: {
+      row: lastCsvCell.row,
+      colIndex: lastCsvCell.colIndex,
+      colHeader: lastCsvCell.colHeader,
+    },
+  }
+  commentDraftImages.value = []
+  selectionAnchor.value = null
+  lastSelectionRange = null
   nextTick(() => sidebarDraftInputEl.value?.focus())
 }
 
@@ -1319,6 +1468,7 @@ function cancelComment(): void {
   lastSelectionText = ''
   lastSelectionLines = null
   lastSelectionRange = null
+  lastCsvCell = null
 }
 
 function saveComment(): void {
@@ -1332,6 +1482,8 @@ function saveComment(): void {
     comment: note,
     lineStart: draft.lines?.start ?? null,
     lineEnd: draft.lines?.end ?? null,
+    colIndex: draft.cell?.colIndex ?? null,
+    colHeader: draft.cell?.colHeader ?? null,
     images: commentDraftImages.value.length ? commentDraftImages.value : undefined,
   })
   commentDraft.value = null
@@ -1339,6 +1491,7 @@ function saveComment(): void {
   lastSelectionText = ''
   lastSelectionLines = null
   lastSelectionRange = null
+  lastCsvCell = null
 }
 
 async function handleDraftImageUpload(e: Event): Promise<void> {
@@ -1681,6 +1834,11 @@ if (typeof window !== 'undefined') {
   justify-content: center;
   padding: 0;
   background: var(--bg2, rgba(255, 255, 255, 0.04));
+}
+.fv-body-csv {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 .fv-img {
   max-width: 100%;

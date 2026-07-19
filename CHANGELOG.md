@@ -1,5 +1,59 @@
 # Changelog
 
+## v0.5.1 - 2026-07-19
+
+### Added
+- feat(ollama): default opus tier to minimax-m3:cloud (`f01543b`)
+- feat(chat): manage queued messages server-side and reconnect live turns faster (`3e3d813`)
+- feat(web): add CSV table preview and cell editing in the file viewer (`903e7f5`)
+- feat(web): add cell-level CSV comments with row/column anchors for the agent (`8c26f63`)
+- feat(chat): show newly created files in Outputs chips (`855864d`)
+- feat(web): run all missed schedules and show workspace missed counts (`ad7bbbb`)
+- feat(web): nest all subagent activity inside collapsible reasoning trace; clean up oneshot routing and dev defaults (`1dc74a7`)
+- feat(web): display both input and output live token counts in ChatPanel (`b666948`)
+- feat(critique): restrict default critique panel to opus/fable, prioritize native Anthropic, and display effective models in PWA settings UI (`f83553f`)
+- feat(mcp): make MCP the default control surface with graceful legacy fallback (`7cd8b87`)
+- feat(web): two-line slash-command picker rows, drop source tag (`3b00902`)
+- feat(mcp): surface per-tool usage in Settings (`a057246`)
+- feat(pwa): order provider models by tier in model pickers (`518d5a7`)
+- feat(settings): align home-tab cards and fix stale nav references (`9026ad5`)
+- feat(critique): add OpenAI (Codex) fable to the default panel (`f53f058`)
+- feat(gws-auth): request one full scope set with a --scopes override (`018caad`)
+
+### Changed
+- Merge pull request #153 from raffaelefarinaro/chore/sync-develop-v0.5.0 (`7dce211`)
+- web: disable in-app toasts and unread markers for background agents (`d484a0f`)
+- Update retry tests to match new _drive_stream async generator signature (`20763fd`)
+- refactor(web): fold stop into the composer send button (`fdb4130`)
+- web: guard WebSocket event handlers from orphaned connections to prevent duplicate stream appends (`9dc848a`)
+- Move Google Workspace card to Workspaces tab and suppress allowed rate limit status events (`4785327`)
+- Merge fix/chat-sync-stale-state: heal three chat live-sync bugs (`44ebf5e`)
+
+### Fixed
+- fix(reporting): reject leaked mock-object reprs in bug reports (`f4b73d7`)
+- Fix duplicate assistant message rendering, support turn-based history merging, and persist streaming start times (`e966bae`)
+- fix(chat): keep PWA live through capability fallback (`e19542c`)
+- fix(web): show AskUserQuestion prompts from text/type payloads (`ecb5cf8`)
+- fix(oneshot): drop tool schemas and MCP from routine calls (`9bc661d`)
+- fix(web): hide Claude requesting status outside Activity (`9beacc0`)
+- fix(web): show restart overlay during drain instead of chat errors (`53eb371`)
+- fix(deploy): retry git pull on transient network errors (`83a9e48`)
+- fix(web): keep Working Activity during mid-turn history sync (`0318c44`)
+- fix: inject resolved codex binary dir into child process PATH (`cf34f56`)
+- fix: suppress allowed rate limit status events in chat stream (`313a572`)
+- fix(web): stop duplicating Anthropic tiers as a Claude (Ollama) section (`4e21d91`)
+- fix(sync): heal three stale live-state bugs in chat streaming (`b598968`)
+- fix(chat): preserve queued messages when a turn pauses on a question (`0663c49`)
+- fix(pwa): anchor file-viewer comment bubbles to their cell reliably (`8bed282`)
+- fix(memory): stop proposal flood and route facts by scope (`013e6d6`)
+
+### Maintenance
+- docs(pwa): document queue_state and queue management WS messages (`b2da446`)
+- chore(memory): disable Claude Code auto-memory when working in Ciaobot (`f231a0e`)
+- docs(pwa-api): document /api/mcp/usage route (#158) (`df7b297`)
+- docs(critique): point /critique command at the adversarial-review panel (`22d0238`)
+- docs(capabilities): catalog CSV table viewer, cell comments, and missed-schedule catch-up (`0c8b74f`)
+
 ## v0.5.0 - 2026-07-16
 
 ### Added

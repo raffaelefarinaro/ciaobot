@@ -3,7 +3,7 @@
     <div v-if="dragOver" class="drop-overlay">Drop images here</div>
 
     <!-- Header -->
-    <PaneHeader @open-sidebar="$emit('open-sidebar')">
+    <PaneHeader :active-bg-agents="store.activeBackgroundAgents" @open-sidebar="$emit('open-sidebar')">
       <template #title>
         <div class="header-left">
           <button class="close-btn desktop-only" @click="$emit('close')" title="Close chat">&times;</button>
@@ -206,6 +206,7 @@
               >
                 <span class="file-chip-icon" aria-hidden="true">{{ fileCardIcon(f.file_path) }}</span>
                 <span class="file-chip-name">{{ fileCardBasename(f.file_path) }}</span>
+                <span v-if="f.action === 'created'" class="file-chip-action">new</span>
                 <span class="file-chip-open" aria-hidden="true">&#8599;</span>
               </button>
             </div>
@@ -279,6 +280,7 @@
                   >
                     <span class="file-chip-icon" aria-hidden="true">{{ fileCardIcon(f.file_path) }}</span>
                     <span class="file-chip-name">{{ fileCardBasename(f.file_path) }}</span>
+                    <span v-if="f.action === 'created'" class="file-chip-action">new</span>
                     <span class="file-chip-open" aria-hidden="true">&#8599;</span>
                   </button>
                 </div>
@@ -343,8 +345,6 @@
             >Fix this error</button>
           </div>
         </div>
-        <!-- Background (async) subagents still running after the parent turn -->
-        <SubagentPanel v-else-if="item.kind === 'subagents'" :subagents="item.subs" />
         <!-- System message (errors, etc) -->
         <div v-else-if="item.kind === 'system'" class="message system">
           <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
@@ -442,16 +442,10 @@
             v-html="renderMarkdown(store.currentStreamingThinking)"
           ></div>
           <div v-if="store.currentStreamingText" class="trace-text trace-streaming" v-html="renderMarkdown(store.currentStreamingText)"></div>
-          <!-- Foreground subagents for the in-flight turn nest in the live trace;
-               background async agents render as a standalone panel below. -->
+          <!-- Subagents for the in-flight turn nest in the live trace -->
           <SubagentPanel v-if="liveSubagents.length" :subagents="liveSubagents" />
         </div>
-        </div>
-
-      <SubagentPanel
-        v-if="liveStandaloneSubagents.length"
-        :subagents="liveStandaloneSubagents"
-      />
+      </div>
 
       <div ref="scrollAnchor"></div>
 
@@ -619,7 +613,9 @@
           <span v-if="q.header" class="question-block-chip">{{ q.header }}</span>
           <span v-if="q.multiSelect" class="question-block-multi">multi-select</span>
         </div>
-        <div class="question-block-prompt">{{ q.question }}</div>
+        <div v-if="q.question || !q.header" class="question-block-prompt">
+          {{ questionPromptLabel(q, qi) }}
+        </div>
         <div class="question-options">
           <button
             v-for="opt in q.options"
@@ -678,15 +674,53 @@
 
     <!-- Queued messages (sent while a response was already streaming). -->
     <div v-if="store.currentQueued.length" class="queued-messages">
-      <div v-for="(q, i) in store.currentQueued" :key="i" class="queued-chip" title="Will be sent when current response finishes">
+      <div
+        v-for="(q, i) in store.currentQueued"
+        :key="q.id || i"
+        class="queued-chip"
+        title="Will be sent when current response finishes"
+      >
         <span class="queued-label">Queued</span>
         <div class="queued-body">
           <div v-if="q.images?.length" class="queued-images">
             <img v-for="img in q.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="queued-image-thumb" />
           </div>
-          <span class="queued-text">{{ q.text }}</span>
+          <template v-if="editingQueueId === q.id">
+            <textarea
+              v-model="editingQueueText"
+              class="queued-edit-input"
+              rows="2"
+              @keydown.enter.prevent="saveEditQueue(chat.chat_id, q.id)"
+              @keydown.esc="cancelEditQueue"
+            />
+          </template>
+          <span v-else class="queued-text">{{ q.text }}</span>
         </div>
-        <button class="queued-remove" @click="store.removeQueued(chat.chat_id, i)" title="Remove">&times;</button>
+        <div class="queued-actions">
+          <button
+            class="queued-action"
+            :disabled="i === 0"
+            title="Move up"
+            @click="store.reorderQueued(chat.chat_id, i, i - 1)"
+          >▲</button>
+          <button
+            class="queued-action"
+            :disabled="i === store.currentQueued.length - 1"
+            title="Move down"
+            @click="store.reorderQueued(chat.chat_id, i, i + 1)"
+          >▼</button>
+          <button
+            v-if="editingQueueId !== q.id"
+            class="queued-action"
+            title="Edit"
+            @click="startEditQueue(q)"
+          >✎</button>
+          <template v-else>
+            <button class="queued-action" title="Save" @click="saveEditQueue(chat.chat_id, q.id)">✓</button>
+            <button class="queued-action" title="Cancel" @click="cancelEditQueue">✕</button>
+          </template>
+          <button class="queued-remove" @click="store.removeQueued(chat.chat_id, i)" title="Remove">&times;</button>
+        </div>
       </div>
     </div>
 
@@ -704,16 +738,6 @@
     </div>
 
     <!-- Input -->
-    <!-- Streaming controls bar (separate row above input) -->
-    <div v-if="store.isStreaming && !chat.archived" class="streaming-bar">
-      <span class="streaming-spinner" aria-hidden="true">{{ spinnerFrame }}</span>
-      <span class="streaming-label">ciaobot is thinking</span>
-      <button class="stop-btn" @click="store.stopChat(chat.chat_id)">
-        <span class="stop-icon">&#9632;</span>
-        <span class="stop-text">stop</span>
-      </button>
-    </div>
-
     <!-- Background agents still running after the parent turn finished. -->
     <div
       v-if="store.activeBackgroundAgents > 0 && !chat.archived"
@@ -740,14 +764,15 @@
         @mousedown.prevent="applyCommand(cmd)"
         @mouseenter="commandHighlightIdx = i"
       >
-        <span class="commands-picker-name">/{{ cmd.name }}</span>
-        <span v-if="cmd.argument_hint" class="commands-picker-hint">{{ cmd.argument_hint }}</span>
-        <span v-if="cmd.description" class="commands-picker-desc">{{ cmd.description }}</span>
-        <span class="commands-picker-source">{{ cmd.source }}</span>
+        <div class="commands-picker-head">
+          <span class="commands-picker-name">/{{ cmd.name }}</span>
+          <span v-if="cmd.argument_hint" class="commands-picker-hint">{{ cmd.argument_hint }}</span>
+        </div>
+        <div v-if="cmd.description" class="commands-picker-desc">{{ cmd.description }}</div>
       </div>
     </div>
 
-    <div class="input-bar" data-tour="chat-input" :class="{ disabled: chat.archived, 'has-streaming-bar': store.isStreaming && !chat.archived }">
+    <div class="input-bar" data-tour="chat-input" :class="{ disabled: chat.archived }">
       <template v-if="chat.archived">
         <div class="archived-notice">
           <span>This chat is archived.</span>
@@ -779,13 +804,18 @@
             <input type="file" accept="image/*" multiple hidden @change="handleFileSelect" />
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
           </label>
+          <!-- While streaming: empty composer → stop; any draft → queue. -->
           <button
             class="send-btn"
-            :disabled="!inputText.trim() && !store.pendingImages.length && !store.pendingComments.length && !store.pendingChatComments.length"
-            :title="store.isStreaming ? 'Queue message (sends when current turn finishes)' : 'Send'"
-            :aria-label="store.isStreaming ? 'Queue message' : 'Send message'"
-            @click="send"
-          ><span class="send-glyph">{{ store.isStreaming ? '»' : '↵' }}</span></button>
+            :class="{ 'is-stop': showStopAction }"
+            :disabled="!showStopAction && !canSend"
+            :title="primaryActionTitle"
+            :aria-label="primaryActionLabel"
+            @click="primaryAction"
+          >
+            <span v-if="showStopAction" class="stop-icon" aria-hidden="true">&#9632;</span>
+            <span v-else class="send-glyph">{{ store.isStreaming ? '»' : '↵' }}</span>
+          </button>
         </div>
       </template>
     </div>
@@ -814,13 +844,13 @@ import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
 import { formatTime, formatDuration } from '../lib/time'
 import { collectTraceOutputs, formatTokenUsage, traceSummaryMeta, type TraceOutput } from '../lib/chatActivity'
 import { buildForkSnapshot } from '../lib/chatFork'
+import { formatCommentLocation } from '../lib/commentContext'
 
 type RenderItem =
   | { kind: 'user'; msg: ChatMessage }
   | { kind: 'assistant'; msg: ChatMessage; outputs?: TraceOutput[]; subchats?: ProviderSubchatRecord[] }
   | { kind: 'system'; msg: ChatMessage }
   | { kind: 'trace'; steps: ChatMessage[]; subs?: SubagentTranscript[]; outputs?: TraceOutput[]; subchats?: ProviderSubchatRecord[] }
-  | { kind: 'subagents'; subs: SubagentTranscript[] }
 
 type ChatComment = {
   id: string
@@ -837,27 +867,11 @@ const inputText = ref('')
 const inputEl = ref<HTMLTextAreaElement>()
 const isContinuing = ref(false)
 
-// Braille spinner for the "ciaobot is thinking" indicator. We tick a
-// ref instead of using a CSS @keyframes since content can't be animated
-// reliably across browsers.
-const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-const spinnerIdx = ref(0)
-const spinnerFrame = computed(() => SPINNER_FRAMES[spinnerIdx.value])
-let spinnerTimer: ReturnType<typeof setInterval> | null = null
 // Ticks once a second while streaming so the live elapsed-time label in the
-// "Working..." trace meta advances. Kept separate from the 90ms spinner so we
-// don't recompute the meta string ten times a second.
+// "Working..." trace meta advances.
 const nowTs = ref(Date.now())
 let clockTimer: ReturnType<typeof setInterval> | null = null
 watch(() => store.isStreaming, (streaming) => {
-  if (streaming && !spinnerTimer) {
-    spinnerTimer = setInterval(() => {
-      spinnerIdx.value = (spinnerIdx.value + 1) % SPINNER_FRAMES.length
-    }, 90)
-  } else if (!streaming && spinnerTimer) {
-    clearInterval(spinnerTimer)
-    spinnerTimer = null
-  }
   if (streaming && !clockTimer) {
     nowTs.value = Date.now()
     clockTimer = setInterval(() => { nowTs.value = Date.now() }, 1000)
@@ -866,6 +880,33 @@ watch(() => store.isStreaming, (streaming) => {
     clockTimer = null
   }
 }, { immediate: true })
+
+const canSend = computed(() =>
+  !!(inputText.value.trim()
+    || store.pendingImages.length
+    || store.pendingComments.length
+    || store.pendingChatComments.length),
+)
+// Empty composer while a turn is in flight → stop; otherwise the same
+// button queues/sends the draft.
+const showStopAction = computed(() => store.isStreaming && !canSend.value)
+const primaryActionTitle = computed(() => {
+  if (showStopAction.value) return 'Stop'
+  if (store.isStreaming) return 'Queue message (sends when current turn finishes)'
+  return 'Send'
+})
+const primaryActionLabel = computed(() => {
+  if (showStopAction.value) return 'Stop generation'
+  if (store.isStreaming) return 'Queue message'
+  return 'Send message'
+})
+function primaryAction() {
+  if (showStopAction.value) {
+    store.stopChat(chat.value.chat_id)
+    return
+  }
+  send()
+}
 
 // Slash-command picker: populated once on mount from /api/commands.
 type SlashCommand = {
@@ -911,6 +952,27 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const dragOver = ref(false)
 const chat = computed(() => store.activeChat!)
+
+// Inline editing state for queued messages. Keyed by queue entry id.
+const editingQueueId = ref<string | null>(null)
+const editingQueueText = ref('')
+
+function startEditQueue(entry: { id: string; text: string }) {
+  editingQueueId.value = entry.id
+  editingQueueText.value = entry.text
+}
+
+function cancelEditQueue() {
+  editingQueueId.value = null
+  editingQueueText.value = ''
+}
+
+function saveEditQueue(chatId: string, entryId: string) {
+  const text = editingQueueText.value.trim()
+  if (!text) return
+  store.editQueued(chatId, entryId, text)
+  cancelEditQueue()
+}
 
 // Loops bound to this chat (loop-driven chats get a banner with controls).
 const taskStore = useTaskStore()
@@ -1204,6 +1266,16 @@ const allQuestionsAnswered = computed(() => {
   return true
 })
 
+// Prefer the model's header/question; fall back to "Question N" so an empty
+// AskUserQuestion payload never renders as broken markdown (`****: …`) or a
+// blank prompt above the option list.
+function questionPromptLabel(
+  q: { header?: string; question?: string },
+  index: number,
+): string {
+  return (q.question || q.header || `Question ${index + 1}`).trim()
+}
+
 function submitQuestionAnswers() {
   if (!allQuestionsAnswered.value) return
   if (!chat.value || chat.value.archived) return
@@ -1221,7 +1293,7 @@ function submitQuestionAnswers() {
     if (other) parts.push(other)
     const answer = parts.length ? parts.join(', ') : '(no answer)'
     nativeAnswers[q.id] = parts
-    lines.push(`**${q.header || q.question}**: ${answer}`)
+    lines.push(`**${questionPromptLabel(q, i)}**: ${answer}`)
   }
   const requestId = qs[0]?.requestId || ''
   if (requestId) {
@@ -1269,16 +1341,39 @@ const activeBucket = computed<BucketKey>(() => {
   return ollamaModels.includes(c.model) ? 'claude_personal' : 'claude_work'
 })
 
-const chatModelSections = computed(() => sectionsFromModelsResponse(modelsResponse.value))
+const chatModelSections = computed(() => {
+  const baseSections = sectionsFromModelsResponse(modelsResponse.value)
+  // The Anthropic section is always the real Anthropic subscription: its tier
+  // aliases route to Anthropic and picking one hands the chat over there. It is
+  // NOT relabeled per active bucket — when routing through Ollama/OpenRouter
+  // those tiers already appear as badges on that provider's concrete models
+  // (e.g. "minimax-m3:cloud · Opus"), so a "Claude (Ollama)" clone would just
+  // duplicate them. Keeping a single fixed "Claude (Anthropic)" section both
+  // removes that duplicate and preserves an explicit handover path to Anthropic.
+  return baseSections.map(section => {
+    if (section.key === 'anthropic') {
+      return { ...section, label: 'Claude (Anthropic)' }
+    }
+    return section
+  })
+})
 
 const activeModelHighlights = computed(() => {
   const c = chat.value
   if (!c) return []
-  const tier = tierAlias(c.model)
-  if (tier && activeBucket.value === 'codex') {
-    return [modelsResponse.value?.alias_tiers?.codex?.[tier] || tier]
+  const resolvedModel = canonicalTier(c.model)
+  const tier = tierAlias(resolvedModel)
+  if (tier) {
+    // Only the Anthropic subscription bucket highlights the bare tier, because
+    // there the model literally IS the tier and lives in the "Claude
+    // (Anthropic)" section. For concrete-provider buckets (codex / ollama /
+    // openrouter) highlight only that provider's real model — the bare tier now
+    // belongs to the separate Anthropic handover section and must not light up.
+    if (activeBucket.value === 'claude_work') return [tier]
+    const provider = activeBucket.value === 'claude_personal' ? 'ollama' : activeBucket.value
+    const nativeModel = modelsResponse.value?.alias_tiers?.[provider]?.[tier]
+    return nativeModel ? [nativeModel] : [c.model]
   }
-  if (tier) return [tier]
   const effective = effectiveModelForBucket(c.model, activeBucket.value)
   return [effective || c.model]
 })
@@ -1823,7 +1918,6 @@ onBeforeUnmount(() => {
   messagesEl.value?.removeEventListener('scroll', checkScroll)
   messagesResizeObserver?.disconnect()
   messagesResizeObserver = null
-  if (spinnerTimer) { clearInterval(spinnerTimer); spinnerTimer = null }
   if (clockTimer) { clearInterval(clockTimer); clockTimer = null }
 })
 
@@ -1940,54 +2034,12 @@ async function speakMessage(text: string, key: string): Promise<void> {
 
 onBeforeUnmount(stopSpeaking)
 
-// System bubbles produced by _summarize_task_notification (routes_api.py)
-// announce a subagent completion ("🤖 Subagent completed: ..." / "🤖 Agent
-// \"X\" completed"). renderItems uses them as the chronological anchor for
-// the dispatching turn's SubagentPanel.
-function isSubagentCompletionNotice(content: string): boolean {
-  return /^\u{1F916} (Subagent|Agent\b)/u.test(content.trim())
-}
-
-// Pull the dispatched agent's own description out of a completion-notice
-// bubble (e.g. 'Agent "Curate recent chats and proposals" finished') so the
-// notice can be tied to its exact SubagentTranscript by name. turn_index
-// can't be used for this: it only increments on a message that ships to the
-// server as a fresh prompt, but a chat can advance server-side turns purely
-// via internal continuations (auto-drained queued follow-ups) with no
-// corresponding visible `role: 'user'` bubble — so the render walk's turn
-// counter can be several turns behind the async subagent's real turn_index
-// by the time its notice appears.
-function noticeSubagentName(content: string): string | null {
-  const m = content.match(/Agent "([^"]+)"/)
-  return m ? m[1] : null
-}
-
 // Subagent activity lines are tagged with the leading turnstile arrow by the
 // store's tool_use handler when an event arrives with parent_tool_use_id set.
 // Used to indent and de-emphasize them so the trace reads "parent → subagent
 // → parent" without the user mistaking subagent work for the parent's own.
 function isSubagentLine(line: string): boolean {
   return line.trimStart().startsWith('↳')  // ↳
-}
-
-// Foreground Task/Agent dispatches run inside the parent turn and belong in
-// the Reasoning trace. Background (`run_in_background`) agents outlive the
-// parent reply and get a standalone panel the user can keep watching.
-function isBackgroundSubagent(sub: SubagentTranscript): boolean {
-  return sub.is_async === true
-}
-
-function partitionSubagents(subs: SubagentTranscript[]): {
-  trace: SubagentTranscript[]
-  standalone: SubagentTranscript[]
-} {
-  const trace: SubagentTranscript[] = []
-  const standalone: SubagentTranscript[] = []
-  for (const sub of subs) {
-    if (isBackgroundSubagent(sub)) standalone.push(sub)
-    else trace.push(sub)
-  }
-  return { trace, standalone }
 }
 
 function handleFileLinkClick(e: MouseEvent): void {
@@ -2038,9 +2090,12 @@ const liveTraceMeta = computed(() => {
     const elapsed = nowTs.value - startedAt
     if (elapsed >= 0) parts.push(formatDuration(elapsed))
   }
-  // Live token count: cumulative output tokens reported so far this turn.
+  // Live token count: cumulative tokens reported so far this turn.
   const usage = store.currentLiveUsage
-  if (usage && usage.output > 0) parts.push(`${formatTokens(usage.output)} tok`)
+  if (usage) {
+    if (usage.input > 0) parts.push(`${formatTokens(usage.input)} in`)
+    if (usage.output > 0) parts.push(`${formatTokens(usage.output)} out`)
+  }
   return parts.join(' · ')
 })
 
@@ -2133,38 +2188,8 @@ const renderData = computed<{
     if (turnIndex === null) return []
     const subs = subsByTurn.get(turnIndex)
     if (!subs?.length) return []
-    const { trace, standalone } = partitionSubagents(subs)
-    if (standalone.length) subsByTurn.set(turnIndex, standalone)
-    else subsByTurn.delete(turnIndex)
-    return trace
-  }
-
-  const flushStandaloneSubagents = () => {
-    if (currentTurnIndex === null) return
-    const subs = subsByTurn.get(currentTurnIndex)
-    if (!subs?.length) return
-    const standalone = subs.filter(isBackgroundSubagent)
-    if (!standalone.length) return
-    items.push({ kind: 'subagents', subs: standalone })
-    const foreground = subs.filter(s => !isBackgroundSubagent(s))
-    if (foreground.length) subsByTurn.set(currentTurnIndex, foreground)
-    else subsByTurn.delete(currentTurnIndex)
-  }
-
-  // Place exactly the subagent a completion notice names, searching every
-  // turn bucket rather than just currentTurnIndex (see noticeSubagentName).
-  // Returns false if no match was found so the caller can fall back.
-  const flushStandaloneSubagentByName = (name: string): boolean => {
-    for (const [idx, subs] of subsByTurn.entries()) {
-      const match = subs.find(s => isBackgroundSubagent(s) && s.description === name)
-      if (!match) continue
-      items.push({ kind: 'subagents', subs: [match] })
-      const remaining = subs.filter(s => s !== match)
-      if (remaining.length) subsByTurn.set(idx, remaining)
-      else subsByTurn.delete(idx)
-      return true
-    }
-    return false
+    subsByTurn.delete(turnIndex)
+    return subs
   }
 
   const flushTurn = (isFinal = false) => {
@@ -2261,7 +2286,6 @@ const renderData = computed<{
   for (const msg of store.activeMessages) {
     if (msg.role === 'user') {
       flushTurn()
-      flushStandaloneSubagents()
       currentTurnIndex = typeof msg.turn_index === 'number'
         ? msg.turn_index
         : currentTurnIndex === null ? 0 : currentTurnIndex + 1
@@ -2273,18 +2297,6 @@ const renderData = computed<{
       && msg.tool_name !== '_filecard'
     ) {
       flushTurn()
-      // A subagent-completion notice marks where the background work ended:
-      // flush that exact subagent's standalone panel just before it so the
-      // chat reads chronologically (dispatch reply → background agent →
-      // completion notice → report) instead of dumping the panel after the
-      // report at the end of the turn. Match by name, not currentTurnIndex —
-      // a chat can advance several server-side turns via auto-drained queued
-      // follow-ups with no new `role: 'user'` bubble, leaving the render
-      // walk's turn counter behind the async subagent's real turn_index.
-      if (isSubagentCompletionNotice(msg.content)) {
-        const name = noticeSubagentName(msg.content)
-        if (!name || !flushStandaloneSubagentByName(name)) flushStandaloneSubagents()
-      }
       items.push({ kind: 'system', msg })
     } else {
       // assistant text, _activity tool block, _thinking note, or _filecard:
@@ -2293,32 +2305,22 @@ const renderData = computed<{
     }
   }
   flushTurn(true)
-  // While streaming, foreground subagents nest in the live trace; background
-  // async agents render as a standalone panel below it.
+  // While streaming, subagents nest in the live trace.
   if (store.isStreaming) {
     const all = [...subsByTurn.values()].flat().concat(unanchoredSubs)
-    const { trace, standalone } = partitionSubagents(all)
-    return { items, liveSubs: trace, liveStandaloneSubs: standalone }
+    return { items, liveSubs: all, liveStandaloneSubs: [] }
   }
-  flushStandaloneSubagents()
   // Anything still unplaced (turn not in history yet, or no turn info):
-  // foreground leftovers fold into a trace block; background ones stay standalone.
+  // leftovers fold into a trace block.
   const leftovers = [...subsByTurn.values()].flat().concat(unanchoredSubs)
-  const { trace, standalone } = partitionSubagents(leftovers)
-  if (standalone.length) {
-    items.push({ kind: 'subagents', subs: standalone })
-  }
-  if (trace.length) {
-    items.push({ kind: 'trace', steps: [], subs: trace })
+  if (leftovers.length) {
+    items.push({ kind: 'trace', steps: [], subs: leftovers })
   }
   return { items, liveSubs: [], liveStandaloneSubs: [] }
 })
 
 const renderItems = computed<RenderItem[]>(() => renderData.value.items)
 const liveSubagents = computed<SubagentTranscript[]>(() => renderData.value.liveSubs)
-const liveStandaloneSubagents = computed<SubagentTranscript[]>(
-  () => renderData.value.liveStandaloneSubs,
-)
 
 // Watcher: keep highlights in sync with the pending list and message DOM.
 watch(
@@ -2471,10 +2473,13 @@ function commentBasename(path: string): string {
 // Pretty line label: empty when no range, "42" for single line, "42-57"
 // for ranges. Mirrors the structured `lines="L42-L57"` attribute we send
 // to the model, minus the `L` prefix to keep the chip tight.
-function commentLineLabel(c: { lineStart?: number | null; lineEnd?: number | null }): string {
-  if (!c.lineStart) return ''
-  if (!c.lineEnd || c.lineEnd === c.lineStart) return String(c.lineStart)
-  return `${c.lineStart}-${c.lineEnd}`
+function commentLineLabel(c: {
+  lineStart?: number | null
+  lineEnd?: number | null
+  colIndex?: number | null
+  colHeader?: string | null
+}): string {
+  return formatCommentLocation(c)
 }
 
 // Retry support: error messages are system bubbles whose content starts
@@ -2551,8 +2556,21 @@ function tierAlias(model: string): TierAlias | null {
     : null
 }
 
+function tierForModel(model: string, bucket: BucketKey): TierAlias | null {
+  if (bucket === 'codex') return null
+  const provider = bucket === 'claude_personal' ? 'ollama' : bucket
+  const tiers = modelsResponse.value?.alias_tiers?.[provider] || {}
+  for (const [tier, target] of Object.entries(tiers)) {
+    if (target === model) return tier as TierAlias
+  }
+  return null
+}
+
 function canonicalTier(model: string): string {
-  return tierAlias(model) || model
+  const alias = tierAlias(model)
+  if (alias) return alias
+  const resolvedAlias = tierForModel(model, activeBucket.value)
+  return resolvedAlias || model
 }
 
 function modelBucketForBucket(bucket: BucketKey): ModelBucketValue {
@@ -2649,6 +2667,10 @@ async function selectModel(value: string | string[], sectionKey = '') {
     ollama: 'claude_personal',
     openrouter: 'openrouter',
   }
+  // The Anthropic section is an explicit handover to the Anthropic
+  // subscription: picking a tier there always routes to claude_work, never the
+  // currently-active Ollama/OpenRouter/Codex bucket. To change tier while
+  // staying on a concrete provider, pick that provider's real model instead.
   const targetBucket = sectionBucket[sectionKey] || bucketForSelectedModel(model)
   const modelBucket = modelBucketForBucket(targetBucket)
   const sameModelAndRoute = canonicalTier(model) === canonicalTier(chat.value.model) && targetBucket === activeBucket.value
@@ -3473,6 +3495,13 @@ function insertImageRef(n: number) {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.file-chip-action {
+  flex-shrink: 0;
+  color: var(--accent);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-transform: lowercase;
+}
 .file-chip-open {
   color: var(--fg3);
   flex-shrink: 0;
@@ -3941,34 +3970,6 @@ details[open] > .activity-summary::before {
 .comment-chip-remove:hover { background: var(--bg2); color: var(--fg); }
 
 
-/* Streaming controls bar (above input) */
-.streaming-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  padding-left: calc(12px + var(--safe-left));
-  padding-right: calc(12px + var(--safe-right));
-  border-top: 1px solid var(--border);
-  background: var(--bg);
-  flex-shrink: 0;
-}
-
-.streaming-spinner {
-  color: var(--accent);
-  font-size: calc(14px * var(--font-scale));
-  line-height: 1;
-  width: 1ch;
-  flex-shrink: 0;
-  font-variant-numeric: tabular-nums;
-}
-
-.streaming-label {
-  font-size: var(--text-sm);
-  color: var(--fg2);
-  margin-right: auto;
-}
-
 /* Background agents running after the parent turn finished. */
 .bg-agents-bar {
   display: flex;
@@ -4033,15 +4034,20 @@ details[open] > .activity-summary::before {
 }
 .commands-picker-row {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  gap: 2px;
   padding: 6px 12px;
   cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
 }
 .commands-picker-row.active {
   background: var(--hover, rgba(128, 128, 128, 0.12));
+}
+.commands-picker-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+  overflow: hidden;
 }
 .commands-picker-name {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -4052,22 +4058,19 @@ details[open] > .activity-summary::before {
   color: var(--muted, #888);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.85em;
-  flex-shrink: 0;
-}
-.commands-picker-desc {
-  color: var(--muted, #888);
-  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.commands-picker-source {
-  font-size: 0.7em;
+.commands-picker-desc {
   color: var(--muted, #888);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  flex-shrink: 0;
-  opacity: 0.6;
+  font-size: 0.85em;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 /* Input bar */
@@ -4085,11 +4088,6 @@ details[open] > .activity-summary::before {
   border-top: 1px solid var(--border);
   background: var(--bg);
   flex-shrink: 0;
-}
-
-.input-bar.has-streaming-bar {
-  border-top: none;
-  padding-top: 4px;
 }
 
 /* Buttons sit in a row at the bottom by default; once the textarea grows
@@ -4150,7 +4148,7 @@ details[open] > .activity-summary::before {
 .image-btn:hover { background: var(--bg3); color: var(--fg); border-color: var(--fg2); }
 .image-btn:active { background: var(--bg2); }
 
-.send-btn, .stop-btn {
+.send-btn {
   min-width: var(--touch);
   min-height: var(--touch);
   padding: 0 16px;
@@ -4164,11 +4162,19 @@ details[open] > .activity-summary::before {
   align-items: center;
   justify-content: center;
   transition: background 120ms var(--ease), transform 120ms var(--ease);
+  background: var(--accent);
+  color: white;
 }
-.send-btn { background: var(--accent); color: white; }
 .send-btn:hover { background: var(--accent-strong); }
 .send-btn:active { transform: scale(0.96); }
 .send-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+.send-btn.is-stop {
+  background: var(--error);
+  padding: 0;
+  width: var(--touch);
+  height: var(--touch);
+}
+.send-btn.is-stop:hover { background: var(--error); filter: brightness(1.08); }
 .send-glyph {
   font-size: 20px;
   font-weight: 700;
@@ -4176,20 +4182,10 @@ details[open] > .activity-summary::before {
   display: inline-block;
   transform: translateY(-1px);
 }
-.stop-btn {
-  background: var(--error);
-  color: white;
-  padding: 0;
-  width: var(--touch);
-  height: var(--touch);
-}
 .stop-icon {
   font-size: 14px;
   line-height: 1;
   display: inline-block;
-}
-.stop-text {
-  display: none;
 }
 
 /* Queued message chips */
@@ -4257,6 +4253,36 @@ details[open] > .activity-summary::before {
   flex-shrink: 0;
 }
 .queued-remove:hover { color: var(--fg); background: var(--bg2); }
+.queued-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.queued-action {
+  background: none;
+  border: none;
+  color: var(--fg2);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.queued-action:hover:not(:disabled) { color: var(--fg); background: var(--bg2); }
+.queued-action:disabled { opacity: 0.3; cursor: not-allowed; }
+.queued-edit-input {
+  width: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 8px;
+  font-family: var(--font);
+  font-size: 13px;
+  resize: vertical;
+}
 
 /* AskUserQuestion picker. Same docking pattern as the permission card so
    the model's structured question doesn't get lost in the trace. */
@@ -4651,7 +4677,7 @@ details[open] > .activity-summary::before {
   /* Keep every composer action at the shared touch-target minimum. */
   .input-bar { padding-top: 5px; padding-bottom: 5px; }
   .chat-input { min-height: var(--touch); }
-  .stop-btn, .input-actions .send-btn {
+  .input-actions .send-btn {
     min-width: var(--touch);
     min-height: var(--touch);
     width: var(--touch);
@@ -4660,8 +4686,6 @@ details[open] > .activity-summary::before {
   }
   .image-btn { min-height: var(--touch); min-width: var(--touch); }
   :deep(.voice-btn) { min-height: var(--touch); min-width: var(--touch); }
-  /* Compact streaming bar on mobile */
-  .streaming-bar { padding-top: 4px; padding-bottom: 4px; }
 }
 
 /* Chat comment selection trigger + composer */

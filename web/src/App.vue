@@ -9,6 +9,10 @@
         @skip="skipped = true"
       />
     </Transition>
+    <RestartOverlay
+      v-if="projectStore.serverRestarting"
+      :message="projectStore.serverRestartMessage"
+    />
     <router-view />
     <InAppToast />
   </div>
@@ -17,7 +21,9 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import InAppToast from './components/InAppToast.vue'
+import RestartOverlay from './components/RestartOverlay.vue'
 import StartupView from './components/StartupView.vue'
+import { useProjectStore } from './stores/projects'
 
 interface Phase {
   name: string
@@ -27,6 +33,7 @@ interface Phase {
   finished_at: string | null
 }
 
+const projectStore = useProjectStore()
 const phases = ref<Phase[]>([])
 const overallReady = ref(false)
 const serverVersion = ref('')

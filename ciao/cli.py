@@ -1904,6 +1904,17 @@ def build_parser() -> argparse.ArgumentParser:
     release_parser.add_argument("args", nargs=argparse.REMAINDER)
     release_parser.set_defaults(func=lambda args: release.main(args.args))
 
+    benchmark_parser = subparsers.add_parser(
+        "benchmark-control-surfaces",
+        help="Run the paired live legacy-vs-MCP evaluation suite.",
+    )
+    benchmark_parser.add_argument("args", nargs=argparse.REMAINDER)
+    benchmark_parser.set_defaults(
+        func=lambda args: __import__(
+            "ciao.control_surface_benchmark", fromlist=["main"]
+        ).main(args.args)
+    )
+
     memory_parser = subparsers.add_parser(
         "memory",
         help="Read or edit bounded memory files.",
@@ -2127,6 +2138,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    os.environ.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
     argv_list = list(sys.argv[1:] if argv is None else argv)
     if argv_list[:1] == ["public-preflight"]:
         return public_release.main(argv_list[1:])
@@ -2134,6 +2146,10 @@ def main(argv: list[str] | None = None) -> int:
         return package_smoke.main(argv_list[1:])
     if argv_list[:1] == ["prepare-release"]:
         return release.main(argv_list[1:])
+    if argv_list[:1] == ["benchmark-control-surfaces"]:
+        from ciao.control_surface_benchmark import main as benchmark_main
+
+        return benchmark_main(argv_list[1:])
     parser = build_parser()
     args = parser.parse_args(argv_list)
     if not hasattr(args, "func"):

@@ -25,6 +25,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from ciao.web.auth import authorize_websocket
 from ciao.web.chat_broker import ChatStream
 from ciao.models import ImageAttachment
+from ciao.web.project_chats import RestartDrainingError
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +168,35 @@ async def ws_chat(websocket: WebSocket) -> None:
                     )
                 continue
 
+            if msg_type == "queue_reorder":
+                pcm.reorder_queue(
+                    chat_id,
+                    entry_id=str(msg.get("entry_id", "")),
+                    before_id=str(msg.get("before_id")) if msg.get("before_id") else None,
+                )
+                continue
+
+            if msg_type == "queue_edit":
+                images: list[ImageAttachment] = []
+                for ref in msg.get("images", []):
+                    attachment = pcm.resolve_image_ref(ref)
+                    if attachment:
+                        images.append(attachment)
+                pcm.edit_queue(
+                    chat_id,
+                    entry_id=str(msg.get("entry_id", "")),
+                    text=str(msg.get("text", "")),
+                    images=images or None,
+                )
+                continue
+
+            if msg_type == "queue_remove":
+                pcm.remove_queue(
+                    chat_id,
+                    entry_id=str(msg.get("entry_id", "")),
+                )
+                continue
+
             if msg_type == "message":
                 text = msg.get("text", "")
                 if not text:
@@ -194,7 +224,10 @@ async def ws_chat(websocket: WebSocket) -> None:
                         except Exception:
                             logger.exception("steer_stream failed for %s", chat_id)
                     if not handled:
-                        handled = pcm.queue_message(chat_id, text, images=images or None)
+                        handled = pcm.queue_message(
+                            chat_id, text, images=images or None,
+                            entry_id=str(msg.get("entry_id")) if msg.get("entry_id") else None,
+                        )
                     if handled:
                         continue
                     # Else: the stream raced-finish between check and queue;
@@ -207,6 +240,18 @@ async def ws_chat(websocket: WebSocket) -> None:
 
                 try:
                     pcm.start_stream(chat_id, text, images=images or None)
+                except RestartDrainingError as exc:
+                    # Not a chat failure — the server is draining for
+                    # restart. Tell the client so it can show the restart
+                    # overlay instead of an inline "Fix this error" bubble.
+                    try:
+                        await websocket.send_json({
+                            "type": "server_restarting",
+                            "message": str(exc),
+                        })
+                    except (WebSocketDisconnect, RuntimeError):
+                        break
+                    continue
                 except Exception as exc:
                     logger.exception("Failed to start stream for %s", chat_id)
                     try:
@@ -240,6 +285,7 @@ async def ws_events(websocket: WebSocket) -> None:
     - `chat_subagents_ready`    {chat_id, project_id, remaining}
     - `chat_title`              {chat_id, title}
     - `open_chat`               {chat_id}  (menu-bar deep link into running PWA)
+    - `server_restarting`       {message}  (restart drain began; show overlay)
 
     On connect, sends a snapshot of currently-active streams so a fresh client
     can paint sidebar indicators without waiting for the next event.
@@ -267,6 +313,9 @@ async def ws_events(websocket: WebSocket) -> None:
             # client can paint the "N agents running" indicator immediately
             # (and clear a count left stale by a missed event during a gap).
             "background_agents": pcm.background_agent_counts,
+            # Late connectors that missed `server_restarting` still get the
+            # overlay instead of a chat-level turn rejection.
+            "restarting": bool(getattr(pcm, "_restart_draining", False)),
         })
     except (WebSocketDisconnect, RuntimeError):
         return

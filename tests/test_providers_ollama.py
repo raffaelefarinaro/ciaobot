@@ -154,7 +154,7 @@ def test_ciao_config_parses_ollama_env(monkeypatch) -> None:
     assert config.ollama.api_key == "ollama"  # default daemon-relay token
     # Default cheap free-tier title model when nothing is set.
     assert config.ollama.title_model == "gemma4:e2b-it-qat"
-    assert config.ollama.opus_model == "glm-5.2:cloud"
+    assert config.ollama.opus_model == "minimax-m3:cloud"
     assert config.ollama.fable_model == "glm-5.2:cloud"
     assert config.ollama.sonnet_model == "kimi-k2.7-code:cloud"
     assert config.ollama.haiku_model == "deepseek-v4-flash:cloud"
@@ -289,6 +289,7 @@ def test_build_extra_env_leaves_anthropic_chat_alone(tmp_path: Path) -> None:
     assert "ANTHROPIC_AUTH_TOKEN" not in env
     assert "ANTHROPIC_BASE_URL" not in env
     assert env["GWS_PROFILE"] == "personal"
+    assert env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1"
 
 
 async def test_auto_title_uses_workspace_haiku_model(

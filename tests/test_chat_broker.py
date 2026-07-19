@@ -108,6 +108,74 @@ def test_extract_file_touch_dict_input() -> None:
     assert extract_file_touch("Write", None) is None
 
 
+def test_extract_file_touches_from_bash_creates() -> None:
+    """Shell redirects / touch / tee / cp surface as Outputs file chips."""
+    from ciao.web.chat_broker import extract_file_touches
+
+    assert extract_file_touches(
+        "Bash", {"command": "echo hi > guests.csv", "description": "Create CSV"}
+    ) == [{"file_path": "guests.csv", "action": "created"}]
+    assert extract_file_touches(
+        "Bash", {"command": "touch a.md b.md"}
+    ) == [
+        {"file_path": "a.md", "action": "created"},
+        {"file_path": "b.md", "action": "created"},
+    ]
+    assert extract_file_touches(
+        "Bash", {"command": "cp src/template.csv memory-vault/guests.csv"}
+    ) == [{"file_path": "memory-vault/guests.csv", "action": "created"}]
+    # Descriptions alone (live summary without the command) must not invent paths.
+    assert extract_file_touches("Bash", "Create the guest CSV") == []
+    assert extract_file_touches("Bash", {"command": "ls -la /tmp"}) == []
+    # Bare English after `>` must not become a file chip / linkify target.
+    assert extract_file_touches("Bash", {"command": "echo hi > There"}) == []
+    assert extract_file_touches(
+        "Bash", {"command": "echo hi > memory-vault/notes/there.md"}
+    ) == [{"file_path": "memory-vault/notes/there.md", "action": "created"}]
+
+
+def test_event_to_json_prefers_precomputed_file_touches() -> None:
+    payload = event_to_json(
+        ToolUseEvent(
+            type="assistant",
+            tool_name="Bash",
+            tool_input="Create guest CSV",
+            file_touches=[
+                {"file_path": "guests.csv", "action": "created"},
+                {"file_path": "notes.md", "action": "created"},
+            ],
+        )
+    )
+    assert payload["file_touch"] == {
+        "file_path": "guests.csv",
+        "action": "created",
+    }
+    assert payload["file_touches"] == [
+        {"file_path": "guests.csv", "action": "created"},
+        {"file_path": "notes.md", "action": "created"},
+    ]
+
+
+def test_refine_file_touch_actions_marks_new_writes_created(tmp_path) -> None:
+    from ciao.web.chat_broker import refine_file_touch_actions
+
+    existing = tmp_path / "old.md"
+    existing.write_text("x", encoding="utf-8")
+    refined = refine_file_touch_actions(
+        [
+            {"file_path": "old.md", "action": "written"},
+            {"file_path": "new.md", "action": "written"},
+            {"file_path": "edited.md", "action": "edited"},
+        ],
+        workspace_root=tmp_path,
+    )
+    assert refined == [
+        {"file_path": "old.md", "action": "written"},
+        {"file_path": "new.md", "action": "created"},
+        {"file_path": "edited.md", "action": "edited"},
+    ]
+
+
 def test_event_to_json_permission_request_includes_request_id() -> None:
     """Client needs ``request_id`` to reply with the matching
     ``permission_response`` — otherwise it can't correlate approvals to
@@ -154,6 +222,17 @@ def test_event_to_json_thinking() -> None:
     assert event_to_json(ThinkingEvent(type="assistant", text="hmm")) == {
         "type": "thinking",
         "text": "hmm",
+    }
+
+
+def test_event_to_json_model_changed() -> None:
+    from ciao.models import ModelChangedEvent
+
+    assert event_to_json(
+        ModelChangedEvent(type="model_changed", model="minimax-m3:cloud")
+    ) == {
+        "type": "model_changed",
+        "model": "minimax-m3:cloud",
     }
 
 

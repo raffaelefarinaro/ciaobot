@@ -4,13 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ciaobot"
-version = "0.5.0"
+version = "0.5.1"
 description = "Ciaobot personal assistant server."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = [
-  "claude-agent-sdk==0.2.120",
+  "claude-agent-sdk==0.2.123",
+  # Agent-facing control plane shared by Claude Code and Codex.
+  "mcp==1.28.1",
   "openai==2.45.0",
   "starlette==0.52.1",
   "uvicorn[standard]==0.51.0",

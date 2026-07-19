@@ -13,6 +13,14 @@ Flow:
 5. Removes stale encrypted files so gws uses the new credentials
 """
 
+import sys
+
+if sys.version_info < (3, 12):
+    sys.exit(
+        f"This script needs Python 3.12+ (running {sys.version.split()[0]}). "
+        f"Try the ciaobot venv: /Users/raffaelefarinaro/repos/ciaobot/.venv/bin/python {sys.argv[0] if sys.argv else __file__}"
+    )
+
 import argparse
 import json
 import os
@@ -28,33 +36,27 @@ PROFILE_CONFIGS = {
     "work": REPO_ROOT / "secrets" / "gws",
 }
 
-# Scopes requested per profile (must match or exceed what gws needs).
-PERSONAL_SCOPES = (
+# Full scope set requested for every profile. OAuth has no "all scopes" wildcard,
+# so this enumerates every core Workspace service gws supports. Google only grants
+# what the account's GCP OAuth consent screen allows; in "testing" mode all of these
+# are available to the project's test users. Extra/enterprise services (admin-reports,
+# keep, classroom, chat, meet) are omitted because they need admin grants or special
+# API enablement and would fail consent on a normal account — pass --scopes to request
+# a custom set when you need them.
+FULL_SCOPES = (
     "https://www.googleapis.com/auth/gmail.modify "
     "https://www.googleapis.com/auth/calendar "
-    "https://www.googleapis.com/auth/tasks "
-    "openid "
-    "https://www.googleapis.com/auth/userinfo.email "
-    "https://www.googleapis.com/auth/userinfo.profile"
-)
-
-WORK_SCOPES = (
     "https://www.googleapis.com/auth/drive "
     "https://www.googleapis.com/auth/spreadsheets "
-    "https://www.googleapis.com/auth/gmail.modify "
-    "https://www.googleapis.com/auth/calendar "
     "https://www.googleapis.com/auth/documents "
     "https://www.googleapis.com/auth/presentations "
     "https://www.googleapis.com/auth/tasks "
+    "https://www.googleapis.com/auth/contacts "
+    "https://www.googleapis.com/auth/forms.body "
     "openid "
     "https://www.googleapis.com/auth/userinfo.email "
     "https://www.googleapis.com/auth/userinfo.profile"
 )
-
-PROFILE_SCOPES = {
-    "personal": PERSONAL_SCOPES,
-    "work": WORK_SCOPES,
-}
 
 
 def read_client_secret(config_dir: Path) -> dict:
@@ -181,6 +183,16 @@ def validate_profile(profile: str) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Interactive GWS OAuth helper")
     parser.add_argument("profile", choices=["personal", "work"], help="GWS profile to authenticate")
+    parser.add_argument(
+        "--redirect-url",
+        help="Full redirect URL from the browser. When given, skip the interactive "
+        "prompt and exchange the code directly (for headless/non-TTY use).",
+    )
+    parser.add_argument(
+        "--scopes",
+        help="Space-separated OAuth scopes to request instead of the full default set "
+        "(e.g. 'https://www.googleapis.com/auth/keep https://www.googleapis.com/auth/chat.messages').",
+    )
     args = parser.parse_args()
 
     config_dir = validate_profile(args.profile)
@@ -192,7 +204,7 @@ def main() -> None:
     redirect_uris = installed.get("redirect_uris", ["http://localhost"])
     redirect_uri = redirect_uris[0]
 
-    scopes = PROFILE_SCOPES[args.profile]
+    scopes = args.scopes.strip() if args.scopes else FULL_SCOPES
 
     print(f"\nProfile: {args.profile}")
     print(f"Config dir: {config_dir}")
@@ -209,7 +221,11 @@ def main() -> None:
     print("URL from your browser's address bar and paste it below.")
     print()
 
-    redirect_url = input("Paste redirect URL: ").strip()
+    if args.redirect_url:
+        redirect_url = args.redirect_url.strip()
+        print(f"Using redirect URL from --redirect-url flag.")
+    else:
+        redirect_url = input("Paste redirect URL: ").strip()
     if not redirect_url:
         print("No URL provided. Exiting.")
         sys.exit(1)
@@ -244,8 +260,7 @@ def main() -> None:
     fix_encryption_key_permissions(config_dir)
 
     print("\nDone. Verify with:")
-    print(f"  GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file scripts/gws-profile.sh {args.profile} gws auth status")
-    print(f"  GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file scripts/gws-profile.sh {args.profile} gws calendar events list --params '{{\"calendarId\": \"primary\", \"maxResults\": 1}}'")
+    print(f"  GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file scripts/gws-profile.sh {args.profile} calendar events list --params '{{\"calendarId\": \"primary\", \"maxResults\": 1}}'")
 
 
 if __name__ == "__main__":

@@ -61,7 +61,11 @@ Steps:
 with the system info, error excerpt, version, and reproduction steps. If `gh` is \
 unavailable/unauthenticated, file the report automatically and anonymously by running \
 `ciao report-bug --title "..." --details "<traceback + what triggered it>"` \
-(the `--system` field is auto-detected). If that command also fails, end with:
+(the `--system` field is auto-detected). Write a short, human-readable title that \
+summarizes the bug in one line; never paste raw log lines, object reprs (such as \
+`<MagicMock ...>` or `object at 0x...`), or full tracebacks into the title — put \
+those in `--details`. If the only "error" you can find is a leaked object repr or \
+test mock, do not file a report; say so in your summary instead. If that command also fails, end with:
    - A clickable pre-filled GitHub issue URL (https://github.com/raffaelefarinaro/ciaobot/issues/new?title=...&body=...) pre-filling the title and summary (properly URL-encoded).
    - A separate, paste-ready detailed traceback and system info block for them to copy into the issue description.
 5. Close with a short summary: what was found, what was fixed, what was escalated.

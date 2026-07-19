@@ -1,9 +1,10 @@
 import type { ChatMessage, SubagentTranscript } from './types'
+import { isPlausibleFilePath } from './filePaths'
 
-export type TraceOutput = { file_path: string }
+export type TraceOutput = { file_path: string; action?: string }
 
 export function collectTraceOutputs(
-  steps: Pick<ChatMessage, 'tool_name' | 'file_path' | 'content'>[] | undefined,
+  steps: Pick<ChatMessage, 'tool_name' | 'file_path' | 'content' | 'action'>[] | undefined,
 ): TraceOutput[] {
   const seen = new Set<string>()
   const outputs: TraceOutput[] = []
@@ -11,8 +12,13 @@ export function collectTraceOutputs(
     if (step.tool_name !== '_filecard') continue
     const filePath = step.file_path || step.content
     if (!filePath || seen.has(filePath)) continue
+    // Drop shell false positives like "There" that are not real paths.
+    if (!isPlausibleFilePath(filePath)) continue
     seen.add(filePath)
-    outputs.push({ file_path: filePath })
+    outputs.push({
+      file_path: filePath,
+      ...(step.action ? { action: step.action } : {}),
+    })
   }
   return outputs
 }

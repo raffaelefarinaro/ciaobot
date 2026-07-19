@@ -4,6 +4,10 @@ The upstream (Anthropic / Ollama / OpenRouter) is chosen by the caller
 through the ``env`` dict -- the same ``ANTHROPIC_BASE_URL`` /
 ``ANTHROPIC_AUTH_TOKEN`` env injection used for chats -- so this helper is
 backend-agnostic and needs no provider switch of its own.
+
+Calls are intentionally bare: custom system prompt, no filesystem
+settings/skills, no tools, no MCP discovery. Titles, insights, critique,
+and similar routines never need the agent tool surface.
 """
 
 from __future__ import annotations
@@ -112,12 +116,27 @@ async def _run_claude_oneshot(
     model: str,
     env: dict[str, str] | None,
 ) -> str:
+    # Titles / insights / critique never need agent tooling. Leaving
+    # ``tools`` unset keeps the CLI's default Claude Code tool schemas in
+    # the prompt (Bash/Read/Edit/…), which burns tokens for no benefit.
+    # ``tools=[]`` maps to ``--tools ""``; ``strict_mcp_config`` with the
+    # empty default ``mcp_servers`` also blocks project/user MCP discovery.
+    # ``setting_sources=[]`` / ``skills=[]`` already skip CLAUDE.md and
+    # skill listings (the useful half of Claude Code ``--bare``).
     options = ClaudeAgentOptions(
         model=model,
         system_prompt=system_prompt,
         setting_sources=[],
         skills=[],
-        max_turns=1,
+        tools=[],
+        strict_mcp_config=True,
+        # ``max_turns=2`` (not 1) absorbs a stray ``stop_reason=tool_use`` the
+        # model occasionally emits under ``tools=[]`` — a known SDK quirk
+        # where the model starts to call a tool, gets nothing back, and the
+        # SDK aborts the turn. With 2 turns the model recovers and returns
+        # the actual text on the next iteration. Title / critique callers
+        # never loop, so this is one extra API call at most.
+        max_turns=2,
         env=env or {},
     )
     parts: list[str] = []
@@ -239,11 +258,14 @@ async def run_oneshot(
             )
     elif provider == "claude":
         async def _attempt() -> str:
+            # Disable Claude Code's auto memory to avoid double memory layers
+            merged_env = dict(env or {})
+            merged_env.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
             return await _run_claude_oneshot(
                 prompt,
                 system_prompt=system_prompt,
                 model=model,
-                env=env,
+                env=merged_env,
             )
     else:
         raise ValueError(f"Unknown one-shot provider '{provider}'")

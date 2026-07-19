@@ -31,6 +31,7 @@ ciao package-smoke --skip-frontend
 ciao auth claude --print-only              # show terminal OAuth command
 ciao auth codex --print-only               # show Codex / ChatGPT login command
 ciao auth ollama                           # run provider login helper
+ciao benchmark-control-surfaces --smoke   # 3 paired live MCP/legacy scenarios
 ```
 
 ### macOS venv workarounds
@@ -118,6 +119,7 @@ ciao package-smoke --skip-frontend # Wheel install smoke test
 ciao vault-index --workspace default --format json  # Query the vault index
 ciao vault-search "keyword" --limit 5 # FTS search over the configured vault
 ciao vault-lint --vault-root memory-vault # Vault hygiene lint
+ciao benchmark-control-surfaces --provider claude --provider codex --repeats 5 # 240-turn release evaluation
 cd web && npm test             # Frontend unit tests
 cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 ```
@@ -145,6 +147,20 @@ Canonical example: `ciao/skill_evolution.py:_process_skill_dag`. Use a DAG when 
 `ScheduleManager.catch_up()` runs once at server startup. It dispatches only the latest missed occurrence for each enabled schedule, leaves the prompt unchanged, and records the missed occurrence's local date so a later slot on the startup day can still fire normally. Cover changes to this behavior in `tests/test_schedules.py`.
 
 `ProviderSubchatManager` handles routing, limits, and executing participant turns. Cover changes to this behavior in `tests/test_provider_subchats.py` (for manager logic/limit tracking) and `tests/test_provider_subchat_routes.py` (for Starlette HTTP handlers).
+
+## MCP control plane
+
+`ciao/control_plane.py` is the provider-neutral application boundary;
+`ciao/mcp_server.py` is only its authenticated MCP adapter. Add business rules
+to managers/control-plane methods, not tool handlers. Every tool must declare
+read/write/destructive annotations, return a stable envelope, enforce scoped
+workspace/project/chat access, and have focused protocol plus domain tests.
+Self-affecting operations must defer until the caller chat drains. Provider
+tokens must never enter the model's shell environment or telemetry arguments.
+
+See `docs/MCP.md` for the catalog, Claude/Codex configuration, and the release
+benchmark/promotion rule. Smoke/partial results are diagnostic only; promotion
+requires all 12 scenarios and at least five repeats.
 
 ## Change guidelines
 

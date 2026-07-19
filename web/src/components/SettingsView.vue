@@ -1,6 +1,5 @@
 <template>
   <div class="settings-pane">
-    <RestartOverlay v-if="restarting" :message="restartMessage" />
     <PaneHeader title="settings" @open-sidebar="emit('open-sidebar')" />
     <div class="pane-body">
 
@@ -8,17 +7,19 @@
       <template v-if="currentTab === 'home'">
         <!-- Actions -->
         <div class="card">
-          <div class="settings-card-header">
-            <p class="section-title">app actions</p>
-            <p class="hint">Snapshot, sync, or restart this local Ciaobot instance.</p>
-          </div>
-          <div class="action-row action-row--spaced action-row--compact">
-            <button class="btn-primary" @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()" :disabled="!!actionPending">
-              {{ actionPending === 'snapshot' ? (localStatus?.git_repo ? 'Syncing...' : 'Snapshotting...') : (localStatus?.git_repo ? 'Sync with Remote' : 'Git Snapshot') }}
-            </button>
-            <button class="btn-caution" @click="() => doDeploy()" :disabled="!!actionPending" title="Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code">
-              {{ actionPending === 'deploy' ? 'Restarting...' : 'Restart' }}
-            </button>
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">app actions</p>
+              <p class="hint">Snapshot, sync, or restart this local Ciaobot instance.</p>
+            </div>
+            <div class="settings-card-header-actions">
+              <button class="btn-primary btn-small" @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()" :disabled="!!actionPending">
+                {{ actionPending === 'snapshot' ? (localStatus?.git_repo ? 'Syncing...' : 'Snapshotting...') : (localStatus?.git_repo ? 'Sync with Remote' : 'Git Snapshot') }}
+              </button>
+              <button class="btn-caution btn-small" @click="() => doDeploy()" :disabled="!!actionPending" title="Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code">
+                {{ actionPending === 'deploy' ? 'Restarting...' : 'Restart' }}
+              </button>
+            </div>
           </div>
           <div v-if="actionResult" class="action-result" :class="{ 'action-result--error': hasDeployError }">{{ actionResult }}</div>
           <div v-if="hasDeployError" class="deploy-steps">
@@ -79,23 +80,29 @@
           </div>
         </div>
 
+        <!-- Main workspace -->
+        <div v-if="routines && routines.workspace_context" class="card">
+          <div class="settings-card-header">
+            <p class="section-title">main workspace</p>
+            <p class="hint">
+              The server filesystem root for routines, skills, scripts, and runtime state.
+              Set <code>CIAO_WORKSPACE</code> in your <code>.env</code> file, then restart Ciaobot.
+              Logical chat workspaces (sidebar switcher) are managed separately under Settings &rarr; Workspaces.
+            </p>
+          </div>
+          <code class="workspace-root-path">{{ routines.workspace_context.workspace_root }}</code>
+        </div>
+
         <!-- Package update -->
         <div class="card">
-          <div class="settings-card-header">
-            <p class="section-title">package update</p>
-            <p class="hint">Check the installed package version and upgrade this local app.</p>
-          </div>
-          <div v-if="packageLoading && !packageStatus" class="loading">
-            Checking package status...
-          </div>
-          <div v-else-if="packageStatus">
-            <div v-if="packageStatus.error" class="hint hint--warn hint--spaced">
-              Update check failed: {{ packageStatus.error }}
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">package update</p>
+              <p class="hint">Check the installed package version and upgrade this local app.</p>
             </div>
-
-            <div class="action-row action-row--spaced action-row--compact">
+            <div v-if="packageStatus" class="settings-card-header-actions">
               <button
-                :class="packageStatus.update_available ? 'btn-primary' : 'btn-secondary'"
+                :class="packageStatus.update_available ? 'btn-primary btn-small' : 'btn-secondary btn-small'"
                 @click="openUpdatePanel"
                 :disabled="!packageStatus.update_available || packageUpdating || showUpdatePanel"
               >
@@ -103,6 +110,14 @@
                     ? `Update to ${packageStatus.latest_version}`
                     : 'Up to date' }}
               </button>
+            </div>
+          </div>
+          <div v-if="packageLoading && !packageStatus" class="loading">
+            Checking package status...
+          </div>
+          <div v-else-if="packageStatus">
+            <div v-if="packageStatus.error" class="hint hint--warn hint--spaced">
+              Update check failed: {{ packageStatus.error }}
             </div>
 
             <div v-if="showUpdatePanel" class="settings-form-panel">
@@ -139,11 +154,22 @@
 
         <!-- Notifications -->
         <div class="card">
-          <div class="settings-card-header">
-            <p class="section-title">notifications</p>
-            <p class="hint">
-              Get a notification when a chat replies and the app is not focused.
-            </p>
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">notifications</p>
+              <p class="hint">
+                Get a notification when a chat replies and the app is not focused.
+              </p>
+            </div>
+            <div v-if="!needsIosInstall && !permissionDenied && pushSupportedFlag" class="settings-card-header-actions">
+              <button
+                :class="(!pushEnabledFlag && !isMacDesktop()) ? 'btn-primary btn-small' : 'btn-secondary btn-small'"
+                @click="togglePush"
+                :disabled="pushPending"
+              >
+                {{ pushPending ? 'Working...' : (pushEnabledFlag ? 'Disable on this device' : 'Enable on this device') }}
+              </button>
+            </div>
           </div>
           <div v-if="needsIosInstall" class="hint hint--warn">
             On iOS, push notifications only work after you "Add to Home Screen" and open the app from there.
@@ -164,15 +190,6 @@
               You're covered — the menu bar already shows a notification when a chat
               replies and the app isn't focused. Nothing to enable.
             </p>
-            <div class="action-row action-row--compact">
-              <button
-                :class="(!pushEnabledFlag && !isMacDesktop()) ? 'btn-primary' : 'btn-secondary'"
-                @click="togglePush"
-                :disabled="pushPending"
-              >
-                {{ pushPending ? 'Working...' : (pushEnabledFlag ? 'Disable on this device' : 'Enable on this device') }}
-              </button>
-            </div>
             <p v-if="isMacDesktop() && !pushEnabledFlag" class="hint">
               Optional upgrade: for notifications branded as <strong>Ciaobot</strong> that
               open the exact chat (and keep working even if you quit the menu bar), install
@@ -240,15 +257,17 @@
 
         <!-- Debug (dev mode only) -->
         <div v-if="localStatus?.dev_mode" class="card">
-          <div class="settings-card-header">
-            <p class="section-title">debug</p>
-            <p class="hint">Runtime issue log: server errors and failed background jobs. Send it to a chat so the agent can self-fix.</p>
-          </div>
-          <div class="action-row action-row--spaced">
-            <button class="btn-primary" @click="fixIssuesInChat" :disabled="debugPending">
-              {{ debugPending ? 'Collecting issues...' : 'Fix issues in chat' }}
-            </button>
-            <button class="btn-small" @click="refreshDebugIssues" :disabled="debugPending">Refresh</button>
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">debug</p>
+              <p class="hint">Runtime issue log: server errors and failed background jobs. Send it to a chat so the agent can self-fix.</p>
+            </div>
+            <div class="settings-card-header-actions">
+              <button class="btn-primary btn-small" @click="fixIssuesInChat" :disabled="debugPending">
+                {{ debugPending ? 'Collecting issues...' : 'Fix issues in chat' }}
+              </button>
+              <button class="btn-small" @click="refreshDebugIssues" :disabled="debugPending">Refresh</button>
+            </div>
           </div>
           <div v-if="debugSummary" class="action-result">{{ debugSummary }}</div>
         </div>
@@ -282,28 +301,8 @@
               <p class="hint">
                 These tasks use their own model setting, separate from the active chat model.
                 "Automatic" keeps the built-in default. Local Ollama models run on this machine.
-                System automations without a model picker are tracked in Settings &rarr; Automation.
+                System automations without a model picker are tracked on the Automations page.
               </p>
-            </div>
-            <div v-if="routines.workspace_context" class="routine-context">
-              <div>
-                <div class="settings-label-row">
-                  <span class="dev-label">Main workspace</span>
-                  <details class="field-info">
-                    <summary aria-label="How to change the main workspace" title="How to change the main workspace">i</summary>
-                    <div class="field-info-panel">
-                      <p>
-                        This is the server filesystem root for routines, skills, scripts, and runtime state.
-                        Set <code>CIAO_WORKSPACE</code> in your <code>.env</code> file, then restart Ciaobot.
-                      </p>
-                      <p>
-                        Logical chat workspaces (sidebar switcher) are managed separately under Settings &rarr; Workspaces.
-                      </p>
-                    </div>
-                  </details>
-                </div>
-                <code>{{ routines.workspace_context.workspace_root }}</code>
-              </div>
             </div>
 
             <div class="routine-row">
@@ -437,7 +436,7 @@
                         <span>&times;</span>
                       </button>
                     </div>
-                    <span v-else>Automatic default</span>
+                    <span v-else>Automatic default ({{ routines?.critique_models_effective || '' }})</span>
                   </div>
                   <button
                     type="button"
@@ -453,7 +452,7 @@
                   :model-value="selectedCritiqueModels"
                   :sections="critiqueModelSections"
                   placeholder="Select critique models"
-                  empty-placeholder="Automatic default"
+                  :empty-placeholder="`Automatic default (${routines?.critique_models_effective || ''})`"
                   :disabled="routinesSaving"
                   @update:model-value="setCritiqueModels"
                 />
@@ -595,6 +594,21 @@
               <div v-if="providerConnectionResult" class="action-result">{{ providerConnectionResult }}</div>
             </div>
 
+            <div v-if="mcpStatus" class="credential-row">
+              <div class="setting-row-main setting-row-main--inline">
+                <div class="routine-info">
+                  <span class="routine-name">Ciaobot MCP</span>
+                  <p class="hint hint--compact">
+                    {{ mcpStatus.tool_count }} scoped tools · {{ mcpStatus.active_sessions || 0 }} active managed session{{ (mcpStatus.active_sessions || 0) === 1 ? '' : 's' }}
+                  </p>
+                </div>
+                <span class="badge" :class="mcpStatus.enabled && mcpStatus.bound ? 'badge--success' : 'badge--error'">
+                  {{ mcpStatus.enabled && mcpStatus.bound ? 'Ready' : 'Unavailable' }}
+                </span>
+              </div>
+              <p v-if="mcpStatus.last_error" class="hint hint--warn">Last tool error: {{ mcpStatus.last_error }}</p>
+            </div>
+
             <div v-for="(meta, key) in providerKeys.service_keys" :key="key" class="credential-row">
               <div class="setting-row-main setting-row-main--inline">
                 <div class="routine-info">
@@ -642,6 +656,331 @@
             <div v-if="providerKeysResult" class="action-result">{{ providerKeysResult }}</div>
           </div>
 
+
+          <!-- Provider-neutral model routing -->
+          <div v-if="tierProviderSections.length" class="card">
+            <div class="settings-card-header">
+              <p class="section-title">model routing</p>
+              <p class="hint">
+                Ciaobot maps Haiku, Sonnet, Opus, and Fable to provider-specific models. OpenAI routes run through Codex; Ollama and OpenRouter routes run through Claude Code.
+              </p>
+            </div>
+            <div class="alias-provider-bar">
+              <label class="settings-field alias-provider-field">
+                <span class="ws-label">Provider</span>
+                <select
+                  class="routine-select alias-provider-select"
+                  :value="selectedTierProviderSection?.key || ''"
+                  :disabled="routinesSaving"
+                  @change="selectedTierProvider = ($event.target as HTMLSelectElement).value as RoutingProviderKey"
+                >
+                  <option v-for="section in tierProviderSections" :key="section.key" :value="section.key">
+                    {{ section.label }}<template v-if="!section.available"> (not configured)</template>
+                  </option>
+                </select>
+              </label>
+            </div>
+            <div v-if="selectedTierProviderSection" class="tier-provider-section">
+              <div class="settings-field-grid">
+                <label v-for="tier in modelTiers" :key="`${selectedTierProviderSection.key}-${tier.key}`" class="settings-field">
+                  <span class="ws-label">{{ tier.label }}</span>
+                  <ModelSelector
+                    v-if="selectedTierProviderSection.configurable"
+                    :model-value="tierSelectorValue(selectedTierProviderSection.key as TierProviderKey, tier.key)"
+                    :sections="tierModelSectionsFor(selectedTierProviderSection.key as TierProviderKey, tier.key)"
+                    :disabled="routinesSaving || !selectedTierProviderSection.available"
+                    @update:model-value="saveTierModel(selectedTierProviderSection.key as TierProviderKey, tier.key, $event)"
+                  />
+                  <input
+                    v-else
+                    class="routine-input routing-model-input"
+                    :value="tierModelForProvider(selectedTierProviderSection.key, tier.key)"
+                    :aria-label="`${tier.label} ${selectedTierProviderSection.label} routing model`"
+                    disabled
+                  />
+                </label>
+              </div>
+              <p v-if="selectedTierProviderSection.key === 'codex' && selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
+                OpenAI models are discovered from the signed-in Codex account. Ciaobot assigns the tiers automatically; pick a model above to pin a tier. A pin falls back to the automatic mapping if its model disappears from the account.
+              </p>
+              <p v-else-if="!selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
+                {{ tierProviderUnavailableHint }}
+              </p>
+            </div>
+          </div>
+        </template>
+      </template>
+
+      <!-- USAGE TAB -->
+      <template v-if="currentTab === 'usage'">
+        <div class="card">
+          <div class="settings-card-header">
+            <div class="settings-label-row">
+              <p class="section-title">MCP tool usage</p>
+              <button class="btn-small" :disabled="!mcpUsageLoaded" @click="fetchMcpUsage">Refresh</button>
+            </div>
+            <p class="hint">
+              How often each managed Ciaobot MCP tool has been called since telemetry began.
+              Every tool call &mdash; from any provider or chat &mdash; is counted here.
+            </p>
+          </div>
+
+          <div v-if="!mcpUsageLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
+          <p v-else-if="mcpUsageError" class="hint hint--warn">{{ mcpUsageError }}</p>
+          <template v-else-if="mcpUsage">
+            <div class="usage-summary">
+              <div class="usage-stat">
+                <span class="usage-stat-value">{{ mcpUsage.total_calls.toLocaleString() }}</span>
+                <span class="usage-stat-label">total calls</span>
+              </div>
+              <div class="usage-stat">
+                <span class="usage-stat-value">{{ mcpUsage.tool_count }}</span>
+                <span class="usage-stat-label">tools</span>
+              </div>
+              <div class="usage-stat">
+                <span class="usage-stat-value" :class="{ 'usage-stat-value--warn': mcpUsage.total_errors > 0 }">
+                  {{ mcpUsage.total_errors.toLocaleString() }}
+                </span>
+                <span class="usage-stat-label">errors</span>
+              </div>
+            </div>
+
+            <p v-if="mcpUsage.total_calls === 0" class="hint hint--info">
+              No tool calls recorded yet. Usage will appear here once chats start using MCP tools.
+            </p>
+            <div v-else class="usage-table-wrap">
+              <table class="usage-table">
+                <thead>
+                  <tr>
+                    <th class="usage-th" :class="{ 'usage-th--active': usageSortKey === 'tool' }" @click="sortUsageBy('tool')">
+                      Tool<span v-if="usageSortKey === 'tool'" class="usage-sort">{{ usageSortDir === 'desc' ? '▾' : '▴' }}</span>
+                    </th>
+                    <th class="usage-th usage-th--num" :class="{ 'usage-th--active': usageSortKey === 'calls' }" @click="sortUsageBy('calls')">
+                      Calls<span v-if="usageSortKey === 'calls'" class="usage-sort">{{ usageSortDir === 'desc' ? '▾' : '▴' }}</span>
+                    </th>
+                    <th class="usage-th usage-th--num" :class="{ 'usage-th--active': usageSortKey === 'errors' }" @click="sortUsageBy('errors')">
+                      Errors<span v-if="usageSortKey === 'errors'" class="usage-sort">{{ usageSortDir === 'desc' ? '▾' : '▴' }}</span>
+                    </th>
+                    <th class="usage-th usage-th--num" :class="{ 'usage-th--active': usageSortKey === 'avg_ms' }" @click="sortUsageBy('avg_ms')">
+                      Avg ms<span v-if="usageSortKey === 'avg_ms'" class="usage-sort">{{ usageSortDir === 'desc' ? '▾' : '▴' }}</span>
+                    </th>
+                    <th class="usage-th">Providers</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in sortedUsage" :key="row.tool" :class="{ 'usage-row--idle': row.calls === 0 }">
+                    <td class="usage-td usage-td--tool">{{ row.tool }}</td>
+                    <td class="usage-td usage-td--num">{{ row.calls.toLocaleString() }}</td>
+                    <td class="usage-td usage-td--num" :class="{ 'usage-td--warn': row.errors > 0 }">{{ row.errors }}</td>
+                    <td class="usage-td usage-td--num">{{ row.calls ? row.avg_ms : '—' }}</td>
+                    <td class="usage-td usage-td--providers">{{ row.providers.join(', ') || '—' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <!-- WORKSPACES TAB -->
+      <template v-if="currentTab === 'workspaces'">
+        <div v-if="!workspacesLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
+        <template v-else-if="workspacesError">
+          <div class="card"><p class="hint hint--warn">{{ workspacesError }}</p></div>
+        </template>
+        <template v-else>
+          <div class="card">
+            <div class="settings-card-header settings-card-header--split">
+              <div>
+                <p class="section-title">workspaces</p>
+                <p class="hint">
+                  Logical chat spaces that route projects, chats, vault names, model defaults, and integration profiles.
+                </p>
+              </div>
+              <button class="btn-small" @click="showNewWorkspace = !showNewWorkspace">
+                {{ showNewWorkspace ? 'Cancel' : '+ Add workspace' }}
+              </button>
+            </div>
+
+            <div v-if="showNewWorkspace" class="workspace-card workspace-card--new">
+              <div class="workspace-card-header">
+                <div>
+                  <p class="workspace-title">New workspace</p>
+                  <p class="hint hint--compact">Saved to <code>.runtime/workspaces.json</code> and applied immediately.</p>
+                </div>
+              </div>
+              <div class="settings-field-grid">
+                <label class="settings-field"><span class="ws-label">Name</span>
+                  <input class="routine-input" v-model="newWorkspaceForm.name" :disabled="workspacesSaving === 'new'" placeholder="letters, numbers, dashes, underscores" />
+                </label>
+                <label class="settings-field"><span class="ws-label">Vault name</span>
+                  <input class="routine-input" v-model="newWorkspaceForm.vault_root" :disabled="workspacesSaving === 'new'" placeholder="(defaults to name)" />
+                </label>
+                <label class="settings-field"><span class="ws-label">Provider</span>
+                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.default_provider" :disabled="workspacesSaving === 'new'">
+                    <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
+                      {{ provider.label }}
+                    </option>
+                  </select>
+                </label>
+                <label class="settings-field"><span class="ws-label">Default model</span>
+                  <ModelSelector
+                    v-model="newWorkspaceForm.default_model"
+                    :sections="newWorkspaceModelSections"
+                    :placeholder="workspaceInheritPlaceholder"
+                    :empty-placeholder="workspaceInheritPlaceholder"
+                    :disabled="workspacesSaving === 'new'"
+                  />
+                </label>
+                <label class="settings-field">
+                  <div class="settings-label-row">
+                    <span class="ws-label">Google profile</span>
+                    <details class="field-info">
+                      <summary aria-label="About GWS profiles" title="About GWS profiles">i</summary>
+                      <div class="field-info-panel">
+                        <p>
+                          Selects the Google Workspace profile used by this workspace. Manage profiles and credentials below.
+                        </p>
+                      </div>
+                    </details>
+                  </div>
+                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.gws_profile" :disabled="workspacesSaving === 'new'">
+                    <option value="">Default ({{ defaultGwsProfileName }})</option>
+                    <option v-for="profile in gwsProfileOptions" :key="`new-gws-${profile.name}`" :value="profile.name">
+                      {{ profile.label }} ({{ profile.email || profile.name }})
+                    </option>
+                    <option v-if="workspaceCustomGwsProfile(newWorkspaceForm.gws_profile)" :value="newWorkspaceForm.gws_profile">
+                      Custom: {{ newWorkspaceForm.gws_profile }}
+                    </option>
+                  </select>
+                </label>
+                <div v-if="newWorkspaceForm.default_provider !== 'codex'" class="settings-field settings-field--wide">
+                  <div class="settings-label-row">
+                    <span class="ws-label">Claude.ai MCPs</span>
+                    <details class="field-info">
+                      <summary aria-label="About Claude.ai MCP connectors" title="About Claude.ai MCP connectors">i</summary>
+                      <div class="field-info-panel">
+                        <p>
+                          Allows this workspace to use claude.ai account connectors, for example Airtable,
+                          Slack, Atlassian, BigQuery, Sentry, or similar tools.
+                        </p>
+                        <p>
+                          Turn this off for personal workspaces when your connected accounts point to work systems,
+                          so personal chats do not inherit work-only connectors.
+                        </p>
+                      </div>
+                    </details>
+                  </div>
+                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.claude_ai_mcps" :disabled="workspacesSaving === 'new'" aria-label="Claude.ai MCPs">
+                    <option value="on">On (connectors allowed)</option>
+                    <option value="off">Off (connectors blocked)</option>
+                  </select>
+                </div>
+
+              </div>
+              <div class="action-row settings-actions">
+                <button class="btn-primary" @click="createNewWorkspace" :disabled="workspacesSaving === 'new'">
+                  {{ workspacesSaving === 'new' ? 'Creating...' : 'Create workspace' }}
+                </button>
+              </div>
+            </div>
+
+            <div class="workspace-list">
+              <div
+                v-for="form in workspaceForms"
+                :key="form.name"
+                class="workspace-card"
+              >
+                <div class="workspace-card-header">
+                  <div>
+                    <p class="workspace-title">{{ form.name }}</p>
+                  </div>
+                  <div class="workspace-actions">
+                    <button
+                      class="btn-small"
+                      @click="saveWorkspace(form.name)"
+                      :disabled="workspacesSaving === form.name"
+                    >
+                      {{ workspacesSaving === form.name ? 'Saving...' : 'Save' }}
+                    </button>
+                    <button
+                      v-if="workspaceForms.length > 1"
+                      class="btn-small btn-danger"
+                      @click="removeWorkspace(form.name)"
+                      :disabled="workspacesSaving === form.name"
+                    >Delete</button>
+                  </div>
+                </div>
+
+                <div class="settings-field-grid">
+                  <label class="settings-field"><span class="ws-label">Provider</span>
+                    <select class="routine-input workspace-select" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
+                      <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
+                        {{ provider.label }}
+                      </option>
+                    </select>
+                  </label>
+                  <label class="settings-field"><span class="ws-label">Default model</span>
+                    <ModelSelector
+                      v-model="form.default_model"
+                      :sections="workspaceModelSectionsForForm(form)"
+                      :placeholder="workspaceInheritPlaceholder"
+                      :empty-placeholder="workspaceInheritPlaceholder"
+                      :disabled="workspacesSaving === form.name"
+                    />
+                  </label>
+                  <label class="settings-field">
+                    <div class="settings-label-row">
+                      <span class="ws-label">Google profile</span>
+                      <details class="field-info">
+                        <summary aria-label="About GWS profiles" title="About GWS profiles">i</summary>
+                        <div class="field-info-panel">
+                          <p>
+                            Selects the Google Workspace profile used by this workspace. Manage profiles and credentials below.
+                          </p>
+                        </div>
+                      </details>
+                    </div>
+                    <select class="routine-input workspace-select" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
+                      <option value="">Default ({{ defaultGwsProfileName }})</option>
+                      <option v-for="profile in gwsProfileOptions" :key="`${form.name}-gws-${profile.name}`" :value="profile.name">
+                        {{ profile.label }} ({{ profile.email || profile.name }})
+                      </option>
+                      <option v-if="workspaceCustomGwsProfile(form.gws_profile)" :value="form.gws_profile">
+                        Custom: {{ form.gws_profile }}
+                      </option>
+                    </select>
+                  </label>
+                  <div v-if="form.default_provider !== 'codex'" class="settings-field settings-field--wide">
+                    <div class="settings-label-row">
+                      <span class="ws-label">Claude.ai MCPs</span>
+                      <details class="field-info">
+                        <summary aria-label="About Claude.ai MCP connectors" title="About Claude.ai MCP connectors">i</summary>
+                        <div class="field-info-panel">
+                          <p>
+                            Allows this workspace to use claude.ai account connectors, for example Airtable,
+                            Slack, Atlassian, BigQuery, Sentry, or similar tools.
+                          </p>
+                          <p>
+                            Turn this off for personal workspaces when your connected accounts point to work systems,
+                            so personal chats do not inherit work-only connectors.
+                          </p>
+                        </div>
+                      </details>
+                    </div>
+                    <select class="routine-input workspace-select" v-model="form.claude_ai_mcps" :disabled="workspacesSaving === form.name" aria-label="Claude.ai MCPs">
+                      <option value="on">On (connectors allowed)</option>
+                      <option value="off">Off (connectors blocked)</option>
+                    </select>
+                  </div>
+
+                </div>
+              </div>
+            </div>
+
+            <div v-if="workspacesResult" class="action-result">{{ workspacesResult }}</div>
+          </div>
+
           <!-- Google Workspace integration -->
           <div class="card">
             <div class="settings-card-header settings-card-header--split">
@@ -659,7 +998,7 @@
                       </p>
                       <p>
                         Use separate <strong>personal</strong> and <strong>work</strong> profiles so a personal chat never inherits work Drive or calendar access.
-                        Each workspace picks its profile under Settings &rarr; Workspaces.
+                        Each workspace picks its profile.
                       </p>
                       <p><strong>One-time setup per profile</strong></p>
                       <ol class="field-info-steps">
@@ -681,7 +1020,7 @@
                 </div>
                 <p class="hint">
                   Connect Gmail, Calendar, Drive, Docs, Sheets, Slides, and Tasks through separate local <code>gws</code> profiles.
-                  Workspaces choose which profile to use in Settings &rarr; Workspaces.
+                  Workspaces choose which profile to use above.
                 </p>
               </div>
               <span
@@ -871,263 +1210,6 @@
                 Keep personal and work Google accounts in different profiles. A personal chat should not inherit work Drive, calendar, or connector access by accident.
               </p>
             </template>
-          </div>
-
-          <!-- Provider-neutral model routing -->
-          <div v-if="tierProviderSections.length" class="card">
-            <div class="settings-card-header">
-              <p class="section-title">model routing</p>
-              <p class="hint">
-                Ciaobot maps Haiku, Sonnet, Opus, and Fable to provider-specific models. OpenAI routes run through Codex; Ollama and OpenRouter routes run through Claude Code.
-              </p>
-            </div>
-            <div class="alias-provider-bar">
-              <label class="settings-field alias-provider-field">
-                <span class="ws-label">Provider</span>
-                <select
-                  class="routine-select alias-provider-select"
-                  :value="selectedTierProviderSection?.key || ''"
-                  :disabled="routinesSaving"
-                  @change="selectedTierProvider = ($event.target as HTMLSelectElement).value as RoutingProviderKey"
-                >
-                  <option v-for="section in tierProviderSections" :key="section.key" :value="section.key">
-                    {{ section.label }}<template v-if="!section.available"> (not configured)</template>
-                  </option>
-                </select>
-              </label>
-            </div>
-            <div v-if="selectedTierProviderSection" class="tier-provider-section">
-              <div class="settings-field-grid">
-                <label v-for="tier in modelTiers" :key="`${selectedTierProviderSection.key}-${tier.key}`" class="settings-field">
-                  <span class="ws-label">{{ tier.label }}</span>
-                  <ModelSelector
-                    v-if="selectedTierProviderSection.configurable"
-                    :model-value="tierSelectorValue(selectedTierProviderSection.key as TierProviderKey, tier.key)"
-                    :sections="tierModelSectionsFor(selectedTierProviderSection.key as TierProviderKey, tier.key)"
-                    :disabled="routinesSaving || !selectedTierProviderSection.available"
-                    @update:model-value="saveTierModel(selectedTierProviderSection.key as TierProviderKey, tier.key, $event)"
-                  />
-                  <input
-                    v-else
-                    class="routine-input routing-model-input"
-                    :value="tierModelForProvider(selectedTierProviderSection.key, tier.key)"
-                    :aria-label="`${tier.label} ${selectedTierProviderSection.label} routing model`"
-                    disabled
-                  />
-                </label>
-              </div>
-              <p v-if="selectedTierProviderSection.key === 'codex' && selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
-                OpenAI models are discovered from the signed-in Codex account. Ciaobot assigns the tiers automatically; pick a model above to pin a tier. A pin falls back to the automatic mapping if its model disappears from the account.
-              </p>
-              <p v-else-if="!selectedTierProviderSection.available" class="hint hint--info tier-provider-note">
-                {{ tierProviderUnavailableHint }}
-              </p>
-            </div>
-          </div>
-        </template>
-      </template>
-
-      <!-- WORKSPACES TAB -->
-      <template v-if="currentTab === 'workspaces'">
-        <div v-if="!workspacesLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
-        <template v-else-if="workspacesError">
-          <div class="card"><p class="hint hint--warn">{{ workspacesError }}</p></div>
-        </template>
-        <template v-else>
-          <div class="card">
-            <div class="settings-card-header settings-card-header--split">
-              <div>
-                <p class="section-title">workspaces</p>
-                <p class="hint">
-                  Logical chat spaces that route projects, chats, vault names, model defaults, and integration profiles.
-                </p>
-              </div>
-              <button class="btn-small" @click="showNewWorkspace = !showNewWorkspace">
-                {{ showNewWorkspace ? 'Cancel' : '+ Add workspace' }}
-              </button>
-            </div>
-
-            <div v-if="showNewWorkspace" class="workspace-card workspace-card--new">
-              <div class="workspace-card-header">
-                <div>
-                  <p class="workspace-title">New workspace</p>
-                  <p class="hint hint--compact">Saved to <code>.runtime/workspaces.json</code> and applied immediately.</p>
-                </div>
-              </div>
-              <div class="settings-field-grid">
-                <label class="settings-field"><span class="ws-label">Name</span>
-                  <input class="routine-input" v-model="newWorkspaceForm.name" :disabled="workspacesSaving === 'new'" placeholder="letters, numbers, dashes, underscores" />
-                </label>
-                <label class="settings-field"><span class="ws-label">Vault name</span>
-                  <input class="routine-input" v-model="newWorkspaceForm.vault_root" :disabled="workspacesSaving === 'new'" placeholder="(defaults to name)" />
-                </label>
-                <label class="settings-field"><span class="ws-label">Provider</span>
-                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.default_provider" :disabled="workspacesSaving === 'new'">
-                    <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
-                      {{ provider.label }}
-                    </option>
-                  </select>
-                </label>
-                <label class="settings-field"><span class="ws-label">Default model</span>
-                  <ModelSelector
-                    v-model="newWorkspaceForm.default_model"
-                    :sections="newWorkspaceModelSections"
-                    :placeholder="workspaceInheritPlaceholder"
-                    :empty-placeholder="workspaceInheritPlaceholder"
-                    :disabled="workspacesSaving === 'new'"
-                  />
-                </label>
-                <label class="settings-field">
-                  <div class="settings-label-row">
-                    <span class="ws-label">Google profile</span>
-                    <details class="field-info">
-                      <summary aria-label="About GWS profiles" title="About GWS profiles">i</summary>
-                      <div class="field-info-panel">
-                        <p>
-                          Selects the Google Workspace profile used by this workspace. Manage profiles and credentials in the Providers tab.
-                        </p>
-                      </div>
-                    </details>
-                  </div>
-                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.gws_profile" :disabled="workspacesSaving === 'new'">
-                    <option value="">Default ({{ defaultGwsProfileName }})</option>
-                    <option v-for="profile in gwsProfileOptions" :key="`new-gws-${profile.name}`" :value="profile.name">
-                      {{ profile.label }} ({{ profile.email || profile.name }})
-                    </option>
-                    <option v-if="workspaceCustomGwsProfile(newWorkspaceForm.gws_profile)" :value="newWorkspaceForm.gws_profile">
-                      Custom: {{ newWorkspaceForm.gws_profile }}
-                    </option>
-                  </select>
-                </label>
-                <div v-if="newWorkspaceForm.default_provider !== 'codex'" class="settings-field settings-field--wide">
-                  <div class="settings-label-row">
-                    <span class="ws-label">Claude.ai MCPs</span>
-                    <details class="field-info">
-                      <summary aria-label="About Claude.ai MCP connectors" title="About Claude.ai MCP connectors">i</summary>
-                      <div class="field-info-panel">
-                        <p>
-                          Allows this workspace to use claude.ai account connectors, for example Airtable,
-                          Slack, Atlassian, BigQuery, Sentry, or similar tools.
-                        </p>
-                        <p>
-                          Turn this off for personal workspaces when your connected accounts point to work systems,
-                          so personal chats do not inherit work-only connectors.
-                        </p>
-                      </div>
-                    </details>
-                  </div>
-                  <select class="routine-input workspace-select" v-model="newWorkspaceForm.claude_ai_mcps" :disabled="workspacesSaving === 'new'" aria-label="Claude.ai MCPs">
-                    <option value="on">On (connectors allowed)</option>
-                    <option value="off">Off (connectors blocked)</option>
-                  </select>
-                </div>
-
-              </div>
-              <div class="action-row settings-actions">
-                <button class="btn-primary" @click="createNewWorkspace" :disabled="workspacesSaving === 'new'">
-                  {{ workspacesSaving === 'new' ? 'Creating...' : 'Create workspace' }}
-                </button>
-              </div>
-            </div>
-
-            <div class="workspace-list">
-              <div
-                v-for="form in workspaceForms"
-                :key="form.name"
-                class="workspace-card"
-              >
-                <div class="workspace-card-header">
-                  <div>
-                    <p class="workspace-title">{{ form.name }}</p>
-                    <p class="hint hint--compact">{{ form.vault_root || form.name }} vault name</p>
-                  </div>
-                  <div class="workspace-actions">
-                    <button
-                      class="btn-small"
-                      @click="saveWorkspace(form.name)"
-                      :disabled="workspacesSaving === form.name"
-                    >
-                      {{ workspacesSaving === form.name ? 'Saving...' : 'Save' }}
-                    </button>
-                    <button
-                      v-if="workspaceForms.length > 1"
-                      class="btn-small btn-danger"
-                      @click="removeWorkspace(form.name)"
-                      :disabled="workspacesSaving === form.name"
-                    >Delete</button>
-                  </div>
-                </div>
-
-                <div class="settings-field-grid">
-                  <label class="settings-field"><span class="ws-label">Vault name</span>
-                    <input class="routine-input" v-model="form.vault_root" :disabled="workspacesSaving === form.name" placeholder="(defaults to workspace name)" />
-                  </label>
-                  <label class="settings-field"><span class="ws-label">Provider</span>
-                    <select class="routine-input workspace-select" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
-                      <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
-                        {{ provider.label }}
-                      </option>
-                    </select>
-                  </label>
-                  <label class="settings-field"><span class="ws-label">Default model</span>
-                    <ModelSelector
-                      v-model="form.default_model"
-                      :sections="workspaceModelSectionsForForm(form)"
-                      :placeholder="workspaceInheritPlaceholder"
-                      :empty-placeholder="workspaceInheritPlaceholder"
-                      :disabled="workspacesSaving === form.name"
-                    />
-                  </label>
-                  <label class="settings-field">
-                    <div class="settings-label-row">
-                      <span class="ws-label">Google profile</span>
-                      <details class="field-info">
-                        <summary aria-label="About GWS profiles" title="About GWS profiles">i</summary>
-                        <div class="field-info-panel">
-                          <p>
-                            Selects the Google Workspace profile used by this workspace. Manage profiles and credentials in the Providers tab.
-                          </p>
-                        </div>
-                      </details>
-                    </div>
-                    <select class="routine-input workspace-select" v-model="form.gws_profile" :disabled="workspacesSaving === form.name">
-                      <option value="">Default ({{ defaultGwsProfileName }})</option>
-                      <option v-for="profile in gwsProfileOptions" :key="`${form.name}-gws-${profile.name}`" :value="profile.name">
-                        {{ profile.label }} ({{ profile.email || profile.name }})
-                      </option>
-                      <option v-if="workspaceCustomGwsProfile(form.gws_profile)" :value="form.gws_profile">
-                        Custom: {{ form.gws_profile }}
-                      </option>
-                    </select>
-                  </label>
-                  <div v-if="form.default_provider !== 'codex'" class="settings-field settings-field--wide">
-                    <div class="settings-label-row">
-                      <span class="ws-label">Claude.ai MCPs</span>
-                      <details class="field-info">
-                        <summary aria-label="About Claude.ai MCP connectors" title="About Claude.ai MCP connectors">i</summary>
-                        <div class="field-info-panel">
-                          <p>
-                            Allows this workspace to use claude.ai account connectors, for example Airtable,
-                            Slack, Atlassian, BigQuery, Sentry, or similar tools.
-                          </p>
-                          <p>
-                            Turn this off for personal workspaces when your connected accounts point to work systems,
-                            so personal chats do not inherit work-only connectors.
-                          </p>
-                        </div>
-                      </details>
-                    </div>
-                    <select class="routine-input workspace-select" v-model="form.claude_ai_mcps" :disabled="workspacesSaving === form.name" aria-label="Claude.ai MCPs">
-                      <option value="on">On (connectors allowed)</option>
-                      <option value="off">Off (connectors blocked)</option>
-                    </select>
-                  </div>
-
-                </div>
-              </div>
-            </div>
-
-            <div v-if="workspacesResult" class="action-result">{{ workspacesResult }}</div>
           </div>
         </template>
       </template>
@@ -1613,6 +1695,9 @@ import type {
   GwsIntegrationSettings,
   LocalStatus,
   ModelsResponse,
+  McpStatus,
+  McpUsage,
+  McpToolUsage,
   PromptAsset,
   ProviderConfigSettings,
   RoutineSettings,
@@ -1629,7 +1714,6 @@ import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
-import RestartOverlay from './RestartOverlay.vue'
 import OnboardingCard from './OnboardingCard.vue'
 import { providerModelBadges, sectionsFromModelOptions, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 
@@ -2211,6 +2295,12 @@ const providerKeysLoaded = ref(false)
 const providerKeysError = ref('')
 const providerKeysSaving = ref(false)
 const providerKeysResult = ref('')
+const mcpStatus = ref<McpStatus | null>(null)
+const mcpUsage = ref<McpUsage | null>(null)
+const mcpUsageLoaded = ref(false)
+const mcpUsageError = ref('')
+const usageSortKey = ref<'calls' | 'errors' | 'avg_ms' | 'tool'>('calls')
+const usageSortDir = ref<'asc' | 'desc'>('desc')
 const providerKeyInputs = ref<Record<string, string>>({})
 const providerConnectionPending = ref('')
 const providerConnectionResult = ref('')
@@ -2419,6 +2509,57 @@ async function fetchProviderKeys() {
     providerKeysLoaded.value = true
   }
 }
+
+async function fetchMcpStatus() {
+  try {
+    mcpStatus.value = await api.get<McpStatus>('/api/mcp/status')
+  } catch {
+    mcpStatus.value = { enabled: false, bound: false, tool_count: 0 }
+  }
+}
+
+async function fetchMcpUsage() {
+  mcpUsageError.value = ''
+  try {
+    mcpUsage.value = await api.get<McpUsage>('/api/mcp/usage')
+  } catch (err) {
+    mcpUsage.value = null
+    const message = err instanceof Error ? err.message : String(err)
+    // A non-JSON body (the SPA index.html) means the /api/mcp/usage route
+    // isn't served yet — the running backend predates it and needs a restart.
+    mcpUsageError.value = /Unexpected token|not valid JSON|<!DOCTYPE/i.test(message)
+      ? 'MCP usage endpoint not available on the running server yet. Restart the Ciaobot service (or ask the operator to Deploy) to enable it.'
+      : message || 'Could not load MCP tool usage.'
+  } finally {
+    mcpUsageLoaded.value = true
+  }
+}
+
+function sortUsageBy(key: 'calls' | 'errors' | 'avg_ms' | 'tool') {
+  if (usageSortKey.value === key) {
+    usageSortDir.value = usageSortDir.value === 'desc' ? 'asc' : 'desc'
+  } else {
+    usageSortKey.value = key
+    usageSortDir.value = key === 'tool' ? 'asc' : 'desc'
+  }
+}
+
+const sortedUsage = computed<McpToolUsage[]>(() => {
+  const rows = [...(mcpUsage.value?.tools ?? [])]
+  const key = usageSortKey.value
+  const factor = usageSortDir.value === 'desc' ? -1 : 1
+  rows.sort((a, b) => {
+    let cmp: number
+    if (key === 'tool') {
+      cmp = a.tool.localeCompare(b.tool)
+    } else {
+      cmp = (a[key] as number) - (b[key] as number)
+      if (cmp === 0) cmp = a.tool.localeCompare(b.tool) * -1
+    }
+    return cmp * factor
+  })
+  return rows
+})
 
 async function providerConnectionAction(provider: string, action: 'connect' | 'verify' | 'logout') {
   if (action === 'logout' && !confirm(`Log out of ${provider === 'codex' ? 'OpenAI Codex' : 'Claude Code'} on this computer?`)) {
@@ -3327,7 +3468,7 @@ async function saveWorkspace(name: string) {
   workspacesResult.value = ''
   try {
     await projectStore.updateWorkspace(name, {
-      vault_root: form.vault_root,
+      vault_root: name,
       default_provider: form.default_provider,
       default_model: form.default_model,
       gws_profile: form.gws_profile,
@@ -3355,7 +3496,7 @@ async function createNewWorkspace() {
   try {
     await projectStore.createWorkspace({
       name: form.name.trim(),
-      vault_root: form.vault_root,
+      vault_root: form.name.trim(),
       default_provider: form.default_provider,
       default_model: form.default_model,
       gws_profile: form.gws_profile,
@@ -3401,6 +3542,8 @@ onMounted(async () => {
   fetchAutomation()
   fetchPackageStatus()
   fetchProviderKeys()
+  fetchMcpStatus()
+  fetchMcpUsage()
   fetchWorkspaceModels()
   fetchGwsIntegration()
   fetchWorkspacesList()
@@ -3476,53 +3619,12 @@ async function doSnapshot(confirmWarnings = false) {
   actionPending.value = null
 }
 
-const restarting = ref(false)
-const restartMessage = ref('')
-
-// Show the full-screen restart overlay, then wait for the server to come back
-// before reloading. Used by any action that triggers a server restart (model
-// installs, provider key changes) so the UI never lands on a half-booted
-// server and shows a "Failed to fetch" error.
-async function restartAndReload(message: string) {
-  restartMessage.value = message
-  restarting.value = true
-  await reloadWhenServerReady()
-}
-
-async function reloadWhenServerReady(timeoutMs = 120000) {
-  // The deploy endpoint returns ok immediately while the restart is only
-  // scheduled (~2s later). Reloading on a fixed timer races the server
-  // coming back up and lands on a dead/half-booted process -> grey screen.
-  // Instead, poll /api/startup-status (the same signal App.vue's boot overlay
-  // uses): wait for the server to go down, then reload once it reports
-  // overall_ready again. Fallback to a forced reload on timeout.
-  const start = Date.now()
-  let sawDown = false
-  while (true) {
-    try {
-      const res = await fetch('/api/startup-status')
-      if (res.ok) {
-        const data = await res.json()
-        if (!data.overall_ready) {
-          sawDown = true
-        } else if (sawDown) {
-          location.reload()
-          return
-        }
-      } else {
-        // server returned non-ok status (e.g. 502 Bad Gateway during restart)
-        sawDown = true
-      }
-    } catch {
-      // server is down mid-restart (network error / connection refused)
-      sawDown = true
-    }
-    if (Date.now() - start > timeoutMs) {
-      location.reload()
-      return
-    }
-    await new Promise(r => setTimeout(r, 1000))
-  }
+// Show the full-screen restart overlay (App.vue), then wait for the server to
+// come back before reloading. Used by any action that triggers a server
+// restart (model installs, provider key changes, deploy) so the UI never
+// lands on a half-booted server and shows a "Failed to fetch" error.
+function restartAndReload(message: string) {
+  projectStore.beginServerRestart(message)
 }
 
 async function doDeploy(confirmWarnings = false) {
@@ -3535,7 +3637,7 @@ async function doDeploy(confirmWarnings = false) {
     deploySteps.value = r.steps
     if (r.ok) {
       actionResult.value = 'Restart complete. Waiting for server to come back, then reloading...'
-      reloadWhenServerReady()
+      projectStore.beginServerRestart('Deploy complete. Restarting Ciaobot…')
     } else {
       actionResult.value = 'Restart failed. See steps above.'
     }
@@ -3796,6 +3898,13 @@ async function doPackageUpdate() {
   padding-bottom: var(--space-3);
   border-bottom: 1px solid var(--border);
 }
+/* No divider when the header is the only element in the card (nothing below
+   it to separate). v-if="false" siblings render as comment nodes, which
+   :last-child ignores, so this also covers cards whose body is conditional. */
+.settings-card-header:last-child {
+  padding-bottom: 0;
+  border-bottom: none;
+}
 .settings-card-header--split {
   flex-direction: row;
   align-items: flex-start;
@@ -3906,6 +4015,14 @@ async function doPackageUpdate() {
   color: var(--warning);
   border-color: color-mix(in srgb, var(--warning) 65%, var(--border));
   background: color-mix(in srgb, var(--warning) 8%, var(--bg3));
+}
+/* When paired with .btn-small, keep the compact size (scoped .btn-caution
+   would otherwise outrank the global .btn-small padding). */
+.btn-caution.btn-small {
+  min-height: 0;
+  padding: 6px 12px;
+  font-size: var(--text-sm);
+  font-weight: 500;
 }
 .btn-caution:hover { background: color-mix(in srgb, var(--warning) 15%, var(--bg3)); }
 .btn-secondary:active,
@@ -4184,24 +4301,14 @@ async function doPackageUpdate() {
 .routine-select::-ms-expand {
   display: none;
 }
-.routine-context {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: var(--space-3) 0;
+.workspace-root-path {
+  display: block;
+  margin-top: var(--space-3);
   padding: var(--space-3);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm, 4px);
   background: color-mix(in srgb, var(--bg) 76%, transparent);
   font-size: var(--text-sm);
-}
-.routine-context > div {
-  display: flex;
-  flex-direction: column;
-  gap: 0.35em;
-  align-items: flex-start;
-}
-.routine-context code {
   overflow-wrap: anywhere;
 }
 .routine-model-controls {
@@ -5388,5 +5495,108 @@ async function doPackageUpdate() {
 .ws-label {
   font-size: var(--text-sm);
   color: var(--fg2);
+}
+
+/* MCP tool usage tab */
+.usage-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+.usage-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 88px;
+  padding: var(--space-3);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.usage-stat-value {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.usage-stat-value--warn {
+  color: var(--warning);
+}
+.usage-stat-label {
+  font-size: var(--text-xs);
+  color: var(--fg3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.usage-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+.usage-th {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  color: var(--fg2);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  position: sticky;
+  top: 0;
+}
+.usage-th--num {
+  text-align: right;
+}
+.usage-th--active {
+  color: var(--fg);
+}
+.usage-th:hover {
+  color: var(--fg);
+}
+.usage-sort {
+  margin-left: 4px;
+  font-size: var(--text-xs);
+}
+.usage-td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.usage-td--tool {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--fg);
+  white-space: nowrap;
+}
+.usage-td--num {
+  text-align: right;
+}
+.usage-td--warn {
+  color: var(--warning);
+  font-weight: 600;
+}
+.usage-td--providers {
+  color: var(--fg2);
+  font-size: var(--text-xs);
+}
+.usage-row--idle .usage-td {
+  color: var(--fg3);
+}
+.usage-row--idle .usage-td--tool {
+  color: var(--fg3);
+}
+.usage-table tbody tr:last-child .usage-td {
+  border-bottom: none;
+}
+.usage-table tbody tr:hover .usage-td {
+  background: var(--bg2);
 }
 </style>

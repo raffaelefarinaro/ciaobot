@@ -8,6 +8,7 @@ from typing import Literal
 
 ExecutionMode = Literal["provider_prompt", "provider_cli_arg", "bot_handler"]
 BridgeMode = Literal["normal", "plan", "auto", "bypass"]
+ControlSurface = Literal["legacy", "mcp", "auto"]
 MessagePhase = Literal["commentary", "final_answer"]
 
 
@@ -124,6 +125,19 @@ class AgentRequest:
     # Provider-native thinking/reasoning level (see THINKING_LEVELS).
     # Empty = provider default, nothing is forwarded.
     thinking_level: str = ""
+    # Agent-facing Ciaobot control surface. ``mcp`` is the default managed
+    # connection, ``legacy`` preserves the CLI/skill path (hidden fallback),
+    # and ``auto`` lets the application select the measured winner/fallback.
+    # The engine always sets this explicitly on build_agent_request; the
+    # default here only keeps the dataclass consistent with the new default.
+    control_surface: ControlSurface = "mcp"
+    # Ephemeral managed-process MCP credentials. They are deliberately kept
+    # out of ``extra_env`` so normal model-created shell commands never see
+    # the bearer token. Providers translate these fields into their native
+    # MCP configuration immediately before spawning the process.
+    mcp_url: str = ""
+    mcp_token: str = ""
+    mcp_required: bool = False
 
 
 @dataclass(slots=True)
@@ -161,6 +175,11 @@ class ToolUseEvent(StreamEvent):
     set when this tool fires inside a Task subagent — its value matches
     the parent-level Task dispatch's ``tool_use_id``, so the client can
     look up the subagent's description and label the activity line.
+
+    ``file_touches`` is optional precomputed ``[{file_path, action}, …]``
+    from the raw tool input (before summarisation). Needed for Bash, where
+    the live ``tool_input`` summary is often a short description rather
+    than the command text that actually names the written paths.
     """
 
     tool_name: str = ""
@@ -170,6 +189,7 @@ class ToolUseEvent(StreamEvent):
     # Set for provider-native structured questions that must be answered
     # inside the active turn (Codex app-server request_user_input).
     request_id: str = ""
+    file_touches: list | None = None
 
 
 @dataclass(slots=True)
@@ -185,6 +205,17 @@ class SystemStatusEvent(StreamEvent):
     """System status event."""
 
     status: str | None = None
+
+
+@dataclass(slots=True)
+class ModelChangedEvent(StreamEvent):
+    """Emitted when the chat's model is switched during a capability fallback.
+
+    The PWA uses this to update the model pill and chat metadata in real time
+    so the user sees the switch without needing a page reload.
+    """
+
+    model: str = ""
 
 
 @dataclass(slots=True)

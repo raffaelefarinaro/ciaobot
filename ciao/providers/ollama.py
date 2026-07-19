@@ -71,7 +71,7 @@ class OllamaSettings:
     # / ``_SONNET_MODEL`` / ``_OPUS_MODEL`` / ``_FABLE_MODEL``.
     haiku_model: str = "deepseek-v4-flash:cloud"
     sonnet_model: str = "kimi-k2.7-code:cloud"
-    opus_model: str = "glm-5.2:cloud"
+    opus_model: str = "minimax-m3:cloud"
     fable_model: str = "glm-5.2:cloud"
     # Models served by a *local* Ollama daemon, routed independently of the
     # cloud allowlist above so both flavours can coexist (cloud key set →

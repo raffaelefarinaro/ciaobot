@@ -348,8 +348,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # contain app source, so there is no frontend rebuild at startup.
 
     # Update skills in the background, startup should not wait on npm.
-    tracker.start("update_skills")
-
     def _skills_task():
         try:
             update_skills(str(config.workspace_root))
@@ -358,7 +356,11 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             tracker.fail("update_skills", "skill install failed")
             logger.exception("Skill update failed")
 
-    asyncio.create_task(asyncio.to_thread(_skills_task))
+    if getattr(config, "benchmark_mode", False):
+        logger.info("Benchmark mode: skipping autonomous skill refresh.")
+    else:
+        tracker.start("update_skills")
+        asyncio.create_task(asyncio.to_thread(_skills_task))
 
     # Initialize stores
     state = StateStore(
@@ -434,8 +436,15 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         chat_exists=_loop_target_dispatchable,
     )
 
-    # Create and wire up web app
-    app = create_app(config, app_settings=app_settings)
+    # Create and wire up web app. MCP stays available while legacy remains
+    # the default so controlled A/B runs can select a surface per chat.
+    from ciao.mcp_server import CiaoMcpService
+
+    mcp_service = None
+    control_plane = None
+    if bool(getattr(config, "mcp_enabled", True)) and not getattr(config, "bootstrap_mode", False):
+        mcp_service = CiaoMcpService(config)
+    app = create_app(config, app_settings=app_settings, mcp_service=mcp_service)
     app.state.startup_tracker = tracker
     app.state.schedule_manager = schedule_manager
     app.state.loop_manager = loop_manager
@@ -464,6 +473,22 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         runtime_root=config.state_path.parent,
         dev_mode=config.dev_mode,
     )
+    if mcp_service is not None:
+        from ciao.control_plane import CiaoControlPlane
+
+        control_plane = CiaoControlPlane(
+            config,
+            project_chat_manager=pcm,
+            schedule_manager=schedule_manager,
+            loop_manager=loop_manager,
+            provider_subchat_manager=provider_subchat_manager,
+            local_session_manager=app.state.local_session_manager,
+            app_settings=app_settings,
+            startup_tracker=tracker,
+        )
+        mcp_service.bind(control_plane)
+        pcm._mcp_service = mcp_service
+        app.state.control_plane = control_plane
     push_subject = _push_subject_for_config(config)
     if not push_subject:
         logger.info(
@@ -592,6 +617,10 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         logger.info(
             "Bootstrap mode: holding schedule/loop dispatch until setup completes."
         )
+    elif getattr(config, "benchmark_mode", False):
+        logger.info(
+            "Benchmark mode: holding autonomous schedule/loop dispatch."
+        )
     else:
         schedule_manager.start()
         # Loops with autostart begin running now; manually-started loops stay
@@ -700,7 +729,8 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             except Exception:
                 logger.exception("Branch backup push failed")
 
-    asyncio.create_task(_branch_backup_loop())
+    if not getattr(config, "benchmark_mode", False):
+        asyncio.create_task(_branch_backup_loop())
 
     # ── Google Workspace token health ────────────────────────
     # Cheap periodic `auth status` ping per configured GWS profile. When a
@@ -737,7 +767,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                 logger.exception("GWS token health check failed")
             await asyncio.sleep(_gws_health_interval)
 
-    if not getattr(config, "bootstrap_mode", False):
+    if not getattr(config, "bootstrap_mode", False) and not getattr(
+        config, "benchmark_mode", False
+    ):
         asyncio.create_task(_gws_health_loop())
 
 
@@ -830,6 +862,8 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         restart_task[0] = asyncio.create_task(_restart_when_idle())
 
     app.state.request_restart = request_restart
+    if control_plane is not None:
+        control_plane.set_lifecycle_callback(request_restart)
 
     # ── Startup error triage ─────────────────────────────────
     # Cap the append-only launchd service logs, then — when the error log
@@ -846,7 +880,8 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         except Exception:
             logger.exception("Startup error triage failed")
 
-    asyncio.create_task(_startup_error_triage())
+    if not getattr(config, "benchmark_mode", False):
+        asyncio.create_task(_startup_error_triage())
 
     # ── Voice extras self-heal ───────────────────────────────
     # `brew upgrade` replaces the app's private venv, dropping optional
@@ -861,7 +896,8 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         except Exception:
             logger.exception("Voice extras self-heal failed")
 
-    asyncio.create_task(_heal_voice_extras())
+    if not getattr(config, "benchmark_mode", False):
+        asyncio.create_task(_heal_voice_extras())
 
     # ── Stale-install self-heal ──────────────────────────────
     # Two upgrade shapes leave this process running old code after a bare
@@ -898,7 +934,8 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                 request_restart(config.restart_exit_code)
                 return
 
-    asyncio.create_task(_watch_installed_version())
+    if not getattr(config, "benchmark_mode", False):
+        asyncio.create_task(_watch_installed_version())
 
     # ── App bundle refresh on upgrade ────────────────────────
     # `brew upgrade` swaps the Python package but doesn't rewrite Ciaobot Server.app,
@@ -919,7 +956,8 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         except Exception:
             logger.exception("App bundle refresh failed")
 
-    asyncio.create_task(_refresh_app_bundle())
+    if not getattr(config, "benchmark_mode", False):
+        asyncio.create_task(_refresh_app_bundle())
 
     async def _shutdown_providers() -> None:
         # Disconnect every active provider before uvicorn finishes its

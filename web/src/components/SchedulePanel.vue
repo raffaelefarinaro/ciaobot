@@ -438,6 +438,13 @@
           <span class="ov-dot ov-dot--alert"></span>
           Missed <span class="ov-count">{{ missedSchedules.length }}</span>
           <span class="ov-hint">expected to run, didn't</span>
+          <button
+            type="button"
+            class="btn-small ov-run-all"
+            :disabled="runningAllMissed"
+            :aria-busy="runningAllMissed"
+            @click.stop="runAllMissed"
+          >{{ runningAllMissed ? 'Starting…' : 'Run all' }}</button>
         </div>
         <router-link
           v-for="s in missedSchedules"
@@ -507,6 +514,7 @@ const editing = ref(false)
 const actionsOpen = ref(false)
 const copiedPromptKey = ref('')
 const startingBySchedule = ref<Set<string>>(new Set())
+const runningAllMissed = ref(false)
 // schedule_id -> chat_id while the linked chat is still streaming
 const runningBySchedule = ref<Record<string, string>>({})
 const editData = ref({
@@ -1071,6 +1079,53 @@ async function runNow() {
   }
 }
 
+async function runAllMissed() {
+  const targets = missedSchedules.value
+  if (!targets.length || runningAllMissed.value) return
+  runningAllMissed.value = true
+  let started = 0
+  let failed = 0
+  let firstChatId = ''
+  try {
+    // Sequential, same as server catch-up — avoid flooding providers.
+    for (const s of targets) {
+      const scheduleKey = s.schedule_id
+      startingBySchedule.value = new Set([...startingBySchedule.value, scheduleKey])
+      try {
+        const result = await store.runScheduleNow(scheduleKey)
+        started += 1
+        if (result.chat_id) {
+          runningBySchedule.value = {
+            ...runningBySchedule.value,
+            [scheduleKey]: result.chat_id,
+          }
+          if (!firstChatId) firstChatId = result.chat_id
+        }
+      } catch {
+        failed += 1
+      } finally {
+        stopStarting(scheduleKey)
+      }
+    }
+    await Promise.all([store.fetchSchedules(), projectStore.fetchAll()])
+    const total = started + failed
+    if (started > 0) {
+      projectStore.pushToast({
+        chat_id: firstChatId,
+        title: failed ? `Started ${started} of ${total}` : `Started ${started} schedules`,
+        body: failed ? `${failed} failed to start` : 'Missed schedules are running',
+      })
+    } else {
+      projectStore.pushErrorToast(
+        'Could not start missed schedules',
+        'All run-now requests failed.',
+      )
+    }
+  } finally {
+    runningAllMissed.value = false
+  }
+}
+
 async function onToggleEnabled() {
   if (!schedule.value) return
   await store.updateSchedule(schedule.value.schedule_id, { enabled: !schedule.value.enabled })
@@ -1285,6 +1340,16 @@ function closeSchedule() {
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--fg);
+}
+.ov-run-all {
+  margin-left: auto;
+  flex-shrink: 0;
+  border-color: var(--warning);
+  color: var(--warning);
+}
+.ov-run-all:disabled {
+  opacity: 0.6;
+  cursor: wait;
 }
 .ov-count {
   font-size: var(--text-xs);

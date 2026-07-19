@@ -15,6 +15,12 @@ describe('buildKnownPathRules', () => {
     const rules = buildKnownPathRules(['memory-vault/work/foo/stradivari-ondevice-slide.pptx'])
     expect(rules.some(r => r.match === 'stradivari-ondevice-slide.pptx')).toBe(true)
   })
+
+  it('ignores bare English words that are not real paths', () => {
+    const rules = buildKnownPathRules(['There', 'memory-vault/work/foo/notes.md'])
+    expect(rules.some(r => r.match === 'There')).toBe(false)
+    expect(linkifyText('There was an error', ['There'])).not.toContain('class="file-link"')
+  })
 })
 
 describe('linkifyText', () => {

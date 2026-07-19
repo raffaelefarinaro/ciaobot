@@ -40,6 +40,7 @@ Ciaobot has three memory layers. Use the right one; do not duplicate facts acros
 
 - After editing canonical `skills/`, `commands/`, or `subagents/`: `ciao sync-skills` (mirrors into `.claude/` and Codex wrappers).
 - Spin off a new chat: `ciao create-chat --prompt "…"` (optional `--workspace`, `--project`, `--model`, `--title`).
+- Consult another provider mid-turn: `ciao provider-chat start --chat-id <id> --provider <provider> --model <model> --message "…"` (see the `provider-consultation` skill for the full lifecycle: start → send → close/cancel). **Never** search for or invoke a provider binary (like `codex` or `ollama`) directly; all cross-provider task delegation flows through `ciao provider-chat`.
 - Google Workspace: always via `scripts/gws-profile.sh` (see Google Workspace section below).
 
 **Background memory routines** (Settings → Automation): archived chats get session insights and memory proposals; the daily **Memory curation** schedule processes proposals and appends to `Workspace/Learnings.md`; the weekly review promotes recurring learnings into `CLAUDE.md`. Do not promote proposals silently in normal chats unless the user asks.

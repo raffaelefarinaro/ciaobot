@@ -235,8 +235,10 @@ def append_proposals(
 ) -> Path | None:
     """Append a timestamped batch to ``Workspace/Memory-Proposals.md``.
 
-    Returns the proposals file path on success, or None when the proposal
-    list is empty.
+    Proposals whose text is already recorded in the file are dropped so
+    recurring corrections don't stack up batch after batch. Returns the
+    proposals file path when a batch was written, or None when the list is
+    empty or every proposal was already present.
     """
     if not proposals:
         return None
@@ -248,15 +250,40 @@ def append_proposals(
     out_path = vault_root / workspace / "Workspace/Memory-Proposals.md"
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    header = _proposals_header_block(source_path)
-    lines = [p.as_bullet() for p in proposals]
-    block = header + "\n".join(lines) + "\n"
-
     # File is append-only; new batches stack at the end with their own
     # timestamp so it's easy to see what came from which curation run.
     existing = out_path.read_text(encoding="utf-8") if out_path.exists() else _STUB_HEADER
+
+    # Drop anything already sitting in the file. Corrections recur across
+    # sessions ("Continue from where you left off.") and, while bounded memory
+    # is full, keep failing promotion and landing here — without this guard the
+    # same bullet stacks up every archive, growing the file unboundedly.
+    already = _existing_proposal_texts(existing)
+    fresh = [p for p in proposals if p.text.strip() not in already]
+    if not fresh:
+        return None
+
+    header = _proposals_header_block(source_path)
+    lines = [p.as_bullet() for p in fresh]
+    block = header + "\n".join(lines) + "\n"
+
     out_path.write_text(existing + "\n" + block, encoding="utf-8")
     return out_path
+
+
+# Matches a bullet written by ``MemoryProposal.as_bullet`` and captures its
+# text payload (between the ``[target]`` tag and the trailing ``_(from: …)_``).
+_BULLET_RE = re.compile(r"^- \[[^\]]+\] (.+?)  _\(from: [^)]*\)_\s*$")
+
+
+def _existing_proposal_texts(file_text: str) -> set[str]:
+    """Return the set of proposal texts already recorded in the file."""
+    out: set[str] = set()
+    for line in file_text.splitlines():
+        m = _BULLET_RE.match(line)
+        if m:
+            out.add(m.group(1).strip())
+    return out
 
 
 _STUB_HEADER = (

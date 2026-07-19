@@ -81,11 +81,44 @@ function basenameOf(filePath: string): string {
   return slash >= 0 ? cleaned.slice(slash + 1) : cleaned
 }
 
+const EXTENSIONLESS_BASENAMES = new Set([
+  'makefile',
+  'dockerfile',
+  'containerfile',
+  'license',
+  'licence',
+  'readme',
+  'changelog',
+  'gemfile',
+  'rakefile',
+  'procfile',
+  'vagrantfile',
+  'gitignore',
+  'dockerignore',
+  'editorconfig',
+  'npmrc',
+  'browserslist',
+])
+
+/** Reject bare English words that were never a real path (e.g. "There"). */
+export function isPlausibleFilePath(filePath: string): boolean {
+  const trimmed = filePath.trim()
+  if (!trimmed) return false
+  if (/[*?$`\n]/.test(trimmed)) return false
+  if (trimmed.includes('/') || trimmed.includes('\\') || trimmed.startsWith('.')) return true
+  const base = basenameOf(trimmed)
+  if (!base) return false
+  if (/\.\w{1,20}$/.test(base)) return true
+  return EXTENSIONLESS_BASENAMES.has(base.toLowerCase())
+}
+
 type KnownPathRule = { match: string; path: string; basenameOnly: boolean }
 
 /** Build longest-first literal match rules from agent-touched file paths. */
 export function buildKnownPathRules(knownPaths: string[]): KnownPathRule[] {
-  const deduped = [...new Set(knownPaths.map(p => p.trim()).filter(Boolean))]
+  const deduped = [...new Set(
+    knownPaths.map(p => p.trim()).filter(p => p && isPlausibleFilePath(p)),
+  )]
   if (!deduped.length) return []
 
   const basenameOwners = new Map<string, string>()
@@ -105,6 +138,8 @@ export function buildKnownPathRules(knownPaths: string[]): KnownPathRule[] {
     if (!p) continue
     // Skip basename rule when it duplicates a full-path rule entry.
     if (deduped.includes(base)) continue
+    // Never linkify bare words like "There" even if a bad _filecard exists.
+    if (!isPlausibleFilePath(base)) continue
     rules.push({ match: base, path: p, basenameOnly: true })
   }
   rules.sort((a, b) => b.match.length - a.match.length)

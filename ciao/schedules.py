@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import threading
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -261,21 +262,23 @@ class ScheduleStore:
         self._path = runtime_root / "schedules.json"
         self._system_state_path = runtime_root / "system_schedules_state.json"
         self._include_system = include_system
+        self._lock = threading.RLock()
 
     def list(self, *, chat_id: int | None = None) -> list[ScheduleEntry]:
-        raw_items = self._runtime_items()
-        items: list[ScheduleEntry] = []
-        for item in raw_items:
-            if item.get("scope") == "system":
-                continue
-            # Strip unknown keys that ScheduleEntry doesn't accept
-            items.append(self._entry_from_item(item))
-        if self._include_system:
-            items.extend(self._system_entries())
-        items.sort(key=lambda item: (item.daily_time_utc, item.created_at))
-        if chat_id is not None:
-            items = [item for item in items if item.chat_id == chat_id]
-        return items
+        with self._lock:
+            raw_items = self._runtime_items()
+            items: list[ScheduleEntry] = []
+            for item in raw_items:
+                if item.get("scope") == "system":
+                    continue
+                # Strip unknown keys that ScheduleEntry doesn't accept
+                items.append(self._entry_from_item(item))
+            if self._include_system:
+                items.extend(self._system_entries())
+            items.sort(key=lambda item: (item.daily_time_utc, item.created_at))
+            if chat_id is not None:
+                items = [item for item in items if item.chat_id == chat_id]
+            return items
 
     def get(self, schedule_id: str) -> ScheduleEntry | None:
         for item in self.list():
@@ -327,36 +330,39 @@ class ScheduleStore:
             title=title or "",
             description=description or "",
         )
-        data = self._load()
-        data.setdefault("schedules", []).append(self._serialize_entry(entry))
-        self._save(data)
+        with self._lock:
+            data = self._load()
+            data.setdefault("schedules", []).append(self._serialize_entry(entry))
+            self._save(data)
         return entry
 
     def replace(self, entry: ScheduleEntry) -> None:
-        if entry.scope == "system":
-            self._replace_system_state(entry)
-            return
-        data = self._load()
-        items = data.setdefault("schedules", [])
-        for index, item in enumerate(items):
-            if item.get("schedule_id") == entry.schedule_id:
-                items[index] = self._serialize_entry(entry)
-                self._save(data)
+        with self._lock:
+            if entry.scope == "system":
+                self._replace_system_state(entry)
                 return
-        items.append(self._serialize_entry(entry))
-        self._save(data)
+            data = self._load()
+            items = data.setdefault("schedules", [])
+            for index, item in enumerate(items):
+                if item.get("schedule_id") == entry.schedule_id:
+                    items[index] = self._serialize_entry(entry)
+                    self._save(data)
+                    return
+            items.append(self._serialize_entry(entry))
+            self._save(data)
 
     def delete(self, schedule_id: str) -> bool:
-        entry = self.get(schedule_id)
-        if entry is not None and entry.scope == "system":
-            return False
-        data = self._load()
-        before = len(data.setdefault("schedules", []))
-        data["schedules"] = [item for item in data["schedules"] if item.get("schedule_id") != schedule_id]
-        if len(data["schedules"]) == before:
-            return False
-        self._save(data)
-        return True
+        with self._lock:
+            entry = self.get(schedule_id)
+            if entry is not None and entry.scope == "system":
+                return False
+            data = self._load()
+            before = len(data.setdefault("schedules", []))
+            data["schedules"] = [item for item in data["schedules"] if item.get("schedule_id") != schedule_id]
+            if len(data["schedules"]) == before:
+                return False
+            self._save(data)
+            return True
 
     def _load(self) -> dict:
         if not self._path.exists():
@@ -368,7 +374,9 @@ class ScheduleStore:
 
     def _save(self, payload: dict) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        tmp = self._path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(self._path)
 
     def _runtime_items(self) -> list[dict]:
         return [item for item in self._load().get("schedules", []) if isinstance(item, dict)]
@@ -433,10 +441,12 @@ class ScheduleStore:
     def _save_system_state(self, payload: dict[str, dict]) -> None:
         self._system_state_path.parent.mkdir(parents=True, exist_ok=True)
         data = {"schedules": payload}
-        self._system_state_path.write_text(
+        tmp = self._system_state_path.with_suffix(".json.tmp")
+        tmp.write_text(
             json.dumps(data, indent=2, sort_keys=True),
             encoding="utf-8",
         )
+        tmp.replace(self._system_state_path)
 
     def _replace_system_state(self, entry: ScheduleEntry) -> None:
         state = self._load_system_state()
@@ -534,6 +544,10 @@ class ScheduleManager:
 
     def delete(self, schedule_id: str) -> bool:
         return self._store.delete(schedule_id)
+
+    def replace(self, entry: ScheduleEntry) -> None:
+        """Persist a validated schedule update through the public manager API."""
+        self._store.replace(entry)
 
     async def _dispatch_entry(
         self,

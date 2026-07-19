@@ -93,7 +93,13 @@ class StdioJsonRpcPeer:
             raise RpcProcessError(f"{self.name}: empty command")
         child_env = os.environ.copy()
         if self.env:
-            child_env.update(self.env)
+            # Prepend PATH additions so the child keeps inherited entries.
+            extra_path = self.env.get("PATH", "")
+            merged = {k: v for k, v in self.env.items() if k != "PATH"}
+            child_env.update(merged)
+            if extra_path:
+                existing = child_env.get("PATH", "")
+                child_env["PATH"] = f"{extra_path}:{existing}" if existing else extra_path
         try:
             self.process = await asyncio.create_subprocess_exec(
                 *self.command,

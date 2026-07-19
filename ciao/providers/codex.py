@@ -122,7 +122,11 @@ def codex_protocol_status(
     cached = _PROTOCOL_CACHE.get(binary)
     if cached and cached[1] == stamp and time.monotonic() - cached[0] < 300:
         return cached[2], cached[3]
+    path_env = _codex_path_env(binary)
     merged_env = {**os.environ, **dict(env or {})}
+    if "PATH" in path_env:
+        existing = merged_env.get("PATH", "")
+        merged_env["PATH"] = f"{path_env['PATH']}:{existing}" if existing else path_env["PATH"]
     try:
         with tempfile.TemporaryDirectory(prefix="ciao-codex-schema-") as raw_dir:
             out = Path(raw_dir)
@@ -271,7 +275,7 @@ def resolve_codex_binary(env: Mapping[str, str] | None = None) -> str | None:
             return str(path.resolve())
         return None
     resolved = resolve_tool("codex")
-    if resolved:
+    if resolved and "cmux-cli-shims" not in resolved:
         return resolved
     for candidate in (
         Path("/Applications/ChatGPT.app/Contents/Resources/codex"),
@@ -280,6 +284,21 @@ def resolve_codex_binary(env: Mapping[str, str] | None = None) -> str | None:
         if candidate.is_file():
             return str(candidate.resolve())
     return None
+
+
+def _codex_path_env(binary: str) -> dict[str, str]:
+    """Return an env fragment that puts *binary*'s directory on ``PATH``.
+
+    When the binary was resolved from a fallback location (e.g. inside
+    ChatGPT.app), the child process needs the directory on ``PATH`` so
+    that ``codex`` can locate itself for internal sub-invocations.
+    """
+    bin_dir = Path(binary).resolve().parent
+    paths = [str(bin_dir)]
+    node_bin = bin_dir / "cua_node" / "bin"
+    if node_bin.is_dir():
+        paths.append(str(node_bin))
+    return {"PATH": os.pathsep.join(paths)}
 
 
 def codex_login_status(
@@ -299,6 +318,12 @@ def codex_login_status(
             "command": "npm install -g @openai/codex@latest",
             "detail": "Codex CLI is not installed or is not visible on PATH.",
         }
+    path_env = _codex_path_env(binary)
+    merged_env = {**os.environ, **dict(env or {})}
+    if "PATH" in path_env:
+        existing = merged_env.get("PATH", "")
+        merged_env["PATH"] = f"{path_env['PATH']}:{existing}" if existing else path_env["PATH"]
+
     try:
         version_run = subprocess.run(
             [binary, "--version"],
@@ -306,6 +331,7 @@ def codex_login_status(
             text=True,
             timeout=timeout,
             check=False,
+            env=merged_env,
         )
         version_lines = (version_run.stdout or version_run.stderr).strip().splitlines()
         version = version_lines[-1] if version_lines else "installed"
@@ -318,6 +344,7 @@ def codex_login_status(
             text=True,
             timeout=timeout,
             check=False,
+            env=merged_env,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return {
@@ -330,7 +357,7 @@ def codex_login_status(
     output = "\n".join(part for part in (login.stdout, login.stderr) if part).strip()
     logged_in = login.returncode == 0 and "logged in" in output.lower()
     if logged_in:
-        compatible, protocol_detail = codex_protocol_status(binary, env)
+        compatible, protocol_detail = codex_protocol_status(binary, merged_env)
         if not compatible:
             return {
                 "name": "codex",
@@ -429,11 +456,15 @@ def _thread_item_tool_events(item: Mapping[str, Any]) -> list[ToolUseEvent]:
     item_type = str(item.get("type") or "")
     item_id = str(item.get("id") or "") or None
     if item_type == "commandExecution":
+        command = str(item.get("command") or "")[:2000]
+        from ciao.web.chat_broker import extract_file_touches
+        touches = extract_file_touches("Bash", {"command": command})
         return [ToolUseEvent(
             type="assistant",
             tool_name="Bash",
-            tool_input=str(item.get("command") or "")[:2000],
+            tool_input=command,
             tool_use_id=item_id,
+            file_touches=touches or None,
         )]
     if item_type == "fileChange":
         events: list[ToolUseEvent] = []
@@ -442,11 +473,14 @@ def _thread_item_tool_events(item: Mapping[str, Any]) -> list[ToolUseEvent]:
                 continue
             kind = str(change.get("kind") or "update").lower()
             name = "Write" if kind in {"add", "create"} else "Edit"
+            action = "created" if name == "Write" else "edited"
+            path = str(change.get("path") or "")[:2000]
             events.append(ToolUseEvent(
                 type="assistant",
                 tool_name=name,
-                tool_input=str(change.get("path") or "")[:2000],
+                tool_input=path,
                 tool_use_id=item_id,
+                file_touches=[{"file_path": path, "action": action}] if path else None,
             ))
         return events
     if item_type == "mcpToolCall":
@@ -547,6 +581,7 @@ class CodexProvider(BaseSDKProvider):
         ] = {}
         self._request_counter = 0
         self._turn_tool_item_ids: set[str] = set()
+        self._peer_mcp_token = ""
 
     @property
     def current_session_id(self) -> str | None:
@@ -556,7 +591,7 @@ class CodexProvider(BaseSDKProvider):
     def can_drain(self) -> bool:
         return False
 
-    def _resolved_command(self) -> list[str]:
+    def _resolved_command(self, request: AgentRequest | None = None) -> list[str]:
         if self._command is not None:
             return list(self._command)
         binary = resolve_codex_binary()
@@ -564,9 +599,19 @@ class CodexProvider(BaseSDKProvider):
             raise FileNotFoundError(
                 "Codex CLI not found. Install Codex and run `ciao auth codex`."
             )
-        return [binary, "app-server", "--stdio"]
+        overrides: list[str] = []
+        if request is not None and request.mcp_url and request.mcp_token:
+            overrides = [
+                "-c", f"mcp_servers.ciaobot.url={json.dumps(request.mcp_url)}",
+                "-c", "mcp_servers.ciaobot.bearer_token_env_var=\"CIAO_MCP_SESSION_TOKEN\"",
+                "-c", "mcp_servers.ciaobot.enabled=true",
+                "-c", f"mcp_servers.ciaobot.required={'true' if request.mcp_required else 'false'}",
+                # The app-server needs the token, model-created shell commands do not.
+                "-c", "shell_environment_policy.exclude=[\"CIAO_MCP_SESSION_TOKEN\"]",
+            ]
+        return [binary, *overrides, "app-server", "--stdio"]
 
-    def _memory_instructions(self) -> str:
+    def _memory_instructions(self, request: AgentRequest | None = None) -> str:
         if self._developer_instructions is not None:
             return self._developer_instructions
         cfg = self.config
@@ -576,7 +621,10 @@ class CodexProvider(BaseSDKProvider):
                 memory_char_limit=int(getattr(cfg, "memory_char_limit", 2200)),
                 user_char_limit=int(getattr(cfg, "user_char_limit", 1375)),
             )
-        payload = system_prompt_payload(memory) or {}
+        payload = system_prompt_payload(
+            memory,
+            control_surface=request.control_surface if request is not None else "legacy",
+        ) or {}
         return str(payload.get("append") or "")
 
     def _runtime_context(self, request: AgentRequest) -> str:
@@ -604,12 +652,22 @@ class CodexProvider(BaseSDKProvider):
         return f"[CIAO_CONTEXT_BEGIN]\n{context}\n{marker}\n\n{prompt}"
 
     async def _ensure_peer(self, request: AgentRequest) -> StdioJsonRpcPeer:
+        if (
+            self._peer is not None
+            and self._peer.running
+            and request.mcp_token != self._peer_mcp_token
+        ):
+            await self.disconnect()
         if self._peer is not None and self._peer.running:
             return self._peer
+        command = self._resolved_command(request)
+        env = {**_codex_path_env(command[0]), **(request.extra_env or {})}
+        if request.mcp_token:
+            env["CIAO_MCP_SESSION_TOKEN"] = request.mcp_token
         self._peer = StdioJsonRpcPeer(
-            self._resolved_command(),
+            command,
             cwd=self.workspace_root,
-            env=request.extra_env or {},
+            env=env,
             name="codex app-server",
         )
         await self._peer.start()
@@ -622,6 +680,7 @@ class CodexProvider(BaseSDKProvider):
             timeout=_CONTROL_TIMEOUT,
         )
         await self._peer.notify("initialized", {})
+        self._peer_mcp_token = request.mcp_token
         return self._peer
 
     async def _ensure_thread(self, request: AgentRequest) -> str:
@@ -639,7 +698,7 @@ class CodexProvider(BaseSDKProvider):
             "approvalPolicy": approval,
             "approvalsReviewer": reviewer,
             "sandbox": sandbox,
-            "developerInstructions": self._memory_instructions(),
+            "developerInstructions": self._memory_instructions(request),
         }
         requested_session = request.resume_session or self._session_id
         method = (
@@ -1102,6 +1161,7 @@ class CodexProvider(BaseSDKProvider):
         self._turn_id = None
         self._permission_requests.clear()
         self._question_requests.clear()
+        self._peer_mcp_token = ""
         self._reset_settings()
         if peer is not None:
             await peer.close()
@@ -1123,7 +1183,10 @@ class CodexProvider(BaseSDKProvider):
         cached = _MODEL_CACHE.get(key)
         if cached and not force and time.monotonic() - cached[0] < _MODEL_CACHE_TTL:
             return [dict(item) for item in cached[1]]
-        peer = StdioJsonRpcPeer(command, cwd=workspace_root, name="codex model catalog")
+        peer = StdioJsonRpcPeer(
+            command, cwd=workspace_root, name="codex model catalog",
+            env=_codex_path_env(command[0]),
+        )
         try:
             await peer.start()
             await peer.request(
@@ -1176,7 +1239,10 @@ class CodexProvider(BaseSDKProvider):
             if not binary:
                 return None
             command = [binary, "app-server", "--stdio"]
-        peer = StdioJsonRpcPeer(command, cwd=workspace_root, name="codex history")
+        peer = StdioJsonRpcPeer(
+            command, cwd=workspace_root, name="codex history",
+            env=_codex_path_env(command[0]),
+        )
         try:
             await peer.start()
             await peer.request(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from starlette.applications import Starlette
@@ -11,6 +12,7 @@ from starlette.staticfiles import StaticFiles
 from starlette.responses import FileResponse
 
 from ciao.package_version import make_cached_package_status
+from ciao.mcp_server import mcp_status_endpoint, mcp_usage_endpoint
 from ciao.web.auth import AuthMiddleware, make_serializer
 from ciao.web.agent_assets import (
     agent_assets_endpoint,
@@ -153,7 +155,7 @@ def _spa_catchall(request):
     return FileResponse(STATIC_DIR / "index.html", status_code=404)
 
 
-def create_app(config, app_settings=None) -> Starlette:
+def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     serializer = make_serializer(config.pwa_auth_token)
 
     routes = [
@@ -281,6 +283,8 @@ def create_app(config, app_settings=None) -> Starlette:
         Route("/api/setup/list-dirs", setup_list_dirs_endpoint, methods=["GET"]),
         Route("/api/setup/mkdir", setup_mkdir_endpoint, methods=["POST"]),
         Route("/api/stats", cli_stats, methods=["GET"]),
+        Route("/api/mcp/status", mcp_status_endpoint, methods=["GET"]),
+        Route("/api/mcp/usage", mcp_usage_endpoint, methods=["GET"]),
         # Push notifications
         Route("/api/push/public-key", push_public_key, methods=["GET"]),
         Route("/api/push/subscribe", push_subscribe, methods=["POST"]),
@@ -304,6 +308,11 @@ def create_app(config, app_settings=None) -> Starlette:
         WebSocketRoute("/ws/events", ws_events),
     ]
 
+    # Agent-facing MCP is mounted before the SPA catch-all. Its own bearer
+    # authentication is independent from the browser's signed session cookie.
+    if mcp_service is not None:
+        routes.append(Mount("/mcp", app=mcp_service.http_app, name="ciaobot-mcp"))
+
     # Serve Vite build output if it exists
     if STATIC_DIR.exists():
         routes.append(Mount("/assets", app=StaticFiles(directory=STATIC_DIR / "assets"), name="assets"))
@@ -314,12 +323,22 @@ def create_app(config, app_settings=None) -> Starlette:
         Middleware(AuthMiddleware, serializer=serializer, auth_required=config.pwa_auth_required),
     ]
 
-    app = Starlette(routes=routes, middleware=middleware)
+    lifespan = None
+    if mcp_service is not None:
+        @asynccontextmanager
+        async def _mcp_lifespan(_app):
+            async with mcp_service.lifespan():
+                yield
+
+        lifespan = _mcp_lifespan
+
+    app = Starlette(routes=routes, middleware=middleware, lifespan=lifespan)
     app.state.serializer = serializer
     app.state.config = config
     # Runtime-mutable settings store (Settings → Models tab). None in
     # tests that build the app without one; the route 503s in that case.
     app.state.app_settings = app_settings
+    app.state.mcp_service = mcp_service
     # Cache the GitHub release lookup so opening Settings repeatedly does not
     # exhaust the API rate limit (especially on shared/NAT egress IPs).
     app.state.package_status_fetcher = make_cached_package_status()

@@ -43,7 +43,7 @@ from ciao.setup_status import setup_status
 from ciao.cli import _auth_command_for_provider
 from ciao.skills_inventory import build_skill_inventory
 from ciao.web.auth import SESSION_COOKIE, session_cookie_kwargs
-from ciao.web.chat_broker import extract_file_touch
+from ciao.web.chat_broker import extract_file_touches
 from ciao.web.project_chats import (
     _PROJECT_UPLOAD_MAX_BYTES,
     _normalize_handover_messages,
@@ -51,6 +51,7 @@ from ciao.web.project_chats import (
 from ciao.web.routes_helpers import (
     _allowed_roots,
     _commit_and_push,
+    _git_pull_with_retry,
     _resolve_workspace_path,
 )
 
@@ -278,12 +279,16 @@ def _tool_icon(name: str) -> str:
 def _extract_assistant_blocks(raw: object) -> list[dict]:
     """Return ordered text/tool_use blocks for an assistant message.
 
-    Items: {"kind": "text", "text": str} or
+    Items: {"kind": "text", "text": str},
+           {"kind": "thinking", "text": str}, or
            {"kind": "tool_use", "name": str, "summary": str,
             "file_touch": {file_path, action} | None}.
     ``file_touch`` is populated when the tool mutates a file on disk so the
     PWA can render an inline file card on reload instead of the generic
-    activity row.
+    activity row. ``thinking`` mirrors the live stream's ThinkingEvent so
+    reasoning is tagged as reasoning on reload instead of being dropped or
+    (for providers that persist reasoning as a text block) promoted into the
+    final answer bubble.
     """
     items: list[dict] = []
     if not isinstance(raw, dict):
@@ -307,16 +312,28 @@ def _extract_assistant_blocks(raw: object) -> list[dict]:
             text = block.get("text", "")
             if text.strip():
                 items.append({"kind": "text", "text": text})
+        elif btype in ("thinking", "redacted_thinking"):
+            # Extended-thinking / reasoning blocks. Anthropic stores these as
+            # {"type": "thinking", "thinking": "..."}; the redacted variant is
+            # encrypted and carries no readable text (skip it). Surfacing them
+            # as their own kind lets the history renderer tag them `_thinking`
+            # — matching the live path — so reasoning stays collapsed in the
+            # Activity trace instead of rendering as a normal answer bubble.
+            thought = block.get("thinking") or block.get("text") or ""
+            if isinstance(thought, str) and thought.strip():
+                items.append({"kind": "thinking", "text": thought})
         elif btype == "tool_use":
             name = block.get("name", "")
             tinput = block.get("input") or {}
             if not isinstance(tinput, dict):
                 tinput = {}
             summary = _summarize_tool_input(name, tinput)
-            touch = extract_file_touch(name, tinput)
+            touches = extract_file_touches(name, tinput)
             entry = {"kind": "tool_use", "name": name, "summary": summary}
-            if touch:
-                entry["file_touch"] = touch
+            if touches:
+                entry["file_touch"] = touches[0]
+                if len(touches) > 1:
+                    entry["file_touches"] = touches
             items.append(entry)
     return items
 
@@ -533,22 +550,33 @@ def _render_subagent_messages(msgs: Iterable[object]) -> list[dict]:
                 if blk["kind"] == "tool_use":
                     name = blk["name"] or "tool"
                     summary = blk.get("summary") or ""
-                    touch = blk.get("file_touch")
-                    if touch:
+                    touches = blk.get("file_touches")
+                    if not isinstance(touches, list) or not touches:
+                        touch = blk.get("file_touch")
+                        touches = [touch] if touch else []
+                    if touches:
                         flush_tools()
-                        rendered.append({
-                            "role": "system",
-                            "tool_name": "_filecard",
-                            "content": touch["file_path"],
-                            "file_path": touch["file_path"],
-                            "action": touch["action"],
-                            "tool": name,
-                        })
+                        for touch in touches:
+                            if not isinstance(touch, dict) or not touch.get("file_path"):
+                                continue
+                            rendered.append({
+                                "role": "system",
+                                "tool_name": "_filecard",
+                                "content": touch["file_path"],
+                                "file_path": touch["file_path"],
+                                "action": touch.get("action") or "touched",
+                                "tool": name,
+                            })
                         continue
                     line = f"{_tool_icon(name)} {name}"
                     if summary:
                         line += f" {summary}"
                     pending_tools.append(line)
+                elif blk["kind"] == "thinking":
+                    # Subagent reasoning is not surfaced in the transcript
+                    # panel (it was dropped before thinking blocks were
+                    # extracted; skip to keep that behavior).
+                    continue
                 else:
                     flush_tools()
                     text = blk["text"].strip()
@@ -830,8 +858,7 @@ def _workspace_from_request(
         claude_ai_mcps = None
     return WorkspaceConfig(
         name=name,
-        vault_root=str(data.get("vault_root", existing.vault_root if existing else name)).strip()
-        or name,
+        vault_root=name,
         default_provider=provider,
         default_model=str(
             data.get("default_model", existing.default_model if existing else "")
@@ -1018,7 +1045,7 @@ def _launch_provider_login(config, provider: str) -> tuple[bool, str]:
     rendered = shlex.join(command)
     if sys.platform != "darwin":
         return False, rendered
-    runtime_root = Path(config.runtime_root)
+    runtime_root = Path(config.state_path).parent
     runtime_root.mkdir(parents=True, exist_ok=True)
     script = runtime_root / f"provider-login-{provider}.command"
     script.write_text(
@@ -1452,6 +1479,15 @@ async def gws_exchange_code(request: Request) -> JSONResponse:
             code=code,
             redirect_uri=redirect_uri,
         )
+        # Refresh the cached token-validity state so the Settings UI clears
+        # the "Login expired" banner immediately instead of waiting up to
+        # ``CIAO_GWS_HEALTH_INTERVAL`` seconds. Mirrors gws_relogin_status.
+        monitor = getattr(request.app.state, "gws_health_monitor", None)
+        if monitor is not None:
+            try:
+                await asyncio.to_thread(monitor.check_once)
+            except Exception:
+                logger.exception("Post-exchange health refresh failed")
         return JSONResponse(_gws_integration_payload(config))
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
@@ -1708,6 +1744,7 @@ async def create_project_chat(request: Request) -> JSONResponse:
             mode=body.get("mode"),
             provider=body.get("provider"),
             model_bucket=body.get("model_bucket"),
+            control_surface=body.get("control_surface"),
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
@@ -1790,6 +1827,13 @@ async def chat_detail(request: Request) -> JSONResponse:
         return JSONResponse({"ok": ok})
     # PATCH
     body = await request.json()
+    if "control_surface" in body:
+        surface = str(body.get("control_surface") or "").strip()
+        if surface not in {"", "legacy", "mcp", "auto"}:
+            return JSONResponse(
+                {"error": "control_surface must be legacy, mcp, auto, or empty"},
+                status_code=400,
+            )
     level_error = await _unsupported_codex_level_error(
         request.app.state.config, pcm, chat_id, body
     )
@@ -1806,6 +1850,15 @@ async def chat_detail(request: Request) -> JSONResponse:
             thinking_level=body.get("thinking_level"),
             model_bucket=body.get("model_bucket"),
         )
+        if chat is not None and "control_surface" in body:
+            changed = chat.control_surface != surface
+            chat.control_surface = surface
+            if changed:
+                pcm._revoke_mcp_chat(chat_id)
+                provider_service = pcm._providers.pop(chat_id, None)
+                if provider_service is not None:
+                    asyncio.create_task(provider_service.disconnect())
+                pcm._save(reason="chat_control_surface")
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     if chat is None:
@@ -2313,13 +2366,19 @@ def _render_codex_thread(thread: dict, chat) -> list[dict]:
                         continue
                     file_path = str(change.get("path") or "")
                     if file_path:
+                        kind_name = str(change.get("kind") or "update").lower()
+                        action = (
+                            "created"
+                            if kind_name in {"add", "create"}
+                            else "edited"
+                        )
                         result.append({
                             "role": "system",
                             "tool_name": "_filecard",
                             "content": file_path,
                             "file_path": file_path,
-                            "action": str(change.get("kind") or "edited"),
-                            "tool": "Edit",
+                            "action": action,
+                            "tool": "Write" if action == "created" else "Edit",
                         })
                 continue
             if kind == "commandExecution":
@@ -2328,9 +2387,22 @@ def _render_codex_thread(thread: dict, chat) -> list[dict]:
                     label = " ".join(str(part) for part in command)
                 else:
                     label = str(command or "")
-                pending_tools.append(
-                    f"{_tool_icon('Bash')} Bash {label}".strip()
-                )
+                touches = extract_file_touches("Bash", {"command": label})
+                if touches:
+                    flush_tools()
+                    for touch in touches:
+                        result.append({
+                            "role": "system",
+                            "tool_name": "_filecard",
+                            "content": touch["file_path"],
+                            "file_path": touch["file_path"],
+                            "action": touch.get("action") or "touched",
+                            "tool": "Bash",
+                        })
+                else:
+                    pending_tools.append(
+                        f"{_tool_icon('Bash')} Bash {label}".strip()
+                    )
                 continue
             if kind in {"mcpToolCall", "dynamicToolCall"}:
                 name = str(item.get("tool") or item.get("name") or kind)
@@ -2472,7 +2544,8 @@ async def chat_messages(request: Request) -> JSONResponse:
             # /model or /mode user turn that we skip below.
             text_blocks = [b for b in blocks if b["kind"] == "text"]
             tool_blocks = [b for b in blocks if b["kind"] == "tool_use"]
-            if not tool_blocks and len(text_blocks) == 1:
+            thinking_blocks = [b for b in blocks if b["kind"] == "thinking"]
+            if not tool_blocks and not thinking_blocks and len(text_blocks) == 1:
                 label = _classify_control_ack(text_blocks[0]["text"])
                 if label:
                     result.append({"role": "system", "content": label})
@@ -2497,22 +2570,41 @@ async def chat_messages(request: Request) -> JSONResponse:
                 if blk["kind"] == "tool_use":
                     name = blk["name"] or "tool"
                     summary = blk.get("summary") or ""
-                    touch = blk.get("file_touch")
-                    if touch:
+                    touches = blk.get("file_touches")
+                    if not isinstance(touches, list) or not touches:
+                        touch = blk.get("file_touch")
+                        touches = [touch] if touch else []
+                    if touches:
                         flush_tools()
-                        result.append({
-                            "role": "system",
-                            "tool_name": "_filecard",
-                            "content": touch["file_path"],
-                            "file_path": touch["file_path"],
-                            "action": touch["action"],
-                            "tool": name,
-                        })
+                        for touch in touches:
+                            if not isinstance(touch, dict) or not touch.get("file_path"):
+                                continue
+                            result.append({
+                                "role": "system",
+                                "tool_name": "_filecard",
+                                "content": touch["file_path"],
+                                "file_path": touch["file_path"],
+                                "action": touch.get("action") or "touched",
+                                "tool": name,
+                            })
                         continue
                     line = f"{_tool_icon(name)} {name}"
                     if summary:
                         line += f" {summary}"
                     pending_tools.append(line)
+                elif blk["kind"] == "thinking":
+                    # Reasoning: tag as `_thinking` so the PWA folds it into the
+                    # collapsed Activity trace (never the final answer bubble),
+                    # matching the live stream. Emit in order relative to tools
+                    # and text by flushing any pending tool group first.
+                    flush_tools()
+                    text = blk["text"].strip()
+                    if text:
+                        result.append({
+                            "role": "system",
+                            "content": text,
+                            "tool_name": "_thinking",
+                        })
                 else:
                     flush_tools()
                     text = blk["text"].strip()
@@ -2526,6 +2618,9 @@ async def chat_messages(request: Request) -> JSONResponse:
             content = _strip_injected_context(content)
         content = content.strip()
         if not content:
+            continue
+        # Drop allowed rate limit status events so they do not pollute the chat history.
+        if m.type == "system" and "Rate limit: allowed" in content and "allowed_warning" not in content:
             continue
         # Drop SDK-injected control slash commands (/model, /mode). Skipping
         # without incrementing user_idx keeps chat.user_turn_images aligned
@@ -4676,16 +4771,19 @@ async def admin_deploy(request: Request) -> JSONResponse:
             status_code=500,
         )
 
-    # 1. Git pull (idempotent after snapshot, but catches any race push)
-    result = await asyncio.to_thread(
-        _run_step, ["git", "pull"], cwd=str(codebase_root), timeout=60,
-    )
-    steps.append(_record("git pull", result))
-    if result.returncode != 0:
+    # 1. Git pull (idempotent after snapshot, but catches any race push).
+    #    Uses the same retry helper as the snapshot step so a short DNS
+    #    resolver flap doesn't fail the whole deploy with a confusing
+    #    "Could not resolve host" error.
+    rc, pull_out = await _git_pull_with_retry(codebase_root)
+    if rc != 0:
+        out = (pull_out or "").strip()[:500]
+        steps.append({"step": "git pull", "ok": False, "output": out})
         return JSONResponse(
-            {"steps": steps, "ok": False, "error": f"git pull failed: {steps[-1]['output']}"},
+            {"steps": steps, "ok": False, "error": f"git pull failed: {out}"},
             status_code=500,
         )
+    steps.append({"step": "git pull", "ok": True, "output": (pull_out or "").strip()[:500]})
 
     # 2. pip install
     import sys

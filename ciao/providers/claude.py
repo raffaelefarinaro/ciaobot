@@ -194,10 +194,10 @@ def _summarize_tool_input(name: str, tool_input: dict) -> str:
         path = tool_input.get("file_path", "")
         return path
     if name in ("Edit", "edit"):
-        path = tool_input.get("file_path", "")
+        path = tool_input.get("file_path") or tool_input.get("path") or ""
         return path
     if name in ("Write", "write"):
-        path = tool_input.get("file_path", "")
+        path = tool_input.get("file_path") or tool_input.get("path") or ""
         return path
     # Search
     if name in ("Grep", "grep"):
@@ -361,6 +361,7 @@ class ClaudeProvider(BaseSDKProvider):
         # One gate per provider. Each turn rebinds ``emit`` to the turn's
         # merge queue so late approvals can't land in a stale stream.
         self._permission_gate = PermissionGate()
+        self._mcp_token = ""
 
     def _stderr_handler(self, line: str) -> None:
         _route_cli_stderr(line)
@@ -388,6 +389,15 @@ class ClaudeProvider(BaseSDKProvider):
 
     async def _ensure_connected(self, request: AgentRequest) -> ClaudeSDKClient:
         requested_model = request.model
+        if (
+            self._client is not None
+            and self._connected
+            and request.mcp_token != self._mcp_token
+        ):
+            # MCP configuration is fixed when the managed CLI process starts.
+            # Reconnect when a chat switches surfaces or receives a refreshed
+            # ephemeral token; model/mode alone can still change in place.
+            await self.disconnect()
         if (
             self._client is not None
             and self._connected
@@ -438,7 +448,9 @@ class ClaudeProvider(BaseSDKProvider):
             except Exception:  # noqa: BLE001 — never block a chat on memory wiring
                 logger.exception("memory block failed; continuing without it")
                 memory_block = ""
-        system_prompt = system_prompt_payload(memory_block)
+        system_prompt = system_prompt_payload(
+            memory_block, control_surface=request.control_surface
+        )
 
         options = ClaudeAgentOptions(
             model=requested_model,
@@ -502,6 +514,15 @@ class ClaudeProvider(BaseSDKProvider):
             options.effort = request.thinking_level  # type: ignore[assignment]
         if system_prompt is not None:
             options.system_prompt = system_prompt
+        if request.mcp_url and request.mcp_token:
+            options.mcp_servers = {
+                "ciaobot": {
+                    "type": "http",
+                    "url": request.mcp_url,
+                    "headers": {"Authorization": f"Bearer {request.mcp_token}"},
+                }
+            }
+            options.strict_mcp_config = bool(request.mcp_required)
         if system_cli:
             options.cli_path = system_cli
         if resume_session:
@@ -526,6 +547,7 @@ class ClaudeProvider(BaseSDKProvider):
             options.session_id = str(uuid.uuid4())
 
         self._client = ClaudeSDKClient(options=options)
+        self._mcp_token = request.mcp_token
         self._remember_settings(request)
         return self._client
 
@@ -557,6 +579,7 @@ class ClaudeProvider(BaseSDKProvider):
         self._connected = False
         self._session_id = None
         self._pending_quota = {}
+        self._mcp_token = ""
         self._reset_settings()
 
     async def steer(self, request: AgentRequest) -> bool:
@@ -900,13 +923,23 @@ class ClaudeProvider(BaseSDKProvider):
             parent_id = getattr(msg, "parent_tool_use_id", None)
             for block in msg.content:
                 if isinstance(block, ToolUseBlock):
-                    summary = _summarize_tool_input(block.name, block.input or {})
+                    raw_input = block.input or {}
+                    if not isinstance(raw_input, dict):
+                        raw_input = {}
+                    # Compute file touches from the raw SDK input before
+                    # summarising. Bash summaries are often a short description
+                    # ("Create guest CSV"), which would hide created paths from
+                    # the PWA Outputs chips.
+                    from ciao.web.chat_broker import extract_file_touches
+                    touches = extract_file_touches(block.name, raw_input)
+                    summary = _summarize_tool_input(block.name, raw_input)
                     events.append(ToolUseEvent(
                         type="assistant",
                         tool_name=block.name,
                         tool_input=summary,
                         tool_use_id=getattr(block, "id", None),
                         parent_tool_use_id=parent_id,
+                        file_touches=touches or None,
                     ))
             if msg.session_id:
                 self._session_id = msg.session_id
@@ -941,6 +974,8 @@ class ClaudeProvider(BaseSDKProvider):
                 self._rate_limit_store.update(msg.rate_limit_info)
             except Exception:  # noqa: BLE001 — never fail a turn on telemetry
                 logger.debug("rate_limit persistence failed", exc_info=True)
+            if self._pending_quota.get("status") == "allowed":
+                return []
             return [
                 SystemStatusEvent(
                     type="system",
@@ -1040,7 +1075,10 @@ class ClaudeProvider(BaseSDKProvider):
         data = msg.data or {}
 
         if subtype == "status":
-            return [SystemStatusEvent(type="system", status=data.get("status"))]
+            status_str = data.get("status") or ""
+            if "Rate limit: allowed" in status_str and "allowed_warning" not in status_str:
+                return []
+            return [SystemStatusEvent(type="system", status=status_str)]
 
         if subtype == "input_required":
             tool_name = data.get("tool_name", "") or data.get("tool", "")

@@ -30,6 +30,32 @@ export interface WorkspacesResponse {
   claude_ai_connectors?: string[]
 }
 
+export interface McpStatus {
+  enabled: boolean
+  bound: boolean
+  url?: string
+  tool_count: number
+  active_sessions?: number
+  providers?: string[]
+  last_error?: string
+}
+
+export interface McpToolUsage {
+  tool: string
+  calls: number
+  errors: number
+  avg_ms: number
+  providers: string[]
+  last_used: string
+}
+
+export interface McpUsage {
+  total_calls: number
+  total_errors: number
+  tool_count: number
+  tools: McpToolUsage[]
+}
+
 // ── Projects & Chats ────────────────────────────────────────────────────
 
 export interface ProjectInfo {
@@ -61,6 +87,10 @@ export interface ChatInfo {
   // Provider-native thinking/reasoning level ('' = provider default).
   // Allowed values per provider come from ModelsResponse.thinking_levels.
   thinking_level?: string
+  // Ciaobot control surface. Engine-controlled now (MCP by default, with a
+  // legacy fallback); no longer user-set from the PWA. Kept on ChatInfo
+  // because the engine still returns/persists it, preserving round-trip typing.
+  control_surface?: '' | 'legacy' | 'mcp' | 'auto'
   session_id: string
   created_at: string
   archived: boolean
@@ -198,9 +228,12 @@ export type WsEvent =
       // it into the generic _activity row. Path may be workspace-relative
       // or absolute; the viewer enforces file-type and size allowlists.
       file_touch?: { file_path: string; action: string };
+      // Populated when one shell command creates/overwrites multiple files.
+      file_touches?: Array<{ file_path: string; action: string }>;
     }
   | { type: 'thinking'; text: string; parent_tool_use_id?: string }
   | { type: 'status'; message: string }
+  | { type: 'model_changed'; model: string }
   // Running token totals for the in-flight turn (cumulative, monotonic).
   // Emitted from partial stream events so the live trace can show a token
   // count as the model works; the authoritative totals still land on `result`.
@@ -209,14 +242,22 @@ export type WsEvent =
   | { type: 'permission_request'; tool_name: string; tool_input?: string; message: string; request_id: string }
   | { type: 'chat_title'; chat_id: string; title: string }
   | { type: 'user_echo'; text: string; images?: string[]; turn_index?: number; sent_at?: string }
-  | { type: 'queued'; text: string; images?: string[] }
+  | { type: 'queued'; id?: string; text: string; images?: string[] }
+  | { type: 'queue_state'; queue: Array<{ id: string; text: string; images?: string[] }> }
   | { type: 'steered'; text: string; images?: string[] }
   | { type: 'error'; message: string }
+  // Server is draining for restart; client should show RestartOverlay, not
+  // treat this as a chat failure.
+  | { type: 'server_restarting'; message: string }
   | { type: 'chat_retry'; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number }
+  // Idle heartbeat from the broker / events hub. Clients treat it as a
+  // liveness signal only and must not mutate chat UI state.
+  | { type: 'keepalive' }
 
 // Global awareness events from /ws/events
 export type EventsWsMessage =
-  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number> }
+  | { type: 'keepalive' }
+  | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; restarting?: boolean }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean }
   | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string }
@@ -230,6 +271,7 @@ export type EventsWsMessage =
   | { type: 'project_updated'; project: ProjectInfo }
   | { type: 'project_deleted'; project_id: string }
   | { type: 'open_chat'; chat_id: string }
+  | { type: 'server_restarting'; message?: string }
   | { type: 'provider_subchat_created'; subchat_id: string; parent_chat_id: string; record: ProviderSubchatRecord }
   | { type: 'provider_subchat_status'; subchat_id: string; parent_chat_id: string; status: string; record: ProviderSubchatRecord }
   | { type: 'provider_subchat_event'; subchat_id: string; parent_chat_id: string; event: any }

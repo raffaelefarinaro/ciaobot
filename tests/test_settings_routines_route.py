@@ -72,6 +72,7 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     assert data["model_options"]["ollama_cloud"] == [
         "kimi-k2.7-code:cloud",
         "deepseek-v4-flash:cloud",
+        "minimax-m3:cloud",
         "glm-5.2:cloud",
         "gemma4:e2b-it-qat",
     ]

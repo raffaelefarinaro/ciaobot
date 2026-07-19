@@ -207,6 +207,8 @@ async def _call_with_retry(
             system_prompt=system_prompt,
             setting_sources=[],
             skills=[],
+            tools=[],
+            strict_mcp_config=True,
             max_turns=1,
             env=env,
         )

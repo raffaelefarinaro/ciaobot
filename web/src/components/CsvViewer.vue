@@ -1,0 +1,440 @@
+<template>
+  <div class="csv-viewer" :class="{ editing: !readOnly }" ref="rootEl">
+    <div v-if="parseError" class="csv-error">{{ parseError }}</div>
+    <template v-else>
+      <div v-if="!readOnly" class="csv-toolbar">
+        <button type="button" class="csv-tool-btn" @click="addRow" title="Add row">+ Row</button>
+        <button type="button" class="csv-tool-btn" @click="addColumn" title="Add column">+ Column</button>
+        <span class="csv-meta">{{ table.rows.length }} rows · {{ table.headers.length }} cols</span>
+      </div>
+      <div v-else-if="table.headers.length" class="csv-meta-bar">
+        <span>{{ table.rows.length }} rows · {{ table.headers.length }} cols</span>
+        <span class="csv-hint">Click a cell to comment</span>
+      </div>
+      <div v-if="!table.headers.length" class="csv-empty">Empty CSV.</div>
+      <div v-else class="csv-scroll" ref="scrollEl">
+        <table class="csv-table">
+          <thead>
+            <tr>
+              <th v-if="!readOnly || commentable" class="csv-row-num" scope="col">#</th>
+              <th
+                v-for="(header, colIdx) in table.headers"
+                :key="`h-${colIdx}`"
+                scope="col"
+              >
+                <input
+                  v-if="!readOnly && table.hasHeader"
+                  class="csv-input csv-input-header"
+                  :value="header"
+                  :aria-label="`Column ${colIdx + 1} header`"
+                  @input="onHeaderInput(colIdx, ($event.target as HTMLInputElement).value)"
+                />
+                <template v-else>{{ header }}</template>
+              </th>
+              <th v-if="!readOnly" class="csv-row-actions" scope="col"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(row, rowIdx) in table.rows" :key="`r-${rowIdx}`">
+              <td v-if="!readOnly || commentable" class="csv-row-num">{{ rowIdx + 1 }}</td>
+              <td
+                v-for="(cell, colIdx) in row"
+                :key="`c-${rowIdx}-${colIdx}`"
+                :class="{
+                  'csv-cell-wrap': true,
+                  'is-selected': isSelected(rowIdx, colIdx),
+                  'comment-highlight': !!commentIdForCell(rowIdx, colIdx),
+                }"
+                :data-row="rowIdx + 1"
+                :data-col="colIdx"
+                :data-comment-id="commentIdForCell(rowIdx, colIdx) || undefined"
+                @click="onCellClick(rowIdx, colIdx, $event)"
+              >
+                <input
+                  v-if="!readOnly"
+                  class="csv-input"
+                  :value="cell"
+                  :aria-label="`Row ${rowIdx + 1}, ${table.headers[colIdx] || `Column ${colIdx + 1}`}`"
+                  @input="onCellInput(rowIdx, colIdx, ($event.target as HTMLInputElement).value)"
+                />
+                <span v-else class="csv-cell" :title="cell">{{ cell }}</span>
+              </td>
+              <td v-if="!readOnly" class="csv-row-actions">
+                <button
+                  type="button"
+                  class="csv-tool-btn csv-tool-danger"
+                  :title="`Delete row ${rowIdx + 1}`"
+                  :aria-label="`Delete row ${rowIdx + 1}`"
+                  @click="removeRow(rowIdx)"
+                >×</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </template>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, ref, watch } from 'vue'
+import { parseCsv, serializeCsv, type CsvTable } from '../lib/csv'
+
+export type CsvCellRef = {
+  /** 1-indexed data row (matches the # column). */
+  row: number
+  /** 0-indexed column. */
+  colIndex: number
+  colHeader: string
+  value: string
+}
+
+export type CsvCellComment = {
+  id: string
+  row: number
+  colIndex: number
+}
+
+const props = withDefaults(
+  defineProps<{
+    content: string
+    readOnly?: boolean
+    /** When true (preview), cells are clickable for commenting. */
+    commentable?: boolean
+    cellComments?: CsvCellComment[]
+  }>(),
+  {
+    readOnly: true,
+    commentable: false,
+    cellComments: () => [],
+  },
+)
+
+const emit = defineEmits<{
+  (e: 'change', value: string): void
+  (e: 'cell-select', cell: CsvCellRef, rect: DOMRect): void
+  (e: 'cell-activate', cell: CsvCellRef): void
+}>()
+
+const rootEl = ref<HTMLElement>()
+const scrollEl = ref<HTMLElement>()
+const table = ref<CsvTable>({ headers: [], rows: [], hasHeader: false })
+const parseError = ref('')
+const lastEmitted = ref('')
+const selected = ref<{ rowIdx: number; colIdx: number } | null>(null)
+
+const contentKey = computed(() => props.content)
+
+const commentMap = computed(() => {
+  const map = new Map<string, string>()
+  for (const c of props.cellComments || []) {
+    const key = `${c.row}:${c.colIndex}`
+    if (!map.has(key)) map.set(key, c.id)
+  }
+  return map
+})
+
+function commentIdForCell(rowIdx: number, colIdx: number): string | undefined {
+  return commentMap.value.get(`${rowIdx + 1}:${colIdx}`)
+}
+
+function isSelected(rowIdx: number, colIdx: number): boolean {
+  return selected.value?.rowIdx === rowIdx && selected.value?.colIdx === colIdx
+}
+
+function cellRef(rowIdx: number, colIdx: number): CsvCellRef {
+  const header = table.value.headers[colIdx] || `Column ${colIdx + 1}`
+  const value = table.value.rows[rowIdx]?.[colIdx] ?? ''
+  return {
+    row: rowIdx + 1,
+    colIndex: colIdx,
+    colHeader: header,
+    value,
+  }
+}
+
+function onCellClick(rowIdx: number, colIdx: number, event: MouseEvent): void {
+  if (!props.readOnly || !props.commentable) return
+  selected.value = { rowIdx, colIdx }
+  const target = event.currentTarget as HTMLElement | null
+  const rect = target?.getBoundingClientRect()
+  const cell = cellRef(rowIdx, colIdx)
+  if (rect) emit('cell-select', cell, rect)
+  // Second click / activate on an already-commented cell opens the comment.
+  const existingId = commentIdForCell(rowIdx, colIdx)
+  if (existingId) emit('cell-activate', cell)
+}
+
+function loadFromContent(text: string): void {
+  try {
+    table.value = parseCsv(text)
+    parseError.value = ''
+    lastEmitted.value = text
+  } catch (e) {
+    parseError.value = e instanceof Error ? e.message : String(e)
+    table.value = { headers: [], rows: [], hasHeader: false }
+  }
+}
+
+watch(contentKey, (text) => {
+  // Avoid clobbering in-progress edits when we just emitted this value.
+  if (!props.readOnly && text === lastEmitted.value) return
+  loadFromContent(text)
+  selected.value = null
+}, { immediate: true })
+
+function emitChange(): void {
+  const next = serializeCsv(table.value)
+  if (next === lastEmitted.value) return
+  lastEmitted.value = next
+  emit('change', next)
+}
+
+function onHeaderInput(colIdx: number, value: string): void {
+  const headers = [...table.value.headers]
+  headers[colIdx] = value
+  table.value = { ...table.value, headers }
+  emitChange()
+}
+
+function onCellInput(rowIdx: number, colIdx: number, value: string): void {
+  const rows = table.value.rows.map((row, i) =>
+    i === rowIdx ? row.map((cell, j) => (j === colIdx ? value : cell)) : row,
+  )
+  table.value = { ...table.value, rows }
+  emitChange()
+}
+
+function addRow(): void {
+  const width = table.value.headers.length || 1
+  const headers = table.value.headers.length
+    ? table.value.headers
+    : Array.from({ length: width }, (_, i) => `Column ${i + 1}`)
+  const rows = [...table.value.rows, Array.from({ length: headers.length }, () => '')]
+  table.value = {
+    headers,
+    rows,
+    hasHeader: table.value.hasHeader || false,
+  }
+  emitChange()
+}
+
+function addColumn(): void {
+  const colIdx = table.value.headers.length
+  const headers = [...table.value.headers, `Column ${colIdx + 1}`]
+  const rows = table.value.rows.map(row => [...row, ''])
+  table.value = {
+    ...table.value,
+    headers,
+    rows,
+  }
+  emitChange()
+}
+
+function removeRow(rowIdx: number): void {
+  const rows = table.value.rows.filter((_, i) => i !== rowIdx)
+  table.value = { ...table.value, rows }
+  emitChange()
+}
+
+defineExpose({
+  rootEl,
+  clearSelection: () => { selected.value = null },
+})
+</script>
+
+<style scoped>
+.csv-viewer {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  gap: 8px;
+}
+
+.csv-error {
+  color: var(--error, #f44336);
+  font-size: var(--text-sm, 12px);
+  padding: 8px 0;
+}
+
+.csv-empty {
+  color: var(--fg2, var(--text-muted, #b4b4c4));
+  font-size: var(--text-sm, 12px);
+  padding: 16px 0;
+}
+
+.csv-toolbar,
+.csv-meta-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.csv-meta-bar {
+  justify-content: space-between;
+}
+
+.csv-meta,
+.csv-meta-bar {
+  color: var(--fg2, var(--text-muted, #b4b4c4));
+  font-size: var(--text-xs, 11px);
+  letter-spacing: 0.02em;
+}
+
+.csv-hint {
+  color: var(--fg2, var(--text-muted, #b4b4c4));
+  font-size: var(--text-xs, 11px);
+  opacity: 0.8;
+}
+
+.csv-tool-btn {
+  min-height: var(--touch, 44px);
+  padding: 0 12px;
+  border: 1px solid var(--border, #2e3258);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg3, var(--bg2, #2a2e54));
+  color: var(--fg, #e8e8f0);
+  font-family: inherit;
+  font-size: var(--text-xs, 11px);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.csv-tool-btn:hover {
+  border-color: var(--border-strong, #3a3f70);
+  background: var(--bg-elev, #23264a);
+}
+
+.csv-tool-danger {
+  min-width: var(--touch, 44px);
+  padding: 0;
+  color: var(--error, #f44336);
+}
+
+.csv-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--border, #2e3258);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg, #1a1a2e);
+}
+
+.csv-table {
+  border-collapse: collapse;
+  width: max-content;
+  min-width: 100%;
+  font-size: var(--text-sm, 12px);
+  line-height: 1.4;
+}
+
+.csv-table th,
+.csv-table td {
+  border: 1px solid var(--border, #2e3258);
+  padding: 0;
+  vertical-align: top;
+  min-width: 120px;
+  max-width: 320px;
+}
+
+.csv-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg3, var(--bg2, #2a2e54));
+  font-weight: 600;
+  text-align: left;
+  color: var(--fg, #e8e8f0);
+}
+
+.csv-table th:not(.csv-row-num):not(.csv-row-actions),
+.csv-table td:not(.csv-row-num):not(.csv-row-actions) {
+  padding: 0;
+}
+
+.csv-cell-wrap {
+  cursor: default;
+}
+
+.csv-viewer:not(.editing) .csv-cell-wrap {
+  cursor: pointer;
+}
+
+.csv-cell-wrap.is-selected {
+  outline: 2px solid var(--accent, #ff4d6d);
+  outline-offset: -2px;
+  background: color-mix(in srgb, var(--accent, #ff4d6d) 12%, transparent);
+}
+
+.csv-cell-wrap.comment-highlight {
+  background: color-mix(in srgb, var(--accent2, #6a47b8) 22%, transparent);
+}
+
+.csv-cell-wrap.comment-highlight.is-selected {
+  background: color-mix(in srgb, var(--accent, #ff4d6d) 18%, transparent);
+}
+
+.csv-cell {
+  display: block;
+  padding: 6px 9px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-height: 8.5em;
+  overflow: auto;
+}
+
+.csv-input {
+  display: block;
+  width: 100%;
+  min-height: 36px;
+  box-sizing: border-box;
+  border: 0;
+  background: transparent;
+  color: var(--fg, #e8e8f0);
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 1.4;
+  padding: 6px 9px;
+  resize: none;
+}
+
+.csv-input:focus {
+  outline: 2px solid var(--accent, #ff4d6d);
+  outline-offset: -2px;
+  background: var(--bg2, #1f2240);
+}
+
+.csv-input-header {
+  font-weight: 600;
+}
+
+.csv-row-num,
+.csv-row-actions {
+  min-width: 44px;
+  max-width: 56px;
+  width: 44px;
+  text-align: center;
+  color: var(--fg2, var(--text-muted, #b4b4c4));
+  background: var(--bg2, #1f2240);
+  vertical-align: middle;
+  padding: 4px !important;
+}
+
+.csv-table thead .csv-row-num,
+.csv-table thead .csv-row-actions {
+  background: var(--bg3, var(--bg2, #2a2e54));
+}
+
+.csv-viewer.editing .csv-table td.csv-row-num,
+.csv-viewer:not(.editing) .csv-table td.csv-row-num {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+}
+</style>

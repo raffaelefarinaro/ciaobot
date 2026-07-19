@@ -1,6 +1,6 @@
 ---
 name: ciao-capabilities
-description: Authoritative catalog of what Ciaobot can do, for capability questions and feature tours. Use whenever the user asks what Ciaobot is, what it can do, what features are available, whether it can do something specific, or how one of its features works (memory, vault, archiving, schedules, loops, routines, workspaces, projects, forks, provider consultations, skills, voice, models, providers, notifications, menu bar, files, chat comments, pinned files, document previews) — and when onboarding or giving a tour or walkthrough to a new user. Trigger on phrasings like "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "can you remind me / remember / schedule", "can you fork this chat", "can you ask Codex / another provider", even when the word "Ciaobot" is not mentioned.
+description: Authoritative catalog of what Ciaobot can do, for capability questions and feature tours. Use whenever the user asks what Ciaobot is, what it can do, what features are available, whether it can do something specific, or how one of its features works (memory, vault, archiving, schedules, loops, routines, workspaces, projects, forks, provider consultations, skills, voice, models, providers, notifications, menu bar, files, chat comments, pinned files, document previews, CSV tables and cell comments) — and when onboarding or giving a tour or walkthrough to a new user. Trigger on phrasings like "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "can you remind me / remember / schedule", "can you fork this chat", "can you ask Codex / another provider", even when the word "Ciaobot" is not mentioned.
 ---
 
 # Ciaobot Capabilities
@@ -35,12 +35,13 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 
 - Chats are **archived into a markdown vault** (e.g. `memory-vault/Logs/Chats/`). From archived sessions Ciaobot extracts insights and drafts **memory proposals** — the user reviews and approves them before anything is promoted into durable memory (`MEMORY.md`). Nothing is memorized silently.
 - The vault is standard, open markdown: notes, project folders, `CLAUDE.md`, `MEMORY.md`, a generated `INDEX.md` from frontmatter and wikilinks. It is agent-agnostic and remains useful without Ciaobot.
-- Vault tooling: `ciao vault-search` (search before adding duplicate facts), `ciao vault-index` (rebuild the index after larger edits). Reading conventions live in the `vault-read` skill.
+- Vault tooling: search before adding duplicate facts, and refresh the index after larger edits. Reading conventions live in the `vault-read` skill. For the live list of typed Ciaobot tools (memory, vault, projects, chats, schedules, loops, files), call `capabilities_get` rather than reciting a static tool list.
 
 ### 3. Schedules, loops, and automations
 
 - A native scheduler dispatches recurring or one-off prompts as fresh chat turns into a target project or chat — daily/weekly/monthly/once, timezone-aware. Configure from the **Automations page** or directly in chat (the `ciao-automations` skill has the full recipe).
 - **Loops** are the sub-day sibling of schedules: bound to one existing chat, they re-send the same prompt every N minutes (e.g. "check my PRs every 10 minutes"), keeping the conversation's context between iterations. A loop runs with the chat's own model; loops set to start with the server resume on boot, the rest are started manually. Managed from the same Automations page.
+- Schedules that were due while the app was off are caught up on the next launch; each workspace shows how many runs it missed.
 - System maintenance schedules ship with the app; the Automation page shows background job runs.
 
 ### 4. Files
@@ -49,6 +50,7 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 - **In chat**: agent file touches surface as inline cards; open the viewer, pin beside the chat, and add line comments on selections.
 - **Chat annotations**: select text in any message and attach a comment that rides on your next send.
 - **Rich previews**: images inline; PDFs in the viewer; `.pptx` slides rendered as PDF (LibreOffice on the server).
+- **CSV tables**: `.csv` files render as an editable table in the viewer, and you can attach comments to individual cells (anchored by row and column) the same way you annotate document lines.
 
 ### 5. Skills, subagents, and commands (extensibility)
 

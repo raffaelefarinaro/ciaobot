@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import subprocess
@@ -8,7 +9,37 @@ from pathlib import Path
 
 from starlette.responses import JSONResponse, Response
 
+logger = logging.getLogger(__name__)
+
 _LINE_SUFFIX_RE = re.compile(r":\d+$")
+
+
+# Markers in ``git pull`` stderr that point at a transient network failure
+# (DNS flap, dropped TCP, etc.) rather than a real config or auth problem.
+# Used by ``_git_pull_with_retry`` to decide whether a second attempt is
+# worth a few seconds of waiting. Case-insensitive substring match.
+_TRANSIENT_GIT_PULL_MARKERS: tuple[str, ...] = (
+    "could not resolve host",
+    "failed to connect to",
+    "connection timed out",
+    "connection reset",
+    "operation timed out",
+    "network is unreachable",
+    "no route to host",
+    "temporary failure in name resolution",
+)
+
+
+def _is_transient_git_pull_error(stderr: str) -> bool:
+    """True if the git pull stderr looks like a transient network error.
+
+    Real problems (auth, no upstream, merge conflict) never contain these
+    phrases, so retrying on them wouldn't help and would just add latency.
+    """
+    if not stderr:
+        return False
+    lower = stderr.lower()
+    return any(marker in lower for marker in _TRANSIENT_GIT_PULL_MARKERS)
 
 
 def _allowed_roots(config, for_write: bool = False) -> list[Path]:
@@ -225,7 +256,7 @@ async def _commit_and_push(workspace: Path, message: str) -> tuple[bool, str]:
         if rc != 0:
             return False, f"git commit failed: {out}"
 
-    rc, out = await _git("pull")
+    rc, out = await _git_pull_with_retry(workspace)
     if rc != 0:
         return False, f"git pull failed: {out}"
 
@@ -234,3 +265,49 @@ async def _commit_and_push(workspace: Path, message: str) -> tuple[bool, str]:
         return False, f"git push failed: {out}"
 
     return True, out or "pushed"
+
+
+async def _git_pull_with_retry(
+    workspace: Path,
+    *,
+    attempts: int = 2,
+    backoff_s: float = 3.0,
+) -> tuple[int, str]:
+    """Run ``git pull`` in ``workspace``, retrying once on transient network errors.
+
+    The deploy snapshot step (and the post-snapshot ``git pull`` in
+    ``admin_deploy``) used to hard-fail on macOS DNS resolver flaps that
+    last a few seconds. A short backoff plus one retry absorbs those without
+    papering over real problems — auth, no-upstream, and merge conflicts
+    never match the transient markers, so they still fail immediately.
+    ``branch_backup`` already had its own dedup; this just gives the
+    one-shot deploy path the same resilience.
+    """
+    last_out = ""
+    last_rc = -1
+    for attempt in range(1, attempts + 1):
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "pull"],
+            cwd=str(workspace),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        out = (result.stdout or "").strip()
+        err = (result.stderr or "").strip()
+        combined = (out + ("\n" + err if err else "")).strip()
+        last_rc = result.returncode
+        last_out = combined
+        if result.returncode == 0:
+            return 0, combined or "Already up to date."
+        transient = _is_transient_git_pull_error(err)
+        if not transient or attempt >= attempts:
+            return result.returncode, combined[:1000]
+        last_line = err.splitlines()[-1] if err else "(no stderr)"
+        logger.warning(
+            "transient git pull failure in %s (attempt %d/%d): %s; retrying in %.1fs",
+            workspace, attempt, attempts, last_line, backoff_s,
+        )
+        await asyncio.sleep(backoff_s)
+    return last_rc, last_out[:1000]

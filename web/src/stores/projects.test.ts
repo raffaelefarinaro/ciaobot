@@ -2,12 +2,13 @@
 
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { shouldReconnectActiveChatOnStreamingStarted, useProjectStore } from './projects'
+import { shouldReconnectActiveChatOnStreamingStarted, chatWsReconnectDelayMs, useProjectStore } from './projects'
 
 const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
 const apiPatch = vi.hoisted(() => vi.fn())
 const apiDel = vi.hoisted(() => vi.fn())
+const reloadWhenServerReady = vi.hoisted(() => vi.fn(() => Promise.resolve()))
 
 vi.mock('../lib/api', () => ({
   api: {
@@ -17,6 +18,14 @@ vi.mock('../lib/api', () => ({
     del: apiDel,
   },
 }))
+
+vi.mock('../lib/serverRestart', async () => {
+  const actual = await vi.importActual<typeof import('../lib/serverRestart')>('../lib/serverRestart')
+  return {
+    ...actual,
+    reloadWhenServerReady,
+  }
+})
 
 const routerPush = vi.hoisted(() => vi.fn())
 vi.mock('../router', () => ({
@@ -63,6 +72,7 @@ beforeEach(() => {
   apiGet.mockReset()
   apiPost.mockReset()
   apiPatch.mockReset()
+  reloadWhenServerReady.mockClear()
   const storage = {
     getItem: vi.fn((key: string) => localStorageData[key] ?? null),
     setItem: vi.fn((key: string, value: string) => { localStorageData[key] = value }),
@@ -91,6 +101,13 @@ describe('streaming started reconnect guard', () => {
 })
 
 describe('per-chat WS auto-reconnect', () => {
+  test('reconnect delay starts near-immediate then backs off', () => {
+    expect(chatWsReconnectDelayMs(1)).toBe(50)
+    expect(chatWsReconnectDelayMs(2)).toBe(100)
+    expect(chatWsReconnectDelayMs(3)).toBe(200)
+    expect(chatWsReconnectDelayMs(10)).toBe(2000)
+  })
+
   test('reconnects the active chat after an unexpected drop', async () => {
     apiGet.mockResolvedValue([])
     const store = useProjectStore()
@@ -103,12 +120,52 @@ describe('per-chat WS auto-reconnect', () => {
     try {
       fakeSockets[0].close() // simulate an unexpected server-side close
       expect(fakeSockets.length).toBe(1) // reconnect is scheduled, not immediate
-      await vi.advanceTimersByTimeAsync(1200) // > 1s backoff
+      await vi.advanceTimersByTimeAsync(60) // first retry ~50ms
     } finally {
       vi.useRealTimers()
     }
 
     expect(fakeSockets.length).toBe(2) // fresh socket opened (resync + reconnect)
+  })
+
+  test('keeps the live Activity timeline frozen across an unexpected drop', async () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'c-freeze'
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'tool_use', tool_name: 'Read', tool_input: '{}' }),
+    })
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'text_delta', text: 'partial answer' }),
+    })
+    expect(store.streaming[chatId]).toBe(true)
+    expect(store.currentStreamingText).toBe('partial answer')
+    expect(store.currentTimeline.some(e => e.kind === 'tool' && e.content.includes('Read'))).toBe(true)
+
+    vi.useFakeTimers()
+    try {
+      fakeSockets[0].close()
+      // Still frozen while reconnect is pending — no blank Activity flash.
+      expect(store.streaming[chatId]).toBe(true)
+      expect(store.currentStreamingText).toBe('partial answer')
+      expect(store.currentTimeline.some(e => e.kind === 'tool' && e.content.includes('Read'))).toBe(true)
+      await vi.advanceTimersByTimeAsync(60)
+    } finally {
+      vi.useRealTimers()
+    }
+
+    expect(fakeSockets.length).toBe(2)
+    // First real frame after reconnect clears the frozen buffer, then applies
+    // the replayed event (avoids duplicating the pre-drop timeline).
+    fakeSockets[1].onmessage?.({
+      data: JSON.stringify({ type: 'tool_use', tool_name: 'Bash', tool_input: '{}' }),
+    })
+    expect(store.streaming[chatId]).toBe(true)
+    expect(store.currentStreamingText).toBe('')
+    expect(store.currentTimeline.some(e => e.kind === 'tool' && e.content.includes('Bash'))).toBe(true)
+    expect(store.currentTimeline.some(e => e.kind === 'tool' && e.content.includes('Read'))).toBe(false)
   })
 
   test('does not reconnect after an intentional disconnect', async () => {
@@ -147,11 +204,60 @@ describe('per-chat WS auto-reconnect', () => {
   })
 })
 
+describe('ephemeral status events', () => {
+  test('does not render Claude requesting status as a system message', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'c-requesting'
+    store.activeChatId = chatId
+    store.messages[chatId] = [
+      { role: 'user', content: 'hi', timestamp: '' },
+    ]
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'status', message: 'requesting' }),
+    })
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'status', message: 'requesting' }),
+    })
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'status', message: 'retrying on sonnet' }),
+    })
+
+    const msgsFinal = store.messages[chatId] || []
+    expect(msgsFinal.some(m => m.role === 'system' && m.content === 'requesting')).toBe(false)
+    expect(msgsFinal.some(m => m.role === 'system' && m.content === 'retrying on sonnet')).toBe(true)
+  })
+
+  test('does not render allowed rate limit status as a system message', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'c-ratelimit'
+    store.activeChatId = chatId
+    store.messages[chatId] = [
+      { role: 'user', content: 'hi', timestamp: '' },
+    ]
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'status', message: 'Rate limit: allowed (five_hour)' }),
+    })
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'status', message: 'Rate limit: allowed_warning (five_hour) 90.0% used' }),
+    })
+
+    const msgs = store.messages[chatId] || []
+    expect(msgs.some(m => m.role === 'system' && m.content.includes('Rate limit: allowed (five_hour)'))).toBe(false)
+    expect(msgs.some(m => m.role === 'system' && m.content.includes('Rate limit: allowed_warning'))).toBe(true)
+  })
+})
+
 describe('queued message replay handling', () => {
   test('clears local queued chips when server history contains the flushed user turn', async () => {
     const store = useProjectStore()
     const chatId = 'chat-queue'
-    store.queuedMessages[chatId] = [{ text: 'msg A' }]
+    store.queuedMessages[chatId] = [{ id: 'q-1', text: 'msg A' }]
     apiGet.mockResolvedValue([
       { role: 'user', content: 'initial', sent_at: '', turn_index: 0 },
       { role: 'assistant', content: 'reply', sent_at: '' },
@@ -163,18 +269,18 @@ describe('queued message replay handling', () => {
     expect(store.queuedMessages[chatId]).toBeUndefined()
   })
 
-  test('ignores stale queued replay when the flushed combined user turn is already hydrated', () => {
+  test('ignores stale queued replay when the flushed user turn is already hydrated', () => {
     const store = useProjectStore()
     const chatId = 'chat-queue'
     store.messages[chatId] = [
       { role: 'user', content: 'initial', timestamp: '', turn_index: 0 },
       { role: 'assistant', content: 'reply', timestamp: '' },
-      { role: 'user', content: 'msg A\n\nmsg B', timestamp: '', turn_index: 1 },
+      { role: 'user', content: 'msg A', timestamp: '', turn_index: 1 },
     ]
 
     store.connectWs(chatId)
     fakeSockets[0].onmessage?.({
-      data: JSON.stringify({ type: 'queued', text: 'msg A' }),
+      data: JSON.stringify({ type: 'queued', id: 'q-1', text: 'msg A' }),
     })
 
     expect(store.queuedMessages[chatId]).toBeUndefined()
@@ -259,6 +365,47 @@ describe('optimistic user bubble reconciliation', () => {
     )
     expect(userMsgs.length).toBe(1)
     expect(userMsgs[0].turn_index).toBe(1)
+  })
+
+  test('loadMessages discards trailing optimistic user bubbles when server has settled without them', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-unsent'
+    store.messages[chatId] = [
+      { role: 'user', content: 'prior question', timestamp: '2026-07-16T13:07:59Z', turn_index: 1 },
+      { role: 'assistant', content: 'prior reply', timestamp: '' },
+      { role: 'user', content: 'unsent question', timestamp: '', turn_index: undefined },
+    ]
+    apiGet.mockResolvedValue([
+      { role: 'user', content: 'prior question', sent_at: '2026-07-16T13:07:59Z', turn_index: 1 },
+      { role: 'assistant', content: 'prior reply', sent_at: '' },
+    ])
+
+    await store.loadMessages(chatId)
+
+    const msgs = store.messages[chatId]
+    expect(msgs.length).toBe(2)
+    expect(msgs.some(m => m.content === 'unsent question')).toBe(false)
+  })
+
+  test('loadMessages keeps local history to avoid data loss if server has fewer completed user turns', async () => {
+    const store = useProjectStore()
+    const chatId = 'chat-dataloss'
+    store.messages[chatId] = [
+      { role: 'user', content: 'question 1', timestamp: '', turn_index: 1 },
+      { role: 'assistant', content: 'reply 1', timestamp: '' },
+      { role: 'user', content: 'question 2', timestamp: '', turn_index: 2 },
+      { role: 'assistant', content: 'reply 2', timestamp: '' },
+    ]
+    // Server session reset, only has question 2
+    apiGet.mockResolvedValue([
+      { role: 'user', content: 'question 2', sent_at: '', turn_index: 1 },
+      { role: 'assistant', content: 'reply 2', sent_at: '' },
+    ])
+
+    await store.loadMessages(chatId)
+
+    const msgs = store.messages[chatId]
+    expect(msgs.length).toBe(4) // Keeps local to avoid data loss
   })
 })
 
@@ -448,6 +595,63 @@ describe('Codex structured questions', () => {
     expect(store.chatNeedsInput(chatId)).toBe(false)
   })
 
+  test('parses alternate text/type AskUserQuestion payloads', () => {
+    // MiniMax (and possibly other Claude-compatible providers) emit
+    // `text` + `type: single_select` instead of `question`/`multiSelect`.
+    const store = useProjectStore()
+    const chatId = 'alt-schema-chat'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Alt',
+      model: 'minimax-m3:cloud',
+      provider: 'claude',
+      mode: 'auto',
+      session_id: 's1',
+      created_at: '',
+      archived: false,
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[fakeSockets.length - 1]
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'tool_use',
+        tool_name: 'AskUserQuestion',
+        tool_input: JSON.stringify({
+          questions: [
+            {
+              text: 'How do you want to handle the booking form?',
+              type: 'single_select',
+              options: [
+                { label: 'A. Link manually', value: 'manual' },
+                { label: 'B. Leave as-is', value: 'skip' },
+              ],
+            },
+            {
+              text: 'Which guests first?',
+              type: 'multi_select',
+              options: [{ label: 'All Yes', value: 'all_yes' }],
+            },
+          ],
+        }),
+      }),
+    })
+
+    expect(store.activeQuestions[chatId]).toHaveLength(2)
+    expect(store.activeQuestions[chatId][0]).toMatchObject({
+      question: 'How do you want to handle the booking form?',
+      multiSelect: false,
+    })
+    expect(store.activeQuestions[chatId][0].options.map(o => o.label)).toEqual([
+      'A. Link manually',
+      'B. Leave as-is',
+    ])
+    expect(store.activeQuestions[chatId][1]).toMatchObject({
+      question: 'Which guests first?',
+      multiSelect: true,
+    })
+  })
+
   test('surfaces approval requests and preserves Codex quota metadata', () => {
     const store = useProjectStore()
     const chatId = 'codex-gates'
@@ -583,6 +787,48 @@ describe('latest status sync', () => {
     expect(store.streaming[chatId]).toBe(false)
     expect(store.streamingText[chatId]).toBe('')
   })
+
+  test('keeps Working live when /messages hydrates mid-turn progress text', async () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    const store = useProjectStore()
+    const chatId = 'c-midturn'
+    store.chats = [
+      { chat_id: chatId, project_id: 'p1', title: 'Mid turn', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeChatId = chatId
+    store.messages[chatId] = [
+      { role: 'user', content: 'yes make it more robust', timestamp: '', turn_index: 0 },
+    ]
+    store.streaming[chatId] = true
+    store.streamingText[chatId] = 'I\'m in the ciao repo'
+    // Server still running this turn — events WS truth.
+    store.projectStreaming[chatId] = true
+
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/chats') {
+        return Promise.resolve([
+          { chat_id: chatId, project_id: 'p1', title: 'Mid turn', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+        ])
+      }
+      if (path === `/api/chats/${chatId}/messages`) {
+        // Claude session files already contain progress notes mid-turn.
+        return Promise.resolve([
+          { role: 'user', content: 'yes make it more robust', sent_at: '2026-07-18T08:00:00Z', turn_index: 0 },
+          { role: 'assistant', content: 'Interesting — mismatch found.' },
+          { role: 'assistant', content: 'I\'m in the ciao repo, not ciaobot. Let me cd:' },
+        ])
+      }
+      if (path === `/api/chats/${chatId}/subagents`) return Promise.resolve([])
+      return Promise.resolve([])
+    })
+
+    await store.syncLatest()
+
+    expect(store.streaming[chatId]).toBe(true)
+    expect(store.projectStreaming[chatId]).toBe(true)
+    expect(store.isStreaming).toBe(true)
+    expect(store.streamingText[chatId]).toBe('I\'m in the ciao repo')
+  })
 })
 
 describe('background agents indicator', () => {
@@ -616,7 +862,7 @@ describe('background agents indicator', () => {
     expect(store.activeBackgroundAgents).toBe(0)
   })
 
-  test('suppresses toast and unread marker when nudged=true on completion', () => {
+  test('does not set toast or unread marker on background agent completion', () => {
     Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
     apiGet.mockResolvedValue([])
     const store = useProjectStore()
@@ -639,9 +885,8 @@ describe('background agents indicator', () => {
     store.backgroundAgents[chatId] = 1
 
     fire(0, false)
-    expect(store.toasts).toHaveLength(1)
-    expect(store.toasts[0].body).toBe('Background agents finished')
-    expect(store.unread[chatId]).toBe(1)
+    expect(store.toasts).toHaveLength(0)
+    expect(store.unread[chatId]).toBeUndefined()
   })
 
   test('a new turn keeps the background-agents count (agents outlive turns)', () => {
@@ -673,6 +918,106 @@ describe('background agents indicator', () => {
     })
     expect(store.backgroundAgents['c-stale']).toBeUndefined()
     expect(store.backgroundAgents['c-live']).toBe(2)
+  })
+})
+
+describe('chat_streaming_done clears stale streaming for inactive chats', () => {
+  test('an inactive chat finishing clears its orphaned local streaming flag', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const activeId = 'c-active'
+    const otherId = 'c-other'
+    store.activeChatId = activeId
+    // The user was streaming `otherId`, then switched away: its per-chat WS is
+    // gone but the local optimistic flag is frozen true, and projectStreaming
+    // still reflects the running turn.
+    store.streaming[otherId] = true
+    store.projectStreaming[otherId] = true
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'chat_streaming_done',
+        chat_id: otherId,
+        project_id: 'p1',
+        is_error: false,
+      }),
+    })
+    // Both flags cleared → the sidebar dot (projectStreaming || streaming)
+    // stops showing "working" without a full reload.
+    expect(store.projectStreaming[otherId]).toBeUndefined()
+    expect(store.streaming[otherId]).toBe(false)
+    expect(store.isChatStreaming(otherId)).toBe(false)
+  })
+})
+
+describe('server restart overlay', () => {
+  test('server_restarting over /ws/events flips the global overlay', () => {
+    const store = useProjectStore()
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'server_restarting',
+        message: 'Ciaobot is waiting for active chats to finish before restarting',
+      }),
+    })
+    expect(store.serverRestarting).toBe(true)
+    expect(store.serverRestartMessage).toContain('waiting for active chats')
+    expect(reloadWhenServerReady).toHaveBeenCalled()
+  })
+
+  test('snapshot.restarting flips the overlay for late connectors', () => {
+    const store = useProjectStore()
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'snapshot',
+        active_streams: [],
+        restarting: true,
+      }),
+    })
+    expect(store.serverRestarting).toBe(true)
+  })
+
+  test('per-chat server_restarting undoes the optimistic send and skips the error bubble', () => {
+    const store = useProjectStore()
+    const chatId = 'c-restart'
+    store.messages[chatId] = [
+      { role: 'user', content: 'hello', timestamp: '2026-07-17T19:36:00Z' },
+    ]
+    store.streaming[chatId] = true
+    store.connectWs(chatId)
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'server_restarting',
+        message: 'Ciaobot is waiting for active chats to finish before restarting',
+      }),
+    })
+    expect(store.serverRestarting).toBe(true)
+    expect(store.messages[chatId]).toEqual([])
+    expect(store.streaming[chatId]).toBe(false)
+  })
+
+  test('legacy error drain message also opens the overlay without an error bubble', () => {
+    const store = useProjectStore()
+    const chatId = 'c-legacy'
+    store.messages[chatId] = [
+      { role: 'user', content: 'hello', timestamp: '2026-07-17T19:36:00Z' },
+    ]
+    store.streaming[chatId] = true
+    store.connectWs(chatId)
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'error',
+        message: 'Ciaobot is waiting for active chats to finish before restarting',
+      }),
+    })
+    expect(store.serverRestarting).toBe(true)
+    expect(store.messages[chatId]).toEqual([])
   })
 })
 

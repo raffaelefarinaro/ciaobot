@@ -2,7 +2,7 @@
 
 Vue 3 + Vite + Pinia + TypeScript. Built output goes to `ciao/web/static/`, served by the same Starlette server as the API. See `../README.md` for the repo-wide layout and `../PWA_API.md` for backend routes.
 
-The file viewer is Vue-first, with one intentional React bridge: `ExcalidrawViewer.vue` mounts `@excalidraw/excalidraw` through `react-dom/client` so `.excalidraw` JSON files can render as read-only diagrams in the Preview tab. History and Diff still operate on the raw JSON snapshots.
+The file viewer is Vue-first, with one intentional React bridge: `ExcalidrawViewer.vue` mounts `@excalidraw/excalidraw` through `react-dom/client` so `.excalidraw` JSON files can render as read-only diagrams in the Preview tab. History and Diff still operate on the raw JSON snapshots. CSV files use `CsvViewer.vue` (PapaParse) for table Preview and cell Edit in the same modal / pinned panel.
 
 ## Dev workflow
 
@@ -84,7 +84,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 - One Vue SFC per pane. Keep `<script setup lang="ts">`, template, scoped `<style>`.
 - Markdown rendering goes through `lib/safeMarkdown.ts` (DOMPurify + marked + highlight.js). Never `v-html` raw user content.
 - DOM manipulation that needs to bypass Vue's scoped attribute (e.g. inline highlight spans inserted into rendered markdown) uses `:deep(...)` in the scoped stylesheet.
-- Completed chat traces stay collapsed as one compact `Activity` row. Touched-file chips sit below the final answer under `Outputs`; interrupted turns keep their file chips inside `Activity` so unfinished work remains visible.
+- Completed chat traces stay collapsed as one compact `Activity` row. Touched-file chips sit below the final answer under `Outputs` (including files created via `Write` or common Bash redirects/`touch`/`cp`); interrupted turns keep their file chips inside `Activity` so unfinished work remains visible. Newly created files are labelled `new` on the chip.
 - Conversation forks are initiated from the final assistant reply action group (Copy/Read aloud/Fork). The PWA sends the selected message slice up to that reply and redirects to the newly created chat, focusing the composer.
 - New PWA actions (state-changing routes) must be documented in `../PWA_API.md` → Agent recipes, or whitelisted in `../tests/test_pwa_api_docs.py`.
 

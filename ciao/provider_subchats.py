@@ -290,9 +290,9 @@ class ProviderSubchatManager:
             raise ValueError("Sub-chat is already processing a turn")
 
         if getattr(self.pcm, "_restart_draining", False):
-            raise RuntimeError(
-                "Ciaobot is waiting for active chats to finish before restarting"
-            )
+            from ciao.web.project_chats import RestartDrainingError
+
+            raise RestartDrainingError()
 
         # Check limits
         limit_messages = 12 + record.limit_messages_extended
@@ -358,6 +358,7 @@ class ProviderSubchatManager:
             model=record.participant.model,
             mode=parent_chat.mode if parent_chat else "auto",
             thinking_level=parent_chat.thinking_level if parent_chat else "",
+            control_surface=parent_chat.control_surface if parent_chat else "",
         )
 
         instruction = (
@@ -386,10 +387,16 @@ class ProviderSubchatManager:
 
         try:
             async for event in service.execute_streaming(request):
-                from ciao.web.chat_broker import event_to_json
+                from ciao.web.chat_broker import apply_file_touches_to_payload, event_to_json
                 event_json = event_to_json(event)
                 if event_json is None:
                     continue
+                apply_file_touches_to_payload(
+                    event_json,
+                    workspace_root=getattr(
+                        getattr(self.pcm, "_config", None), "workspace_root", None
+                    ),
+                )
 
                 self.pcm._events.publish({
                     "type": "provider_subchat_event",

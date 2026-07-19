@@ -30,6 +30,35 @@ from ciao.providers.codex import (
 )
 
 
+def test_codex_managed_process_receives_scoped_mcp_configuration(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    binary = tmp_path / "codex"
+    binary.touch()
+    monkeypatch.setattr("ciao.providers.codex.resolve_codex_binary", lambda: str(binary))
+    provider = CodexProvider(tmp_path)
+    request = AgentRequest(
+        prompt="test",
+        model="gpt-test",
+        mode="auto",
+        provider="codex",
+        control_surface="mcp",
+        mcp_url="http://127.0.0.1:8443/mcp/",
+        mcp_token="secret-session-token",
+        mcp_required=True,
+    )
+
+    command = provider._resolved_command(request)
+
+    rendered = " ".join(command)
+    assert command[-2:] == ["app-server", "--stdio"]
+    assert "mcp_servers.ciaobot.url" in rendered
+    assert "bearer_token_env_var" in rendered
+    assert "mcp_servers.ciaobot.required=true" in rendered
+    assert "shell_environment_policy.exclude" in rendered
+    assert "secret-session-token" not in rendered
+
+
 FAKE_APP_SERVER = r'''#!/usr/bin/env python3
 import json
 import os

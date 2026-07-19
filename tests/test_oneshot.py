@@ -11,6 +11,7 @@ def _fake_query(captured: dict):
     async def fake_query(*, prompt: str, options):
         captured["model"] = options.model
         captured["prompt"] = prompt
+        captured["options"] = options
         if False:  # pragma: no cover - make this an async generator
             yield None
 
@@ -68,6 +69,26 @@ async def test_run_oneshot_passes_plain_models_through(monkeypatch) -> None:
 
     await oneshot.run_oneshot("hello", system_prompt="sys", model="haiku")
     assert captured["model"] == "haiku"
+
+
+@pytest.mark.asyncio
+async def test_run_oneshot_disables_tools_and_filesystem_discovery(
+    monkeypatch,
+) -> None:
+    """Titles/insights must not load Claude Code tools, skills, or MCP."""
+    captured: dict = {}
+    monkeypatch.setattr(oneshot, "query", _fake_query(captured))
+
+    await oneshot.run_oneshot("hello", system_prompt="sys", model="haiku")
+    options = captured["options"]
+    assert options.tools == []
+    assert options.skills == []
+    assert options.setting_sources == []
+    assert options.strict_mcp_config is True
+    # ``max_turns=2`` (not 1) absorbs a stray ``stop_reason=tool_use`` the
+    # model occasionally emits under ``tools=[]`` — see the comment in
+    # ``_run_claude_oneshot`` for the full rationale.
+    assert options.max_turns == 2
 
 
 def test_result_error_detail_composes_available_fields() -> None:
@@ -180,3 +201,13 @@ async def test_run_oneshot_no_retry_when_disabled(monkeypatch) -> None:
             "hi", system_prompt="s", model="haiku", max_retries=0
         )
     assert calls[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_run_oneshot_disables_claude_auto_memory(monkeypatch) -> None:
+    captured: dict = {}
+    monkeypatch.setattr(oneshot, "query", _fake_query(captured))
+
+    await oneshot.run_oneshot("hello", system_prompt="sys", model="haiku")
+    options = captured["options"]
+    assert options.env.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY") == "1"

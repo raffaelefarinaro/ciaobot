@@ -1,11 +1,10 @@
 """Coverage for the queued-message flush path in `_drive()`.
 
 Context: while a turn is streaming, a user can type more messages — they get
-queued via `ProjectChatManager.queue_message()` and flushed together as a
-single follow-up turn once the first one finishes. The UI bug reported on
-2026-04-21 was that the flushed follow-up rendered as a "Thinking" spinner
-with no user bubble, suggesting either a missing/garbled `user_echo` or a
-turn_index off-by-one.
+queued via `ProjectChatManager.queue_message()` and flushed one at a time as
+separate follow-up turns once the first one finishes. This matches the PWA
+request to send queued messages individually and to be able to reorder or edit
+them before they go out.
 
 These tests pin the server-side contract so any regression on the publish
 side is caught before it reaches the PWA.
@@ -14,6 +13,7 @@ side is caught before it reaches the PWA.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -22,6 +22,7 @@ from ciao.config import CiaoConfig
 from ciao.models import ResultEvent, ToolUseEvent
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
+from ciao.web.chat_broker import ChatStream
 from ciao.web.project_chats import ProjectChatManager
 
 
@@ -55,17 +56,8 @@ async def _wait_for(predicate, timeout: float = 2.0, step: float = 0.01) -> None
     raise AssertionError(f"timed out waiting for predicate {predicate!r}")
 
 
-async def test_queued_messages_flush_as_single_user_echo(tmp_path: Path) -> None:
-    """Two messages queued mid-turn must flush as one `user_echo` payload.
-
-    Contract under test:
-      - `stream_chat` is invoked twice (initial prompt + combined follow-up)
-      - the combined follow-up prompt is the queued texts joined by "\\n\\n"
-      - exactly one additional `user_echo` event is published for the flush
-      - it carries the joined text AND a `turn_index` equal to the pre-flush
-        `user_turn_count` (so the client can dedup against any optimistic
-        bubble it rendered locally)
-    """
+async def test_queued_messages_flush_one_at_a_time(tmp_path: Path) -> None:
+    """Two messages queued mid-turn must flush as two separate turns."""
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("2026-q2-queue", workspace="work")
     # Non-default title so the auto-title side-effect task doesn't spawn.
@@ -114,37 +106,65 @@ async def test_queued_messages_flush_as_single_user_echo(tmp_path: Path) -> None
     assert pcm.queue_message(chat.chat_id, "msg A") is True
     assert pcm.queue_message(chat.chat_id, "msg B") is True
 
-    # Release the first turn; _drive will drain pending and kick the follow-up.
+    # Release the first turn; _drive will drain pending one by one.
     first_turn_ready.set()
 
     await asyncio.wait_for(consumer, timeout=5.0)
 
-    # Two stream_chat invocations expected: initial prompt + combined flush.
-    assert len(turn_calls) == 2, f"expected 2 turns, got {turn_calls!r}"
+    # Three stream_chat invocations expected: initial prompt + two follow-ups.
+    assert len(turn_calls) == 3, f"expected 3 turns, got {turn_calls!r}"
     assert turn_calls[0] == "initial"
-    assert turn_calls[1] == "msg A\n\nmsg B", (
-        f"combined prompt mismatch: {turn_calls[1]!r}"
-    )
+    assert turn_calls[1] == "msg A"
+    assert turn_calls[2] == "msg B"
 
     echoes = [e for e in captured if e.get("type") == "user_echo"]
-    assert len(echoes) == 2, (
-        f"expected 2 user_echo events (initial + flush), got {echoes!r}"
+    assert len(echoes) == 3, (
+        f"expected 3 user_echo events (initial + two follow-ups), got {echoes!r}"
     )
 
     # Initial echo carries the initial prompt and turn_index 0.
     assert echoes[0]["text"] == "initial"
     assert echoes[0].get("turn_index") == 0
 
-    # The flushed echo is the bug-prone one: this is what must render as a
-    # user bubble for the combined follow-up turn.
-    flushed = echoes[1]
-    assert flushed["text"] == "msg A\n\nmsg B", (
-        f"flushed echo text mismatch: {flushed!r}"
+    # Each queued follow-up gets its own echo and its own turn_index.
+    assert echoes[1]["text"] == "msg A"
+    assert echoes[1].get("turn_index") == 1
+    assert echoes[2]["text"] == "msg B"
+    assert echoes[2].get("turn_index") == 2
+
+
+def test_question_notification_prefers_text_prompt_alias(tmp_path: Path) -> None:
+    """Alternate AskUserQuestion shape uses `text` instead of `question`.
+
+    MiniMax (Claude path) has been observed to emit
+    ``{"text": "...", "type": "single_select", "options": [...]}``. Without
+    accepting ``text``, the push body falls through to the raw JSON blob.
+    """
+    pcm = _make_manager(tmp_path)
+    bodies: list[str] = []
+    pcm.notify_question_cb = lambda _chat_id, body: bodies.append(body)
+
+    payload = json.dumps(
+        {
+            "questions": [
+                {
+                    "text": "How do you want to handle the booking form?",
+                    "type": "single_select",
+                    "options": [{"label": "A. Link manually", "value": "manual"}],
+                },
+                {
+                    "question": "Which guests first?",
+                    "options": [{"label": "All Yes"}],
+                },
+            ]
+        },
+        ensure_ascii=False,
     )
-    assert flushed.get("turn_index") == 1, (
-        f"flushed echo turn_index mismatch: {flushed!r}"
-    )
-    assert flushed.get("images") == []
+    pcm._notify_question("chat-x", payload)
+
+    assert bodies == [
+        "How do you want to handle the booking form?\nWhich guests first?"
+    ]
 
 
 async def test_ask_user_question_pauses_turn_without_draining_as_queued(tmp_path: Path) -> None:
@@ -203,6 +223,111 @@ async def test_ask_user_question_pauses_turn_without_draining_as_queued(tmp_path
     assert pcm._chats[chat.chat_id].to_dict()["pending_question"] == (
         '{"questions":[{"question":"Which email?"}]}'
     )
+
+
+async def test_queued_messages_survive_question_pause_and_flush_after_answer(
+    tmp_path: Path,
+) -> None:
+    """Messages queued mid-turn must not be dropped when the turn pauses on an
+    AskUserQuestion. They get parked on the chat and re-seeded into the answer
+    turn so they still flush as follow-ups (regression: queued messages
+    disappeared and were never sent after answering a question via the PWA).
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q3-park", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="park-test")
+
+    queued_ready = asyncio.Event()
+    turn_calls: list[str] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None):
+        turn_calls.append(prompt)
+        if prompt == "initial":
+            # Hold the first turn open until the test has queued follow-ups,
+            # then pause on a question — which tears the stream down.
+            await queued_ready.wait()
+            yield ToolUseEvent(
+                type="assistant",
+                tool_name="AskUserQuestion",
+                tool_input='{"questions":[{"question":"Which email?"}]}',
+            )
+            return
+        yield ResultEvent(
+            type="result",
+            result=f"done: {prompt}",
+            session_id="sess-park",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    captured: list[dict] = []
+
+    async def consume(stream) -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    consumer = asyncio.create_task(consume(stream))
+    await _wait_for(
+        lambda: any(e.get("type") == "user_echo" for e in captured),
+        timeout=2.0,
+    )
+
+    # Queue two follow-ups while the first turn is still running.
+    assert pcm.queue_message(chat.chat_id, "msg A") is True
+    assert pcm.queue_message(chat.chat_id, "msg B") is True
+
+    # Release the turn so it reaches the question and pauses.
+    queued_ready.set()
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    # The paused turn produced no result and the stream is gone...
+    assert not any(e.get("type") == "result" for e in captured), captured
+    assert pcm.get_active_stream(chat.chat_id) is None
+    # ...but the queued follow-ups were parked on the chat, not dropped.
+    parked = pcm._chats[chat.chat_id].pending_queue
+    assert [p["text"] for p in parked] == ["msg A", "msg B"], parked
+
+    # The user answers, starting a fresh turn. The parked follow-ups must
+    # re-seed and flush after it, in order.
+    captured2: list[dict] = []
+
+    async def consume2(stream) -> None:
+        async for ev in stream.subscribe():
+            captured2.append(ev)
+
+    stream2 = pcm.start_stream(chat.chat_id, "answer")
+    await asyncio.wait_for(consume2(stream2), timeout=5.0)
+
+    # answer + two flushed follow-ups.
+    assert turn_calls == ["initial", "answer", "msg A", "msg B"], turn_calls
+    echoes = [e["text"] for e in captured2 if e.get("type") == "user_echo"]
+    assert echoes == ["answer", "msg A", "msg B"], echoes
+    # The park buffer is consumed exactly once.
+    assert pcm._chats[chat.chat_id].pending_queue == []
+
+
+async def test_new_session_clears_parked_question_queue(tmp_path: Path) -> None:
+    """Starting a fresh session abandons a paused question and any follow-ups
+    parked for its answer turn — they must not leak into the new conversation.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q3-reset", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="reset-test")
+    pcm._chats[chat.chat_id].pending_question = '{"questions":[{"question":"x?"}]}'
+    pcm._chats[chat.chat_id].pending_queue = [
+        {"id": "q-1", "text": "stale follow-up", "images": []}
+    ]
+
+    pcm.new_session(chat.chat_id)
+
+    assert pcm._chats[chat.chat_id].pending_question == ""
+    assert pcm._chats[chat.chat_id].pending_queue == []
 
 
 async def test_ask_user_question_interrupts_live_provider(tmp_path: Path) -> None:
@@ -284,9 +409,10 @@ async def test_user_send_clears_pending_question(tmp_path: Path) -> None:
     assert pcm._chats[chat.chat_id].pending_question == ""
 
 
-async def test_queue_flush_bumps_user_turn_count(tmp_path: Path) -> None:
-    """The flush turn must bump `user_turn_count` exactly once so history
-    replay (GET /messages) lines up with what the client rendered live."""
+async def test_queue_flush_bumps_user_turn_count_per_message(tmp_path: Path) -> None:
+    """Each flushed queued message bumps `user_turn_count` exactly once so
+    history replay (GET /messages) lines up with what the client rendered live.
+    """
     pcm = _make_manager(tmp_path)
     project = pcm.create_project("2026-q2-count", workspace="work")
     chat = pcm.create_chat(project.project_id, title="count-test")
@@ -330,6 +456,150 @@ async def test_queue_flush_bumps_user_turn_count(tmp_path: Path) -> None:
     first_turn_ready.set()
     await asyncio.wait_for(consumer, timeout=5.0)
 
-    # Start: 0. Initial bump: 1. Flush bump: 2. No extra bumps for the
-    # individual queued messages (they merge into one turn).
-    assert pcm.get_chat(chat.chat_id).user_turn_count == 2
+    # Start: 0. Initial bump: 1. Each queued follow-up bumps once more: 3.
+    assert pcm.get_chat(chat.chat_id).user_turn_count == 3
+
+
+def test_chat_stream_pending_reorder_edit_remove() -> None:
+    """ChatStream exposes stable ids and supports reorder/edit/remove."""
+    stream = ChatStream("hello")
+    id_a = stream.enqueue("A")
+    id_b = stream.enqueue("B")
+    id_c = stream.enqueue("C")
+
+    assert [p["text"] for p in stream.pending] == ["A", "B", "C"]
+
+    # Move B before A.
+    assert stream.reorder_pending(id_b, before_id=id_a) is True
+    assert [p["text"] for p in stream.pending] == ["B", "A", "C"]
+
+    # Move A to the end.
+    assert stream.reorder_pending(id_a, before_id=None) is True
+    assert [p["text"] for p in stream.pending] == ["B", "C", "A"]
+
+    # Edit C.
+    assert stream.edit_pending(id_c, "C-edited", images=["img.png"]) is True
+    assert [p["text"] for p in stream.pending] == ["B", "C-edited", "A"]
+    assert stream.pending[1]["images"] == ["img.png"]
+
+    # Remove B.
+    assert stream.remove_pending(id_b) is True
+    assert [p["text"] for p in stream.pending] == ["C-edited", "A"]
+
+    # Drain one at a time preserves the new order.
+    first = stream.drain_one()
+    assert first is not None and first["text"] == "C-edited"
+    second = stream.drain_one()
+    assert second is not None and second["text"] == "A"
+    assert stream.drain_one() is None
+
+
+def test_chat_stream_enqueue_accepts_client_id() -> None:
+    """If the client supplies an entry id, the backend uses it."""
+    stream = ChatStream("hello")
+    client_id = "client-abc-123"
+    resolved = stream.enqueue("hello", entry_id=client_id)
+    assert resolved == client_id
+    assert stream.pending[0]["id"] == client_id
+
+
+async def test_queue_reorder_changes_flush_order(tmp_path: Path) -> None:
+    """Reordering the backend queue changes the order in which queued messages
+    are flushed as individual turns."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q2-reorder", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="reorder-test")
+
+    first_turn_ready = asyncio.Event()
+    turn_calls: list[str] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None):
+        turn_calls.append(prompt)
+        if len(turn_calls) == 1:
+            await first_turn_ready.wait()
+        yield ResultEvent(
+            type="result",
+            result="ok",
+            session_id="sess-r",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    captured: list[dict] = []
+
+    async def consume(stream) -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    consumer = asyncio.create_task(consume(stream))
+
+    await _wait_for(
+        lambda: any(e.get("type") == "user_echo" for e in captured),
+        timeout=2.0,
+    )
+
+    id_a = pcm.get_active_stream(chat.chat_id).enqueue("A")
+    pcm.get_active_stream(chat.chat_id).enqueue("B")
+
+    # Swap order so B goes first.
+    pcm.reorder_queue(chat.chat_id, id_a, before_id=None)
+
+    first_turn_ready.set()
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    assert turn_calls == ["initial", "B", "A"]
+
+
+async def test_queue_edit_updates_flushed_text(tmp_path: Path) -> None:
+    """Editing a queued message changes what is sent in its follow-up turn."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q2-edit", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="edit-test")
+
+    first_turn_ready = asyncio.Event()
+    turn_calls: list[str] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None):
+        turn_calls.append(prompt)
+        if len(turn_calls) == 1:
+            await first_turn_ready.wait()
+        yield ResultEvent(
+            type="result",
+            result="ok",
+            session_id="sess-e",
+            is_error=False,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    captured: list[dict] = []
+
+    async def consume(stream) -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    consumer = asyncio.create_task(consume(stream))
+
+    await _wait_for(
+        lambda: any(e.get("type") == "user_echo" for e in captured),
+        timeout=2.0,
+    )
+
+    entry_id = pcm.get_active_stream(chat.chat_id).enqueue("old")
+    pcm.edit_queue(chat.chat_id, entry_id, "edited")
+
+    first_turn_ready.set()
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    assert turn_calls == ["initial", "edited"]

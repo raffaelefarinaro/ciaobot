@@ -15,6 +15,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 - `GET /api/setup/list-dirs` and `POST /api/setup/mkdir` back the setup wizard's folder picker. They are only accepted in bootstrap mode from localhost with a matching browser origin/referer (404 outside bootstrap mode, 403 off-localhost), list directories only, and never read file contents.
 - State-changing `/api/*` requests with an `Origin` or `Referer` header must match the request host. Missing headers are accepted for non-browser clients.
 - HTTP responses include baseline security headers, including CSP, `X-Content-Type-Options`, `Referrer-Policy`, and frame denial.
+- The agent-facing `/mcp/` mount uses a separate scoped bearer capability issued to Ciaobot-managed provider processes; it does not accept the browser session cookie. `GET /api/mcp/status` exposes only readiness and catalog metadata, never a token.
 
 ## Routes
 
@@ -89,6 +90,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/rate-limits` | Read Claude rate-limit snapshots |
 | GET | `/api/models` | List configured models |
 | GET, PATCH | `/api/status` | Read or update status |
+| GET | `/api/mcp/status` | Embedded Ciaobot MCP readiness, tool catalog, and active-session counts (no credentials) |
+| GET | `/api/mcp/usage` | Embedded Ciaobot MCP per-tool call/error counters (no credentials) |
 | GET | `/api/startup-status` | Read startup phase progress |
 | GET | `/api/active-chats` | List chat IDs with in-flight work (streaming or background subagents); drives the macOS menu bar spinner |
 | GET | `/api/setup-status` | Read first-run setup checks and provider readiness |
@@ -238,6 +241,9 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projec
 # thinking_levels) and is safe to change mid-chat; it resets to '' on
 # handover. Changing model/provider/model_bucket across a routing boundary
 # on a started chat returns 400; use handover instead.
+# control_surface (legacy|mcp|auto|'') is still accepted here as an escape
+# hatch, but it is engine-controlled now (MCP by default, legacy fallback);
+# the PWA no longer exposes a selector for it.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/chats/$CID" \
   -H 'content-type: application/json' -d '{"thinking_level":"high"}'
 
@@ -474,8 +480,11 @@ Global `/ws/events` payloads the PWA reacts to:
 - `chat_read`: another client/device marked the chat read.
 - `chat_title`: auto-title finished.
 - `chat_moved` / `chat_deleted`: project changes.
+- `server_restarting`: restart drain began (`{message}`). The connect `snapshot` also carries `restarting: true` when drain is already in progress so late clients show the overlay without waiting for a turn rejection.
 
-Per-chat `/ws/chat/{chat_id}` events include text/thinking deltas, `tool_use` (with optional `file_touch` and provider-native `request_id`), `permission_request`, `result`, `user_echo`, `queued`, `steered`, `status`, and `error`. Client messages include normal `message`, `stop`, `permission_response`, and `question_response`; Codex structured questions use `question_response {request_id, answers: {question_id: string[]}}` so the answer resolves inside the still-running app-server turn.
+Per-chat `/ws/chat/{chat_id}` events include text/thinking deltas, `tool_use` (with optional `file_touch` and provider-native `request_id`), `permission_request`, `result`, `user_echo`, `queued`, `queue_state`, `steered`, `status`, `error`, and `server_restarting` (sent instead of `error` when a new turn is rejected because restart drain is in progress). Client messages include normal `message`, `stop`, `permission_response`, and `question_response`; Codex structured questions use `question_response {request_id, answers: {question_id: string[]}}` so the answer resolves inside the still-running app-server turn.
+
+**Queue management**: while the assistant is streaming, the client can queue follow-up messages (mode `queue`). Each queued item gets an `id` and is flushed as its own user turn once the prior turn finishes. The client can also send `queue_reorder {entry_id, before_id}` (move `entry_id` before `before_id`, or to the end when `before_id` is null), `queue_edit {entry_id, text, images?}`, and `queue_remove {entry_id}`. The server confirms with `queue_state {queue: [{id, text, images?}]}` so connected clients stay in sync.
 
 **Auto tier-fallback status events**: when the primary model returns a capability error (image input, tool use, context length, etc.), the server emits a `status` event with a "retrying on &lt;model&gt;" message, then runs the retry and emits the normal `result` for the new model. The terminal `result.effective_model` is the retry target's id. Rate limits, auth errors, content filters, and 5xx do NOT trigger this path; only Claude, Ollama, and OpenRouter backends participate.
 

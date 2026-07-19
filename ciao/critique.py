@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any
@@ -30,22 +31,98 @@ from ciao.providers.routing import routing_routine_env_for_model
 
 DEFAULT_TIMEOUT = 120  # seconds per model
 
+# Panel entries prefixed with this route through the Codex (OpenAI / ChatGPT)
+# app-server instead of the Anthropic-compatible one-shot path.
+CODEX_PREFIX = "codex:"
+
+_CODEX_AVAILABLE_CACHE: tuple[float, bool] | None = None
+_CODEX_AVAILABLE_TTL = 30.0  # seconds — panel resolution is read-hot
+
+def is_anthropic_available() -> bool:
+    """True when Anthropic API key or Claude Code OAuth credentials are present."""
+    if os.environ.get("ANTHROPIC_API_KEY", "").strip():
+        return True
+    for p in [
+        Path.home() / ".claude-agent" / "credentials.json",
+        Path.home() / ".claude" / ".credentials.json",
+    ]:
+        try:
+            if p.is_file():
+                return True
+        except Exception:
+            pass
+    raw_cfg = os.environ.get("CLAUDE_CONFIG_PATH", "").strip()
+    config_path = Path(raw_cfg).expanduser() if raw_cfg else Path.home() / ".claude.json"
+    try:
+        if config_path.is_file():
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("oauthAccount"):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def is_codex_available() -> bool:
+    """True when the Codex CLI is installed and signed in (OpenAI / ChatGPT).
+
+    Backs the "add the OpenAI voice to the critique panel" default. Result is
+    cached briefly because :func:`default_critique_panel` runs on every
+    Settings → Models read and ``codex login status`` spawns a subprocess;
+    when no Codex binary is present the check returns immediately without one.
+    """
+    global _CODEX_AVAILABLE_CACHE
+    now = time.monotonic()
+    cached = _CODEX_AVAILABLE_CACHE
+    if cached is not None and now - cached[0] < _CODEX_AVAILABLE_TTL:
+        return cached[1]
+    try:
+        from ciao.providers.codex import codex_login_status
+
+        ok = bool(codex_login_status().get("ok"))
+    except Exception:  # noqa: BLE001 — availability probe must never crash the panel
+        ok = False
+    _CODEX_AVAILABLE_CACHE = (now, ok)
+    return ok
+
 
 def default_critique_panel(config: CiaoConfig) -> list[str]:
     """Backend-aware default when Settings → Models has no critique override."""
-    if config.openrouter.available:
-        return [
-            "anthropic/claude-sonnet-latest",
-            "anthropic/claude-haiku-latest",
-            "anthropic/claude-opus-latest",
-        ]
-    if config.ollama.api_key and config.ollama.api_key != "ollama":
-        return [
-            config.ollama.sonnet_model,
-            config.ollama.haiku_model,
-            config.ollama.opus_model,
-        ]
-    return ["sonnet", "haiku", "opus"]
+    models = []
+
+    # Prioritize native Anthropic over OpenRouter for the Claude models
+    if is_anthropic_available():
+        models.extend(["opus", "fable"])
+    elif config.openrouter.available:
+        models.extend([config.openrouter.opus_model, config.openrouter.fable_model])
+    else:
+        # Fallback when neither is explicitly configured
+        models.extend(["opus", "fable"])
+
+    # Add Ollama models if Ollama is configured / available
+    oll = config.ollama
+    if bool(oll.local_models) or (bool(oll.api_key) and oll.api_key != "ollama"):
+        if oll.opus_model:
+            models.append(oll.opus_model)
+        if oll.fable_model:
+            models.append(oll.fable_model)
+
+    # Add the OpenAI (Codex) fable model when the Codex CLI is signed in, so a
+    # ChatGPT / OpenAI account lends a non-Anthropic voice to the panel. The
+    # ``codex:`` prefix routes the entry through the Codex app-server; the bare
+    # ``fable`` tier resolves to the signed-in account's model at dispatch.
+    if is_codex_available():
+        models.append(f"{CODEX_PREFIX}fable")
+
+    # Filter out empty strings or duplicates while preserving order
+    seen = set()
+    unique_models = []
+    for m in models:
+        if m and m not in seen:
+            seen.add(m)
+            unique_models.append(m)
+
+    return unique_models
 
 
 def resolve_critique_panel(config: CiaoConfig, *, override: str = "") -> list[str]:
@@ -139,20 +216,35 @@ def extract_json(text: str) -> dict | None:
     return None
 
 
+def _split_provider(model: str) -> tuple[str, str]:
+    """Map a panel entry to its ``(provider, model_id)`` dispatch pair.
+
+    A ``codex:`` prefix selects the Codex (OpenAI / ChatGPT) app-server; every
+    other id runs through the Anthropic-compatible one-shot path with per-model
+    routing env (Anthropic passthrough / OpenRouter / Ollama).
+    """
+    if model.startswith(CODEX_PREFIX):
+        return "codex", model[len(CODEX_PREFIX):].strip()
+    return "claude", model
+
+
 async def _review_one(
     model: str, artifact: str, user_prompt: str, config: CiaoConfig, timeout: float
 ) -> ModelResult:
-    import time
-
-    env = routing_routine_env_for_model(model, config)
+    provider, model_id = _split_provider(model)
+    # Codex routes by provider, not by env injection; the Anthropic-compatible
+    # path picks its upstream from the model id shape.
+    env = {} if provider == "codex" else routing_routine_env_for_model(model_id, config)
     t0 = time.monotonic()
     try:
         raw = await run_oneshot(
             user_prompt,
             system_prompt=SYSTEM_PROMPT,
-            model=model,
+            model=model_id,
             env=env,
             timeout_s=timeout,
+            provider=provider,
+            cwd=config.workspace_root if provider == "codex" else None,
         )
     except (TimeoutError, OSError, RuntimeError) as exc:
         return ModelResult(model, time.monotonic() - t0, False, error=f"{type(exc).__name__}: {exc}")
