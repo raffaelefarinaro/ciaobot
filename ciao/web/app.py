@@ -12,7 +12,7 @@ from starlette.staticfiles import StaticFiles
 from starlette.responses import FileResponse
 
 from ciao.package_version import make_cached_package_status
-from ciao.mcp_server import mcp_status_endpoint
+from ciao.mcp_server import mcp_status_endpoint, mcp_usage_endpoint
 from ciao.web.auth import AuthMiddleware, make_serializer
 from ciao.web.agent_assets import (
     agent_assets_endpoint,
@@ -284,6 +284,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/setup/mkdir", setup_mkdir_endpoint, methods=["POST"]),
         Route("/api/stats", cli_stats, methods=["GET"]),
         Route("/api/mcp/status", mcp_status_endpoint, methods=["GET"]),
+        Route("/api/mcp/usage", mcp_usage_endpoint, methods=["GET"]),
         # Push notifications
         Route("/api/push/public-key", push_public_key, methods=["GET"]),
         Route("/api/push/subscribe", push_subscribe, methods=["POST"]),

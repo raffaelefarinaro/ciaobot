@@ -283,6 +283,13 @@
         >
           agent assets
         </router-link>
+        <router-link
+          to="/settings/usage"
+          class="settings-nav-item"
+          :class="{ active: route.path === '/settings/usage' }"
+        >
+          tool usage
+        </router-link>
       </div>
     </template>
 

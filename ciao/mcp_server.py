@@ -214,6 +214,80 @@ class CiaoMcpService:
             **self.registry.status(),
         }
 
+    def usage(self, *, limit: int | None = None) -> dict[str, Any]:
+        """Aggregate per-tool call counts from the telemetry log.
+
+        Reads ``mcp_tool_calls.jsonl`` (written by :meth:`_record_tool_call`) and
+        groups the records by tool name so the PWA can render a usage table.
+        """
+        tools: dict[str, dict[str, Any]] = {}
+        total = 0
+        total_errors = 0
+        if self._telemetry_path.exists():
+            try:
+                with self._telemetry_path.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            record = json.loads(line)
+                        except (ValueError, TypeError):
+                            continue
+                        name = str(record.get("tool") or "")
+                        if not name:
+                            continue
+                        entry = tools.setdefault(
+                            name,
+                            {"calls": 0, "errors": 0, "total_ms": 0, "providers": set(), "last_used": ""},
+                        )
+                        entry["calls"] += 1
+                        total += 1
+                        if record.get("status") != "ok":
+                            entry["errors"] += 1
+                            total_errors += 1
+                        try:
+                            entry["total_ms"] += int(record.get("duration_ms") or 0)
+                        except (ValueError, TypeError):
+                            pass
+                        provider = str(record.get("provider") or "")
+                        if provider:
+                            entry["providers"].add(provider)
+                        timestamp = str(record.get("timestamp") or "")
+                        if timestamp > entry["last_used"]:
+                            entry["last_used"] = timestamp
+            except OSError:
+                pass
+        rows: list[dict[str, Any]] = []
+        for name, entry in tools.items():
+            calls = entry["calls"]
+            rows.append(
+                {
+                    "tool": name,
+                    "calls": calls,
+                    "errors": entry["errors"],
+                    "avg_ms": int(entry["total_ms"] / calls) if calls else 0,
+                    "providers": sorted(entry["providers"]),
+                    "last_used": entry["last_used"],
+                }
+            )
+        # Include registered tools that have never been called so the table
+        # reflects the full catalog rather than only what has run so far.
+        for name in self._tool_names:
+            if name not in tools:
+                rows.append(
+                    {"tool": name, "calls": 0, "errors": 0, "avg_ms": 0, "providers": [], "last_used": ""}
+                )
+        rows.sort(key=lambda item: (item["calls"], item["tool"]), reverse=True)
+        if limit is not None:
+            rows = rows[:limit]
+        return {
+            "total_calls": total,
+            "total_errors": total_errors,
+            "tool_count": len(self._tool_names),
+            "tools": rows,
+        }
+
     def _principal(self) -> McpPrincipal:
         access = get_access_token()
         if access is None or not isinstance(access.claims, dict):
@@ -1006,3 +1080,10 @@ async def mcp_status_endpoint(request: Request) -> JSONResponse:
     if service is None:
         return JSONResponse({"enabled": False, "bound": False, "tool_count": 0})
     return JSONResponse(service.status())
+
+
+async def mcp_usage_endpoint(request: Request) -> JSONResponse:
+    service = getattr(request.app.state, "mcp_service", None)
+    if service is None:
+        return JSONResponse({"total_calls": 0, "total_errors": 0, "tool_count": 0, "tools": []})
+    return JSONResponse(service.usage())

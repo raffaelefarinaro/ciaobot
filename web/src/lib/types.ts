@@ -40,6 +40,22 @@ export interface McpStatus {
   last_error?: string
 }
 
+export interface McpToolUsage {
+  tool: string
+  calls: number
+  errors: number
+  avg_ms: number
+  providers: string[]
+  last_used: string
+}
+
+export interface McpUsage {
+  total_calls: number
+  total_errors: number
+  tool_count: number
+  tools: McpToolUsage[]
+}
+
 // ── Projects & Chats ────────────────────────────────────────────────────
 
 export interface ProjectInfo {

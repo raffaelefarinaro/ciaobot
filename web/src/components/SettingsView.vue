@@ -711,6 +711,77 @@
         </template>
       </template>
 
+      <!-- USAGE TAB -->
+      <template v-if="currentTab === 'usage'">
+        <div class="card">
+          <div class="settings-card-header">
+            <div class="settings-label-row">
+              <p class="section-title">MCP tool usage</p>
+              <button class="btn-small" :disabled="!mcpUsageLoaded" @click="fetchMcpUsage">Refresh</button>
+            </div>
+            <p class="hint">
+              How often each managed Ciaobot MCP tool has been called since telemetry began.
+              Every tool call &mdash; from any provider or chat &mdash; is counted here.
+            </p>
+          </div>
+
+          <div v-if="!mcpUsageLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
+          <p v-else-if="mcpUsageError" class="hint hint--warn">{{ mcpUsageError }}</p>
+          <template v-else-if="mcpUsage">
+            <div class="usage-summary">
+              <div class="usage-stat">
+                <span class="usage-stat-value">{{ mcpUsage.total_calls.toLocaleString() }}</span>
+                <span class="usage-stat-label">total calls</span>
+              </div>
+              <div class="usage-stat">
+                <span class="usage-stat-value">{{ mcpUsage.tool_count }}</span>
+                <span class="usage-stat-label">tools</span>
+              </div>
+              <div class="usage-stat">
+                <span class="usage-stat-value" :class="{ 'usage-stat-value--warn': mcpUsage.total_errors > 0 }">
+                  {{ mcpUsage.total_errors.toLocaleString() }}
+                </span>
+                <span class="usage-stat-label">errors</span>
+              </div>
+            </div>
+
+            <p v-if="mcpUsage.total_calls === 0" class="hint hint--info">
+              No tool calls recorded yet. Usage will appear here once chats start using MCP tools.
+            </p>
+            <div v-else class="usage-table-wrap">
+              <table class="usage-table">
+                <thead>
+                  <tr>
+                    <th class="usage-th" :class="{ 'usage-th--active': usageSortKey === 'tool' }" @click="sortUsageBy('tool')">
+                      Tool<span v-if="usageSortKey === 'tool'" class="usage-sort">{{ usageSortDir === 'desc' ? '▾' : '▴' }}</span>
+                    </th>
+                    <th class="usage-th usage-th--num" :class="{ 'usage-th--active': usageSortKey === 'calls' }" @click="sortUsageBy('calls')">
+                      Calls<span v-if="usageSortKey === 'calls'" class="usage-sort">{{ usageSortDir === 'desc' ? '▾' : '▴' }}</span>
+                    </th>
+                    <th class="usage-th usage-th--num" :class="{ 'usage-th--active': usageSortKey === 'errors' }" @click="sortUsageBy('errors')">
+                      Errors<span v-if="usageSortKey === 'errors'" class="usage-sort">{{ usageSortDir === 'desc' ? '▾' : '▴' }}</span>
+                    </th>
+                    <th class="usage-th usage-th--num" :class="{ 'usage-th--active': usageSortKey === 'avg_ms' }" @click="sortUsageBy('avg_ms')">
+                      Avg ms<span v-if="usageSortKey === 'avg_ms'" class="usage-sort">{{ usageSortDir === 'desc' ? '▾' : '▴' }}</span>
+                    </th>
+                    <th class="usage-th">Providers</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in sortedUsage" :key="row.tool" :class="{ 'usage-row--idle': row.calls === 0 }">
+                    <td class="usage-td usage-td--tool">{{ row.tool }}</td>
+                    <td class="usage-td usage-td--num">{{ row.calls.toLocaleString() }}</td>
+                    <td class="usage-td usage-td--num" :class="{ 'usage-td--warn': row.errors > 0 }">{{ row.errors }}</td>
+                    <td class="usage-td usage-td--num">{{ row.calls ? row.avg_ms : '—' }}</td>
+                    <td class="usage-td usage-td--providers">{{ row.providers.join(', ') || '—' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </div>
+      </template>
+
       <!-- WORKSPACES TAB -->
       <template v-if="currentTab === 'workspaces'">
         <div v-if="!workspacesLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
@@ -1625,6 +1696,8 @@ import type {
   LocalStatus,
   ModelsResponse,
   McpStatus,
+  McpUsage,
+  McpToolUsage,
   PromptAsset,
   ProviderConfigSettings,
   RoutineSettings,
@@ -2223,6 +2296,11 @@ const providerKeysError = ref('')
 const providerKeysSaving = ref(false)
 const providerKeysResult = ref('')
 const mcpStatus = ref<McpStatus | null>(null)
+const mcpUsage = ref<McpUsage | null>(null)
+const mcpUsageLoaded = ref(false)
+const mcpUsageError = ref('')
+const usageSortKey = ref<'calls' | 'errors' | 'avg_ms' | 'tool'>('calls')
+const usageSortDir = ref<'asc' | 'desc'>('desc')
 const providerKeyInputs = ref<Record<string, string>>({})
 const providerConnectionPending = ref('')
 const providerConnectionResult = ref('')
@@ -2439,6 +2517,49 @@ async function fetchMcpStatus() {
     mcpStatus.value = { enabled: false, bound: false, tool_count: 0 }
   }
 }
+
+async function fetchMcpUsage() {
+  mcpUsageError.value = ''
+  try {
+    mcpUsage.value = await api.get<McpUsage>('/api/mcp/usage')
+  } catch (err) {
+    mcpUsage.value = null
+    const message = err instanceof Error ? err.message : String(err)
+    // A non-JSON body (the SPA index.html) means the /api/mcp/usage route
+    // isn't served yet — the running backend predates it and needs a restart.
+    mcpUsageError.value = /Unexpected token|not valid JSON|<!DOCTYPE/i.test(message)
+      ? 'MCP usage endpoint not available on the running server yet. Restart the Ciaobot service (or ask the operator to Deploy) to enable it.'
+      : message || 'Could not load MCP tool usage.'
+  } finally {
+    mcpUsageLoaded.value = true
+  }
+}
+
+function sortUsageBy(key: 'calls' | 'errors' | 'avg_ms' | 'tool') {
+  if (usageSortKey.value === key) {
+    usageSortDir.value = usageSortDir.value === 'desc' ? 'asc' : 'desc'
+  } else {
+    usageSortKey.value = key
+    usageSortDir.value = key === 'tool' ? 'asc' : 'desc'
+  }
+}
+
+const sortedUsage = computed<McpToolUsage[]>(() => {
+  const rows = [...(mcpUsage.value?.tools ?? [])]
+  const key = usageSortKey.value
+  const factor = usageSortDir.value === 'desc' ? -1 : 1
+  rows.sort((a, b) => {
+    let cmp: number
+    if (key === 'tool') {
+      cmp = a.tool.localeCompare(b.tool)
+    } else {
+      cmp = (a[key] as number) - (b[key] as number)
+      if (cmp === 0) cmp = a.tool.localeCompare(b.tool) * -1
+    }
+    return cmp * factor
+  })
+  return rows
+})
 
 async function providerConnectionAction(provider: string, action: 'connect' | 'verify' | 'logout') {
   if (action === 'logout' && !confirm(`Log out of ${provider === 'codex' ? 'OpenAI Codex' : 'Claude Code'} on this computer?`)) {
@@ -3422,6 +3543,7 @@ onMounted(async () => {
   fetchPackageStatus()
   fetchProviderKeys()
   fetchMcpStatus()
+  fetchMcpUsage()
   fetchWorkspaceModels()
   fetchGwsIntegration()
   fetchWorkspacesList()
@@ -5368,5 +5490,108 @@ async function doPackageUpdate() {
 .ws-label {
   font-size: var(--text-sm);
   color: var(--fg2);
+}
+
+/* MCP tool usage tab */
+.usage-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+.usage-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 88px;
+  padding: var(--space-3);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.usage-stat-value {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.usage-stat-value--warn {
+  color: var(--warning);
+}
+.usage-stat-label {
+  font-size: var(--text-xs);
+  color: var(--fg3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.usage-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+.usage-th {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  color: var(--fg2);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  position: sticky;
+  top: 0;
+}
+.usage-th--num {
+  text-align: right;
+}
+.usage-th--active {
+  color: var(--fg);
+}
+.usage-th:hover {
+  color: var(--fg);
+}
+.usage-sort {
+  margin-left: 4px;
+  font-size: var(--text-xs);
+}
+.usage-td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.usage-td--tool {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--fg);
+  white-space: nowrap;
+}
+.usage-td--num {
+  text-align: right;
+}
+.usage-td--warn {
+  color: var(--warning);
+  font-weight: 600;
+}
+.usage-td--providers {
+  color: var(--fg2);
+  font-size: var(--text-xs);
+}
+.usage-row--idle .usage-td {
+  color: var(--fg3);
+}
+.usage-row--idle .usage-td--tool {
+  color: var(--fg3);
+}
+.usage-table tbody tr:last-child .usage-td {
+  border-bottom: none;
+}
+.usage-table tbody tr:hover .usage-td {
+  background: var(--bg2);
 }
 </style>

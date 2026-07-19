@@ -196,6 +196,46 @@ def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
     } <= names
 
 
+def test_usage_aggregates_telemetry_by_tool(tmp_path: Path) -> None:
+    service, _control_plane = _service(tmp_path)
+    records = [
+        {"tool": "memory_read", "status": "ok", "duration_ms": 8, "provider": "claude", "timestamp": "2026-07-19T10:00:00Z"},
+        {"tool": "memory_read", "status": "ok", "duration_ms": 12, "provider": "codex", "timestamp": "2026-07-19T11:00:00Z"},
+        {"tool": "vault_search", "status": "error", "error_code": "invalid_request", "duration_ms": 40, "provider": "claude", "timestamp": "2026-07-19T09:00:00Z"},
+    ]
+    service._telemetry_path.parent.mkdir(parents=True, exist_ok=True)
+    with service._telemetry_path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record) + "\n")
+        handle.write("\n")  # blank line is skipped
+        handle.write("{not valid json\n")  # malformed line is skipped
+
+    usage = service.usage()
+
+    assert usage["total_calls"] == 3
+    assert usage["total_errors"] == 1
+    assert usage["tool_count"] == len(service.status()["tools"])
+    by_tool = {row["tool"]: row for row in usage["tools"]}
+    assert by_tool["memory_read"]["calls"] == 2
+    assert by_tool["memory_read"]["errors"] == 0
+    assert by_tool["memory_read"]["avg_ms"] == 10
+    assert by_tool["memory_read"]["providers"] == ["claude", "codex"]
+    assert by_tool["memory_read"]["last_used"] == "2026-07-19T11:00:00Z"
+    assert by_tool["vault_search"]["errors"] == 1
+    # Registered-but-never-called tools appear with zero counts.
+    assert by_tool["chat_create"]["calls"] == 0
+    # Sorted by call count descending, so the busiest tool is first.
+    assert usage["tools"][0]["tool"] == "memory_read"
+
+
+def test_usage_endpoint_returns_empty_when_no_telemetry(tmp_path: Path) -> None:
+    service, _control_plane = _service(tmp_path)
+    usage = service.usage()
+    assert usage["total_calls"] == 0
+    assert usage["total_errors"] == 0
+    assert all(row["calls"] == 0 for row in usage["tools"])
+
+
 def test_schedule_handler_does_not_forward_closed_over_service(tmp_path: Path) -> None:
     service, control_plane = _service(tmp_path)
     token, _ = service.registry.issue(
