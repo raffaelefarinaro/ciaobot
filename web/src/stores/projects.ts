@@ -291,12 +291,6 @@ export const useProjectStore = defineStore('projects', () => {
     if (resolvedQuestions.value[chatId]?.has(questionsSignature(qs))) return
     activeQuestions.value[chatId] = qs
   }
-  // Per-chat map from a Task/Agent dispatch's tool_use_id to a short subagent
-  // label like "[Explore]". Populated when we see the parent's Task tool_use,
-  // consumed when later stream events from inside the subagent arrive with
-  // `parent_tool_use_id` set so we can prefix the activity line in the trace.
-  // Cleared when the result event closes the turn — labels are turn-scoped.
-  const subagentLabels = ref<Record<string, Record<string, string>>>({})
   const eventsSocket = ref<WebSocket | null>(null)
   const toasts = ref<InAppToast[]>([])
   let toastCounter = 0
@@ -3155,36 +3149,18 @@ export const useProjectStore = defineStore('projects', () => {
           break
         }
 
-        // Record Task/Agent dispatches so we can prefix any tool calls that
-        // fire from inside the subagent (those arrive later with
-        // parent_tool_use_id pointing back at this dispatch's tool_use_id).
-        // Server-side _summarize_tool_input already formats the input as
-        // "[subagent_type] description"; we only need the bracketed prefix.
-        const isSubagentDispatch =
-          (event.tool_name === 'Task' || event.tool_name === 'Agent')
-          && !!event.tool_use_id
-        if (isSubagentDispatch) {
-          const match = (event.tool_input || '').match(/^\[([^\]]+)\]/)
-          const label = match ? `[${match[1]}]` : '[subagent]'
-          if (!subagentLabels.value[chatId]) subagentLabels.value[chatId] = {}
-          subagentLabels.value[chatId][event.tool_use_id!] = label
-        }
+        // Tool calls that fire from inside a subagent arrive with
+        // parent_tool_use_id set. They belong to the subagent, which the PWA
+        // already renders in its own "Subagent activity" box (SubagentPanel,
+        // fed by the subagent transcript). Inlining them in the parent trace
+        // too double-counts the work and inflates the parent turn's tool-call
+        // total (e.g. parent header shows "15 tool calls" while the box shows
+        // "31"), so we drop them here and let the box own subagent activity.
+        if (event.parent_tool_use_id) break
 
-        let line = event.tool_input
+        const line = event.tool_input
           ? `${_toolIcon(event.tool_name)} ${event.tool_name} ${event.tool_input}`
           : `${_toolIcon(event.tool_name)} ${event.tool_name}`
-
-        // Subagent activity: prefix with the parent dispatch's label and a
-        // turnstile arrow so the trace reads top-down as
-        //   🤖 Agent [Explore] Trace WebSocket …
-        //     ↳ [Explore] $ Bash find …
-        // Falls back to a generic [subagent] tag if the dispatch's label
-        // isn't in the map (e.g. WS reconnect after a buffer drop).
-        if (event.parent_tool_use_id) {
-          const label = subagentLabels.value[chatId]?.[event.parent_tool_use_id]
-            ?? '[subagent]'
-          line = `↳ ${label} ${line}`
-        }
 
         _pushToolLine(chatId, line)
         break
@@ -3350,10 +3326,6 @@ export const useProjectStore = defineStore('projects', () => {
         // futures as deny via cancel_all(). Drop the bubbles on our side too
         // so a late click can't race a brand-new turn.
         delete pendingPermissions.value[chatId]
-        // Subagent labels are turn-scoped — a tool_use_id from this turn
-        // can't possibly match a future dispatch's id, but clearing the map
-        // keeps memory bounded for long-lived chats with many turns.
-        delete subagentLabels.value[chatId]
         persistMessages()
         // Reconcile with the authoritative SDK session. Handles the reconnect
         // case where /messages already had this turn (dedups) and the race

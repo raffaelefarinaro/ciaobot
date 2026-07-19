@@ -2311,10 +2311,21 @@ const renderData = computed<{
     return { items, liveSubs: all, liveStandaloneSubs: [] }
   }
   // Anything still unplaced (turn not in history yet, or no turn info):
-  // leftovers fold into a trace block.
+  // attach to the last turn's trace block so a background subagent reads as
+  // part of that turn's activity — the same single "Activity" group the live
+  // "Working…" view shows — instead of a dangling standalone block. Fall back
+  // to a fresh trace block only when there's no prior trace to attach to.
   const leftovers = [...subsByTurn.values()].flat().concat(unanchoredSubs)
   if (leftovers.length) {
-    items.push({ kind: 'trace', steps: [], subs: leftovers })
+    let lastTrace: RenderItem | undefined
+    for (let i = items.length - 1; i >= 0; i--) {
+      if (items[i].kind === 'trace') { lastTrace = items[i]; break }
+    }
+    if (lastTrace && lastTrace.kind === 'trace') {
+      lastTrace.subs = [...(lastTrace.subs || []), ...leftovers]
+    } else {
+      items.push({ kind: 'trace', steps: [], subs: leftovers })
+    }
   }
   return { items, liveSubs: [], liveStandaloneSubs: [] }
 })
