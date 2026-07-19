@@ -7,17 +7,19 @@
       <template v-if="currentTab === 'home'">
         <!-- Actions -->
         <div class="card">
-          <div class="settings-card-header">
-            <p class="section-title">app actions</p>
-            <p class="hint">Snapshot, sync, or restart this local Ciaobot instance.</p>
-          </div>
-          <div class="action-row action-row--spaced action-row--compact">
-            <button class="btn-primary" @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()" :disabled="!!actionPending">
-              {{ actionPending === 'snapshot' ? (localStatus?.git_repo ? 'Syncing...' : 'Snapshotting...') : (localStatus?.git_repo ? 'Sync with Remote' : 'Git Snapshot') }}
-            </button>
-            <button class="btn-caution" @click="() => doDeploy()" :disabled="!!actionPending" title="Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code">
-              {{ actionPending === 'deploy' ? 'Restarting...' : 'Restart' }}
-            </button>
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">app actions</p>
+              <p class="hint">Snapshot, sync, or restart this local Ciaobot instance.</p>
+            </div>
+            <div class="settings-card-header-actions">
+              <button class="btn-primary btn-small" @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()" :disabled="!!actionPending">
+                {{ actionPending === 'snapshot' ? (localStatus?.git_repo ? 'Syncing...' : 'Snapshotting...') : (localStatus?.git_repo ? 'Sync with Remote' : 'Git Snapshot') }}
+              </button>
+              <button class="btn-caution btn-small" @click="() => doDeploy()" :disabled="!!actionPending" title="Pull latest, reinstall deps, rebuild the frontend, and restart with the latest code">
+                {{ actionPending === 'deploy' ? 'Restarting...' : 'Restart' }}
+              </button>
+            </div>
           </div>
           <div v-if="actionResult" class="action-result" :class="{ 'action-result--error': hasDeployError }">{{ actionResult }}</div>
           <div v-if="hasDeployError" class="deploy-steps">
@@ -78,23 +80,29 @@
           </div>
         </div>
 
+        <!-- Main workspace -->
+        <div v-if="routines && routines.workspace_context" class="card">
+          <div class="settings-card-header">
+            <p class="section-title">main workspace</p>
+            <p class="hint">
+              The server filesystem root for routines, skills, scripts, and runtime state.
+              Set <code>CIAO_WORKSPACE</code> in your <code>.env</code> file, then restart Ciaobot.
+              Logical chat workspaces (sidebar switcher) are managed separately under Settings &rarr; Workspaces.
+            </p>
+          </div>
+          <code class="workspace-root-path">{{ routines.workspace_context.workspace_root }}</code>
+        </div>
+
         <!-- Package update -->
         <div class="card">
-          <div class="settings-card-header">
-            <p class="section-title">package update</p>
-            <p class="hint">Check the installed package version and upgrade this local app.</p>
-          </div>
-          <div v-if="packageLoading && !packageStatus" class="loading">
-            Checking package status...
-          </div>
-          <div v-else-if="packageStatus">
-            <div v-if="packageStatus.error" class="hint hint--warn hint--spaced">
-              Update check failed: {{ packageStatus.error }}
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">package update</p>
+              <p class="hint">Check the installed package version and upgrade this local app.</p>
             </div>
-
-            <div class="action-row action-row--spaced action-row--compact">
+            <div v-if="packageStatus" class="settings-card-header-actions">
               <button
-                :class="packageStatus.update_available ? 'btn-primary' : 'btn-secondary'"
+                :class="packageStatus.update_available ? 'btn-primary btn-small' : 'btn-secondary btn-small'"
                 @click="openUpdatePanel"
                 :disabled="!packageStatus.update_available || packageUpdating || showUpdatePanel"
               >
@@ -102,6 +110,14 @@
                     ? `Update to ${packageStatus.latest_version}`
                     : 'Up to date' }}
               </button>
+            </div>
+          </div>
+          <div v-if="packageLoading && !packageStatus" class="loading">
+            Checking package status...
+          </div>
+          <div v-else-if="packageStatus">
+            <div v-if="packageStatus.error" class="hint hint--warn hint--spaced">
+              Update check failed: {{ packageStatus.error }}
             </div>
 
             <div v-if="showUpdatePanel" class="settings-form-panel">
@@ -138,11 +154,22 @@
 
         <!-- Notifications -->
         <div class="card">
-          <div class="settings-card-header">
-            <p class="section-title">notifications</p>
-            <p class="hint">
-              Get a notification when a chat replies and the app is not focused.
-            </p>
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">notifications</p>
+              <p class="hint">
+                Get a notification when a chat replies and the app is not focused.
+              </p>
+            </div>
+            <div v-if="!needsIosInstall && !permissionDenied && pushSupportedFlag" class="settings-card-header-actions">
+              <button
+                :class="(!pushEnabledFlag && !isMacDesktop()) ? 'btn-primary btn-small' : 'btn-secondary btn-small'"
+                @click="togglePush"
+                :disabled="pushPending"
+              >
+                {{ pushPending ? 'Working...' : (pushEnabledFlag ? 'Disable on this device' : 'Enable on this device') }}
+              </button>
+            </div>
           </div>
           <div v-if="needsIosInstall" class="hint hint--warn">
             On iOS, push notifications only work after you "Add to Home Screen" and open the app from there.
@@ -163,15 +190,6 @@
               You're covered — the menu bar already shows a notification when a chat
               replies and the app isn't focused. Nothing to enable.
             </p>
-            <div class="action-row action-row--compact">
-              <button
-                :class="(!pushEnabledFlag && !isMacDesktop()) ? 'btn-primary' : 'btn-secondary'"
-                @click="togglePush"
-                :disabled="pushPending"
-              >
-                {{ pushPending ? 'Working...' : (pushEnabledFlag ? 'Disable on this device' : 'Enable on this device') }}
-              </button>
-            </div>
             <p v-if="isMacDesktop() && !pushEnabledFlag" class="hint">
               Optional upgrade: for notifications branded as <strong>Ciaobot</strong> that
               open the exact chat (and keep working even if you quit the menu bar), install
@@ -239,15 +257,17 @@
 
         <!-- Debug (dev mode only) -->
         <div v-if="localStatus?.dev_mode" class="card">
-          <div class="settings-card-header">
-            <p class="section-title">debug</p>
-            <p class="hint">Runtime issue log: server errors and failed background jobs. Send it to a chat so the agent can self-fix.</p>
-          </div>
-          <div class="action-row action-row--spaced">
-            <button class="btn-primary" @click="fixIssuesInChat" :disabled="debugPending">
-              {{ debugPending ? 'Collecting issues...' : 'Fix issues in chat' }}
-            </button>
-            <button class="btn-small" @click="refreshDebugIssues" :disabled="debugPending">Refresh</button>
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">debug</p>
+              <p class="hint">Runtime issue log: server errors and failed background jobs. Send it to a chat so the agent can self-fix.</p>
+            </div>
+            <div class="settings-card-header-actions">
+              <button class="btn-primary btn-small" @click="fixIssuesInChat" :disabled="debugPending">
+                {{ debugPending ? 'Collecting issues...' : 'Fix issues in chat' }}
+              </button>
+              <button class="btn-small" @click="refreshDebugIssues" :disabled="debugPending">Refresh</button>
+            </div>
           </div>
           <div v-if="debugSummary" class="action-result">{{ debugSummary }}</div>
         </div>
@@ -281,28 +301,8 @@
               <p class="hint">
                 These tasks use their own model setting, separate from the active chat model.
                 "Automatic" keeps the built-in default. Local Ollama models run on this machine.
-                System automations without a model picker are tracked in Settings &rarr; Automation.
+                System automations without a model picker are tracked on the Automations page.
               </p>
-            </div>
-            <div v-if="routines.workspace_context" class="routine-context">
-              <div>
-                <div class="settings-label-row">
-                  <span class="dev-label">Main workspace</span>
-                  <details class="field-info">
-                    <summary aria-label="How to change the main workspace" title="How to change the main workspace">i</summary>
-                    <div class="field-info-panel">
-                      <p>
-                        This is the server filesystem root for routines, skills, scripts, and runtime state.
-                        Set <code>CIAO_WORKSPACE</code> in your <code>.env</code> file, then restart Ciaobot.
-                      </p>
-                      <p>
-                        Logical chat workspaces (sidebar switcher) are managed separately under Settings &rarr; Workspaces.
-                      </p>
-                    </div>
-                  </details>
-                </div>
-                <code>{{ routines.workspace_context.workspace_root }}</code>
-              </div>
             </div>
 
             <div class="routine-row">
@@ -3898,6 +3898,13 @@ async function doPackageUpdate() {
   padding-bottom: var(--space-3);
   border-bottom: 1px solid var(--border);
 }
+/* No divider when the header is the only element in the card (nothing below
+   it to separate). v-if="false" siblings render as comment nodes, which
+   :last-child ignores, so this also covers cards whose body is conditional. */
+.settings-card-header:last-child {
+  padding-bottom: 0;
+  border-bottom: none;
+}
 .settings-card-header--split {
   flex-direction: row;
   align-items: flex-start;
@@ -4008,6 +4015,14 @@ async function doPackageUpdate() {
   color: var(--warning);
   border-color: color-mix(in srgb, var(--warning) 65%, var(--border));
   background: color-mix(in srgb, var(--warning) 8%, var(--bg3));
+}
+/* When paired with .btn-small, keep the compact size (scoped .btn-caution
+   would otherwise outrank the global .btn-small padding). */
+.btn-caution.btn-small {
+  min-height: 0;
+  padding: 6px 12px;
+  font-size: var(--text-sm);
+  font-weight: 500;
 }
 .btn-caution:hover { background: color-mix(in srgb, var(--warning) 15%, var(--bg3)); }
 .btn-secondary:active,
@@ -4286,24 +4301,14 @@ async function doPackageUpdate() {
 .routine-select::-ms-expand {
   display: none;
 }
-.routine-context {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: var(--space-3) 0;
+.workspace-root-path {
+  display: block;
+  margin-top: var(--space-3);
   padding: var(--space-3);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm, 4px);
   background: color-mix(in srgb, var(--bg) 76%, transparent);
   font-size: var(--text-sm);
-}
-.routine-context > div {
-  display: flex;
-  flex-direction: column;
-  gap: 0.35em;
-  align-items: flex-start;
-}
-.routine-context code {
   overflow-wrap: anywhere;
 }
 .routine-model-controls {

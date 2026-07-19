@@ -256,6 +256,13 @@
           providers
         </router-link>
         <router-link
+          to="/settings/workspaces"
+          class="settings-nav-item"
+          :class="{ active: route.path === '/settings/workspaces' }"
+        >
+          workspaces
+        </router-link>
+        <router-link
           to="/settings/models"
           class="settings-nav-item"
           :class="{ active: route.path === '/settings/models' }"
@@ -268,13 +275,6 @@
           :class="{ active: route.path === '/settings/context' }"
         >
           agent context
-        </router-link>
-        <router-link
-          to="/settings/workspaces"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/workspaces' }"
-        >
-          workspaces
         </router-link>
         <router-link
           to="/settings/skills"
