@@ -279,12 +279,16 @@ def _tool_icon(name: str) -> str:
 def _extract_assistant_blocks(raw: object) -> list[dict]:
     """Return ordered text/tool_use blocks for an assistant message.
 
-    Items: {"kind": "text", "text": str} or
+    Items: {"kind": "text", "text": str},
+           {"kind": "thinking", "text": str}, or
            {"kind": "tool_use", "name": str, "summary": str,
             "file_touch": {file_path, action} | None}.
     ``file_touch`` is populated when the tool mutates a file on disk so the
     PWA can render an inline file card on reload instead of the generic
-    activity row.
+    activity row. ``thinking`` mirrors the live stream's ThinkingEvent so
+    reasoning is tagged as reasoning on reload instead of being dropped or
+    (for providers that persist reasoning as a text block) promoted into the
+    final answer bubble.
     """
     items: list[dict] = []
     if not isinstance(raw, dict):
@@ -308,6 +312,16 @@ def _extract_assistant_blocks(raw: object) -> list[dict]:
             text = block.get("text", "")
             if text.strip():
                 items.append({"kind": "text", "text": text})
+        elif btype in ("thinking", "redacted_thinking"):
+            # Extended-thinking / reasoning blocks. Anthropic stores these as
+            # {"type": "thinking", "thinking": "..."}; the redacted variant is
+            # encrypted and carries no readable text (skip it). Surfacing them
+            # as their own kind lets the history renderer tag them `_thinking`
+            # — matching the live path — so reasoning stays collapsed in the
+            # Activity trace instead of rendering as a normal answer bubble.
+            thought = block.get("thinking") or block.get("text") or ""
+            if isinstance(thought, str) and thought.strip():
+                items.append({"kind": "thinking", "text": thought})
         elif btype == "tool_use":
             name = block.get("name", "")
             tinput = block.get("input") or {}
@@ -558,6 +572,11 @@ def _render_subagent_messages(msgs: Iterable[object]) -> list[dict]:
                     if summary:
                         line += f" {summary}"
                     pending_tools.append(line)
+                elif blk["kind"] == "thinking":
+                    # Subagent reasoning is not surfaced in the transcript
+                    # panel (it was dropped before thinking blocks were
+                    # extracted; skip to keep that behavior).
+                    continue
                 else:
                     flush_tools()
                     text = blk["text"].strip()
@@ -2525,7 +2544,8 @@ async def chat_messages(request: Request) -> JSONResponse:
             # /model or /mode user turn that we skip below.
             text_blocks = [b for b in blocks if b["kind"] == "text"]
             tool_blocks = [b for b in blocks if b["kind"] == "tool_use"]
-            if not tool_blocks and len(text_blocks) == 1:
+            thinking_blocks = [b for b in blocks if b["kind"] == "thinking"]
+            if not tool_blocks and not thinking_blocks and len(text_blocks) == 1:
                 label = _classify_control_ack(text_blocks[0]["text"])
                 if label:
                     result.append({"role": "system", "content": label})
@@ -2572,6 +2592,19 @@ async def chat_messages(request: Request) -> JSONResponse:
                     if summary:
                         line += f" {summary}"
                     pending_tools.append(line)
+                elif blk["kind"] == "thinking":
+                    # Reasoning: tag as `_thinking` so the PWA folds it into the
+                    # collapsed Activity trace (never the final answer bubble),
+                    # matching the live stream. Emit in order relative to tools
+                    # and text by flushing any pending tool group first.
+                    flush_tools()
+                    text = blk["text"].strip()
+                    if text:
+                        result.append({
+                            "role": "system",
+                            "content": text,
+                            "tool_name": "_thinking",
+                        })
                 else:
                     flush_tools()
                     text = blk["text"].strip()

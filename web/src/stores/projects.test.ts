@@ -921,6 +921,36 @@ describe('background agents indicator', () => {
   })
 })
 
+describe('chat_streaming_done clears stale streaming for inactive chats', () => {
+  test('an inactive chat finishing clears its orphaned local streaming flag', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const activeId = 'c-active'
+    const otherId = 'c-other'
+    store.activeChatId = activeId
+    // The user was streaming `otherId`, then switched away: its per-chat WS is
+    // gone but the local optimistic flag is frozen true, and projectStreaming
+    // still reflects the running turn.
+    store.streaming[otherId] = true
+    store.projectStreaming[otherId] = true
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+    sock.onmessage?.({
+      data: JSON.stringify({
+        type: 'chat_streaming_done',
+        chat_id: otherId,
+        project_id: 'p1',
+        is_error: false,
+      }),
+    })
+    // Both flags cleared → the sidebar dot (projectStreaming || streaming)
+    // stops showing "working" without a full reload.
+    expect(store.projectStreaming[otherId]).toBeUndefined()
+    expect(store.streaming[otherId]).toBe(false)
+    expect(store.isChatStreaming(otherId)).toBe(false)
+  })
+})
+
 describe('server restart overlay', () => {
   test('server_restarting over /ws/events flips the global overlay', () => {
     const store = useProjectStore()
