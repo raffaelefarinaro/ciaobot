@@ -460,6 +460,79 @@ async def test_queue_flush_bumps_user_turn_count_per_message(tmp_path: Path) -> 
     assert pcm.get_chat(chat.chat_id).user_turn_count == 3
 
 
+async def test_queued_message_survives_non_retryable_error(tmp_path: Path) -> None:
+    """A follow-up turn that ends in a non-retryable error (not a quota or
+    connection error eligible for auto-retry) must not silently drop whatever
+    was still queued behind it. Regression: `_drive()` popped the next queued
+    message off the stream before checking `had_error`, then discarded it on
+    `break` without parking it — so with two messages queued, the first got
+    sent as a follow-up turn and the second vanished when that turn errored.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q3-error-drop", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="error-drop-test")
+
+    first_turn_ready = asyncio.Event()
+    turn_calls: list[str] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None):
+        turn_calls.append(prompt)
+        if prompt == "initial":
+            await first_turn_ready.wait()
+            yield ResultEvent(
+                type="result",
+                result="assistant answer",
+                session_id="sess-x",
+                is_error=False,
+                effective_model=chat.model,
+                usage={},
+                quota={},
+                cost_usd=0.0,
+            )
+            return
+        # The follow-up turn (msg A) fails with a non-retryable error: not a
+        # quota or connection error, so it must not auto-retry, and any
+        # message still queued behind it must be parked, not dropped.
+        yield ResultEvent(
+            type="result",
+            result="permission denied: tool X is not allowed",
+            session_id="sess-x",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    captured: list[dict] = []
+
+    async def consume(stream) -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    consumer = asyncio.create_task(consume(stream))
+
+    await _wait_for(
+        lambda: any(e.get("type") == "user_echo" for e in captured),
+        timeout=2.0,
+    )
+
+    assert pcm.queue_message(chat.chat_id, "msg A") is True
+    assert pcm.queue_message(chat.chat_id, "msg B") is True
+
+    first_turn_ready.set()
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    # msg A was sent as a follow-up turn and errored; msg B must be parked on
+    # the chat rather than lost.
+    assert turn_calls == ["initial", "msg A"], turn_calls
+    parked = pcm._chats[chat.chat_id].pending_queue
+    assert [p["text"] for p in parked] == ["msg B"], parked
+
+
 def test_chat_stream_pending_reorder_edit_remove() -> None:
     """ChatStream exposes stable ids and supports reorder/edit/remove."""
     stream = ChatStream("hello")

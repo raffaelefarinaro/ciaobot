@@ -5029,6 +5029,18 @@ class ProjectChatManager:
                                     had_progress=had_provider_progress,
                                     reason=error_msg,
                                 )
+                            # Defensive: a no-op if _arm_retry already parked
+                            # (drain_pending on an already-drained stream
+                            # returns []). Covers the non-retryable case,
+                            # where nothing above parks the queue and it
+                            # would otherwise be lost when `finally` tears
+                            # the stream down.
+                            parked = stream.drain_pending()
+                            if parked:
+                                cm_park = self._chats.get(chat_id)
+                                if cm_park is not None:
+                                    cm_park.pending_queue = list(parked)
+                                    self._save()
                             break
 
                     if turn_assistant_text:
@@ -5060,6 +5072,17 @@ class ProjectChatManager:
                         if next_pending is not None:
                             had_error = False
                     if next_pending is None or had_error:
+                        if had_error and next_pending is not None:
+                            # A real error broke the loop after we'd already
+                            # popped the next queued message (and possibly
+                            # more behind it) for the follow-up turn. Park
+                            # all of it instead of letting it vanish when
+                            # `finally` tears the stream down.
+                            remaining = stream.drain_pending()
+                            cm_park = self._chats.get(chat_id)
+                            if cm_park is not None:
+                                cm_park.pending_queue = [next_pending, *remaining]
+                                self._save()
                         break
 
                     combined_text = next_pending.get("text", "").strip()
