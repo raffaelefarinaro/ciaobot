@@ -34,6 +34,7 @@ from dataclasses import dataclass
 import logging
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
+from urllib.parse import urlsplit
 from typing import Any
 
 from claude_agent_sdk import (
@@ -123,6 +124,57 @@ _CONNECTION_DROP_MESSAGE = (
 def _is_connection_drop_text(text: str) -> bool:
     low = (text or "").lower()
     return any(marker in low for marker in _CONNECTION_DROP_MARKERS)
+
+
+# A name-resolution / connect failure surfaces from the Claude CLI as a generic
+# "API Error: Unable to connect to API (ENOTFOUND)" with no host, so an operator
+# reading a failed schedule can't tell which endpoint failed to resolve (the
+# Anthropic API, an OpenRouter/Ollama gateway, a custom ANTHROPIC_BASE_URL...).
+# We know the endpoint the turn was pointed at, so annotate the error with it.
+# See issue #162.
+_HOSTLESS_CONNECT_MARKERS = (
+    "unable to connect",
+    "enotfound",
+    "econnrefused",
+    "etimedout",
+    "getaddrinfo",
+    "name resolution",
+    "failed to fetch",
+)
+
+
+def _resolve_api_host(env: dict[str, str]) -> str:
+    """Hostname the spawned CLI will talk to for this turn.
+
+    Prefers the per-turn ``ANTHROPIC_BASE_URL`` override (Ollama / OpenRouter
+    routing) and falls back to the process env, then Anthropic's default.
+    """
+    base = (
+        env.get("ANTHROPIC_BASE_URL")
+        or os.environ.get("ANTHROPIC_BASE_URL")
+        or "https://api.anthropic.com"
+    )
+    try:
+        return urlsplit(base).hostname or ""
+    except ValueError:
+        return ""
+
+
+def _annotate_connection_host(text: str, host: str) -> str:
+    """Append ``host`` to a hostless connection-error result string.
+
+    No-op unless the text reads as a DNS/connect failure and doesn't already
+    name the host, so ordinary errors and already-annotated ones pass through
+    untouched.
+    """
+    if not host or not text:
+        return text
+    low = text.lower()
+    if not any(marker in low for marker in _HOSTLESS_CONNECT_MARKERS):
+        return text
+    if host.lower() in low:
+        return text
+    return f"{text} (host: {host})"
 
 # The claude-agent-sdk reads the CLI subprocess stdout into a bounded decode
 # buffer (default 1 MiB, ``_DEFAULT_MAX_BUFFER_SIZE``) and raises a fatal,
@@ -379,6 +431,9 @@ class ClaudeProvider(BaseSDKProvider):
         # the session is held by a background agent. The next connect
         # attempt re-resumes with ``--fork-session`` to branch a copy.
         self._fork_resume_next = False
+        # Hostname the CLI is pointed at for the in-flight turn, captured at
+        # connect time so a hostless connection error can name its endpoint.
+        self._api_host = ""
         # Runtime root: state_path.parent on CiaoConfig; fall back to
         # workspace_root/.runtime when config is absent (tests).
         runtime_root = Path(
@@ -419,6 +474,9 @@ class ClaudeProvider(BaseSDKProvider):
 
     async def _ensure_connected(self, request: AgentRequest) -> ClaudeSDKClient:
         requested_model = request.model
+        # Refresh every turn: a reused client can still change host if the
+        # chat's routing env changed, and errors annotate against this value.
+        self._api_host = _resolve_api_host(request.extra_env or {})
         if (
             self._client is not None
             and self._connected
@@ -1015,10 +1073,13 @@ class ClaudeProvider(BaseSDKProvider):
             usage = self._extract_usage(msg)
             quota = self._pending_quota or self._extract_quota(msg)
             self._pending_quota = {}
+            result_text = msg.result or ""
+            if msg.is_error:
+                result_text = _annotate_connection_host(result_text, self._api_host)
             return [
                 ResultEvent(
                     type="result",
-                    result=msg.result or "",
+                    result=result_text,
                     session_id=self._session_id,
                     is_error=msg.is_error,
                     effective_model=self._extract_effective_model(msg),

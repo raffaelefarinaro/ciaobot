@@ -465,6 +465,67 @@ def test_claude_convert_result_message(
     assert result.is_error is False
 
 
+def test_claude_error_result_gets_host_annotation(
+    claude_provider: ClaudeProvider,
+) -> None:
+    """A hostless connection error gains the resolved endpoint host (#162)."""
+    from claude_agent_sdk import ResultMessage
+
+    claude_provider._api_host = "api.anthropic.com"
+    msg = ResultMessage(
+        subtype="result",
+        duration_ms=1000,
+        duration_api_ms=900,
+        is_error=True,
+        num_turns=1,
+        session_id="sess-enotfound",
+        result="API Error: Unable to connect to API (ENOTFOUND)",
+    )
+    result = claude_provider._convert_message(msg)[0]
+    assert result.is_error is True
+    assert "(host: api.anthropic.com)" in result.result
+
+
+def test_claude_error_result_annotation_is_selective(
+    claude_provider: ClaudeProvider,
+) -> None:
+    """Non-connection errors and success results pass through untouched (#162)."""
+    from claude_agent_sdk import ResultMessage
+
+    from ciao.providers.claude import _annotate_connection_host, _resolve_api_host
+
+    claude_provider._api_host = "api.anthropic.com"
+    # A non-connection error is not annotated.
+    other = claude_provider._convert_message(
+        ResultMessage(
+            subtype="result",
+            duration_ms=1,
+            duration_api_ms=1,
+            is_error=True,
+            num_turns=1,
+            session_id="s",
+            result="Model refused the request.",
+        )
+    )[0]
+    assert "host:" not in other.result
+
+    # Already naming the host: no double-annotation.
+    assert (
+        _annotate_connection_host(
+            "getaddrinfo ENOTFOUND api.anthropic.com", "api.anthropic.com"
+        )
+        == "getaddrinfo ENOTFOUND api.anthropic.com"
+    )
+    # A per-turn ANTHROPIC_BASE_URL override (Ollama/OpenRouter) wins.
+    assert (
+        _resolve_api_host({"ANTHROPIC_BASE_URL": "https://openrouter.ai/api/v1"})
+        == "openrouter.ai"
+    )
+    # Falls back to a real hostname (process env or Anthropic's default),
+    # never an empty string.
+    assert _resolve_api_host({})
+
+
 @pytest.mark.asyncio
 async def test_prompt_payload_is_async_iterable_without_images(
     claude_provider: ClaudeProvider,
