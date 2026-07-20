@@ -312,6 +312,48 @@ async def test_queued_messages_survive_question_pause_and_flush_after_answer(
     assert pcm._chats[chat.chat_id].pending_queue == []
 
 
+async def test_queue_edit_remove_reorder_operate_on_parked_queue(tmp_path: Path) -> None:
+    """reorder_queue/edit_queue/remove_queue must not silently no-op once the
+    stream that queued them has torn down (error, question-pause, retry-armed
+    — anything that parks onto `chat.pending_queue`). Regression: they only
+    ever touched the live ChatStream's in-memory queue via `self._broker.get`,
+    so once that returned None they returned False without checking the
+    persisted parked queue — the client's QUEUED chip would show an edit or
+    removal as successful (optimistic UI) while the original, untouched
+    message still flushed on the next turn.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q3-parked-ops", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="parked-ops-test")
+
+    # No live stream for this chat — simulates a turn that already tore down
+    # after parking its queue (e.g. a non-retryable error, or question-pause).
+    assert pcm.get_active_stream(chat.chat_id) is None
+    pcm._chats[chat.chat_id].pending_queue = [
+        {"id": "q-1", "text": "msg A", "images": []},
+        {"id": "q-2", "text": "msg B", "images": []},
+        {"id": "q-3", "text": "msg C", "images": []},
+    ]
+
+    # Edit operates on the parked queue, not a no-op.
+    assert pcm.edit_queue(chat.chat_id, "q-2", "msg B edited") is True
+    parked = pcm._chats[chat.chat_id].pending_queue
+    assert [p["text"] for p in parked] == ["msg A", "msg B edited", "msg C"], parked
+
+    # Reorder likewise.
+    assert pcm.reorder_queue(chat.chat_id, "q-3", before_id="q-1") is True
+    parked = pcm._chats[chat.chat_id].pending_queue
+    assert [p["id"] for p in parked] == ["q-3", "q-1", "q-2"], parked
+
+    # Remove likewise.
+    assert pcm.remove_queue(chat.chat_id, "q-1") is True
+    parked = pcm._chats[chat.chat_id].pending_queue
+    assert [p["id"] for p in parked] == ["q-3", "q-2"], parked
+
+    # Unknown entry id still correctly fails.
+    assert pcm.remove_queue(chat.chat_id, "nope") is False
+
+
 async def test_new_session_clears_parked_question_queue(tmp_path: Path) -> None:
     """Starting a fresh session abandons a paused question and any follow-ups
     parked for its answer turn — they must not leak into the new conversation.

@@ -72,7 +72,14 @@ from ciao.providers.routing import intended_backend, routing_env_for_model
 from ciao.provider_service import ProviderService, supported_providers
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore, _claude_projects_dir
-from ciao.web.chat_broker import ChatStream, ChatStreamBroker, EventsHub
+from ciao.web.chat_broker import (
+    ChatStream,
+    ChatStreamBroker,
+    EventsHub,
+    edit_pending_list,
+    remove_pending_list,
+    reorder_pending_list,
+)
 from ciao.web.commands import expand_slash_command
 from ciao.web.file_snapshots import SnapshotStore
 
@@ -4329,18 +4336,27 @@ class ProjectChatManager:
         entry_id: str,
         before_id: str | None = None,
     ) -> bool:
-        """Move a queued message within the active stream's pending queue.
+        """Move a queued message within the pending queue.
 
         ``before_id`` is the id of the entry the moved entry should precede;
-        None moves it to the end. Returns True if the stream existed and the
-        entry was found.
+        None moves it to the end. Operates on the active stream's in-memory
+        queue if one exists, otherwise falls back to the persisted
+        ``chat.pending_queue`` (a stream tears down on error/question-pause/
+        retry-armed, but the parked queue outlives it and the client's chip
+        UI must stay truthful about it). Returns True if the entry was found.
         """
         stream = self._broker.get(chat_id)
-        if stream is None or stream.background:
+        if stream is not None and not stream.background:
+            if not stream.reorder_pending(entry_id, before_id):
+                return False
+            stream.publish({"type": "queue_state", "queue": stream.pending})
+            return True
+        chat = self._chats.get(chat_id)
+        if chat is None:
             return False
-        if not stream.reorder_pending(entry_id, before_id):
+        if not reorder_pending_list(chat.pending_queue, entry_id, before_id):
             return False
-        stream.publish({"type": "queue_state", "queue": stream.pending})
+        self._save()
         return True
 
     def edit_queue(
@@ -4350,28 +4366,40 @@ class ProjectChatManager:
         text: str,
         images: list[ImageAttachment] | None = None,
     ) -> bool:
-        """Update an existing queued message."""
-        stream = self._broker.get(chat_id)
-        if stream is None or stream.background:
-            return False
+        """Update an existing queued message (live stream, else parked queue)."""
         image_refs: list[str] = []
         for img in images or []:
             ref = getattr(img, "ref", None) or getattr(img, "original_filename", None)
             if ref:
                 image_refs.append(str(ref))
-        if not stream.edit_pending(entry_id, text, image_refs):
+        stream = self._broker.get(chat_id)
+        if stream is not None and not stream.background:
+            if not stream.edit_pending(entry_id, text, image_refs):
+                return False
+            stream.publish({"type": "queue_state", "queue": stream.pending})
+            return True
+        chat = self._chats.get(chat_id)
+        if chat is None:
             return False
-        stream.publish({"type": "queue_state", "queue": stream.pending})
+        if not edit_pending_list(chat.pending_queue, entry_id, text, image_refs):
+            return False
+        self._save()
         return True
 
     def remove_queue(self, chat_id: str, entry_id: str) -> bool:
-        """Remove a queued message."""
+        """Remove a queued message (live stream, else parked queue)."""
         stream = self._broker.get(chat_id)
-        if stream is None or stream.background:
+        if stream is not None and not stream.background:
+            if not stream.remove_pending(entry_id):
+                return False
+            stream.publish({"type": "queue_state", "queue": stream.pending})
+            return True
+        chat = self._chats.get(chat_id)
+        if chat is None:
             return False
-        if not stream.remove_pending(entry_id):
+        if not remove_pending_list(chat.pending_queue, entry_id):
             return False
-        stream.publish({"type": "queue_state", "queue": stream.pending})
+        self._save()
         return True
 
     @property
