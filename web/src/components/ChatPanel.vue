@@ -672,11 +672,11 @@
         class="permission-card"
       >
         <div class="permission-header">
-          <span class="permission-icon">&#128679;</span>
+          <svg class="permission-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3.5v5c0 4.5-3 7.75-7 9-4-1.25-7-4.5-7-9v-5L12 3z"/><path d="M12 8v5"/><path d="M12 16h.01"/></svg>
           <span class="permission-tool">{{ p.tool_name }}</span>
-          <span class="permission-message">{{ p.message }}</span>
+          <span v-if="permissionReason(p)" class="permission-message">{{ permissionReason(p) }}</span>
         </div>
-        <pre v-if="p.tool_input" class="permission-input">{{ p.tool_input }}</pre>
+        <pre v-if="p.tool_input" class="permission-input">{{ formatToolInput(p.tool_input) }}</pre>
         <div class="permission-actions">
           <button
             class="btn-deny"
@@ -1220,6 +1220,26 @@ const pendingApprovals = computed(() => {
   if (!id) return []
   return store.pendingPermissions[id] || []
 })
+
+// The backend's `message` field is almost always the templated
+// "Approve use of {tool_name}?" (see permission_gate.py / codex.py), which
+// just repeats the tool-name badge shown right next to it. Only surface it
+// when it actually carries something the badge doesn't (e.g. Codex's
+// model-supplied `reason` string).
+function permissionReason(p: { tool_name: string; message: string }) {
+  return p.message && p.message !== `Approve use of ${p.tool_name}?` ? p.message : ''
+}
+
+// tool_input is opaque server text — usually compact JSON, sometimes a bare
+// shell command or reason sentence. Pretty-print only when it parses;
+// otherwise fall back to showing it verbatim rather than guessing at structure.
+function formatToolInput(raw: string) {
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2)
+  } catch {
+    return raw
+  }
+}
 
 // AskUserQuestion picker. The headless CLI can't render the SDK's built-in
 // picker, so the model's tool call lands with an empty result; the PWA owns
@@ -4509,8 +4529,9 @@ details[open] > .activity-summary::before {
 .question-card-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 /* Pending Auto-mode permission prompts. Sticks above the input until the
-   user answers. Warmer accent color than the queued chips, because this
-   is a blocking action (the turn is waiting on the user). */
+   user answers. Chrome uses --warning (this is a "waiting on you" state,
+   not an action) so --accent reads as a single, unambiguous signal on the
+   Approve button rather than being smeared across the whole card. */
 .permission-requests {
   display: flex;
   flex-direction: column;
@@ -4529,16 +4550,16 @@ details[open] > .activity-summary::before {
   gap: 6px;
   padding: 10px 12px;
   background: var(--bg);
-  border: 1px solid var(--accent);
-  border-left: 3px solid var(--accent);
+  border: 1px solid var(--warning);
+  border-left: 3px solid var(--warning);
   border-radius: var(--radius);
   font-size: 13px;
   animation: permission-pulse 1.4s ease-out;
 }
 
 @keyframes permission-pulse {
-  0% { box-shadow: 0 0 0 0 rgba(233, 69, 96, 0.4); }
-  100% { box-shadow: 0 0 0 8px rgba(233, 69, 96, 0); }
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--warning) 40%, transparent); }
+  100% { box-shadow: 0 0 0 8px color-mix(in srgb, var(--warning) 0%, transparent); }
 }
 
 .permission-header {
@@ -4551,7 +4572,9 @@ details[open] > .activity-summary::before {
 }
 
 .permission-icon {
-  font-size: 14px;
+  width: 14px;
+  height: 14px;
+  color: var(--warning);
   flex-shrink: 0;
 }
 
@@ -4559,7 +4582,7 @@ details[open] > .activity-summary::before {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--warning);
   background: var(--bg2);
   padding: 1px 6px;
   border-radius: 3px;
