@@ -296,6 +296,8 @@ def _is_retryable_quota_error(text: str) -> bool:
     low = (text or "").lower()
     if "reached your session usage limit" in low:
         return True
+    if any(needle in low for needle in ("out of credit", "out of credits", "spend limit", "insufficient credit", "credit balance")):
+        return True
     if "429" not in low and "too many requests" not in low:
         return False
     return any(needle in low for needle in ("usage limit", "rate limit", "quota", "session"))
@@ -4171,6 +4173,7 @@ class ProjectChatManager:
             context_label=chat.title,
             provider=chat.provider,
             tool_events=tool_events,
+            is_error=had_error,
         )
 
         # Update global cost

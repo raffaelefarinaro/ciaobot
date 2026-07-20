@@ -528,6 +528,12 @@ def test_connection_drop_banner_classified_as_connection_error() -> None:
     # It is NOT a quota error — must not be routed to the hourly retry path.
     assert _is_retryable_quota_error(banner) is False
 
+    # Out of credits / spend limits must be classified as retryable quota errors
+    credits_err = "Title generation via codex gpt-5.6-terra failed: Your workspace is out of credits. Ask your workspace owner to refill in order to continue."
+    spend_limit_err = "You've hit your org's monthly spend limit"
+    assert _is_retryable_quota_error(credits_err) is True
+    assert _is_retryable_quota_error(spend_limit_err) is True
+
 
 def test_provider_detects_connection_drop_text() -> None:
     from ciao.providers.claude import _is_connection_drop_text

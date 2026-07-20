@@ -2472,11 +2472,22 @@ async def chat_messages(request: Request) -> JSONResponse:
         if thread is not None:
             rendered = _render_codex_thread(thread, chat)
             if rendered:
+                current = pcm._transcripts.current_messages(
+                    ChatContext.for_web(chat_id), "codex"
+                )
+                if current and current[-1].get("role") == "assistant" and current[-1].get("is_error"):
+                    has_error_in_rendered = False
+                    for row in reversed(rendered):
+                        if row.get("role") == "assistant":
+                            if row.get("is_error") or row.get("content") == current[-1].get("content"):
+                                has_error_in_rendered = True
+                            break
+                    if not has_error_in_rendered:
+                        err_msg = dict(current[-1])
+                        rendered.append(err_msg)
                 _overlay_codex_transcript_metadata(
                     rendered,
-                    pcm._transcripts.current_messages(
-                        ChatContext.for_web(chat_id), "codex"
-                    ),
+                    current,
                 )
                 return JSONResponse(handover_messages + rendered)
         current = pcm._transcripts.current_messages(
@@ -2619,8 +2630,11 @@ async def chat_messages(request: Request) -> JSONResponse:
         content = content.strip()
         if not content:
             continue
-        # Drop allowed rate limit status events so they do not pollute the chat history.
-        if m.type == "system" and "Rate limit: allowed" in content and "allowed_warning" not in content:
+        # Drop "allowed" rate limit status events — both the plain allowance
+        # pings and the escalating "allowed_warning … NN% used" ticks — so
+        # transient usage telemetry does not pollute the chat history. A hard
+        # "Rate limit exceeded" carries no "allowed" and still surfaces.
+        if m.type == "system" and "Rate limit: allowed" in content:
             continue
         # Drop SDK-injected control slash commands (/model, /mode). Skipping
         # without incrementing user_idx keeps chat.user_turn_images aligned
