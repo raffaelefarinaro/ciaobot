@@ -325,6 +325,9 @@ class CiaoConfig:
     # Models tab (runtime settings store) or ``CIAO_INSIGHTS_MODEL``.
     # Empty = automatic routing: the workspace's sonnet-tier model.
     insights_model_override: str = ""
+    # Asynchronously backfill missing insights on server startup.
+    # Enable with ``CIAO_INSIGHTS_BACKFILL_ON_STARTUP=1``.
+    insights_backfill_on_startup: bool = False
     # Trajectory capture: when a chat is archived, also write a structured
     # JSON record of skills loaded, tools used, errors, decisions, and the
     # outcome to ``~/.ciao/trajectories/YYYY-MM/<session-id>.json``. The
@@ -773,6 +776,10 @@ class CiaoConfig:
                 source.get("CIAO_INSIGHTS_MIN_TURNS", "5") or "5"
             ),
             insights_model_override=source.get("CIAO_INSIGHTS_MODEL", "").strip(),
+            insights_backfill_on_startup=source.get(
+                "CIAO_INSIGHTS_BACKFILL_ON_STARTUP", "false"
+            ).strip().lower()
+            not in {"0", "false", "no", "off"},
             trajectories_enabled=source.get(
                 "CIAO_TRAJECTORIES_DISABLED", ""
             ).strip().lower()

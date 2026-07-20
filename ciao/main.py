@@ -365,6 +365,18 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         tracker.start("update_skills")
         asyncio.create_task(asyncio.to_thread(_skills_task))
 
+    if config.insights_backfill_on_startup:
+        tracker.start("backfill_insights")
+        async def _backfill_task():
+            try:
+                from ciao.insights import backfill_insights_task
+                await backfill_insights_task(config)
+                tracker.done("backfill_insights")
+            except Exception:
+                tracker.fail("backfill_insights", "backfill failed")
+                logger.exception("Insights backfill failed")
+        asyncio.create_task(_backfill_task())
+
     # Initialize stores
     state = StateStore(
         config.state_path,

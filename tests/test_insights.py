@@ -506,3 +506,79 @@ def test_extract_skips_project_doc_when_path_empty(
         ))
 
     assert doc.read_text(encoding="utf-8") == _PROJECT_DOC
+
+
+# ── backfill_insights_task ───────────────────────────────────────────────
+
+
+def test_backfill_insights_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Set up directory layout
+    vault_root = tmp_path / "vault"
+    workspace_root = tmp_path / "ws"
+    
+    chats_dir = vault_root / "memory-vault" / "Logs" / "Chats" / "chat-123" / "claude"
+    chats_dir.mkdir(parents=True)
+    
+    # 1. Archive already done
+    done_archive = chats_dir / "already-done-00000000-0000-0000-0000-000000000001.md"
+    done_archive.write_text("# Archived chat\n\n## Session insights\n- old insights", encoding="utf-8")
+    
+    # 2. Archive to be backfilled (full mode)
+    full_archive = chats_dir / "full-mode-00000000-0000-0000-0000-000000000002.md"
+    full_archive.write_text("# Archived chat full\n", encoding="utf-8")
+    
+    # 3. Archive to be backfilled (text fallback mode)
+    text_archive = chats_dir / "text-mode-00000000-0000-0000-0000-000000000003.md"
+    text_archive.write_text("# Archived chat text\n", encoding="utf-8")
+    
+    # Create the jsonl for full mode
+    fake_home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    
+    # normal project directory path
+    slug = str(workspace_root).replace("/", "-").lstrip("-")
+    project_dir = fake_home / ".claude" / "projects" / f"-{slug}"
+    project_dir.mkdir(parents=True)
+    
+    session2_id = "00000000-0000-0000-0000-000000000002"
+    jsonl = project_dir / f"{session2_id}.jsonl"
+    _write_jsonl(jsonl, [
+        {"type": "user", "message": {"content": "hello"}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "hi back"}]}},
+    ])
+    
+    config = _config()
+    config.vault_root = vault_root
+    config.workspace_root = workspace_root
+    config.insights_model = "deepseek-v4-flash:cloud"
+    
+    calls = []
+    
+    async def fake_oneshot(user_prompt: str, **kwargs) -> str:
+        calls.append((user_prompt, kwargs))
+        if "JSONL" in user_prompt or "line-oriented JSON" in user_prompt:
+            return "## Decisions\n- Full mode decisions\n"
+        else:
+            return "## Decisions\n- Text mode decisions\n"
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+
+    asyncio.run(insights.backfill_insights_task(
+        config,
+        mode="both",
+        concurrency=1,
+    ))
+    
+    # Check that already_done was skipped (no content change)
+    assert done_archive.read_text(encoding="utf-8") == "# Archived chat\n\n## Session insights\n- old insights"
+    
+    # Check full mode was processed with JSONL
+    full_text = full_archive.read_text(encoding="utf-8")
+    assert "## Session insights" in full_text
+    assert "Full mode decisions" in full_text
+    
+    # Check text mode fallback was processed
+    text_text = text_archive.read_text(encoding="utf-8")
+    assert "## Session insights" in text_text
+    assert "Text mode decisions" in text_text
+
