@@ -303,6 +303,16 @@ def _is_retryable_quota_error(text: str) -> bool:
     return any(needle in low for needle in ("usage limit", "rate limit", "quota", "session"))
 
 
+def _is_billing_or_spend_limit_error(text: str) -> bool:
+    low = (text or "").lower()
+    if "reached your session usage limit" in low:
+        return True
+    if any(needle in low for needle in ("out of credit", "out of credits", "spend limit", "insufficient credit", "credit balance")):
+        return True
+    return False
+
+
+
 def _is_retryable_connection_error(text: str) -> bool:
     low = (text or "").lower()
     connection_indicators = (
@@ -4954,9 +4964,9 @@ class ProjectChatManager:
                                     # are safe to resume even mid-response —
                                     # _arm_retry resumes the session with
                                     # "continue" rather than replaying.
-                                    if (
+                                    if _is_retryable_quota_error(result_text) and (
                                         not had_provider_progress
-                                        and _is_retryable_quota_error(result_text)
+                                        or _is_billing_or_spend_limit_error(result_text)
                                     ):
                                         self._arm_retry(
                                             chat_id,
@@ -4996,9 +5006,9 @@ class ProjectChatManager:
                                 error_msg = f"{error_msg}\n{stderr}"
                             stream.publish({"type": "error", "message": error_msg})
                             had_error = True
-                            if (
+                            if _is_retryable_quota_error(error_msg) and (
                                 not had_provider_progress
-                                and _is_retryable_quota_error(error_msg)
+                                or _is_billing_or_spend_limit_error(error_msg)
                             ):
                                 self._arm_retry(
                                     chat_id,

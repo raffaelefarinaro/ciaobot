@@ -518,6 +518,7 @@ def test_connection_drop_banner_classified_as_connection_error() -> None:
     from ciao.web.project_chats import (
         _is_retryable_connection_error,
         _is_retryable_quota_error,
+        _is_billing_or_spend_limit_error,
     )
 
     banner = (
@@ -531,8 +532,15 @@ def test_connection_drop_banner_classified_as_connection_error() -> None:
     # Out of credits / spend limits must be classified as retryable quota errors
     credits_err = "Title generation via codex gpt-5.6-terra failed: Your workspace is out of credits. Ask your workspace owner to refill in order to continue."
     spend_limit_err = "You've hit your org's monthly spend limit"
+    rate_limit_err = "API Error: Request rejected (429): rate limit exceeded"
     assert _is_retryable_quota_error(credits_err) is True
     assert _is_retryable_quota_error(spend_limit_err) is True
+    assert _is_retryable_quota_error(rate_limit_err) is True
+
+    assert _is_billing_or_spend_limit_error(credits_err) is True
+    assert _is_billing_or_spend_limit_error(spend_limit_err) is True
+    assert _is_billing_or_spend_limit_error(rate_limit_err) is False
+
 
 
 def test_provider_detects_connection_drop_text() -> None:
@@ -671,3 +679,74 @@ async def test_midresponse_drop_stops_after_retry_cap(tmp_path: Path) -> None:
     assert not any(
         e.get("type") == "chat_retry" and e.get("status") == "pending" for e in events
     )
+
+
+async def test_billing_spend_limit_error_with_progress_arms_retry(tmp_path: Path) -> None:
+    """Billing and spend limit errors must trigger auto-retry even after provider progress."""
+    from ciao.models import AssistantTextDelta
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+
+    async def fake_stream_chat(chat_id, prompt, images=None):
+        yield AssistantTextDelta(type="assistant", text="some progress... ")
+        yield ResultEvent(
+            type="result",
+            result="You've hit your org's monthly spend limit · run /usage-credits to ask your admin for a higher limit",
+            session_id="sess-billing",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "do the thing")
+    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status == "pending"
+    assert updated.retry_prompt == "do the thing"
+    assert any(
+        e.get("type") == "chat_retry" and e.get("status") == "pending" for e in events
+    )
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_rate_limit_error_with_progress_does_not_arm_retry(tmp_path: Path) -> None:
+    """Rate limit errors must NOT trigger auto-retry after provider progress."""
+    from ciao.models import AssistantTextDelta
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+
+    async def fake_stream_chat(chat_id, prompt, images=None):
+        yield AssistantTextDelta(type="assistant", text="some progress... ")
+        yield ResultEvent(
+            type="result",
+            result="API Error: Request rejected (429): rate limit exceeded",
+            session_id="sess-rate",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "do the thing")
+    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status != "pending"
+    assert not any(
+        e.get("type") == "chat_retry" and e.get("status") == "pending" for e in events
+    )
+
