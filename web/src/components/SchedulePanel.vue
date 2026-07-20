@@ -366,10 +366,10 @@
 
     <!-- Overview homepage: shown when nothing is selected but automations exist -->
     <div v-else-if="workspaceSchedules.length || workspaceLoops.length" class="scroll-body overview-body">
-      <div class="ov-card">
-        <div class="ov-head">
-          <span class="ov-dot"></span>
-          Schedules vs loops
+      <div class="ov-card ov-card--info">
+        <div class="ov-head ov-head--info">
+          <span class="ov-info-icon" aria-hidden="true">i</span>
+          How automations work
         </div>
         <p class="ov-explain">
           <strong>Schedules</strong> fire at a time of day — daily, weekly, monthly, or once —
@@ -382,6 +382,12 @@
           chat's model to change the loop's. Loops set to <strong>start with the server</strong>
           resume on boot; the others stay stopped until started manually. If an iteration is still
           running when the next one is due, the loop skips it and retries shortly after.
+        </p>
+        <p class="ov-explain">
+          <strong>Auto-archive</strong> keeps the list tidy. Set a schedule's archive behavior to
+          <strong>automatic</strong> and, after each clean run, a classifier checks the result —
+          if there's nothing for you to judge (no proposals, decisions, or warnings) the chat is
+          archived out of the way. Anything worth your attention stays visible.
         </p>
       </div>
 
@@ -1331,6 +1337,27 @@ function closeSchedule() {
 .ov-card--alert {
   border-color: var(--warning);
   box-shadow: inset 3px 0 0 var(--warning);
+}
+.ov-card--info {
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg2));
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.ov-head--info { color: var(--accent); }
+.ov-info-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--bg);
+  font-size: 11px;
+  font-weight: 700;
+  font-style: italic;
+  line-height: 1;
 }
 .ov-head {
   display: flex;
