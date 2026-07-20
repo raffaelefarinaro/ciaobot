@@ -2253,10 +2253,16 @@ const renderData = computed<{
     // as an attribute of the reply. Only when the turn produced no answer bubble
     // (still in progress / interrupted) do they fall back to the activity trace.
     const traceSubchats = finalMsg ? [] : turnSubchats
-    if (intermediate.length) {
+    // A turn gets exactly ONE "Activity" group. Tool calls / file writes the
+    // model runs AFTER emitting its answer text (`trailing`) are bookkeeping —
+    // they belong in the same trace as the pre-answer steps, not a second
+    // dangling "Activity" block below the reply. Fold them into one block that
+    // renders before the answer.
+    const traceSteps = [...intermediate, ...trailing]
+    if (traceSteps.length) {
       items.push({
         kind: 'trace',
-        steps: intermediate,
+        steps: traceSteps,
         ...(traceSubs.length ? { subs: traceSubs } : {}),
         ...(!finalMsg && turnOutputs.length ? { outputs: turnOutputs } : {}),
         ...(traceSubchats.length ? { subchats: traceSubchats } : {}),
@@ -2276,9 +2282,6 @@ const renderData = computed<{
         ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
         ...(turnSubchats.length ? { subchats: turnSubchats } : {}),
       })
-    }
-    if (trailing.length) {
-      items.push({ kind: 'trace', steps: trailing })
     }
     buffer = []
   }
