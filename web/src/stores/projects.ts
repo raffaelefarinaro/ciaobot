@@ -3188,7 +3188,11 @@ export const useProjectStore = defineStore('projects', () => {
         // those belong in the Activity trace via tool_use, not as chat lines.
         const message = (event.message || '').trim()
         const ephemeral = new Set(['thinking', 'stopped', 'requesting', 'rate_limit', 'model_rerouted'])
-        const isAllowedRateLimit = message.includes('Rate limit: allowed') && !message.includes('allowed_warning')
+        // Drop "allowed" rate-limit telemetry — the plain allowance pings and
+        // the escalating "allowed_warning … NN% used" ticks alike. They are
+        // usage status, not conversation, and one chat line per 1% is noise.
+        // A hard "Rate limit exceeded" carries no "allowed" and still shows.
+        const isAllowedRateLimit = message.includes('Rate limit: allowed')
         if (message && !ephemeral.has(message) && !message.startsWith('error:') && !isAllowedRateLimit) {
           msgs.push({
             role: 'system',

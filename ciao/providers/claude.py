@@ -1097,7 +1097,12 @@ class ClaudeProvider(BaseSDKProvider):
                 self._rate_limit_store.update(msg.rate_limit_info)
             except Exception:  # noqa: BLE001 — never fail a turn on telemetry
                 logger.debug("rate_limit persistence failed", exc_info=True)
-            if self._pending_quota.get("status") == "allowed":
+            # Quota is cached and persisted above (Settings shows all tiers),
+            # so suppress the chat-facing status for every "allowed" state —
+            # the plain allowance ping AND the escalating "allowed_warning"
+            # ticks. They are usage telemetry, not conversation. A non-allowed
+            # state (e.g. exceeded/rejected) still emits so the user is told.
+            if self._pending_quota.get("status", "").startswith("allowed"):
                 return []
             return [
                 SystemStatusEvent(
@@ -1203,7 +1208,12 @@ class ClaudeProvider(BaseSDKProvider):
 
         if subtype == "status":
             status_str = data.get("status") or ""
-            if "Rate limit: allowed" in status_str and "allowed_warning" not in status_str:
+            # Drop "allowed" rate-limit status notes — both the plain
+            # allowance pings and the escalating "allowed_warning … NN% used"
+            # ticks. They are transient usage telemetry, not conversation, and
+            # rendering one chat line per 1% increment just clutters the turn.
+            # A hard "Rate limit exceeded" carries no "allowed" and still shows.
+            if "Rate limit: allowed" in status_str:
                 return []
             return [SystemStatusEvent(type="system", status=status_str)]
 

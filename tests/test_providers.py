@@ -391,11 +391,14 @@ def test_claude_convert_stream_event_threads_parent_tool_use_id(
     assert thinking.parent_tool_use_id == parent_id
 
 
-def test_claude_rate_limit_event_emits_status_and_caches_quota(
+def test_claude_rate_limit_event_suppresses_status_and_caches_quota(
     claude_provider: ClaudeProvider,
 ) -> None:
     from claude_agent_sdk import RateLimitEvent, RateLimitInfo, ResultMessage
 
+    # An "allowed_warning" tick is usage telemetry, not conversation: it emits
+    # no chat-facing status event, but its quota is still cached for the
+    # Settings rate-limit card and the ResultMessage payload.
     events = claude_provider._convert_message(
         RateLimitEvent(
             rate_limit_info=RateLimitInfo(
@@ -409,8 +412,7 @@ def test_claude_rate_limit_event_emits_status_and_caches_quota(
         )
     )
 
-    assert len(events) == 1
-    assert events[0].status == "Rate limit: allowed_warning (five_hour) 91.0% used"
+    assert events == []
 
     result_events = claude_provider._convert_message(
         ResultMessage(
@@ -742,5 +744,14 @@ def test_claude_convert_system_message_suppresses_allowed_rate_limit(
             data={"status": "Rate limit: allowed_warning (five_hour) 90% used"},
         )
     )
-    assert len(events2) == 1
-    assert events2[0].status == "Rate limit: allowed_warning (five_hour) 90% used"
+    assert len(events2) == 0
+
+    # A non-allowed rate-limit state still surfaces so the user is told.
+    events3 = claude_provider._convert_message(
+        SystemMessage(
+            subtype="status",
+            data={"status": "Rate limit exceeded (five_hour)"},
+        )
+    )
+    assert len(events3) == 1
+    assert events3[0].status == "Rate limit exceeded (five_hour)"

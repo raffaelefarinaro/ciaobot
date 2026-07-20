@@ -230,7 +230,7 @@ describe('ephemeral status events', () => {
     expect(msgsFinal.some(m => m.role === 'system' && m.content === 'retrying on sonnet')).toBe(true)
   })
 
-  test('does not render allowed rate limit status as a system message', () => {
+  test('does not render allowed or allowed_warning rate limit status as a system message', () => {
     apiGet.mockResolvedValue([])
     const store = useProjectStore()
     const chatId = 'c-ratelimit'
@@ -249,7 +249,7 @@ describe('ephemeral status events', () => {
 
     const msgs = store.messages[chatId] || []
     expect(msgs.some(m => m.role === 'system' && m.content.includes('Rate limit: allowed (five_hour)'))).toBe(false)
-    expect(msgs.some(m => m.role === 'system' && m.content.includes('Rate limit: allowed_warning'))).toBe(true)
+    expect(msgs.some(m => m.role === 'system' && m.content.includes('Rate limit: allowed_warning'))).toBe(false)
   })
 })
 

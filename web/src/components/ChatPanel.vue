@@ -362,7 +362,7 @@
         </div>
       </template>
 
-      <div v-if="chat.retry?.status === 'pending'" class="retry-card">
+      <div v-if="chat.retry?.status === 'pending' && !store.isStreaming" class="retry-card">
         <div class="retry-card-main">
           <span class="retry-card-icon">⏱</span>
           <div>
@@ -842,7 +842,7 @@ import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
 import { formatTime, formatDuration } from '../lib/time'
-import { collectTraceOutputs, formatTokenUsage, traceSummaryMeta, type TraceOutput } from '../lib/chatActivity'
+import { buildTurnParts, collectTraceOutputs, formatTokenUsage, isAnswerBubble, traceSummaryMeta, type TraceOutput } from '../lib/chatActivity'
 import { buildForkSnapshot } from '../lib/chatFork'
 import { formatCommentLocation } from '../lib/commentContext'
 
@@ -2197,21 +2197,16 @@ const renderData = computed<{
     const turnOutputs = collectTraceOutputs(buffer)
     // Find index of the LAST assistant text message (the final answer).
     // _activity (tool calls) and _thinking (model reasoning) are part of
-    // the trace, never the final user-facing reply.
+    // the trace, never the final user-facing reply. `isAnswerBubble` is the
+    // same predicate `buildTurnParts` uses, so the two never disagree on
+    // which steps are bubbles vs trace material.
     let finalIdx = -1
     for (let k = buffer.length - 1; k >= 0; k--) {
-      const m = buffer[k]
-      if (
-        m.role === 'assistant'
-        && m.tool_name !== '_activity'
-        && m.tool_name !== '_thinking'
-        && m.phase !== 'commentary'
-      ) {
+      if (isAnswerBubble(buffer[k])) {
         finalIdx = k
         break
       }
     }
-    const intermediate = finalIdx >= 0 ? buffer.slice(0, finalIdx) : buffer.slice()
     const finalMsg = finalIdx >= 0 ? buffer[finalIdx] : null
     const trailing = finalIdx >= 0 ? buffer.slice(finalIdx + 1) : []
 
@@ -2253,28 +2248,37 @@ const renderData = computed<{
     // as an attribute of the reply. Only when the turn produced no answer bubble
     // (still in progress / interrupted) do they fall back to the activity trace.
     const traceSubchats = finalMsg ? [] : turnSubchats
-    // A turn gets exactly ONE "Activity" group. Tool calls / file writes the
-    // model runs AFTER emitting its answer text (`trailing`) are bookkeeping —
-    // they belong in the same trace as the pre-answer steps, not a second
-    // dangling "Activity" block below the reply. Fold them into one block that
-    // renders before the answer.
-    const traceSteps = [...intermediate, ...trailing]
-    if (traceSteps.length) {
-      items.push({
-        kind: 'trace',
-        steps: traceSteps,
-        ...(traceSubs.length ? { subs: traceSubs } : {}),
-        ...(!finalMsg && turnOutputs.length ? { outputs: turnOutputs } : {}),
-        ...(traceSubchats.length ? { subchats: traceSubchats } : {}),
-      })
-    } else if (traceSubs.length || traceSubchats.length) {
-      items.push({
-        kind: 'trace',
-        steps: [],
-        ...(traceSubs.length ? { subs: traceSubs } : {}),
-        ...(traceSubchats.length ? { subchats: traceSubchats } : {}),
-      })
+    // Substantive assistant text that appears BEFORE the final answer used to
+    // be swallowed into the Activity trace (rendered italic, indistinguishable
+    // from reasoning). Split the turn so each such block renders as its own
+    // bubble, interleaved with the tool/thinking groups that ran between them,
+    // in the order the model produced them. The final answer is appended below
+    // with the turn's outputs/subchats attached.
+    const turnItems: RenderItem[] = buildTurnParts(buffer, finalIdx).map((part) =>
+      part.kind === 'assistant'
+        ? { kind: 'assistant', msg: part.msg }
+        : { kind: 'trace', steps: part.steps },
+    )
+    // Foreground subagents / (when there's no answer bubble) file outputs and
+    // consultations belong to the one Activity trace that sits right before the
+    // reply. Reuse the trailing trace if there is one; otherwise mint an empty
+    // one so those attachments still have a home adjacent to the answer.
+    const needsHost =
+      traceSubs.length > 0
+      || traceSubchats.length > 0
+      || (!finalMsg && turnOutputs.length > 0)
+    const last = turnItems[turnItems.length - 1]
+    let host = last && last.kind === 'trace' ? last : null
+    if (!host && needsHost) {
+      host = { kind: 'trace', steps: [] }
+      turnItems.push(host)
     }
+    if (host) {
+      if (traceSubs.length) host.subs = traceSubs
+      if (!finalMsg && turnOutputs.length) host.outputs = turnOutputs
+      if (traceSubchats.length) host.subchats = traceSubchats
+    }
+    for (const it of turnItems) items.push(it)
     if (finalMsg) {
       items.push({
         kind: 'assistant',
