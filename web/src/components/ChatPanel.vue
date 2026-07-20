@@ -2325,7 +2325,7 @@ const renderData = computed<{
     }
 
     const traceSubs = takeForegroundSubs(currentTurnIndex)
-    // Consultations attach to the final answer when there is one, so they read
+    // Handoffs attach to the final answer when there is one, so they read
     // as an attribute of the reply. Only when the turn produced no answer bubble
     // (still in progress / interrupted) do they fall back to the activity trace.
     const traceSubchats = finalMsg ? [] : turnSubchats
@@ -2341,7 +2341,7 @@ const renderData = computed<{
         : { kind: 'trace', steps: part.steps },
     )
     // Foreground subagents / (when there's no answer bubble) file outputs and
-    // consultations belong to the one Activity trace that sits right before the
+    // handoffs belong to the one Activity trace that sits right before the
     // reply. Reuse the trailing trace if there is one; otherwise mint an empty
     // one so those attachments still have a home adjacent to the answer.
     const needsHost =

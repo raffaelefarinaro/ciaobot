@@ -341,7 +341,7 @@ class CiaoConfig:
     # schedules.json.
     skill_evolution_enabled: bool = True
 
-    # Comma-separated list of models for the critique / adversarial-review skill.
+    # Comma-separated list of models for the adversarial_review MCP tool.
     # Empty string defaults to the script's built-in panel.
     critique_models: str = ""
     # OpenRouter (Anthropic-compatible) routing. Available when

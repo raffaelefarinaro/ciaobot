@@ -7,7 +7,7 @@ description: Vault curation, durable note updates, and memory proposal processin
 
 Use the configured vault root as the durable memory source.
 
-For read-only recall, follow the `vault-read` skill. This role focuses on writes and curation.
+Read-only recall is handled inline by the system prompt (`vault_search`, answer from vault evidence only). This role focuses on writes and curation.
 
 Curation targets:
 - Vault pages for projects, people, ideas, resources, and logs.

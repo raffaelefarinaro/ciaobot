@@ -73,7 +73,7 @@ class McpSessionRegistry:
         workspace: str,
         provider: str,
         role: str = "chat",
-        consultation_depth: int = 0,
+        handoff_depth: int = 0,
     ) -> tuple[str, McpPrincipal]:
         key = (chat_id, provider, role)
         now = int(time.time())
@@ -90,7 +90,7 @@ class McpSessionRegistry:
                 workspace=workspace,
                 provider=provider,
                 role=role,  # type: ignore[arg-type]
-                consultation_depth=consultation_depth,
+                handoff_depth=handoff_depth,
             )
             session = _Session(
                 principal=principal,
@@ -194,7 +194,7 @@ class CiaoMcpService:
             workspace=project.workspace,
             provider=chat.provider,
             role=role,
-            consultation_depth=1 if role == "consultation" else 0,
+            handoff_depth=1 if role == "handoff" else 0,
         )
         return self.url, token
 
@@ -312,10 +312,10 @@ class CiaoMcpService:
             if self.control_plane is None:
                 raise ControlPlaneError("unavailable", "Ciaobot control plane is not ready.", retryable=True)
             principal = self._principal()
-            if mutating and principal.role == "consultation":
+            if mutating and principal.role == "handoff":
                 raise ControlPlaneError(
-                    "consultation_read_only",
-                    "Provider consultation participants have read-only Ciaobot access.",
+                    "handoff_read_only",
+                    "Agent handoff participants have read-only Ciaobot access.",
                 )
             if mutating and self.control_plane.chat_mode(principal) == "plan":
                 raise ControlPlaneError("plan_mode_read_only", "Mutating Ciaobot tools are disabled in plan mode.")
@@ -473,25 +473,10 @@ class CiaoMcpService:
                 mutating=True,
             )
 
-        @tool(name="vault_notes_list", annotations=_READ, structured_output=True)
-        async def vault_notes_list(limit: int = 100) -> dict[str, Any]:
-            """List markdown note paths in the active workspace vault."""
-            return await self._invoke("vault_notes_list", lambda cp, p: cp.vault_notes_list(p, limit))
-
         @tool(name="vault_search", annotations=_READ, structured_output=True)
         async def vault_search(query: str, limit: int = 10) -> dict[str, Any]:
             """Full-text search the active workspace vault."""
             return await self._invoke("vault_search", lambda cp, p: cp.vault_search(p, query, limit))
-
-        @tool(name="vault_note_read", annotations=_READ, structured_output=True)
-        async def vault_note_read(path: str) -> dict[str, Any]:
-            """Read one vault-relative markdown note."""
-            return await self._invoke("vault_note_read", lambda cp, p: cp.vault_note_read(p, path))
-
-        @tool(name="vault_note_write", annotations=_WRITE, structured_output=True)
-        async def vault_note_write(path: str, content: str) -> dict[str, Any]:
-            """Write one vault-relative markdown note."""
-            return await self._invoke("vault_note_write", lambda cp, p: cp.vault_note_write(p, path, content), mutating=True)
 
         @tool(name="vault_index_refresh", annotations=_WRITE, structured_output=True)
         async def vault_index_refresh() -> dict[str, Any]:
@@ -566,14 +551,28 @@ class CiaoMcpService:
 
         @tool(name="chat_create", annotations=_WRITE, structured_output=True)
         async def chat_create(
-            project_id: str,
+            project_id: str | None = None,
             title: str = "New Chat",
             provider: str | None = None,
             model: str | None = None,
             mode: str | None = None,
             control_surface: str | None = None,
+            prompt: str | None = None,
         ) -> dict[str, Any]:
-            """Create a fresh chat in a project."""
+            """Create a fresh chat, optionally sending its first prompt in the same call.
+
+            Args:
+                project_id: Project id or case-insensitive name. Omit to use the
+                    calling chat's own project — you don't need to call
+                    projects_list first for the common case of a sub-topic in
+                    the current project.
+                provider: Provider override. Omit to inherit the target
+                    project's workspace default.
+                model: Model override. Omit to inherit the target project's
+                    workspace default.
+                prompt: If given, immediately starts the new chat's first turn
+                    with this text — skips a separate chat_send call.
+            """
             return await self._invoke(
                 "chat_create",
                 lambda cp, p: cp.chat_create(
@@ -584,6 +583,7 @@ class CiaoMcpService:
                     model=model,
                     mode=mode,
                     control_surface=control_surface,  # type: ignore[arg-type]
+                    prompt=prompt,
                 ),
                 mutating=True,
             )
@@ -720,15 +720,15 @@ class CiaoMcpService:
                 "chat_stop", lambda cp, p: cp.chat_stop(p, chat_id), mutating=True
             )
 
-        @tool(name="consultations_list", annotations=_READ, structured_output=True)
-        async def consultations_list(chat_id: str = "") -> dict[str, Any]:
-            """List cross-provider consultations attached to a chat."""
+        @tool(name="handoffs_list", annotations=_READ, structured_output=True)
+        async def handoffs_list(chat_id: str = "") -> dict[str, Any]:
+            """List agent handoffs (cross-provider sub-chats) attached to a chat."""
             return await self._invoke(
-                "consultations_list", lambda cp, p: cp.consultations_list(p, chat_id)
+                "handoffs_list", lambda cp, p: cp.handoffs_list(p, chat_id)
             )
 
-        @tool(name="consultation_start", annotations=_WRITE, structured_output=True)
-        async def consultation_start(
+        @tool(name="handoff_start", annotations=_WRITE, structured_output=True)
+        async def handoff_start(
             provider: str,
             model: str,
             message: str,
@@ -736,10 +736,22 @@ class CiaoMcpService:
             model_bucket: str = "",
             user_authorized: bool = False,
         ) -> dict[str, Any]:
-            """Start a bounded cross-provider consultation and return its first reply."""
+            """Start a bounded handoff to another provider/model and return its first reply.
+
+            Spawns a read-only sub-chat (the participant) attached to this turn.
+            Start one only after the user explicitly asks to consult, hand off to,
+            delegate to, or route work to another model or provider — never
+            unsolicited. You are the sole conduit: the user cannot write directly
+            into the participant, and a participant cannot itself start a nested
+            handoff. Never search for or invoke a provider binary (like `codex` or
+            `ollama`) directly — this tool is the only supported path for
+            cross-provider delegation. If the participant asks a clarifying
+            question that needs the user's input, relay it through this chat,
+            then send the answer back via handoff_send.
+            """
             return await self._invoke(
-                "consultation_start",
-                lambda cp, p: cp.consultation_start(
+                "handoff_start",
+                lambda cp, p: cp.handoff_start(
                     p,
                     provider=provider,
                     model=model,
@@ -751,51 +763,54 @@ class CiaoMcpService:
                 mutating=True,
             )
 
-        @tool(name="consultation_send", annotations=_WRITE, structured_output=True)
-        async def consultation_send(
+        @tool(name="handoff_send", annotations=_WRITE, structured_output=True)
+        async def handoff_send(
             subchat_id: str,
             message: str,
             user_authorized: bool = False,
         ) -> dict[str, Any]:
-            """Send a follow-up message to a provider consultation."""
+            """Send a follow-up message to an active handoff."""
             return await self._invoke(
-                "consultation_send",
-                lambda cp, p: cp.consultation_send(
+                "handoff_send",
+                lambda cp, p: cp.handoff_send(
                     p, subchat_id, message, user_authorized=user_authorized
                 ),
                 mutating=True,
             )
 
-        @tool(name="consultation_events", annotations=_READ, structured_output=True)
-        async def consultation_events(subchat_id: str) -> dict[str, Any]:
-            """Read the event transcript for a provider consultation."""
+        @tool(name="handoff_events", annotations=_READ, structured_output=True)
+        async def handoff_events(subchat_id: str) -> dict[str, Any]:
+            """Read the event transcript for a handoff."""
             return await self._invoke(
-                "consultation_events", lambda cp, p: cp.consultation_events(p, subchat_id)
+                "handoff_events", lambda cp, p: cp.handoff_events(p, subchat_id)
             )
 
-        @tool(name="consultation_close", annotations=_WRITE, structured_output=True)
-        async def consultation_close(subchat_id: str) -> dict[str, Any]:
-            """Close a provider consultation that no longer needs follow-up."""
+        @tool(name="handoff_close", annotations=_WRITE, structured_output=True)
+        async def handoff_close(subchat_id: str) -> dict[str, Any]:
+            """Close a handoff once it has successfully finished and you have
+            enough information — don't leave it open once you're done with it."""
             return await self._invoke(
-                "consultation_close", lambda cp, p: cp.consultation_close(p, subchat_id), mutating=True
+                "handoff_close", lambda cp, p: cp.handoff_close(p, subchat_id), mutating=True
             )
 
-        @tool(name="consultation_cancel", annotations=_DESTRUCTIVE, structured_output=True)
-        async def consultation_cancel(subchat_id: str) -> dict[str, Any]:
-            """Cancel active work in a provider consultation."""
+        @tool(name="handoff_cancel", annotations=_DESTRUCTIVE, structured_output=True)
+        async def handoff_cancel(subchat_id: str) -> dict[str, Any]:
+            """Abort active work in a handoff."""
             return await self._invoke(
-                "consultation_cancel", lambda cp, p: cp.consultation_cancel(p, subchat_id), mutating=True
+                "handoff_cancel", lambda cp, p: cp.handoff_cancel(p, subchat_id), mutating=True
             )
 
-        @tool(name="consultation_extend", annotations=_WRITE, structured_output=True)
-        async def consultation_extend(
+        @tool(name="handoff_extend", annotations=_WRITE, structured_output=True)
+        async def handoff_extend(
             subchat_id: str,
             user_authorized: bool = False,
         ) -> dict[str, Any]:
-            """Extend consultation quotas only after explicit user authorization."""
+            """Extend a handoff past its message/time limit (12 messages / 30
+            minutes) — call this only after explicitly asking the user for
+            authorization; never pass user_authorized=True on your own judgment."""
             return await self._invoke(
-                "consultation_extend",
-                lambda cp, p: cp.consultation_extend(
+                "handoff_extend",
+                lambda cp, p: cp.handoff_extend(
                     p, subchat_id, user_authorized=user_authorized
                 ),
                 mutating=True,
@@ -822,7 +837,13 @@ class CiaoMcpService:
             model: str = "",
             archive_policy: str = "manual",
         ) -> dict[str, Any]:
-            """Validate a schedule and compute its next run without saving it."""
+            """Validate a schedule and compute its next run without saving it.
+
+            Call this before schedule_create for a new recurring schedule and
+            show the user the resulting next_run as part of the draft. A
+            missing or invalid next_run means the fields don't validate as
+            given — don't create it yet. See schedule_create's docstring for
+            field semantics (they're identical here)."""
             values = {key: value for key, value in locals().items() if key != "self"}
             return await self._invoke("schedule_preview", lambda cp, p: cp.schedule_preview(p, **values))
 
@@ -843,7 +864,49 @@ class CiaoMcpService:
             model: str = "",
             archive_policy: str = "manual",
         ) -> dict[str, Any]:
-            """Create a validated Ciaobot schedule without editing runtime JSON."""
+            """Create a validated Ciaobot schedule (recurring, one-off, or manual-only).
+
+            Show the user a concise draft and get confirmation before creating
+            it, unless they already explicitly asked you to apply it — call
+            schedule_preview first and include its next_run in the draft.
+
+            Args:
+                prompt: The prompt dispatched each run. Start with the goal in
+                    3-7 words (becomes the chat-title hint); keep only
+                    schedule-specific logic — a fresh project run already
+                    inherits canonical docs and skills. Aim for <=1000 chars
+                    for a simple check, <=4000 for an aggregation/review. For
+                    routine checks, have it exit early with a one-line no-op
+                    when there's nothing to report. Supports two placeholders:
+                    {{ERROR_LOG}} (sanitized server error tail) and
+                    {{ISSUE_REPORT}} (server errors + failed background jobs);
+                    Ciaobot clears the consumed error log after a clean run
+                    that uses one.
+                daily_time: Local HH:MM in `timezone` (persisted as the legacy
+                    field daily_time_utc).
+                timezone: IANA name, e.g. "Europe/Rome". Use the user's local
+                    timezone unless they ask for UTC.
+                frequency: "daily" | "weekly" | "monthly" | "manual" | "once".
+                days_of_week: weekly only — lowercase "mon".."sun".
+                day_of_month: 1-31, monthly only.
+                run_at_date: "YYYY-MM-DD", once only, must be in the future.
+                project_id: Project id or case-insensitive name — creates a
+                    fresh chat in that project per run. Preferred for
+                    vault-aware automation.
+                chat_id: Posts into one existing chat instead. Use only when
+                    conversation continuity across runs matters; resolve it
+                    via chats_list first (chat titles aren't unique, unlike
+                    project names, so there's no name lookup for this one).
+                model: Empty inherits the target workspace's default model at
+                    dispatch time; override only when necessary.
+                provider: Empty inherits the target workspace's default
+                    provider at dispatch time; override only when necessary.
+                archive_policy: "manual" | "auto".
+
+            An enabled schedule with a missed latest occurrence (e.g. the
+            server was off) runs once on startup; older missed intervals are
+            not replayed.
+            """
             values = {key: value for key, value in locals().items() if key != "self"}
             return await self._invoke("schedule_create", lambda cp, p: cp.schedule_create(p, **values), mutating=True)
 
@@ -865,7 +928,10 @@ class CiaoMcpService:
             model: str | None = None,
             archive_policy: str | None = None,
         ) -> dict[str, Any]:
-            """Update a Ciaobot schedule through validated fields."""
+            """Update a Ciaobot schedule through validated fields. Field
+            semantics match schedule_create. System schedules (scope=system)
+            only accept enabled/workspace changes — everything else raises
+            system_schedule_read_only."""
             values = {
                 key: value
                 for key, value in locals().items()
@@ -894,7 +960,8 @@ class CiaoMcpService:
 
         @tool(name="schedule_delete", annotations=_DESTRUCTIVE, structured_output=True)
         async def schedule_delete(schedule_id: str) -> dict[str, Any]:
-            """Delete a removable user schedule."""
+            """Delete a removable user schedule. System schedules (scope=system)
+            cannot be deleted — this raises schedule_not_removable instead."""
             return await self._invoke("schedule_delete", lambda cp, p: cp.schedule_delete(p, schedule_id), mutating=True)
 
         @tool(name="loops_list", annotations=_READ, structured_output=True)
@@ -910,7 +977,30 @@ class CiaoMcpService:
             title: str = "",
             autostart: bool = False,
         ) -> dict[str, Any]:
-            """Create an interval loop bound to an existing chat."""
+            """Create an interval loop: re-sends one prompt into a fixed chat
+            every N minutes, retaining that chat's context. Use a loop rather
+            than a schedule for sub-day recurrence that needs one
+            conversation's continuity; use a schedule instead when each run
+            should get a fresh project chat.
+
+            Args:
+                chat_id: An existing chat id. Resolve it via chats_list first
+                    — chat titles aren't unique, so there's no name lookup
+                    here (unlike schedule_create's project_id).
+                prompt: Give a short, fixed no-change response for a no-op
+                    tick, so repeated iterations stay cheap and scannable.
+                interval_minutes: There is no model field — each iteration
+                    uses the target chat's current model and mode.
+                autostart: Only controls whether the loop starts on server
+                    boot; live running/stopped state is set separately via
+                    loop_start/loop_stop.
+
+            If the target chat is busy when a tick fires, that iteration is
+            skipped and retried on the next tick (not queued). If the target
+            chat is missing or archived, the loop stops. Loops do not catch
+            up missed ticks after downtime (unlike schedules, which fire once
+            for a missed occurrence on startup).
+            """
             return await self._invoke(
                 "loop_create",
                 lambda cp, p: cp.loop_create(p, chat_id, prompt, interval_minutes, title, autostart),
@@ -964,6 +1054,16 @@ class CiaoMcpService:
             """Write a workspace-relative UTF-8 file; runtime stores are forbidden."""
             return await self._invoke("workspace_file_write", lambda cp, p: cp.workspace_file_write(p, path, content), mutating=True)
 
+        @tool(name="file_surface", annotations=_READ, structured_output=True)
+        async def file_surface(path: str) -> dict[str, Any]:
+            """Deliberately open a workspace file in the user's pinned preview panel.
+
+            Use this to show the user a file you produced or want to highlight —
+            even one you only read, or one a subagent wrote — instead of relying on
+            them to notice it. Ordinary Write/Edit calls no longer auto-open the
+            panel; call this when a file is worth surfacing."""
+            return await self._invoke("file_surface", lambda cp, p: cp.file_surface(p, path))
+
         @tool(name="file_history_list", annotations=_READ, structured_output=True)
         async def file_history_list(chat_id: str, file_path: str) -> dict[str, Any]:
             """List captured file snapshots for a chat and file path."""
@@ -990,6 +1090,45 @@ class CiaoMcpService:
             return await self._invoke(
                 "file_snapshot_restore",
                 lambda cp, p: cp.file_snapshot_restore(p, chat_id, file_path, seq),
+                mutating=True,
+            )
+
+        @tool(name="adversarial_review", annotations=_WRITE, structured_output=True)
+        async def adversarial_review(
+            artifact: str,
+            doc_type: str = "document",
+            focus: str = "",
+            context: str = "",
+            models: str = "",
+            format: str = "markdown",
+        ) -> dict[str, Any]:
+            """Send an artifact to several models for a multi-model adversarial review.
+
+            Each configured model reviews the artifact independently (no shared
+            context between them) and the results are synthesized into per-model
+            verdicts plus a combined issue list. Use when the user explicitly asks
+            for a review, critique, red-team, or second opinion, when they're about
+            to ship something high-stakes (a PRD, brief, plan, customer email, exec
+            deck, public post), or when you just produced a substantive artifact
+            yourself and want it pressure-tested before declaring done. Skip for
+            trivial outputs (one-line answers, simple lookups) — the panel costs
+            real tokens and time.
+
+            Args:
+                artifact: The full text to review, inlined directly (not a file path).
+                doc_type: Artifact type, e.g. "prd", "plan", "brief", "email", "code".
+                focus: Optional area to focus the critique on.
+                context: Optional extra context for the reviewers (audience, constraints).
+                models: Comma-separated model ids to override the configured panel
+                    (Settings → Models → Adversarial review panel) for this one call.
+                format: "markdown" (a rendered report) or "json" (raw per-model results).
+            """
+            return await self._invoke(
+                "adversarial_review",
+                lambda cp, p: cp.adversarial_review(
+                    p, artifact, doc_type=doc_type, focus=focus, context=context,
+                    models=models, format=format,
+                ),
                 mutating=True,
             )
 

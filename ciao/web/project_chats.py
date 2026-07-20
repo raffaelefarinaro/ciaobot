@@ -3172,9 +3172,9 @@ class ProjectChatManager:
         if not records:
             return
 
-        lines = ["", "## Provider consultations", ""]
+        lines = ["", "## Agent handoffs", ""]
         for r in records:
-            lines.append(f"### Consultation: {r.owner.label or r.owner.provider} ↔ {r.participant.label or r.participant.provider}")
+            lines.append(f"### Handoff: {r.owner.label or r.owner.provider} ↔ {r.participant.label or r.participant.provider}")
             lines.append(f"- **Participant Model**: {r.participant.model}")
             lines.append(f"- **Status**: {r.status}")
             lines.append(f"- **Duration**: {r.active_seconds:.1f}s")
@@ -3397,18 +3397,18 @@ class ProjectChatManager:
         if handover:
             parts.append(handover)
 
-        # Add a reminder about open provider consultations
+        # Add a reminder about open agent handoffs
         manager = getattr(self, "_provider_subchat_manager", None)
         if manager is not None:
             active_sc = [r for r in manager.list_records(chat.chat_id) if r.status == "waiting_owner"]
             if active_sc:
-                reminder_lines = ["[REMINDER: Active provider consultations waiting for owner input:"]
+                reminder_lines = ["[REMINDER: Active agent handoffs waiting for owner input:"]
                 for sc in active_sc:
                     reminder_lines.append(
                         f"- Sub-chat ID: '{sc.subchat_id}'. "
                         f"Participant: '{sc.participant.provider}' using model '{sc.participant.model}'."
                     )
-                reminder_lines.append("Use the provider-consultation skill to send answers or close them.]")
+                reminder_lines.append("Use handoff_send or handoff_close to send answers or close them.]")
                 parts.append("\n".join(reminder_lines))
 
         if not parts:
@@ -3991,7 +3991,7 @@ class ProjectChatManager:
                 )
                 resolved_surface = "legacy"
             else:
-                role = "consultation" if chat.chat_id.startswith("sub-") else "chat"
+                role = "handoff" if chat.chat_id.startswith("sub-") else "chat"
                 mcp_url, mcp_token = service.credentials_for_chat(
                     chat, project, role=role
                 )

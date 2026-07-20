@@ -48,7 +48,7 @@ What that looks like in practice:
 - **Files and automations** — create, preview, edit, and restore vault files from the UI; run recurring routines on a cron you choose (schedules) or re-run a prompt inside one chat every N minutes (loops).
 - **Voice, notifications, and updates** — transcription, push alerts, model settings, and in-app package updates. On macOS: menu bar companion, `Ciaobot Server.app`, and background service after setup.
 - **Provider choice** — Claude Code or Codex with your existing login; Ollama, OpenRouter, and on-device models for lighter tasks (see [Providers](#providers)).
-- **Agent-safe control plane** — an authenticated, chat-scoped MCP surface lets managed Claude Code and Codex processes operate Ciaobot memory, vault, projects, chats, schedules, loops, consultations, and file history without curl or direct runtime-JSON edits. MCP is the default transport, with the legacy CLI path retained as an automatic fallback. See [docs/MCP.md](docs/MCP.md).
+- **Agent-safe control plane** — an authenticated, chat-scoped MCP surface lets managed Claude Code and Codex processes operate Ciaobot memory, vault, projects, chats, schedules, loops, agent handoffs, and file history without curl or direct runtime-JSON edits. MCP is the default transport, with the legacy CLI path retained as an automatic fallback. See [docs/MCP.md](docs/MCP.md).
 
 Pick a workspace folder, choose a provider, and work — Ciaobot is the interface on top; the vault is yours to keep.
 
@@ -71,7 +71,7 @@ When your message mentions a name that appears in the vault index, the agent get
 - Comment on any passage of a reply — select text, attach a note, and it rides along with your next prompt; queue follow-ups while the agent is still working.
 - Per-chat model picker with provider thinking levels on top of per-workspace defaults.
 - Fork conversation: create a new independent chat in the same project starting from any completed agent answer, preserving history.
-- Provider consultations: spawn and communicate with a second provider route (the participant) as a read-only sub-chat attached to the originating turn.
+- Agent handoffs: spawn and communicate with a second provider route (the participant) as a read-only sub-chat attached to the originating turn.
 
 **Voice — dictation and read-aloud**
 
@@ -144,7 +144,7 @@ Type these in any chat ([ciao/stock/commands/](ciao/stock/commands/)):
 |---|---|
 | [/remember](ciao/stock/commands/remember.md) | Saves a durable fact or learning to the right memory layer (agent memory, user profile, or a vault page). |
 | [/interrogation](ciao/stock/commands/interrogation.md) | Asks a few targeted questions to turn a vague project, person, or idea into a useful canonical vault note. |
-| [/critique](ciao/stock/commands/critique.md) | Quick single-model review of a plan or draft (the multi-model `adversarial-review` skill is the heavier option). |
+| [/critique](ciao/stock/commands/critique.md) | Multi-model adversarial review of a plan or draft, via the `adversarial_review` MCP tool. |
 
 ### System routines
 

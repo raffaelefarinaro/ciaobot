@@ -2857,21 +2857,14 @@ export const useProjectStore = defineStore('projects', () => {
     })
   }
 
-  // Collaboration-friendly, previewable artifacts worth auto-surfacing. Kept
-  // deliberately narrow: .md/.csv are the formats the pinned panel renders as
-  // an editable, comment-able canvas. Images/pdf/pptx preview too but are
-  // rarely something the user wants yanked open unprompted.
-  const _AUTO_PIN_EXT_RE = /\.(md|markdown|csv)$/i
-  // Bookkeeping files the agent writes as a side effect (memory, proposals,
-  // agent config) are not deliverables — surfacing them on every write is noise.
-  const _AUTO_PIN_SKIP_BASENAMES = new Set([
-    'memory.md', 'user.md', 'memory.local.md',
-    'memory-proposals.md', 'learnings.md', 'agents.md', 'claude.md',
-  ])
-
-  // Auto-surface a freshly written .md/.csv in the pinned side panel so the
-  // user sees a deliverable next to the chat without hunting for it. Fills the
-  // empty state only — never yanks a file the user already pinned — and only on
+  // Auto-surface a file in the pinned side panel, but only when the agent
+  // deliberately asked to via the `file_surface` MCP tool (action === 'surfaced')
+  // — not for every ordinary Write/Edit, which used to be guessed at by
+  // extension (.md/.csv) plus a bookkeeping-file skip-list. That heuristic
+  // both missed real deliverables (non-.md/.csv, or written by a subagent)
+  // and fired on noisy writes the agent never meant to highlight. An explicit
+  // tool call is a genuine signal; a file extension is not. Fills the empty
+  // state only — never yanks a file the user already pinned — and only on
   // desktop, where the split layout exists (mirrors FileViewerModal's canPin
   // gate). localStorage-backed like every other pin; no backend state.
   function _maybeAutoPin(
@@ -2880,15 +2873,12 @@ export const useProjectStore = defineStore('projects', () => {
   ): void {
     if (typeof window === 'undefined' || window.innerWidth <= 768) return
     if (pinnedFileFor(chatId)) return
-    // Freshest qualifying artifact wins (last touch in the batch).
+    // Freshest surfaced artifact wins (last touch in the batch).
     for (let i = touches.length - 1; i >= 0; i--) {
-      const raw = touches[i]?.file_path
-      if (!raw) continue
-      const clean = raw.replace(/:\d+$/, '')
-      if (!_AUTO_PIN_EXT_RE.test(clean)) continue
-      const base = clean.split(/[\\/]/).pop()?.toLowerCase() || ''
-      if (_AUTO_PIN_SKIP_BASENAMES.has(base)) continue
-      if (!isPlausibleFilePath(raw)) continue
+      const touch = touches[i]
+      if (touch?.action !== 'surfaced') continue
+      const raw = touch.file_path
+      if (!raw || !isPlausibleFilePath(raw)) continue
       pinFile(chatId, raw)
       return
     }

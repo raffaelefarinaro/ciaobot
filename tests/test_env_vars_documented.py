@@ -23,7 +23,7 @@ INTERNAL_VARS: dict[str, str] = {
     "CIAO_CONTEXT_END": "subprocess IPC delimiter wrapping injected context",
     "CIAO_RESTART_EXIT_CODE": "internal exit-code convention for restart-requesting handlers",
     "CIAO_RUNTIME_ROOT": "test-only override for the runtime/ directory",
-    "CIAO_PARENT_CHAT_ID": "subprocess IPC marker for the parent chat ID of a provider consultation",
+    "CIAO_PARENT_CHAT_ID": "subprocess IPC marker for the parent chat ID of an agent handoff",
     "CIAO_PROVIDER_SUBCHAT_ID": "subprocess IPC marker for the provider sub-chat ID",
 }
 

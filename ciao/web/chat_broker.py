@@ -61,6 +61,10 @@ _FILE_TOUCH_TOOLS: dict[str, tuple[str, ...]] = {
     "generateImage": ("ImageName", "image_path", "path", "file_path"),
     "write_file": ("path", "file_path"),
     "writeFile": ("path", "file_path"),
+    # The model's deliberate "show this to the user" signal (ciao/mcp_server.py
+    # file_surface), not a mutation — reuses the file-touch pipeline so it gets
+    # the same inline card, with a distinct action the frontend auto-pins on.
+    "mcp__ciaobot__file_surface": ("path",),
 }
 
 # Shell tools whose command text may create or overwrite files. Parsed
@@ -81,6 +85,7 @@ _FILE_TOUCH_ACTIONS: dict[str, str] = {
     "generateImage": "generated",
     "write_file": "written",
     "writeFile": "written",
+    "mcp__ciaobot__file_surface": "surfaced",
 }
 
 _SHELL_REDIRECT_RE = re.compile(

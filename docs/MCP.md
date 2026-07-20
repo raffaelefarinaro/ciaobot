@@ -42,7 +42,7 @@ flowchart LR
   of an already-live MCP session surfaces through the CLI/tool-call error path
   and server logs rather than a strict-config launch failure (see the note on
   `strict_mcp_config` below).
-- Plan-mode chats cannot call mutating tools. Provider-consultation principals
+- Plan-mode chats cannot call mutating tools. Agent-handoff participants
   are read-only. Tool results use stable `{ok,data}` / `{ok:false,error}`
   envelopes, and inputs are validated again by the domain manager.
 - A tool cannot stop its own active turn. Operations that would disconnect the
@@ -109,20 +109,30 @@ telemetry remain enforced.
 
 ## Tool catalog
 
-The catalog currently contains 79 explicit tools. `capabilities_get` returns
+The catalog currently contains 78 explicit tools. `capabilities_get` returns
 the live list so clients do not need to infer it from documentation.
+
+Vault note reads/writes/listing intentionally go through the model's native
+Read/Write/Glob tools rather than dedicated MCP wrappers: the spawned Claude
+Code/Codex session already has unsandboxed filesystem access to the
+workspace, so `vault_note_read`/`vault_note_write`/`vault_notes_list` would
+only have added weaker, opt-out guardrails without closing any real gap.
+`vault_search`, `vault_index_refresh`, and `vault_lint` stay as MCP tools —
+they wrap real logic (a maintained FTS index, a link/orphan linter) a generic
+file tool can't replicate.
 
 | Domain | Tools |
 |---|---|
 | Context and status | `capabilities_get`, `context_get`, `agent_context_get`, `system_status_get`, `automation_runs_list`, `debug_issues_get`, `package_status_get` |
 | Bounded memory | `memory_read`, `memory_add`, `memory_replace`, `memory_remove`, `memory_proposals_list`, `memory_proposal_resolve` |
-| Vault | `vault_notes_list`, `vault_search`, `vault_note_read`, `vault_note_write`, `vault_index_refresh`, `vault_lint` |
+| Vault | `vault_search`, `vault_index_refresh`, `vault_lint` |
 | Projects | `projects_list`, `project_get`, `project_create`, `project_update`, `project_complete`, `project_restore`, `project_delete`, `project_files_list` |
 | Chats | `chats_list`, `chat_get`, `chat_create`, `chat_update`, `chat_send`, `chat_continue`, `chat_retry`, `chat_retry_update`, `chat_new_session`, `chat_handover`, `chat_fork`, `chat_archive`, `chat_delete`, `chat_mark_read`, `chat_stop` |
-| Provider consultations | `consultations_list`, `consultation_start`, `consultation_send`, `consultation_events`, `consultation_close`, `consultation_cancel`, `consultation_extend` |
+| Agent handoffs | `handoffs_list`, `handoff_start`, `handoff_send`, `handoff_events`, `handoff_close`, `handoff_cancel`, `handoff_extend` |
+| Adversarial review | `adversarial_review` |
 | Schedules | `schedules_list`, `schedule_preview`, `schedule_create`, `schedule_update`, `schedule_pause`, `schedule_resume`, `schedule_run`, `schedule_delete` |
 | Loops | `loops_list`, `loop_create`, `loop_update`, `loop_start`, `loop_stop`, `loop_run`, `loop_delete` |
-| Workspace files and history | `workspace_file_read`, `workspace_file_write`, `file_history_list`, `file_snapshot_read`, `file_snapshot_restore` |
+| Workspace files and history | `workspace_file_read`, `workspace_file_write`, `file_surface`, `file_history_list`, `file_snapshot_read`, `file_snapshot_restore` |
 | Agent assets and workspace | `workspace_health_get`, `workspace_health_fix`, `skills_list`, `skills_sync` |
 | Local session | `local_session_status`, `local_session_preflight`, `local_session_handback`, `local_session_resync` |
 | Deferred lifecycle | `lifecycle_actions_list`, `lifecycle_action_request` |

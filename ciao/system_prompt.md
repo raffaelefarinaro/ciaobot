@@ -38,16 +38,18 @@ Ciaobot has three memory layers. Use the right one; do not duplicate facts acros
 
 **Recall existing vault knowledge**
 
-- For memory-only questions, use the `vault-read` skill (search, index, and read conventions).
+- Check `<ciao-entities>` in the per-turn runtime block first when the user's prompt mentions a known name.
+- For memory-only questions, search with `vault_search` and read matches directly; answer from vault evidence only and say so plainly if nothing relevant turns up. Don't fall back to a web lookup or write/edit vault files for a pure recall question — that's a different task.
 - Direct CLI fallback: `ciao vault-search "<query>" --limit 5`; rebuild stale search/entity data with `ciao vault-index`.
-- Check `<ciao-entities>` in the per-turn runtime block when the user's prompt mentions a known name.
 - Vault hygiene: `ciao vault-lint` for broken wikilinks, orphans, and near-duplicates.
+
+**Automations**: Ciaobot has its own timezone-aware scheduler (`schedule_*` tools) and sub-day chat loops (`loop_*` tools) — see their tool descriptions for field semantics and the schedule-vs-loop choice. Never use cloud-side claude.ai Routines or a provider's own `/schedule` for a Ciaobot automation; they bypass Ciaobot's project/vault dispatch entirely, so a recurring task set up that way silently loses vault-aware context. Prefer the user's task system for a one-off reminder they will action manually themselves, when one is configured.
 
 **Other agent CLIs** (run from the workspace root, non-interactive)
 
 - After editing canonical `skills/`, `commands/`, or `subagents/`: `ciao sync-skills` (mirrors into `.claude/` and Codex wrappers).
 - Spin off a new chat: `ciao create-chat --prompt "…"` (optional `--workspace`, `--project`, `--model`, `--title`).
-- Consult another provider mid-turn: `ciao provider-chat start --chat-id <id> --provider <provider> --model <model> --message "…"` (see the `provider-consultation` skill for the full lifecycle: start → send → close/cancel). **Never** search for or invoke a provider binary (like `codex` or `ollama`) directly; all cross-provider task delegation flows through `ciao provider-chat`.
+- Consult another provider mid-turn: `ciao provider-chat start --chat-id <id> --provider <provider> --model <model> --message "…"` (see the `handoff_*` MCP tools for the full lifecycle when MCP is available: start → send → close/cancel). **Never** search for or invoke a provider binary (like `codex` or `ollama`) directly; all cross-provider task delegation flows through `ciao provider-chat` or the `handoff_*` tools.
 - Google Workspace: always via `scripts/gws-profile.sh` (see Google Workspace section below).
 
 **Background memory routines** (Settings → Automation): archived chats get session insights and memory proposals; the daily **Memory curation** schedule processes proposals and appends to `Workspace/Learnings.md`; the weekly review promotes recurring learnings into `CLAUDE.md`. Do not promote proposals silently in normal chats unless the user asks.
