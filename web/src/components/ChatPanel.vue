@@ -452,6 +452,11 @@
               class="trace-text trace-thinking"
               v-html="renderMarkdown(entry.content)"
             ></div>
+            <div
+              v-else-if="entry.kind === 'status'"
+              class="trace-text trace-status"
+              v-html="renderMarkdown(entry.content)"
+            ></div>
             <div v-else class="trace-text" v-html="renderMarkdown(entry.content)"></div>
           </template>
           <div
@@ -3587,6 +3592,12 @@ function insertImageRef(n: number) {
   border-left: 2px solid var(--fg2);
   padding-left: 8px;
   margin-left: 2px;
+}
+
+/* Transient status ticks (e.g. compaction) — one live line, dimmer than
+   regular trace text, no border since it's not a block of reasoning. */
+.trace-status {
+  opacity: 0.6;
 }
 
 .trace-tools {

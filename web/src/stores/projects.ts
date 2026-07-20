@@ -151,6 +151,7 @@ export const useProjectStore = defineStore('projects', () => {
     | { kind: 'thinking'; content: string }
     | { kind: 'text'; content: string; phase?: ChatMessage['phase'] }
     | { kind: 'filecard'; content: string; file_path: string; action: string; tool: string }
+    | { kind: 'status'; content: string }
   const streamingTimeline = ref<Record<string, StreamEntry[]>>({})  // per-chat interleaved tool/text entries
   const unread = ref<Record<string, number>>({})  // per-chat unread assistant message count
   // Per-chat "broker is running for this chat" flag, driven by /ws/events.
@@ -2841,6 +2842,20 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
+  function _pushStatusLine(chatId: string, text: string) {
+    // Compaction (and similar) status ticks arrive repeatedly while a turn
+    // works — fold them into one live line in the trace instead of stacking
+    // a new bubble per tick.
+    if (!streamingTimeline.value[chatId]) streamingTimeline.value[chatId] = []
+    const arr = streamingTimeline.value[chatId]
+    const last = arr[arr.length - 1]
+    if (last && last.kind === 'status') {
+      last.content = text
+    } else {
+      arr.push({ kind: 'status', content: text })
+    }
+  }
+
   function _pushFileCard(
     chatId: string,
     payload: { file_path: string; action: string; tool: string },
@@ -3183,7 +3198,14 @@ export const useProjectStore = defineStore('projects', () => {
         // usage status, not conversation, and one chat line per 1% is noise.
         // A hard "Rate limit exceeded" carries no "allowed" and still shows.
         const isAllowedRateLimit = message.includes('Rate limit: allowed')
-        if (message && !ephemeral.has(message) && !message.startsWith('error:') && !isAllowedRateLimit) {
+        // Compaction ticks repeat several times per pass. Unlike the
+        // rate-limit pings they're useful operator signal, so fold them into
+        // the live Thinking/Working trace (one line, updated in place)
+        // instead of dropping them or stacking a chat bubble per tick.
+        const isCompacting = /compact/i.test(message)
+        if (isCompacting) {
+          _pushStatusLine(chatId, message)
+        } else if (message && !ephemeral.has(message) && !message.startsWith('error:') && !isAllowedRateLimit) {
           msgs.push({
             role: 'system',
             content: message,
@@ -3267,6 +3289,10 @@ export const useProjectStore = defineStore('projects', () => {
               timestamp: now,
               tool_name: '_thinking',
             })
+          } else if (entry.kind === 'status') {
+            // Transient trace-only line (e.g. compaction ticks) — never
+            // persisted as a chat message, live view only.
+            continue
           } else {
             // Skip timeline text entries that are already represented in the
             // final merged text so the trace doesn't duplicate the answer bubble.

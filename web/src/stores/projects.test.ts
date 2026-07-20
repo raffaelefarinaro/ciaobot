@@ -251,6 +251,37 @@ describe('ephemeral status events', () => {
     expect(msgs.some(m => m.role === 'system' && m.content.includes('Rate limit: allowed (five_hour)'))).toBe(false)
     expect(msgs.some(m => m.role === 'system' && m.content.includes('Rate limit: allowed_warning'))).toBe(false)
   })
+
+  test('folds repeated compacting status ticks into one live trace line, not stacked system bubbles', () => {
+    // Regression: each "compacting" tick from the CLI used to push its own
+    // top-level system bubble (3 identical "compacting" bubbles stacked
+    // above the live Thinking trace instead of one line inside it).
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'c-compacting'
+    store.activeChatId = chatId
+    store.messages[chatId] = [
+      { role: 'user', content: 'hi', timestamp: '' },
+    ]
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'status', message: 'compacting' }),
+    })
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'status', message: 'compacting' }),
+    })
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'status', message: 'compacting' }),
+    })
+
+    const msgs = store.messages[chatId] || []
+    expect(msgs.some(m => m.content === 'compacting')).toBe(false)
+
+    const statusEntries = store.currentTimeline.filter(e => e.kind === 'status')
+    expect(statusEntries.length).toBe(1)
+    expect(statusEntries[0].content).toBe('compacting')
+  })
 })
 
 describe('queued message replay handling', () => {
