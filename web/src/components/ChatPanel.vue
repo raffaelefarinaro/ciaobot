@@ -155,7 +155,16 @@
             <span class="trace-chevron">{{ openTraces[i] ? '\u25BE' : '\u25B8' }}</span>
             <span class="trace-icon">&#129504;</span>
             <span class="trace-label">Activity</span>
-            <span class="trace-meta">{{ traceSummaryMeta(item.steps, item.subs) }}</span>
+            <span class="trace-meta">
+              <span
+                v-for="part in traceSummaryMetaParts(item.steps, item.subs)"
+                :key="part.key"
+                :class="['trace-meta-part', `part-${part.key}`, { 'part-important': part.isImportant }]"
+              >
+                <span class="part-text-long">{{ part.text }}</span>
+                <span class="part-text-short">{{ part.shortText || part.text }}</span>
+              </span>
+            </span>
             <span class="sr-only">, {{ openTraces[i] ? 'expanded' : 'collapsed' }}</span>
           </button>
           <div v-if="openTraces[i]" class="trace-body">
@@ -395,7 +404,16 @@
           <span class="activity-spinner"></span>
           <span class="trace-icon">&#129504;</span>
           <span class="trace-label">{{ (store.currentTimeline.length || store.currentStreamingText) ? 'Working...' : 'Thinking...' }}</span>
-          <span v-if="liveTraceMeta" class="trace-meta">{{ liveTraceMeta }}</span>
+          <span v-if="liveTraceMetaParts.length" class="trace-meta">
+            <span
+              v-for="part in liveTraceMetaParts"
+              :key="part.key"
+              :class="['trace-meta-part', `part-${part.key}`, { 'part-important': part.isImportant }]"
+            >
+              <span class="part-text-long">{{ part.text }}</span>
+              <span class="part-text-short">{{ part.shortText || part.text }}</span>
+            </span>
+          </span>
           <span class="sr-only">, {{ liveTraceOpen ? 'expanded' : 'collapsed' }}</span>
         </button>
         <div
@@ -842,7 +860,7 @@ import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
 import { formatTime, formatDuration } from '../lib/time'
-import { buildTurnParts, collectTraceOutputs, formatTokenUsage, isAnswerBubble, traceSummaryMeta, type TraceOutput } from '../lib/chatActivity'
+import { buildTurnParts, collectTraceOutputs, formatTokenUsage, isAnswerBubble, traceSummaryMeta, traceSummaryMetaParts, type TraceOutput } from '../lib/chatActivity'
 import { buildForkSnapshot } from '../lib/chatFork'
 import { formatCommentLocation } from '../lib/commentContext'
 
@@ -2060,7 +2078,7 @@ function handleFileLinkClick(e: MouseEvent): void {
   }
 }
 
-const liveTraceMeta = computed(() => {
+const liveTraceMetaParts = computed(() => {
   let toolCount = 0
   let textCount = 0
   let thinkingCount = 0
@@ -2078,25 +2096,68 @@ const liveTraceMeta = computed(() => {
   }
   if (store.currentStreamingThinking) thinkingCount += 1
   if (store.currentStreamingText) textCount += 1
-  const parts: string[] = []
-  if (thinkingCount) parts.push(`${thinkingCount} thought${thinkingCount === 1 ? '' : 's'}`)
-  if (textCount) parts.push(`${textCount} note${textCount === 1 ? '' : 's'}`)
-  if (toolCount) parts.push(`${toolCount} tool call${toolCount === 1 ? '' : 's'}`)
-  if (fileCount) parts.push(`${fileCount} file${fileCount === 1 ? '' : 's'}`)
+  const parts: { key: string; text: string; shortText?: string; isImportant?: boolean }[] = []
+  if (thinkingCount) {
+    parts.push({
+      key: 'thoughts',
+      text: `${thinkingCount} thought${thinkingCount === 1 ? '' : 's'}`,
+      shortText: `${thinkingCount} th`
+    })
+  }
+  if (textCount) {
+    parts.push({
+      key: 'notes',
+      text: `${textCount} note${textCount === 1 ? '' : 's'}`,
+      shortText: `${textCount} n`
+    })
+  }
+  if (toolCount) {
+    parts.push({
+      key: 'tools',
+      text: `${toolCount} tool call${toolCount === 1 ? '' : 's'}`,
+      shortText: `${toolCount} tool${toolCount === 1 ? '' : 's'}`,
+      isImportant: true
+    })
+  }
+  if (fileCount) {
+    parts.push({
+      key: 'files',
+      text: `${fileCount} file${fileCount === 1 ? '' : 's'}`,
+      shortText: `${fileCount} f`
+    })
+  }
   // Live elapsed time: reads nowTs (ticks every second) against the turn's
   // start so the label counts up while the model works.
   const startedAt = store.currentStreamStartedAt
   if (startedAt) {
     const elapsed = nowTs.value - startedAt
-    if (elapsed >= 0) parts.push(formatDuration(elapsed))
+    if (elapsed >= 0) {
+      parts.push({
+        key: 'duration',
+        text: formatDuration(elapsed),
+        isImportant: true
+      })
+    }
   }
   // Live token count: cumulative tokens reported so far this turn.
   const usage = store.currentLiveUsage
   if (usage) {
-    if (usage.input > 0) parts.push(`${formatTokens(usage.input)} in`)
-    if (usage.output > 0) parts.push(`${formatTokens(usage.output)} out`)
+    if (usage.input > 0) {
+      parts.push({
+        key: 'tokens-in',
+        text: `${formatTokens(usage.input)} in`,
+        shortText: `${formatTokens(usage.input)} in`
+      })
+    }
+    if (usage.output > 0) {
+      parts.push({
+        key: 'tokens-out',
+        text: `${formatTokens(usage.output)} out`,
+        shortText: `${formatTokens(usage.output)} out`
+      })
+    }
   }
-  return parts.join(' · ')
+  return parts
 })
 
 // Compact token label: 1234 -> "1.2k", 1_200_000 -> "1.2M". Keeps the live
@@ -3384,9 +3445,9 @@ function insertImageRef(n: number) {
   outline-offset: 2px;
 }
 
-.trace-chevron { font-size: calc(10px * var(--font-scale)); color: var(--fg2); }
-.trace-icon { font-size: calc(14px * var(--font-scale)); }
-.trace-label { color: var(--fg2); }
+.trace-chevron { font-size: calc(10px * var(--font-scale)); color: var(--fg2); flex-shrink: 0; }
+.trace-icon { font-size: calc(14px * var(--font-scale)); flex-shrink: 0; }
+.trace-label { color: var(--fg2); white-space: nowrap; flex-shrink: 0; }
 .trace-meta {
   color: var(--fg2);
   opacity: 0.7;
@@ -3397,6 +3458,41 @@ function insertImageRef(n: number) {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: var(--text-xs);
+  display: flex;
+  align-items: center;
+}
+.trace-meta-part {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+.trace-meta-part::after {
+  content: "·";
+  margin: 0 6px;
+  opacity: 0.7;
+}
+.trace-meta-part:last-child::after {
+  content: none;
+}
+.trace-meta-part .part-text-short {
+  display: none;
+}
+@media (max-width: 640px) {
+  .trace-meta-part.part-thoughts,
+  .trace-meta-part.part-notes,
+  .trace-meta-part.part-files,
+  .trace-meta-part.part-subagents {
+    display: none;
+  }
+  .trace-meta-part:not(:has(~ .trace-meta-part:not(.part-thoughts):not(.part-notes):not(.part-files):not(.part-subagents)))::after {
+    content: none;
+  }
+  .trace-meta-part .part-text-long {
+    display: none;
+  }
+  .trace-meta-part .part-text-short {
+    display: inline;
+  }
 }
 
 .trace-body {
@@ -3656,6 +3752,7 @@ details[open] > .activity-summary::before {
   border-radius: 50%;
   background: var(--accent);
   animation: activity-pulse 1.1s ease-in-out infinite;
+  flex-shrink: 0;
 }
 
 @keyframes activity-pulse {

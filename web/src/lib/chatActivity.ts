@@ -130,4 +130,67 @@ export function traceSummaryMeta(steps: ChatMessage[], subs?: SubagentTranscript
   return parts.join(' · ') || 'steps'
 }
 
+export interface MetaPart {
+  key: string
+  text: string
+  shortText?: string
+  isImportant?: boolean
+}
+
+export function traceSummaryMetaParts(steps: ChatMessage[], subs?: SubagentTranscript[]): MetaPart[] {
+  let toolCount = 0
+  let textCount = 0
+  let thinkingCount = 0
+  let fileCount = 0
+  for (const s of steps) {
+    if (s.tool_name === '_activity') {
+      toolCount += s.content.split('\n').filter(Boolean).length
+    } else if (s.tool_name === '_thinking') {
+      thinkingCount += 1
+    } else if (s.tool_name === '_filecard') {
+      fileCount += 1
+    } else if (s.role === 'assistant') {
+      textCount += 1
+    }
+  }
+  const parts: MetaPart[] = []
+  if (thinkingCount) {
+    parts.push({
+      key: 'thoughts',
+      text: `${thinkingCount} thought${thinkingCount === 1 ? '' : 's'}`,
+      shortText: `${thinkingCount} th`
+    })
+  }
+  if (textCount) {
+    parts.push({
+      key: 'notes',
+      text: `${textCount} note${textCount === 1 ? '' : 's'}`,
+      shortText: `${textCount} n`
+    })
+  }
+  if (toolCount) {
+    parts.push({
+      key: 'tools',
+      text: `${toolCount} tool call${toolCount === 1 ? '' : 's'}`,
+      shortText: `${toolCount} tool${toolCount === 1 ? '' : 's'}`,
+      isImportant: true
+    })
+  }
+  if (fileCount) {
+    parts.push({
+      key: 'files',
+      text: `${fileCount} file${fileCount === 1 ? '' : 's'}`,
+      shortText: `${fileCount} f`
+    })
+  }
+  if (subs?.length) {
+    parts.push({
+      key: 'subagents',
+      text: `${subs.length} subagent${subs.length === 1 ? '' : 's'}`,
+      shortText: `${subs.length} sub${subs.length === 1 ? '' : 's'}`
+    })
+  }
+  return parts
+}
+
 
