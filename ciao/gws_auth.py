@@ -46,28 +46,29 @@ logger = logging.getLogger(__name__)
 
 BUILTIN_PROFILES = ("personal", "work")
 
-# OAuth scopes granted per profile. Kept identical to the historical PWA-native
-# flow so re-login does not silently change what the user consented to.
+# OAuth scopes granted per profile. Both profiles request the full set of core
+# Workspace services gws supports, so the in-process re-login flow can mint
+# tokens that cover any feature the user turns on later (Forms, Contacts, etc.)
+# without a re-consent round-trip. Keep this list in sync with
+# `FULL_SCOPES` in `scripts/gws-auth-helper.py` (both ciao and ciaobot copies).
+# Extra/enterprise services (admin-reports, keep, classroom, chat, meet) are
+# omitted because they need admin grants or extra API enablement; pass a
+# custom scope set to `GwsReloginManager.start` when one is required.
 _PERSONAL_SCOPES = (
     "https://www.googleapis.com/auth/gmail.modify "
     "https://www.googleapis.com/auth/calendar "
-    "https://www.googleapis.com/auth/tasks "
-    "openid "
-    "https://www.googleapis.com/auth/userinfo.email "
-    "https://www.googleapis.com/auth/userinfo.profile"
-)
-_WORK_SCOPES = (
     "https://www.googleapis.com/auth/drive "
     "https://www.googleapis.com/auth/spreadsheets "
-    "https://www.googleapis.com/auth/gmail.modify "
-    "https://www.googleapis.com/auth/calendar "
     "https://www.googleapis.com/auth/documents "
     "https://www.googleapis.com/auth/presentations "
     "https://www.googleapis.com/auth/tasks "
+    "https://www.googleapis.com/auth/contacts "
+    "https://www.googleapis.com/auth/forms.body "
     "openid "
     "https://www.googleapis.com/auth/userinfo.email "
     "https://www.googleapis.com/auth/userinfo.profile"
 )
+_WORK_SCOPES = _PERSONAL_SCOPES
 
 _TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 _AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/auth"

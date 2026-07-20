@@ -54,9 +54,28 @@ def test_profile_config_dir_mapping(tmp_path: Path) -> None:
     assert gws_auth.profile_config_dir(cfg, "!!!") is None
 
 
-def test_scopes_differ_by_profile() -> None:
-    assert "drive" in gws_auth.scopes_for_profile("work")
-    assert "drive" not in gws_auth.scopes_for_profile("personal")
+def test_scopes_cover_all_supported_services() -> None:
+    # Both profiles request the full Workspace scope set so the in-process
+    # re-login can mint a token that covers any gws subcommand (including
+    # Forms, Drive, Contacts) without a re-consent round-trip.
+    expected = {
+        "gmail.modify",
+        "calendar",
+        "drive",
+        "spreadsheets",
+        "documents",
+        "presentations",
+        "tasks",
+        "contacts",
+        "forms.body",
+    }
+    for profile in ("personal", "work"):
+        scopes = gws_auth.scopes_for_profile(profile)
+        for fragment in expected:
+            assert fragment in scopes, f"{profile} scopes missing {fragment}"
+        # openid + userinfo are always present.
+        assert "openid" in scopes
+        assert "userinfo.email" in scopes
 
 
 def test_build_auth_url_includes_state_and_client() -> None:
