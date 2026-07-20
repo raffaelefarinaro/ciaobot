@@ -41,6 +41,7 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/integrations/gws/auth-url": "browser GWS integration auth url request",
     "/api/integrations/gws/exchange": "browser GWS integration oauth token exchange",
     "/api/integrations/gws/disconnect": "browser GWS integration disconnect/removal",
+    "/api/automation/backfill-insights": "browser Settings button to trigger insights backfill",
 }
 
 

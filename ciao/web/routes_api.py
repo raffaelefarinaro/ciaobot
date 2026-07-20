@@ -3598,6 +3598,67 @@ async def list_automation(request: Request) -> JSONResponse:
     return JSONResponse(job_runs.automation_summary())
 
 
+async def trigger_backfill_insights(request: Request) -> JSONResponse:
+    """Trigger the insights backfill process in the background."""
+    import asyncio
+    from pathlib import Path
+    from ciao.job_runs import track
+    from scripts.backfill_insights import _discover_archives, _worker
+
+    config = request.app.state.config
+
+    async def _run_backfill():
+        async with track("backfill_insights", "Insights backfill", category="system") as handle:
+            archives = _discover_archives(Path(config.workspace_root))
+            todo = [
+                a for a in archives
+                if not a.already_done and a.session_id is not None
+            ]
+
+            handle.extra["total_discovered"] = len(archives)
+            handle.extra["to_process"] = len(todo)
+
+            if not todo:
+                handle.skip("No archives to backfill")
+                return
+
+            sem = asyncio.Semaphore(2)  # concurrency=2
+            tasks = [
+                _worker(sem, a, config=config, mode_filter="both")
+                for a in todo
+            ]
+
+            processed_count = 0
+            success_count = 0
+            skipped_count = 0
+            error_count = 0
+
+            for fut in asyncio.as_completed(tasks):
+                try:
+                    archive, status, detail = await fut
+                    processed_count += 1
+                    if status == "ok":
+                        success_count += 1
+                    elif status == "skipped":
+                        skipped_count += 1
+                    else:
+                        error_count += 1
+                except Exception:
+                    error_count += 1
+                    processed_count += 1
+
+            handle.extra["processed"] = processed_count
+            handle.extra["success"] = success_count
+            handle.extra["skipped"] = skipped_count
+            handle.extra["errors"] = error_count
+
+            if error_count > 0:
+                raise RuntimeError(f"Backfill finished with {error_count} errors out of {processed_count} tasks")
+
+    asyncio.create_task(_run_backfill())
+    return JSONResponse({"status": "started"}, status_code=202)
+
+
 async def create_schedule(request: Request) -> JSONResponse:
     sm = request.app.state.schedule_manager
     state = request.app.state.state_store

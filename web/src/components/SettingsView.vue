@@ -783,6 +783,133 @@
         </div>
       </template>
 
+      <!-- AUTOMATIONS TAB -->
+      <template v-if="currentTab === 'automations'">
+        <div class="card">
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <div class="settings-label-row">
+                <p class="section-title">Background Automations</p>
+                <button class="btn-small" :disabled="!automationLoaded" @click="fetchAutomation">Refresh</button>
+              </div>
+              <p class="hint">
+                Status and logs of background tasks (git sync, memory curation, skills update, title generation).
+                Tasks wrapped in telemetry are recorded here.
+              </p>
+            </div>
+          </div>
+
+          <div v-if="!automationLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
+          <p v-else-if="automationError" class="hint hint--warn">{{ automationError }}</p>
+          <template v-else-if="automationItems">
+            <p v-if="automationItems.length === 0" class="hint hint--info">
+              No automation runs recorded yet.
+            </p>
+            <div v-else class="automation-list">
+              <div v-for="item in automationItems" :key="item.job" class="automation-row-container">
+                <!-- Header of job run -->
+                <div class="automation-job-header" @click="expandedAutomations[item.job] = !expandedAutomations[item.job]">
+                  <div class="job-meta-left">
+                    <span class="expand-icon">{{ expandedAutomations[item.job] ? '▼' : '▶' }}</span>
+                    <span class="job-title">{{ item.label }}</span>
+                    <span class="job-desc" :title="item.description">{{ item.description }}</span>
+                  </div>
+                  <div class="job-meta-right">
+                    <!-- Stats summary -->
+                    <span v-if="item.stats.total_runs" class="job-stat-summary">
+                      {{ Math.round((item.stats.success_rate || 0) * 100) }}% ok &middot; {{ item.stats.total_runs }} runs
+                    </span>
+                    <!-- Status badge -->
+                    <span class="badge" :class="getJobBadgeClass(item.job)">
+                      {{ getJobStatus(item.job) }}
+                    </span>
+                    <!-- Trigger button -->
+                    <button
+                      v-if="getJobSchedule(item.job)"
+                      class="btn-small btn-run"
+                      :disabled="triggeringJobs[item.job]"
+                      @click.stop="triggerJob(item.job)"
+                    >
+                      {{ triggeringJobs[item.job] ? 'Running...' : 'Run now' }}
+                    </button>
+                    <button
+                      v-else-if="item.job === 'insights' || item.job === 'backfill_insights'"
+                      class="btn-small btn-run"
+                      :disabled="backfillRunning"
+                      @click.stop="triggerBackfill"
+                    >
+                      {{ backfillRunning ? 'Backfilling...' : 'Backfill insights' }}
+                    </button>
+                    <span v-else class="job-trigger-context" title="Event-driven or periodic backend task">
+                      Auto
+                    </span>
+                  </div>
+                </div>
+
+                <!-- Expanded details (Runs log) -->
+                <div v-if="expandedAutomations[item.job]" class="automation-job-detail">
+                  <!-- Last run meta -->
+                  <div v-if="item.last_run" class="last-run-info">
+                    <div class="detail-row">
+                      <span class="detail-label">Last Run:</span>
+                      <span class="detail-val">{{ getJobLastRunLabel(item.job) }} ({{ getJobDuration(item.job) }})</span>
+                    </div>
+                    <div v-if="item.last_run.model" class="detail-row">
+                      <span class="detail-label">Model:</span>
+                      <span class="detail-val">{{ item.last_run.provider }}/{{ item.last_run.model }}</span>
+                    </div>
+                  </div>
+
+                  <!-- Last error banner -->
+                  <div v-if="item.stats.last_error" class="error-banner">
+                    <div class="error-banner-header">
+                      <span>Last Error ({{ formatTime(item.stats.last_error.ts) }})</span>
+                    </div>
+                    <pre class="error-text">{{ item.stats.last_error.error }}</pre>
+                  </div>
+
+                  <!-- Recent runs history -->
+                  <div class="runs-history">
+                    <p class="history-title">Recent Runs History</p>
+                    <div v-if="item.recent.length === 0" class="empty-history">No runs logged in this session.</div>
+                    <table v-else class="history-table">
+                      <thead>
+                        <tr>
+                          <th>Finished</th>
+                          <th>Status</th>
+                          <th>Duration</th>
+                          <th>Details / Errors</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="run in item.recent" :key="run.started_at + run.ended_at">
+                          <td class="td-time">{{ formatTime(run.ended_at || run.started_at) }}</td>
+                          <td>
+                            <span class="badge" :class="getTelemetryBadgeClass(run.status)">
+                              {{ run.status }}
+                            </span>
+                          </td>
+                          <td class="td-dur">{{ formatDuration(run.duration_ms) || '0ms' }}</td>
+                          <td class="td-details">
+                            <span v-if="run.model" class="run-model-info">{{ run.provider }}/{{ run.model }}</span>
+                            <span v-if="run.status === 'skipped' && run.extra?.skip_reason" class="run-skip-info">
+                              Skipped: {{ run.extra.skip_reason }}
+                            </span>
+                            <div v-if="run.error" class="run-error-details" :title="run.error">
+                              {{ run.error }}
+                            </div>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+      </template>
+
       <!-- WORKSPACES TAB -->
       <template v-if="currentTab === 'workspaces'">
         <div v-if="!workspacesLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
@@ -1713,6 +1840,7 @@ import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSuppor
 import { useAuthStore } from '../stores/auth'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
+import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import OnboardingCard from './OnboardingCard.vue'
@@ -1723,6 +1851,7 @@ const emit = defineEmits<{ 'open-sidebar': [] }>()
 const route = useRoute()
 const fileViewer = useFileViewerStore()
 const projectStore = useProjectStore()
+const taskStore = useTaskStore()
 const currentTab = computed(() => (route.params.tab as string) || 'home')
 
 const expandedSkills = ref<Record<string, boolean>>({})
@@ -3262,6 +3391,47 @@ async function fetchAutomation() {
     automationError.value = `Failed to load automation: ${e?.message || e}`
   } finally {
     automationLoaded.value = true
+  }
+}
+
+const expandedAutomations = ref<Record<string, boolean>>({})
+const triggeringJobs = ref<Record<string, boolean>>({})
+const jobScheduleMap: Record<string, string> = {
+  memory_proposals: 'system-memory-curation',
+  vault_index: 'system-workspace-hygiene',
+  skill_evolution: 'system-skill-evolution'
+}
+
+async function triggerJob(jobId: string) {
+  const scheduleId = jobScheduleMap[jobId]
+  if (!scheduleId) return
+  triggeringJobs.value[jobId] = true
+  try {
+    await taskStore.runScheduleNow(scheduleId)
+    notifySaved(`Triggered automation job "${jobId}" via schedule "${scheduleId}".`, 'Automations')
+    await fetchAutomation()
+  } catch (e: any) {
+    alert(`Failed to trigger job: ${e?.message || e}`)
+  } finally {
+    triggeringJobs.value[jobId] = false
+  }
+}
+
+function getJobSchedule(jobId: string): string | undefined {
+  return jobScheduleMap[jobId]
+}
+
+const backfillRunning = ref(false)
+async function triggerBackfill() {
+  backfillRunning.value = true
+  try {
+    await api.post('/api/automation/backfill-insights', {})
+    notifySaved('Insights backfill started in the background.', 'Automations')
+    setTimeout(fetchAutomation, 2000)
+  } catch (e: any) {
+    alert(`Failed to start backfill: ${e?.message || e}`)
+  } finally {
+    backfillRunning.value = false
   }
 }
 
@@ -5607,5 +5777,233 @@ async function doPackageUpdate() {
 }
 .usage-table tbody tr:hover .usage-td {
   background: var(--bg2);
+}
+
+/* Background Automations Tab */
+.automation-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+.automation-row-container {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  transition: border-color 0.15s var(--ease);
+}
+
+.automation-row-container:hover {
+  border-color: var(--border-strong);
+}
+
+.automation-job-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--space-3);
+  cursor: pointer;
+  user-select: none;
+  background: var(--bg2);
+}
+
+.job-meta-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.expand-icon {
+  font-size: 10px;
+  color: var(--fg3);
+  width: 12px;
+  text-align: center;
+}
+
+.job-title {
+  font-weight: 600;
+  color: var(--fg);
+  white-space: nowrap;
+}
+
+.job-desc {
+  font-size: var(--text-xs);
+  color: var(--fg3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.job-meta-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: 0 0 auto;
+}
+
+.job-stat-summary {
+  font-size: var(--text-xs);
+  color: var(--fg3);
+  font-variant-numeric: tabular-nums;
+  margin-right: var(--space-2);
+}
+
+.btn-run {
+  background: var(--accent2);
+  color: #fff;
+  border: none;
+}
+
+.btn-run:hover:not(:disabled) {
+  background: var(--accent-strong);
+}
+
+.job-trigger-context {
+  font-size: var(--text-xs);
+  color: var(--fg3);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  background: var(--bg3);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+
+.automation-job-detail {
+  padding: var(--space-4);
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.last-run-info {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  font-size: var(--text-sm);
+}
+
+.detail-row {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.detail-label {
+  color: var(--fg2);
+  font-weight: 500;
+}
+
+.detail-val {
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+
+.error-banner {
+  background: rgba(244, 67, 54, 0.08);
+  border: 1px solid var(--error);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+}
+
+.error-banner-header {
+  font-weight: 600;
+  color: var(--error);
+  margin-bottom: var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.error-text {
+  margin: 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--text-xs);
+  color: var(--fg);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.runs-history {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.history-title {
+  font-weight: 600;
+  font-size: var(--text-xs);
+  color: var(--fg2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.empty-history {
+  font-size: var(--text-xs);
+  color: var(--fg3);
+}
+
+.history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-xs);
+}
+
+.history-table th {
+  text-align: left;
+  padding: var(--space-2);
+  color: var(--fg3);
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.history-table td {
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--border);
+  color: var(--fg);
+  vertical-align: middle;
+}
+
+.history-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.td-time {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.td-dur {
+  font-variant-numeric: tabular-nums;
+  color: var(--fg2);
+}
+
+.run-model-info {
+  background: var(--bg2);
+  padding: 1px 4px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  color: var(--fg2);
+  font-size: 10px;
+  margin-right: var(--space-2);
+}
+
+.run-skip-info {
+  color: var(--warning);
+}
+
+.run-error-details {
+  color: var(--error);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 350px;
 }
 </style>

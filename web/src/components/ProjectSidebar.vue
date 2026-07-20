@@ -290,6 +290,13 @@
         >
           tool usage
         </router-link>
+        <router-link
+          to="/settings/automations"
+          class="settings-nav-item"
+          :class="{ active: route.path === '/settings/automations' }"
+        >
+          automations
+        </router-link>
       </div>
     </template>
 
