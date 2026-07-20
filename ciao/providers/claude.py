@@ -552,7 +552,19 @@ class ClaudeProvider(BaseSDKProvider):
                     "headers": {"Authorization": f"Bearer {request.mcp_token}"},
                 }
             }
-            options.strict_mcp_config = bool(request.mcp_required)
+            # Deliberately NOT setting ``strict_mcp_config`` here. Strict mode
+            # restricts the CLI to *only* the servers in ``mcp_servers`` (just
+            # ciaobot) and ignores every other MCP source — which includes the
+            # account's claude.ai connector MCPs (``mcp__claude_ai_*``). Those
+            # are fetched from the claude.ai login, not declared in
+            # ``mcp_servers``, so strict mode silently suppressed all of them
+            # (see the ``claude_ai_mcps`` / ``disallowed_tools`` gating in
+            # ciao/config.py and the contract in docs/MCP.md). Connectors must
+            # stay loaded so the per-workspace denylist can gate them; the
+            # ciaobot server is still injected above, and a server that is
+            # unavailable at spawn time already degrades to the legacy surface
+            # in ProjectChatManager. ``request.mcp_required`` is still honored
+            # on the Codex path, which has a non-exclusive per-server flag.
         if system_cli:
             options.cli_path = system_cli
         if resume_session:

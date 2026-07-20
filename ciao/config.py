@@ -476,8 +476,10 @@ class CiaoConfig:
           ``_DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL`` (n8n) for personal and
           ``[]`` for every other workspace.
 
-        So a personal chat defaults to blocking all 8 claude.ai connectors plus
-        n8n; a work chat defaults to no denylist. Both are overridable: the
+        So, with the toggle at its default (on), a personal chat blocks only
+        n8n and a work chat blocks nothing; the 8 claude.ai connectors are
+        allowed in both until the toggle is flipped off. Both are overridable:
+        the
         toggle via ``CIAO_CLAUDE_AI_MCPS_PERSONAL`` / ``CIAO_CLAUDE_AI_MCPS_WORK``
         / the PWA switch, the extras via ``CIAO_DISALLOWED_TOOLS_PERSONAL`` /
         ``CIAO_DISALLOWED_TOOLS_WORK`` / the "Extra disallowed tools" field.

@@ -38,9 +38,10 @@ flowchart LR
   unavailable degrades gracefully to the legacy path with a logged WARNING,
   rather than failing the turn. This keeps the app usable during bootstrap or
   when `CIAO_MCP_ENABLED=false`. The `GET /api/mcp/status` readiness display
-  (Settings) and server logs make the fallback observable. Once a chat has
-  launched with a live MCP session, strict provider configuration still surfaces
-  a mid-turn server outage as a visible error (see below).
+  (Settings) and server logs make the fallback observable. A mid-turn outage
+  of an already-live MCP session surfaces through the CLI/tool-call error path
+  and server logs rather than a strict-config launch failure (see the note on
+  `strict_mcp_config` below).
 - Plan-mode chats cannot call mutating tools. Provider-consultation principals
   are read-only. Tool results use stable `{ok,data}` / `{ok:false,error}`
   envelopes, and inputs are validated again by the domain manager.
@@ -65,12 +66,23 @@ ClaudeAgentOptions(
             "headers": {"Authorization": "Bearer <scoped-token>"},
         }
     },
-    strict_mcp_config=True,
+    # strict_mcp_config is intentionally left off — see below.
 )
 ```
 
-The managed Claude process is restarted when its MCP token changes. Strict MCP
-configuration makes an unavailable Ciaobot server a visible turn error.
+The managed Claude process is restarted when its MCP token changes.
+
+`strict_mcp_config` is **not** set on the chat path. The SDK's
+`McpHttpServerConfig` has no per-server "required" flag, so the only way to
+guarantee the Ciaobot server is the global strict switch — but strict mode
+restricts the CLI to *only* the servers in `mcp_servers` and ignores every
+other MCP source, which includes the account's claude.ai connector MCPs
+(`mcp__claude_ai_*`). Forcing it therefore suppressed all connectors regardless
+of the per-workspace `claude_ai_mcps` toggle (that was a bug: the toggle became
+dead UI on the MCP surface). Connectors now stay loaded and are gated solely by
+the per-workspace `disallowed_tools` denylist. A Ciaobot server that is
+unavailable at spawn time already degrades to the legacy surface (above), so
+strict mode is not needed to surface that case.
 
 ## Managed Codex configuration
 

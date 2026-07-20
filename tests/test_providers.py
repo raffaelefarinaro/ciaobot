@@ -71,7 +71,11 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
     await provider._ensure_connected(request)
 
     options = captured["options"]
-    assert options.strict_mcp_config is True
+    # Strict mode must NOT be forced on the chat path: it restricts the CLI to
+    # only the ciaobot server and suppresses the account's claude.ai connector
+    # MCPs (mcp__claude_ai_*). Connectors stay loaded and are gated per-workspace
+    # by the disallowed_tools denylist instead. The ciaobot server is still injected.
+    assert options.strict_mcp_config is False
     assert options.mcp_servers == {
         "ciaobot": {
             "type": "http",
