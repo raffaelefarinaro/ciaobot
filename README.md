@@ -1,5 +1,9 @@
 # Ciaobot
 
+<p align="center">
+  <img src="docs/hero.png" alt="Ciaobot mascot saying Ciao!" width="100%">
+</p>
+
 Ciaobot is a **second brain you own** — a local, provider-agnostic AI workspace whose memory is a plain-markdown vault you own outright. Chats, projects, files, schedules, and memory live in one interface, backed by whichever model you choose (Claude Code, OpenAI Codex, and others).
 
 ## Why it exists
