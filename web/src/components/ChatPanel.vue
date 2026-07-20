@@ -1,6 +1,6 @@
 <template>
   <div class="chat-panel" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handleFileLinkClick">
-    <div v-if="dragOver" class="drop-overlay">Drop images here</div>
+    <div v-if="dragOver" class="drop-overlay">Drop images to attach, or files/folders to insert their path</div>
 
     <!-- Header -->
     <PaneHeader :active-bg-agents="store.activeBackgroundAgents" @open-sidebar="$emit('open-sidebar')">
@@ -2873,14 +2873,33 @@ async function handleVoice(blob: Blob) {
   }
 }
 async function handleFileSelect(e: Event) { const input = e.target as HTMLInputElement; if (!input.files?.length) return; await store.uploadImages(chat.value.chat_id, Array.from(input.files)); input.value = '' }
-async function handleDrop(e: DragEvent) { dragOver.value = false; const files = Array.from(e.dataTransfer?.files || []).filter(f => f.type.startsWith('image/')); if (files.length) await store.uploadImages(chat.value.chat_id, files) }
+async function handleDrop(e: DragEvent) {
+  dragOver.value = false
+  const dt = e.dataTransfer
+  if (!dt) return
+  const imageFiles: File[] = []
+  const paths: string[] = []
+  for (const item of Array.from(dt.items || [])) {
+    if (item.kind !== 'file') continue
+    const entry = (item as any).webkitGetAsEntry?.()
+    if (entry && entry.isDirectory) {
+      paths.push(entry.name)
+      continue
+    }
+    const file = item.getAsFile()
+    if (!file) continue
+    if (file.type.startsWith('image/')) imageFiles.push(file)
+    else paths.push((file as any).webkitRelativePath || file.name)
+  }
+  if (paths.length) insertTextAtCursor(paths.join(' '))
+  if (imageFiles.length) await store.uploadImages(chat.value.chat_id, imageFiles)
+}
 async function handlePaste(e: ClipboardEvent) { const items = Array.from(e.clipboardData?.items || []).filter(i => i.type.startsWith('image/')); if (items.length) { e.preventDefault(); await store.uploadImages(chat.value.chat_id, items.map(i => i.getAsFile()).filter(Boolean) as File[]) } }
 function removePendingImage(index: number) { store.removePendingImage(index) }
 
-function insertImageRef(n: number) {
+function insertTextAtCursor(token: string) {
   const el = inputEl.value
   if (!el) return
-  const token = `[Image ${n}]`
   const start = el.selectionStart ?? 0
   const end = el.selectionEnd ?? 0
   const before = inputText.value.slice(0, start)
@@ -2896,6 +2915,10 @@ function insertImageRef(n: number) {
     el.selectionStart = el.selectionEnd = pos
     el.focus()
   })
+}
+
+function insertImageRef(n: number) {
+  insertTextAtCursor(`[Image ${n}]`)
 }
 </script>
 
