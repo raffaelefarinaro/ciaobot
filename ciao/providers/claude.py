@@ -99,6 +99,31 @@ _TURN_INTERRUPTED_MESSAGE = (
     "\"continue\" to resume."
 )
 
+# The Claude CLI appends this banner as assistant text when the upstream API
+# connection drops mid-stream ("API Error: Connection closed mid-response. The
+# response above may be incomplete."). The SDK may then report the turn as a
+# normal (non-error) terminal result, so nothing downstream would treat it as a
+# failure. We detect the banner and re-flag the result as an error the
+# orchestration layer can auto-resume. Keep these markers in sync with
+# ``_is_retryable_connection_error`` in ``ciao/web/project_chats.py``.
+_CONNECTION_DROP_MARKERS = (
+    "connection closed mid-response",
+    "response above may be incomplete",
+)
+
+# Canonical result text used when the drop was seen only in streamed deltas and
+# the terminal result field itself is empty. Carries a marker so the
+# orchestration layer's connection-error classifier recognises it.
+_CONNECTION_DROP_MESSAGE = (
+    "API Error: Connection closed mid-response. The response above may be "
+    "incomplete."
+)
+
+
+def _is_connection_drop_text(text: str) -> bool:
+    low = (text or "").lower()
+    return any(marker in low for marker in _CONNECTION_DROP_MARKERS)
+
 # The claude-agent-sdk reads the CLI subprocess stdout into a bounded decode
 # buffer (default 1 MiB, ``_DEFAULT_MAX_BUFFER_SIZE``) and raises a fatal,
 # stream-killing error when a single JSON message exceeds it — typically a
@@ -345,6 +370,11 @@ class ClaudeProvider(BaseSDKProvider):
         self._turn_input_tokens = 0
         self._turn_output_committed = 0
         self._cur_msg_output = 0
+        # Tail of the current turn's streamed assistant text, used to detect
+        # the CLI's mid-response connection-drop banner even when it arrives as
+        # streamed deltas rather than in the terminal result field. Bounded and
+        # reset per turn.
+        self._turn_text_tail = ""
         # Set by the stderr handler when the CLI refuses to resume because
         # the session is held by a background agent. The next connect
         # attempt re-resumes with ``--fork-session`` to branch a copy.
@@ -764,6 +794,7 @@ class ClaudeProvider(BaseSDKProvider):
         self._turn_input_tokens = 0
         self._turn_output_committed = 0
         self._cur_msg_output = 0
+        self._turn_text_tail = ""
 
         # Register handle *before* connect/query so /stop can interrupt a
         # hanging SDK call — otherwise the bot locks up with "No active run".
@@ -799,6 +830,25 @@ class ClaudeProvider(BaseSDKProvider):
 
                 if pending_result is not None:
                     await self._augment_with_context_pct(client, pending_result)
+                    # A mid-response connection drop is emitted by the CLI as
+                    # assistant text and may come back as a *non-error* terminal
+                    # result. Re-flag it as an error (and make sure the banner
+                    # text is on the result) so the orchestration layer can
+                    # auto-resume instead of silently ending the turn.
+                    if (
+                        _is_connection_drop_text(pending_result.result)
+                        or _is_connection_drop_text(self._turn_text_tail)
+                    ):
+                        if not pending_result.is_error:
+                            logger.warning(
+                                "Claude turn ended on a mid-response connection "
+                                "drop reported as success for session %s; "
+                                "re-flagging as a retryable error",
+                                self._session_id,
+                            )
+                        pending_result.is_error = True
+                        if not _is_connection_drop_text(pending_result.result):
+                            pending_result.result = _CONNECTION_DROP_MESSAGE
                     merged.put_nowait(pending_result)
                 else:
                     # receive_response() completed *normally* but never yielded
@@ -1003,6 +1053,10 @@ class ClaudeProvider(BaseSDKProvider):
             if delta_type == "text_delta":
                 text = delta.get("text", "")
                 if text:
+                    # Only the top-level turn's text can carry the CLI's
+                    # connection-drop banner; subagent text is unrelated.
+                    if parent_id is None:
+                        self._turn_text_tail = (self._turn_text_tail + text)[-4096:]
                     return [AssistantTextDelta(
                         type="assistant",
                         text=text,

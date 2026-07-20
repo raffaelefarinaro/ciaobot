@@ -104,6 +104,16 @@ _PROJECT_UPLOAD_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 _RETRY_INTERVAL_SECONDS = 60 * 60
 _RETRY_CONNECTION_INTERVAL_SECONDS = 30
 _RETRY_STATUSES = {"pending", "stopped", ""}
+# Prompt used to resume a session after a mid-response connection drop. The
+# original prompt is NOT replayed — the partial turn already ran (and may have
+# executed tools), so we resume the existing session and ask it to continue,
+# matching the "send 'continue' to resume" idiom the interrupted-turn banner
+# already tells users about.
+_RESUME_CONTINUE_PROMPT = "continue"
+# Cap on consecutive resume-continue retries for a mid-response drop so a
+# persistently flaky connection cannot loop forever burning quota. Once hit,
+# the turn is left for the user to continue manually.
+_MAX_CONNECTION_DROP_RETRIES = 6
 
 # Injected into the parent turn when its background subagents all finish. The
 # CLI does not auto-continue a parent turn after a background `Agent` dispatch
@@ -313,6 +323,12 @@ def _is_retryable_connection_error(text: str) -> bool:
         "connect timeout",
         "connection timeout",
         "connection timed out",
+        # Upstream API dropped the streaming connection mid-response. The CLI
+        # surfaces this as a banner; the Claude provider re-flags it as an
+        # error. Kept in sync with ``_CONNECTION_DROP_MARKERS`` in
+        # ``ciao/providers/claude.py``.
+        "connection closed mid-response",
+        "response above may be incomplete",
     )
     return any(indicator in low for indicator in connection_indicators)
 
@@ -3576,10 +3592,12 @@ class ProjectChatManager:
     def disallowed_tools_for_chat(self, chat: ChatInfo) -> list[str]:
         """Per-workspace tool denylist for a chat's spawned CLI.
 
-        Personal chats deny all claude.ai connector MCPs by default
-        (work-only tools), work chats deny nothing by default. Both are
-        overridable via ``CIAO_DISALLOWED_TOOLS_PERSONAL`` /
-        ``CIAO_DISALLOWED_TOOLS_WORK``.
+        With the ``claude_ai_mcps`` toggle at its default (on), the claude.ai
+        connector MCPs are allowed in both workspaces: personal chats deny only
+        the self-hosted n8n MCP, work chats deny nothing. Flip the toggle off
+        (``CIAO_CLAUDE_AI_MCPS_PERSONAL`` / ``_WORK`` / the PWA switch) to add
+        the connector set to the denylist; extras are overridable via
+        ``CIAO_DISALLOWED_TOOLS_PERSONAL`` / ``CIAO_DISALLOWED_TOOLS_WORK``.
         """
         if chat.provider != "claude":
             return []
@@ -4368,6 +4386,88 @@ class ProjectChatManager:
         """Last announced running-background-subagent count per chat (>0 only)."""
         return {cid: n for cid, n in self._background_agents_last.items() if n > 0}
 
+    def _park_pending_for_retry(self, chat_id: str, stream: "ChatStream") -> None:
+        """Move queued follow-ups off the (about-to-be-torn-down) stream onto
+        the chat so a scheduled retry re-seeds them instead of dropping them.
+
+        ``start_stream`` re-seeds ``chat.pending_queue`` on every turn
+        (including retries), so parking here keeps the user's queued messages
+        alive across the retry window rather than losing them when the errored
+        stream's ``finish()``/``clear()`` runs.
+        """
+        parked = stream.drain_pending()
+        if not parked:
+            return
+        chat = self._chats.get(chat_id)
+        if chat is not None:
+            chat.pending_queue = list(parked)
+            self._save()
+
+    def _arm_retry(
+        self,
+        chat_id: str,
+        stream: "ChatStream",
+        *,
+        kind: str,
+        current_prompt: str,
+        current_images: list[ImageAttachment] | None,
+        had_progress: bool,
+        reason: str,
+    ) -> bool:
+        """Arm a deferred retry for a quota/connection failure.
+
+        ``kind`` is ``"quota"`` or ``"connection"``. A connection failure that
+        dropped *after* streaming output (``had_progress``) resumes the session
+        with a "continue" nudge instead of replaying the prompt — replaying
+        could re-run tool calls the partial turn already executed — and is
+        capped at ``_MAX_CONNECTION_DROP_RETRIES`` so a flaky connection cannot
+        loop forever. Every armed retry parks queued follow-ups onto the chat
+        so they survive to the retried turn. Returns True if a retry was armed.
+        """
+        chat = self._chats.get(chat_id)
+        # Resume-continue only makes sense with a session to resume. Without one
+        # (never expected once output has streamed, but be safe) "continue"
+        # would seed a useless fresh session, so replay the prompt instead.
+        resume_continue = (
+            kind == "connection"
+            and had_progress
+            and chat is not None
+            and bool(chat.session_id)
+        )
+        if resume_continue:
+            attempts = chat.retry_attempts if chat is not None else 0
+            if attempts >= _MAX_CONNECTION_DROP_RETRIES:
+                logger.warning(
+                    "chat %s hit the mid-response connection-drop retry cap "
+                    "(%d); leaving the turn for a manual continue",
+                    chat_id,
+                    _MAX_CONNECTION_DROP_RETRIES,
+                )
+                return False
+            prompt = _RESUME_CONTINUE_PROMPT
+            image_refs: list[str] | None = None
+            interval = _RETRY_CONNECTION_INTERVAL_SECONDS
+        elif kind == "connection":
+            prompt = current_prompt
+            image_refs = self._image_refs(current_images)
+            interval = _RETRY_CONNECTION_INTERVAL_SECONDS
+        else:  # quota
+            prompt = current_prompt
+            image_refs = self._image_refs(current_images)
+            interval = _RETRY_INTERVAL_SECONDS
+        armed = self.set_chat_retry(
+            chat_id,
+            prompt,
+            image_refs=image_refs,
+            reason=reason,
+            interval_seconds=interval,
+        )
+        if armed is None:
+            return False
+        stream.publish({"type": "chat_retry", "status": "pending"})
+        self._park_pending_for_retry(chat_id, stream)
+        return True
+
     def set_chat_retry(
         self,
         chat_id: str,
@@ -4844,31 +4944,36 @@ class ProjectChatManager:
                             if isinstance(event, ResultEvent):
                                 if event.is_error:
                                     had_error = True
-                                    if not had_provider_progress:
-                                        if _is_retryable_quota_error(event.result or ""):
-                                            self.set_chat_retry(
-                                                chat_id,
-                                                current_prompt,
-                                                image_refs=self._image_refs(current_images),
-                                                reason=event.result or "quota limit",
-                                                interval_seconds=_RETRY_INTERVAL_SECONDS,
-                                            )
-                                            stream.publish({
-                                                "type": "chat_retry",
-                                                "status": "pending",
-                                            })
-                                        elif _is_retryable_connection_error(event.result or ""):
-                                            self.set_chat_retry(
-                                                chat_id,
-                                                current_prompt,
-                                                image_refs=self._image_refs(current_images),
-                                                reason=event.result or "connection error",
-                                                interval_seconds=_RETRY_CONNECTION_INTERVAL_SECONDS,
-                                            )
-                                            stream.publish({
-                                                "type": "chat_retry",
-                                                "status": "pending",
-                                            })
+                                    result_text = event.result or ""
+                                    # Quota rejections only auto-retry when
+                                    # nothing streamed (retrying a partial turn
+                                    # would double-run work). Connection errors
+                                    # are safe to resume even mid-response —
+                                    # _arm_retry resumes the session with
+                                    # "continue" rather than replaying.
+                                    if (
+                                        not had_provider_progress
+                                        and _is_retryable_quota_error(result_text)
+                                    ):
+                                        self._arm_retry(
+                                            chat_id,
+                                            stream,
+                                            kind="quota",
+                                            current_prompt=current_prompt,
+                                            current_images=current_images,
+                                            had_progress=had_provider_progress,
+                                            reason=result_text or "quota limit",
+                                        )
+                                    elif _is_retryable_connection_error(result_text):
+                                        self._arm_retry(
+                                            chat_id,
+                                            stream,
+                                            kind="connection",
+                                            current_prompt=current_prompt,
+                                            current_images=current_images,
+                                            had_progress=had_provider_progress,
+                                            reason=result_text or "connection error",
+                                        )
                                 else:
                                     turn_assistant_text = event.result or ""
                     except Exception as exc:
@@ -4888,31 +4993,29 @@ class ProjectChatManager:
                                 error_msg = f"{error_msg}\n{stderr}"
                             stream.publish({"type": "error", "message": error_msg})
                             had_error = True
-                            if not had_provider_progress:
-                                if _is_retryable_quota_error(error_msg):
-                                    self.set_chat_retry(
-                                        chat_id,
-                                        current_prompt,
-                                        image_refs=self._image_refs(current_images),
-                                        reason=error_msg,
-                                        interval_seconds=_RETRY_INTERVAL_SECONDS,
-                                    )
-                                    stream.publish({
-                                        "type": "chat_retry",
-                                        "status": "pending",
-                                    })
-                                elif _is_retryable_connection_error(error_msg):
-                                    self.set_chat_retry(
-                                        chat_id,
-                                        current_prompt,
-                                        image_refs=self._image_refs(current_images),
-                                        reason=error_msg,
-                                        interval_seconds=_RETRY_CONNECTION_INTERVAL_SECONDS,
-                                    )
-                                    stream.publish({
-                                        "type": "chat_retry",
-                                        "status": "pending",
-                                    })
+                            if (
+                                not had_provider_progress
+                                and _is_retryable_quota_error(error_msg)
+                            ):
+                                self._arm_retry(
+                                    chat_id,
+                                    stream,
+                                    kind="quota",
+                                    current_prompt=current_prompt,
+                                    current_images=current_images,
+                                    had_progress=had_provider_progress,
+                                    reason=error_msg,
+                                )
+                            elif _is_retryable_connection_error(error_msg):
+                                self._arm_retry(
+                                    chat_id,
+                                    stream,
+                                    kind="connection",
+                                    current_prompt=current_prompt,
+                                    current_images=current_images,
+                                    had_progress=had_provider_progress,
+                                    reason=error_msg,
+                                )
                             break
 
                     if turn_assistant_text:
