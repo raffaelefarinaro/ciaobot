@@ -2503,16 +2503,26 @@ async def chat_messages(request: Request) -> JSONResponse:
         return JSONResponse({"error": "SDK not available"}, status_code=500)
 
     result: list[dict] = []
-    try:
-        msgs = get_session_messages(
-            chat.session_id,
-            directory=str(config.workspace_root),
-        )
-    except (FileNotFoundError, ValueError):
-        # Session file doesn't exist on this machine (remote chat) or was
-        # deleted after archiving. If the chat is archived and has a transcript
-        # path, render the durable markdown record instead.
-        msgs = None
+    # A chat can rotate through more than one SDK session file within the
+    # same conversation (autocompact, or a resume-failure fallback) — each
+    # file only holds the turns written after it started. Walk the full
+    # lineage (oldest first) so history renders continuously across the
+    # rotation instead of only showing the newest segment.
+    session_ids = [*chat.previous_session_ids, chat.session_id]
+    msgs: list | None = None
+    for sid in session_ids:
+        if not sid:
+            continue
+        try:
+            segment = get_session_messages(sid, directory=str(config.workspace_root))
+        except (FileNotFoundError, ValueError):
+            # This segment's file doesn't exist on this machine (remote chat,
+            # or pruned after rotating away). Skip it rather than blanking
+            # the whole history — the other segments may still be intact.
+            continue
+        if msgs is None:
+            msgs = []
+        msgs.extend(segment)
 
     if msgs is None:
         if chat.archived and chat.archive_path:

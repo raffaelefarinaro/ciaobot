@@ -702,6 +702,14 @@ class ChatInfo:
     # and legacy chats can coexist without process-global configuration.
     control_surface: str = ""
     session_id: str = ""
+    # SDK session ids this chat rotated through earlier in the SAME
+    # conversation (autocompact, or a resume-failure fallback that forks a
+    # new session) — oldest first. `/messages` walks these plus the current
+    # `session_id` to render continuous history across the rotation, since
+    # each SDK session file only holds the turns written after it started.
+    # Cleared (not carried forward) by explicit resets: new_session() and
+    # handover_chat() intentionally start a new conversation/session lineage.
+    previous_session_ids: list[str] = field(default_factory=list)
     created_at: str = ""
     archived: bool = False
     last_activity_at: str = ""
@@ -1035,6 +1043,7 @@ class ProjectChatManager:
                 thinking_level=cd.get("thinking_level", ""),
                 control_surface=cd.get("control_surface", ""),
                 session_id=cd.get("session_id", ""),
+                previous_session_ids=list(cd.get("previous_session_ids", [])),
                 created_at=cd.get("created_at", ""),
                 archived=cd.get("archived", False),
                 last_activity_at=cd.get("last_activity_at", cd.get("created_at", "")),
@@ -1125,6 +1134,7 @@ class ProjectChatManager:
                     "thinking_level": c.thinking_level,
                     "control_surface": c.control_surface,
                     "session_id": c.session_id,
+                    "previous_session_ids": c.previous_session_ids,
                     "created_at": c.created_at,
                     "archived": c.archived,
                     "last_activity_at": c.last_activity_at,
@@ -3024,6 +3034,10 @@ class ProjectChatManager:
             else ""
         )
         chat.session_id = ""
+        # Provider switch: the new provider has its own session numbering, so
+        # the old lineage doesn't apply. Visible history instead carries over
+        # via `handover_messages` above.
+        chat.previous_session_ids = []
         chat.last_activity_at = _now_iso()
 
         ctx = ChatContext.for_web(chat_id)
@@ -3320,15 +3334,20 @@ class ProjectChatManager:
             session_id=chat.session_id,
             provider=chat.provider,
         )
-        # Delete the SDK session blob for the now-archived session.
-        if chat.session_id and chat.provider == "claude":
-            self._transcripts.delete_sdk_session_blob(
-                self._config.workspace_root, chat.session_id
-            )
+        # Delete the SDK session blob for the now-archived session, plus any
+        # earlier ones this chat rotated through (autocompact/resume-fallback)
+        # before this reset — they're all being abandoned together.
+        if chat.provider == "claude":
+            for sid in [*chat.previous_session_ids, chat.session_id]:
+                if sid:
+                    self._transcripts.delete_sdk_session_blob(
+                        self._config.workspace_root, sid
+                    )
         # Drop attached images: they belong to the archived transcript.
         self._unlink_chat_images(chat)
         # Reset session
         chat.session_id = ""
+        chat.previous_session_ids = []
         chat.archived = False
         chat.archive_path = ""
         chat.handover_messages = []
@@ -3853,6 +3872,18 @@ class ProjectChatManager:
         """
         return chat.mode
 
+    @staticmethod
+    def _rotate_session_id(chat: ChatInfo, new_session_id: str) -> None:
+        """Record a mid-conversation SDK session rotation (autocompact, or a
+        resume-failure fallback that forks a new session) before overwriting
+        ``chat.session_id``, so ``/messages`` can still stitch the turns the
+        old session file holds into continuous history. A no-op for the
+        first-ever session assignment (``chat.session_id`` still empty).
+        """
+        if chat.session_id and chat.session_id not in chat.previous_session_ids:
+            chat.previous_session_ids.append(chat.session_id)
+        chat.session_id = new_session_id
+
     async def _drive_stream(
         self,
         *,
@@ -3879,7 +3910,7 @@ class ProjectChatManager:
             yield event
             sdk_sid = provider.current_session_id
             if sdk_sid and sdk_sid != chat.session_id:
-                chat.session_id = sdk_sid
+                self._rotate_session_id(chat, sdk_sid)
                 self._save()
             if isinstance(event, ResultEvent):
                 outcome.response_text = event.result
@@ -3892,7 +3923,7 @@ class ProjectChatManager:
                 outcome.quota = event.quota
                 outcome.cost_usd = event.cost_usd or 0.0
                 if event.session_id and event.session_id != chat.session_id:
-                    chat.session_id = event.session_id
+                    self._rotate_session_id(chat, event.session_id)
                     self._save()
             elif isinstance(event, ToolUseEvent):
                 outcome.tool_events.append({
