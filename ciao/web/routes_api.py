@@ -3940,6 +3940,19 @@ async def loop_detail(request: Request) -> JSONResponse:
     lm.replace(entry)
     if "running" in body:
         if body["running"]:
+            chat = pcm.get_chat(entry.web_chat_id)
+            if chat is not None and chat.archived:
+                # The target chat was archived (e.g. by an auto-archive
+                # policy) while the loop was stopped. Resuming into a dead
+                # chat would just auto-stop again on the next tick, so fork
+                # a fresh chat from the archived transcript and re-point the
+                # loop at it instead.
+                try:
+                    new_chat = pcm.continue_archived_chat(entry.web_chat_id)
+                except ValueError as exc:
+                    return JSONResponse({"error": str(exc)}, status_code=409)
+                entry.web_chat_id = new_chat.chat_id
+                lm.replace(entry)
             lm.start_loop(loop_id)
         else:
             lm.stop_loop(loop_id)

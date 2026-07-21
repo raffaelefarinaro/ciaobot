@@ -13,21 +13,41 @@ from ciao.web.routes_api import create_loop, list_loops, loop_detail, run_loop_n
 
 
 class _Chat:
-    def __init__(self, title: str) -> None:
+    def __init__(self, title: str, *, archived: bool = False) -> None:
         self.title = title
+        self.archived = archived
+
+
+class _NewChat:
+    def __init__(self, chat_id: str) -> None:
+        self.chat_id = chat_id
 
 
 class _ProjectChats:
-    """Stub PCM: knows two chats, one of which is permanently busy."""
+    """Stub PCM: knows an idle, a busy, and two archived chats."""
 
     def __init__(self) -> None:
-        self.chats = {"chat-idle": _Chat("Idle chat"), "chat-busy": _Chat("Busy chat")}
+        self.chats = {
+            "chat-idle": _Chat("Idle chat"),
+            "chat-busy": _Chat("Busy chat"),
+            "chat-archived": _Chat("Archived chat", archived=True),
+            "chat-archived-broken": _Chat("Broken archive", archived=True),
+        }
+        self._continued = 0
 
     def get_chat(self, chat_id: str):
         return self.chats.get(chat_id)
 
     def chat_stream_active(self, chat_id: str) -> bool:
         return chat_id == "chat-busy"
+
+    def continue_archived_chat(self, chat_id: str):
+        if chat_id == "chat-archived-broken":
+            raise ValueError("No message history found in transcript")
+        self._continued += 1
+        new_id = f"chat-continued-{self._continued}"
+        self.chats[new_id] = _Chat("Continued chat")
+        return _NewChat(new_id)
 
 
 def _make_client(tmp_path: Path) -> tuple[TestClient, LoopManager]:
@@ -131,6 +151,34 @@ def test_patch_updates_and_toggles_running(tmp_path: Path) -> None:
     assert client.patch(f"/api/loops/{loop_id}", json={"interval_minutes": 0}).status_code == 400
     assert client.patch(f"/api/loops/{loop_id}", json={"web_chat_id": "chat-nope"}).status_code == 400
     assert client.patch("/api/loops/loop-nope", json={"prompt": "x"}).status_code == 404
+
+
+def test_start_on_archived_chat_forks_new_chat(tmp_path: Path) -> None:
+    client, manager = _make_client(tmp_path)
+    loop_id = client.post(
+        "/api/loops", json={"prompt": "p", "web_chat_id": "chat-archived"}
+    ).json()["loop_id"]
+
+    resp = client.patch(f"/api/loops/{loop_id}", json={"running": True})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["running"] is True
+    assert body["web_chat_id"] == "chat-continued-1"
+    assert manager.is_running(loop_id)
+    assert manager.get(loop_id).web_chat_id == "chat-continued-1"
+
+
+def test_start_on_archived_chat_with_unreadable_transcript_errors(tmp_path: Path) -> None:
+    client, manager = _make_client(tmp_path)
+    loop_id = client.post(
+        "/api/loops", json={"prompt": "p", "web_chat_id": "chat-archived-broken"}
+    ).json()["loop_id"]
+
+    resp = client.patch(f"/api/loops/{loop_id}", json={"running": True})
+    assert resp.status_code == 409
+    assert "error" in resp.json()
+    assert not manager.is_running(loop_id)
+    assert manager.get(loop_id).web_chat_id == "chat-archived-broken"
 
 
 def test_run_now_and_busy_conflict(tmp_path: Path) -> None:
