@@ -150,6 +150,13 @@ export interface ChatMessage {
   // trace; only final_answer is eligible for the terminal response bubble.
   // Undefined keeps the legacy last-assistant-message inference.
   phase?: 'commentary' | 'final_answer'
+  // True when this assistant bubble was promoted from a live streaming
+  // thinking buffer via the PWA's "Show reply as text" affordance. Used to
+  // suppress a duplicate if the same text later arrives through a normal
+  // result event (the dedup in normalizeMessages already filters identical
+  // text, but the flag documents intent and is available for any UI that
+  // wants to label promoted bubbles differently).
+  promoted_from_thinking?: boolean
 }
 
 // Subagent transcripts from /api/chats/{id}/subagents. One entry per subagent

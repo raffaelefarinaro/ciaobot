@@ -1943,6 +1943,37 @@ export const useProjectStore = defineStore('projects', () => {
     persistStreamStartedAt()
   }
 
+  // Manual recovery for Ollama-routed models that wrap their final answer in
+  // a thinking content block. The model is still streaming (or stalled), the
+  // text stream is empty, and the thinking buffer is long enough to be a
+  // real reply — promote it to a normal assistant bubble so the user can
+  // read it. The server is left alone: when its result event eventually
+  // fires, the normal commit path still adds the model-canonical text and
+  // the now-promoted bubble simply gets re-rendered as part of the
+  // reconciled history. A second copy can land if the result text contains
+  // the same content, but the timeline dedup at result-time (see
+  // _flushTimeline) collapses it.
+  function promoteStreamingThinkingToAnswer(chatId: string) {
+    const thinking = (streamingThinking.value[chatId] || '').trim()
+    if (!thinking) return
+    const msgs = messages.value[chatId] || []
+    msgs.push({
+      role: 'assistant',
+      content: thinking,
+      timestamp: new Date().toISOString(),
+      // phase === 'final_answer' keeps isAnswerBubble() true so the existing
+      // buildTurnParts path renders this as a real bubble, not as a trace
+      // step, even before the result event arrives.
+      phase: 'final_answer',
+      promoted_from_thinking: true,
+    })
+    messages.value[chatId] = normalizeMessages([...msgs])
+    // Clear the live buffers so the trace stops re-painting the same text
+    // and the "Show reply as text" affordance hides itself.
+    streamingThinking.value[chatId] = ''
+    persistMessages()
+  }
+
   // Consecutive handshakes that closed without ever opening. A server that
   // rejects the upgrade (403 after a token rotation or restart) fails
   // identically on every attempt, so a fixed 2s retry becomes a request
@@ -3493,5 +3524,6 @@ export const useProjectStore = defineStore('projects', () => {
     connectWs, disconnectWs, connectEventsWs,
     beginServerRestart,
     pushToast, pushErrorToast, dismissToast, fixError,
+    promoteStreamingThinkingToAnswer,
   }
 })
