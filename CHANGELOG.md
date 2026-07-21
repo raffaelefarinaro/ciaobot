@@ -1,5 +1,55 @@
 # Changelog
 
+## v0.5.2 - 2026-07-21
+
+### Added
+- feat(chat): auto-surface freshly written .md/.csv in the pinned panel (`3d0878e`)
+- feat(schedules): make automations explainer an info callout, cover auto-archive (`87cb2dd`)
+- feat: add startup insights backfill option and refactor backfill core logic (`d2690d1`)
+- feat(settings): add automations tab with background runs history and insights backfill trigger (`bd5f0a8`)
+- feat(chat): drag files/folders into the composer to insert their path (`a7421df`)
+- feat(gws): unify OAuth scopes across profiles, document the profile wrapper (`62717c3`)
+- feat(config): deny PWA-irrelevant harness tools by default in every workspace (`bd7f0e9`)
+- feat(pwa): surface replies that Ollama-routed models bury in thinking (`6adfa9f`)
+
+### Changed
+- Merge pull request #161 from raffaelefarinaro/chore/sync-develop-v0.5.1 (`bc5f03e`)
+- ui(settings): dock MCP tool usage counters into the card header (`10e6058`)
+- Surface out of credit errors and trigger automatic retry (`21cc545`)
+- web: allow billing and spend limit errors to auto-retry even with progress (`2c02036`)
+- web: fix trace summary wrapping and hide secondary metadata on narrow screens (`034dbf3`)
+- refactor(mcp): trim redundant vault tools, enrich schedule/loop docstrings, rename provider-consultation to agent-handoff (`3b0661e`)
+- refactor(config): drop the unused personal denylist alias, dedup extras branch (`da1bdbe`)
+
+### Fixed
+- fix(chat): stop double-rendering subagent activity in the parent trace (`45b6943`)
+- fix(chat): merge trailing tool calls into the single turn Activity group (`99059ac`)
+- fix(chat): auto-resume turns dropped by a mid-response connection close (`6d18866`)
+- fix(mcp): stop strict_mcp_config from suppressing claude.ai connectors (`5d1e4b8`)
+- fix(claude): name host on ENOTFOUND, silence benign SDK control-task errors (`78595b1`)
+- fix(chat): show each assistant reply as its own bubble, hide rate-limit noise (`5c6410f`)
+- fix(chat): stop queued follow-up messages from vanishing on a non-retryable error (`02e7642`)
+- fix(chat): redesign the in-chat permission approval card (`14b95b0`)
+- fix(chat): stitch /messages history across a mid-conversation SDK session rotation (`c60c964`)
+- fix(chat): persist queue reorder/edit/remove when there's no live stream (`f27176c`)
+- fix(chat): fold repeated compaction status ticks into one live trace line (`af5c574`)
+- fix(loops): resume into a fresh chat when a loop's target was archived (`7ec9b95`)
+- fix(schedules): record last_run_chat_id synchronously on auto-fire (`3cb001c`)
+- fix(triage): exclude startup triage's own runs from the failure report (`8f4ec60`)
+- fix(triage): scope the self-loop exclusion to triage dispatch only (`3b7f3aa`)
+- fix(chat): resume instead of replaying on a mid-turn quota limit (`566b6e4`)
+- fix(pwa): restore the Backfill insights endpoint after the scripts refactor (`e0210ac`)
+
+### Maintenance
+- docs(readme): position Ciaobot as an owned second brain vs Claude Cowork (`ab717f3`)
+- docs(readme): add Ciao! mascot hero banner (`2862626`)
+- chore: bump openai dependency to 2.46.0 (`aec717e`)
+- chore: rebuild PWA bundle (`77d4ed4`)
+- docs(release): make the pre-release quality review a mandatory blocking gate (`080da58`)
+- chore: disable Claude Code Artifacts across all dispatched sessions (`07515a6`)
+- chore(skills): clarify sync summary wording (custom-agent symlinks) (`41baadb`)
+- docs(capabilities)/chore(pwa): catalog drag-to-composer, fix misleading comments (`b6f63a1`)
+
 ## v0.5.1 - 2026-07-19
 
 ### Added
