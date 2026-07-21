@@ -4499,16 +4499,22 @@ class ProjectChatManager:
         so they survive to the retried turn. Returns True if a retry was armed.
         """
         chat = self._chats.get(chat_id)
-        # Resume-continue only makes sense with a session to resume. Without one
-        # (never expected once output has streamed, but be safe) "continue"
-        # would seed a useless fresh session, so replay the prompt instead.
+        # Replaying the prompt after output already streamed re-runs any tool
+        # calls the partial turn executed — true for a quota/usage-limit error
+        # that lands mid-turn just as much as for a connection drop. So once
+        # there's progress and a live session to resume, nudge with "continue"
+        # instead of replaying, regardless of kind. Resume-continue needs a
+        # session to resume; without one (never expected once output streamed,
+        # but be safe) "continue" would seed a useless fresh session, so we
+        # fall back to replaying the prompt.
         resume_continue = (
-            kind == "connection"
-            and had_progress
+            had_progress
             and chat is not None
             and bool(chat.session_id)
         )
-        if resume_continue:
+        # The connection-drop cap guards against a flaky link looping forever;
+        # quota resumes are time-gated by the hourly retry interval instead.
+        if resume_continue and kind == "connection":
             attempts = chat.retry_attempts if chat is not None else 0
             if attempts >= _MAX_CONNECTION_DROP_RETRIES:
                 logger.warning(
@@ -4518,17 +4524,17 @@ class ProjectChatManager:
                     _MAX_CONNECTION_DROP_RETRIES,
                 )
                 return False
+        if resume_continue:
             prompt = _RESUME_CONTINUE_PROMPT
             image_refs: list[str] | None = None
-            interval = _RETRY_CONNECTION_INTERVAL_SECONDS
-        elif kind == "connection":
+        else:
             prompt = current_prompt
             image_refs = self._image_refs(current_images)
-            interval = _RETRY_CONNECTION_INTERVAL_SECONDS
-        else:  # quota
-            prompt = current_prompt
-            image_refs = self._image_refs(current_images)
-            interval = _RETRY_INTERVAL_SECONDS
+        interval = (
+            _RETRY_CONNECTION_INTERVAL_SECONDS
+            if kind == "connection"
+            else _RETRY_INTERVAL_SECONDS
+        )
         armed = self.set_chat_retry(
             chat_id,
             prompt,

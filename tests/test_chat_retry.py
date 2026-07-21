@@ -606,6 +606,48 @@ async def test_midresponse_drop_resumes_with_continue_not_replay(tmp_path: Path)
     pcm.stop_chat_retry(chat.chat_id)
 
 
+async def test_quota_error_with_progress_resumes_continue(tmp_path: Path) -> None:
+    """A usage-limit error that lands mid-turn (after output streamed) must
+    resume the live session with "continue" rather than replaying the prompt,
+    which would re-run any tool calls the partial turn already executed."""
+    from ciao.models import AssistantTextDelta
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    # A mid-turn limit implies a live session to resume (see the drop test).
+    chat.session_id = "sess-live"
+    pcm._save()
+
+    async def fake_stream_chat(chat_id, prompt, images=None):
+        # A tool ran / text streamed before the limit hit → had progress.
+        yield AssistantTextDelta(type="assistant", text="sending the email… ")
+        yield ResultEvent(
+            type="result",
+            result="API Error: Request rejected (429): reached your session usage limit",
+            session_id="sess-live",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "send the email then reply")
+    await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status == "pending"
+    # Resume-continue, NOT a replay that would re-send the email.
+    assert updated.retry_prompt == "continue"
+    # Still gated by the hourly quota interval, not the fast connection one.
+    assert updated.retry_interval_seconds == 3600
+    pcm.stop_chat_retry(chat.chat_id)
+
+
 async def test_midresponse_drop_without_session_falls_back_to_replay(tmp_path: Path) -> None:
     """With progress but no session to resume, replay the prompt, not "continue"."""
     from ciao.models import AssistantTextDelta
