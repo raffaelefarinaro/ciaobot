@@ -62,14 +62,6 @@ _DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL: tuple[str, ...] = (
     "mcp__n8n_mcp",
 )
 
-# Back-compat alias: the full personal default denylist (connectors + harness
-# + extras). Kept for any caller that still wants the combined set.
-_DEFAULT_DISALLOWED_TOOLS_PERSONAL: tuple[str, ...] = (
-    *CLAUDE_AI_CONNECTORS,
-    *_DEFAULT_HARNESS_DISALLOWED_TOOLS,
-    *_DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL,
-)
-
 
 def coerce_claude_ai_mcps(raw: object) -> bool | None:
     """Parse the claude.ai MCPs toggle. ``None``/``"default"`` → unset (use the
@@ -522,13 +514,10 @@ class CiaoConfig:
         )
         extras = workspace_config.disallowed_tools
         if extras is None:
+            # The harness set applies to every workspace; personal adds n8n.
+            extras = list(_DEFAULT_HARNESS_DISALLOWED_TOOLS)
             if workspace_config.name == "personal":
-                extras = [
-                    *_DEFAULT_HARNESS_DISALLOWED_TOOLS,
-                    *_DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL,
-                ]
-            else:
-                extras = list(_DEFAULT_HARNESS_DISALLOWED_TOOLS)
+                extras += _DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL
         # Union, preserving order, deduped.
         seen: set[str] = set()
         effective: list[str] = []
