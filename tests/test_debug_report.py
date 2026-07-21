@@ -65,9 +65,7 @@ def test_failures_sorted_newest_first_and_capped(tmp_path: Path) -> None:
     assert [f["error"] for f in failures] == ["fail at 11", "fail at 10"]
 
 
-def test_startup_triage_own_run_excluded(tmp_path: Path) -> None:
-    """The triage's own schedule dispatch must not be re-triaged as a failure,
-    otherwise its summary text loops back into the next boot's report."""
+def _record_triage_and_real_failure() -> None:
     job_runs.record_run(JobRun(
         job="schedule_dispatch", label="Scheduled dispatch",
         started_at="2026-07-20T21:21:49+00:00",
@@ -83,8 +81,21 @@ def test_startup_triage_own_run_excluded(tmp_path: Path) -> None:
         extra={"schedule_id": "sched-real", "chat_id": "chat-xyz"},
     ))
 
-    failures = recent_job_failures()
 
+def test_schedule_failures_included_by_default(tmp_path: Path) -> None:
+    """The shared aggregator surfaces a broken triage run to the human debug
+    report — exclusion is opt-in, not the default."""
+    _record_triage_and_real_failure()
+    errors = [f["error"] for f in recent_job_failures()]
+    assert "real dispatch failure" in errors
+    assert any("Triage Summary" in e for e in errors)
+
+
+def test_triage_own_run_excluded_when_requested(tmp_path: Path) -> None:
+    """Triage-dispatch callers pass their own schedule id so the triage never
+    re-triages its own recorded summary, while other failures still show."""
+    _record_triage_and_real_failure()
+    failures = recent_job_failures(exclude_schedule_ids={TRIAGE_SCHEDULE_ID})
     errors = [f["error"] for f in failures]
     assert "real dispatch failure" in errors
     assert all("Triage Summary" not in e for e in errors)

@@ -12,30 +12,38 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+from collections.abc import Collection
+
 from ciao import job_runs
 from ciao.error_log import ERROR_LOG_NAME, tail_error_log
-from ciao.startup_triage import TRIAGE_SCHEDULE_ID
 
 DEFAULT_LOG_LINES = 200
 DEFAULT_MAX_FAILED_JOBS = 20
 
 
-def recent_job_failures(limit: int = DEFAULT_MAX_FAILED_JOBS) -> list[dict]:
+def recent_job_failures(
+    limit: int = DEFAULT_MAX_FAILED_JOBS,
+    *,
+    exclude_schedule_ids: Collection[str] | None = None,
+) -> list[dict]:
     """Return recent failed job runs, newest first, capped at *limit*.
 
-    Runs from the startup triage's own schedule dispatch are excluded: the
-    triage records its summary as the schedule run's outcome, and when that
-    run is flagged an error the summary text lands in the ``error`` field.
-    Feeding it back here would make each triage re-triage its own prior
-    output on the next boot (a self-referential loop).
+    ``exclude_schedule_ids`` drops schedule-dispatch runs whose
+    ``extra.schedule_id`` matches. Triage-dispatch callers pass their own
+    schedule id here so a triage never re-triages its own past runs: the
+    triage records its summary as the run's outcome, and a run flagged an
+    error carries that summary in the ``error`` field, which would otherwise
+    loop straight back into the next report. Left empty by default so the
+    human-facing debug report still surfaces a genuinely broken triage.
     """
+    excluded = set(exclude_schedule_ids or ())
     failures: list[dict] = []
     for job, info in job_runs.load_runs(limit_per_job=10).items():
         for run in info.get("recent") or []:
             if run.get("status") != "error":
                 continue
             extra = run.get("extra")
-            if isinstance(extra, dict) and extra.get("schedule_id") == TRIAGE_SCHEDULE_ID:
+            if isinstance(extra, dict) and extra.get("schedule_id") in excluded:
                 continue
             failures.append({
                 "job": job,
@@ -63,10 +71,18 @@ def build_issue_report(
     *,
     log_lines: int = DEFAULT_LOG_LINES,
     max_failed_jobs: int = DEFAULT_MAX_FAILED_JOBS,
+    exclude_schedule_ids: Collection[str] | None = None,
 ) -> dict:
-    """Collect current runtime issues into a JSON-friendly report."""
+    """Collect current runtime issues into a JSON-friendly report.
+
+    ``exclude_schedule_ids`` is forwarded to :func:`recent_job_failures`;
+    triage-dispatch callers pass their own schedule id to avoid re-triaging
+    their own runs.
+    """
     error_log = tail_error_log(workspace_root, log_lines)
-    failed_jobs = recent_job_failures(max_failed_jobs)
+    failed_jobs = recent_job_failures(
+        max_failed_jobs, exclude_schedule_ids=exclude_schedule_ids
+    )
     error_line_count = sum(1 for line in error_log.splitlines() if line.strip())
     report = {
         "error_log": error_log,

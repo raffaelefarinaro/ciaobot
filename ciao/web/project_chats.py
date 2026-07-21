@@ -6329,9 +6329,14 @@ class ProjectChatManager:
         had_issue_placeholder = "{{ISSUE_REPORT}}" in prompt
         if had_issue_placeholder:
             from ciao.debug_report import build_issue_report
+            from ciao.startup_triage import TRIAGE_SCHEDULE_ID
 
+            # Exclude the triage's own past runs so a triage prompt built from
+            # {{ISSUE_REPORT}} never re-triages its own recorded summary.
             issue_report = await asyncio.to_thread(
-                build_issue_report, self._config.workspace_root
+                build_issue_report,
+                self._config.workspace_root,
+                exclude_schedule_ids={TRIAGE_SCHEDULE_ID},
             )
             prompt = prompt.replace(
                 "{{ISSUE_REPORT}}", issue_report["report_text"]

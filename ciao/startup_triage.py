@@ -176,7 +176,14 @@ async def run_startup_triage(pcm, config, resolve_target) -> bool:
 
     runtime_dir = Path(config.state_path).parent
 
-    report = await asyncio.to_thread(build_issue_report, config.workspace_root)
+    # Exclude the triage's own past dispatch runs: a run flagged an error
+    # stores this triage's summary prose in its error field, which would
+    # otherwise re-trigger a triage of itself on the next boot.
+    report = await asyncio.to_thread(
+        build_issue_report,
+        config.workspace_root,
+        exclude_schedule_ids={TRIAGE_SCHEDULE_ID},
+    )
     if not report.get("error_line_count") and not report.get("failed_jobs"):
         return False
 
