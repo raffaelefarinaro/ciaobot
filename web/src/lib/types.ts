@@ -277,6 +277,7 @@ export type EventsWsMessage =
   | { type: 'project_created'; project: ProjectInfo }
   | { type: 'project_updated'; project: ProjectInfo }
   | { type: 'project_deleted'; project_id: string }
+  | { type: 'projects_reordered'; workspace: string; order: string[] }
   | { type: 'open_chat'; chat_id: string }
   | { type: 'server_restarting'; message?: string }
   | { type: 'provider_subchat_created'; subchat_id: string; parent_chat_id: string; record: ProviderSubchatRecord }

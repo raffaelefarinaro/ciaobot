@@ -445,6 +445,17 @@ export const useProjectStore = defineStore('projects', () => {
       .slice(0, 5)
   })
 
+  // Full "jump back in" list for the home screen: every non-archived local
+  // chat with activity, across ALL workspaces, newest first (uncapped). The
+  // home surface is a global hub, so unlike recentChats it isn't scoped to
+  // the active workspace — each chat carries its own workspace/project tag.
+  const activeChatsAll = computed<ChatInfo[]>(() => {
+    return chats.value
+      .filter(c => !c.archived && c.local !== false)
+      .filter(c => Boolean(chatActivity(c)))
+      .sort((a, b) => chatActivity(b).localeCompare(chatActivity(a)))
+  })
+
   function isChatStreaming(chatId: string): boolean {
     return Boolean(projectStreaming.value[chatId] || streaming.value[chatId])
   }
@@ -1256,6 +1267,20 @@ export const useProjectStore = defineStore('projects', () => {
     const idx = projects.value.findIndex(x => x.project_id === projectId)
     if (idx >= 0) projects.value[idx] = p
     return p
+  }
+
+  // Persist a drag-reordered project sequence for the active workspace.
+  // Optimistically rewrites local `order` so the sidebar reflects the drop
+  // instantly; the server echoes a `projects_reordered` event that reconciles.
+  async function reorderProjects(orderedIds: string[]) {
+    orderedIds.forEach((pid, index) => {
+      const p = projects.value.find(x => x.project_id === pid)
+      if (p) p.order = index
+    })
+    await api.post('/api/projects/reorder', {
+      workspace: activeWorkspace.value,
+      order: orderedIds,
+    })
   }
 
   async function deleteProject(projectId: string) {
@@ -2304,6 +2329,18 @@ export const useProjectStore = defineStore('projects', () => {
         if (activeChat.value && activeChat.value.project_id === msg.project_id) {
           activeChatId.value = null
         }
+        break
+      }
+      case 'projects_reordered': {
+        // Server-authoritative order after a drag-reorder (this or another
+        // device). Rewrite local order so workspaceProjects re-sorts.
+        const orderMap = new Map<string, number>(
+          (msg.order as string[]).map((pid, i) => [pid, i]),
+        )
+        projects.value.forEach(p => {
+          const next = orderMap.get(p.project_id)
+          if (next !== undefined) p.order = next
+        })
         break
       }
       case 'gws_health': {
@@ -3503,10 +3540,10 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
     chatUnread, chatNeedsInput, projectNeedsInput, projectUnread, workspaceUnread, totalUnread, clearUnread, markRead, markAllRead,
-    recentChats, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
+    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
     // Actions
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
-    createProject, updateProject, deleteProject, completeProject,
+    createProject, updateProject, reorderProjects, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
     createChat, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
