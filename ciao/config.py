@@ -521,6 +521,8 @@ class CiaoConfig:
                 load_dotenv(dotenv_path)
             # Default to disabling Claude Code's auto memory inside Ciaobot
             os.environ.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
+            # Artifacts publish to claude.ai; ciaobot has no use for that surface
+            os.environ.setdefault("CLAUDE_CODE_DISABLE_ARTIFACT", "1")
 
         source = env if env is not None else os.environ
 

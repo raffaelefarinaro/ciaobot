@@ -3853,6 +3853,8 @@ class ProjectChatManager:
         env["CIAO_CHAT_ID"] = chat.chat_id
         # Disable Claude Code's auto memory to avoid double memory layers
         env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+        # Artifacts publish to claude.ai; ciaobot has no use for that surface
+        env["CLAUDE_CODE_DISABLE_ARTIFACT"] = "1"
         return env
 
     def _effective_mode_for_chat(self, chat: ChatInfo) -> BridgeMode:

@@ -211,3 +211,4 @@ async def test_run_oneshot_disables_claude_auto_memory(monkeypatch) -> None:
     await oneshot.run_oneshot("hello", system_prompt="sys", model="haiku")
     options = captured["options"]
     assert options.env.get("CLAUDE_CODE_DISABLE_AUTO_MEMORY") == "1"
+    assert options.env.get("CLAUDE_CODE_DISABLE_ARTIFACT") == "1"

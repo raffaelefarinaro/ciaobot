@@ -2139,6 +2139,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     os.environ.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
+    os.environ.setdefault("CLAUDE_CODE_DISABLE_ARTIFACT", "1")
     argv_list = list(sys.argv[1:] if argv is None else argv)
     if argv_list[:1] == ["public-preflight"]:
         return public_release.main(argv_list[1:])
