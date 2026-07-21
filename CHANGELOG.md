@@ -21,6 +21,7 @@
 - web: allow billing and spend limit errors to auto-retry even with progress (`2c02036`)
 - web: fix trace summary wrapping and hide secondary metadata on narrow screens (`034dbf3`)
 - refactor(mcp): trim redundant vault tools, enrich schedule/loop docstrings, rename provider-consultation to agent-handoff (`3b0661e`)
+- refactor(mcp): trim tool catalog 78->42, migrate plumbing to CLI (`f702dd8`)
 - refactor(config): drop the unused personal denylist alias, dedup extras branch (`da1bdbe`)
 
 ### Fixed
