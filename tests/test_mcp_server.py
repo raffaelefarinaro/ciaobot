@@ -18,25 +18,27 @@ from ciao.mcp_server import CiaoMcpService, McpSessionRegistry
 class _FakeControlPlane:
     def __init__(self, *, mode: str = "auto") -> None:
         self.mode = mode
-        self.add_calls = 0
+        self.create_calls = 0
         self.schedule_values = None
 
     def chat_mode(self, _principal) -> str:
         return self.mode
 
-    def memory_read(self, principal, target: str) -> dict:
+    def context_get(self, principal) -> dict:
         return {
             "ok": True,
             "data": {
                 "chat_id": principal.chat_id,
                 "workspace": principal.workspace,
-                "target": target,
             },
         }
 
-    def memory_add(self, _principal, target: str, text: str) -> dict:
-        self.add_calls += 1
-        return {"ok": True, "data": {"target": target, "text": text}}
+    def system_status_get(self, _principal) -> dict:
+        return {"ok": True, "data": {"server": "ok"}}
+
+    def schedule_create(self, _principal, **values) -> dict:
+        self.create_calls += 1
+        return {"ok": True, "data": values}
 
     def schedule_preview(self, _principal, **values) -> dict:
         self.schedule_values = values
@@ -137,20 +139,25 @@ def test_streamable_http_auth_and_structured_tool_result(tmp_path: Path) -> None
             client,
             token,
             "tools/call",
-            {"name": "memory_read", "arguments": {"target": "user"}},
+            {"name": "context_get", "arguments": {}},
             request_id=2,
         )
 
     assert called.status_code == 200
     result = called.json()["result"]
     assert result["isError"] is False
+    # system_status_get is folded into context_get under the "system" key.
     assert result["structuredContent"] == {
         "ok": True,
-        "data": {"chat_id": "chat-1", "workspace": "personal", "target": "user"},
+        "data": {
+            "chat_id": "chat-1",
+            "workspace": "personal",
+            "system": {"server": "ok"},
+        },
     }
     telemetry = service._telemetry_path.read_text(encoding="utf-8").splitlines()
     record = json.loads(telemetry[-1])
-    assert record["tool"] == "memory_read"
+    assert record["tool"] == "context_get"
     assert record["chat_id"] == "chat-1"
     assert record["provider"] == "claude"
     assert record["status"] == "ok"
@@ -170,14 +177,14 @@ def test_plan_mode_rejects_mutation_before_control_plane_call(tmp_path: Path) ->
             client,
             token,
             "tools/call",
-            {"name": "memory_add", "arguments": {"target": "memory", "text": "fact"}},
+            {"name": "schedule_create", "arguments": {"prompt": "do a thing"}},
         )
 
     assert called.status_code == 200
     payload = called.json()["result"]["structuredContent"]
     assert payload["ok"] is False
     assert payload["error"]["code"] == "plan_mode_read_only"
-    assert control_plane.add_calls == 0
+    assert control_plane.create_calls == 0
 
 
 def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
@@ -185,16 +192,32 @@ def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
     names = set(service.status()["tools"])
 
     assert {
-        "memory_read",
-        "memory_add",
+        "context_get",
         "vault_search",
         "project_create",
         "chat_create",
         "schedule_create",
+        "schedule_action",
         "loop_create",
-        "workspace_file_read",
-        "workspace_health_get",
+        "loop_action",
+        "chat_handover",
+        "adversarial_review",
     } <= names
+
+    # Tools migrated to the ciao CLI or the provider's native tools are gone.
+    assert not (
+        {
+            "memory_read",
+            "memory_add",
+            "workspace_file_read",
+            "workspace_health_get",
+            "skills_sync",
+            "capabilities_get",
+            "chat_new_session",
+            "chat_retry_update",
+        }
+        & names
+    )
 
 
 def test_usage_aggregates_telemetry_by_tool(tmp_path: Path) -> None:
