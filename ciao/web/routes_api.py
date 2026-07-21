@@ -1621,6 +1621,20 @@ async def create_project(request: Request) -> JSONResponse:
     return JSONResponse(project.to_dict(), status_code=201)
 
 
+async def reorder_projects(request: Request) -> JSONResponse:
+    """Persist a drag-reordered project sequence for one workspace."""
+    pcm = request.app.state.project_chat_manager
+    body = await request.json()
+    workspace = body.get("workspace") or ""
+    ordered_ids = body.get("order")
+    if not workspace or not isinstance(ordered_ids, list):
+        return JSONResponse(
+            {"error": "workspace and order[] are required"}, status_code=400
+        )
+    projects = pcm.reorder_projects(workspace, [str(pid) for pid in ordered_ids])
+    return JSONResponse([p.to_dict() for p in projects])
+
+
 async def project_detail(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     project_id = request.path_params["project_id"]

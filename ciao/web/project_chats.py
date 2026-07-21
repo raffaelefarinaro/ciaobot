@@ -2333,6 +2333,43 @@ class ProjectChatManager:
         })
         return project
 
+    def reorder_projects(
+        self, workspace: str, ordered_ids: list[str]
+    ) -> list[ProjectInfo]:
+        """Persist a new sidebar order for *workspace*'s projects.
+
+        ``ordered_ids`` is the desired top-to-bottom sequence. Projects in the
+        workspace that are omitted keep their existing relative order after the
+        listed ones. Each project's ``order`` is rewritten to its final index
+        so the ``workspaceProjects`` sort (order, then name) reflects the drag.
+        Ids for other workspaces or unknown ids are ignored.
+        """
+        ws_projects = [p for p in self._projects.values() if p.workspace == workspace]
+        by_id = {p.project_id: p for p in ws_projects}
+        seen: set[str] = set()
+        sequence: list[ProjectInfo] = []
+        for pid in ordered_ids:
+            project = by_id.get(pid)
+            if project is not None and pid not in seen:
+                sequence.append(project)
+                seen.add(pid)
+        # Anything not named stays, in its current order, after the listed set.
+        for project in sorted(ws_projects, key=lambda p: (p.order, p.name)):
+            if project.project_id not in seen:
+                sequence.append(project)
+        # General is auto-managed and re-pinned to order 0 at every boot
+        # (_ensure_defaults); keep it first here so a reorder doesn't snap back.
+        sequence.sort(key=lambda p: p.name != "General")
+        for index, project in enumerate(sequence):
+            project.order = index
+        self._save()
+        self._events.publish({
+            "type": "projects_reordered",
+            "workspace": workspace,
+            "order": [p.project_id for p in sequence],
+        })
+        return sequence
+
     def complete_project(self, project_id: str) -> dict:
         """Move a project's vault entry to completed/, then delete the PWA project.
 

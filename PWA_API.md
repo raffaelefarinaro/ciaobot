@@ -27,6 +27,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/projects` | List projects |
 | POST | `/api/projects` | Create project |
 | PATCH, DELETE | `/api/projects/{project_id}` | Update or delete project |
+| POST | `/api/projects/reorder` | Reorder a workspace's projects (drag-to-reorder) |
 | POST | `/api/projects/{project_id}/complete` | Complete a vault-backed project |
 | GET | `/api/projects/completed` | List completed projects (vault `completed/` scan) |
 | POST | `/api/projects/completed/restore` | Restore a completed project to active |
@@ -202,6 +203,13 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projec
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/projects/$PID" \
   -H 'content-type: application/json' \
   -d '{"context":"Track the kitchen rebuild"}'
+
+# Reorder — pass the full top-to-bottom sequence of project ids for one
+# workspace. Omitted ids keep their relative order after the listed ones;
+# `General` is always pinned first regardless of where it appears.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projects/reorder" \
+  -H 'content-type: application/json' \
+  -d '{"workspace":"personal","order":["proj-b","proj-a"]}'
 
 # Complete (vault-backed only) — moves the vault folder to projects/completed/ and deletes the PWA project.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projects/$PID/complete"
