@@ -11,6 +11,7 @@ from ciao.debug_report import (
     recent_job_failures,
 )
 from ciao.job_runs import JobRun
+from ciao.startup_triage import TRIAGE_SCHEDULE_ID
 
 
 def _write_error_log(workspace: Path, text: str) -> None:
@@ -62,6 +63,31 @@ def test_failures_sorted_newest_first_and_capped(tmp_path: Path) -> None:
         ))
     failures = recent_job_failures(limit=2)
     assert [f["error"] for f in failures] == ["fail at 11", "fail at 10"]
+
+
+def test_startup_triage_own_run_excluded(tmp_path: Path) -> None:
+    """The triage's own schedule dispatch must not be re-triaged as a failure,
+    otherwise its summary text loops back into the next boot's report."""
+    job_runs.record_run(JobRun(
+        job="schedule_dispatch", label="Scheduled dispatch",
+        started_at="2026-07-20T21:21:49+00:00",
+        ended_at="2026-07-20T21:31:12+00:00",
+        status="error", error="## Triage Summary — nothing to file",
+        extra={"schedule_id": TRIAGE_SCHEDULE_ID, "chat_id": "chat-abc"},
+    ))
+    job_runs.record_run(JobRun(
+        job="schedule_dispatch", label="Scheduled dispatch",
+        started_at="2026-07-20T22:00:00+00:00",
+        ended_at="2026-07-20T22:00:05+00:00",
+        status="error", error="real dispatch failure",
+        extra={"schedule_id": "sched-real", "chat_id": "chat-xyz"},
+    ))
+
+    failures = recent_job_failures()
+
+    errors = [f["error"] for f in failures]
+    assert "real dispatch failure" in errors
+    assert all("Triage Summary" not in e for e in errors)
 
 
 def test_format_report_only_errors_no_jobs(tmp_path: Path) -> None:

@@ -14,17 +14,28 @@ from pathlib import Path
 
 from ciao import job_runs
 from ciao.error_log import ERROR_LOG_NAME, tail_error_log
+from ciao.startup_triage import TRIAGE_SCHEDULE_ID
 
 DEFAULT_LOG_LINES = 200
 DEFAULT_MAX_FAILED_JOBS = 20
 
 
 def recent_job_failures(limit: int = DEFAULT_MAX_FAILED_JOBS) -> list[dict]:
-    """Return recent failed job runs, newest first, capped at *limit*."""
+    """Return recent failed job runs, newest first, capped at *limit*.
+
+    Runs from the startup triage's own schedule dispatch are excluded: the
+    triage records its summary as the schedule run's outcome, and when that
+    run is flagged an error the summary text lands in the ``error`` field.
+    Feeding it back here would make each triage re-triage its own prior
+    output on the next boot (a self-referential loop).
+    """
     failures: list[dict] = []
     for job, info in job_runs.load_runs(limit_per_job=10).items():
         for run in info.get("recent") or []:
             if run.get("status") != "error":
+                continue
+            extra = run.get("extra")
+            if isinstance(extra, dict) and extra.get("schedule_id") == TRIAGE_SCHEDULE_ID:
                 continue
             failures.append({
                 "job": job,
