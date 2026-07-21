@@ -109,33 +109,45 @@ telemetry remain enforced.
 
 ## Tool catalog
 
-The catalog currently contains 78 explicit tools. `capabilities_get` returns
-the live list so clients do not need to infer it from documentation.
+The catalog contains 42 explicit tools. The MCP `tools/list` response is the
+live list, so clients do not need to infer it from documentation. The catalog
+holds *capabilities* — orchestration and search that a shell can't cheaply
+replicate. Plain plumbing that the managed Claude Code/Codex session can do
+with its own shell and filesystem is not duplicated as an MCP tool:
 
-Vault note reads/writes/listing intentionally go through the model's native
-Read/Write/Glob tools rather than dedicated MCP wrappers: the spawned Claude
-Code/Codex session already has unsandboxed filesystem access to the
-workspace, so `vault_note_read`/`vault_note_write`/`vault_notes_list` would
-only have added weaker, opt-out guardrails without closing any real gap.
-`vault_search`, `vault_index_refresh`, and `vault_lint` stay as MCP tools —
-they wrap real logic (a maintained FTS index, a link/orphan linter) a generic
-file tool can't replicate.
+- **Bounded memory** read/add/replace/remove → `ciao memory read|add|replace|remove`.
+- **Vault maintenance** → `ciao index` (index refresh) and `ciao lint`.
+  `vault_search` stays — it wraps a maintained FTS5 index a file tool can't
+  replicate.
+- **Workspace file** read/write and **file history/snapshots** → the model's
+  native Read/Write/Glob tools and the workspace git repo.
+- **Local session** status/preflight/handback/resync → the shell agent's own
+  git; the PWA "Sync to Remote" feature drives the control plane over REST.
+- **Agent assets** → `ciao health get|fix` (workspace health) and
+  `ciao skills list` / `ciao skills-sync`.
+- **Vault note wrappers** (`vault_note_read`/`_write`/`_notes_list`) were never
+  added, for the same reason.
+
+`context_get` now also carries the former `system_status_get` under its
+`system` key. `capabilities_get`, `automation_runs_list`, `debug_issues_get`,
+`agent_context_get`, `chat_mark_read`, `package_status_get`, and the deferred
+`lifecycle_*` tools were dropped as host/PWA concerns. Retry, new-session,
+and the schedule/loop lifecycle verbs are folded into parameterized tools
+(`chat_retry` with an `action`, `chat_handover` with empty provider/model for
+an in-place new session, `schedule_action`, `loop_action`).
 
 | Domain | Tools |
 |---|---|
-| Context and status | `capabilities_get`, `context_get`, `agent_context_get`, `system_status_get`, `automation_runs_list`, `debug_issues_get`, `package_status_get` |
-| Bounded memory | `memory_read`, `memory_add`, `memory_replace`, `memory_remove`, `memory_proposals_list`, `memory_proposal_resolve` |
-| Vault | `vault_search`, `vault_index_refresh`, `vault_lint` |
+| Context | `context_get` (includes `system` status) |
+| Bounded memory | `memory_proposals_list`, `memory_proposal_resolve` |
+| Vault | `vault_search` |
 | Projects | `projects_list`, `project_get`, `project_create`, `project_update`, `project_complete`, `project_restore`, `project_delete`, `project_files_list` |
-| Chats | `chats_list`, `chat_get`, `chat_create`, `chat_update`, `chat_send`, `chat_continue`, `chat_retry`, `chat_retry_update`, `chat_new_session`, `chat_handover`, `chat_fork`, `chat_archive`, `chat_delete`, `chat_mark_read`, `chat_stop` |
+| Chats | `chats_list`, `chat_get`, `chat_create`, `chat_update`, `chat_send`, `chat_continue`, `chat_retry`, `chat_handover`, `chat_fork`, `chat_archive`, `chat_delete`, `chat_stop` |
 | Agent handoffs | `handoffs_list`, `handoff_start`, `handoff_send`, `handoff_events`, `handoff_close`, `handoff_cancel`, `handoff_extend` |
 | Adversarial review | `adversarial_review` |
-| Schedules | `schedules_list`, `schedule_preview`, `schedule_create`, `schedule_update`, `schedule_pause`, `schedule_resume`, `schedule_run`, `schedule_delete` |
-| Loops | `loops_list`, `loop_create`, `loop_update`, `loop_start`, `loop_stop`, `loop_run`, `loop_delete` |
-| Workspace files and history | `workspace_file_read`, `workspace_file_write`, `file_surface`, `file_history_list`, `file_snapshot_read`, `file_snapshot_restore` |
-| Agent assets and workspace | `workspace_health_get`, `workspace_health_fix`, `skills_list`, `skills_sync` |
-| Local session | `local_session_status`, `local_session_preflight`, `local_session_handback`, `local_session_resync` |
-| Deferred lifecycle | `lifecycle_actions_list`, `lifecycle_action_request` |
+| Schedules | `schedules_list`, `schedule_preview`, `schedule_create`, `schedule_update`, `schedule_action` |
+| Loops | `loops_list`, `loop_create`, `loop_update`, `loop_action` |
+| Workspace files | `file_surface` |
 
 The catalog covers application actions that are safe and meaningful for a
 scoped agent. Browser-session administration, login/OAuth secrets, Web Push

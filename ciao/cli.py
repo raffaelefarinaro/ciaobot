@@ -1377,6 +1377,30 @@ def _cleanup_sdk_blobs_command(args: argparse.Namespace) -> int:
     return cleanup_sdk_blobs.main(module_args)
 
 
+def _skills_list_command(args: argparse.Namespace) -> int:
+    from ciao.skills_inventory import build_skill_inventory
+
+    workspace_root = Path(args.workspace).expanduser().resolve()
+    inventory = build_skill_inventory(workspace_root)
+    json.dump(inventory, sys.stdout, ensure_ascii=False, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
+def _health_command(args: argparse.Namespace) -> int:
+    from ciao.config import CiaoConfig
+    from ciao.web.agent_assets import repair_workspace_health, workspace_health
+
+    config = CiaoConfig.from_env()
+    if args.action == "fix":
+        result = repair_workspace_health(config)
+    else:
+        result = workspace_health(config)
+    json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
 def _skills_sync_command(args: argparse.Namespace) -> int:
     from ciao import skills_sync
 
@@ -2081,6 +2105,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     skills_sync_parser.add_argument("args", nargs=argparse.REMAINDER)
     skills_sync_parser.set_defaults(func=_skills_sync_command)
+
+    skills_parser = subparsers.add_parser(
+        "skills",
+        help="Inspect skills (stock, custom, installed) with provider availability.",
+    )
+    skills_sub = skills_parser.add_subparsers(dest="action", required=True)
+    skills_list_parser = skills_sub.add_parser(
+        "list", help="List skills as JSON (former skills_list MCP tool)."
+    )
+    skills_list_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=Path("."),
+        help="Workspace root. Defaults to current directory.",
+    )
+    skills_list_parser.set_defaults(func=_skills_list_command)
+
+    health_parser = subparsers.add_parser(
+        "health",
+        help="Check or repair canonical agent assets and provider mirrors.",
+    )
+    health_sub = health_parser.add_subparsers(dest="action", required=True)
+    health_get_parser = health_sub.add_parser(
+        "get", help="Report workspace health as JSON (former workspace_health_get)."
+    )
+    health_get_parser.set_defaults(func=_health_command, action="get")
+    health_fix_parser = health_sub.add_parser(
+        "fix", help="Repair scaffolding and provider mirrors (former workspace_health_fix)."
+    )
+    health_fix_parser.set_defaults(func=_health_command, action="fix")
 
     sync_skills_parser = subparsers.add_parser(
         "sync-skills",

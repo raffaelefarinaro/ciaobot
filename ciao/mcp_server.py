@@ -398,59 +398,24 @@ class CiaoMcpService:
 
         @tool(name="context_get", annotations=_READ, structured_output=True)
         async def context_get() -> dict[str, Any]:
-            """Return the active Ciaobot workspace, project, chat, provider, and control surface."""
-            return await self._invoke("context_get", lambda cp, p: cp.context_get(p))
+            """Return the active Ciaobot workspace, project, chat, provider, and
+            control surface, plus local server/startup/active-chat status folded
+            in under the ``system`` key (the former system_status_get)."""
 
-        @tool(name="capabilities_get", annotations=_READ, structured_output=True)
-        async def capabilities_get() -> dict[str, Any]:
-            """List the Ciaobot MCP tools available to this managed provider process."""
-            return await self._invoke(
-                "capabilities_get",
-                lambda _cp, _p: {"ok": True, "data": sorted(self._tool_names)},
-            )
+            def _op(cp: CiaoControlPlane, p: McpPrincipal) -> dict[str, Any]:
+                result = cp.context_get(p)
+                status = cp.system_status_get(p)
+                data = result.get("data") if isinstance(result, dict) else None
+                if isinstance(data, dict):
+                    data["system"] = (
+                        status.get("data") if isinstance(status, dict) else status
+                    )
+                return result
 
-        @tool(name="system_status_get", annotations=_READ, structured_output=True)
-        async def system_status_get() -> dict[str, Any]:
-            """Return local Ciaobot server, workspace, startup, and active-chat status."""
-            return await self._invoke("system_status_get", lambda cp, p: cp.system_status_get(p))
+            return await self._invoke("context_get", _op)
 
-        @tool(name="automation_runs_list", annotations=_READ, structured_output=True)
-        async def automation_runs_list(limit_per_job: int = 10) -> dict[str, Any]:
-            """List recent background automation runs and their durations/errors."""
-            return await self._invoke(
-                "automation_runs_list",
-                lambda cp, p: cp.automation_runs_list(p, limit_per_job),
-            )
-
-        @tool(name="debug_issues_get", annotations=_READ, structured_output=True)
-        async def debug_issues_get() -> dict[str, Any]:
-            """Return a sanitized local Ciaobot runtime issue report."""
-            return await self._invoke("debug_issues_get", lambda cp, p: cp.debug_issues_get(p))
-
-        @tool(name="memory_read", annotations=_READ, structured_output=True)
-        async def memory_read(target: str = "memory") -> dict[str, Any]:
-            """Read bounded cross-session memory or the bounded user profile."""
-            return await self._invoke("memory_read", lambda cp, p: cp.memory_read(p, target))
-
-        @tool(name="memory_add", annotations=_WRITE, structured_output=True)
-        async def memory_add(text: str, target: str = "memory") -> dict[str, Any]:
-            """Add one validated durable entry to bounded memory or the user profile."""
-            return await self._invoke("memory_add", lambda cp, p: cp.memory_add(p, target, text), mutating=True)
-
-        @tool(name="memory_replace", annotations=_WRITE, structured_output=True)
-        async def memory_replace(old_text: str, new_text: str, target: str = "memory") -> dict[str, Any]:
-            """Replace exactly one bounded-memory entry selected by a unique substring."""
-            return await self._invoke(
-                "memory_replace",
-                lambda cp, p: cp.memory_replace(p, target, old_text, new_text),
-                mutating=True,
-            )
-
-        @tool(name="memory_remove", annotations=_DESTRUCTIVE, structured_output=True)
-        async def memory_remove(text: str, target: str = "memory") -> dict[str, Any]:
-            """Remove exactly one bounded-memory entry selected by a unique substring."""
-            return await self._invoke("memory_remove", lambda cp, p: cp.memory_remove(p, target, text), mutating=True)
-
+        # Bounded-memory read/add/replace/remove are the `ciao memory` CLI
+        # subcommands; keep only the proposal-review flow on MCP.
         @tool(name="memory_proposals_list", annotations=_READ, structured_output=True)
         async def memory_proposals_list() -> dict[str, Any]:
             """List reviewable memory proposals produced from archived chats."""
@@ -478,15 +443,7 @@ class CiaoMcpService:
             """Full-text search the active workspace vault."""
             return await self._invoke("vault_search", lambda cp, p: cp.vault_search(p, query, limit))
 
-        @tool(name="vault_index_refresh", annotations=_WRITE, structured_output=True)
-        async def vault_index_refresh() -> dict[str, Any]:
-            """Rebuild the active vault's markdown and FTS indexes."""
-            return await self._invoke("vault_index_refresh", lambda cp, p: cp.vault_index_refresh(p), mutating=True)
-
-        @tool(name="vault_lint", annotations=_READ, structured_output=True)
-        async def vault_lint_tool() -> dict[str, Any]:
-            """Check the active vault for broken links, orphans, and near-duplicates."""
-            return await self._invoke("vault_lint", lambda cp, p: cp.vault_lint(p))
+        # vault_index_refresh -> `ciao index`; vault_lint -> `ciao lint`.
 
         @tool(name="projects_list", annotations=_READ, structured_output=True)
         async def projects_list(include_completed: bool = False) -> dict[str, Any]:
@@ -629,53 +586,46 @@ class CiaoMcpService:
             return await self._invoke("chat_continue", lambda cp, p: cp.chat_continue(p, chat_id), mutating=True)
 
         @tool(name="chat_retry", annotations=_WRITE, structured_output=True)
-        async def chat_retry(chat_id: str) -> dict[str, Any]:
-            """Run a pending provider-limit retry immediately."""
-            return await self._invoke("chat_retry", lambda cp, p: cp.chat_retry(p, chat_id), mutating=True)
-
-        @tool(name="chat_retry_update", annotations=_WRITE, structured_output=True)
-        async def chat_retry_update(
+        async def chat_retry(
             chat_id: str,
             action: str = "try_now",
             prompt: str = "",
         ) -> dict[str, Any]:
-            """Set, stop, or immediately try a deferred provider-limit retry."""
+            """Manage a deferred provider-limit retry: set, stop, or (default)
+            immediately try it now."""
             return await self._invoke(
-                "chat_retry_update",
+                "chat_retry",
                 lambda cp, p: cp.chat_retry_update(
                     p, chat_id, action=action, prompt=prompt  # type: ignore[arg-type]
                 ),
                 mutating=True,
             )
 
-        @tool(name="chat_new_session", annotations=_WRITE, structured_output=True)
-        async def chat_new_session(chat_id: str) -> dict[str, Any]:
-            """Clear provider session state while retaining the chat record."""
-            return await self._invoke(
-                "chat_new_session", lambda cp, p: cp.chat_new_session(p, chat_id), mutating=True
-            )
-
         @tool(name="chat_handover", annotations=_WRITE, structured_output=True)
         async def chat_handover(
             chat_id: str,
-            provider: str,
-            model: str,
+            provider: str = "",
+            model: str = "",
             messages: list[dict[str, Any]] | None = None,
             model_bucket: str = "",
         ) -> dict[str, Any]:
-            """Continue a chat on a fresh provider session with optional visible history."""
-            return await self._invoke(
-                "chat_handover",
-                lambda cp, p: cp.chat_handover(
+            """Continue a chat on a fresh provider session with optional visible
+            history. With provider and model both empty, this just clears the
+            current provider session in place (the former chat_new_session)."""
+
+            def _op(cp: CiaoControlPlane, p: McpPrincipal) -> Any:
+                if not provider and not model:
+                    return cp.chat_new_session(p, chat_id)
+                return cp.chat_handover(
                     p,
                     chat_id,
                     provider=provider,
                     model=model,
                     messages=messages,
                     model_bucket=model_bucket,
-                ),
-                mutating=True,
-            )
+                )
+
+            return await self._invoke("chat_handover", _op, mutating=True)
 
         @tool(name="chat_fork", annotations=_WRITE, structured_output=True)
         async def chat_fork(
@@ -704,13 +654,6 @@ class CiaoMcpService:
             """Delete a chat; deleting the current caller is deferred until the turn finishes."""
             return await self._invoke(
                 "chat_delete", lambda cp, p: cp.chat_delete(p, chat_id), mutating=True
-            )
-
-        @tool(name="chat_mark_read", annotations=_WRITE, structured_output=True)
-        async def chat_mark_read(chat_id: str) -> dict[str, Any]:
-            """Mark a chat read across connected PWA clients."""
-            return await self._invoke(
-                "chat_mark_read", lambda cp, p: cp.chat_mark_read(p, chat_id), mutating=True
             )
 
         @tool(name="chat_stop", annotations=_DESTRUCTIVE, structured_output=True)
@@ -943,26 +886,30 @@ class CiaoMcpService:
                 mutating=True,
             )
 
-        @tool(name="schedule_pause", annotations=_WRITE, structured_output=True)
-        async def schedule_pause(schedule_id: str) -> dict[str, Any]:
-            """Pause a schedule without deleting it."""
-            return await self._invoke("schedule_pause", lambda cp, p: cp.schedule_pause(p, schedule_id), mutating=True)
+        @tool(name="schedule_action", annotations=_DESTRUCTIVE, structured_output=True)
+        async def schedule_action(schedule_id: str, action: str) -> dict[str, Any]:
+            """Run one lifecycle action on a schedule.
 
-        @tool(name="schedule_resume", annotations=_WRITE, structured_output=True)
-        async def schedule_resume(schedule_id: str) -> dict[str, Any]:
-            """Resume a paused schedule."""
-            return await self._invoke("schedule_resume", lambda cp, p: cp.schedule_resume(p, schedule_id), mutating=True)
-
-        @tool(name="schedule_run", annotations=_WRITE, structured_output=True)
-        async def schedule_run(schedule_id: str) -> dict[str, Any]:
-            """Dispatch a schedule immediately through the normal chat pipeline."""
-            return await self._invoke("schedule_run", lambda cp, p: cp.schedule_run(p, schedule_id), mutating=True)
-
-        @tool(name="schedule_delete", annotations=_DESTRUCTIVE, structured_output=True)
-        async def schedule_delete(schedule_id: str) -> dict[str, Any]:
-            """Delete a removable user schedule. System schedules (scope=system)
-            cannot be deleted — this raises schedule_not_removable instead."""
-            return await self._invoke("schedule_delete", lambda cp, p: cp.schedule_delete(p, schedule_id), mutating=True)
+            action:
+                "pause"  — pause without deleting.
+                "resume" — resume a paused schedule.
+                "run"    — dispatch immediately through the normal chat pipeline.
+                "delete" — delete a removable user schedule (destructive). System
+                    schedules (scope=system) cannot be deleted — this raises
+                    schedule_not_removable instead.
+            """
+            dispatch = {
+                "pause": lambda cp, p: cp.schedule_pause(p, schedule_id),
+                "resume": lambda cp, p: cp.schedule_resume(p, schedule_id),
+                "run": lambda cp, p: cp.schedule_run(p, schedule_id),
+                "delete": lambda cp, p: cp.schedule_delete(p, schedule_id),
+            }
+            op = dispatch.get(action)
+            if op is None:
+                raise ControlPlaneError(
+                    "invalid_action", "action must be pause, resume, run, or delete."
+                )
+            return await self._invoke("schedule_action", op, mutating=True)
 
         @tool(name="loops_list", annotations=_READ, structured_output=True)
         async def loops_list() -> dict[str, Any]:
@@ -1024,36 +971,30 @@ class CiaoMcpService:
             }
             return await self._invoke("loop_update", lambda cp, p: cp.loop_update(p, loop_id, **values), mutating=True)
 
-        @tool(name="loop_start", annotations=_WRITE, structured_output=True)
-        async def loop_start(loop_id: str) -> dict[str, Any]:
-            """Start a loop's runtime cadence."""
-            return await self._invoke("loop_start", lambda cp, p: cp.loop_start(p, loop_id), mutating=True)
+        @tool(name="loop_action", annotations=_DESTRUCTIVE, structured_output=True)
+        async def loop_action(loop_id: str, action: str) -> dict[str, Any]:
+            """Run one lifecycle action on an in-chat loop.
 
-        @tool(name="loop_stop", annotations=_WRITE, structured_output=True)
-        async def loop_stop(loop_id: str) -> dict[str, Any]:
-            """Stop a loop's runtime cadence without deleting it."""
-            return await self._invoke("loop_stop", lambda cp, p: cp.loop_stop(p, loop_id), mutating=True)
+            action:
+                "start"  — start the loop's runtime cadence.
+                "stop"   — stop the cadence without deleting it.
+                "run"    — run one iteration immediately.
+                "delete" — delete the loop (destructive).
+            """
+            dispatch = {
+                "start": lambda cp, p: cp.loop_start(p, loop_id),
+                "stop": lambda cp, p: cp.loop_stop(p, loop_id),
+                "run": lambda cp, p: cp.loop_run(p, loop_id),
+                "delete": lambda cp, p: cp.loop_delete(p, loop_id),
+            }
+            op = dispatch.get(action)
+            if op is None:
+                raise ControlPlaneError(
+                    "invalid_action", "action must be start, stop, run, or delete."
+                )
+            return await self._invoke("loop_action", op, mutating=True)
 
-        @tool(name="loop_run", annotations=_WRITE, structured_output=True)
-        async def loop_run(loop_id: str) -> dict[str, Any]:
-            """Run one loop iteration immediately."""
-            return await self._invoke("loop_run", lambda cp, p: cp.loop_run(p, loop_id), mutating=True)
-
-        @tool(name="loop_delete", annotations=_DESTRUCTIVE, structured_output=True)
-        async def loop_delete(loop_id: str) -> dict[str, Any]:
-            """Delete an in-chat loop."""
-            return await self._invoke("loop_delete", lambda cp, p: cp.loop_delete(p, loop_id), mutating=True)
-
-        @tool(name="workspace_file_read", annotations=_READ, structured_output=True)
-        async def workspace_file_read(path: str) -> dict[str, Any]:
-            """Read a workspace-relative UTF-8 text file up to 2 MiB."""
-            return await self._invoke("workspace_file_read", lambda cp, p: cp.workspace_file_read(p, path))
-
-        @tool(name="workspace_file_write", annotations=_WRITE, structured_output=True)
-        async def workspace_file_write(path: str, content: str) -> dict[str, Any]:
-            """Write a workspace-relative UTF-8 file; runtime stores are forbidden."""
-            return await self._invoke("workspace_file_write", lambda cp, p: cp.workspace_file_write(p, path, content), mutating=True)
-
+        # Workspace file read/write use the provider's native filesystem tools.
         @tool(name="file_surface", annotations=_READ, structured_output=True)
         async def file_surface(path: str) -> dict[str, Any]:
             """Deliberately open a workspace file in the user's pinned preview panel.
@@ -1064,35 +1005,7 @@ class CiaoMcpService:
             panel; call this when a file is worth surfacing."""
             return await self._invoke("file_surface", lambda cp, p: cp.file_surface(p, path))
 
-        @tool(name="file_history_list", annotations=_READ, structured_output=True)
-        async def file_history_list(chat_id: str, file_path: str) -> dict[str, Any]:
-            """List captured file snapshots for a chat and file path."""
-            return await self._invoke(
-                "file_history_list",
-                lambda cp, p: cp.file_history_list(p, chat_id, file_path),
-            )
-
-        @tool(name="file_snapshot_read", annotations=_READ, structured_output=True)
-        async def file_snapshot_read(
-            chat_id: str, file_path: str, seq: int
-        ) -> dict[str, Any]:
-            """Read one UTF-8 file snapshot from append-only chat history."""
-            return await self._invoke(
-                "file_snapshot_read",
-                lambda cp, p: cp.file_snapshot_read(p, chat_id, file_path, seq),
-            )
-
-        @tool(name="file_snapshot_restore", annotations=_DESTRUCTIVE, structured_output=True)
-        async def file_snapshot_restore(
-            chat_id: str, file_path: str, seq: int
-        ) -> dict[str, Any]:
-            """Restore a workspace-contained snapshot and capture the restoration as a new snapshot."""
-            return await self._invoke(
-                "file_snapshot_restore",
-                lambda cp, p: cp.file_snapshot_restore(p, chat_id, file_path, seq),
-                mutating=True,
-            )
-
+        # File history/snapshot/restore are covered by the workspace git repo.
         @tool(name="adversarial_review", annotations=_WRITE, structured_output=True)
         async def adversarial_review(
             artifact: str,
@@ -1132,86 +1045,12 @@ class CiaoMcpService:
                 mutating=True,
             )
 
-        @tool(name="agent_context_get", annotations=_READ, structured_output=True)
-        async def agent_context_get() -> dict[str, Any]:
-            """List context assets, subagents, commands, and workspace health."""
-            return await self._invoke("agent_context_get", lambda cp, p: cp.agent_context_get(p))
-
-        @tool(name="workspace_health_get", annotations=_READ, structured_output=True)
-        async def workspace_health_get() -> dict[str, Any]:
-            """Check canonical agent assets and generated provider mirrors."""
-            return await self._invoke("workspace_health_get", lambda cp, p: cp.workspace_health_get(p))
-
-        @tool(name="workspace_health_fix", annotations=_WRITE, structured_output=True)
-        async def workspace_health_fix() -> dict[str, Any]:
-            """Repair missing workspace scaffolding and provider asset mirrors."""
-            return await self._invoke("workspace_health_fix", lambda cp, p: cp.workspace_health_fix(p), mutating=True)
-
-        @tool(name="skills_list", annotations=_READ, structured_output=True)
-        async def skills_list() -> dict[str, Any]:
-            """List stock, custom, and installed skills with provider availability."""
-            return await self._invoke("skills_list", lambda cp, p: cp.skills_list(p))
-
-        @tool(name="skills_sync", annotations=_WRITE, structured_output=True)
-        async def skills_sync(refresh_upstream: bool = False) -> dict[str, Any]:
-            """Synchronize canonical skills, commands, and subagents to provider mirrors."""
-            return await self._invoke("skills_sync", lambda cp, p: cp.skills_sync(p, refresh_upstream), mutating=True)
-
-        @tool(name="local_session_status", annotations=_READ, structured_output=True)
-        async def local_session_status() -> dict[str, Any]:
-            """Return local git-session synchronization status."""
-            return await self._invoke("local_session_status", lambda cp, p: cp.local_session_status(p))
-
-        @tool(name="local_session_preflight", annotations=_READ, structured_output=True)
-        async def local_session_preflight() -> dict[str, Any]:
-            """Run the local-session safety preflight without committing or pushing."""
-            return await self._invoke("local_session_preflight", lambda cp, p: cp.local_session_preflight(p))
-
-        @tool(name="local_session_handback", annotations=_DESTRUCTIVE, structured_output=True)
-        async def local_session_handback(confirm_warnings: bool = False) -> dict[str, Any]:
-            """Commit and synchronize the current branch after secrets preflight."""
-            return await self._invoke(
-                "local_session_handback",
-                lambda cp, p: cp.local_session_handback(
-                    p, confirm_warnings=confirm_warnings
-                ),
-                mutating=True,
-            )
-
-        @tool(name="local_session_resync", annotations=_WRITE, structured_output=True)
-        async def local_session_resync() -> dict[str, Any]:
-            """Finish local synchronization after an interactive conflict resolution."""
-            return await self._invoke(
-                "local_session_resync", lambda cp, p: cp.local_session_resync(p), mutating=True
-            )
-
-        @tool(name="package_status_get", annotations=_READ, structured_output=True)
-        async def package_status_get() -> dict[str, Any]:
-            """Return installed package version and best-effort update availability."""
-            return await self._invoke(
-                "package_status_get", lambda cp, p: cp.package_status_get(p)
-            )
-
-        @tool(name="lifecycle_actions_list", annotations=_READ, structured_output=True)
-        async def lifecycle_actions_list() -> dict[str, Any]:
-            """List this managed process's deferred restart/update actions."""
-            return await self._invoke(
-                "lifecycle_actions_list", lambda cp, p: cp.lifecycle_actions_list(p)
-            )
-
-        @tool(name="lifecycle_action_request", annotations=_DESTRUCTIVE, structured_output=True)
-        async def lifecycle_action_request(
-            action: str,
-            confirmed: bool = False,
-        ) -> dict[str, Any]:
-            """Queue a confirmed restart or package update after the current turn drains."""
-            return await self._invoke(
-                "lifecycle_action_request",
-                lambda cp, p: cp.lifecycle_action_request(
-                    p, action=action, confirmed=confirmed  # type: ignore[arg-type]
-                ),
-                mutating=True,
-            )
+        # agent_context_get / workspace_health_* -> `ciao health get|fix`;
+        # skills_list -> `ciao skills list`; skills_sync -> `ciao skills-sync`.
+        # local_session_* (status/preflight/handback/resync) are dropped: shell
+        # agents commit/push with git directly, and the PWA "Sync to Remote"
+        # feature drives the control plane through its own REST route.
+        # package_status_get / lifecycle_* are host/PWA concerns, not agent tools.
 
 
 async def mcp_status_endpoint(request: Request) -> JSONResponse:
