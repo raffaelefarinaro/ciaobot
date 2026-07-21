@@ -151,11 +151,11 @@ export interface ChatMessage {
   // Undefined keeps the legacy last-assistant-message inference.
   phase?: 'commentary' | 'final_answer'
   // True when this assistant bubble was promoted from a live streaming
-  // thinking buffer via the PWA's "Show reply as text" affordance. Used to
-  // suppress a duplicate if the same text later arrives through a normal
-  // result event (the dedup in normalizeMessages already filters identical
-  // text, but the flag documents intent and is available for any UI that
-  // wants to label promoted bubbles differently).
+  // thinking buffer via the PWA's "Show reply as text" affordance. Marks the
+  // bubble for any UI that wants to label promoted replies differently; it is
+  // not itself a dedup key. If the model's eventual result event repeats the
+  // same text a second bubble can appear — an accepted edge for this manual
+  // recovery path.
   promoted_from_thinking?: boolean
 }
 

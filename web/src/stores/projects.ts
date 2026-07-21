@@ -1949,10 +1949,10 @@ export const useProjectStore = defineStore('projects', () => {
   // real reply — promote it to a normal assistant bubble so the user can
   // read it. The server is left alone: when its result event eventually
   // fires, the normal commit path still adds the model-canonical text and
-  // the now-promoted bubble simply gets re-rendered as part of the
-  // reconciled history. A second copy can land if the result text contains
-  // the same content, but the timeline dedup at result-time (see
-  // _flushTimeline) collapses it.
+  // the now-promoted bubble is re-rendered as part of the reconciled
+  // history. If that result text repeats the promoted content a second
+  // bubble can appear — an accepted edge, since this is a manual button the
+  // user only reaches when the reply is otherwise stuck in the trace.
   function promoteStreamingThinkingToAnswer(chatId: string) {
     const thinking = (streamingThinking.value[chatId] || '').trim()
     if (!thinking) return

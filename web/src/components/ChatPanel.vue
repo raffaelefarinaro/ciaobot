@@ -995,21 +995,26 @@ const chat = computed(() => store.activeChat!)
 // Inline editing state for queued messages. Keyed by queue entry id.
 const editingQueueId = ref<string | null>(null)
 const editingQueueText = ref('')
+// The edit UI only edits text, so hold the entry's images and re-send them on
+// save — otherwise the backend clears attachments it resolves from an empty list.
+const editingQueueImages = ref<string[] | undefined>(undefined)
 
-function startEditQueue(entry: { id: string; text: string }) {
+function startEditQueue(entry: { id: string; text: string; images?: string[] }) {
   editingQueueId.value = entry.id
   editingQueueText.value = entry.text
+  editingQueueImages.value = entry.images ? [...entry.images] : undefined
 }
 
 function cancelEditQueue() {
   editingQueueId.value = null
   editingQueueText.value = ''
+  editingQueueImages.value = undefined
 }
 
 function saveEditQueue(chatId: string, entryId: string) {
   const text = editingQueueText.value.trim()
   if (!text) return
-  store.editQueued(chatId, entryId, text)
+  store.editQueued(chatId, entryId, text, editingQueueImages.value)
   cancelEditQueue()
 }
 
@@ -2215,12 +2220,13 @@ const liveTraceMetaParts = computed(() => {
 // final answer in a thinking content block, so the visible text stream stays
 // empty and the user sees the response painted as reasoning. When the
 // thinking buffer is long and no text has streamed in for this turn, that's
-// almost certainly the reply, not background reasoning. Trigger only above
-// 200 chars of thinking to keep short model introspection from flashing the
-// affordance on well-behaved models.
+// almost certainly the reply, not background reasoning. The length gate keeps
+// short model introspection from flashing the affordance on well-behaved
+// models.
+const LIKELY_ANSWER_THINKING_CHARS = 200
 const thinkingIsLikelyAnswer = computed(() => {
   const thinking = store.currentStreamingThinking
-  if (!thinking || thinking.length < 200) return false
+  if (!thinking || thinking.length < LIKELY_ANSWER_THINKING_CHARS) return false
   if (store.currentStreamingText) return false
   return true
 })
