@@ -31,19 +31,42 @@ CLAUDE_AI_CONNECTORS: tuple[str, ...] = (
     "mcp__claude_ai_incident_io",
 )
 
-# Non-connector tools blocked by default in the personal workspace. The
-# self-hosted n8n MCP (project-scoped in .mcp.json) is work-only, so it stays
-# blocked even when the claude.ai MCP toggle is flipped on. Operators add or
-# remove entries via the per-workspace "Extra disallowed tools" field (PWA) or
-# ``CIAO_DISALLOWED_TOOLS_PERSONAL`` (CSV; literal ``none`` clears).
+# Harness tools that are irrelevant inside the Ciaobot PWA regardless of
+# workspace. The PWA is the notification, plan-approval, and scheduling
+# surface, so the CLI's own plan-mode, cron, /loop wakeup, routine-trigger,
+# desktop/phone push, notebook-edit, and design-system-sync tools just
+# duplicate it (or have no UI to render them). Denied as bare tool names so
+# their definitions drop out of the model payload, shrinking every request.
+# See "What I'd do next" in ciao-improvements and the aihero.dev
+# "kill the bloat in Claude Code's system prompt" guide for the rationale.
+_DEFAULT_HARNESS_DISALLOWED_TOOLS: tuple[str, ...] = (
+    "EnterPlanMode",
+    "ExitPlanMode",
+    "DesignSync",
+    "NotebookEdit",
+    "CronCreate",
+    "CronDelete",
+    "CronList",
+    "ScheduleWakeup",
+    "PushNotification",
+    "RemoteTrigger",
+)
+
+# Non-connector tools blocked by default in the personal workspace on top of
+# the harness set. The self-hosted n8n MCP (project-scoped in .mcp.json) is
+# work-only, so it stays blocked even when the claude.ai MCP toggle is on.
+# Operators add or remove entries via the per-workspace "Extra disallowed
+# tools" field (PWA) or ``CIAO_DISALLOWED_TOOLS_PERSONAL`` (CSV; literal
+# ``none`` clears).
 _DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL: tuple[str, ...] = (
     "mcp__n8n_mcp",
 )
 
-# Back-compat alias: the full personal default denylist (connectors + extras).
-# Kept for any caller that still wants the combined set.
+# Back-compat alias: the full personal default denylist (connectors + harness
+# + extras). Kept for any caller that still wants the combined set.
 _DEFAULT_DISALLOWED_TOOLS_PERSONAL: tuple[str, ...] = (
     *CLAUDE_AI_CONNECTORS,
+    *_DEFAULT_HARNESS_DISALLOWED_TOOLS,
     *_DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL,
 )
 
@@ -476,15 +499,17 @@ class CiaoConfig:
         * the claude.ai connector set (``CLAUDE_AI_CONNECTORS``) when
           ``claude_ai_mcps`` resolves to False, and
         * the workspace's extra tools (``disallowed_tools``), which defaults to
-          ``_DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL`` (n8n) for personal and
-          ``[]`` for every other workspace.
+          the harness set (``_DEFAULT_HARNESS_DISALLOWED_TOOLS``) for every
+          workspace plus n8n (``_DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL``) for
+          personal.
 
-        So, with the toggle at its default (on), a personal chat blocks only
-        n8n and a work chat blocks nothing; the 8 claude.ai connectors are
-        allowed in both until the toggle is flipped off. Both are overridable:
-        the
-        toggle via ``CIAO_CLAUDE_AI_MCPS_PERSONAL`` / ``CIAO_CLAUDE_AI_MCPS_WORK``
-        / the PWA switch, the extras via ``CIAO_DISALLOWED_TOOLS_PERSONAL`` /
+        So, with the toggle at its default (on), every chat blocks the
+        PWA-irrelevant harness tools (plan mode, cron, /loop wakeup, routine
+        trigger, push, notebook edit, design-system sync), a personal chat
+        additionally blocks n8n, and the 8 claude.ai connectors are allowed in
+        both until the toggle is flipped off. Both are overridable: the toggle
+        via ``CIAO_CLAUDE_AI_MCPS_PERSONAL`` / ``CIAO_CLAUDE_AI_MCPS_WORK`` /
+        the PWA switch, the extras via ``CIAO_DISALLOWED_TOOLS_PERSONAL`` /
         ``CIAO_DISALLOWED_TOOLS_WORK`` / the "Extra disallowed tools" field.
         """
         workspace_config = self.workspace(workspace)
@@ -497,11 +522,13 @@ class CiaoConfig:
         )
         extras = workspace_config.disallowed_tools
         if extras is None:
-            extras = (
-                list(_DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL)
-                if workspace_config.name == "personal"
-                else []
-            )
+            if workspace_config.name == "personal":
+                extras = [
+                    *_DEFAULT_HARNESS_DISALLOWED_TOOLS,
+                    *_DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL,
+                ]
+            else:
+                extras = list(_DEFAULT_HARNESS_DISALLOWED_TOOLS)
         # Union, preserving order, deduped.
         seen: set[str] = set()
         effective: list[str] = []

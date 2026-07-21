@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ciao.config import CiaoConfig
+from ciao.config import CiaoConfig, _DEFAULT_HARNESS_DISALLOWED_TOOLS
 
 
 def _config(**overrides: str) -> CiaoConfig:
@@ -97,7 +97,8 @@ def test_ciao_workspaces_json_defines_named_workspaces(tmp_path: Path) -> None:
     assert config.default_model_for_workspace("home") == "haiku"
     assert config.disallowed_tools_for_workspace("home") == ["Bash", "mcp__example"]
     assert config.default_model_for_workspace("client") == "opus"
-    assert config.disallowed_tools_for_workspace("client") == []
+    # Non-personal workspaces still deny the PWA-irrelevant harness tools.
+    assert config.disallowed_tools_for_workspace("client") == list(_DEFAULT_HARNESS_DISALLOWED_TOOLS)
 
 
 def test_runtime_workspaces_json_is_used_when_env_is_absent(tmp_path: Path) -> None:

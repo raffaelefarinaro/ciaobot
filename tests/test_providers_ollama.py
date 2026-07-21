@@ -11,7 +11,12 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
-from ciao.config import CiaoConfig, WorkspaceConfig
+from ciao.config import (
+    CiaoConfig,
+    WorkspaceConfig,
+    _DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL,
+    _DEFAULT_HARNESS_DISALLOWED_TOOLS,
+)
 from ciao.providers.ollama import (
     OllamaSettings,
     is_ollama_model,
@@ -475,8 +480,9 @@ def test_personal_workspace_allows_claude_ai_mcps_by_default(monkeypatch) -> Non
     assert "mcp__claude_ai_Airtable" not in personal
     # Self-hosted n8n MCP (project-scoped in .mcp.json) is work-only, so it is blocked.
     assert "mcp__n8n_mcp" in personal
-    # Work workspace: defaults to empty (workspace-specific tools available).
-    assert config.disallowed_tools_for_workspace("work") == []
+    # Every workspace denies the PWA-irrelevant harness tools by default;
+    # personal adds n8n on top. Work has no extra beyond the harness set.
+    assert config.disallowed_tools_for_workspace("work") == list(_DEFAULT_HARNESS_DISALLOWED_TOOLS)
 
 
 def test_disallowed_tools_env_override_unions_with_toggle(monkeypatch) -> None:
@@ -502,7 +508,10 @@ def test_claude_ai_mcps_toggle_env_override(monkeypatch) -> None:
     # Flip personal on → connectors allowed, only the n8n extra stays.
     monkeypatch.setenv("CIAO_CLAUDE_AI_MCPS_PERSONAL", "true")
     config = CiaoConfig.from_env()
-    assert config.disallowed_tools_for_workspace("personal") == ["mcp__n8n_mcp"]
+    assert config.disallowed_tools_for_workspace("personal") == [
+        *_DEFAULT_HARNESS_DISALLOWED_TOOLS,
+        *_DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL,
+    ]
     assert config.claude_ai_mcps_for_workspace("personal") is True
     # Flip work off → connectors blocked on top of any extras.
     monkeypatch.setenv("CIAO_CLAUDE_AI_MCPS_WORK", "false")
@@ -601,7 +610,9 @@ def test_pcm_disallowed_tools_for_chat_routes_by_workspace(
     w_disallowed = pcm.disallowed_tools_for_chat(w_chat)
     assert "mcp__claude_ai_Airtable" not in p_disallowed
     assert "mcp__n8n_mcp" in p_disallowed
-    assert w_disallowed == []
+    # Work denies the PWA-irrelevant harness tools; personal adds n8n on top.
+    assert w_disallowed == list(_DEFAULT_HARNESS_DISALLOWED_TOOLS)
+    assert set(_DEFAULT_HARNESS_DISALLOWED_TOOLS).issubset(set(p_disallowed))
 
 
 def test_default_model_for_workspace_falls_back_to_global(monkeypatch) -> None:
