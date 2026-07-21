@@ -66,7 +66,7 @@
                   />
                 </button>
               </div>
-              <p class="empty-hint">// select a chat from the sidebar, or start a new one.</p>
+              <HomeRecentChats />
               <div class="empty-actions">
                 <button
                   v-for="action in generalWorkspaceActions"
@@ -142,7 +142,7 @@
                 />
               </button>
             </div>
-            <p class="empty-hint">// select a chat from the sidebar, or start a new one.</p>
+            <HomeRecentChats />
             <div class="empty-actions">
               <button
                 v-for="action in generalWorkspaceActions"
@@ -180,6 +180,7 @@ import PinnedFilePanel from './PinnedFilePanel.vue'
 import PaneHeader from './PaneHeader.vue'
 import ProductTour from './ProductTour.vue'
 import OnboardingCard from './OnboardingCard.vue'
+import HomeRecentChats from './HomeRecentChats.vue'
 import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
 
 const store = useProjectStore()
@@ -696,7 +697,10 @@ onBeforeUnmount(() => {
            calc(var(--space-4) + var(--safe-bottom))
            calc(var(--space-4) + var(--safe-left));
   text-align: center;
-  overflow: hidden;
+  /* `safe center` centers short content but falls back to start-alignment
+     (scrollable) when the full jump-back-in list overflows the viewport. */
+  justify-content: safe center;
+  overflow-y: auto;
 }
 
 .empty-state .empty-mark {
@@ -785,10 +789,17 @@ onBeforeUnmount(() => {
 }
 
 .empty-actions {
-  display: flex;
-  gap: var(--space-3);
-  flex-wrap: wrap;
-  justify-content: center;
+  /* Mirror the jump-back-in tile grid so the new-chat buttons line up with
+     the cards (same 560px column, same auto-fill tracks and gap). */
+  width: 100%;
+  max-width: 560px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 8px;
+}
+.empty-actions .btn-primary {
+  width: 100%;
 }
 
 .sidebar-backdrop {

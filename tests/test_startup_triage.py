@@ -80,7 +80,7 @@ def test_cap_service_logs_keeps_recent_tail(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_no_errors_means_no_chat(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
-        "ciao.debug_report.build_issue_report", lambda root: _issue_report(0, 0)
+        "ciao.debug_report.build_issue_report", lambda root, **kw: _issue_report(0, 0)
     )
     pcm = FakePCM()
 
@@ -91,7 +91,7 @@ async def test_no_errors_means_no_chat(tmp_path: Path, monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_errors_dispatch_triage_chat(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
-        "ciao.debug_report.build_issue_report", lambda root: _issue_report(5, 2)
+        "ciao.debug_report.build_issue_report", lambda root, **kw: _issue_report(5, 2)
     )
     pcm = FakePCM()
     config = _config(tmp_path)
@@ -116,7 +116,7 @@ async def test_errors_dispatch_triage_chat(tmp_path: Path, monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_cooldown_blocks_repeat_triage(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
-        "ciao.debug_report.build_issue_report", lambda root: _issue_report(1, 0)
+        "ciao.debug_report.build_issue_report", lambda root, **kw: _issue_report(1, 0)
     )
     pcm = FakePCM()
     config = _config(tmp_path)

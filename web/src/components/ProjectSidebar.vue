@@ -290,6 +290,13 @@
         >
           tool usage
         </router-link>
+        <router-link
+          to="/settings/automations"
+          class="settings-nav-item"
+          :class="{ active: route.path === '/settings/automations' }"
+        >
+          automations
+        </router-link>
       </div>
     </template>
 
@@ -312,7 +319,8 @@
       <!-- Scrollable area for chats/projects -->
       <div class="chats-scroll-area">
         <!-- Recent chats (max 5) -->
-        <div v-if="store.recentChats.length" class="recent-section">
+        <!-- Recent moved to the home-screen "jump back in" grid (HomeRecentChats). -->
+        <div v-if="false" class="recent-section">
           <div class="recent-label">recent</div>
           <div class="recent-items">
             <button
@@ -357,7 +365,16 @@
           >
             <div
               class="project-header"
-              :class="{ 'is-system': project.is_auto }"
+              :class="{
+                'is-system': project.is_auto,
+                'drag-over': dragOverProjectId === project.project_id && dragProjectId !== project.project_id,
+                'dragging': dragProjectId === project.project_id,
+              }"
+              :draggable="isDraggable(project)"
+              @dragstart="onProjectDragStart(project, $event)"
+              @dragover.prevent="onProjectDragOver(project)"
+              @drop.prevent="onProjectDrop(project)"
+              @dragend="onProjectDragEnd"
               @contextmenu.prevent="toggleProjectMenu($event, project)"
             >
               <button
@@ -807,6 +824,48 @@ watch(() => store.workspaceProjects, (projects) => {
 function selectChat(chatId: string) {
   store.switchChat(chatId)
   emit('chat-selected')
+}
+
+// ── Drag-to-reorder projects ──────────────────────────────────────────────
+// General is auto-managed and pinned to the top (order 0) by the server, so
+// it isn't draggable; everything else can be dragged into a new order.
+const dragProjectId = ref<string | null>(null)
+const dragOverProjectId = ref<string | null>(null)
+
+function isDraggable(project: ProjectInfo): boolean {
+  return project.name !== 'General' && !project.is_auto
+}
+
+function onProjectDragStart(project: ProjectInfo, event: DragEvent) {
+  if (!isDraggable(project)) return
+  dragProjectId.value = project.project_id
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    // Firefox requires data to be set for the drag to start.
+    event.dataTransfer.setData('text/plain', project.project_id)
+  }
+}
+
+function onProjectDragOver(project: ProjectInfo) {
+  if (!dragProjectId.value || dragProjectId.value === project.project_id) return
+  dragOverProjectId.value = project.project_id
+}
+
+function onProjectDrop(target: ProjectInfo) {
+  const draggedId = dragProjectId.value
+  onProjectDragEnd()
+  if (!draggedId || draggedId === target.project_id) return
+  const ids = store.workspaceProjects.map(p => p.project_id)
+  const from = ids.indexOf(draggedId)
+  const to = ids.indexOf(target.project_id)
+  if (from < 0 || to < 0 || from === to) return
+  ids.splice(to, 0, ids.splice(from, 1)[0])
+  void store.reorderProjects(ids)
+}
+
+function onProjectDragEnd() {
+  dragProjectId.value = null
+  dragOverProjectId.value = null
 }
 
 function toggleProject(id: string) {
@@ -1395,6 +1454,20 @@ async function confirmDeleteChat(chatId: string) {
 }
 
 .project-header:hover {
+  background: var(--bg3);
+}
+
+/* Drag-to-reorder affordances. The header shows a grab cursor when draggable,
+   dims while being dragged, and draws an accent line where a drop will land. */
+.project-header[draggable="true"] {
+  cursor: grab;
+}
+.project-header.dragging {
+  opacity: 0.4;
+  cursor: grabbing;
+}
+.project-header.drag-over {
+  box-shadow: inset 0 2px 0 0 var(--accent);
   background: var(--bg3);
 }
 

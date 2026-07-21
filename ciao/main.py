@@ -25,7 +25,7 @@ from ciao.signals import RestartRequested
 from ciao.transcripts import TranscriptStore
 from ciao.upgrade import update_skills
 from ciao.web.app import create_app
-from ciao.error_log import setup_error_logging
+from ciao.error_log import install_asyncio_noise_filter, setup_error_logging
 from ciao.web.project_chats import ProjectChatManager
 from ciao.web.push import PushManager
 
@@ -243,6 +243,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     """Server implementation; caller owns the workspace instance lock."""
 
     setup_error_logging(config.workspace_root)
+    # Keep the SDK's benign closed-transport control-task errors out of the
+    # error log (asyncio would otherwise log them at ERROR). See issue #163.
+    install_asyncio_noise_filter()
 
     # Discover models installed on the local Ollama daemon (best-effort,
     # 2s timeout) and surface them in the model pickers alongside the cloud
@@ -361,6 +364,18 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     else:
         tracker.start("update_skills")
         asyncio.create_task(asyncio.to_thread(_skills_task))
+
+    if config.insights_backfill_on_startup:
+        tracker.start("backfill_insights")
+        async def _backfill_task():
+            try:
+                from ciao.insights import backfill_insights_task
+                await backfill_insights_task(config)
+                tracker.done("backfill_insights")
+            except Exception:
+                tracker.fail("backfill_insights", "backfill failed")
+                logger.exception("Insights backfill failed")
+        asyncio.create_task(_backfill_task())
 
     # Initialize stores
     state = StateStore(

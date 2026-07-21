@@ -855,7 +855,8 @@ def sync_workspace_skills(
     codex_wrappers_installed, codex_wrappers_pruned = _install_codex_wrappers(root)
     codex_agents_installed, codex_agents_pruned = _install_codex_agents(root)
     print(
-        f"Skills: {agents_installed} agent links, {commands_installed} command links rebuilt; "
+        f"Skills: {agents_installed} custom-agent symlinks rebuilt, "
+        f"{commands_installed} command links rebuilt; "
         f"{agents_pruned + commands_pruned} orphaned pruned."
     )
     print(

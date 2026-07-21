@@ -1,6 +1,6 @@
 ---
 name: ciao-capabilities
-description: Authoritative catalog of what Ciaobot can do, for capability questions and feature tours. Use whenever the user asks what Ciaobot is, what it can do, what features are available, whether it can do something specific, or how one of its features works (memory, vault, archiving, schedules, loops, routines, workspaces, projects, forks, provider consultations, skills, voice, models, providers, notifications, menu bar, files, chat comments, pinned files, document previews, CSV tables and cell comments) — and when onboarding or giving a tour or walkthrough to a new user. Trigger on phrasings like "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "can you remind me / remember / schedule", "can you fork this chat", "can you ask Codex / another provider", even when the word "Ciaobot" is not mentioned.
+description: Authoritative catalog of what Ciaobot can do, for capability questions and feature tours. Use whenever the user asks what Ciaobot is, what it can do, what features are available, whether it can do something specific, or how one of its features works (memory, vault, archiving, schedules, loops, routines, workspaces, projects, forks, agent handoffs, skills, voice, models, providers, notifications, menu bar, files, chat comments, pinned files, document previews, CSV tables and cell comments) — and when onboarding or giving a tour or walkthrough to a new user. Trigger on phrasings like "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "can you remind me / remember / schedule", "can you fork this chat", "can you ask Codex / another provider", even when the word "Ciaobot" is not mentioned.
 ---
 
 # Ciaobot Capabilities
@@ -26,20 +26,20 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 - Workspaces can have their own vault root, default model, integration profile, and tool deny-list.
 - Each chat can override the workspace's model/provider from the picker.
 - Voice transcription for chat input; push notifications; the PWA is installable on desktop and mobile.
-- Chats can be spawned programmatically from within a chat (see the `create-chat` skill).
+- Chats can be spawned programmatically from within a chat via the `chat_create` MCP tool.
 - **Forks**: any completed agent answer has a *Fork conversation from here* action. It creates an independent new chat in the same project, copies the visible history through that answer, and inherits the source's provider/model/mode/thinking level — but starts a fresh provider session and never syncs back to the source. Forks are titled `Original · Fork 1`, `Original · Fork 2`. Use it to explore a branch without disturbing the original.
-- **Provider consultations (cross-provider sub-chats)**: when you explicitly ask the current agent to consult another route — e.g. "ask Codex to review this before answering" — it opens a read-only sub-chat (`Claude ↔ Codex`) attached to that turn, exchanges several messages with the other provider, can relay a clarifying question back to you, then synthesizes the result. It only happens on an explicit request, never silently. Details: `provider-consultation` skill.
+- **Agent handoffs (cross-provider sub-chats)**: when you explicitly ask the current agent to hand off to another route — e.g. "ask Codex to review this before answering" — it opens a read-only sub-chat (`Claude ↔ Codex`) attached to that turn, exchanges several messages with the other provider, can relay a clarifying question back to you, then synthesizes the result. It only happens on an explicit request, never silently. Details: the `handoff_*` MCP tools.
 - **Turn resilience**: if a turn hits a provider connection error, Ciaobot auto-retries it with backoff instead of dropping the message; you can stop the retry or trigger one immediately. The active chat's live socket also auto-reconnects so a brief network blip doesn't lose the streaming result.
 
 ### 2. Memory and the vault (second brain)
 
 - Chats are **archived into a markdown vault** (e.g. `memory-vault/Logs/Chats/`). From archived sessions Ciaobot extracts insights and drafts **memory proposals** — the user reviews and approves them before anything is promoted into durable memory (`MEMORY.md`). Nothing is memorized silently.
 - The vault is standard, open markdown: notes, project folders, `CLAUDE.md`, `MEMORY.md`, a generated `INDEX.md` from frontmatter and wikilinks. It is agent-agnostic and remains useful without Ciaobot.
-- Vault tooling: search before adding duplicate facts, and refresh the index after larger edits. Reading conventions live in the `vault-read` skill. For the live list of typed Ciaobot tools (memory, vault, projects, chats, schedules, loops, files), call `capabilities_get` rather than reciting a static tool list.
+- Vault tooling: search (`vault_search`) before adding duplicate facts, and refresh the index (`ciao index`) after larger edits. Read-only recall (search, read matches, admit when nothing is found) is inline system-prompt policy, not a separate skill. For the live list of typed Ciaobot tools (projects, chats, schedules, loops, handoffs), read the MCP `tools/list` rather than reciting a static tool list; bounded-memory and vault-maintenance edits are the `ciao` CLI (`ciao memory …`, `ciao index`, `ciao lint`).
 
 ### 3. Schedules, loops, and automations
 
-- A native scheduler dispatches recurring or one-off prompts as fresh chat turns into a target project or chat — daily/weekly/monthly/once, timezone-aware. Configure from the **Automations page** or directly in chat (the `ciao-automations` skill has the full recipe).
+- A native scheduler dispatches recurring or one-off prompts as fresh chat turns into a target project or chat — daily/weekly/monthly/once, timezone-aware. Configure from the **Automations page** or directly in chat (the `schedule_*`/`loop_*` MCP tools carry the full field semantics in their own docstrings).
 - **Loops** are the sub-day sibling of schedules: bound to one existing chat, they re-send the same prompt every N minutes (e.g. "check my PRs every 10 minutes"), keeping the conversation's context between iterations. A loop runs with the chat's own model; loops set to start with the server resume on boot, the rest are started manually. Managed from the same Automations page.
 - Schedules that were due while the app was off are caught up on the next launch; each workspace shows how many runs it missed.
 - System maintenance schedules ship with the app; the Automation page shows background job runs.
@@ -47,7 +47,8 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 ### 4. Files
 
 - Create, preview, edit, and **restore** workspace and vault files from the PWA, with history — no terminal needed.
-- **In chat**: agent file touches surface as inline cards; open the viewer, pin beside the chat, and add line comments on selections.
+- **In chat**: agent file touches surface as inline cards; open the viewer, pin beside the chat, and add line comments on selections. Freshly written `.md`/`.csv` files auto-surface in the pinned panel so you see them without hunting.
+- **Drag to attach**: drag a file or folder into the composer to insert its name into the message (browsers only expose the name for OS drags, not a full path); images dropped this way upload as attachments.
 - **Chat annotations**: select text in any message and attach a comment that rides on your next send.
 - **Rich previews**: images inline; PDFs in the viewer; `.pptx` slides rendered as PDF (LibreOffice on the server).
 - **CSV tables**: `.csv` files render as an editable table in the viewer, and you can attach comments to individual cells (anchored by row and column) the same way you annotate document lines.
@@ -63,7 +64,7 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 
 - Backends: **Claude Code** (Claude subscription or Anthropic API key), **Codex** (OpenAI ChatGPT subscription via the Codex CLI), **Ollama** (cloud or local daemon, routed through Claude Code), and **OpenRouter** (routed through Claude Code). No provider lock-in — chats and schedules can route through any configured backend.
 - Per-workspace default model and model bucket (which controls how aliases like `opus`/`sonnet` resolve), per-chat override in the picker.
-- Beyond per-chat routing, one chat can **consult another provider mid-turn** (cross-provider sub-chats — see §1 and the `provider-consultation` skill), so a Claude chat can get a Codex or Ollama second opinion without leaving the conversation.
+- Beyond per-chat routing, one chat can **consult another provider mid-turn** (cross-provider sub-chats — see §1 and the `handoff_*` MCP tools), so a Claude chat can get a Codex or Ollama second opinion without leaving the conversation.
 
 ### 7. Google Workspace (`gws`)
 
@@ -76,7 +77,7 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 
 - **Settings page**: provider keys, model lists, skill/agent inventory, the injected system prompt (read-only), and local package updates from the UI.
 - **macOS extras**: a menu bar companion (`ciao menubar`) with server status, a Start at Login status/toggle, and open/restart/logs actions (the Ciaobot face turns scared when the server is down), a distinct `Ciaobot Server.app` recovery launcher, and LaunchAgents so everything starts on login.
-- **Local HTTP API**: the app exposes an API an in-chat agent can drive (create chats, subagents, commands) — recipes are in `PWA_API.md` in the Ciaobot GitHub repo (`raffaelefarinaro/ciaobot`); fetch it when you need the raw API surface. For the common cases, the shipped `create-chat` and `ciao-automations` skills already contain the working recipes.
+- **Local HTTP API**: the app exposes an API an in-chat agent can drive (create chats, subagents, commands) — recipes are in `PWA_API.md` in the Ciaobot GitHub repo (`raffaelefarinaro/ciaobot`); fetch it when you need the raw API surface. For the common cases, the `chat_create` and `schedule_*`/`loop_*` MCP tools already carry the working recipes in their own docstrings.
 
 ### Privacy and trust posture
 
@@ -98,5 +99,5 @@ Close with: they can ask "what can Ciaobot do?" (or about any specific feature) 
 ## Where the details live
 
 - Workspace customization surface (env vars, workspaces registry, tool deny-lists, model routing): `CIAO_CUSTOMIZATION.md` in the workspace root.
-- Schedules and loops how-to: the `ciao-automations` skill. Spawning chats: the `create-chat` skill. Consulting another provider mid-chat: the `provider-consultation` skill. Vault conventions: the `vault-read` skill.
+- Schedules and loops how-to: the `schedule_*`/`loop_*` MCP tool docstrings. Spawning chats: the `chat_create` MCP tool. Consulting another provider mid-chat: the `handoff_*` MCP tools. Vault read conventions are inline system-prompt policy.
 - Canonical docs in the Ciaobot GitHub repo (`raffaelefarinaro/ciaobot`, also present in source checkouts): `README.md`, `docs/ARCHITECTURE.md`, and `PWA_API.md` (routes, auth, agent recipes).

@@ -1,6 +1,27 @@
 # Ciaobot
 
-Ciaobot is a local web app for knowledge work with subscription-backed agents (Claude Code, OpenAI Codex, and others). Chats, projects, files, schedules, memory, and archived knowledge live in one interface instead of being scattered across terminal sessions — with a plain-markdown vault you own.
+<p align="center">
+  <img src="docs/hero.png" alt="Ciaobot mascot saying Ciao!" width="100%">
+</p>
+
+Ciaobot is a **second brain you own** — a local, provider-agnostic AI workspace whose memory is a plain-markdown vault you own outright. Chats, projects, files, schedules, and memory live in one interface, backed by whichever model you choose (Claude Code, OpenAI Codex, and others).
+
+## Why it exists
+
+Ciaobot started from the limits of Claude Cowork. Cowork is genuinely good at *doing the work* — it runs on your own desktop, edits your own files, and follows along on your phone. But it's Claude-only, and everything it learns about *you* — your sessions, your context, your history — lives in an account you rent. It knows you no better on day 365 than on day 1: it remembers *sessions*, not *you*.
+
+Ciaobot is the other bet — differences that are structural, not features:
+
+- **Any model, local or cloud.** Claude Code, OpenAI Codex, Ollama (local or cloud), or OpenRouter — the second brain outlives any single model, and lighter tasks can run entirely on your own hardware.
+- **Your machine's own power.** Voice is already wired to work on-device: dictation and read-aloud run on your computer (Apple Silicon) with no cloud round-trip needed.
+- **Accrual, not storage.** A memory system, baked in, that curates itself and compounds into *you* over time — not a pile of past sessions.
+- **Yours to keep.** That memory is plain markdown in a git repo you own outright — portable, and useful even if this app disappears.
+
+The coworker is just the interface. The second brain is the product.
+
+## It follows you — without leaving your machine
+
+Ciaobot runs on your computer, but you're not chained to your desk. The PWA is built mobile-first with push notifications, and over [Tailscale](https://tailscale.com/) your phone reaches the machine at home on a private mesh — the same desk-to-phone continuity as a cloud assistant, without shipping your work to anyone's servers. The one honest trade: the host has to be awake. When the machine sleeps, so does your second brain.
 
 ## Who it's for
 
@@ -17,6 +38,8 @@ Ciaobot does not reinvent how you talk to agents. It runs [Claude Code](https://
 2. **One interface** — the same UI regardless of which project or provider you're talking to.
 3. **Incremental capabilities** — features are added only when I need them or discover a pattern worth adopting, not speculatively.
 
+The same instinct runs through the infrastructure: rather than build and run servers, Ciaobot stands on primitives that already have millions of users hardening them — **git** for sync, versioning, and durability; **Tailscale** for private remote access; an installable **PWA** instead of a bespoke native shell. Every hard problem is answered by borrowing a battle-tested tool, not maintaining a new one.
+
 What that looks like in practice:
 
 - **Workspaces and projects** — split life areas (personal, work, a client, …) into sidebar workspaces, then organize work inside projects. Ciaobot injects project notes and context into every turn.
@@ -25,7 +48,7 @@ What that looks like in practice:
 - **Files and automations** — create, preview, edit, and restore vault files from the UI; run recurring routines on a cron you choose (schedules) or re-run a prompt inside one chat every N minutes (loops).
 - **Voice, notifications, and updates** — transcription, push alerts, model settings, and in-app package updates. On macOS: menu bar companion, `Ciaobot Server.app`, and background service after setup.
 - **Provider choice** — Claude Code or Codex with your existing login; Ollama, OpenRouter, and on-device models for lighter tasks (see [Providers](#providers)).
-- **Agent-safe control plane** — an authenticated, chat-scoped MCP surface lets managed Claude Code and Codex processes operate Ciaobot memory, vault, projects, chats, schedules, loops, consultations, and file history without curl or direct runtime-JSON edits. MCP is the default transport, with the legacy CLI path retained as an automatic fallback. See [docs/MCP.md](docs/MCP.md).
+- **Agent-safe control plane** — an authenticated, chat-scoped MCP surface lets managed Claude Code and Codex processes operate Ciaobot memory, vault, projects, chats, schedules, loops, agent handoffs, and file history without curl or direct runtime-JSON edits. MCP is the default transport, with the legacy CLI path retained as an automatic fallback. See [docs/MCP.md](docs/MCP.md).
 
 Pick a workspace folder, choose a provider, and work — Ciaobot is the interface on top; the vault is yours to keep.
 
@@ -48,7 +71,7 @@ When your message mentions a name that appears in the vault index, the agent get
 - Comment on any passage of a reply — select text, attach a note, and it rides along with your next prompt; queue follow-ups while the agent is still working.
 - Per-chat model picker with provider thinking levels on top of per-workspace defaults.
 - Fork conversation: create a new independent chat in the same project starting from any completed agent answer, preserving history.
-- Provider consultations: spawn and communicate with a second provider route (the participant) as a read-only sub-chat attached to the originating turn.
+- Agent handoffs: spawn and communicate with a second provider route (the participant) as a read-only sub-chat attached to the originating turn.
 
 **Voice — dictation and read-aloud**
 
@@ -121,7 +144,7 @@ Type these in any chat ([ciao/stock/commands/](ciao/stock/commands/)):
 |---|---|
 | [/remember](ciao/stock/commands/remember.md) | Saves a durable fact or learning to the right memory layer (agent memory, user profile, or a vault page). |
 | [/interrogation](ciao/stock/commands/interrogation.md) | Asks a few targeted questions to turn a vague project, person, or idea into a useful canonical vault note. |
-| [/critique](ciao/stock/commands/critique.md) | Quick single-model review of a plan or draft (the multi-model `adversarial-review` skill is the heavier option). |
+| [/critique](ciao/stock/commands/critique.md) | Multi-model adversarial review of a plan or draft, via the `adversarial_review` MCP tool. |
 
 ### System routines
 
@@ -177,7 +200,7 @@ See [INTEGRATIONS.md](INTEGRATIONS.md) for env vars, OAuth, and per-task model r
 
 ## A personal project, shared
 
-Ciaobot is my personal idea of how an AI assistant should work day to day. I built it for my own use, run it on my own machines, and the defaults reflect that: project-first navigation, a plain-markdown vault as memory, explicit model routing, and self-improvement loops that propose changes instead of applying them blindly.
+Ciaobot is my idea of an AI assistant that belongs to you, not to a vendor: it runs on your machine, talks to whichever model you choose, and turns your work into a second brain you keep in plain files. I built it for my own use and run it on my own machines; the defaults reflect that: project-first navigation, a plain-markdown vault as memory, explicit model routing, and self-improvement loops that propose changes instead of applying them blindly.
 
 I'm sharing it because the patterns may be useful to you. Ideas, bug reports, disagreements with my defaults, and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 

@@ -230,7 +230,7 @@ describe('ephemeral status events', () => {
     expect(msgsFinal.some(m => m.role === 'system' && m.content === 'retrying on sonnet')).toBe(true)
   })
 
-  test('does not render allowed rate limit status as a system message', () => {
+  test('does not render allowed or allowed_warning rate limit status as a system message', () => {
     apiGet.mockResolvedValue([])
     const store = useProjectStore()
     const chatId = 'c-ratelimit'
@@ -249,7 +249,38 @@ describe('ephemeral status events', () => {
 
     const msgs = store.messages[chatId] || []
     expect(msgs.some(m => m.role === 'system' && m.content.includes('Rate limit: allowed (five_hour)'))).toBe(false)
-    expect(msgs.some(m => m.role === 'system' && m.content.includes('Rate limit: allowed_warning'))).toBe(true)
+    expect(msgs.some(m => m.role === 'system' && m.content.includes('Rate limit: allowed_warning'))).toBe(false)
+  })
+
+  test('folds repeated compacting status ticks into one live trace line, not stacked system bubbles', () => {
+    // Regression: each "compacting" tick from the CLI used to push its own
+    // top-level system bubble (3 identical "compacting" bubbles stacked
+    // above the live Thinking trace instead of one line inside it).
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'c-compacting'
+    store.activeChatId = chatId
+    store.messages[chatId] = [
+      { role: 'user', content: 'hi', timestamp: '' },
+    ]
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'status', message: 'compacting' }),
+    })
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'status', message: 'compacting' }),
+    })
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'status', message: 'compacting' }),
+    })
+
+    const msgs = store.messages[chatId] || []
+    expect(msgs.some(m => m.content === 'compacting')).toBe(false)
+
+    const statusEntries = store.currentTimeline.filter(e => e.kind === 'status')
+    expect(statusEntries.length).toBe(1)
+    expect(statusEntries[0].content).toBe('compacting')
   })
 })
 
@@ -1344,5 +1375,68 @@ describe('provider sub-chats', () => {
 
     await store.loadProviderSubchatEvents(subchatId)
     expect(store.providerSubchatEvents[subchatId]).toEqual(events)
+  })
+})
+
+describe('promoteStreamingThinkingToAnswer', () => {
+  // Recovery path for Ollama-routed models (glm-5.2, minimax-m3, kimi-k2.7)
+  // that wrap their final answer in a thinking content block. The text
+  // stream stays empty, so the live trace keeps showing "Thinking..." and
+  // the reply is buried in the reasoning buffer. The PWA exposes a
+  // "Show reply as text" affordance that promotes the thinking buffer
+  // into a real assistant bubble.
+
+  test('promotes non-empty thinking buffer to an assistant bubble with final_answer phase', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'c-thinking-promote'
+    store.activeChatId = chatId
+    store.messages[chatId] = [
+      { role: 'user', content: 'why is the deploy live?', timestamp: '2026-07-21T08:00:00Z' },
+    ]
+    // Simulate the live trace state: thinking buffer has the model's
+    // actual reply, text stream is empty (because the upstream wrapped it
+    // in a thinking block).
+    store.streaming[chatId] = true
+    // The store doesn't expose the raw streamingThinking map publicly, so
+    // reach the same internal state via the public API: dispatch a thinking
+    // event over WS so the store populates the buffer for us.
+    store.connectWs(chatId)
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'thinking', text: 'Good news: the server restarted at 08:00 UTC today, so the deploy is live.' }),
+    })
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'thinking', text: ' You can verify with `/context` in a new chat.' }),
+    })
+
+    expect(store.currentStreamingThinking).toContain('Good news: the server restarted')
+
+    store.promoteStreamingThinkingToAnswer(chatId)
+
+    const msgs = store.messages[chatId] || []
+    const promoted = msgs.find(m => m.role === 'assistant' && m.phase === 'final_answer')
+    expect(promoted).toBeDefined()
+    expect(promoted?.content).toContain('Good news: the server restarted')
+    expect(promoted?.content).toContain('/context')
+    expect(promoted?.promoted_from_thinking).toBe(true)
+
+    // The live buffer must clear so the affordance hides itself and the
+    // thinking text doesn't get re-painted under the new bubble.
+    expect(store.currentStreamingThinking).toBe('')
+  })
+
+  test('is a no-op when the thinking buffer is empty', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'c-thinking-empty'
+    store.activeChatId = chatId
+    store.messages[chatId] = [
+      { role: 'user', content: 'hi', timestamp: '2026-07-21T08:00:00Z' },
+    ]
+
+    store.promoteStreamingThinkingToAnswer(chatId)
+
+    const msgs = store.messages[chatId] || []
+    expect(msgs.some(m => m.role === 'assistant')).toBe(false)
   })
 })

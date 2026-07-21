@@ -312,6 +312,48 @@ async def test_queued_messages_survive_question_pause_and_flush_after_answer(
     assert pcm._chats[chat.chat_id].pending_queue == []
 
 
+async def test_queue_edit_remove_reorder_operate_on_parked_queue(tmp_path: Path) -> None:
+    """reorder_queue/edit_queue/remove_queue must not silently no-op once the
+    stream that queued them has torn down (error, question-pause, retry-armed
+    — anything that parks onto `chat.pending_queue`). Regression: they only
+    ever touched the live ChatStream's in-memory queue via `self._broker.get`,
+    so once that returned None they returned False without checking the
+    persisted parked queue — the client's QUEUED chip would show an edit or
+    removal as successful (optimistic UI) while the original, untouched
+    message still flushed on the next turn.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q3-parked-ops", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="parked-ops-test")
+
+    # No live stream for this chat — simulates a turn that already tore down
+    # after parking its queue (e.g. a non-retryable error, or question-pause).
+    assert pcm.get_active_stream(chat.chat_id) is None
+    pcm._chats[chat.chat_id].pending_queue = [
+        {"id": "q-1", "text": "msg A", "images": []},
+        {"id": "q-2", "text": "msg B", "images": []},
+        {"id": "q-3", "text": "msg C", "images": []},
+    ]
+
+    # Edit operates on the parked queue, not a no-op.
+    assert pcm.edit_queue(chat.chat_id, "q-2", "msg B edited") is True
+    parked = pcm._chats[chat.chat_id].pending_queue
+    assert [p["text"] for p in parked] == ["msg A", "msg B edited", "msg C"], parked
+
+    # Reorder likewise.
+    assert pcm.reorder_queue(chat.chat_id, "q-3", before_id="q-1") is True
+    parked = pcm._chats[chat.chat_id].pending_queue
+    assert [p["id"] for p in parked] == ["q-3", "q-1", "q-2"], parked
+
+    # Remove likewise.
+    assert pcm.remove_queue(chat.chat_id, "q-1") is True
+    parked = pcm._chats[chat.chat_id].pending_queue
+    assert [p["id"] for p in parked] == ["q-3", "q-2"], parked
+
+    # Unknown entry id still correctly fails.
+    assert pcm.remove_queue(chat.chat_id, "nope") is False
+
+
 async def test_new_session_clears_parked_question_queue(tmp_path: Path) -> None:
     """Starting a fresh session abandons a paused question and any follow-ups
     parked for its answer turn — they must not leak into the new conversation.
@@ -458,6 +500,79 @@ async def test_queue_flush_bumps_user_turn_count_per_message(tmp_path: Path) -> 
 
     # Start: 0. Initial bump: 1. Each queued follow-up bumps once more: 3.
     assert pcm.get_chat(chat.chat_id).user_turn_count == 3
+
+
+async def test_queued_message_survives_non_retryable_error(tmp_path: Path) -> None:
+    """A follow-up turn that ends in a non-retryable error (not a quota or
+    connection error eligible for auto-retry) must not silently drop whatever
+    was still queued behind it. Regression: `_drive()` popped the next queued
+    message off the stream before checking `had_error`, then discarded it on
+    `break` without parking it — so with two messages queued, the first got
+    sent as a follow-up turn and the second vanished when that turn errored.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q3-error-drop", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="error-drop-test")
+
+    first_turn_ready = asyncio.Event()
+    turn_calls: list[str] = []
+
+    async def fake_stream_chat(chat_id, prompt, images=None):
+        turn_calls.append(prompt)
+        if prompt == "initial":
+            await first_turn_ready.wait()
+            yield ResultEvent(
+                type="result",
+                result="assistant answer",
+                session_id="sess-x",
+                is_error=False,
+                effective_model=chat.model,
+                usage={},
+                quota={},
+                cost_usd=0.0,
+            )
+            return
+        # The follow-up turn (msg A) fails with a non-retryable error: not a
+        # quota or connection error, so it must not auto-retry, and any
+        # message still queued behind it must be parked, not dropped.
+        yield ResultEvent(
+            type="result",
+            result="permission denied: tool X is not allowed",
+            session_id="sess-x",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    captured: list[dict] = []
+
+    async def consume(stream) -> None:
+        async for ev in stream.subscribe():
+            captured.append(ev)
+
+    stream = pcm.start_stream(chat.chat_id, "initial")
+    consumer = asyncio.create_task(consume(stream))
+
+    await _wait_for(
+        lambda: any(e.get("type") == "user_echo" for e in captured),
+        timeout=2.0,
+    )
+
+    assert pcm.queue_message(chat.chat_id, "msg A") is True
+    assert pcm.queue_message(chat.chat_id, "msg B") is True
+
+    first_turn_ready.set()
+    await asyncio.wait_for(consumer, timeout=5.0)
+
+    # msg A was sent as a follow-up turn and errored; msg B must be parked on
+    # the chat rather than lost.
+    assert turn_calls == ["initial", "msg A"], turn_calls
+    parked = pcm._chats[chat.chat_id].pending_queue
+    assert [p["text"] for p in parked] == ["msg B"], parked
 
 
 def test_chat_stream_pending_reorder_edit_remove() -> None:

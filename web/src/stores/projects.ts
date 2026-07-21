@@ -151,6 +151,7 @@ export const useProjectStore = defineStore('projects', () => {
     | { kind: 'thinking'; content: string }
     | { kind: 'text'; content: string; phase?: ChatMessage['phase'] }
     | { kind: 'filecard'; content: string; file_path: string; action: string; tool: string }
+    | { kind: 'status'; content: string }
   const streamingTimeline = ref<Record<string, StreamEntry[]>>({})  // per-chat interleaved tool/text entries
   const unread = ref<Record<string, number>>({})  // per-chat unread assistant message count
   // Per-chat "broker is running for this chat" flag, driven by /ws/events.
@@ -291,12 +292,6 @@ export const useProjectStore = defineStore('projects', () => {
     if (resolvedQuestions.value[chatId]?.has(questionsSignature(qs))) return
     activeQuestions.value[chatId] = qs
   }
-  // Per-chat map from a Task/Agent dispatch's tool_use_id to a short subagent
-  // label like "[Explore]". Populated when we see the parent's Task tool_use,
-  // consumed when later stream events from inside the subagent arrive with
-  // `parent_tool_use_id` set so we can prefix the activity line in the trace.
-  // Cleared when the result event closes the turn — labels are turn-scoped.
-  const subagentLabels = ref<Record<string, Record<string, string>>>({})
   const eventsSocket = ref<WebSocket | null>(null)
   const toasts = ref<InAppToast[]>([])
   let toastCounter = 0
@@ -448,6 +443,17 @@ export const useProjectStore = defineStore('projects', () => {
       .filter(c => Boolean(chatActivity(c)))
       .sort((a, b) => chatActivity(b).localeCompare(chatActivity(a)))
       .slice(0, 5)
+  })
+
+  // Full "jump back in" list for the home screen: every non-archived local
+  // chat with activity, across ALL workspaces, newest first (uncapped). The
+  // home surface is a global hub, so unlike recentChats it isn't scoped to
+  // the active workspace — each chat carries its own workspace/project tag.
+  const activeChatsAll = computed<ChatInfo[]>(() => {
+    return chats.value
+      .filter(c => !c.archived && c.local !== false)
+      .filter(c => Boolean(chatActivity(c)))
+      .sort((a, b) => chatActivity(b).localeCompare(chatActivity(a)))
   })
 
   function isChatStreaming(chatId: string): boolean {
@@ -1263,6 +1269,20 @@ export const useProjectStore = defineStore('projects', () => {
     return p
   }
 
+  // Persist a drag-reordered project sequence for the active workspace.
+  // Optimistically rewrites local `order` so the sidebar reflects the drop
+  // instantly; the server echoes a `projects_reordered` event that reconciles.
+  async function reorderProjects(orderedIds: string[]) {
+    orderedIds.forEach((pid, index) => {
+      const p = projects.value.find(x => x.project_id === pid)
+      if (p) p.order = index
+    })
+    await api.post('/api/projects/reorder', {
+      workspace: activeWorkspace.value,
+      order: orderedIds,
+    })
+  }
+
   async function deleteProject(projectId: string) {
     const activeChatProject = activeChat.value?.project_id
     await api.del(`/api/projects/${projectId}`)
@@ -1948,6 +1968,37 @@ export const useProjectStore = defineStore('projects', () => {
     persistStreamStartedAt()
   }
 
+  // Manual recovery for Ollama-routed models that wrap their final answer in
+  // a thinking content block. The model is still streaming (or stalled), the
+  // text stream is empty, and the thinking buffer is long enough to be a
+  // real reply — promote it to a normal assistant bubble so the user can
+  // read it. The server is left alone: when its result event eventually
+  // fires, the normal commit path still adds the model-canonical text and
+  // the now-promoted bubble is re-rendered as part of the reconciled
+  // history. If that result text repeats the promoted content a second
+  // bubble can appear — an accepted edge, since this is a manual button the
+  // user only reaches when the reply is otherwise stuck in the trace.
+  function promoteStreamingThinkingToAnswer(chatId: string) {
+    const thinking = (streamingThinking.value[chatId] || '').trim()
+    if (!thinking) return
+    const msgs = messages.value[chatId] || []
+    msgs.push({
+      role: 'assistant',
+      content: thinking,
+      timestamp: new Date().toISOString(),
+      // phase === 'final_answer' keeps isAnswerBubble() true so the existing
+      // buildTurnParts path renders this as a real bubble, not as a trace
+      // step, even before the result event arrives.
+      phase: 'final_answer',
+      promoted_from_thinking: true,
+    })
+    messages.value[chatId] = normalizeMessages([...msgs])
+    // Clear the live buffers so the trace stops re-painting the same text
+    // and the "Show reply as text" affordance hides itself.
+    streamingThinking.value[chatId] = ''
+    persistMessages()
+  }
+
   // Consecutive handshakes that closed without ever opening. A server that
   // rejects the upgrade (403 after a token rotation or restart) fails
   // identically on every attempt, so a fixed 2s retry becomes a request
@@ -2278,6 +2329,18 @@ export const useProjectStore = defineStore('projects', () => {
         if (activeChat.value && activeChat.value.project_id === msg.project_id) {
           activeChatId.value = null
         }
+        break
+      }
+      case 'projects_reordered': {
+        // Server-authoritative order after a drag-reorder (this or another
+        // device). Rewrite local order so workspaceProjects re-sorts.
+        const orderMap = new Map<string, number>(
+          (msg.order as string[]).map((pid, i) => [pid, i]),
+        )
+        projects.value.forEach(p => {
+          const next = orderMap.get(p.project_id)
+          if (next !== undefined) p.order = next
+        })
         break
       }
       case 'gws_health': {
@@ -2847,6 +2910,20 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
+  function _pushStatusLine(chatId: string, text: string) {
+    // Compaction (and similar) status ticks arrive repeatedly while a turn
+    // works — fold them into one live line in the trace instead of stacking
+    // a new bubble per tick.
+    if (!streamingTimeline.value[chatId]) streamingTimeline.value[chatId] = []
+    const arr = streamingTimeline.value[chatId]
+    const last = arr[arr.length - 1]
+    if (last && last.kind === 'status') {
+      last.content = text
+    } else {
+      arr.push({ kind: 'status', content: text })
+    }
+  }
+
   function _pushFileCard(
     chatId: string,
     payload: { file_path: string; action: string; tool: string },
@@ -2861,6 +2938,33 @@ export const useProjectStore = defineStore('projects', () => {
       action: payload.action,
       tool: payload.tool,
     })
+  }
+
+  // Auto-surface a file in the pinned side panel, but only when the agent
+  // deliberately asked to via the `file_surface` MCP tool (action === 'surfaced')
+  // — not for every ordinary Write/Edit, which used to be guessed at by
+  // extension (.md/.csv) plus a bookkeeping-file skip-list. That heuristic
+  // both missed real deliverables (non-.md/.csv, or written by a subagent)
+  // and fired on noisy writes the agent never meant to highlight. An explicit
+  // tool call is a genuine signal; a file extension is not. Fills the empty
+  // state only — never yanks a file the user already pinned — and only on
+  // desktop, where the split layout exists (mirrors FileViewerModal's canPin
+  // gate). localStorage-backed like every other pin; no backend state.
+  function _maybeAutoPin(
+    chatId: string,
+    touches: Array<{ file_path?: string; action?: string }>,
+  ): void {
+    if (typeof window === 'undefined' || window.innerWidth <= 768) return
+    if (pinnedFileFor(chatId)) return
+    // Freshest surfaced artifact wins (last touch in the batch).
+    for (let i = touches.length - 1; i >= 0; i--) {
+      const touch = touches[i]
+      if (touch?.action !== 'surfaced') continue
+      const raw = touch.file_path
+      if (!raw || !isPlausibleFilePath(raw)) continue
+      pinFile(chatId, raw)
+      return
+    }
   }
 
   function _flushTimeline(chatId: string): StreamEntry[] {
@@ -3114,39 +3218,22 @@ export const useProjectStore = defineStore('projects', () => {
               tool: event.tool_name,
             })
           }
+          _maybeAutoPin(chatId, touches)
           break
         }
 
-        // Record Task/Agent dispatches so we can prefix any tool calls that
-        // fire from inside the subagent (those arrive later with
-        // parent_tool_use_id pointing back at this dispatch's tool_use_id).
-        // Server-side _summarize_tool_input already formats the input as
-        // "[subagent_type] description"; we only need the bracketed prefix.
-        const isSubagentDispatch =
-          (event.tool_name === 'Task' || event.tool_name === 'Agent')
-          && !!event.tool_use_id
-        if (isSubagentDispatch) {
-          const match = (event.tool_input || '').match(/^\[([^\]]+)\]/)
-          const label = match ? `[${match[1]}]` : '[subagent]'
-          if (!subagentLabels.value[chatId]) subagentLabels.value[chatId] = {}
-          subagentLabels.value[chatId][event.tool_use_id!] = label
-        }
+        // Tool calls that fire from inside a subagent arrive with
+        // parent_tool_use_id set. They belong to the subagent, which the PWA
+        // already renders in its own "Subagent activity" box (SubagentPanel,
+        // fed by the subagent transcript). Inlining them in the parent trace
+        // too double-counts the work and inflates the parent turn's tool-call
+        // total (e.g. parent header shows "15 tool calls" while the box shows
+        // "31"), so we drop them here and let the box own subagent activity.
+        if (event.parent_tool_use_id) break
 
-        let line = event.tool_input
+        const line = event.tool_input
           ? `${_toolIcon(event.tool_name)} ${event.tool_name} ${event.tool_input}`
           : `${_toolIcon(event.tool_name)} ${event.tool_name}`
-
-        // Subagent activity: prefix with the parent dispatch's label and a
-        // turnstile arrow so the trace reads top-down as
-        //   🤖 Agent [Explore] Trace WebSocket …
-        //     ↳ [Explore] $ Bash find …
-        // Falls back to a generic [subagent] tag if the dispatch's label
-        // isn't in the map (e.g. WS reconnect after a buffer drop).
-        if (event.parent_tool_use_id) {
-          const label = subagentLabels.value[chatId]?.[event.parent_tool_use_id]
-            ?? '[subagent]'
-          line = `↳ ${label} ${line}`
-        }
 
         _pushToolLine(chatId, line)
         break
@@ -3174,8 +3261,19 @@ export const useProjectStore = defineStore('projects', () => {
         // those belong in the Activity trace via tool_use, not as chat lines.
         const message = (event.message || '').trim()
         const ephemeral = new Set(['thinking', 'stopped', 'requesting', 'rate_limit', 'model_rerouted'])
-        const isAllowedRateLimit = message.includes('Rate limit: allowed') && !message.includes('allowed_warning')
-        if (message && !ephemeral.has(message) && !message.startsWith('error:') && !isAllowedRateLimit) {
+        // Drop "allowed" rate-limit telemetry — the plain allowance pings and
+        // the escalating "allowed_warning … NN% used" ticks alike. They are
+        // usage status, not conversation, and one chat line per 1% is noise.
+        // A hard "Rate limit exceeded" carries no "allowed" and still shows.
+        const isAllowedRateLimit = message.includes('Rate limit: allowed')
+        // Compaction ticks repeat several times per pass. Unlike the
+        // rate-limit pings they're useful operator signal, so fold them into
+        // the live Thinking/Working trace (one line, updated in place)
+        // instead of dropping them or stacking a chat bubble per tick.
+        const isCompacting = /compact/i.test(message)
+        if (isCompacting) {
+          _pushStatusLine(chatId, message)
+        } else if (message && !ephemeral.has(message) && !message.startsWith('error:') && !isAllowedRateLimit) {
           msgs.push({
             role: 'system',
             content: message,
@@ -3259,6 +3357,10 @@ export const useProjectStore = defineStore('projects', () => {
               timestamp: now,
               tool_name: '_thinking',
             })
+          } else if (entry.kind === 'status') {
+            // Transient trace-only line (e.g. compaction ticks) — never
+            // persisted as a chat message, live view only.
+            continue
           } else {
             // Skip timeline text entries that are already represented in the
             // final merged text so the trace doesn't duplicate the answer bubble.
@@ -3312,10 +3414,6 @@ export const useProjectStore = defineStore('projects', () => {
         // futures as deny via cancel_all(). Drop the bubbles on our side too
         // so a late click can't race a brand-new turn.
         delete pendingPermissions.value[chatId]
-        // Subagent labels are turn-scoped — a tool_use_id from this turn
-        // can't possibly match a future dispatch's id, but clearing the map
-        // keeps memory bounded for long-lived chats with many turns.
-        delete subagentLabels.value[chatId]
         persistMessages()
         // Reconcile with the authoritative SDK session. Handles the reconnect
         // case where /messages already had this turn (dedups) and the race
@@ -3442,10 +3540,10 @@ export const useProjectStore = defineStore('projects', () => {
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
     chatUnread, chatNeedsInput, projectNeedsInput, projectUnread, workspaceUnread, totalUnread, clearUnread, markRead, markAllRead,
-    recentChats, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
+    recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
     // Actions
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
-    createProject, updateProject, deleteProject, completeProject,
+    createProject, updateProject, reorderProjects, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
     createChat, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
@@ -3463,5 +3561,6 @@ export const useProjectStore = defineStore('projects', () => {
     connectWs, disconnectWs, connectEventsWs,
     beginServerRestart,
     pushToast, pushErrorToast, dismissToast, fixError,
+    promoteStreamingThinkingToAnswer,
   }
 })

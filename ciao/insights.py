@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 
 from ciao import job_runs
@@ -516,3 +517,171 @@ async def _call_model(
     if provider != "claude":
         kwargs.update({"provider": provider, "cwd": cwd})
     return await run_oneshot(user_prompt, **kwargs)
+
+
+UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+)
+
+_TEXT_MODE_SYSTEM_PROMPT = """\
+You are extracting durable signal from a Claude Code chat transcript.
+The user is the workspace owner. The transcript is a rendered Markdown summary -
+tool calls, tool errors, thinking blocks, and intermediate states are
+NOT included, only the user/assistant text turns. Adjust accordingly:
+sections like Errors, Reusable snippets, and Vault changes will often
+be empty. Omit empty sections - do NOT write "none" or "n/a".
+
+Cite by short paraphrase or quote (no `[idx=N]` indices in this mode).
+Do not invent facts. Do not summarise the conversation - that is the
+transcript itself.
+
+Rules:
+- Skip anything obvious from the transcript prose alone.
+- "User corrections" = the user pushed back, redirected, or rejected an approach.
+- "New entities" = people/projects/places/products mentioned for the first time.
+- Be terse. One line per item where possible.
+
+## User corrections
+- User said: "<short quote>" -> assistant changed <what>.
+
+## New entities
+- <type>: <name> - <one-line context>.
+
+## Decisions
+- Chose <X> over <Y> because <reason>.
+
+## Open loops
+- <thing left undone, with any deadline or condition>.
+
+## Errors
+- <if the transcript itself describes a failure resolution that's worth keeping>
+
+## Reusable snippets
+- <only if a fully formed command or query appears in the assistant text>
+"""
+
+
+async def backfill_insights_task(
+    config,
+    *,
+    limit: int = 0,
+    mode: str = "both",
+    dry_run: bool = False,
+    concurrency: int = 2,
+    workspace: str = "",
+) -> None:
+    """Scan the vault's archived transcripts and extract/append missing insights."""
+    vault_root = config.vault_root
+    base = vault_root / "memory-vault" / "Logs" / "Chats"
+    if not base.exists():
+        logger.info("Vault directory %s does not exist, skipping backfill", base)
+        return
+
+    project_dir = _claude_projects_dir(config.workspace_root)
+
+    todo = []
+    # Loop over sorted files to ensure deterministic order (oldest first or alphabetic)
+    for md in sorted(base.glob("*/claude/*.md")):
+        if _has_insights_section(md):
+            continue
+
+        # Filter by workspace/context if requested
+        context = md.parent.parent.name
+        if workspace and context != workspace:
+            continue
+
+        match = UUID_RE.search(md.name)
+        session_id = match.group(0) if match else None
+        if not session_id:
+            continue
+
+        has_jsonl = bool(session_id and (project_dir / f"{session_id}.jsonl").exists())
+        
+        # Decide if we keep this one based on mode filter
+        if has_jsonl and mode in {"both", "full"}:
+            todo.append((md, session_id, True))
+        elif (not has_jsonl) and mode in {"both", "text"}:
+            todo.append((md, session_id, False))
+
+    if limit > 0:
+        todo = todo[:limit]
+
+    if not todo:
+        logger.info("No archives matching limit=%d, mode=%s, workspace=%s require backfill.", limit, mode, workspace)
+        return
+
+    logger.info("Starting backfill for %d archives (dry_run=%s, mode=%s)...", len(todo), dry_run, mode)
+    if dry_run:
+        for md, _, hj in todo[:20]:
+            m = "full" if hj else "text"
+            logger.info("  [%s] %s", m, md.relative_to(vault_root))
+        if len(todo) > 20:
+            logger.info("  ... and %d more", len(todo) - 20)
+        return
+
+    sem = asyncio.Semaphore(concurrency)
+
+    async def worker(archive_path: Path, session_id: str, has_jsonl: bool):
+        async with sem:
+            try:
+                insights_model = resolve_insights_model(config)
+                if has_jsonl:
+                    filtered = filter_session_jsonl(config.workspace_root, session_id)
+                    if not filtered:
+                        logger.warning("Session JSONL empty or filtered to nothing for %s", archive_path)
+                        return
+                    await extract_and_append(
+                        archive_path=archive_path,
+                        filtered_jsonl=filtered,
+                        config=config,
+                        model=insights_model,
+                        session_id=session_id,
+                        workspace_root=config.workspace_root,
+                        vault_root=config.vault_root,
+                        trajectories_enabled=getattr(config, "trajectories_enabled", True),
+                    )
+                    logger.info("Backfilled [full] insights for %s", archive_path.name)
+                else:
+                    body = archive_path.read_text(encoding="utf-8")
+                    user_prompt = (
+                        "Below is a rendered Markdown chat transcript. Tool calls, errors, "
+                        "and thinking blocks are not preserved - only user/assistant text. "
+                        "Extract durable signal per the system prompt's section schema.\n\n"
+                        f"{body}"
+                    )
+                    from ciao.providers.routing import resolve_with_fallback
+                    effective_model, env, note = resolve_with_fallback(
+                        insights_model, config, default_model=config.insights_model
+                    )
+
+                    async def run_text_extract():
+                        from ciao.providers.oneshot import run_oneshot
+                        return await run_oneshot(
+                            user_prompt,
+                            system_prompt=_TEXT_MODE_SYSTEM_PROMPT,
+                            model=effective_model,
+                            env=env,
+                            timeout_s=120.0,
+                            cwd=config.workspace_root,
+                        )
+
+                    output = ""
+                    try:
+                        output = await run_text_extract()
+                    except Exception as exc:
+                        logger.info("Text fallback insights call failed (%s); retrying in %ds", exc, _RETRY_DELAY_S)
+                        await asyncio.sleep(_RETRY_DELAY_S)
+                        try:
+                            output = await run_text_extract()
+                        except Exception:
+                            logger.exception("Text fallback insights call failed twice; skipping %s", archive_path)
+
+                    if output:
+                        _append_section(archive_path, output)
+                        logger.info("Backfilled [text] insights for %s", archive_path.name)
+            except Exception:
+                logger.exception("Failed backfilling insights for %s", archive_path)
+
+    tasks = [worker(md, sid, hj) for md, sid, hj in todo]
+    await asyncio.gather(*tasks, return_exceptions=True)
+    logger.info("Backfill task completed.")

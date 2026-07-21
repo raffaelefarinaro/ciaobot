@@ -362,10 +362,10 @@ class ProviderSubchatManager:
         )
 
         instruction = (
-            "You are the participant in a provider consultation. "
+            "You are the participant in an agent handoff. "
             "You are talking to the owner agent, not directly to the user. "
             "Ask the owner for missing information when needed. "
-            "Do not start another provider consultation."
+            "Do not start another handoff."
         )
         full_prompt = f"{instruction}\n\n{prompt}"
 

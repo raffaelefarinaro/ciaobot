@@ -40,7 +40,7 @@ class AppSettings:
     # Voice preset per engine (OpenAI voice name / Kokoro voice id).
     tts_cloud_voice: str = ""
     tts_local_voice: str = ""
-    # Comma-separated list of models for the critique / adversarial-review skill.
+    # Comma-separated list of models for the adversarial_review MCP tool.
     critique_models: str = ""
     # Per-backend tier aliases used when a chat asks for haiku/sonnet/opus/fable
     # while the workspace routes through Ollama or OpenRouter.

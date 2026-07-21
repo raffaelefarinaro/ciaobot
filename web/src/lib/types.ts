@@ -150,6 +150,13 @@ export interface ChatMessage {
   // trace; only final_answer is eligible for the terminal response bubble.
   // Undefined keeps the legacy last-assistant-message inference.
   phase?: 'commentary' | 'final_answer'
+  // True when this assistant bubble was promoted from a live streaming
+  // thinking buffer via the PWA's "Show reply as text" affordance. Marks the
+  // bubble for any UI that wants to label promoted replies differently; it is
+  // not itself a dedup key. If the model's eventual result event repeats the
+  // same text a second bubble can appear — an accepted edge for this manual
+  // recovery path.
+  promoted_from_thinking?: boolean
 }
 
 // Subagent transcripts from /api/chats/{id}/subagents. One entry per subagent
@@ -270,6 +277,7 @@ export type EventsWsMessage =
   | { type: 'project_created'; project: ProjectInfo }
   | { type: 'project_updated'; project: ProjectInfo }
   | { type: 'project_deleted'; project_id: string }
+  | { type: 'projects_reordered'; workspace: string; order: string[] }
   | { type: 'open_chat'; chat_id: string }
   | { type: 'server_restarting'; message?: string }
   | { type: 'provider_subchat_created'; subchat_id: string; parent_chat_id: string; record: ProviderSubchatRecord }

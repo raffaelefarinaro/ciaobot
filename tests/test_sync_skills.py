@@ -214,7 +214,7 @@ def test_sync_workspace_skills_seeds_stock_commands_into_canonical_dir(tmp_path:
     assert interrogation.is_file()
     assert "memory_add" in remember.read_text(encoding="utf-8")
     assert "1–3 targeted questions" in interrogation.read_text(encoding="utf-8")
-    assert "adversarial-review skill" in critique.read_text(encoding="utf-8")
+    assert "adversarial_review` MCP tool" in critique.read_text(encoding="utf-8")
 
     link = workspace / ".claude" / "commands" / "remember.md"
     assert link.is_symlink()
@@ -245,22 +245,22 @@ def test_sync_installs_stock_skills_with_marker(tmp_path: Path) -> None:
 
     result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
-    installed = workspace / ".claude" / "skills" / "ciao-automations"
+    installed = workspace / ".claude" / "skills" / "ciao-capabilities"
     assert (installed / "SKILL.md").is_file()
     assert (installed / sync_skills.STOCK_SKILL_MARKER).is_file()
     assert not installed.is_symlink()
-    assert result.stock_installed >= 5  # the packaged generic skill set
+    assert result.stock_installed >= 3  # the packaged generic skill set
 
 
 def test_workspace_skill_shadows_stock_skill(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
-    _write(workspace / "skills" / "vault-read" / "SKILL.md", "# My override\n")
+    _write(workspace / "skills" / "web-research" / "SKILL.md", "# My override\n")
 
     sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
-    link = workspace / ".claude" / "skills" / "vault-read"
+    link = workspace / ".claude" / "skills" / "web-research"
     assert link.is_symlink()
-    assert link.resolve() == (workspace / "skills" / "vault-read").resolve()
+    assert link.resolve() == (workspace / "skills" / "web-research").resolve()
     # A later sync (override still present) keeps the symlink, no stock copy.
     sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
     assert link.is_symlink()
@@ -403,7 +403,7 @@ def test_sync_installs_stock_agents_with_marker(tmp_path: Path) -> None:
     memory = workspace / ".claude" / "agents" / "memory.md"
     assert memory.is_file()
     assert sync_skills._is_managed_stock_agent(memory)
-    assert "vault-read" in memory.read_text(encoding="utf-8")
+    assert "vault_search" in memory.read_text(encoding="utf-8")
     assert result.stock_agents_installed == 3
 
 
@@ -415,7 +415,7 @@ def test_sync_refreshes_managed_stock_agent(tmp_path: Path) -> None:
 
     sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
 
-    assert "vault-read" in memory.read_text(encoding="utf-8")
+    assert "vault_search" in memory.read_text(encoding="utf-8")
 
 
 def test_stale_stock_agent_copy_is_pruned(tmp_path: Path) -> None:

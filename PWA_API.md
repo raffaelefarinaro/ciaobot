@@ -27,6 +27,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/projects` | List projects |
 | POST | `/api/projects` | Create project |
 | PATCH, DELETE | `/api/projects/{project_id}` | Update or delete project |
+| POST | `/api/projects/reorder` | Reorder a workspace's projects (drag-to-reorder) |
 | POST | `/api/projects/{project_id}/complete` | Complete a vault-backed project |
 | GET | `/api/projects/completed` | List completed projects (vault `completed/` scan) |
 | POST | `/api/projects/completed/restore` | Restore a completed project to active |
@@ -78,6 +79,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/loop-run/{loop_id}` | Fire one loop iteration now (409 when the chat has a turn in flight) |
 | PATCH, DELETE | `/api/loops/{loop_id}` | Update, start/stop (`{"running": bool}`), or delete a loop |
 | GET | `/api/automation` | Background-job status (Settings → Automation): last run, duration, model, errors per process |
+| POST | `/api/automation/backfill-insights` | Trigger background backfill of Session Insights into old archived chats |
 | GET | `/api/debug/issues` | Runtime issue report (server error log tail + failed job runs) for the dev-mode "Fix issues in chat" flow; 404 unless `CIAO_DEV_MODE` is set |
 | GET | `/api/commands` | List slash commands |
 | GET | `/api/agent-assets` | List instruction sources, subagents, slash commands, and workspace health for Settings |
@@ -201,6 +203,13 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projec
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/projects/$PID" \
   -H 'content-type: application/json' \
   -d '{"context":"Track the kitchen rebuild"}'
+
+# Reorder — pass the full top-to-bottom sequence of project ids for one
+# workspace. Omitted ids keep their relative order after the listed ones;
+# `General` is always pinned first regardless of where it appears.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projects/reorder" \
+  -H 'content-type: application/json' \
+  -d '{"workspace":"personal","order":["proj-b","proj-a"]}'
 
 # Complete (vault-backed only) — moves the vault folder to projects/completed/ and deletes the PWA project.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/projects/$PID/complete"
@@ -517,7 +526,7 @@ Every file-touch tool call also triggers a debounced (1.5s) content snapshot via
 
 - Project and chat state: `.runtime/web_projects.json`. `.runtime/server.lock` prevents two backend processes from owning this registry, and `.runtime/web_projects.audit.jsonl` records append-only mutation IDs/revisions for repair without storing chat content. On-disk shape mirrors the `ProjectInfo` and `ChatInfo` dataclasses in `ciao/web/project_chats.py`; `to_dict()` on each defines the JSON fields. `ChatInfo.user_turn_timings` holds per-turn `{sent_at, completed_at, duration_ms}` keyed by user-turn index (as str); the matching `_turn_perf_started` map on `ProjectChatManager` is in-memory only.
 - `ChatInfo.pending_question` (string, in `to_dict()` so it rides every chat list / chat object): raw AskUserQuestion JSON (`{"questions": [...]}`) set when the model paused the chat on a question. When the headless CLI fires AskUserQuestion the server interrupts the live turn so the CLI cannot auto-answer it, persists this field, and clears it on the next user send. The PWA reads it on chat open to rebuild the interactive question picker after a reload. Empty string when no question is pending.
-- Schedule state: `.runtime/schedules.json`. Shape and field semantics in `ciao/schedules.py` (`ScheduleEntry`); the `ciao-automations` skill packs the create/edit recipes.
+- Schedule state: `.runtime/schedules.json`. Shape and field semantics in `ciao/schedules.py` (`ScheduleEntry`); the `schedule_create`/`schedule_update` MCP tools carry the field semantics in their own docstrings.
 - Loop state: `.runtime/loops.json` (`ciao/loops.py`, `LoopEntry`). Running/stopped is runtime-only state in the `LoopManager`: `autostart` decides what runs after boot, so prefer the API over direct file writes for loops.
 - Uploaded media: under the configured runtime/media directory
 

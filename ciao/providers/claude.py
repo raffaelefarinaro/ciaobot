@@ -34,6 +34,7 @@ from dataclasses import dataclass
 import logging
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
+from urllib.parse import urlsplit
 from typing import Any
 
 from claude_agent_sdk import (
@@ -98,6 +99,82 @@ _TURN_INTERRUPTED_MESSAGE = (
     "often a server restart). No output was lost from earlier steps; send "
     "\"continue\" to resume."
 )
+
+# The Claude CLI appends this banner as assistant text when the upstream API
+# connection drops mid-stream ("API Error: Connection closed mid-response. The
+# response above may be incomplete."). The SDK may then report the turn as a
+# normal (non-error) terminal result, so nothing downstream would treat it as a
+# failure. We detect the banner and re-flag the result as an error the
+# orchestration layer can auto-resume. Keep these markers in sync with
+# ``_is_retryable_connection_error`` in ``ciao/web/project_chats.py``.
+_CONNECTION_DROP_MARKERS = (
+    "connection closed mid-response",
+    "response above may be incomplete",
+)
+
+# Canonical result text used when the drop was seen only in streamed deltas and
+# the terminal result field itself is empty. Carries a marker so the
+# orchestration layer's connection-error classifier recognises it.
+_CONNECTION_DROP_MESSAGE = (
+    "API Error: Connection closed mid-response. The response above may be "
+    "incomplete."
+)
+
+
+def _is_connection_drop_text(text: str) -> bool:
+    low = (text or "").lower()
+    return any(marker in low for marker in _CONNECTION_DROP_MARKERS)
+
+
+# A name-resolution / connect failure surfaces from the Claude CLI as a generic
+# "API Error: Unable to connect to API (ENOTFOUND)" with no host, so an operator
+# reading a failed schedule can't tell which endpoint failed to resolve (the
+# Anthropic API, an OpenRouter/Ollama gateway, a custom ANTHROPIC_BASE_URL...).
+# We know the endpoint the turn was pointed at, so annotate the error with it.
+# See issue #162.
+_HOSTLESS_CONNECT_MARKERS = (
+    "unable to connect",
+    "enotfound",
+    "econnrefused",
+    "etimedout",
+    "getaddrinfo",
+    "name resolution",
+    "failed to fetch",
+)
+
+
+def _resolve_api_host(env: dict[str, str]) -> str:
+    """Hostname the spawned CLI will talk to for this turn.
+
+    Prefers the per-turn ``ANTHROPIC_BASE_URL`` override (Ollama / OpenRouter
+    routing) and falls back to the process env, then Anthropic's default.
+    """
+    base = (
+        env.get("ANTHROPIC_BASE_URL")
+        or os.environ.get("ANTHROPIC_BASE_URL")
+        or "https://api.anthropic.com"
+    )
+    try:
+        return urlsplit(base).hostname or ""
+    except ValueError:
+        return ""
+
+
+def _annotate_connection_host(text: str, host: str) -> str:
+    """Append ``host`` to a hostless connection-error result string.
+
+    No-op unless the text reads as a DNS/connect failure and doesn't already
+    name the host, so ordinary errors and already-annotated ones pass through
+    untouched.
+    """
+    if not host or not text:
+        return text
+    low = text.lower()
+    if not any(marker in low for marker in _HOSTLESS_CONNECT_MARKERS):
+        return text
+    if host.lower() in low:
+        return text
+    return f"{text} (host: {host})"
 
 # The claude-agent-sdk reads the CLI subprocess stdout into a bounded decode
 # buffer (default 1 MiB, ``_DEFAULT_MAX_BUFFER_SIZE``) and raises a fatal,
@@ -345,10 +422,18 @@ class ClaudeProvider(BaseSDKProvider):
         self._turn_input_tokens = 0
         self._turn_output_committed = 0
         self._cur_msg_output = 0
+        # Tail of the current turn's streamed assistant text, used to detect
+        # the CLI's mid-response connection-drop banner even when it arrives as
+        # streamed deltas rather than in the terminal result field. Bounded and
+        # reset per turn.
+        self._turn_text_tail = ""
         # Set by the stderr handler when the CLI refuses to resume because
         # the session is held by a background agent. The next connect
         # attempt re-resumes with ``--fork-session`` to branch a copy.
         self._fork_resume_next = False
+        # Hostname the CLI is pointed at for the in-flight turn, captured at
+        # connect time so a hostless connection error can name its endpoint.
+        self._api_host = ""
         # Runtime root: state_path.parent on CiaoConfig; fall back to
         # workspace_root/.runtime when config is absent (tests).
         runtime_root = Path(
@@ -389,6 +474,9 @@ class ClaudeProvider(BaseSDKProvider):
 
     async def _ensure_connected(self, request: AgentRequest) -> ClaudeSDKClient:
         requested_model = request.model
+        # Refresh every turn: a reused client can still change host if the
+        # chat's routing env changed, and errors annotate against this value.
+        self._api_host = _resolve_api_host(request.extra_env or {})
         if (
             self._client is not None
             and self._connected
@@ -522,7 +610,19 @@ class ClaudeProvider(BaseSDKProvider):
                     "headers": {"Authorization": f"Bearer {request.mcp_token}"},
                 }
             }
-            options.strict_mcp_config = bool(request.mcp_required)
+            # Deliberately NOT setting ``strict_mcp_config`` here. Strict mode
+            # restricts the CLI to *only* the servers in ``mcp_servers`` (just
+            # ciaobot) and ignores every other MCP source — which includes the
+            # account's claude.ai connector MCPs (``mcp__claude_ai_*``). Those
+            # are fetched from the claude.ai login, not declared in
+            # ``mcp_servers``, so strict mode silently suppressed all of them
+            # (see the ``claude_ai_mcps`` / ``disallowed_tools`` gating in
+            # ciao/config.py and the contract in docs/MCP.md). Connectors must
+            # stay loaded so the per-workspace denylist can gate them; the
+            # ciaobot server is still injected above, and a server that is
+            # unavailable at spawn time already degrades to the legacy surface
+            # in ProjectChatManager. ``request.mcp_required`` is still honored
+            # on the Codex path, which has a non-exclusive per-server flag.
         if system_cli:
             options.cli_path = system_cli
         if resume_session:
@@ -764,6 +864,7 @@ class ClaudeProvider(BaseSDKProvider):
         self._turn_input_tokens = 0
         self._turn_output_committed = 0
         self._cur_msg_output = 0
+        self._turn_text_tail = ""
 
         # Register handle *before* connect/query so /stop can interrupt a
         # hanging SDK call — otherwise the bot locks up with "No active run".
@@ -799,6 +900,25 @@ class ClaudeProvider(BaseSDKProvider):
 
                 if pending_result is not None:
                     await self._augment_with_context_pct(client, pending_result)
+                    # A mid-response connection drop is emitted by the CLI as
+                    # assistant text and may come back as a *non-error* terminal
+                    # result. Re-flag it as an error (and make sure the banner
+                    # text is on the result) so the orchestration layer can
+                    # auto-resume instead of silently ending the turn.
+                    if (
+                        _is_connection_drop_text(pending_result.result)
+                        or _is_connection_drop_text(self._turn_text_tail)
+                    ):
+                        if not pending_result.is_error:
+                            logger.warning(
+                                "Claude turn ended on a mid-response connection "
+                                "drop reported as success for session %s; "
+                                "re-flagging as a retryable error",
+                                self._session_id,
+                            )
+                        pending_result.is_error = True
+                        if not _is_connection_drop_text(pending_result.result):
+                            pending_result.result = _CONNECTION_DROP_MESSAGE
                     merged.put_nowait(pending_result)
                 else:
                     # receive_response() completed *normally* but never yielded
@@ -953,10 +1073,13 @@ class ClaudeProvider(BaseSDKProvider):
             usage = self._extract_usage(msg)
             quota = self._pending_quota or self._extract_quota(msg)
             self._pending_quota = {}
+            result_text = msg.result or ""
+            if msg.is_error:
+                result_text = _annotate_connection_host(result_text, self._api_host)
             return [
                 ResultEvent(
                     type="result",
-                    result=msg.result or "",
+                    result=result_text,
                     session_id=self._session_id,
                     is_error=msg.is_error,
                     effective_model=self._extract_effective_model(msg),
@@ -974,7 +1097,12 @@ class ClaudeProvider(BaseSDKProvider):
                 self._rate_limit_store.update(msg.rate_limit_info)
             except Exception:  # noqa: BLE001 — never fail a turn on telemetry
                 logger.debug("rate_limit persistence failed", exc_info=True)
-            if self._pending_quota.get("status") == "allowed":
+            # Quota is cached and persisted above (Settings shows all tiers),
+            # so suppress the chat-facing status for every "allowed" state —
+            # the plain allowance ping AND the escalating "allowed_warning"
+            # ticks. They are usage telemetry, not conversation. A non-allowed
+            # state (e.g. exceeded/rejected) still emits so the user is told.
+            if self._pending_quota.get("status", "").startswith("allowed"):
                 return []
             return [
                 SystemStatusEvent(
@@ -1003,6 +1131,10 @@ class ClaudeProvider(BaseSDKProvider):
             if delta_type == "text_delta":
                 text = delta.get("text", "")
                 if text:
+                    # Only the top-level turn's text can carry the CLI's
+                    # connection-drop banner; subagent text is unrelated.
+                    if parent_id is None:
+                        self._turn_text_tail = (self._turn_text_tail + text)[-4096:]
                     return [AssistantTextDelta(
                         type="assistant",
                         text=text,
@@ -1076,7 +1208,12 @@ class ClaudeProvider(BaseSDKProvider):
 
         if subtype == "status":
             status_str = data.get("status") or ""
-            if "Rate limit: allowed" in status_str and "allowed_warning" not in status_str:
+            # Drop "allowed" rate-limit status notes — both the plain
+            # allowance pings and the escalating "allowed_warning … NN% used"
+            # ticks. They are transient usage telemetry, not conversation, and
+            # rendering one chat line per 1% increment just clutters the turn.
+            # A hard "Rate limit exceeded" carries no "allowed" and still shows.
+            if "Rate limit: allowed" in status_str:
                 return []
             return [SystemStatusEvent(type="system", status=status_str)]
 

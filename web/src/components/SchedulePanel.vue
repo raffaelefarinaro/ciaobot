@@ -114,7 +114,45 @@
     <div v-if="showNew" class="scroll-body">
       <div class="type-toggle">
         <button class="btn-chip" :class="{ 'type-active': newType === 'schedule' }" @click="newType = 'schedule'">Schedule</button>
+        <details class="field-info">
+          <summary aria-label="What's possible with schedules" title="What's possible with schedules">i</summary>
+          <div class="field-info-panel">
+            <p>
+              Fires at a time of day — daily, weekly, monthly, or once — usually opening a fresh
+              chat per run in a chosen workspace, with its own model and provider (or the
+              workspace default).
+            </p>
+            <p>
+              Missed runs (app was off when one was due) are caught up on next launch. Can be
+              run on demand, enabled or disabled without deleting.
+            </p>
+            <p>
+              Set <strong>archive behavior</strong> to automatic and a classifier reviews each
+              clean run — routine results with nothing to judge (no proposals, decisions, or
+              warnings) get archived out of the way automatically.
+            </p>
+          </div>
+        </details>
         <button class="btn-chip" :class="{ 'type-active': newType === 'loop' }" @click="newType = 'loop'">Loop</button>
+        <details class="field-info">
+          <summary aria-label="What's possible with loops" title="What's possible with loops">i</summary>
+          <div class="field-info-panel">
+            <p>
+              Lives inside one existing chat and re-sends the same prompt every N minutes (e.g.
+              "check my PRs for changes every 10 minutes"), keeping full conversation context
+              between iterations.
+            </p>
+            <p>
+              Always runs with that chat's own model — change the chat's model to change the
+              loop's. <strong>Start with the server</strong> loops resume automatically on boot;
+              others stay stopped until started manually.
+            </p>
+            <p>
+              If an iteration is still running when the next is due, the loop skips it and
+              retries shortly after. Can be started, stopped, or run on demand at any time.
+            </p>
+          </div>
+        </details>
       </div>
       <p class="hint type-hint">
         {{ newType === 'schedule'
@@ -366,29 +404,26 @@
 
     <!-- Overview homepage: shown when nothing is selected but automations exist -->
     <div v-else-if="workspaceSchedules.length || workspaceLoops.length" class="scroll-body overview-body">
-      <div class="ov-card">
-        <div class="ov-head">
-          <span class="ov-dot"></span>
-          Schedules vs loops
-        </div>
-        <p class="ov-explain">
-          <strong>Schedules</strong> fire at a time of day — daily, weekly, monthly, or once —
-          and usually open a fresh chat per run. Use them for briefings, reports, and maintenance.
-        </p>
-        <p class="ov-explain">
-          <strong>Loops</strong> live inside one existing chat and re-send the same prompt every
-          N minutes (e.g. "check my PRs for changes every 10 minutes"), so the conversation keeps
-          its context between iterations. A loop always runs with the chat's own model — change the
-          chat's model to change the loop's. Loops set to <strong>start with the server</strong>
-          resume on boot; the others stay stopped until started manually. If an iteration is still
-          running when the next one is due, the loop skips it and retries shortly after.
-        </p>
-      </div>
-
       <div v-if="workspaceLoops.length" class="ov-card">
         <div class="ov-head">
           <span class="ov-dot"></span>
           Loops
+          <details class="field-info">
+            <summary aria-label="About loops" title="About loops">i</summary>
+            <div class="field-info-panel">
+              <p>
+                A loop lives inside one existing chat and re-sends the same prompt every N minutes
+                (e.g. "check my PRs for changes every 10 minutes"), so the conversation keeps its
+                context between iterations.
+              </p>
+              <p>
+                It always runs with that chat's own model — change the chat's model to change the
+                loop's. Loops set to <strong>start with the server</strong> resume on boot; others
+                stay stopped until started manually. If an iteration is still running when the next
+                one is due, the loop skips it and retries shortly after.
+              </p>
+            </div>
+          </details>
           <span class="ov-hint">{{ runningLoops.length }} running</span>
         </div>
         <router-link
@@ -460,6 +495,23 @@
         <div class="ov-head">
           <span class="ov-dot"></span>
           Next up
+          <details class="field-info">
+            <summary aria-label="About schedules" title="About schedules">i</summary>
+            <div class="field-info-panel">
+              <p>
+                A schedule fires at a time of day — daily, weekly, monthly, or once — and usually
+                opens a fresh chat per run in a chosen workspace. Use it for briefings, reports,
+                and maintenance.
+              </p>
+              <p>
+                Missed runs (app was off when one was due) are caught up on next launch. Set
+                <strong>archive behavior</strong> to automatic and, after each clean run, a
+                classifier checks the result — if there's nothing to judge (no proposals,
+                decisions, or warnings) the chat is archived out of the way; anything worth your
+                attention stays visible.
+              </p>
+            </div>
+          </details>
           <span class="ov-hint">soonest first</span>
         </div>
         <router-link
@@ -532,21 +584,33 @@ const editData = ref({
   archive_policy: 'manual' as ScheduleArchivePolicy,
 })
 
-// Loops change state server-side (running / last_status / next_run), so
-// refresh them periodically while the panel is open.
+// Loops and schedules change state server-side (running / last_status /
+// next_run), so refresh them periodically while the panel is open. Schedules'
+// next_run is always computed forward from "now" on the server, so a tab left
+// open across its fire time (or asleep overnight) otherwise keeps showing a
+// stale "next run" that's drifted into the past.
 let loopPollTimer: number | undefined
 let copiedPromptTimer: number | undefined
 
+function refreshSchedulesAndLoops() {
+  store.fetchSchedules().catch(() => {})
+  store.fetchLoops().catch(() => {})
+}
+
+function onVisibilityChange() {
+  if (document.visibilityState === 'visible') refreshSchedulesAndLoops()
+}
+
 onMounted(() => {
   if (!store.models) store.fetchModels()
-  loopPollTimer = window.setInterval(() => {
-    store.fetchLoops().catch(() => {})
-  }, 30_000)
+  loopPollTimer = window.setInterval(refreshSchedulesAndLoops, 30_000)
+  document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
 onUnmounted(() => {
   if (loopPollTimer !== undefined) window.clearInterval(loopPollTimer)
   if (copiedPromptTimer !== undefined) window.clearTimeout(copiedPromptTimer)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
 })
 
 const scheduleId = computed(() => (route.params.scheduleId as string) || '')
@@ -731,7 +795,24 @@ async function saveLoopEdit() {
 
 async function onToggleLoopRunning() {
   if (!loop.value) return
-  await store.updateLoop(loop.value.loop_id, { running: !loop.value.running })
+  const wasChatId = loop.value.web_chat_id
+  const nextRunning = !loop.value.running
+  try {
+    const updated = await store.updateLoop(loop.value.loop_id, { running: nextRunning })
+    if (nextRunning && updated.web_chat_id !== wasChatId) {
+      projectStore.pushToast({
+        chat_id: updated.web_chat_id,
+        title: 'Loop resumed in a new chat',
+        body: 'Its chat was archived, so this loop now continues in a fresh one.',
+      })
+    }
+  } catch (e) {
+    projectStore.pushToast({
+      chat_id: wasChatId,
+      title: 'Loop not started',
+      body: e instanceof Error ? e.message : 'Could not resume this loop.',
+    })
+  }
 }
 
 async function onRunLoopNow() {
@@ -1288,7 +1369,7 @@ function closeSchedule() {
 }
 
 /* ── New-automation type toggle ────────────────────────────────── */
-.type-toggle { display: flex; gap: 8px; margin-bottom: 8px; }
+.type-toggle { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .type-active {
   border-color: var(--accent);
   color: var(--accent);
@@ -1306,14 +1387,6 @@ function closeSchedule() {
 }
 .checkbox-line input { flex-shrink: 0; }
 
-.ov-explain {
-  margin: 0 0 8px;
-  font-size: var(--text-sm);
-  color: var(--fg2);
-  line-height: 1.55;
-}
-.ov-explain:last-child { margin-bottom: 0; }
-.ov-explain strong { color: var(--fg); }
 .ov-when--muted { color: var(--fg3); }
 
 /* ── Overview (next up + missed) ───────────────────────────────── */
@@ -1331,6 +1404,57 @@ function closeSchedule() {
 .ov-card--alert {
   border-color: var(--warning);
   box-shadow: inset 3px 0 0 var(--warning);
+}
+.field-info {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+.field-info summary {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg);
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  cursor: pointer;
+  line-height: 1;
+  user-select: none;
+}
+.field-info summary::-webkit-details-marker {
+  display: none;
+}
+.field-info[open] summary,
+.field-info summary:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+}
+.field-info-panel {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 6px);
+  left: 0;
+  right: auto;
+  width: min(380px, calc(100vw - 48px));
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  box-shadow: 0 12px 30px color-mix(in srgb, #000 24%, transparent);
+  color: var(--fg2);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+}
+.field-info-panel p {
+  margin: 0;
+}
+.field-info-panel p + p {
+  margin-top: var(--space-2);
 }
 .ov-head {
   display: flex;

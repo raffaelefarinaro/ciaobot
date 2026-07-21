@@ -1,6 +1,6 @@
 <template>
   <div class="chat-panel" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handleFileLinkClick">
-    <div v-if="dragOver" class="drop-overlay">Drop images here</div>
+    <div v-if="dragOver" class="drop-overlay">Drop images to attach, or files/folders to insert their path</div>
 
     <!-- Header -->
     <PaneHeader :active-bg-agents="store.activeBackgroundAgents" @open-sidebar="$emit('open-sidebar')">
@@ -155,7 +155,16 @@
             <span class="trace-chevron">{{ openTraces[i] ? '\u25BE' : '\u25B8' }}</span>
             <span class="trace-icon">&#129504;</span>
             <span class="trace-label">Activity</span>
-            <span class="trace-meta">{{ traceSummaryMeta(item.steps, item.subs) }}</span>
+            <span class="trace-meta">
+              <span
+                v-for="part in traceSummaryMetaParts(item.steps, item.subs)"
+                :key="part.key"
+                :class="['trace-meta-part', `part-${part.key}`, { 'part-important': part.isImportant }]"
+              >
+                <span class="part-text-long">{{ part.text }}</span>
+                <span class="part-text-short">{{ part.shortText || part.text }}</span>
+              </span>
+            </span>
             <span class="sr-only">, {{ openTraces[i] ? 'expanded' : 'collapsed' }}</span>
           </button>
           <div v-if="openTraces[i]" class="trace-body">
@@ -362,7 +371,7 @@
         </div>
       </template>
 
-      <div v-if="chat.retry?.status === 'pending'" class="retry-card">
+      <div v-if="chat.retry?.status === 'pending' && !store.isStreaming" class="retry-card">
         <div class="retry-card-main">
           <span class="retry-card-icon">⏱</span>
           <div>
@@ -394,8 +403,17 @@
           <span class="trace-chevron">{{ liveTraceOpen ? '\u25BE' : '\u25B8' }}</span>
           <span class="activity-spinner"></span>
           <span class="trace-icon">&#129504;</span>
-          <span class="trace-label">{{ (store.currentTimeline.length || store.currentStreamingText) ? 'Working...' : 'Thinking...' }}</span>
-          <span v-if="liveTraceMeta" class="trace-meta">{{ liveTraceMeta }}</span>
+          <span class="trace-label">{{ liveTraceLabel }}</span>
+          <span v-if="liveTraceMetaParts.length" class="trace-meta">
+            <span
+              v-for="part in liveTraceMetaParts"
+              :key="part.key"
+              :class="['trace-meta-part', `part-${part.key}`, { 'part-important': part.isImportant }]"
+            >
+              <span class="part-text-long">{{ part.text }}</span>
+              <span class="part-text-short">{{ part.shortText || part.text }}</span>
+            </span>
+          </span>
           <span class="sr-only">, {{ liveTraceOpen ? 'expanded' : 'collapsed' }}</span>
         </button>
         <div
@@ -434,6 +452,11 @@
               class="trace-text trace-thinking"
               v-html="renderMarkdown(entry.content)"
             ></div>
+            <div
+              v-else-if="entry.kind === 'status'"
+              class="trace-text trace-status"
+              v-html="renderMarkdown(entry.content)"
+            ></div>
             <div v-else class="trace-text" v-html="renderMarkdown(entry.content)"></div>
           </template>
           <div
@@ -442,6 +465,22 @@
             v-html="renderMarkdown(store.currentStreamingThinking)"
           ></div>
           <div v-if="store.currentStreamingText" class="trace-text trace-streaming" v-html="renderMarkdown(store.currentStreamingText)"></div>
+          <!-- Ollama-routed models (glm-5.2, minimax-m3, kimi-k2.7) sometimes
+               return their final answer wrapped in a thinking block instead
+               of a text block. The text stream stays empty, so the user
+               can't tell their reply is right there in the reasoning trace.
+               Offer a one-click way to surface it as a real assistant bubble
+               when the heuristic (long thinking, no text, still streaming)
+               fires. -->
+          <button
+            v-if="showPromoteThinkingAction"
+            type="button"
+            class="trace-action"
+            @click="promoteStreamingThinkingToAnswer"
+            title="This model returned the reply inside its reasoning trace. Promote it to a normal assistant bubble."
+          >
+            Show reply as text
+          </button>
           <!-- Subagents for the in-flight turn nest in the live trace -->
           <SubagentPanel v-if="liveSubagents.length" :subagents="liveSubagents" />
         </div>
@@ -654,11 +693,11 @@
         class="permission-card"
       >
         <div class="permission-header">
-          <span class="permission-icon">&#128679;</span>
+          <svg class="permission-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3.5v5c0 4.5-3 7.75-7 9-4-1.25-7-4.5-7-9v-5L12 3z"/><path d="M12 8v5"/><path d="M12 16h.01"/></svg>
           <span class="permission-tool">{{ p.tool_name }}</span>
-          <span class="permission-message">{{ p.message }}</span>
+          <span v-if="permissionReason(p)" class="permission-message">{{ permissionReason(p) }}</span>
         </div>
-        <pre v-if="p.tool_input" class="permission-input">{{ p.tool_input }}</pre>
+        <pre v-if="p.tool_input" class="permission-input">{{ formatToolInput(p.tool_input) }}</pre>
         <div class="permission-actions">
           <button
             class="btn-deny"
@@ -842,7 +881,7 @@ import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
 import { formatTime, formatDuration } from '../lib/time'
-import { collectTraceOutputs, formatTokenUsage, traceSummaryMeta, type TraceOutput } from '../lib/chatActivity'
+import { buildTurnParts, collectTraceOutputs, formatTokenUsage, isAnswerBubble, traceSummaryMeta, traceSummaryMetaParts, type TraceOutput } from '../lib/chatActivity'
 import { buildForkSnapshot } from '../lib/chatFork'
 import { formatCommentLocation } from '../lib/commentContext'
 
@@ -956,21 +995,26 @@ const chat = computed(() => store.activeChat!)
 // Inline editing state for queued messages. Keyed by queue entry id.
 const editingQueueId = ref<string | null>(null)
 const editingQueueText = ref('')
+// The edit UI only edits text, so hold the entry's images and re-send them on
+// save — otherwise the backend clears attachments it resolves from an empty list.
+const editingQueueImages = ref<string[] | undefined>(undefined)
 
-function startEditQueue(entry: { id: string; text: string }) {
+function startEditQueue(entry: { id: string; text: string; images?: string[] }) {
   editingQueueId.value = entry.id
   editingQueueText.value = entry.text
+  editingQueueImages.value = entry.images ? [...entry.images] : undefined
 }
 
 function cancelEditQueue() {
   editingQueueId.value = null
   editingQueueText.value = ''
+  editingQueueImages.value = undefined
 }
 
 function saveEditQueue(chatId: string, entryId: string) {
   const text = editingQueueText.value.trim()
   if (!text) return
-  store.editQueued(chatId, entryId, text)
+  store.editQueued(chatId, entryId, text, editingQueueImages.value)
   cancelEditQueue()
 }
 
@@ -1174,6 +1218,15 @@ function toggleLiveTrace() {
   liveTraceOpen.value = !liveTraceOpen.value
 }
 
+// Manual recovery for Ollama-routed models (glm-5.2, minimax-m3, kimi-k2.7)
+// that wrap the final reply in a thinking block. Delegates to the store
+// action so the message list, timeline, and persistence all stay in sync
+// with the rest of the chat-state mutations.
+function promoteStreamingThinkingToAnswer() {
+  if (!chat.value?.chat_id) return
+  store.promoteStreamingThinkingToAnswer(chat.value.chat_id)
+}
+
 function checkScroll() {
   const el = messagesEl.value
   if (!el) return
@@ -1202,6 +1255,26 @@ const pendingApprovals = computed(() => {
   if (!id) return []
   return store.pendingPermissions[id] || []
 })
+
+// The backend's `message` field is almost always the templated
+// "Approve use of {tool_name}?" (see permission_gate.py / codex.py), which
+// just repeats the tool-name badge shown right next to it. Only surface it
+// when it actually carries something the badge doesn't (e.g. Codex's
+// model-supplied `reason` string).
+function permissionReason(p: { tool_name: string; message: string }) {
+  return p.message && p.message !== `Approve use of ${p.tool_name}?` ? p.message : ''
+}
+
+// tool_input is opaque server text — usually compact JSON, sometimes a bare
+// shell command or reason sentence. Pretty-print only when it parses;
+// otherwise fall back to showing it verbatim rather than guessing at structure.
+function formatToolInput(raw: string) {
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2)
+  } catch {
+    return raw
+  }
+}
 
 // AskUserQuestion picker. The headless CLI can't render the SDK's built-in
 // picker, so the model's tool call lands with an empty result; the PWA owns
@@ -2060,7 +2133,7 @@ function handleFileLinkClick(e: MouseEvent): void {
   }
 }
 
-const liveTraceMeta = computed(() => {
+const liveTraceMetaParts = computed(() => {
   let toolCount = 0
   let textCount = 0
   let thinkingCount = 0
@@ -2078,26 +2151,102 @@ const liveTraceMeta = computed(() => {
   }
   if (store.currentStreamingThinking) thinkingCount += 1
   if (store.currentStreamingText) textCount += 1
-  const parts: string[] = []
-  if (thinkingCount) parts.push(`${thinkingCount} thought${thinkingCount === 1 ? '' : 's'}`)
-  if (textCount) parts.push(`${textCount} note${textCount === 1 ? '' : 's'}`)
-  if (toolCount) parts.push(`${toolCount} tool call${toolCount === 1 ? '' : 's'}`)
-  if (fileCount) parts.push(`${fileCount} file${fileCount === 1 ? '' : 's'}`)
+  const parts: { key: string; text: string; shortText?: string; isImportant?: boolean }[] = []
+  if (thinkingCount) {
+    parts.push({
+      key: 'thoughts',
+      text: `${thinkingCount} thought${thinkingCount === 1 ? '' : 's'}`,
+      shortText: `${thinkingCount} th`
+    })
+  }
+  if (textCount) {
+    parts.push({
+      key: 'notes',
+      text: `${textCount} note${textCount === 1 ? '' : 's'}`,
+      shortText: `${textCount} n`
+    })
+  }
+  if (toolCount) {
+    parts.push({
+      key: 'tools',
+      text: `${toolCount} tool call${toolCount === 1 ? '' : 's'}`,
+      shortText: `${toolCount} tool${toolCount === 1 ? '' : 's'}`,
+      isImportant: true
+    })
+  }
+  if (fileCount) {
+    parts.push({
+      key: 'files',
+      text: `${fileCount} file${fileCount === 1 ? '' : 's'}`,
+      shortText: `${fileCount} f`
+    })
+  }
   // Live elapsed time: reads nowTs (ticks every second) against the turn's
   // start so the label counts up while the model works.
   const startedAt = store.currentStreamStartedAt
   if (startedAt) {
     const elapsed = nowTs.value - startedAt
-    if (elapsed >= 0) parts.push(formatDuration(elapsed))
+    if (elapsed >= 0) {
+      parts.push({
+        key: 'duration',
+        text: formatDuration(elapsed),
+        isImportant: true
+      })
+    }
   }
   // Live token count: cumulative tokens reported so far this turn.
   const usage = store.currentLiveUsage
   if (usage) {
-    if (usage.input > 0) parts.push(`${formatTokens(usage.input)} in`)
-    if (usage.output > 0) parts.push(`${formatTokens(usage.output)} out`)
+    if (usage.input > 0) {
+      parts.push({
+        key: 'tokens-in',
+        text: `${formatTokens(usage.input)} in`,
+        shortText: `${formatTokens(usage.input)} in`
+      })
+    }
+    if (usage.output > 0) {
+      parts.push({
+        key: 'tokens-out',
+        text: `${formatTokens(usage.output)} out`,
+        shortText: `${formatTokens(usage.output)} out`
+      })
+    }
   }
-  return parts.join(' · ')
+  return parts
 })
+
+// Heuristic for the "model returned its reply inside the thinking block" case.
+// Ollama-routed models (glm-5.2, minimax-m3, kimi-k2.7) sometimes wrap the
+// final answer in a thinking content block, so the visible text stream stays
+// empty and the user sees the response painted as reasoning. When the
+// thinking buffer is long and no text has streamed in for this turn, that's
+// almost certainly the reply, not background reasoning. The length gate keeps
+// short model introspection from flashing the affordance on well-behaved
+// models.
+const LIKELY_ANSWER_THINKING_CHARS = 200
+const thinkingIsLikelyAnswer = computed(() => {
+  const thinking = store.currentStreamingThinking
+  if (!thinking || thinking.length < LIKELY_ANSWER_THINKING_CHARS) return false
+  if (store.currentStreamingText) return false
+  return true
+})
+
+// Live trace label: distinguish "Working..." (real tool work in progress)
+// from "Reply pending (delivered as thinking)" (the model put its answer
+// in the reasoning stream and we should show the affordance).
+const liveTraceLabel = computed(() => {
+  if (thinkingIsLikelyAnswer.value) return 'Reply pending (in thinking)'
+  if (store.currentTimeline.length || store.currentStreamingText) return 'Working...'
+  return 'Thinking...'
+})
+
+// Only show the "Show reply as text" action once the thinking is actually
+// long enough to plausibly be the answer AND the turn is still live. After
+// the result event fires the thinking gets committed to the timeline as a
+// _thinking step, where the existing expand/collapse UI already covers it.
+const showPromoteThinkingAction = computed(() =>
+  store.isStreaming && thinkingIsLikelyAnswer.value,
+)
 
 // Compact token label: 1234 -> "1.2k", 1_200_000 -> "1.2M". Keeps the live
 // trace meta short while the count grows.
@@ -2197,21 +2346,16 @@ const renderData = computed<{
     const turnOutputs = collectTraceOutputs(buffer)
     // Find index of the LAST assistant text message (the final answer).
     // _activity (tool calls) and _thinking (model reasoning) are part of
-    // the trace, never the final user-facing reply.
+    // the trace, never the final user-facing reply. `isAnswerBubble` is the
+    // same predicate `buildTurnParts` uses, so the two never disagree on
+    // which steps are bubbles vs trace material.
     let finalIdx = -1
     for (let k = buffer.length - 1; k >= 0; k--) {
-      const m = buffer[k]
-      if (
-        m.role === 'assistant'
-        && m.tool_name !== '_activity'
-        && m.tool_name !== '_thinking'
-        && m.phase !== 'commentary'
-      ) {
+      if (isAnswerBubble(buffer[k])) {
         finalIdx = k
         break
       }
     }
-    const intermediate = finalIdx >= 0 ? buffer.slice(0, finalIdx) : buffer.slice()
     const finalMsg = finalIdx >= 0 ? buffer[finalIdx] : null
     const trailing = finalIdx >= 0 ? buffer.slice(finalIdx + 1) : []
 
@@ -2249,26 +2393,41 @@ const renderData = computed<{
     }
 
     const traceSubs = takeForegroundSubs(currentTurnIndex)
-    // Consultations attach to the final answer when there is one, so they read
+    // Handoffs attach to the final answer when there is one, so they read
     // as an attribute of the reply. Only when the turn produced no answer bubble
     // (still in progress / interrupted) do they fall back to the activity trace.
     const traceSubchats = finalMsg ? [] : turnSubchats
-    if (intermediate.length) {
-      items.push({
-        kind: 'trace',
-        steps: intermediate,
-        ...(traceSubs.length ? { subs: traceSubs } : {}),
-        ...(!finalMsg && turnOutputs.length ? { outputs: turnOutputs } : {}),
-        ...(traceSubchats.length ? { subchats: traceSubchats } : {}),
-      })
-    } else if (traceSubs.length || traceSubchats.length) {
-      items.push({
-        kind: 'trace',
-        steps: [],
-        ...(traceSubs.length ? { subs: traceSubs } : {}),
-        ...(traceSubchats.length ? { subchats: traceSubchats } : {}),
-      })
+    // Substantive assistant text that appears BEFORE the final answer used to
+    // be swallowed into the Activity trace (rendered italic, indistinguishable
+    // from reasoning). Split the turn so each such block renders as its own
+    // bubble, interleaved with the tool/thinking groups that ran between them,
+    // in the order the model produced them. The final answer is appended below
+    // with the turn's outputs/subchats attached.
+    const turnItems: RenderItem[] = buildTurnParts(buffer, finalIdx).map((part) =>
+      part.kind === 'assistant'
+        ? { kind: 'assistant', msg: part.msg }
+        : { kind: 'trace', steps: part.steps },
+    )
+    // Foreground subagents / (when there's no answer bubble) file outputs and
+    // handoffs belong to the one Activity trace that sits right before the
+    // reply. Reuse the trailing trace if there is one; otherwise mint an empty
+    // one so those attachments still have a home adjacent to the answer.
+    const needsHost =
+      traceSubs.length > 0
+      || traceSubchats.length > 0
+      || (!finalMsg && turnOutputs.length > 0)
+    const last = turnItems[turnItems.length - 1]
+    let host = last && last.kind === 'trace' ? last : null
+    if (!host && needsHost) {
+      host = { kind: 'trace', steps: [] }
+      turnItems.push(host)
     }
+    if (host) {
+      if (traceSubs.length) host.subs = traceSubs
+      if (!finalMsg && turnOutputs.length) host.outputs = turnOutputs
+      if (traceSubchats.length) host.subchats = traceSubchats
+    }
+    for (const it of turnItems) items.push(it)
     if (finalMsg) {
       items.push({
         kind: 'assistant',
@@ -2276,9 +2435,6 @@ const renderData = computed<{
         ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
         ...(turnSubchats.length ? { subchats: turnSubchats } : {}),
       })
-    }
-    if (trailing.length) {
-      items.push({ kind: 'trace', steps: trailing })
     }
     buffer = []
   }
@@ -2311,10 +2467,21 @@ const renderData = computed<{
     return { items, liveSubs: all, liveStandaloneSubs: [] }
   }
   // Anything still unplaced (turn not in history yet, or no turn info):
-  // leftovers fold into a trace block.
+  // attach to the last turn's trace block so a background subagent reads as
+  // part of that turn's activity — the same single "Activity" group the live
+  // "Working…" view shows — instead of a dangling standalone block. Fall back
+  // to a fresh trace block only when there's no prior trace to attach to.
   const leftovers = [...subsByTurn.values()].flat().concat(unanchoredSubs)
   if (leftovers.length) {
-    items.push({ kind: 'trace', steps: [], subs: leftovers })
+    let lastTrace: RenderItem | undefined
+    for (let i = items.length - 1; i >= 0; i--) {
+      if (items[i].kind === 'trace') { lastTrace = items[i]; break }
+    }
+    if (lastTrace && lastTrace.kind === 'trace') {
+      lastTrace.subs = [...(lastTrace.subs || []), ...leftovers]
+    } else {
+      items.push({ kind: 'trace', steps: [], subs: leftovers })
+    }
   }
   return { items, liveSubs: [], liveStandaloneSubs: [] }
 })
@@ -2774,14 +2941,33 @@ async function handleVoice(blob: Blob) {
   }
 }
 async function handleFileSelect(e: Event) { const input = e.target as HTMLInputElement; if (!input.files?.length) return; await store.uploadImages(chat.value.chat_id, Array.from(input.files)); input.value = '' }
-async function handleDrop(e: DragEvent) { dragOver.value = false; const files = Array.from(e.dataTransfer?.files || []).filter(f => f.type.startsWith('image/')); if (files.length) await store.uploadImages(chat.value.chat_id, files) }
+async function handleDrop(e: DragEvent) {
+  dragOver.value = false
+  const dt = e.dataTransfer
+  if (!dt) return
+  const imageFiles: File[] = []
+  const paths: string[] = []
+  for (const item of Array.from(dt.items || [])) {
+    if (item.kind !== 'file') continue
+    const entry = (item as any).webkitGetAsEntry?.()
+    if (entry && entry.isDirectory) {
+      paths.push(entry.name)
+      continue
+    }
+    const file = item.getAsFile()
+    if (!file) continue
+    if (file.type.startsWith('image/')) imageFiles.push(file)
+    else paths.push((file as any).webkitRelativePath || file.name)
+  }
+  if (paths.length) insertTextAtCursor(paths.join(' '))
+  if (imageFiles.length) await store.uploadImages(chat.value.chat_id, imageFiles)
+}
 async function handlePaste(e: ClipboardEvent) { const items = Array.from(e.clipboardData?.items || []).filter(i => i.type.startsWith('image/')); if (items.length) { e.preventDefault(); await store.uploadImages(chat.value.chat_id, items.map(i => i.getAsFile()).filter(Boolean) as File[]) } }
 function removePendingImage(index: number) { store.removePendingImage(index) }
 
-function insertImageRef(n: number) {
+function insertTextAtCursor(token: string) {
   const el = inputEl.value
   if (!el) return
-  const token = `[Image ${n}]`
   const start = el.selectionStart ?? 0
   const end = el.selectionEnd ?? 0
   const before = inputText.value.slice(0, start)
@@ -2797,6 +2983,10 @@ function insertImageRef(n: number) {
     el.selectionStart = el.selectionEnd = pos
     el.focus()
   })
+}
+
+function insertImageRef(n: number) {
+  insertTextAtCursor(`[Image ${n}]`)
 }
 </script>
 
@@ -3366,9 +3556,9 @@ function insertImageRef(n: number) {
   outline-offset: 2px;
 }
 
-.trace-chevron { font-size: calc(10px * var(--font-scale)); color: var(--fg2); }
-.trace-icon { font-size: calc(14px * var(--font-scale)); }
-.trace-label { color: var(--fg2); }
+.trace-chevron { font-size: calc(10px * var(--font-scale)); color: var(--fg2); flex-shrink: 0; }
+.trace-icon { font-size: calc(14px * var(--font-scale)); flex-shrink: 0; }
+.trace-label { color: var(--fg2); white-space: nowrap; flex-shrink: 0; }
 .trace-meta {
   color: var(--fg2);
   opacity: 0.7;
@@ -3379,6 +3569,41 @@ function insertImageRef(n: number) {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: var(--text-xs);
+  display: flex;
+  align-items: center;
+}
+.trace-meta-part {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+.trace-meta-part::after {
+  content: "·";
+  margin: 0 6px;
+  opacity: 0.7;
+}
+.trace-meta-part:last-child::after {
+  content: none;
+}
+.trace-meta-part .part-text-short {
+  display: none;
+}
+@media (max-width: 640px) {
+  .trace-meta-part.part-thoughts,
+  .trace-meta-part.part-notes,
+  .trace-meta-part.part-files,
+  .trace-meta-part.part-subagents {
+    display: none;
+  }
+  .trace-meta-part:not(:has(~ .trace-meta-part:not(.part-thoughts):not(.part-notes):not(.part-files):not(.part-subagents)))::after {
+    content: none;
+  }
+  .trace-meta-part .part-text-long {
+    display: none;
+  }
+  .trace-meta-part .part-text-short {
+    display: inline;
+  }
 }
 
 .trace-body {
@@ -3432,6 +3657,12 @@ function insertImageRef(n: number) {
   margin-left: 2px;
 }
 
+/* Transient status ticks (e.g. compaction) — one live line, dimmer than
+   regular trace text, no border since it's not a block of reasoning. */
+.trace-status {
+  opacity: 0.6;
+}
+
 .trace-tools {
   background: var(--bg);
   border-radius: 4px;
@@ -3439,6 +3670,27 @@ function insertImageRef(n: number) {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+/* "Show reply as text" affordance shown when the model returned its answer
+   inside the thinking stream (Ollama-routed models). Inline button so it
+   reads as an action, not a trace line. Sits below the thinking block. */
+.trace-action {
+  align-self: flex-start;
+  margin-top: 4px;
+  padding: 4px 10px;
+  font-size: var(--text-sm);
+  font-style: normal;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.trace-action:hover {
+  background: var(--accent);
+  color: var(--bg);
 }
 
 /* Inline file card. Rendered inside the activity trace whenever the agent
@@ -3638,6 +3890,7 @@ details[open] > .activity-summary::before {
   border-radius: 50%;
   background: var(--accent);
   animation: activity-pulse 1.1s ease-in-out infinite;
+  flex-shrink: 0;
 }
 
 @keyframes activity-pulse {
@@ -4394,8 +4647,9 @@ details[open] > .activity-summary::before {
 .question-card-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 /* Pending Auto-mode permission prompts. Sticks above the input until the
-   user answers. Warmer accent color than the queued chips, because this
-   is a blocking action (the turn is waiting on the user). */
+   user answers. Chrome uses --warning (this is a "waiting on you" state,
+   not an action) so --accent reads as a single, unambiguous signal on the
+   Approve button rather than being smeared across the whole card. */
 .permission-requests {
   display: flex;
   flex-direction: column;
@@ -4414,16 +4668,16 @@ details[open] > .activity-summary::before {
   gap: 6px;
   padding: 10px 12px;
   background: var(--bg);
-  border: 1px solid var(--accent);
-  border-left: 3px solid var(--accent);
+  border: 1px solid var(--warning);
+  border-left: 3px solid var(--warning);
   border-radius: var(--radius);
   font-size: 13px;
   animation: permission-pulse 1.4s ease-out;
 }
 
 @keyframes permission-pulse {
-  0% { box-shadow: 0 0 0 0 rgba(233, 69, 96, 0.4); }
-  100% { box-shadow: 0 0 0 8px rgba(233, 69, 96, 0); }
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--warning) 40%, transparent); }
+  100% { box-shadow: 0 0 0 8px color-mix(in srgb, var(--warning) 0%, transparent); }
 }
 
 .permission-header {
@@ -4436,7 +4690,9 @@ details[open] > .activity-summary::before {
 }
 
 .permission-icon {
-  font-size: 14px;
+  width: 14px;
+  height: 14px;
+  color: var(--warning);
   flex-shrink: 0;
 }
 
@@ -4444,7 +4700,7 @@ details[open] > .activity-summary::before {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 12px;
   font-weight: 600;
-  color: var(--accent);
+  color: var(--warning);
   background: var(--bg2);
   padding: 1px 6px;
   border-radius: 3px;

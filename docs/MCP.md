@@ -38,10 +38,11 @@ flowchart LR
   unavailable degrades gracefully to the legacy path with a logged WARNING,
   rather than failing the turn. This keeps the app usable during bootstrap or
   when `CIAO_MCP_ENABLED=false`. The `GET /api/mcp/status` readiness display
-  (Settings) and server logs make the fallback observable. Once a chat has
-  launched with a live MCP session, strict provider configuration still surfaces
-  a mid-turn server outage as a visible error (see below).
-- Plan-mode chats cannot call mutating tools. Provider-consultation principals
+  (Settings) and server logs make the fallback observable. A mid-turn outage
+  of an already-live MCP session surfaces through the CLI/tool-call error path
+  and server logs rather than a strict-config launch failure (see the note on
+  `strict_mcp_config` below).
+- Plan-mode chats cannot call mutating tools. Agent-handoff participants
   are read-only. Tool results use stable `{ok,data}` / `{ok:false,error}`
   envelopes, and inputs are validated again by the domain manager.
 - A tool cannot stop its own active turn. Operations that would disconnect the
@@ -65,12 +66,23 @@ ClaudeAgentOptions(
             "headers": {"Authorization": "Bearer <scoped-token>"},
         }
     },
-    strict_mcp_config=True,
+    # strict_mcp_config is intentionally left off — see below.
 )
 ```
 
-The managed Claude process is restarted when its MCP token changes. Strict MCP
-configuration makes an unavailable Ciaobot server a visible turn error.
+The managed Claude process is restarted when its MCP token changes.
+
+`strict_mcp_config` is **not** set on the chat path. The SDK's
+`McpHttpServerConfig` has no per-server "required" flag, so the only way to
+guarantee the Ciaobot server is the global strict switch — but strict mode
+restricts the CLI to *only* the servers in `mcp_servers` and ignores every
+other MCP source, which includes the account's claude.ai connector MCPs
+(`mcp__claude_ai_*`). Forcing it therefore suppressed all connectors regardless
+of the per-workspace `claude_ai_mcps` toggle (that was a bug: the toggle became
+dead UI on the MCP surface). Connectors now stay loaded and are gated solely by
+the per-workspace `disallowed_tools` denylist. A Ciaobot server that is
+unavailable at spawn time already degrades to the legacy surface (above), so
+strict mode is not needed to surface that case.
 
 ## Managed Codex configuration
 
@@ -97,23 +109,45 @@ telemetry remain enforced.
 
 ## Tool catalog
 
-The catalog currently contains 79 explicit tools. `capabilities_get` returns
-the live list so clients do not need to infer it from documentation.
+The catalog contains 42 explicit tools. The MCP `tools/list` response is the
+live list, so clients do not need to infer it from documentation. The catalog
+holds *capabilities* — orchestration and search that a shell can't cheaply
+replicate. Plain plumbing that the managed Claude Code/Codex session can do
+with its own shell and filesystem is not duplicated as an MCP tool:
+
+- **Bounded memory** read/add/replace/remove → `ciao memory read|add|replace|remove`.
+- **Vault maintenance** → `ciao index` (index refresh) and `ciao lint`.
+  `vault_search` stays — it wraps a maintained FTS5 index a file tool can't
+  replicate.
+- **Workspace file** read/write and **file history/snapshots** → the model's
+  native Read/Write/Glob tools and the workspace git repo.
+- **Local session** status/preflight/handback/resync → the shell agent's own
+  git; the PWA "Sync to Remote" feature drives the control plane over REST.
+- **Agent assets** → `ciao health get|fix` (workspace health) and
+  `ciao skills list` / `ciao skills-sync`.
+- **Vault note wrappers** (`vault_note_read`/`_write`/`_notes_list`) were never
+  added, for the same reason.
+
+`context_get` now also carries the former `system_status_get` under its
+`system` key. `capabilities_get`, `automation_runs_list`, `debug_issues_get`,
+`agent_context_get`, `chat_mark_read`, `package_status_get`, and the deferred
+`lifecycle_*` tools were dropped as host/PWA concerns. Retry, new-session,
+and the schedule/loop lifecycle verbs are folded into parameterized tools
+(`chat_retry` with an `action`, `chat_handover` with empty provider/model for
+an in-place new session, `schedule_action`, `loop_action`).
 
 | Domain | Tools |
 |---|---|
-| Context and status | `capabilities_get`, `context_get`, `agent_context_get`, `system_status_get`, `automation_runs_list`, `debug_issues_get`, `package_status_get` |
-| Bounded memory | `memory_read`, `memory_add`, `memory_replace`, `memory_remove`, `memory_proposals_list`, `memory_proposal_resolve` |
-| Vault | `vault_notes_list`, `vault_search`, `vault_note_read`, `vault_note_write`, `vault_index_refresh`, `vault_lint` |
+| Context | `context_get` (includes `system` status) |
+| Bounded memory | `memory_proposals_list`, `memory_proposal_resolve` |
+| Vault | `vault_search` |
 | Projects | `projects_list`, `project_get`, `project_create`, `project_update`, `project_complete`, `project_restore`, `project_delete`, `project_files_list` |
-| Chats | `chats_list`, `chat_get`, `chat_create`, `chat_update`, `chat_send`, `chat_continue`, `chat_retry`, `chat_retry_update`, `chat_new_session`, `chat_handover`, `chat_fork`, `chat_archive`, `chat_delete`, `chat_mark_read`, `chat_stop` |
-| Provider consultations | `consultations_list`, `consultation_start`, `consultation_send`, `consultation_events`, `consultation_close`, `consultation_cancel`, `consultation_extend` |
-| Schedules | `schedules_list`, `schedule_preview`, `schedule_create`, `schedule_update`, `schedule_pause`, `schedule_resume`, `schedule_run`, `schedule_delete` |
-| Loops | `loops_list`, `loop_create`, `loop_update`, `loop_start`, `loop_stop`, `loop_run`, `loop_delete` |
-| Workspace files and history | `workspace_file_read`, `workspace_file_write`, `file_history_list`, `file_snapshot_read`, `file_snapshot_restore` |
-| Agent assets and workspace | `workspace_health_get`, `workspace_health_fix`, `skills_list`, `skills_sync` |
-| Local session | `local_session_status`, `local_session_preflight`, `local_session_handback`, `local_session_resync` |
-| Deferred lifecycle | `lifecycle_actions_list`, `lifecycle_action_request` |
+| Chats | `chats_list`, `chat_get`, `chat_create`, `chat_update`, `chat_send`, `chat_continue`, `chat_retry`, `chat_handover`, `chat_fork`, `chat_archive`, `chat_delete`, `chat_stop` |
+| Agent handoffs | `handoffs_list`, `handoff_start`, `handoff_send`, `handoff_events`, `handoff_close`, `handoff_cancel`, `handoff_extend` |
+| Adversarial review | `adversarial_review` |
+| Schedules | `schedules_list`, `schedule_preview`, `schedule_create`, `schedule_update`, `schedule_action` |
+| Loops | `loops_list`, `loop_create`, `loop_update`, `loop_action` |
+| Workspace files | `file_surface` |
 
 The catalog covers application actions that are safe and meaningful for a
 scoped agent. Browser-session administration, login/OAuth secrets, Web Push

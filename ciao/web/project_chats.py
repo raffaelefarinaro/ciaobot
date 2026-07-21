@@ -72,7 +72,14 @@ from ciao.providers.routing import intended_backend, routing_env_for_model
 from ciao.provider_service import ProviderService, supported_providers
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore, _claude_projects_dir
-from ciao.web.chat_broker import ChatStream, ChatStreamBroker, EventsHub
+from ciao.web.chat_broker import (
+    ChatStream,
+    ChatStreamBroker,
+    EventsHub,
+    edit_pending_list,
+    remove_pending_list,
+    reorder_pending_list,
+)
 from ciao.web.commands import expand_slash_command
 from ciao.web.file_snapshots import SnapshotStore
 
@@ -104,6 +111,16 @@ _PROJECT_UPLOAD_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 _RETRY_INTERVAL_SECONDS = 60 * 60
 _RETRY_CONNECTION_INTERVAL_SECONDS = 30
 _RETRY_STATUSES = {"pending", "stopped", ""}
+# Prompt used to resume a session after a mid-response connection drop. The
+# original prompt is NOT replayed — the partial turn already ran (and may have
+# executed tools), so we resume the existing session and ask it to continue,
+# matching the "send 'continue' to resume" idiom the interrupted-turn banner
+# already tells users about.
+_RESUME_CONTINUE_PROMPT = "continue"
+# Cap on consecutive resume-continue retries for a mid-response drop so a
+# persistently flaky connection cannot loop forever burning quota. Once hit,
+# the turn is left for the user to continue manually.
+_MAX_CONNECTION_DROP_RETRIES = 6
 
 # Injected into the parent turn when its background subagents all finish. The
 # CLI does not auto-continue a parent turn after a background `Agent` dispatch
@@ -286,9 +303,21 @@ def _is_retryable_quota_error(text: str) -> bool:
     low = (text or "").lower()
     if "reached your session usage limit" in low:
         return True
+    if any(needle in low for needle in ("out of credit", "out of credits", "spend limit", "insufficient credit", "credit balance")):
+        return True
     if "429" not in low and "too many requests" not in low:
         return False
     return any(needle in low for needle in ("usage limit", "rate limit", "quota", "session"))
+
+
+def _is_billing_or_spend_limit_error(text: str) -> bool:
+    low = (text or "").lower()
+    if "reached your session usage limit" in low:
+        return True
+    if any(needle in low for needle in ("out of credit", "out of credits", "spend limit", "insufficient credit", "credit balance")):
+        return True
+    return False
+
 
 
 def _is_retryable_connection_error(text: str) -> bool:
@@ -313,6 +342,12 @@ def _is_retryable_connection_error(text: str) -> bool:
         "connect timeout",
         "connection timeout",
         "connection timed out",
+        # Upstream API dropped the streaming connection mid-response. The CLI
+        # surfaces this as a banner; the Claude provider re-flags it as an
+        # error. Kept in sync with ``_CONNECTION_DROP_MARKERS`` in
+        # ``ciao/providers/claude.py``.
+        "connection closed mid-response",
+        "response above may be incomplete",
     )
     return any(indicator in low for indicator in connection_indicators)
 
@@ -674,6 +709,14 @@ class ChatInfo:
     # and legacy chats can coexist without process-global configuration.
     control_surface: str = ""
     session_id: str = ""
+    # SDK session ids this chat rotated through earlier in the SAME
+    # conversation (autocompact, or a resume-failure fallback that forks a
+    # new session) — oldest first. `/messages` walks these plus the current
+    # `session_id` to render continuous history across the rotation, since
+    # each SDK session file only holds the turns written after it started.
+    # Cleared (not carried forward) by explicit resets: new_session() and
+    # handover_chat() intentionally start a new conversation/session lineage.
+    previous_session_ids: list[str] = field(default_factory=list)
     created_at: str = ""
     archived: bool = False
     last_activity_at: str = ""
@@ -1007,6 +1050,7 @@ class ProjectChatManager:
                 thinking_level=cd.get("thinking_level", ""),
                 control_surface=cd.get("control_surface", ""),
                 session_id=cd.get("session_id", ""),
+                previous_session_ids=list(cd.get("previous_session_ids", [])),
                 created_at=cd.get("created_at", ""),
                 archived=cd.get("archived", False),
                 last_activity_at=cd.get("last_activity_at", cd.get("created_at", "")),
@@ -1097,6 +1141,7 @@ class ProjectChatManager:
                     "thinking_level": c.thinking_level,
                     "control_surface": c.control_surface,
                     "session_id": c.session_id,
+                    "previous_session_ids": c.previous_session_ids,
                     "created_at": c.created_at,
                     "archived": c.archived,
                     "last_activity_at": c.last_activity_at,
@@ -2288,6 +2333,43 @@ class ProjectChatManager:
         })
         return project
 
+    def reorder_projects(
+        self, workspace: str, ordered_ids: list[str]
+    ) -> list[ProjectInfo]:
+        """Persist a new sidebar order for *workspace*'s projects.
+
+        ``ordered_ids`` is the desired top-to-bottom sequence. Projects in the
+        workspace that are omitted keep their existing relative order after the
+        listed ones. Each project's ``order`` is rewritten to its final index
+        so the ``workspaceProjects`` sort (order, then name) reflects the drag.
+        Ids for other workspaces or unknown ids are ignored.
+        """
+        ws_projects = [p for p in self._projects.values() if p.workspace == workspace]
+        by_id = {p.project_id: p for p in ws_projects}
+        seen: set[str] = set()
+        sequence: list[ProjectInfo] = []
+        for pid in ordered_ids:
+            project = by_id.get(pid)
+            if project is not None and pid not in seen:
+                sequence.append(project)
+                seen.add(pid)
+        # Anything not named stays, in its current order, after the listed set.
+        for project in sorted(ws_projects, key=lambda p: (p.order, p.name)):
+            if project.project_id not in seen:
+                sequence.append(project)
+        # General is auto-managed and re-pinned to order 0 at every boot
+        # (_ensure_defaults); keep it first here so a reorder doesn't snap back.
+        sequence.sort(key=lambda p: p.name != "General")
+        for index, project in enumerate(sequence):
+            project.order = index
+        self._save()
+        self._events.publish({
+            "type": "projects_reordered",
+            "workspace": workspace,
+            "order": [p.project_id for p in sequence],
+        })
+        return sequence
+
     def complete_project(self, project_id: str) -> dict:
         """Move a project's vault entry to completed/, then delete the PWA project.
 
@@ -2996,6 +3078,10 @@ class ProjectChatManager:
             else ""
         )
         chat.session_id = ""
+        # Provider switch: the new provider has its own session numbering, so
+        # the old lineage doesn't apply. Visible history instead carries over
+        # via `handover_messages` above.
+        chat.previous_session_ids = []
         chat.last_activity_at = _now_iso()
 
         ctx = ChatContext.for_web(chat_id)
@@ -3144,9 +3230,9 @@ class ProjectChatManager:
         if not records:
             return
 
-        lines = ["", "## Provider consultations", ""]
+        lines = ["", "## Agent handoffs", ""]
         for r in records:
-            lines.append(f"### Consultation: {r.owner.label or r.owner.provider} ↔ {r.participant.label or r.participant.provider}")
+            lines.append(f"### Handoff: {r.owner.label or r.owner.provider} ↔ {r.participant.label or r.participant.provider}")
             lines.append(f"- **Participant Model**: {r.participant.model}")
             lines.append(f"- **Status**: {r.status}")
             lines.append(f"- **Duration**: {r.active_seconds:.1f}s")
@@ -3292,15 +3378,20 @@ class ProjectChatManager:
             session_id=chat.session_id,
             provider=chat.provider,
         )
-        # Delete the SDK session blob for the now-archived session.
-        if chat.session_id and chat.provider == "claude":
-            self._transcripts.delete_sdk_session_blob(
-                self._config.workspace_root, chat.session_id
-            )
+        # Delete the SDK session blob for the now-archived session, plus any
+        # earlier ones this chat rotated through (autocompact/resume-fallback)
+        # before this reset — they're all being abandoned together.
+        if chat.provider == "claude":
+            for sid in [*chat.previous_session_ids, chat.session_id]:
+                if sid:
+                    self._transcripts.delete_sdk_session_blob(
+                        self._config.workspace_root, sid
+                    )
         # Drop attached images: they belong to the archived transcript.
         self._unlink_chat_images(chat)
         # Reset session
         chat.session_id = ""
+        chat.previous_session_ids = []
         chat.archived = False
         chat.archive_path = ""
         chat.handover_messages = []
@@ -3369,18 +3460,18 @@ class ProjectChatManager:
         if handover:
             parts.append(handover)
 
-        # Add a reminder about open provider consultations
+        # Add a reminder about open agent handoffs
         manager = getattr(self, "_provider_subchat_manager", None)
         if manager is not None:
             active_sc = [r for r in manager.list_records(chat.chat_id) if r.status == "waiting_owner"]
             if active_sc:
-                reminder_lines = ["[REMINDER: Active provider consultations waiting for owner input:"]
+                reminder_lines = ["[REMINDER: Active agent handoffs waiting for owner input:"]
                 for sc in active_sc:
                     reminder_lines.append(
                         f"- Sub-chat ID: '{sc.subchat_id}'. "
                         f"Participant: '{sc.participant.provider}' using model '{sc.participant.model}'."
                     )
-                reminder_lines.append("Use the provider-consultation skill to send answers or close them.]")
+                reminder_lines.append("Use handoff_send or handoff_close to send answers or close them.]")
                 parts.append("\n".join(reminder_lines))
 
         if not parts:
@@ -3576,10 +3667,12 @@ class ProjectChatManager:
     def disallowed_tools_for_chat(self, chat: ChatInfo) -> list[str]:
         """Per-workspace tool denylist for a chat's spawned CLI.
 
-        Personal chats deny all claude.ai connector MCPs by default
-        (work-only tools), work chats deny nothing by default. Both are
-        overridable via ``CIAO_DISALLOWED_TOOLS_PERSONAL`` /
-        ``CIAO_DISALLOWED_TOOLS_WORK``.
+        With the ``claude_ai_mcps`` toggle at its default (on), the claude.ai
+        connector MCPs are allowed in both workspaces: personal chats deny only
+        the self-hosted n8n MCP, work chats deny nothing. Flip the toggle off
+        (``CIAO_CLAUDE_AI_MCPS_PERSONAL`` / ``_WORK`` / the PWA switch) to add
+        the connector set to the denylist; extras are overridable via
+        ``CIAO_DISALLOWED_TOOLS_PERSONAL`` / ``CIAO_DISALLOWED_TOOLS_WORK``.
         """
         if chat.provider != "claude":
             return []
@@ -3797,6 +3890,8 @@ class ProjectChatManager:
         env["CIAO_CHAT_ID"] = chat.chat_id
         # Disable Claude Code's auto memory to avoid double memory layers
         env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+        # Artifacts publish to claude.ai; ciaobot has no use for that surface
+        env["CLAUDE_CODE_DISABLE_ARTIFACT"] = "1"
         return env
 
     def _effective_mode_for_chat(self, chat: ChatInfo) -> BridgeMode:
@@ -3822,6 +3917,18 @@ class ProjectChatManager:
         is always live for Ollama-routed chats. Remove it from your ``.env``.
         """
         return chat.mode
+
+    @staticmethod
+    def _rotate_session_id(chat: ChatInfo, new_session_id: str) -> None:
+        """Record a mid-conversation SDK session rotation (autocompact, or a
+        resume-failure fallback that forks a new session) before overwriting
+        ``chat.session_id``, so ``/messages`` can still stitch the turns the
+        old session file holds into continuous history. A no-op for the
+        first-ever session assignment (``chat.session_id`` still empty).
+        """
+        if chat.session_id and chat.session_id not in chat.previous_session_ids:
+            chat.previous_session_ids.append(chat.session_id)
+        chat.session_id = new_session_id
 
     async def _drive_stream(
         self,
@@ -3849,7 +3956,7 @@ class ProjectChatManager:
             yield event
             sdk_sid = provider.current_session_id
             if sdk_sid and sdk_sid != chat.session_id:
-                chat.session_id = sdk_sid
+                self._rotate_session_id(chat, sdk_sid)
                 self._save()
             if isinstance(event, ResultEvent):
                 outcome.response_text = event.result
@@ -3862,7 +3969,7 @@ class ProjectChatManager:
                 outcome.quota = event.quota
                 outcome.cost_usd = event.cost_usd or 0.0
                 if event.session_id and event.session_id != chat.session_id:
-                    chat.session_id = event.session_id
+                    self._rotate_session_id(chat, event.session_id)
                     self._save()
             elif isinstance(event, ToolUseEvent):
                 outcome.tool_events.append({
@@ -3961,7 +4068,7 @@ class ProjectChatManager:
                 )
                 resolved_surface = "legacy"
             else:
-                role = "consultation" if chat.chat_id.startswith("sub-") else "chat"
+                role = "handoff" if chat.chat_id.startswith("sub-") else "chat"
                 mcp_url, mcp_token = service.credentials_for_chat(
                     chat, project, role=role
                 )
@@ -4153,6 +4260,7 @@ class ProjectChatManager:
             context_label=chat.title,
             provider=chat.provider,
             tool_events=tool_events,
+            is_error=had_error,
         )
 
         # Update global cost
@@ -4267,18 +4375,27 @@ class ProjectChatManager:
         entry_id: str,
         before_id: str | None = None,
     ) -> bool:
-        """Move a queued message within the active stream's pending queue.
+        """Move a queued message within the pending queue.
 
         ``before_id`` is the id of the entry the moved entry should precede;
-        None moves it to the end. Returns True if the stream existed and the
-        entry was found.
+        None moves it to the end. Operates on the active stream's in-memory
+        queue if one exists, otherwise falls back to the persisted
+        ``chat.pending_queue`` (a stream tears down on error/question-pause/
+        retry-armed, but the parked queue outlives it and the client's chip
+        UI must stay truthful about it). Returns True if the entry was found.
         """
         stream = self._broker.get(chat_id)
-        if stream is None or stream.background:
+        if stream is not None and not stream.background:
+            if not stream.reorder_pending(entry_id, before_id):
+                return False
+            stream.publish({"type": "queue_state", "queue": stream.pending})
+            return True
+        chat = self._chats.get(chat_id)
+        if chat is None:
             return False
-        if not stream.reorder_pending(entry_id, before_id):
+        if not reorder_pending_list(chat.pending_queue, entry_id, before_id):
             return False
-        stream.publish({"type": "queue_state", "queue": stream.pending})
+        self._save()
         return True
 
     def edit_queue(
@@ -4288,28 +4405,40 @@ class ProjectChatManager:
         text: str,
         images: list[ImageAttachment] | None = None,
     ) -> bool:
-        """Update an existing queued message."""
-        stream = self._broker.get(chat_id)
-        if stream is None or stream.background:
-            return False
+        """Update an existing queued message (live stream, else parked queue)."""
         image_refs: list[str] = []
         for img in images or []:
             ref = getattr(img, "ref", None) or getattr(img, "original_filename", None)
             if ref:
                 image_refs.append(str(ref))
-        if not stream.edit_pending(entry_id, text, image_refs):
+        stream = self._broker.get(chat_id)
+        if stream is not None and not stream.background:
+            if not stream.edit_pending(entry_id, text, image_refs):
+                return False
+            stream.publish({"type": "queue_state", "queue": stream.pending})
+            return True
+        chat = self._chats.get(chat_id)
+        if chat is None:
             return False
-        stream.publish({"type": "queue_state", "queue": stream.pending})
+        if not edit_pending_list(chat.pending_queue, entry_id, text, image_refs):
+            return False
+        self._save()
         return True
 
     def remove_queue(self, chat_id: str, entry_id: str) -> bool:
-        """Remove a queued message."""
+        """Remove a queued message (live stream, else parked queue)."""
         stream = self._broker.get(chat_id)
-        if stream is None or stream.background:
+        if stream is not None and not stream.background:
+            if not stream.remove_pending(entry_id):
+                return False
+            stream.publish({"type": "queue_state", "queue": stream.pending})
+            return True
+        chat = self._chats.get(chat_id)
+        if chat is None:
             return False
-        if not stream.remove_pending(entry_id):
+        if not remove_pending_list(chat.pending_queue, entry_id):
             return False
-        stream.publish({"type": "queue_state", "queue": stream.pending})
+        self._save()
         return True
 
     @property
@@ -4367,6 +4496,94 @@ class ProjectChatManager:
     def background_agent_counts(self) -> dict[str, int]:
         """Last announced running-background-subagent count per chat (>0 only)."""
         return {cid: n for cid, n in self._background_agents_last.items() if n > 0}
+
+    def _park_pending_for_retry(self, chat_id: str, stream: "ChatStream") -> None:
+        """Move queued follow-ups off the (about-to-be-torn-down) stream onto
+        the chat so a scheduled retry re-seeds them instead of dropping them.
+
+        ``start_stream`` re-seeds ``chat.pending_queue`` on every turn
+        (including retries), so parking here keeps the user's queued messages
+        alive across the retry window rather than losing them when the errored
+        stream's ``finish()``/``clear()`` runs.
+        """
+        parked = stream.drain_pending()
+        if not parked:
+            return
+        chat = self._chats.get(chat_id)
+        if chat is not None:
+            chat.pending_queue = list(parked)
+            self._save()
+
+    def _arm_retry(
+        self,
+        chat_id: str,
+        stream: "ChatStream",
+        *,
+        kind: str,
+        current_prompt: str,
+        current_images: list[ImageAttachment] | None,
+        had_progress: bool,
+        reason: str,
+    ) -> bool:
+        """Arm a deferred retry for a quota/connection failure.
+
+        ``kind`` is ``"quota"`` or ``"connection"``. A connection failure that
+        dropped *after* streaming output (``had_progress``) resumes the session
+        with a "continue" nudge instead of replaying the prompt — replaying
+        could re-run tool calls the partial turn already executed — and is
+        capped at ``_MAX_CONNECTION_DROP_RETRIES`` so a flaky connection cannot
+        loop forever. Every armed retry parks queued follow-ups onto the chat
+        so they survive to the retried turn. Returns True if a retry was armed.
+        """
+        chat = self._chats.get(chat_id)
+        # Replaying the prompt after output already streamed re-runs any tool
+        # calls the partial turn executed — true for a quota/usage-limit error
+        # that lands mid-turn just as much as for a connection drop. So once
+        # there's progress and a live session to resume, nudge with "continue"
+        # instead of replaying, regardless of kind. Resume-continue needs a
+        # session to resume; without one (never expected once output streamed,
+        # but be safe) "continue" would seed a useless fresh session, so we
+        # fall back to replaying the prompt.
+        resume_continue = (
+            had_progress
+            and chat is not None
+            and bool(chat.session_id)
+        )
+        # The connection-drop cap guards against a flaky link looping forever;
+        # quota resumes are time-gated by the hourly retry interval instead.
+        if resume_continue and kind == "connection":
+            attempts = chat.retry_attempts if chat is not None else 0
+            if attempts >= _MAX_CONNECTION_DROP_RETRIES:
+                logger.warning(
+                    "chat %s hit the mid-response connection-drop retry cap "
+                    "(%d); leaving the turn for a manual continue",
+                    chat_id,
+                    _MAX_CONNECTION_DROP_RETRIES,
+                )
+                return False
+        if resume_continue:
+            prompt = _RESUME_CONTINUE_PROMPT
+            image_refs: list[str] | None = None
+        else:
+            prompt = current_prompt
+            image_refs = self._image_refs(current_images)
+        interval = (
+            _RETRY_CONNECTION_INTERVAL_SECONDS
+            if kind == "connection"
+            else _RETRY_INTERVAL_SECONDS
+        )
+        armed = self.set_chat_retry(
+            chat_id,
+            prompt,
+            image_refs=image_refs,
+            reason=reason,
+            interval_seconds=interval,
+        )
+        if armed is None:
+            return False
+        stream.publish({"type": "chat_retry", "status": "pending"})
+        self._park_pending_for_retry(chat_id, stream)
+        return True
 
     def set_chat_retry(
         self,
@@ -4844,31 +5061,36 @@ class ProjectChatManager:
                             if isinstance(event, ResultEvent):
                                 if event.is_error:
                                     had_error = True
-                                    if not had_provider_progress:
-                                        if _is_retryable_quota_error(event.result or ""):
-                                            self.set_chat_retry(
-                                                chat_id,
-                                                current_prompt,
-                                                image_refs=self._image_refs(current_images),
-                                                reason=event.result or "quota limit",
-                                                interval_seconds=_RETRY_INTERVAL_SECONDS,
-                                            )
-                                            stream.publish({
-                                                "type": "chat_retry",
-                                                "status": "pending",
-                                            })
-                                        elif _is_retryable_connection_error(event.result or ""):
-                                            self.set_chat_retry(
-                                                chat_id,
-                                                current_prompt,
-                                                image_refs=self._image_refs(current_images),
-                                                reason=event.result or "connection error",
-                                                interval_seconds=_RETRY_CONNECTION_INTERVAL_SECONDS,
-                                            )
-                                            stream.publish({
-                                                "type": "chat_retry",
-                                                "status": "pending",
-                                            })
+                                    result_text = event.result or ""
+                                    # Quota rejections only auto-retry when
+                                    # nothing streamed (retrying a partial turn
+                                    # would double-run work). Connection errors
+                                    # are safe to resume even mid-response —
+                                    # _arm_retry resumes the session with
+                                    # "continue" rather than replaying.
+                                    if _is_retryable_quota_error(result_text) and (
+                                        not had_provider_progress
+                                        or _is_billing_or_spend_limit_error(result_text)
+                                    ):
+                                        self._arm_retry(
+                                            chat_id,
+                                            stream,
+                                            kind="quota",
+                                            current_prompt=current_prompt,
+                                            current_images=current_images,
+                                            had_progress=had_provider_progress,
+                                            reason=result_text or "quota limit",
+                                        )
+                                    elif _is_retryable_connection_error(result_text):
+                                        self._arm_retry(
+                                            chat_id,
+                                            stream,
+                                            kind="connection",
+                                            current_prompt=current_prompt,
+                                            current_images=current_images,
+                                            had_progress=had_provider_progress,
+                                            reason=result_text or "connection error",
+                                        )
                                 else:
                                     turn_assistant_text = event.result or ""
                     except Exception as exc:
@@ -4888,31 +5110,41 @@ class ProjectChatManager:
                                 error_msg = f"{error_msg}\n{stderr}"
                             stream.publish({"type": "error", "message": error_msg})
                             had_error = True
-                            if not had_provider_progress:
-                                if _is_retryable_quota_error(error_msg):
-                                    self.set_chat_retry(
-                                        chat_id,
-                                        current_prompt,
-                                        image_refs=self._image_refs(current_images),
-                                        reason=error_msg,
-                                        interval_seconds=_RETRY_INTERVAL_SECONDS,
-                                    )
-                                    stream.publish({
-                                        "type": "chat_retry",
-                                        "status": "pending",
-                                    })
-                                elif _is_retryable_connection_error(error_msg):
-                                    self.set_chat_retry(
-                                        chat_id,
-                                        current_prompt,
-                                        image_refs=self._image_refs(current_images),
-                                        reason=error_msg,
-                                        interval_seconds=_RETRY_CONNECTION_INTERVAL_SECONDS,
-                                    )
-                                    stream.publish({
-                                        "type": "chat_retry",
-                                        "status": "pending",
-                                    })
+                            if _is_retryable_quota_error(error_msg) and (
+                                not had_provider_progress
+                                or _is_billing_or_spend_limit_error(error_msg)
+                            ):
+                                self._arm_retry(
+                                    chat_id,
+                                    stream,
+                                    kind="quota",
+                                    current_prompt=current_prompt,
+                                    current_images=current_images,
+                                    had_progress=had_provider_progress,
+                                    reason=error_msg,
+                                )
+                            elif _is_retryable_connection_error(error_msg):
+                                self._arm_retry(
+                                    chat_id,
+                                    stream,
+                                    kind="connection",
+                                    current_prompt=current_prompt,
+                                    current_images=current_images,
+                                    had_progress=had_provider_progress,
+                                    reason=error_msg,
+                                )
+                            # Defensive: a no-op if _arm_retry already parked
+                            # (drain_pending on an already-drained stream
+                            # returns []). Covers the non-retryable case,
+                            # where nothing above parks the queue and it
+                            # would otherwise be lost when `finally` tears
+                            # the stream down.
+                            parked = stream.drain_pending()
+                            if parked:
+                                cm_park = self._chats.get(chat_id)
+                                if cm_park is not None:
+                                    cm_park.pending_queue = list(parked)
+                                    self._save()
                             break
 
                     if turn_assistant_text:
@@ -4944,6 +5176,17 @@ class ProjectChatManager:
                         if next_pending is not None:
                             had_error = False
                     if next_pending is None or had_error:
+                        if had_error and next_pending is not None:
+                            # A real error broke the loop after we'd already
+                            # popped the next queued message (and possibly
+                            # more behind it) for the follow-up turn. Park
+                            # all of it instead of letting it vanish when
+                            # `finally` tears the stream down.
+                            remaining = stream.drain_pending()
+                            cm_park = self._chats.get(chat_id)
+                            if cm_park is not None:
+                                cm_park.pending_queue = [next_pending, *remaining]
+                                self._save()
                         break
 
                     combined_text = next_pending.get("text", "").strip()
@@ -6129,9 +6372,14 @@ class ProjectChatManager:
         had_issue_placeholder = "{{ISSUE_REPORT}}" in prompt
         if had_issue_placeholder:
             from ciao.debug_report import build_issue_report
+            from ciao.startup_triage import TRIAGE_SCHEDULE_ID
 
+            # Exclude the triage's own past runs so a triage prompt built from
+            # {{ISSUE_REPORT}} never re-triages its own recorded summary.
             issue_report = await asyncio.to_thread(
-                build_issue_report, self._config.workspace_root
+                build_issue_report,
+                self._config.workspace_root,
+                exclude_schedule_ids={TRIAGE_SCHEDULE_ID},
             )
             prompt = prompt.replace(
                 "{{ISSUE_REPORT}}", issue_report["report_text"]

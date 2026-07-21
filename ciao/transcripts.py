@@ -65,6 +65,7 @@ class TranscriptStore:
         context_label: str = "",
         provider: str = "claude",
         tool_events: list[dict[str, Any]] | None = None,
+        is_error: bool = False,
     ) -> None:
         transcript = self._load_current(ctx, provider)
         if not transcript:
@@ -92,6 +93,7 @@ class TranscriptStore:
                 "resume_session": request.resume_session or "",
                 "image_count": len(request.images),
                 "response": response_text,
+                "is_error": is_error,
                 "effective_model": effective_model or request.model,
                 "usage": usage,
                 "quota": quota,
@@ -176,6 +178,8 @@ class TranscriptStore:
                     "content": response,
                     "sent_at": timestamp,
                 }
+                if turn.get("is_error"):
+                    row["is_error"] = True
                 usage = turn.get("usage")
                 if isinstance(usage, dict) and usage:
                     row["usage"] = usage

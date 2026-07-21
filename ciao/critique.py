@@ -7,9 +7,9 @@ OpenRouter, ``:tag`` ids reach Ollama, and bare aliases stay on Anthropic.
 The artifact is inlined in the prompt (the one-shot call runs with no
 tools, ``max_turns=1``), so no file-read tool is needed.
 
-Exposed as a CLI (``python -m ciao.critique``) with the same flags the old
-``skills/adversarial-review/scripts/review.py`` accepted, so the skill's
-``$SKILL_DIR/scripts/review.py`` can thin-wrap it.
+Exposed as a CLI (``python -m ciao.critique``) and, via :func:`run_panel`, as
+the ``adversarial_review`` MCP tool (``ciao/control_plane.py``) — both call
+the same panel-running logic so they can't drift.
 """
 
 from __future__ import annotations
@@ -258,6 +258,31 @@ async def _review_one(
     return ModelResult(model, elapsed, True, review=parsed, raw_text=raw)
 
 
+async def run_panel(
+    panel: list[str],
+    artifact: str,
+    user_prompt: str,
+    config: CiaoConfig,
+    *,
+    timeout: float = DEFAULT_TIMEOUT,
+    max_parallel: int = 8,
+) -> list[ModelResult]:
+    """Run every model in ``panel`` concurrently and return results in panel order.
+
+    Shared by the CLI (``async_main``) and the ``adversarial_review`` MCP tool
+    so the two entrypoints can't drift on how the panel is actually run.
+    """
+    sem = asyncio.Semaphore(max_parallel)
+
+    async def _run(model: str) -> ModelResult:
+        async with sem:
+            return await _review_one(model, artifact, user_prompt, config, timeout)
+
+    results = await asyncio.gather(*[_run(m) for m in panel])
+    order = {m: i for i, m in enumerate(panel)}
+    return sorted(results, key=lambda r: order.get(r.model, 999))
+
+
 def _group_count(items: list[dict], key: str) -> dict[str, int]:
     out: dict[str, int] = {}
     for it in items:
@@ -390,19 +415,14 @@ async def async_main(argv: list[str] | None = None) -> int:
     )
 
     print(f"[adversarial-review] panel: {', '.join(models)}", file=sys.stderr)
-    sem = asyncio.Semaphore(args.max_parallel)
-
-    async def _run(model: str) -> ModelResult:
-        async with sem:
-            return await _review_one(model, artifact, user_prompt, config, args.timeout)
-
-    results = await asyncio.gather(*[_run(m) for m in models])
+    results = await run_panel(
+        models, artifact, user_prompt, config,
+        timeout=args.timeout, max_parallel=args.max_parallel,
+    )
     for r in results:
         status = "OK" if r.ok else f"FAIL ({r.error})"
         print(f"[adversarial-review] {r.model}: {status} in {r.elapsed_s:.1f}s", file=sys.stderr)
 
-    order = {m: i for i, m in enumerate(models)}
-    results = sorted(results, key=lambda r: order.get(r.model, 999))
     agg = aggregate(results)
 
     if args.format == "json":

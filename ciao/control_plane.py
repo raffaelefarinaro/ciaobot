@@ -41,8 +41,8 @@ class McpPrincipal:
     project_id: str
     workspace: str
     provider: str
-    role: Literal["chat", "automation", "consultation"] = "chat"
-    consultation_depth: int = 0
+    role: Literal["chat", "automation", "handoff"] = "chat"
+    handoff_depth: int = 0
 
     def to_claims(self) -> dict[str, Any]:
         return asdict(self)
@@ -56,7 +56,7 @@ class McpPrincipal:
             workspace=str(claims.get("workspace") or ""),
             provider=str(claims.get("provider") or ""),
             role=str(claims.get("role") or "chat"),  # type: ignore[arg-type]
-            consultation_depth=int(claims.get("consultation_depth") or 0),
+            handoff_depth=int(claims.get("handoff_depth") or 0),
         )
 
 
@@ -104,7 +104,7 @@ class CiaoControlPlane:
         self.pcm = project_chat_manager
         self.schedules = schedule_manager
         self.loops = loop_manager
-        self.consultations = provider_subchat_manager
+        self.handoffs = provider_subchat_manager
         self.local_sessions = local_session_manager
         self.app_settings = app_settings
         self.startup_tracker = startup_tracker
@@ -181,6 +181,40 @@ class CiaoControlPlane:
         self._workspace(principal, project.workspace)
         return project
 
+    def _resolve_project_id(self, principal: McpPrincipal, ref: str) -> str:
+        """Resolve a non-empty project id-or-case-insensitive-name to an exact id.
+
+        Shared by any tool that accepts a project reference, so a caller never
+        has to pre-resolve an id via ``projects_list`` for the common case."""
+        exact = self.pcm.get_project(ref)
+        if exact is not None:
+            return exact.project_id
+        matches = [
+            p for p in self.pcm.list_projects(principal.workspace)
+            if p.name.casefold() == ref.casefold()
+        ]
+        if len(matches) == 1:
+            return matches[0].project_id
+        if len(matches) > 1:
+            raise ControlPlaneError(
+                "project_ambiguous",
+                f"'{ref}' matches more than one project; use its exact id instead.",
+            )
+        raise ControlPlaneError("project_not_found", f"Project '{ref}' was not found.")
+
+    def _resolve_project(self, principal: McpPrincipal, ref: str | None) -> Any:
+        """Resolve a project by exact id, case-insensitive name, or the
+        caller's current project when ``ref`` is omitted."""
+        value = (ref or "").strip()
+        if not value:
+            if not principal.project_id:
+                raise ControlPlaneError(
+                    "project_required",
+                    "No project given and no active project to default to; pass a project id or name.",
+                )
+            return self._project(principal, principal.project_id)
+        return self._project(principal, self._resolve_project_id(principal, value))
+
     def _chat(self, principal: McpPrincipal, chat_id: str) -> Any:
         chat = self.pcm.get_chat(chat_id)
         if chat is None:
@@ -222,7 +256,7 @@ class CiaoControlPlane:
             "chat": chat.to_dict(local=self.pcm.is_session_local(chat)) if chat else None,
             "provider": principal.provider,
             "role": principal.role,
-            "consultation_depth": principal.consultation_depth,
+            "handoff_depth": principal.handoff_depth,
             "control_surface": getattr(chat, "control_surface", "")
             or getattr(self.config, "control_surface", "legacy"),
         })
@@ -349,39 +383,6 @@ class CiaoControlPlane:
 
     # ---- vault ---------------------------------------------------------
 
-    def vault_notes_list(self, principal: McpPrincipal, limit: int = 100) -> dict[str, Any]:
-        root = self._vault_root(principal)
-        rows = []
-        for path in sorted(root.rglob("*.md")):
-            resolved = path.resolve()
-            if not resolved.is_relative_to(root) or any(part.startswith(".") for part in path.relative_to(root).parts):
-                continue
-            rows.append(path.relative_to(root).as_posix())
-            if len(rows) >= max(1, min(500, int(limit))):
-                break
-        return _ok(rows)
-
-    def vault_note_read(self, principal: McpPrincipal, path: str) -> dict[str, Any]:
-        root = self._vault_root(principal)
-        target = self._safe_relative(root, path, must_exist=True)
-        if target.suffix.lower() != ".md" or not target.is_file():
-            raise ControlPlaneError("unsupported_file", "Vault note reads require a markdown file.")
-        text = target.read_text(encoding="utf-8")
-        if len(text) > 200_000:
-            raise ControlPlaneError("file_too_large", "Vault note exceeds the 200000 character MCP limit.")
-        return _ok({"path": path, "content": text})
-
-    def vault_note_write(self, principal: McpPrincipal, path: str, content: str) -> dict[str, Any]:
-        root = self._vault_root(principal)
-        target = self._safe_relative(root, path)
-        if target.suffix.lower() != ".md":
-            raise ControlPlaneError("unsupported_file", "Vault note writes require a .md path.")
-        if len(content) > 200_000:
-            raise ControlPlaneError("file_too_large", "Vault note exceeds the 200000 character MCP limit.")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-        return _ok({"path": target.relative_to(root).as_posix(), "size": len(content)})
-
     def vault_search(self, principal: McpPrincipal, query: str, limit: int = 10) -> dict[str, Any]:
         root = self._vault_root(principal)
         db_path = get_db_path()
@@ -500,22 +501,31 @@ class CiaoControlPlane:
     def chat_create(
         self,
         principal: McpPrincipal,
-        project_id: str,
+        project_id: str | None = None,
         *,
         title: str = "New Chat",
         provider: str | None = None,
         model: str | None = None,
         mode: str | None = None,
         control_surface: ControlSurface | None = None,
+        prompt: str | None = None,
     ) -> dict[str, Any]:
-        self._project(principal, project_id)
+        project = self._resolve_project(principal, project_id)
         chat = self.pcm.create_chat(
-            project_id, title=title, provider=provider, model=model, mode=mode
+            project.project_id, title=title, provider=provider, model=model, mode=mode
         )
         if control_surface is not None:
             chat.control_surface = control_surface
             self.pcm._save()
-        return _ok(chat.to_dict(local=True))
+        result = chat.to_dict(local=True)
+        text = (prompt or "").strip()
+        if text:
+            if self.pcm.queue_message(chat.chat_id, text):
+                result["send_status"] = "queued"
+            else:
+                self.pcm.start_stream(chat.chat_id, text)
+                result["send_status"] = "started"
+        return _ok(result)
 
     def chat_update(
         self,
@@ -717,26 +727,26 @@ class CiaoControlPlane:
             )
         return _ok({"chat_id": chat_id, "stopped": await self.pcm.stop_chat(chat_id)})
 
-    # ---- provider consultations --------------------------------------
+    # ---- agent handoffs -------------------------------------------------
 
-    def _consultation_manager(self) -> Any:
-        if self.consultations is None:
-            raise ControlPlaneError("unavailable", "Provider consultation manager is unavailable.")
-        return self.consultations
+    def _handoff_manager(self) -> Any:
+        if self.handoffs is None:
+            raise ControlPlaneError("unavailable", "Agent handoff manager is unavailable.")
+        return self.handoffs
 
-    def _consultation_record(self, principal: McpPrincipal, subchat_id: str) -> Any:
-        record = self._consultation_manager().get_record(subchat_id)
+    def _handoff_record(self, principal: McpPrincipal, subchat_id: str) -> Any:
+        record = self._handoff_manager().get_record(subchat_id)
         if record is None:
-            raise ControlPlaneError("consultation_not_found", f"Consultation '{subchat_id}' was not found.")
+            raise ControlPlaneError("handoff_not_found", f"Handoff '{subchat_id}' was not found.")
         self._chat(principal, record.parent_chat_id)
         return record
 
-    def consultations_list(self, principal: McpPrincipal, chat_id: str = "") -> dict[str, Any]:
+    def handoffs_list(self, principal: McpPrincipal, chat_id: str = "") -> dict[str, Any]:
         parent_id = chat_id or principal.chat_id
         self._chat(principal, parent_id)
-        return _ok([item.to_dict() for item in self._consultation_manager().list_records(parent_id)])
+        return _ok([item.to_dict() for item in self._handoff_manager().list_records(parent_id)])
 
-    async def consultation_start(
+    async def handoff_start(
         self,
         principal: McpPrincipal,
         *,
@@ -747,11 +757,11 @@ class CiaoControlPlane:
         model_bucket: str = "",
         user_authorized: bool = False,
     ) -> dict[str, Any]:
-        if principal.role == "consultation":
-            raise ControlPlaneError("nested_consultation_forbidden", "A consultation cannot start another consultation.")
+        if principal.role == "handoff":
+            raise ControlPlaneError("nested_handoff_forbidden", "A handoff cannot start another handoff.")
         parent = self._chat(principal, chat_id or principal.chat_id)
         if not provider.strip() or not model.strip() or not message.strip():
-            raise ControlPlaneError("invalid_consultation", "provider, model, and message are required.")
+            raise ControlPlaneError("invalid_handoff", "provider, model, and message are required.")
         from ciao.provider_subchats import ProviderRoute
 
         owner = ProviderRoute(
@@ -766,20 +776,20 @@ class CiaoControlPlane:
             model_bucket=model_bucket.strip(),
             label="participant",
         )
-        record = self._consultation_manager().create_subchat(
+        record = self._handoff_manager().create_subchat(
             parent_chat_id=parent.chat_id,
             parent_turn_index=max(0, int(parent.user_turn_count) - 1),
             owner=owner,
             participant=participant,
         )
-        result = await self._consultation_manager().run_consultation_turn(
+        result = await self._handoff_manager().run_consultation_turn(
             record.subchat_id,
             message.strip(),
             user_authorized=user_authorized,
         )
         return _ok({"record": record.to_dict(), "result": result})
 
-    async def consultation_send(
+    async def handoff_send(
         self,
         principal: McpPrincipal,
         subchat_id: str,
@@ -787,33 +797,33 @@ class CiaoControlPlane:
         *,
         user_authorized: bool = False,
     ) -> dict[str, Any]:
-        self._consultation_record(principal, subchat_id)
+        self._handoff_record(principal, subchat_id)
         if not message.strip():
             raise ControlPlaneError("empty_prompt", "message is required.")
-        return _ok(await self._consultation_manager().run_consultation_turn(
+        return _ok(await self._handoff_manager().run_consultation_turn(
             subchat_id, message.strip(), user_authorized=user_authorized
         ))
 
-    def consultation_events(self, principal: McpPrincipal, subchat_id: str) -> dict[str, Any]:
-        self._consultation_record(principal, subchat_id)
-        return _ok(self._consultation_manager().get_events(subchat_id))
+    def handoff_events(self, principal: McpPrincipal, subchat_id: str) -> dict[str, Any]:
+        self._handoff_record(principal, subchat_id)
+        return _ok(self._handoff_manager().get_events(subchat_id))
 
-    def consultation_close(self, principal: McpPrincipal, subchat_id: str) -> dict[str, Any]:
-        self._consultation_record(principal, subchat_id)
-        self._consultation_manager().close_subchat(subchat_id)
-        return _ok(self._consultation_manager().get_record(subchat_id).to_dict())
+    def handoff_close(self, principal: McpPrincipal, subchat_id: str) -> dict[str, Any]:
+        self._handoff_record(principal, subchat_id)
+        self._handoff_manager().close_subchat(subchat_id)
+        return _ok(self._handoff_manager().get_record(subchat_id).to_dict())
 
-    async def consultation_cancel(self, principal: McpPrincipal, subchat_id: str) -> dict[str, Any]:
-        self._consultation_record(principal, subchat_id)
-        await self._consultation_manager().cancel_subchat(subchat_id)
-        return _ok(self._consultation_manager().get_record(subchat_id).to_dict())
+    async def handoff_cancel(self, principal: McpPrincipal, subchat_id: str) -> dict[str, Any]:
+        self._handoff_record(principal, subchat_id)
+        await self._handoff_manager().cancel_subchat(subchat_id)
+        return _ok(self._handoff_manager().get_record(subchat_id).to_dict())
 
-    def consultation_extend(
+    def handoff_extend(
         self, principal: McpPrincipal, subchat_id: str, *, user_authorized: bool
     ) -> dict[str, Any]:
-        self._consultation_record(principal, subchat_id)
-        self._consultation_manager().extend_subchat(subchat_id, user_authorized=user_authorized)
-        return _ok(self._consultation_manager().get_record(subchat_id).to_dict())
+        self._handoff_record(principal, subchat_id)
+        self._handoff_manager().extend_subchat(subchat_id, user_authorized=user_authorized)
+        return _ok(self._handoff_manager().get_record(subchat_id).to_dict())
 
     # ---- schedules/loops ----------------------------------------------
 
@@ -835,6 +845,10 @@ class CiaoControlPlane:
 
     def schedule_preview(self, principal: McpPrincipal, **values: Any) -> dict[str, Any]:
         workspace = self._workspace(principal)
+        project_ref = values.get("project_id")
+        resolved_project_id = (
+            self._resolve_project_id(principal, str(project_ref)) if project_ref else project_ref
+        )
         now = datetime.now(UTC).isoformat(timespec="seconds")
         entry = ScheduleEntry(
             schedule_id="preview",
@@ -851,7 +865,7 @@ class CiaoControlPlane:
             day_of_month=values.get("day_of_month"),
             run_at_date=values.get("run_at_date"),
             web_chat_id=values.get("chat_id"),
-            web_project_id=values.get("project_id"),
+            web_project_id=resolved_project_id,
             workspace=workspace,
             archive_policy=str(values.get("archive_policy") or "manual"),
             title=str(values.get("title") or ""),
@@ -897,6 +911,8 @@ class CiaoControlPlane:
         entry = self._schedule(principal, schedule_id)
         if entry.scope == "system" and any(key not in {"enabled", "workspace"} for key in changes):
             raise ControlPlaneError("system_schedule_read_only", "System schedules only allow enabled/workspace changes.")
+        if changes.get("project_id"):
+            changes["project_id"] = self._resolve_project_id(principal, str(changes["project_id"]))
         aliases = {"daily_time": "daily_time_utc", "timezone": "timezone_name", "chat_id": "web_chat_id", "project_id": "web_project_id"}
         normalized = {aliases.get(key, key): value for key, value in changes.items() if value is not None}
         known = set(ScheduleEntry.__dataclass_fields__)
@@ -1019,6 +1035,17 @@ class CiaoControlPlane:
         target.write_text(content, encoding="utf-8")
         return _ok({"path": target.relative_to(root).as_posix(), "size": len(content.encode('utf-8'))})
 
+    def file_surface(self, principal: McpPrincipal, path: str) -> dict[str, Any]:
+        """Validate a workspace file exists so the PWA can open it in the pinned
+        preview panel. The actual surfacing happens client-side, keyed off this
+        tool call showing up in the turn's trace — see extract_file_touches in
+        ciao/web/chat_broker.py."""
+        root = Path(self.config.workspace_root).resolve()
+        target = self._safe_relative(root, path, must_exist=True)
+        if not target.is_file():
+            raise ControlPlaneError("unsupported_file", "Only an existing file can be surfaced.")
+        return _ok({"path": target.relative_to(root).as_posix()})
+
     def file_history_list(
         self, principal: McpPrincipal, chat_id: str, file_path: str
     ) -> dict[str, Any]:
@@ -1072,6 +1099,56 @@ class CiaoControlPlane:
             "restored_seq": int(seq),
             "new_seq": new_meta.seq if new_meta else 0,
             "path": target.relative_to(root).as_posix(),
+        })
+
+    # ---- adversarial review ---------------------------------------------
+
+    async def adversarial_review(
+        self,
+        principal: McpPrincipal,
+        artifact: str,
+        *,
+        doc_type: str = "document",
+        focus: str = "",
+        context: str = "",
+        models: str = "",
+        format: str = "markdown",
+    ) -> dict[str, Any]:
+        self._workspace(principal)
+        text = artifact.strip()
+        if not text:
+            raise ControlPlaneError("empty_artifact", "Artifact text is required.")
+        from ciao.critique import (
+            USER_PROMPT_TEMPLATE,
+            aggregate,
+            render_markdown,
+            resolve_critique_panel,
+            run_panel,
+        )
+
+        panel = resolve_critique_panel(self.config, override=models)
+        if not panel:
+            raise ControlPlaneError(
+                "no_panel", "No critique models are configured (Settings → Models)."
+            )
+        user_prompt = USER_PROMPT_TEMPLATE.format(
+            doc_type=doc_type or "document",
+            focus_block=f"Focus area: {focus}\n" if focus else "",
+            context_block=f"Author context: {context}\n" if context else "",
+            artifact=text,
+        )
+        results = await run_panel(panel, text, user_prompt, self.config)
+        agg = aggregate(results)
+        if format == "json":
+            from dataclasses import asdict as _asdict
+
+            return _ok({"aggregate": agg, "results": [_asdict(r) for r in results]})
+        return _ok({
+            "markdown": render_markdown("artifact", results, agg),
+            "model_count": agg["model_count"],
+            "ok_count": agg["ok_count"],
+            "verdicts": agg["verdicts"],
+            "total_issues": agg["total_issues"],
         })
 
     def agent_context_get(self, principal: McpPrincipal) -> dict[str, Any]:

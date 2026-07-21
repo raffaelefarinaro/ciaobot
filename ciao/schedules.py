@@ -665,7 +665,18 @@ class ScheduleManager:
                 if self._resolve_target is not None
                 else ("claude", entry.model, entry.mode, entry.provider)
             )
-            await self._dispatch_entry(entry, model, mode, provider)
+            # Prepare the chat synchronously (like dispatch_now) so
+            # last_run_chat_id is durable in the same write as
+            # last_dispatched_at, instead of depending on the fire-and-forget
+            # dispatch task surviving long enough to write it back later.
+            chat_id: str | None = None
+            if self._prepare_chat is not None:
+                chat_id = self._prepare_chat(entry, entry.prompt, model, mode, provider)
+            await self._dispatch_entry(
+                entry, model, mode, provider, target_chat_id=chat_id
+            )
+            if chat_id:
+                entry.last_run_chat_id = chat_id
 
             if entry.frequency == "once":
                 # One-shot consumed; remove from store rather than mark as
@@ -673,12 +684,12 @@ class ScheduleManager:
                 # Set a sentinel first so that if the delete fails (crash,
                 # git-sync race, disk error), catch_up won't refire it.
                 entry.last_triggered_on = "done"
-                entry.last_dispatched_at = current_day + "T" + localized.strftime("%H:%M:%S")
+                entry.last_dispatched_at = localized.isoformat(timespec="seconds")
                 self._store.replace(entry)
                 self._store.delete(entry.schedule_id)
             else:
                 entry.last_triggered_on = current_day
-                entry.last_dispatched_at = current_day + "T" + localized.strftime("%H:%M:%S")
+                entry.last_dispatched_at = localized.isoformat(timespec="seconds")
                 self._store.replace(entry)
 
     async def catch_up(self, now: datetime | None = None) -> list[str]:
@@ -733,7 +744,14 @@ class ScheduleManager:
                     entry.schedule_id, entry.run_at_date, entry.daily_time_utc,
                     localized.isoformat(),
                 )
-                await self._dispatch_entry(entry, model, mode, provider)
+                chat_id: str | None = None
+                if self._prepare_chat is not None:
+                    chat_id = self._prepare_chat(entry, entry.prompt, model, mode, provider)
+                await self._dispatch_entry(
+                    entry, model, mode, provider, target_chat_id=chat_id
+                )
+                if chat_id:
+                    entry.last_run_chat_id = chat_id
                 entry.last_triggered_on = "done"
                 entry.last_dispatched_at = localized.isoformat(timespec="seconds")
                 self._store.replace(entry)
@@ -760,7 +778,14 @@ class ScheduleManager:
                 last_expected.isoformat(),
                 localized.isoformat(),
             )
-            await self._dispatch_entry(entry, model, mode, provider)
+            chat_id: str | None = None
+            if self._prepare_chat is not None:
+                chat_id = self._prepare_chat(entry, entry.prompt, model, mode, provider)
+            await self._dispatch_entry(
+                entry, model, mode, provider, target_chat_id=chat_id
+            )
+            if chat_id:
+                entry.last_run_chat_id = chat_id
             # Keep the idempotency date tied to the occurrence being caught
             # up. If startup happens before today's target, today's regular
             # tick must still be allowed to run later.

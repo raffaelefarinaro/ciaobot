@@ -6,36 +6,39 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from starlette.applications import Starlette
 from starlette.routing import Mount
 from starlette.testclient import TestClient
 
-from ciao.control_plane import CiaoControlPlane, McpPrincipal
+from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
 from ciao.mcp_server import CiaoMcpService, McpSessionRegistry
 
 
 class _FakeControlPlane:
     def __init__(self, *, mode: str = "auto") -> None:
         self.mode = mode
-        self.add_calls = 0
+        self.create_calls = 0
         self.schedule_values = None
 
     def chat_mode(self, _principal) -> str:
         return self.mode
 
-    def memory_read(self, principal, target: str) -> dict:
+    def context_get(self, principal) -> dict:
         return {
             "ok": True,
             "data": {
                 "chat_id": principal.chat_id,
                 "workspace": principal.workspace,
-                "target": target,
             },
         }
 
-    def memory_add(self, _principal, target: str, text: str) -> dict:
-        self.add_calls += 1
-        return {"ok": True, "data": {"target": target, "text": text}}
+    def system_status_get(self, _principal) -> dict:
+        return {"ok": True, "data": {"server": "ok"}}
+
+    def schedule_create(self, _principal, **values) -> dict:
+        self.create_calls += 1
+        return {"ok": True, "data": values}
 
     def schedule_preview(self, _principal, **values) -> dict:
         self.schedule_values = values
@@ -136,20 +139,25 @@ def test_streamable_http_auth_and_structured_tool_result(tmp_path: Path) -> None
             client,
             token,
             "tools/call",
-            {"name": "memory_read", "arguments": {"target": "user"}},
+            {"name": "context_get", "arguments": {}},
             request_id=2,
         )
 
     assert called.status_code == 200
     result = called.json()["result"]
     assert result["isError"] is False
+    # system_status_get is folded into context_get under the "system" key.
     assert result["structuredContent"] == {
         "ok": True,
-        "data": {"chat_id": "chat-1", "workspace": "personal", "target": "user"},
+        "data": {
+            "chat_id": "chat-1",
+            "workspace": "personal",
+            "system": {"server": "ok"},
+        },
     }
     telemetry = service._telemetry_path.read_text(encoding="utf-8").splitlines()
     record = json.loads(telemetry[-1])
-    assert record["tool"] == "memory_read"
+    assert record["tool"] == "context_get"
     assert record["chat_id"] == "chat-1"
     assert record["provider"] == "claude"
     assert record["status"] == "ok"
@@ -169,14 +177,14 @@ def test_plan_mode_rejects_mutation_before_control_plane_call(tmp_path: Path) ->
             client,
             token,
             "tools/call",
-            {"name": "memory_add", "arguments": {"target": "memory", "text": "fact"}},
+            {"name": "schedule_create", "arguments": {"prompt": "do a thing"}},
         )
 
     assert called.status_code == 200
     payload = called.json()["result"]["structuredContent"]
     assert payload["ok"] is False
     assert payload["error"]["code"] == "plan_mode_read_only"
-    assert control_plane.add_calls == 0
+    assert control_plane.create_calls == 0
 
 
 def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
@@ -184,16 +192,32 @@ def test_catalog_contains_core_pwa_domains(tmp_path: Path) -> None:
     names = set(service.status()["tools"])
 
     assert {
-        "memory_read",
-        "memory_add",
+        "context_get",
         "vault_search",
         "project_create",
         "chat_create",
         "schedule_create",
+        "schedule_action",
         "loop_create",
-        "workspace_file_read",
-        "workspace_health_get",
+        "loop_action",
+        "chat_handover",
+        "adversarial_review",
     } <= names
+
+    # Tools migrated to the ciao CLI or the provider's native tools are gone.
+    assert not (
+        {
+            "memory_read",
+            "memory_add",
+            "workspace_file_read",
+            "workspace_health_get",
+            "skills_sync",
+            "capabilities_get",
+            "chat_new_session",
+            "chat_retry_update",
+        }
+        & names
+    )
 
 
 def test_usage_aggregates_telemetry_by_tool(tmp_path: Path) -> None:
@@ -320,3 +344,173 @@ async def _assert_current_project_action_is_deferred(action: str) -> None:
 def test_current_project_complete_and_delete_are_deferred() -> None:
     asyncio.run(_assert_current_project_action_is_deferred("project_complete"))
     asyncio.run(_assert_current_project_action_is_deferred("project_delete"))
+
+
+class _ChatCreatePcm:
+    def __init__(self) -> None:
+        self.projects = {
+            "project-1": SimpleNamespace(project_id="project-1", name="Ciaobot Improvements", workspace="personal"),
+            "project-2": SimpleNamespace(project_id="project-2", name="Research", workspace="personal"),
+        }
+        self.created: list[dict] = []
+        self.queued: list[tuple[str, str]] = []
+        self.started: list[tuple[str, str]] = []
+
+    def get_project(self, project_id: str):
+        return self.projects.get(project_id)
+
+    def list_projects(self, workspace: str | None = None):
+        return [p for p in self.projects.values() if workspace is None or p.workspace == workspace]
+
+    def create_chat(self, project_id, **kwargs):
+        self.created.append({"project_id": project_id, **kwargs})
+        return SimpleNamespace(
+            chat_id="chat-new",
+            project_id=project_id,
+            to_dict=lambda local=True: {"chat_id": "chat-new", "project_id": project_id},
+        )
+
+    def queue_message(self, chat_id: str, text: str) -> bool:
+        self.queued.append((chat_id, text))
+        return False
+
+    def start_stream(self, chat_id: str, text: str) -> None:
+        self.started.append((chat_id, text))
+
+
+def _chat_create_control_plane(pcm: _ChatCreatePcm) -> CiaoControlPlane:
+    config = SimpleNamespace(workspace=lambda name: object() if name == "personal" else None)
+    return CiaoControlPlane(
+        config,
+        project_chat_manager=pcm,
+        schedule_manager=SimpleNamespace(),
+        loop_manager=SimpleNamespace(),
+    )
+
+
+def _chat_create_principal(**overrides) -> McpPrincipal:
+    defaults = dict(
+        token_id="token-1",
+        chat_id="chat-1",
+        project_id="project-1",
+        workspace="personal",
+        provider="codex",
+    )
+    defaults.update(overrides)
+    return McpPrincipal(**defaults)
+
+
+def test_chat_create_defaults_to_callers_current_project() -> None:
+    pcm = _ChatCreatePcm()
+    control_plane = _chat_create_control_plane(pcm)
+    principal = _chat_create_principal()
+
+    result = control_plane.chat_create(principal, None)
+
+    assert result["data"]["project_id"] == "project-1"
+    assert pcm.created[0]["project_id"] == "project-1"
+
+
+def test_chat_create_resolves_project_by_case_insensitive_name() -> None:
+    pcm = _ChatCreatePcm()
+    control_plane = _chat_create_control_plane(pcm)
+    principal = _chat_create_principal()
+
+    result = control_plane.chat_create(principal, "research")
+
+    assert result["data"]["project_id"] == "project-2"
+
+
+def test_chat_create_rejects_unknown_project_name() -> None:
+    pcm = _ChatCreatePcm()
+    control_plane = _chat_create_control_plane(pcm)
+    principal = _chat_create_principal()
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        control_plane.chat_create(principal, "does-not-exist")
+    assert excinfo.value.code == "project_not_found"
+
+
+def test_chat_create_with_prompt_sends_first_turn_immediately() -> None:
+    pcm = _ChatCreatePcm()
+    control_plane = _chat_create_control_plane(pcm)
+    principal = _chat_create_principal()
+
+    result = control_plane.chat_create(principal, None, prompt="Let's research the new API changes.")
+
+    assert result["data"]["send_status"] == "started"
+    assert pcm.started == [("chat-new", "Let's research the new API changes.")]
+
+
+def test_schedule_create_resolves_project_by_name(tmp_path: Path) -> None:
+    from ciao.schedules import ScheduleManager, ScheduleStore
+
+    pcm = _ChatCreatePcm()
+    dispatched: list[str] = []
+
+    async def dispatch(entry, model, mode, provider, *, target_chat_id=None):
+        dispatched.append(entry.schedule_id)
+
+    schedules = ScheduleManager(store=ScheduleStore(tmp_path), dispatch_to_web=dispatch)
+    config = SimpleNamespace(workspace=lambda name: object() if name == "personal" else None)
+    control_plane = CiaoControlPlane(
+        config,
+        project_chat_manager=pcm,
+        schedule_manager=schedules,
+        loop_manager=SimpleNamespace(),
+    )
+    principal = _chat_create_principal()
+
+    result = control_plane.schedule_create(
+        principal,
+        prompt="Check for new signals.",
+        daily_time="09:00",
+        timezone="UTC",
+        frequency="weekly",
+        project_id="research",
+    )
+
+    assert result["data"]["web_project_id"] == "project-2"
+
+
+def test_adversarial_review_synthesizes_panel_results(monkeypatch) -> None:
+    from ciao.config import CiaoConfig
+
+    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t", "OPENROUTER_API_KEY": "sk-or"})
+    control_plane = CiaoControlPlane(
+        config,
+        project_chat_manager=SimpleNamespace(),
+        schedule_manager=SimpleNamespace(),
+        loop_manager=SimpleNamespace(),
+    )
+    principal = _chat_create_principal(project_id=None, chat_id=None)
+
+    async def fake_oneshot(prompt, *, system_prompt, model, env, timeout_s=120.0, provider="claude", cwd=None):
+        return json.dumps({"verdict": "revise", "confidence": 4, "summary": "solid but needs work", "issues": []})
+
+    monkeypatch.setattr("ciao.critique.run_oneshot", fake_oneshot)
+
+    result = asyncio.run(control_plane.adversarial_review(principal, "Draft artifact text.", models="opus,fable"))
+
+    assert result["ok"] is True
+    assert result["data"]["model_count"] == 2
+    assert result["data"]["ok_count"] == 2
+    assert result["data"]["verdicts"] == {"revise": 2}
+    assert "Adversarial review" in result["data"]["markdown"]
+
+
+def test_adversarial_review_rejects_empty_artifact() -> None:
+    from ciao.config import CiaoConfig
+
+    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
+    control_plane = CiaoControlPlane(
+        config,
+        project_chat_manager=SimpleNamespace(),
+        schedule_manager=SimpleNamespace(),
+        loop_manager=SimpleNamespace(),
+    )
+    principal = _chat_create_principal(project_id=None, chat_id=None)
+
+    with pytest.raises(ControlPlaneError) as excinfo:
+        asyncio.run(control_plane.adversarial_review(principal, "   "))
+    assert excinfo.value.code == "empty_artifact"

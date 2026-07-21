@@ -3,9 +3,9 @@
     <div class="panel-header-summary" @click="togglePanel">
       <span class="chevron">{{ panelOpen ? '\u25BE' : '\u25B8' }}</span>
       <span class="icon">&#128172;</span>
-      <span class="label">Provider consultations</span>
+      <span class="label">Agent handoffs</span>
       <span class="meta">
-        {{ records.length }} consultation{{ records.length === 1 ? '' : 's' }}
+        {{ records.length }} handoff{{ records.length === 1 ? '' : 's' }}
       </span>
     </div>
 
@@ -18,7 +18,7 @@
       >
         <div class="subchat-head" @click="toggleSubchat(sub.subchat_id)">
           <span class="chevron">{{ expanded[sub.subchat_id] ? '\u25BE' : '\u25B8' }}</span>
-          <span class="consultation-route">
+          <span class="handoff-route">
             <span class="owner-lbl">{{ sub.owner.label || sub.owner.provider }}</span>
             <span class="arrow">&leftrightarrow;</span>
             <span class="participant-lbl">{{ sub.participant.label || sub.participant.provider }}</span>
@@ -56,7 +56,7 @@
               class="action-btn close-btn"
               @click.stop="close(sub.subchat_id)"
             >
-              Complete Consultation
+              Complete Handoff
             </button>
           </div>
 
@@ -124,7 +124,7 @@
               </template>
             </div>
             <div v-if="!getEvents(sub.subchat_id).length" class="empty-events">
-              Loading consultation events...
+              Loading handoff events...
             </div>
           </div>
         </div>
@@ -300,7 +300,7 @@ async function resolveQuestion(subchatId: string, requestId: string, answer: str
   user-select: none;
 }
 
-.consultation-route {
+.handoff-route {
   font-weight: 600;
   color: var(--fg);
   display: flex;

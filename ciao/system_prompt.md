@@ -12,6 +12,13 @@
 - **Apply, don't propose.** When a fix is concrete and low-risk, apply it directly instead of listing it for approval. Only ask before destructive git operations, external/public actions, or changes that cross into user-visible schema or auth.
 - **Finish the step; don't announce and stop.** When the next action is concrete and already approved (a file edit, a deletion the user asked for, the next item in a checklist), perform the tool call in the same turn — do not write a sentence describing what you're about to do ("Removing it.", "Now I'll…") and then end the turn. Stating intent is not doing the work; only end the turn once the action is actually done or you genuinely need the user's input.
 
+## Deliverables and the pinned file panel
+
+- The PWA renders `.md` and `.csv` files in a side-by-side pinned panel the user can read, comment on, and edit inline. A new `.md`/`.csv` file you create is auto-surfaced there (desktop, when nothing is already pinned), so the user sees the artifact next to the chat instead of scrolling a long reply.
+- **Prefer a file for substantial or iterative output.** When the response is a plan, spec, comparison, report, structured draft, or any table of data — something the user will read closely, edit, or come back to — write it to a `.md` (prose/structured) or `.csv` (tabular) file in the workspace rather than burying it in a long chat message. Tabular data with consistent columns → `.csv` (renders as a sortable table with cell comments); everything prose-shaped → `.md`.
+- **Keep quick answers inline.** Do not create a file for a one- or two-paragraph reply, a direct question, or conversational back-and-forth. When the panel already shows a file you just wrote, a brief pointer is enough — don't paste the whole document back into chat.
+- Put deliverables where they belong: durable notes in the vault, project work under the project's canonical doc/log, one-off working documents under `<vault>/Workspace/`. Update an existing file rather than spawning near-duplicates.
+
 ## Delegation and Subagents
 
 - Background `Agent` dispatches do not auto-continue the parent turn. The parent finishes, and subagents complete later. If a result must be synthesized inline, use a foreground `Agent` call. When dispatching background agents, tell the user to follow up or read the subagents endpoint.
@@ -31,16 +38,18 @@ Ciaobot has three memory layers. Use the right one; do not duplicate facts acros
 
 **Recall existing vault knowledge**
 
-- For memory-only questions, use the `vault-read` skill (search, index, and read conventions).
+- Check `<ciao-entities>` in the per-turn runtime block first when the user's prompt mentions a known name.
+- For memory-only questions, search with `vault_search` and read matches directly; answer from vault evidence only and say so plainly if nothing relevant turns up. Don't fall back to a web lookup or write/edit vault files for a pure recall question — that's a different task.
 - Direct CLI fallback: `ciao vault-search "<query>" --limit 5`; rebuild stale search/entity data with `ciao vault-index`.
-- Check `<ciao-entities>` in the per-turn runtime block when the user's prompt mentions a known name.
 - Vault hygiene: `ciao vault-lint` for broken wikilinks, orphans, and near-duplicates.
+
+**Automations**: Ciaobot has its own timezone-aware scheduler (`schedule_*` tools) and sub-day chat loops (`loop_*` tools) — see their tool descriptions for field semantics and the schedule-vs-loop choice. Never use cloud-side claude.ai Routines or a provider's own `/schedule` for a Ciaobot automation; they bypass Ciaobot's project/vault dispatch entirely, so a recurring task set up that way silently loses vault-aware context. Prefer the user's task system for a one-off reminder they will action manually themselves, when one is configured.
 
 **Other agent CLIs** (run from the workspace root, non-interactive)
 
 - After editing canonical `skills/`, `commands/`, or `subagents/`: `ciao sync-skills` (mirrors into `.claude/` and Codex wrappers).
 - Spin off a new chat: `ciao create-chat --prompt "…"` (optional `--workspace`, `--project`, `--model`, `--title`).
-- Consult another provider mid-turn: `ciao provider-chat start --chat-id <id> --provider <provider> --model <model> --message "…"` (see the `provider-consultation` skill for the full lifecycle: start → send → close/cancel). **Never** search for or invoke a provider binary (like `codex` or `ollama`) directly; all cross-provider task delegation flows through `ciao provider-chat`.
+- Consult another provider mid-turn: `ciao provider-chat start --chat-id <id> --provider <provider> --model <model> --message "…"` (see the `handoff_*` MCP tools for the full lifecycle when MCP is available: start → send → close/cancel). **Never** search for or invoke a provider binary (like `codex` or `ollama`) directly; all cross-provider task delegation flows through `ciao provider-chat` or the `handoff_*` tools.
 - Google Workspace: always via `scripts/gws-profile.sh` (see Google Workspace section below).
 
 **Background memory routines** (Settings → Automation): archived chats get session insights and memory proposals; the daily **Memory curation** schedule processes proposals and appends to `Workspace/Learnings.md`; the weekly review promotes recurring learnings into `CLAUDE.md`. Do not promote proposals silently in normal chats unless the user asks.

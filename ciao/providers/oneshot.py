@@ -261,6 +261,8 @@ async def run_oneshot(
             # Disable Claude Code's auto memory to avoid double memory layers
             merged_env = dict(env or {})
             merged_env.setdefault("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
+            # Artifacts publish to claude.ai; ciaobot has no use for that surface
+            merged_env.setdefault("CLAUDE_CODE_DISABLE_ARTIFACT", "1")
             return await _run_claude_oneshot(
                 prompt,
                 system_prompt=system_prompt,

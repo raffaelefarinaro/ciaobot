@@ -71,7 +71,11 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
     await provider._ensure_connected(request)
 
     options = captured["options"]
-    assert options.strict_mcp_config is True
+    # Strict mode must NOT be forced on the chat path: it restricts the CLI to
+    # only the ciaobot server and suppresses the account's claude.ai connector
+    # MCPs (mcp__claude_ai_*). Connectors stay loaded and are gated per-workspace
+    # by the disallowed_tools denylist instead. The ciaobot server is still injected.
+    assert options.strict_mcp_config is False
     assert options.mcp_servers == {
         "ciaobot": {
             "type": "http",
@@ -387,11 +391,14 @@ def test_claude_convert_stream_event_threads_parent_tool_use_id(
     assert thinking.parent_tool_use_id == parent_id
 
 
-def test_claude_rate_limit_event_emits_status_and_caches_quota(
+def test_claude_rate_limit_event_suppresses_status_and_caches_quota(
     claude_provider: ClaudeProvider,
 ) -> None:
     from claude_agent_sdk import RateLimitEvent, RateLimitInfo, ResultMessage
 
+    # An "allowed_warning" tick is usage telemetry, not conversation: it emits
+    # no chat-facing status event, but its quota is still cached for the
+    # Settings rate-limit card and the ResultMessage payload.
     events = claude_provider._convert_message(
         RateLimitEvent(
             rate_limit_info=RateLimitInfo(
@@ -405,8 +412,7 @@ def test_claude_rate_limit_event_emits_status_and_caches_quota(
         )
     )
 
-    assert len(events) == 1
-    assert events[0].status == "Rate limit: allowed_warning (five_hour) 91.0% used"
+    assert events == []
 
     result_events = claude_provider._convert_message(
         ResultMessage(
@@ -459,6 +465,67 @@ def test_claude_convert_result_message(
     assert result.result == "All done."
     assert result.session_id == "sess-42"
     assert result.is_error is False
+
+
+def test_claude_error_result_gets_host_annotation(
+    claude_provider: ClaudeProvider,
+) -> None:
+    """A hostless connection error gains the resolved endpoint host (#162)."""
+    from claude_agent_sdk import ResultMessage
+
+    claude_provider._api_host = "api.anthropic.com"
+    msg = ResultMessage(
+        subtype="result",
+        duration_ms=1000,
+        duration_api_ms=900,
+        is_error=True,
+        num_turns=1,
+        session_id="sess-enotfound",
+        result="API Error: Unable to connect to API (ENOTFOUND)",
+    )
+    result = claude_provider._convert_message(msg)[0]
+    assert result.is_error is True
+    assert "(host: api.anthropic.com)" in result.result
+
+
+def test_claude_error_result_annotation_is_selective(
+    claude_provider: ClaudeProvider,
+) -> None:
+    """Non-connection errors and success results pass through untouched (#162)."""
+    from claude_agent_sdk import ResultMessage
+
+    from ciao.providers.claude import _annotate_connection_host, _resolve_api_host
+
+    claude_provider._api_host = "api.anthropic.com"
+    # A non-connection error is not annotated.
+    other = claude_provider._convert_message(
+        ResultMessage(
+            subtype="result",
+            duration_ms=1,
+            duration_api_ms=1,
+            is_error=True,
+            num_turns=1,
+            session_id="s",
+            result="Model refused the request.",
+        )
+    )[0]
+    assert "host:" not in other.result
+
+    # Already naming the host: no double-annotation.
+    assert (
+        _annotate_connection_host(
+            "getaddrinfo ENOTFOUND api.anthropic.com", "api.anthropic.com"
+        )
+        == "getaddrinfo ENOTFOUND api.anthropic.com"
+    )
+    # A per-turn ANTHROPIC_BASE_URL override (Ollama/OpenRouter) wins.
+    assert (
+        _resolve_api_host({"ANTHROPIC_BASE_URL": "https://openrouter.ai/api/v1"})
+        == "openrouter.ai"
+    )
+    # Falls back to a real hostname (process env or Anthropic's default),
+    # never an empty string.
+    assert _resolve_api_host({})
 
 
 @pytest.mark.asyncio
@@ -677,5 +744,14 @@ def test_claude_convert_system_message_suppresses_allowed_rate_limit(
             data={"status": "Rate limit: allowed_warning (five_hour) 90% used"},
         )
     )
-    assert len(events2) == 1
-    assert events2[0].status == "Rate limit: allowed_warning (five_hour) 90% used"
+    assert len(events2) == 0
+
+    # A non-allowed rate-limit state still surfaces so the user is told.
+    events3 = claude_provider._convert_message(
+        SystemMessage(
+            subtype="status",
+            data={"status": "Rate limit exceeded (five_hour)"},
+        )
+    )
+    assert len(events3) == 1
+    assert events3[0].status == "Rate limit exceeded (five_hour)"

@@ -453,7 +453,9 @@ onBeforeUnmount(() => {
 
 .model-selector__popover {
   position: absolute;
-  z-index: 100;
+  /* Sit above header controls (archive button, etc.) so the open menu is a
+     clean overlay instead of tangling with the icons next to the trigger. */
+  z-index: 300;
   min-width: 320px;
   max-width: min(480px, calc(100vw - 24px));
   max-height: min(420px, calc(100vh - var(--safe-top) - var(--safe-bottom) - 48px));

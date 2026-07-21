@@ -44,6 +44,65 @@ export function formatTokenUsage(usage?: Record<string, any>): string {
   return `Tokens ${parts.join(' · ')}`
 }
 
+/** One ordered piece of a rendered turn: either an Activity trace (grouped
+ *  tool calls / thinking / commentary) or a standalone assistant answer bubble. */
+export type TurnPart =
+  | { kind: 'trace'; steps: ChatMessage[] }
+  | { kind: 'assistant'; msg: ChatMessage }
+
+/** True when a buffered step is substantive assistant answer text that should
+ *  render as its own bubble — not an Activity marker (`_activity`/`_thinking`/
+ *  `_filecard`, all emitted with role `system`) and not Codex `commentary`
+ *  narration (which stays folded into the reasoning trace). */
+export function isAnswerBubble(
+  m: Pick<ChatMessage, 'role' | 'tool_name' | 'phase'>,
+): boolean {
+  return (
+    m.role === 'assistant'
+    && m.tool_name !== '_activity'
+    && m.tool_name !== '_thinking'
+    && m.tool_name !== '_filecard'
+    && m.phase !== 'commentary'
+  )
+}
+
+/** Split one turn's buffered steps into ordered parts, EXCLUDING the final
+ *  answer bubble at `finalIdx` (the caller appends that itself, with the
+ *  turn's outputs/subchats attached).
+ *
+ *  Every assistant text block renders as its own message bubble, in order, and
+ *  the tool/thinking steps that ran between two consecutive text blocks group
+ *  into one Activity trace bubble sitting between them — so an agentic turn
+ *  reads as "message → what happened next → message" rather than one giant
+ *  collapsed trace with the real messages buried inside. Bookkeeping tool calls
+ *  the model ran AFTER its final answer (`buffer` indices past `finalIdx`) fold
+ *  into the trace that precedes the reply, never a dangling block below it.
+ *
+ *  Pass `finalIdx < 0` when the turn produced no answer bubble (in progress /
+ *  interrupted / tools only): every step then groups into traces. */
+export function buildTurnParts(buffer: ChatMessage[], finalIdx: number): TurnPart[] {
+  const parts: TurnPart[] = []
+  let steps: ChatMessage[] = []
+  const flush = () => {
+    if (steps.length) {
+      parts.push({ kind: 'trace', steps })
+      steps = []
+    }
+  }
+  for (let k = 0; k < buffer.length; k++) {
+    if (k === finalIdx) continue
+    const m = buffer[k]
+    if (isAnswerBubble(m)) {
+      flush()
+      parts.push({ kind: 'assistant', msg: m })
+    } else {
+      steps.push(m)
+    }
+  }
+  flush()
+  return parts
+}
+
 export function traceSummaryMeta(steps: ChatMessage[], subs?: SubagentTranscript[]): string {
   let toolCount = 0
   let textCount = 0
@@ -69,6 +128,69 @@ export function traceSummaryMeta(steps: ChatMessage[], subs?: SubagentTranscript
     parts.push(`${subs.length} subagent${subs.length === 1 ? '' : 's'}`)
   }
   return parts.join(' · ') || 'steps'
+}
+
+export interface MetaPart {
+  key: string
+  text: string
+  shortText?: string
+  isImportant?: boolean
+}
+
+export function traceSummaryMetaParts(steps: ChatMessage[], subs?: SubagentTranscript[]): MetaPart[] {
+  let toolCount = 0
+  let textCount = 0
+  let thinkingCount = 0
+  let fileCount = 0
+  for (const s of steps) {
+    if (s.tool_name === '_activity') {
+      toolCount += s.content.split('\n').filter(Boolean).length
+    } else if (s.tool_name === '_thinking') {
+      thinkingCount += 1
+    } else if (s.tool_name === '_filecard') {
+      fileCount += 1
+    } else if (s.role === 'assistant') {
+      textCount += 1
+    }
+  }
+  const parts: MetaPart[] = []
+  if (thinkingCount) {
+    parts.push({
+      key: 'thoughts',
+      text: `${thinkingCount} thought${thinkingCount === 1 ? '' : 's'}`,
+      shortText: `${thinkingCount} th`
+    })
+  }
+  if (textCount) {
+    parts.push({
+      key: 'notes',
+      text: `${textCount} note${textCount === 1 ? '' : 's'}`,
+      shortText: `${textCount} n`
+    })
+  }
+  if (toolCount) {
+    parts.push({
+      key: 'tools',
+      text: `${toolCount} tool call${toolCount === 1 ? '' : 's'}`,
+      shortText: `${toolCount} tool${toolCount === 1 ? '' : 's'}`,
+      isImportant: true
+    })
+  }
+  if (fileCount) {
+    parts.push({
+      key: 'files',
+      text: `${fileCount} file${fileCount === 1 ? '' : 's'}`,
+      shortText: `${fileCount} f`
+    })
+  }
+  if (subs?.length) {
+    parts.push({
+      key: 'subagents',
+      text: `${subs.length} subagent${subs.length === 1 ? '' : 's'}`,
+      shortText: `${subs.length} sub${subs.length === 1 ? '' : 's'}`
+    })
+  }
+  return parts
 }
 
 

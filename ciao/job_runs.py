@@ -84,6 +84,8 @@ REGISTRY: tuple[JobSpec, ...] = (
             "Names a chat from its first message."),
     JobSpec("insights", "Session insights", "content",
             "Extracts durable insights from an archived session transcript."),
+    JobSpec("insights_backfill", "Insights backfill", "system",
+            "Backfills Session Insights sections into older archived chats."),
     JobSpec("memory_proposals", "Memory proposals", "content",
             "Proposes durable facts from a session's insights."),
     JobSpec("trajectory", "Trajectory capture", "content",
@@ -106,6 +108,8 @@ REGISTRY: tuple[JobSpec, ...] = (
             "Pushes the per-device working branch for backup."),
     JobSpec("gws_health", "Google Workspace token health", "system",
             "Pings each configured Google profile's token and alerts on revocation."),
+    JobSpec("backfill_insights", "Insights backfill", "system",
+            "Backfills missing session insights on server startup."),
 )
 
 # StartupTracker phase name -> registry job id (phases not listed are skipped,
@@ -114,6 +118,7 @@ STARTUP_PHASE_JOBS: dict[str, str] = {
     "sync_workspace": "startup_sync",
     "refresh_vault_index": "vault_index",
     "update_skills": "skills_update",
+    "backfill_insights": "backfill_insights",
 }
 
 

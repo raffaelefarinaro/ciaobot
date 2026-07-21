@@ -1621,6 +1621,20 @@ async def create_project(request: Request) -> JSONResponse:
     return JSONResponse(project.to_dict(), status_code=201)
 
 
+async def reorder_projects(request: Request) -> JSONResponse:
+    """Persist a drag-reordered project sequence for one workspace."""
+    pcm = request.app.state.project_chat_manager
+    body = await request.json()
+    workspace = body.get("workspace") or ""
+    ordered_ids = body.get("order")
+    if not workspace or not isinstance(ordered_ids, list):
+        return JSONResponse(
+            {"error": "workspace and order[] are required"}, status_code=400
+        )
+    projects = pcm.reorder_projects(workspace, [str(pid) for pid in ordered_ids])
+    return JSONResponse([p.to_dict() for p in projects])
+
+
 async def project_detail(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     project_id = request.path_params["project_id"]
@@ -2472,11 +2486,22 @@ async def chat_messages(request: Request) -> JSONResponse:
         if thread is not None:
             rendered = _render_codex_thread(thread, chat)
             if rendered:
+                current = pcm._transcripts.current_messages(
+                    ChatContext.for_web(chat_id), "codex"
+                )
+                if current and current[-1].get("role") == "assistant" and current[-1].get("is_error"):
+                    has_error_in_rendered = False
+                    for row in reversed(rendered):
+                        if row.get("role") == "assistant":
+                            if row.get("is_error") or row.get("content") == current[-1].get("content"):
+                                has_error_in_rendered = True
+                            break
+                    if not has_error_in_rendered:
+                        err_msg = dict(current[-1])
+                        rendered.append(err_msg)
                 _overlay_codex_transcript_metadata(
                     rendered,
-                    pcm._transcripts.current_messages(
-                        ChatContext.for_web(chat_id), "codex"
-                    ),
+                    current,
                 )
                 return JSONResponse(handover_messages + rendered)
         current = pcm._transcripts.current_messages(
@@ -2492,16 +2517,26 @@ async def chat_messages(request: Request) -> JSONResponse:
         return JSONResponse({"error": "SDK not available"}, status_code=500)
 
     result: list[dict] = []
-    try:
-        msgs = get_session_messages(
-            chat.session_id,
-            directory=str(config.workspace_root),
-        )
-    except (FileNotFoundError, ValueError):
-        # Session file doesn't exist on this machine (remote chat) or was
-        # deleted after archiving. If the chat is archived and has a transcript
-        # path, render the durable markdown record instead.
-        msgs = None
+    # A chat can rotate through more than one SDK session file within the
+    # same conversation (autocompact, or a resume-failure fallback) — each
+    # file only holds the turns written after it started. Walk the full
+    # lineage (oldest first) so history renders continuously across the
+    # rotation instead of only showing the newest segment.
+    session_ids = [*chat.previous_session_ids, chat.session_id]
+    msgs: list | None = None
+    for sid in session_ids:
+        if not sid:
+            continue
+        try:
+            segment = get_session_messages(sid, directory=str(config.workspace_root))
+        except (FileNotFoundError, ValueError):
+            # This segment's file doesn't exist on this machine (remote chat,
+            # or pruned after rotating away). Skip it rather than blanking
+            # the whole history — the other segments may still be intact.
+            continue
+        if msgs is None:
+            msgs = []
+        msgs.extend(segment)
 
     if msgs is None:
         if chat.archived and chat.archive_path:
@@ -2619,8 +2654,11 @@ async def chat_messages(request: Request) -> JSONResponse:
         content = content.strip()
         if not content:
             continue
-        # Drop allowed rate limit status events so they do not pollute the chat history.
-        if m.type == "system" and "Rate limit: allowed" in content and "allowed_warning" not in content:
+        # Drop "allowed" rate limit status events — both the plain allowance
+        # pings and the escalating "allowed_warning … NN% used" ticks — so
+        # transient usage telemetry does not pollute the chat history. A hard
+        # "Rate limit exceeded" carries no "allowed" and still surfaces.
+        if m.type == "system" and "Rate limit: allowed" in content:
             continue
         # Drop SDK-injected control slash commands (/model, /mode). Skipping
         # without incrementing user_idx keeps chat.user_turn_images aligned
@@ -3584,6 +3622,26 @@ async def list_automation(request: Request) -> JSONResponse:
     return JSONResponse(job_runs.automation_summary())
 
 
+async def trigger_backfill_insights(request: Request) -> JSONResponse:
+    """Trigger the insights backfill process in the background."""
+    import asyncio
+    from ciao.job_runs import track
+    from ciao.insights import backfill_insights_task
+
+    config = request.app.state.config
+
+    async def _run_backfill():
+        # backfill_insights_task owns discovery, the concurrency semaphore, and
+        # per-archive logging; it raises only on a fatal error, which track()
+        # records and re-raises. (The old scripts.backfill_insights._worker /
+        # _discover_archives helpers were folded into this task in d2690d1.)
+        async with track("backfill_insights", "Insights backfill", category="system"):
+            await backfill_insights_task(config, mode="both")
+
+    asyncio.create_task(_run_backfill())
+    return JSONResponse({"status": "started"}, status_code=202)
+
+
 async def create_schedule(request: Request) -> JSONResponse:
     sm = request.app.state.schedule_manager
     state = request.app.state.state_store
@@ -3855,6 +3913,19 @@ async def loop_detail(request: Request) -> JSONResponse:
     lm.replace(entry)
     if "running" in body:
         if body["running"]:
+            chat = pcm.get_chat(entry.web_chat_id)
+            if chat is not None and chat.archived:
+                # The target chat was archived (e.g. by an auto-archive
+                # policy) while the loop was stopped. Resuming into a dead
+                # chat would just auto-stop again on the next tick, so fork
+                # a fresh chat from the archived transcript and re-point the
+                # loop at it instead.
+                try:
+                    new_chat = pcm.continue_archived_chat(entry.web_chat_id)
+                except ValueError as exc:
+                    return JSONResponse({"error": str(exc)}, status_code=409)
+                entry.web_chat_id = new_chat.chat_id
+                lm.replace(entry)
             lm.start_loop(loop_id)
         else:
             lm.stop_loop(loop_id)

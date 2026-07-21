@@ -511,3 +511,284 @@ async def test_connection_error_exception_marks_turn_for_fast_retry(tmp_path: Pa
     assert updated.retry_prompt == "do the thing"
     assert updated.retry_interval_seconds == 30
     pcm.stop_chat_retry(chat.chat_id)
+
+
+def test_connection_drop_banner_classified_as_connection_error() -> None:
+    """The CLI mid-response drop banner must be a retryable connection error."""
+    from ciao.web.project_chats import (
+        _is_retryable_connection_error,
+        _is_retryable_quota_error,
+        _is_billing_or_spend_limit_error,
+    )
+
+    banner = (
+        "API Error: Connection closed mid-response. The response above may "
+        "be incomplete."
+    )
+    assert _is_retryable_connection_error(banner) is True
+    # It is NOT a quota error — must not be routed to the hourly retry path.
+    assert _is_retryable_quota_error(banner) is False
+
+    # Out of credits / spend limits must be classified as retryable quota errors
+    credits_err = "Title generation via codex gpt-5.6-terra failed: Your workspace is out of credits. Ask your workspace owner to refill in order to continue."
+    spend_limit_err = "You've hit your org's monthly spend limit"
+    rate_limit_err = "API Error: Request rejected (429): rate limit exceeded"
+    assert _is_retryable_quota_error(credits_err) is True
+    assert _is_retryable_quota_error(spend_limit_err) is True
+    assert _is_retryable_quota_error(rate_limit_err) is True
+
+    assert _is_billing_or_spend_limit_error(credits_err) is True
+    assert _is_billing_or_spend_limit_error(spend_limit_err) is True
+    assert _is_billing_or_spend_limit_error(rate_limit_err) is False
+
+
+
+def test_provider_detects_connection_drop_text() -> None:
+    from ciao.providers.claude import _is_connection_drop_text
+
+    assert _is_connection_drop_text(
+        "API Error: Connection closed mid-response. The response above may "
+        "be incomplete."
+    ) is True
+    assert _is_connection_drop_text("here is a normal answer") is False
+
+
+async def test_midresponse_drop_resumes_with_continue_not_replay(tmp_path: Path) -> None:
+    """A drop AFTER streaming output resumes with "continue", not the prompt.
+
+    Replaying the original prompt could re-run tool calls the partial turn
+    already executed, so with provider progress the retry must ask the
+    resumed session to continue instead. It must also fire on the fast (30s)
+    interval and preserve any queued follow-ups.
+    """
+    from ciao.models import AssistantTextDelta
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    # A mid-response drop implies a live session to resume. In production
+    # _drive_stream persists this from the event; the fake here bypasses it.
+    chat.session_id = "sess-drop"
+    pcm._save()
+
+    async def fake_stream_chat(chat_id, prompt, images=None):
+        # Stream some output first so had_provider_progress flips True.
+        yield AssistantTextDelta(type="assistant", text="Working on it… ")
+        yield ResultEvent(
+            type="result",
+            result=(
+                "API Error: Connection closed mid-response. The response "
+                "above may be incomplete."
+            ),
+            session_id="sess-drop",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "do the big multi-step task")
+    # Queue a follow-up while the turn is (about to be) in flight.
+    stream.enqueue("and then summarise it", entry_id="q-follow")
+    await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status == "pending"
+    # Resume-continue, NOT a replay of the original prompt.
+    assert updated.retry_prompt == "continue"
+    assert updated.retry_interval_seconds == 30
+    # The queued follow-up survived the errored turn (parked for the retry).
+    assert [e.get("text") for e in updated.pending_queue] == ["and then summarise it"]
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_quota_error_with_progress_resumes_continue(tmp_path: Path) -> None:
+    """A usage-limit error that lands mid-turn (after output streamed) must
+    resume the live session with "continue" rather than replaying the prompt,
+    which would re-run any tool calls the partial turn already executed."""
+    from ciao.models import AssistantTextDelta
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    # A mid-turn limit implies a live session to resume (see the drop test).
+    chat.session_id = "sess-live"
+    pcm._save()
+
+    async def fake_stream_chat(chat_id, prompt, images=None):
+        # A tool ran / text streamed before the limit hit → had progress.
+        yield AssistantTextDelta(type="assistant", text="sending the email… ")
+        yield ResultEvent(
+            type="result",
+            result="API Error: Request rejected (429): reached your session usage limit",
+            session_id="sess-live",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "send the email then reply")
+    await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status == "pending"
+    # Resume-continue, NOT a replay that would re-send the email.
+    assert updated.retry_prompt == "continue"
+    # Still gated by the hourly quota interval, not the fast connection one.
+    assert updated.retry_interval_seconds == 3600
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_midresponse_drop_without_session_falls_back_to_replay(tmp_path: Path) -> None:
+    """With progress but no session to resume, replay the prompt, not "continue"."""
+    from ciao.models import AssistantTextDelta
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    # No session_id set — nothing to resume.
+
+    async def fake_stream_chat(chat_id, prompt, images=None):
+        yield AssistantTextDelta(type="assistant", text="starting… ")
+        yield ResultEvent(
+            type="result",
+            result="API Error: Connection closed mid-response.",
+            session_id="",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "do the thing")
+    await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status == "pending"
+    assert updated.retry_prompt == "do the thing"
+    assert updated.retry_interval_seconds == 30
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_midresponse_drop_stops_after_retry_cap(tmp_path: Path) -> None:
+    """Once the connection-drop retry cap is hit, no further retry is armed."""
+    from ciao.models import AssistantTextDelta
+    from ciao.web.project_chats import _MAX_CONNECTION_DROP_RETRIES
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    # Simulate a live session plus an already-exhausted retry budget.
+    chat.session_id = "sess-drop"
+    chat.retry_attempts = _MAX_CONNECTION_DROP_RETRIES
+    pcm._save()
+
+    async def fake_stream_chat(chat_id, prompt, images=None):
+        yield AssistantTextDelta(type="assistant", text="partial… ")
+        yield ResultEvent(
+            type="result",
+            result="API Error: Connection closed mid-response.",
+            session_id="sess-drop",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "do the thing")
+    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    # No retry armed past the cap.
+    assert updated.retry_status != "pending"
+    assert not any(
+        e.get("type") == "chat_retry" and e.get("status") == "pending" for e in events
+    )
+
+
+async def test_billing_spend_limit_error_with_progress_arms_retry(tmp_path: Path) -> None:
+    """Billing and spend limit errors must trigger auto-retry even after provider progress."""
+    from ciao.models import AssistantTextDelta
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+
+    async def fake_stream_chat(chat_id, prompt, images=None):
+        yield AssistantTextDelta(type="assistant", text="some progress... ")
+        yield ResultEvent(
+            type="result",
+            result="You've hit your org's monthly spend limit · run /usage-credits to ask your admin for a higher limit",
+            session_id="sess-billing",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "do the thing")
+    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status == "pending"
+    assert updated.retry_prompt == "do the thing"
+    assert any(
+        e.get("type") == "chat_retry" and e.get("status") == "pending" for e in events
+    )
+    pcm.stop_chat_retry(chat.chat_id)
+
+
+async def test_rate_limit_error_with_progress_does_not_arm_retry(tmp_path: Path) -> None:
+    """Rate limit errors must NOT trigger auto-retry after provider progress."""
+    from ciao.models import AssistantTextDelta
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+
+    async def fake_stream_chat(chat_id, prompt, images=None):
+        yield AssistantTextDelta(type="assistant", text="some progress... ")
+        yield ResultEvent(
+            type="result",
+            result="API Error: Request rejected (429): rate limit exceeded",
+            session_id="sess-rate",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "do the thing")
+    events = await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status != "pending"
+    assert not any(
+        e.get("type") == "chat_retry" and e.get("status") == "pending" for e in events
+    )
+

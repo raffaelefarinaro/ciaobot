@@ -31,6 +31,54 @@ from ciao.models import (
 logger = logging.getLogger(__name__)
 
 
+# Shared by ChatStream's live `_pending` list and ProjectChatManager's
+# persisted `chat.pending_queue` (the parked queue used once a stream tears
+# down mid-error/question-pause/retry) so reorder/edit/remove behave
+# identically whether or not a live stream exists for the chat.
+def reorder_pending_list(
+    items: list[dict], entry_id: str, before_id: str | None = None
+) -> bool:
+    """Move the entry with ``entry_id`` just before ``before_id`` in ``items``.
+
+    If ``before_id`` is None, move to the end. Returns True on success.
+    """
+    src_idx = next((i for i, p in enumerate(items) if p.get("id") == entry_id), -1)
+    if src_idx == -1:
+        return False
+    item = items.pop(src_idx)
+    if before_id is None:
+        items.append(item)
+        return True
+    dst_idx = next((i for i, p in enumerate(items) if p.get("id") == before_id), -1)
+    if dst_idx == -1:
+        # Target vanished; keep the item at the end rather than dropping it.
+        items.append(item)
+        return False
+    items.insert(dst_idx, item)
+    return True
+
+
+def edit_pending_list(
+    items: list[dict], entry_id: str, text: str, images: list[str] | None = None
+) -> bool:
+    """Update text and images of the entry with ``entry_id`` in ``items``."""
+    for item in items:
+        if item.get("id") == entry_id:
+            item["text"] = text
+            item["images"] = list(images or [])
+            return True
+    return False
+
+
+def remove_pending_list(items: list[dict], entry_id: str) -> bool:
+    """Remove the entry with ``entry_id`` from ``items``."""
+    for i, item in enumerate(items):
+        if item.get("id") == entry_id:
+            items.pop(i)
+            return True
+    return False
+
+
 # Heartbeat cadence for an idle stream subscription. A background tool (e.g. a
 # dynamic workflow or a long Bash) can leave the parent turn with no events to
 # publish for tens of seconds. Without traffic the per-chat WebSocket goes
@@ -61,6 +109,10 @@ _FILE_TOUCH_TOOLS: dict[str, tuple[str, ...]] = {
     "generateImage": ("ImageName", "image_path", "path", "file_path"),
     "write_file": ("path", "file_path"),
     "writeFile": ("path", "file_path"),
+    # The model's deliberate "show this to the user" signal (ciao/mcp_server.py
+    # file_surface), not a mutation — reuses the file-touch pipeline so it gets
+    # the same inline card, with a distinct action the frontend auto-pins on.
+    "mcp__ciaobot__file_surface": ("path",),
 }
 
 # Shell tools whose command text may create or overwrite files. Parsed
@@ -81,6 +133,7 @@ _FILE_TOUCH_ACTIONS: dict[str, str] = {
     "generateImage": "generated",
     "write_file": "written",
     "writeFile": "written",
+    "mcp__ciaobot__file_surface": "surfaced",
 }
 
 _SHELL_REDIRECT_RE = re.compile(
@@ -444,38 +497,15 @@ class ChatStream:
 
         If ``before_id`` is None, move to the end. Returns True on success.
         """
-        items = self._pending
-        src_idx = next((i for i, p in enumerate(items) if p.get("id") == entry_id), -1)
-        if src_idx == -1:
-            return False
-        item = items.pop(src_idx)
-        if before_id is None:
-            items.append(item)
-            return True
-        dst_idx = next((i for i, p in enumerate(items) if p.get("id") == before_id), -1)
-        if dst_idx == -1:
-            # Target vanished; keep the item at the end rather than dropping it.
-            items.append(item)
-            return False
-        items.insert(dst_idx, item)
-        return True
+        return reorder_pending_list(self._pending, entry_id, before_id)
 
     def edit_pending(self, entry_id: str, text: str, images: list[str] | None = None) -> bool:
         """Update text and images of the queued entry with ``entry_id``."""
-        for item in self._pending:
-            if item.get("id") == entry_id:
-                item["text"] = text
-                item["images"] = list(images or [])
-                return True
-        return False
+        return edit_pending_list(self._pending, entry_id, text, images)
 
     def remove_pending(self, entry_id: str) -> bool:
         """Remove the queued entry with ``entry_id``."""
-        for i, item in enumerate(self._pending):
-            if item.get("id") == entry_id:
-                self._pending.pop(i)
-                return True
-        return False
+        return remove_pending_list(self._pending, entry_id)
 
     @property
     def pending(self) -> list[dict]:

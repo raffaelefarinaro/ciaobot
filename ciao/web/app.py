@@ -93,6 +93,7 @@ from ciao.web.routes_api import (
     setup_mkdir_endpoint,
     setup_status_endpoint,
     list_automation,
+    trigger_backfill_insights,
     list_completed_projects,
     list_projects,
     list_loops,
@@ -101,6 +102,7 @@ from ciao.web.routes_api import (
     project_chats,
     project_complete,
     project_detail,
+    reorder_projects,
     package_changelog_endpoint,
     package_status_endpoint,
     package_update_endpoint,
@@ -173,6 +175,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         # Literal `completed` paths must precede the {project_id} pattern so
         # they aren't captured as a project id.
         Route("/api/projects/completed", list_completed_projects, methods=["GET"]),
+        Route("/api/projects/reorder", reorder_projects, methods=["POST"]),
         Route("/api/projects/completed/restore", project_restore, methods=["POST"]),
         Route("/api/projects/{project_id}", project_detail, methods=["PATCH", "DELETE"]),
         Route("/api/projects/{project_id}/complete", project_complete, methods=["POST"]),
@@ -235,6 +238,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/loops/{loop_id}", loop_detail, methods=["PATCH", "DELETE"]),
         # Automation status (read-only) — Settings → Automation page
         Route("/api/automation", list_automation, methods=["GET"]),
+        Route("/api/automation/backfill-insights", trigger_backfill_insights, methods=["POST"]),
         # Runtime issue report (dev mode only) — Settings → Debug card
         Route("/api/debug/issues", debug_issues, methods=["GET"]),
         # Slash commands (project + user level)
