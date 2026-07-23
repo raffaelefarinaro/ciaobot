@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { api } from '../lib/api'
 
 // File viewer for workspace files. Opened by clicking a linkified file path
@@ -15,7 +15,7 @@ import { api } from '../lib/api'
 // and snapshot them via the active chat's history.
 
 export type FileViewerKind = 'text' | 'image' | 'excalidraw' | 'pdf'
-export type FileViewerTab = 'preview' | 'history' | 'diff'
+export type FileViewerTab = 'preview' | 'history' | 'diff' | 'backlinks'
 
 export interface SnapshotMeta {
   seq: number
@@ -188,11 +188,19 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     loadToken.value++
   }
 
-  function close(): void {
+  const isDirty = computed(() => editing.value && editBuffer.value !== content.value)
+
+  function close(force = false): boolean {
+    if (!force && isDirty.value) {
+      if (!confirm('You have unsaved file changes. Are you sure you want to close?')) {
+        return false
+      }
+    }
     isOpen.value = false
     path.value = ''
     chatId.value = ''
     _reset()
+    return true
   }
 
   // ── Tabs / history / diff ──────────────────────────────────────────────
@@ -379,6 +387,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     diffLoading,
     diffError,
     editing,
+    isDirty,
     editBuffer,
     editSaving,
     editError,

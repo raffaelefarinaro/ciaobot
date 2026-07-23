@@ -9,7 +9,7 @@ from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
-from starlette.responses import FileResponse
+from starlette.responses import FileResponse, Response
 
 from ciao.package_version import make_cached_package_status
 from ciao.mcp_server import mcp_status_endpoint, mcp_usage_endpoint
@@ -124,6 +124,7 @@ from ciao.web.routes_api import (
     open_chat_endpoint,
     status_endpoint,
     upsert_workspace_setting,
+    vault_backlinks,
     vault_markdown_paths,
     workspace_binary,
     workspace_file,
@@ -144,17 +145,39 @@ from ciao.web.security import SecurityHeadersMiddleware
 STATIC_DIR = Path(__file__).parent / "static"
 
 
+# Hashed build assets never change under a given name, so cache them forever;
+# the entry point and service worker must never be cached or clients pin a
+# stale build.
+_IMMUTABLE_CACHE = "public, max-age=31536000, immutable"
+_NO_CACHE = "no-cache, no-store, must-revalidate"
+
+
+class CacheControlStaticFiles(StaticFiles):
+    """StaticFiles subclass that sets long-term caching for hashed assets."""
+
+    async def get_response(self, path: str, scope) -> Response:
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = _IMMUTABLE_CACHE
+        return response
+
+
 def _spa_catchall(request):
-    """Serve index.html for all unmatched routes (SPA client-side routing)."""
+    """Serve index.html for unmatched routes (SPA client-side routing).
+
+    Hashed ``/assets`` are served (and cached) by the mount registered before
+    this catchall; here we only guard the never-cache entry points.
+    """
     requested = request.path_params.get("path", "")
     if requested:
         candidate = STATIC_DIR / requested
         if candidate.is_file():
-            return FileResponse(candidate)
+            headers = {"Cache-Control": _NO_CACHE} if requested in ("sw.js", "manifest.json") else {}
+            return FileResponse(candidate, headers=headers)
     index = STATIC_DIR / "index.html"
+    headers = {"Cache-Control": _NO_CACHE}
     if index.exists():
-        return FileResponse(index)
-    return FileResponse(STATIC_DIR / "index.html", status_code=404)
+        return FileResponse(index, headers=headers)
+    return FileResponse(STATIC_DIR / "index.html", status_code=404, headers=headers)
 
 
 def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
@@ -216,6 +239,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/workspace-file", workspace_file, methods=["GET"]),
         Route("/api/workspace-file", workspace_file_write, methods=["POST"]),
         Route("/api/vault-markdown-paths", vault_markdown_paths, methods=["GET"]),
+        Route("/api/vault/backlinks", vault_backlinks, methods=["GET"]),
         Route("/api/workspace-image", workspace_image, methods=["GET"]),
         Route("/api/workspace-binary", workspace_binary, methods=["GET"]),
         Route("/api/workspace-open", workspace_open, methods=["POST"]),
@@ -319,7 +343,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
 
     # Serve Vite build output if it exists
     if STATIC_DIR.exists():
-        routes.append(Mount("/assets", app=StaticFiles(directory=STATIC_DIR / "assets"), name="assets"))
+        routes.append(Mount("/assets", app=CacheControlStaticFiles(directory=STATIC_DIR / "assets"), name="assets"))
         routes.append(Route("/{path:path}", _spa_catchall))
 
     middleware = [

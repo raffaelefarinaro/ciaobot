@@ -8,7 +8,6 @@ import logging
 import mimetypes
 import os
 import re
-import hmac
 import shlex
 import shutil
 import subprocess
@@ -16,7 +15,7 @@ import sys
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable, cast
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
@@ -42,7 +41,7 @@ from ciao.schedules import (
 from ciao.setup_status import setup_status
 from ciao.cli import _auth_command_for_provider
 from ciao.skills_inventory import build_skill_inventory
-from ciao.web.auth import SESSION_COOKIE, session_cookie_kwargs
+from ciao.vault_lint import EXCLUDE_DIRS, _links_in
 from ciao.web.chat_broker import extract_file_touches
 from ciao.web.project_chats import (
     _PROJECT_UPLOAD_MAX_BYTES,
@@ -702,71 +701,7 @@ def _local_subagent_transcripts(session_id: str, workspace_root: Path) -> list[d
 
 # ── Auth ────────────────────────────────────────────────────────────────
 
-# Simple in-memory rate limiter for auth_login: max 10 attempts per IP per minute.
-_login_attempts: dict[str, list[tuple[float, int]]] = {}
-_MAX_LOGIN_ATTEMPTS = 10
-_LOGIN_WINDOW_SECONDS = 60
-
-
-def _check_login_rate_limit(client_ip: str) -> bool:
-    """Return True if the IP is within the rate limit, False if blocked."""
-    now = datetime.now(UTC).timestamp()
-    window_start = now - _LOGIN_WINDOW_SECONDS
-    entries = _login_attempts.get(client_ip, [])
-    # Drop stale entries
-    entries = [(t, c) for (t, c) in entries if t > window_start]
-    total = sum(c for (_t, c) in entries)
-    if total >= _MAX_LOGIN_ATTEMPTS:
-        _login_attempts[client_ip] = entries
-        return False
-    entries.append((now, 1))
-    _login_attempts[client_ip] = entries
-    return True
-
-
-async def auth_login(request: Request) -> JSONResponse:
-    app = request.app
-    client_ip = request.client.host if request.client else "unknown"
-    if not _check_login_rate_limit(client_ip):
-        return JSONResponse({"error": "rate limited"}, status_code=429)
-    body = await request.json()
-    token = body.get("token", "")
-    if not hmac.compare_digest(token, app.state.config.pwa_auth_token):
-        return JSONResponse({"error": "invalid token"}, status_code=401)
-    signed = app.state.serializer.dumps({"user": "owner"})
-    response = JSONResponse({"ok": True})
-    response.set_cookie(SESSION_COOKIE, signed, **_session_cookie_kwargs(request))
-    return response
-
-
-def _session_cookie_kwargs(request: Request) -> dict:
-    return session_cookie_kwargs(request)
-
-
-async def auth_logout(request: Request) -> JSONResponse:
-    response = JSONResponse({"ok": True})
-    cookie_kwargs = _session_cookie_kwargs(request)
-    response.delete_cookie(
-        SESSION_COOKIE,
-        path="/",
-        domain=cookie_kwargs.get("domain"),
-        secure=bool(cookie_kwargs.get("secure")),
-        httponly=True,
-        samesite="lax",
-    )
-    return response
-
-
-async def auth_check(request: Request) -> JSONResponse:
-    # Bootstrap mode must land the browser on the setup wizard. The wizard
-    # lives in the login view, and with auth off by default nothing would
-    # ever route there — the SPA would open straight into the app on the
-    # throwaway bootstrap workspace. Report unauthenticated until setup
-    # finishes so the router redirects to /login → first-run wizard.
-    config = getattr(request.app.state, "config", None)
-    if getattr(config, "bootstrap_mode", False):
-        return JSONResponse({"error": "setup required"}, status_code=401)
-    return JSONResponse({"ok": True})
+from ciao.web.routes.routes_auth import auth_check, auth_login, auth_logout
 
 
 # ── Projects ─────────────────────────────────────────────────────────────
@@ -785,7 +720,7 @@ def _workspace_to_dict(workspace: WorkspaceConfig) -> dict:
         "default_provider": getattr(workspace, "default_provider", "claude"),
         "default_model": getattr(workspace, "default_model", ""),
         "disallowed_tools": (
-            list(getattr(workspace, "disallowed_tools", None))
+            list(cast(Iterable[Any], getattr(workspace, "disallowed_tools", None)))
             if getattr(workspace, "disallowed_tools", None) is not None
             else None
         ),
@@ -1086,10 +1021,10 @@ async def provider_connection_action(request: Request) -> JSONResponse:
         return JSONResponse(payload["connections"].get(provider, {}))
     if action == "logout":
         try:
-            command = _auth_command_for_provider(provider)[:1] + ["logout"]
+            logout_command = _auth_command_for_provider(provider)[:1] + ["logout"]
             run = await asyncio.to_thread(
                 subprocess.run,
-                command,
+                logout_command,
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -2548,9 +2483,9 @@ async def chat_messages(request: Request) -> JSONResponse:
                 parsed = pcm._parse_transcript_messages(text)
                 parsed = _normalize_handover_messages(parsed)
                 # Map transcript timestamp field to the frontend's sent_at key.
-                for entry in parsed:
-                    if "timestamp" in entry and "sent_at" not in entry:
-                        entry["sent_at"] = entry["timestamp"]
+                for parsed_entry in parsed:
+                    if "timestamp" in parsed_entry and "sent_at" not in parsed_entry:
+                        parsed_entry["sent_at"] = parsed_entry["timestamp"]
                 _overlay_assistant_timings(parsed, chat.user_turn_timings)
                 return JSONResponse(handover_messages + parsed)
             except OSError:
@@ -2654,11 +2589,10 @@ async def chat_messages(request: Request) -> JSONResponse:
         content = content.strip()
         if not content:
             continue
-        # Drop "allowed" rate limit status events — both the plain allowance
-        # pings and the escalating "allowed_warning … NN% used" ticks — so
-        # transient usage telemetry does not pollute the chat history. A hard
-        # "Rate limit exceeded" carries no "allowed" and still surfaces.
-        if m.type == "system" and "Rate limit: allowed" in content:
+        # Drop rate limit telemetry status events (allowed, rejected, warnings)
+        # so transient usage telemetry does not pollute the chat history. A hard
+        # "Rate limit exceeded" carries no "Rate limit:" prefix and still surfaces.
+        if m.type == "system" and "Rate limit" in content and not content.startswith("Rate limit exceeded"):
             continue
         # Drop SDK-injected control slash commands (/model, /mode). Skipping
         # without incrementing user_idx keeps chat.user_turn_images aligned
@@ -3102,6 +3036,68 @@ async def vault_markdown_paths(request: Request) -> JSONResponse:
     return JSONResponse({"paths": paths})
 
 
+_BACKLINKS_LIMIT = 30
+
+
+def _references_note(content: str, target_stem: str) -> bool:
+    """True if ``content`` wikilinks to the note whose filename stem is ``target_stem``.
+
+    Reuses ``vault_lint._links_in`` so links documented inside code fences/spans
+    or escaped (``\\[[...]]``) don't count — only real references, matching how
+    the vault linter and index resolve the wikilink graph.
+    """
+    for target in _links_in(content):
+        if Path(target).stem.lower() == target_stem:
+            return True
+    return False
+
+
+async def vault_backlinks(request: Request) -> JSONResponse:
+    """Return notes that wikilink to the given markdown path (incoming links)."""
+    target_path = request.query_params.get("path", "").strip()
+    if not target_path:
+        return JSONResponse({"backlinks": []})
+    config = request.app.state.config
+    target_stem = Path(target_path).stem.lower()
+    if not target_stem:
+        return JSONResponse({"backlinks": []})
+    workspace_root = config.workspace_root.resolve()
+    backlinks: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    for root in _allowed_roots(config):
+        if not root.is_dir():
+            continue
+        for md_path in root.rglob("*.md"):
+            if md_path.name.startswith(".") or any(
+                p in EXCLUDE_DIRS for p in md_path.relative_to(root).parts
+            ):
+                continue
+            try:
+                display_path = str(md_path.resolve().relative_to(workspace_root))
+            except (OSError, ValueError):
+                display_path = str(md_path)
+
+            if display_path == target_path or display_path in seen:
+                continue
+
+            try:
+                content = md_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+
+            # Cheap gate before the code-fence stripping + regex in _links_in.
+            if target_stem not in content.lower():
+                continue
+
+            if _references_note(content, target_stem):
+                seen.add(display_path)
+                backlinks.append({"path": display_path, "title": md_path.stem})
+                if len(backlinks) >= _BACKLINKS_LIMIT:
+                    return JSONResponse({"backlinks": backlinks})
+    return JSONResponse({"backlinks": backlinks})
+
+
 # Binary downloads (PDFs, ZIPs, office docs) live under their own endpoint so
 # the text and image viewers stay strictly typed. Same (unrestricted) path
 # contract as ``workspace_file``/``workspace_image``: any allowlisted-extension
@@ -3170,6 +3166,7 @@ async def workspace_binary(request: Request) -> Response:
 
     is_raw = request.query_params.get("raw") == "1"
     filename = resolved.name
+    media_type: str | None = None
 
     if resolved.suffix.lower() == ".pptx" and not is_raw:
         soffice = _find_soffice()
@@ -3197,7 +3194,7 @@ async def workspace_binary(request: Request) -> Response:
 
         if not pdf_path.exists() or resolved.stat().st_mtime > pdf_path.stat().st_mtime:
             with tempfile.TemporaryDirectory() as tmp_dir:
-                result = await asyncio.to_thread(
+                conversion = await asyncio.to_thread(
                     subprocess.run,
                     [
                         soffice,
@@ -3212,9 +3209,9 @@ async def workspace_binary(request: Request) -> Response:
                     text=True,
                     timeout=60,
                 )
-                if result.returncode != 0:
+                if conversion.returncode != 0:
                     return JSONResponse(
-                        {"error": f"LibreOffice conversion failed: {result.stderr or result.stdout}"},
+                        {"error": f"LibreOffice conversion failed: {conversion.stderr or conversion.stdout}"},
                         status_code=500,
                     )
                 generated = Path(tmp_dir) / (resolved.stem + ".pdf")

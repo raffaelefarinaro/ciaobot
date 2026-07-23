@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 # Match [[Target]], ignoring optional #anchors and |labels
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
@@ -19,6 +20,14 @@ _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 _COMMON_STEMS = {
     "readme", "index", "log", "notes", "general", "overview",
     "changelog", "todo", "template",
+}
+
+# Directories that aren't vault content: app state, generated projections, tool
+# caches, and any venv/node_modules checked out inside the vault root (#129).
+EXCLUDE_DIRS = {
+    "Logs", "Templates", ".obsidian",
+    ".venv", "venv", "node_modules", ".git",
+    ".claude", ".agents", ".codex", "__pycache__",
 }
 
 
@@ -42,7 +51,7 @@ def _is_template(stem: str) -> bool:
 
 def run_validation(vault_root: Path) -> dict:
     """Scan the vault directory and find broken wikilinks, orphans, and duplicates."""
-    issues = {
+    issues: dict[str, list[Any]] = {
         "broken_links": [],
         "orphans": [],
         "duplicates": []
@@ -50,19 +59,13 @@ def run_validation(vault_root: Path) -> dict:
 
     valid_targets = set()
     files_to_scan = []
-    incoming_links = {}
+    incoming_links: dict[str, list[str]] = {}
 
-    # Exclude directories that aren't vault content: app state, generated
-    # projections, tool caches, and any venv/node_modules checked out inside
-    # the vault root (see issue #129).
-    exclude_dirs = {
-        "Logs", "Templates", ".obsidian",
-        ".venv", "venv", "node_modules", ".git",
-        ".claude", ".agents", ".codex", "__pycache__",
-    }
+    # Exclude directories that aren't vault content (see EXCLUDE_DIRS / #129).
+    exclude_dirs = EXCLUDE_DIRS
     exclude_files = {"INDEX.md", "MEMORY.md"}
 
-    normalized_names = {}
+    normalized_names: dict[str, list[str]] = {}
 
     for path in vault_root.rglob("*.md"):
         try:

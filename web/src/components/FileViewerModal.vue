@@ -2,8 +2,8 @@
   <div
     v-if="store.isOpen"
     class="fv-backdrop"
-    @click.self="store.close"
-    @keydown.esc="store.close"
+    @click.self="store.close()"
+    @keydown.esc="store.close()"
     tabindex="-1"
     ref="backdropEl"
   >
@@ -71,7 +71,7 @@
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4z"/></svg>
           </button>
-          <button class="btn-icon" @click="store.close" title="Close (Esc)" aria-label="Close">
+          <button class="btn-icon" @click="store.close()" title="Close (Esc)" aria-label="Close">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
         </div>
@@ -104,6 +104,12 @@
           @click="store.setTab('diff')"
           type="button"
         >Diff</button>
+        <button
+          class="fv-tab"
+          :class="{ active: store.tab === 'backlinks' }"
+          @click="loadBacklinks"
+          type="button"
+        >Backlinks<span v-if="backlinks.length" class="fv-tab-badge">{{ backlinks.length }}</span></button>
       </nav>
 
       <div class="fv-main">
@@ -300,6 +306,18 @@
             </template>
           </template>
 
+          <!-- Backlinks Tab -->
+          <div v-if="store.tab === 'backlinks'" class="fv-backlinks-pane">
+            <div v-if="loadingBacklinks" class="fv-loading">Loading backlinks…</div>
+            <div v-else-if="backlinks.length === 0" class="fv-empty-backlinks">No incoming wikilinks found for this note</div>
+            <ul v-else class="fv-backlinks-list">
+              <li v-for="b in backlinks" :key="b.path" class="fv-backlink-item" @click="store.open(b.path)">
+                <span class="fv-backlink-title">{{ b.title }}</span>
+                <span class="fv-backlink-path">{{ b.path }}</span>
+              </li>
+            </ul>
+          </div>
+
         </div>
 
         <!-- Comment sidebar (desktop only) -->
@@ -435,6 +453,7 @@
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
+import { api } from '../lib/api'
 import { parseFrontmatter } from '../lib/markdownFrontmatter'
 import { renderFileMarkdown } from '../lib/safeMarkdown'
 import { buildMarkdownIndex, resolveWikilinkTarget } from '../lib/wikilinks'
@@ -495,12 +514,35 @@ function formatHistoryTs(iso: string): string {
   })
 }
 
+interface BacklinkItem {
+  path: string
+  title: string
+}
+const backlinks = ref<BacklinkItem[]>([])
+const loadingBacklinks = ref(false)
+
+async function loadBacklinks() {
+  store.setTab('backlinks')
+  if (!store.path) return
+  loadingBacklinks.value = true
+  try {
+    const data = await api.get<{ backlinks: BacklinkItem[] }>(
+      `/api/vault/backlinks?path=${encodeURIComponent(store.path)}`,
+    )
+    backlinks.value = data.backlinks || []
+  } catch {
+    backlinks.value = []
+  } finally {
+    loadingBacklinks.value = false
+  }
+}
+
 // Click Diff next to a snapshot row in History: compares it with the
 // snapshot immediately before it (or the only snapshot vs current on disk
 // when there's just one).
 async function diffAgainstSeq(seq: number): Promise<void> {
   const snaps = store.snapshots
-  const idx = snaps.findIndex(s => s.seq === seq)
+  const idx = snaps.findIndex((s: { seq: number }) => s.seq === seq)
   let a = 0, b = seq
   if (idx > 0) {
     a = snaps[idx - 1].seq
@@ -558,7 +600,7 @@ const fmProse = computed(() => {
 // note, not links, so they stay plain text.
 const _LINK_LIST_KEYS = new Set(['related', 'links'])
 const _wikiIndex = computed(() => buildMarkdownIndex(store.markdownPaths || []))
-const _wikiPathSet = computed(() => new Set(store.markdownPaths || []))
+const _wikiPathSet = computed(() => new Set<string>(store.markdownPaths || []))
 
 function resolveListItem(raw: string): { label: string; path: string | null } {
   const inner = raw.replace(/^\[\[(.+)\]\]$/, '$1').trim()
@@ -1607,8 +1649,15 @@ function onSidebarResize(): void {
   updateCommentPositions()
   nextTick(() => layoutSidebarCards())
 }
+function onBeforeUnload(e: BeforeUnloadEvent): void {
+  if (store.isDirty) {
+    e.preventDefault()
+    e.returnValue = ''
+  }
+}
 if (typeof window !== 'undefined') {
   window.addEventListener('resize', onSidebarResize)
+  window.addEventListener('beforeunload', onBeforeUnload)
 }
 onBeforeUnmount(() => {
   if (typeof document !== 'undefined') {
@@ -1616,6 +1665,7 @@ onBeforeUnmount(() => {
   }
   if (typeof window !== 'undefined') {
     window.removeEventListener('resize', onSidebarResize)
+    window.removeEventListener('beforeunload', onBeforeUnload)
   }
   detachScrollSync()
 })
@@ -2695,5 +2745,47 @@ if (typeof window !== 'undefined') {
   .fv-comment-popover { width: calc(100% - 20px); left: 10px !important; }
   .fv-comment-sidebar { display: none; }
   .fv-main { flex-direction: column; }
+}
+
+/* Backlinks Pane */
+.fv-backlinks-pane {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.fv-empty-backlinks {
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  padding: 24px 0;
+  text-align: center;
+}
+.fv-backlinks-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.fv-backlink-item {
+  display: flex;
+  flex-direction: column;
+  padding: 10px 14px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: background 120ms var(--ease);
+}
+.fv-backlink-item:hover {
+  background: var(--bg3);
+}
+.fv-backlink-title {
+  font-weight: 600;
+  font-size: var(--text-base);
+  color: var(--fg);
+}
+.fv-backlink-path {
+  font-size: var(--text-xs);
+  color: var(--fg2);
 }
 </style>
