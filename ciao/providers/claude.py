@@ -35,7 +35,7 @@ import logging
 from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
 from urllib.parse import urlsplit
-from typing import Any
+from typing import Any, cast
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -52,7 +52,7 @@ from claude_agent_sdk import (
     ToolUseBlock,
     get_session_info,
 )
-from claude_agent_sdk.types import PermissionMode
+from claude_agent_sdk.types import PermissionMode, SystemPromptPreset
 
 from ciao.models import (
     AgentRequest,
@@ -80,7 +80,7 @@ from ciao.providers.base import (
     rate_limit_quota_payload,
     rate_limit_status_text,
 )
-from ciao.rate_limits import RateLimitStore, default_store_path
+from ciao.rate_limits import RateLimitStore, default_store_path, is_rate_limit_telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -268,7 +268,7 @@ def _summarize_tool_input(name: str, tool_input: dict) -> str:
         return ""
     # File operations
     if name in ("Read", "read"):
-        path = tool_input.get("file_path", "")
+        path: str = tool_input.get("file_path", "")
         return path
     if name in ("Edit", "edit"):
         path = tool_input.get("file_path") or tool_input.get("path") or ""
@@ -278,7 +278,7 @@ def _summarize_tool_input(name: str, tool_input: dict) -> str:
         return path
     # Search
     if name in ("Grep", "grep"):
-        pattern = tool_input.get("pattern", "")
+        pattern: str = tool_input.get("pattern", "")
         path = tool_input.get("path", "")
         return f'"{pattern}"' + (f" in {path}" if path else "")
     if name in ("Glob", "glob"):
@@ -287,8 +287,8 @@ def _summarize_tool_input(name: str, tool_input: dict) -> str:
         return pattern + (f" in {path}" if path else "")
     # Shell
     if name in ("Bash", "bash"):
-        cmd = tool_input.get("command", "")
-        desc = tool_input.get("description", "")
+        cmd: str = tool_input.get("command", "")
+        desc: str = tool_input.get("description", "")
         if desc:
             return desc
         # Truncate long commands
@@ -296,20 +296,20 @@ def _summarize_tool_input(name: str, tool_input: dict) -> str:
     # Agents
     if name in ("Agent", "agent"):
         desc = tool_input.get("description", "")
-        subtype = tool_input.get("subagent_type", "")
+        subtype: str = tool_input.get("subagent_type", "")
         if subtype and desc:
             return f"[{subtype}] {desc}"
         return desc or subtype
     # Tasks
     if name in ("TaskCreate",):
-        return tool_input.get("subject", "")
+        return cast(str, tool_input.get("subject", ""))
     if name in ("TaskUpdate",):
         tid = tool_input.get("taskId", "")
         status = tool_input.get("status", "")
         return f"#{tid} → {status}" if status else f"#{tid}"
     # Skills
     if name in ("Skill",):
-        return tool_input.get("skill", "")
+        return cast(str, tool_input.get("skill", ""))
     # Interactive question prompt. Headless CLI auto-cancels with empty
     # answers, so the PWA needs the full questions payload to render its
     # own picker. Returning the JSON here keeps every downstream consumer
@@ -324,12 +324,12 @@ def _summarize_tool_input(name: str, tool_input: dict) -> str:
         return ""
     # Web
     if name in ("WebSearch",):
-        return tool_input.get("query", "")
+        return cast(str, tool_input.get("query", ""))
     if name in ("WebFetch",):
-        return tool_input.get("url", "")[:100]
+        return cast(str, tool_input.get("url", ""))[:100]
     # Notebook
     if name in ("NotebookEdit",):
-        return tool_input.get("cell_id", "")
+        return cast(str, tool_input.get("cell_id", ""))
     # MCP tools (tool name contains __)
     if "__" in name:
         # Try to find the most interesting field
@@ -601,7 +601,8 @@ class ClaudeProvider(BaseSDKProvider):
             # the SDK's adaptive-thinking default.
             options.effort = request.thinking_level  # type: ignore[assignment]
         if system_prompt is not None:
-            options.system_prompt = system_prompt
+            # system_prompt_payload builds a SystemPromptPreset-shaped dict.
+            options.system_prompt = cast(SystemPromptPreset, system_prompt)
         if request.mcp_url and request.mcp_token:
             options.mcp_servers = {
                 "ciaobot": {
@@ -1097,19 +1098,11 @@ class ClaudeProvider(BaseSDKProvider):
                 self._rate_limit_store.update(msg.rate_limit_info)
             except Exception:  # noqa: BLE001 — never fail a turn on telemetry
                 logger.debug("rate_limit persistence failed", exc_info=True)
-            # Quota is cached and persisted above (Settings shows all tiers),
-            # so suppress the chat-facing status for every "allowed" state —
-            # the plain allowance ping AND the escalating "allowed_warning"
-            # ticks. They are usage telemetry, not conversation. A non-allowed
-            # state (e.g. exceeded/rejected) still emits so the user is told.
-            if self._pending_quota.get("status", "").startswith("allowed"):
-                return []
-            return [
-                SystemStatusEvent(
-                    type="system",
-                    status=rate_limit_status_text(self._pending_quota),
-                )
-            ]
+            # Quota is cached and persisted above (Settings shows all tiers).
+            # Suppress chat-facing status for rate limit telemetry (allowed,
+            # rejected, warnings, etc.). They update usage telemetry in
+            # Settings, not conversation. Hard failures surface as error results.
+            return []
 
         return []
 
@@ -1208,12 +1201,11 @@ class ClaudeProvider(BaseSDKProvider):
 
         if subtype == "status":
             status_str = data.get("status") or ""
-            # Drop "allowed" rate-limit status notes — both the plain
-            # allowance pings and the escalating "allowed_warning … NN% used"
-            # ticks. They are transient usage telemetry, not conversation, and
-            # rendering one chat line per 1% increment just clutters the turn.
-            # A hard "Rate limit exceeded" carries no "allowed" and still shows.
-            if "Rate limit: allowed" in status_str:
+            # Drop rate-limit status notes (allowed, rejected, warnings). They are
+            # transient usage telemetry, not conversation, and clutter the turn.
+            # A genuine hard block surfaces as an is_error ResultEvent, not a
+            # status line, so nothing actionable is lost by dropping these.
+            if is_rate_limit_telemetry(status_str):
                 return []
             return [SystemStatusEvent(type="system", status=status_str)]
 

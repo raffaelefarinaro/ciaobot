@@ -6,6 +6,7 @@ import logging
 import json
 import os
 import secrets
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -215,12 +216,12 @@ def _parse_disallowed_tools(raw: str) -> list[str] | None:
     return _split_csv(cleaned)
 
 
-def _env(source: dict[str, str], new_name: str, old_name: str, default: str = "") -> str:
+def _env(source: Mapping[str, str], new_name: str, old_name: str, default: str = "") -> str:
     """Read env var with fallback to old TELEGRAM_BRIDGE_* name for migration."""
     return source.get(new_name, "").strip() or source.get(old_name, "").strip() or default
 
 
-def _bootstrap_workspace(source: dict[str, str]) -> Path:
+def _bootstrap_workspace(source: Mapping[str, str]) -> Path:
     raw = source.get("CIAO_BOOTSTRAP_WORKSPACE", "").strip()
     if raw:
         return Path(raw).expanduser().resolve()

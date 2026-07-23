@@ -31,15 +31,19 @@ import json
 import logging
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from ciao import job_runs
+
+if TYPE_CHECKING:
+    from ciao.config import CiaoConfig
 from ciao.providers.ollama import OllamaSettings
 from ciao.transcripts import _claude_projects_dir
 
 logger = logging.getLogger(__name__)
 
 
-def resolve_insights_model(config, workspace: str | None = None) -> str:
+def resolve_insights_model(config: CiaoConfig, workspace: str | None = None) -> str:
     """Pick the model for session-insights extraction.
 
     When the operator has not set an explicit override (Settings → Models →
@@ -313,6 +317,7 @@ async def extract_and_append(
             logger.info("Archive %s already has insights, skipping", archive_path)
             return
 
+        env: dict[str, str]
         if provider == "codex":
             effective_model, env, note = model, {}, None
         else:
@@ -420,14 +425,14 @@ async def extract_and_append(
                     "memory_proposals", "Memory proposals",
                     extra={"archive": archive_path.name},
                 ) as run:
-                    wrote = proposals_from_archive(
+                    proposals_result = proposals_from_archive(
                         archive_path,
                         proposals_vault_root,
                         auto_promote_memory=bool(
                             getattr(config, "memory_enabled", True)
                         ),
                     )
-                    run.extra["wrote"] = bool(wrote)
+                    run.extra["wrote"] = bool(proposals_result)
             except Exception:  # noqa: BLE001 — fire-and-forget, never crash
                 logger.exception(
                     "Memory proposals failed for %s", archive_path
@@ -508,7 +513,7 @@ async def _call_model(
         f"{filtered_jsonl}"
     )
 
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "system_prompt": _INSIGHTS_SYSTEM_PROMPT,
         "model": model,
         "env": env,

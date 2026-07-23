@@ -202,7 +202,7 @@ async def ws_chat(websocket: WebSocket) -> None:
                 if not text:
                     continue
 
-                images: list[ImageAttachment] = []
+                images = []
                 for ref in msg.get("images", []):
                     attachment = pcm.resolve_image_ref(ref)
                     if attachment:

@@ -12,9 +12,10 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from importlib import resources
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Callable, Coroutine, Protocol
 from zoneinfo import ZoneInfo
 
+from ciao.jsonio import read_json_dict
 from ciao.models import BridgeMode
 
 DEFAULT_TIMEZONE = "Europe/Zurich"
@@ -264,7 +265,7 @@ class ScheduleStore:
         self._include_system = include_system
         self._lock = threading.RLock()
 
-    def list(self, *, chat_id: int | None = None) -> list[ScheduleEntry]:
+    def list_entries(self, *, chat_id: int | None = None) -> list[ScheduleEntry]:
         with self._lock:
             raw_items = self._runtime_items()
             items: list[ScheduleEntry] = []
@@ -281,7 +282,7 @@ class ScheduleStore:
             return items
 
     def get(self, schedule_id: str) -> ScheduleEntry | None:
-        for item in self.list():
+        for item in self.list_entries():
             if item.schedule_id == schedule_id:
                 return item
         return None
@@ -368,7 +369,8 @@ class ScheduleStore:
         if not self._path.exists():
             return {"schedules": []}
         try:
-            return json.loads(self._path.read_text(encoding="utf-8"))
+            data = read_json_dict(self._path)
+            return data
         except json.JSONDecodeError:
             return {"schedules": []}
 
@@ -463,6 +465,25 @@ class ScheduleStore:
         return payload
 
 
+class _DispatchToWeb(Protocol):
+    """Callback that dispatches a schedule entry through the web pipeline.
+
+    Declared as a Protocol (rather than ``Callable``) so the ``target_chat_id``
+    keyword argument is expressible and the coroutine return type is precise
+    enough for ``asyncio.create_task``.
+    """
+
+    def __call__(
+        self,
+        entry: ScheduleEntry,
+        model: str,
+        mode: BridgeMode,
+        provider: str,
+        *,
+        target_chat_id: str | None = None,
+    ) -> Coroutine[Any, Any, dict | None]: ...
+
+
 class ScheduleManager:
     """Polls daily schedules and dispatches them as chat turns."""
 
@@ -470,10 +491,7 @@ class ScheduleManager:
         self,
         store: ScheduleStore,
         resolve_target: Callable[[ScheduleEntry], tuple[str, str, BridgeMode, str]] | None = None,
-        dispatch_to_web: Callable[
-            [ScheduleEntry, str, BridgeMode, str], Awaitable[dict | None]
-        ]
-        | None = None,
+        dispatch_to_web: _DispatchToWeb | None = None,
         prepare_chat: Callable[
             [ScheduleEntry, str, str, BridgeMode, str], str | None
         ]
@@ -496,8 +514,8 @@ class ScheduleManager:
                 await self._loop_task
             self._loop_task = None
 
-    def list(self, *, chat_id: int | None = None) -> list[ScheduleEntry]:
-        return self._store.list(chat_id=chat_id)
+    def list_entries(self, *, chat_id: int | None = None) -> list[ScheduleEntry]:
+        return self._store.list_entries(chat_id=chat_id)
 
     def create(
         self,
@@ -635,7 +653,7 @@ class ScheduleManager:
 
     async def tick(self, now: datetime | None = None) -> None:
         current = now or _now_utc()
-        for entry in self._store.list():
+        for entry in self._store.list_entries():
             # Manual and disabled schedules never auto-fire.
             if entry.frequency == "manual" or not entry.enabled:
                 continue
@@ -705,7 +723,7 @@ class ScheduleManager:
         """
         current = now or _now_utc()
         fired: list[str] = []
-        for entry in self._store.list():
+        for entry in self._store.list_entries():
             # Manual and disabled schedules never auto-fire.
             if entry.frequency == "manual" or not entry.enabled:
                 continue
@@ -778,7 +796,7 @@ class ScheduleManager:
                 last_expected.isoformat(),
                 localized.isoformat(),
             )
-            chat_id: str | None = None
+            chat_id = None
             if self._prepare_chat is not None:
                 chat_id = self._prepare_chat(entry, entry.prompt, model, mode, provider)
             await self._dispatch_entry(

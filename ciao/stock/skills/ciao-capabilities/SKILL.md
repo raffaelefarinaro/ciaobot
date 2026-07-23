@@ -1,6 +1,6 @@
 ---
 name: ciao-capabilities
-description: Authoritative catalog of what Ciaobot can do, for capability questions and feature tours. Use whenever the user asks what Ciaobot is, what it can do, what features are available, whether it can do something specific, or how one of its features works (memory, vault, archiving, schedules, loops, routines, workspaces, projects, forks, agent handoffs, skills, voice, models, providers, notifications, menu bar, files, chat comments, pinned files, document previews, CSV tables and cell comments) — and when onboarding or giving a tour or walkthrough to a new user. Trigger on phrasings like "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "can you remind me / remember / schedule", "can you fork this chat", "can you ask Codex / another provider", even when the word "Ciaobot" is not mentioned.
+description: Authoritative catalog of what Ciaobot can do, for capability questions and feature tours. Use whenever the user asks what Ciaobot is, what it can do, what features are available, whether it can do something specific, or how one of its features works (memory, vault, archiving, schedules, loops, routines, workspaces, projects, forks, agent handoffs, skills, voice, models, providers, notifications, menu bar, files, chat comments, pinned files, document previews, CSV tables and cell comments, backlinks, command palette) — and when onboarding or giving a tour or walkthrough to a new user. Trigger on phrasings like "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "can you remind me / remember / schedule", "can you fork this chat", "can you ask Codex / another provider", even when the word "Ciaobot" is not mentioned.
 ---
 
 # Ciaobot Capabilities
@@ -52,6 +52,7 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 - **Chat annotations**: select text in any message and attach a comment that rides on your next send.
 - **Rich previews**: images inline; PDFs in the viewer; `.pptx` slides rendered as PDF (LibreOffice on the server).
 - **CSV tables**: `.csv` files render as an editable table in the viewer, and you can attach comments to individual cells (anchored by row and column) the same way you annotate document lines.
+- **Backlinks**: the markdown viewer has a Backlinks tab listing other vault notes that link to the open note via wikilinks (`[[Note]]`) — the incoming half of the wikilink graph.
 
 ### 5. Skills, subagents, and commands (extensibility)
 
@@ -75,6 +76,7 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 
 ### App and system surface
 
+- **Command palette**: press ⌘K (Ctrl+K on Windows/Linux) anywhere to open a quick palette — search and jump to any chat, hop to Schedules or Settings, or toggle the theme.
 - **Settings page**: provider keys, model lists, skill/agent inventory, the injected system prompt (read-only), and local package updates from the UI.
 - **macOS extras**: a menu bar companion (`ciao menubar`) with server status, a Start at Login status/toggle, and open/restart/logs actions (the Ciaobot face turns scared when the server is down), a distinct `Ciaobot Server.app` recovery launcher, and LaunchAgents so everything starts on login.
 - **Local HTTP API**: the app exposes an API an in-chat agent can drive (create chats, subagents, commands) — recipes are in `PWA_API.md` in the Ciaobot GitHub repo (`raffaelefarinaro/ciaobot`); fetch it when you need the raw API surface. For the common cases, the `chat_create` and `schedule_*`/`loop_*` MCP tools already carry the working recipes in their own docstrings.

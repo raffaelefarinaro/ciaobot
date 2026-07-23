@@ -18,7 +18,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,18 @@ KNOWN_BUCKETS: tuple[str, ...] = (
 )
 
 
+def is_rate_limit_telemetry(text: str) -> bool:
+    """True for a transient rate-limit status line that shouldn't reach chat.
+
+    Drops the allowed / warning / rejected telemetry pings while letting a
+    genuine hard "Rate limit exceeded" through (that surfaces as an error, not
+    telemetry). Single source of truth for the Claude status handler and the
+    chat-history / websocket filters. The frontend mirror is in
+    ``web/src/lib/rateLimit.ts`` — keep the two in sync.
+    """
+    return text.strip().startswith("Rate limit:")
+
+
 @dataclass(slots=True)
 class RateLimitStore:
     """JSON-backed dict of {bucket_type: snapshot}."""
@@ -49,7 +61,7 @@ class RateLimitStore:
         or corrupt so the frontend never has to special-case "uninitialized".
         """
         try:
-            return json.loads(self.path.read_text(encoding="utf-8"))
+            return cast("dict[str, Any]", json.loads(self.path.read_text(encoding="utf-8")))
         except (FileNotFoundError, json.JSONDecodeError):
             return {"buckets": {}, "last_updated": None}
 

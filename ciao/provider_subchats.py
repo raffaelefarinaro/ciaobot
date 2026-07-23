@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 import time
 import uuid
-from typing import Any
+from typing import Any, cast
 
 from ciao.config import CiaoConfig
 from ciao.web.project_chats import ProjectChatManager, ChatInfo
@@ -106,9 +106,17 @@ class ProviderSubchatRecord:
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ProviderSubchatRecord:
         owner_dict = d.get("owner")
-        owner = ProviderRoute.from_dict(owner_dict) if owner_dict else ProviderRoute("", "")
+        owner = (
+            cast(ProviderRoute, ProviderRoute.from_dict(owner_dict))
+            if owner_dict
+            else ProviderRoute("", "")
+        )
         part_dict = d.get("participant")
-        participant = ProviderRoute.from_dict(part_dict) if part_dict else ProviderRoute("", "")
+        participant = (
+            cast(ProviderRoute, ProviderRoute.from_dict(part_dict))
+            if part_dict
+            else ProviderRoute("", "")
+        )
         return cls(
             subchat_id=d["subchat_id"],
             parent_chat_id=d["parent_chat_id"],
@@ -563,7 +571,7 @@ class ProviderSubchatManager:
             return bool(responder(request_id, approved))
         gate = getattr(provider, "permission_gate", None)
         if gate is not None:
-            return gate.answer(request_id, approved=approved, reason=reason)
+            return cast(bool, gate.answer(request_id, approved=approved, reason=reason))
         return False
 
     def respond_question(
@@ -582,5 +590,5 @@ class ProviderSubchatManager:
             return bool(responder(request_id, answers))
         gate = getattr(provider, "question_gate", None)
         if gate is not None:
-            return gate.answer(request_id, answers=answers)
+            return cast(bool, gate.answer(request_id, answers=answers))
         return False

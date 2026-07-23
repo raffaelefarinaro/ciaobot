@@ -24,6 +24,7 @@ import urllib.request
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
+from typing import Any
 
 from ciao.menubar_prefs import (
     notifications_enabled,
@@ -958,7 +959,7 @@ def run_menubar(workspace: Path, port: int) -> int:
     # Only notify for entries newer than launch, not the whole backlog.
     notification_log = NotificationLogTail.at_end(workspace)
     status_fetcher = make_cached_package_status()
-    state = {
+    state: dict[str, Any] = {
         "fingerprint": None,
         "package_status": status_fetcher(),
         "updating": False,

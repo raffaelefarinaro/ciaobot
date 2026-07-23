@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { api } from '../lib/api'
 
 // File viewer for workspace files. Opened by clicking a linkified file path
@@ -15,7 +15,7 @@ import { api } from '../lib/api'
 // and snapshot them via the active chat's history.
 
 export type FileViewerKind = 'text' | 'image' | 'excalidraw' | 'pdf'
-export type FileViewerTab = 'preview' | 'history' | 'diff'
+export type FileViewerTab = 'preview' | 'history' | 'diff' | 'backlinks'
 
 export interface SnapshotMeta {
   seq: number
@@ -70,6 +70,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
   const editBuffer = ref('')
   const editSaving = ref(false)
   const editError = ref('')
+  const isDirty = computed(() => editing.value && editBuffer.value !== content.value)
 
   // .pptx preview needs LibreOffice (soffice) server-side to convert to PDF.
   // Checked proactively so a missing install shows a real "Install" button
@@ -139,8 +140,20 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     return markdownPaths.value
   }
 
-  async function open(filePath: string, lineNumber: number | null = null, chat: string = ''): Promise<void> {
-    if (!filePath) return
+  function canReplaceOpenFile(nextPath: string): boolean {
+    if (!isDirty.value) return true
+    // A background refresh of the currently-open file must never interrupt an
+    // in-progress edit. Explicit navigation to a different file asks first.
+    if (nextPath === path.value) return false
+    return confirm('You have unsaved file changes. Discard them and open another file?')
+  }
+
+  async function open(
+    filePath: string,
+    lineNumber: number | null = null,
+    chat: string = '',
+  ): Promise<boolean> {
+    if (!filePath || !canReplaceOpenFile(filePath)) return false
     _reset()
     isOpen.value = true
     path.value = filePath
@@ -155,7 +168,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
       if (kind.value === 'pdf') {
         content.value = ''
         if (/\.pptx$/i.test(filePath.replace(/:\d+$/, ''))) void checkLibreofficeStatus()
-        return
+        return true
       }
       const url = `/api/workspace-file?path=${encodeURIComponent(filePath)}`
       const [resp] = await Promise.all([
@@ -168,7 +181,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
         else if (resp.status === 413) error.value = 'File is too large to preview (>2 MB).'
         else if (resp.status === 415) error.value = 'Unsupported file type.'
         else error.value = `Failed to load file (HTTP ${resp.status}).`
-        return
+        return true
       }
       content.value = await resp.text()
     } catch (e) {
@@ -176,23 +189,31 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     } finally {
       loading.value = false
     }
+    return true
   }
 
-  function openImage(filePath: string, chat: string = ''): void {
-    if (!filePath) return
+  function openImage(filePath: string, chat: string = ''): boolean {
+    if (!filePath || !canReplaceOpenFile(filePath)) return false
     _reset()
     isOpen.value = true
     kind.value = 'image'
     path.value = filePath
     chatId.value = chat
     loadToken.value++
+    return true
   }
 
-  function close(): void {
+  function close(force = false): boolean {
+    if (!force && isDirty.value) {
+      if (!confirm('You have unsaved file changes. Are you sure you want to close?')) {
+        return false
+      }
+    }
     isOpen.value = false
     path.value = ''
     chatId.value = ''
     _reset()
+    return true
   }
 
   // ── Tabs / history / diff ──────────────────────────────────────────────
@@ -379,6 +400,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     diffLoading,
     diffError,
     editing,
+    isDirty,
     editBuffer,
     editSaving,
     editError,

@@ -16,7 +16,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, AsyncGenerator, Iterator
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Iterator, Optional, cast
+
+if TYPE_CHECKING:
+    from ciao.mcp_server import CiaoMcpService
+    from ciao.provider_subchats import ProviderSubchatManager
+    from ciao.web.push import PushManager
 
 RESTART_DRAIN_MESSAGE = (
     "Ciaobot is waiting for active chats to finish before restarting"
@@ -459,10 +464,10 @@ def resolve_title_model(config, workspace: str | None = None) -> str:
     ``config.title_model``.
     """
     if config.title_model_override:
-        return config.title_model_override
+        return cast(str, config.title_model_override)
     if workspace is not None:
-        return config.haiku_model_for_workspace(workspace)
-    return config.title_model
+        return cast(str, config.haiku_model_for_workspace(workspace))
+    return cast(str, config.title_model)
 
 
 async def _generate_chat_title(
@@ -926,7 +931,10 @@ class ProjectChatManager:
         self._providers: dict[str, ProviderService] = {}
         # Bound by main.py when the embedded MCP control plane is enabled.
         # Tests and legacy-only instances intentionally leave it unset.
-        self._mcp_service = None
+        self._mcp_service: Optional["CiaoMcpService"] = None
+        # Bound by main.py; unset on tests and legacy-only instances.
+        self._provider_subchat_manager: Optional["ProviderSubchatManager"] = None
+        self._push_manager: Optional["PushManager"] = None
         self._broker = ChatStreamBroker()
         self._events = EventsHub()
         # Per-(chat, file) content snapshots taken on Write/Edit/MultiEdit/
@@ -942,17 +950,17 @@ class ProjectChatManager:
         # successfully; the app uses it to dispatch web push to unfocused
         # subscribers. Kept as an injection point so the manager has no
         # direct dependency on Starlette state.
-        self.notify_result_cb = None
+        self.notify_result_cb: Optional[Callable[[str, str, str], None]] = None
         # `notify_permission(chat_id, tool_name, message, request_id)` fires
         # whenever the Auto-mode classifier asks the user to approve a tool.
         # The PWA turn is blocked until the answer lands, so unlike the
         # result push this fires immediately (no delay) and only skips when
         # the chat is focused in the foreground.
-        self.notify_permission_cb = None
+        self.notify_permission_cb: Optional[Callable[[str, str, str, str], None]] = None
         # `notify_question(chat_id, question_text)` fires when the model uses
         # AskUserQuestion. The headless CLI auto-cancels with empty answers,
         # so we notify the user so they can answer in the next turn.
-        self.notify_question_cb = None
+        self.notify_question_cb: Optional[Callable[[str, str], None]] = None
         # Per-chat pending push tasks. Pushes are scheduled with a short
         # delay (CIAO_PUSH_DELAY_SECONDS, default 30s) so that reading the
         # chat on any device within the window suppresses the buzz. New
@@ -1624,11 +1632,8 @@ class ProjectChatManager:
                 # Fall back to <entry>/<entry>.md, the convention for projects
                 # promoted from the old single-file form. Either provides the
                 # frontmatter we read below.
-                fallback = entry / f"{entry.name}.md"
-                readme = fallback if fallback.exists() else None
-            else:
-                pass
-            out.append((entry.name, entry, readme))
+                readme = entry / f"{entry.name}.md"
+            out.append((entry.name, entry, readme if readme.exists() else None))
         return out
 
     def _promote_single_file_personal_projects(self) -> None:
@@ -1878,7 +1883,7 @@ class ProjectChatManager:
                 continue
 
             # Find all markdown transcripts in provider subdirectories
-            transcripts = []
+            transcripts: list[Path] = []
             for sub in chat_dir.iterdir():
                 if sub.is_dir():
                     transcripts.extend(sub.glob("*.md"))
@@ -1999,10 +2004,13 @@ class ProjectChatManager:
             ).strip()
             title = str(transcript.get("context_label") or "").strip()
             if not title or title == "New Chat":
-                title = _fallback_title(visible_prompt or "Recovered Chat")
+                # Input is always non-empty, so the fallback returns a str.
+                title = cast(str, _fallback_title(visible_prompt or "Recovered Chat"))
             created_at = str(transcript.get("started_at") or "") or _now_iso()
             updated_at = str(transcript.get("updated_at") or created_at)
-            mode = str(valid_turns[-1].get("mode") or self._config.claude_mode)
+            mode: BridgeMode = cast(
+                BridgeMode, str(valid_turns[-1].get("mode") or self._config.claude_mode)
+            )
             if mode not in {"normal", "plan", "auto", "bypass"}:
                 mode = self._config.claude_mode
 
@@ -2645,7 +2653,7 @@ class ProjectChatManager:
             model=chat_model,
             provider=chat_provider,
             model_bucket=chat_bucket,
-            mode=mode or self._config.claude_mode,
+            mode=cast(BridgeMode, mode or self._config.claude_mode),
             control_surface=control_surface or "",
             created_at=_now_iso(),
         )
@@ -3310,7 +3318,7 @@ class ProjectChatManager:
             asyncio.create_task(
                 extract_and_append(
                     archive_path=outcome.path,
-                    filtered_jsonl=outcome.filtered_jsonl,
+                    filtered_jsonl=outcome.filtered_jsonl or "",
                     config=config,
                     model=insights_model,
                     session_id=outcome.session_id,
@@ -3331,7 +3339,7 @@ class ProjectChatManager:
                     filtered_jsonl=outcome.filtered_jsonl or "",
                     archive_path=outcome.path,
                     workspace_root=config.workspace_root,
-                    **trajectory_meta,
+                    **cast("dict[str, Any]", trajectory_meta),
                 )
             except Exception:  # noqa: BLE001
                 logger.exception(
@@ -5815,9 +5823,11 @@ class ProjectChatManager:
             return False
         # Pi provider uses extension_ui_response instead of SDK permission gates
         if hasattr(provider, "send_permission_response"):
-            return provider.send_permission_response(request_id, approved)
-        gate = provider.permission_gate
-        return gate.answer(request_id, approved=approved, reason=reason)
+            return cast(bool, provider.send_permission_response(request_id, approved))
+        # permission_gate is defined on the concrete SDK providers, not on
+        # BaseProvider; access via getattr to keep the type checker happy.
+        gate = getattr(provider, "permission_gate")
+        return cast(bool, gate.answer(request_id, approved=approved, reason=reason))
 
     def respond_question(
         self,
@@ -5937,7 +5947,7 @@ class ProjectChatManager:
             title, engine, detail = await _generate_chat_title_with_engine(
                 user_text,
                 assistant_text,
-                **title_kwargs,
+                **cast("dict[str, Any]", title_kwargs),
             )
             run.extra["engine"] = engine
             if detail:
@@ -6244,13 +6254,13 @@ class ProjectChatManager:
             )
             return chat.chat_id
         elif web_chat_id:
-            chat = self._chats.get(web_chat_id)
-            if chat is None:
+            target_chat = self._chats.get(web_chat_id)
+            if target_chat is None:
                 logger.warning("Schedule target chat %s not found, skipping", web_chat_id)
                 return None
-            chat.model = model
-            chat.mode = mode
-            return web_chat_id
+            target_chat.model = model
+            target_chat.mode = mode
+            return cast(str, web_chat_id)
         elif getattr(entry, "scope", "") == "system":
             project = self._resolve_schedule_project("", entry)
             if project is None:
@@ -6583,8 +6593,8 @@ class ProjectChatManager:
 
         if not self._config.openai_api_key:
             raise ValueError("OPENAI_API_KEY is required for voice transcription")
-        transcriber = VoiceTranscriber(self._config)
-        text = await transcriber.transcribe(audio_path)
+        cloud_transcriber = VoiceTranscriber(self._config)
+        text = await cloud_transcriber.transcribe(audio_path)
         # Estimate cost from file duration (rough: file_size / ~16000 bytes per second for OGG)
         try:
             size = audio_path.stat().st_size
@@ -6631,12 +6641,12 @@ class ProjectChatManager:
 
         if not self._config.openai_api_key:
             raise ValueError("OPENAI_API_KEY is required for speech synthesis")
-        speaker = OpenAISpeaker(self._config)
-        audio = await speaker.speak(spoken)
+        cloud_speaker = OpenAISpeaker(self._config)
+        audio = await cloud_speaker.speak(spoken)
         # Estimate cost from text length (rough: ~1000 chars per spoken
         # minute at ~$0.015/min for gpt-4o-mini-tts).
         cost = len(spoken) / 1000 * 0.015
-        return audio, speaker.mime_type, cost
+        return audio, cloud_speaker.mime_type, cost
 
     def save_voice_upload(self, data: bytes, filename: str) -> Path:
         """Save an uploaded voice file and return its path."""

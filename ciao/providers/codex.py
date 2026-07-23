@@ -11,7 +11,7 @@ import time
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ciao.context.entity_tagger import find_entities, format_entities
 from ciao.memory_injector import build_memory_block, system_prompt_payload
@@ -20,6 +20,7 @@ from ciao.models import (
     AgentRequest,
     AssistantTextDelta,
     BridgeMode,
+    MessagePhase,
     PermissionRequestEvent,
     ResultEvent,
     StreamEvent,
@@ -452,7 +453,7 @@ def _quota_payload(snapshot: Mapping[str, Any] | None) -> dict[str, str]:
     return quota
 
 
-def _thread_item_tool_events(item: Mapping[str, Any]) -> list[ToolUseEvent]:
+def _thread_item_tool_events(item: Mapping[str, Any]) -> list[StreamEvent]:
     item_type = str(item.get("type") or "")
     item_id = str(item.get("id") or "") or None
     if item_type == "commandExecution":
@@ -467,7 +468,7 @@ def _thread_item_tool_events(item: Mapping[str, Any]) -> list[ToolUseEvent]:
             file_touches=touches or None,
         )]
     if item_type == "fileChange":
-        events: list[ToolUseEvent] = []
+        events: list[StreamEvent] = []
         for change in item.get("changes") or []:
             if not isinstance(change, Mapping):
                 continue
@@ -692,7 +693,7 @@ class CodexProvider(BaseSDKProvider):
             ).get(canonical_tier(requested_model), "")
         peer = await self._ensure_peer(request)
         sandbox, approval, reviewer = _mode_settings(request.mode)
-        params = {
+        params: dict[str, Any] = {
             "cwd": str(self.workspace_root),
             "model": requested_model or None,
             "approvalPolicy": approval,
@@ -821,7 +822,7 @@ class CodexProvider(BaseSDKProvider):
                     for values in answers.values()
                     for value in values
                 ]
-                result = {
+                result: dict[str, Any] = {
                     "action": "cancel" if "cancel" in selected or not selected else "accept"
                 }
             else:
@@ -890,9 +891,9 @@ class CodexProvider(BaseSDKProvider):
             )
         if method == "mcpServer/elicitation/request":
             self._question_requests[public_id] = (rpc_id, method, params)
-            questions: list[dict[str, Any]] = []
+            elicit_questions: list[dict[str, Any]] = []
             if params.get("mode") == "url":
-                questions.append({
+                elicit_questions.append({
                     "id": "action",
                     "header": "Authorization",
                     "question": (
@@ -927,7 +928,7 @@ class CodexProvider(BaseSDKProvider):
                             label, description = str(option), ""
                         if label:
                             options.append({"label": label, "description": description})
-                    questions.append({
+                    elicit_questions.append({
                         "id": str(field_id),
                         "header": str(field.get("title") or field_id),
                         "question": str(
@@ -941,7 +942,7 @@ class CodexProvider(BaseSDKProvider):
             return ToolUseEvent(
                 type="assistant",
                 tool_name="AskUserQuestion",
-                tool_input=json.dumps({"questions": questions}, ensure_ascii=False),
+                tool_input=json.dumps({"questions": elicit_questions}, ensure_ascii=False),
                 request_id=public_id,
             )
         return None
@@ -960,7 +961,7 @@ class CodexProvider(BaseSDKProvider):
             return [AssistantTextDelta(
                 type="assistant",
                 text=str(params.get("delta") or ""),
-                phase=phase if phase in _MESSAGE_PHASES else None,
+                phase=cast("MessagePhase | None", phase if phase in _MESSAGE_PHASES else None),
             )]
         if method == "item/reasoning/summaryTextDelta":
             return [ThinkingEvent(type="assistant", text=str(params.get("delta") or ""))]
@@ -1091,7 +1092,7 @@ class CodexProvider(BaseSDKProvider):
                             yield AssistantTextDelta(
                                 type="assistant",
                                 text=fallback_text,
-                                phase=message_phases.get(item_id),
+                                phase=cast("MessagePhase | None", message_phases.get(item_id)),
                             )
                 if method == "error" and not bool(params.get("willRetry")):
                     raw_error = params.get("error")

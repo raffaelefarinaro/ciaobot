@@ -22,7 +22,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import yaml
 
@@ -416,7 +416,7 @@ def format_tsv(entries: list[Entry], include_hops: list[int] | None = None) -> s
 
 def format_json(entries: list[Entry], hops: list[int] | None = None) -> str:
     def item(e: Entry, hop: int | None) -> dict:
-        d = {
+        d: dict[str, Any] = {
             "path": str(e.path),
             "workspace": e.workspace,
             "type": e.type,

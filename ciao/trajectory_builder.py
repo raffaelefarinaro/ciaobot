@@ -454,7 +454,8 @@ def list_trajectories(
 
 def load_trajectory(path: Path) -> dict[str, Any]:
     with path.open(encoding="utf-8") as f:
-        return json.load(f)
+        data: dict[str, Any] = json.load(f)
+        return data
 
 
 def prune_old(

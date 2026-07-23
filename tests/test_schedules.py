@@ -108,7 +108,7 @@ def test_system_schedules_load_from_stock_not_runtime(tmp_path: Path) -> None:
     )
     store = ScheduleStore(tmp_path, include_system=True)
 
-    schedules = store.list()
+    schedules = store.list_entries()
 
     assert store.get("sched-user") is not None
     assert store.get("system-old-copy") is None
@@ -857,7 +857,7 @@ def test_system_routines_ship_descriptions_and_set(tmp_path: Path) -> None:
     shipped set is memory-curation + workspace-hygiene + skill-evolution
     (the operator-only self-improvement review is no longer shipped)."""
     store = ScheduleStore(tmp_path, include_system=True)
-    system = {e.schedule_id: e for e in store.list() if e.scope == "system"}
+    system = {e.schedule_id: e for e in store.list_entries() if e.scope == "system"}
     assert set(system) == {
         "system-memory-curation",
         "system-workspace-hygiene",
