@@ -5,7 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from ciao.rate_limits import RateLimitStore, default_store_path
+from ciao.rate_limits import (
+    RateLimitStore,
+    default_store_path,
+    is_rate_limit_telemetry,
+)
 
 
 @dataclass
@@ -56,3 +60,11 @@ def test_load_missing_returns_empty_payload(tmp_path: Path) -> None:
     store = RateLimitStore(path=tmp_path / "nonexistent.json")
     payload = store.load()
     assert payload == {"buckets": {}, "last_updated": None}
+
+
+def test_rate_limit_telemetry_matches_only_status_prefix() -> None:
+    assert is_rate_limit_telemetry("Rate limit: allowed (five_hour)")
+    assert is_rate_limit_telemetry("  Rate limit: rejected (five_hour)")
+    assert not is_rate_limit_telemetry("Rate limit exceeded (five_hour)")
+    assert not is_rate_limit_telemetry("Error: Rate limit exceeded (five_hour)")
+    assert not is_rate_limit_telemetry("A note about Rate limit behavior")

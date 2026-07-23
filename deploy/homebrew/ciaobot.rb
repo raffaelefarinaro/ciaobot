@@ -5,7 +5,7 @@ class Ciaobot < Formula
   homepage "https://github.com/raffaelefarinaro/ciaobot"
   url "https://github.com/raffaelefarinaro/ciaobot/releases/download/v0.5.2/ciaobot-0.5.2-py3-none-any.whl"
   version "0.5.2"
-  sha256 "d1589d4cdff9ebd02788edbabeeb8500335e47abbe940b53b6f79b32e2cc22cb"
+  sha256 "f301c393942a0a0685e631db14d9a57e710925f41cc244c65ca18216e4fccf69"
   license "Apache-2.0"
 
   depends_on "python@3.12"

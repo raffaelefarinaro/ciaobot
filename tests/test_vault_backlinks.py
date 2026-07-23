@@ -46,3 +46,34 @@ def test_vault_backlinks_requires_path(client):
     resp = client.get("/api/vault/backlinks?path=")
     assert resp.status_code == 200
     assert resp.json() == {"backlinks": []}
+
+
+def test_vault_backlinks_resolves_duplicate_stems_by_note_location(client):
+    vault = client.app.state.config.vault_root
+    (vault / "a").mkdir()
+    (vault / "b").mkdir()
+    (vault / "a" / "Target.md").write_text("# A target", encoding="utf-8")
+    (vault / "b" / "Target.md").write_text("# B target", encoding="utf-8")
+    (vault / "a" / "Local.md").write_text("See [[Target]].", encoding="utf-8")
+    (vault / "b" / "Local.md").write_text("See [[Target]].", encoding="utf-8")
+    (vault / "Explicit.md").write_text("See [[a/Target]].", encoding="utf-8")
+    (vault / "Ambiguous.md").write_text("See [[Target]].", encoding="utf-8")
+
+    resp = client.get("/api/vault/backlinks?path=memory-vault/a/Target.md")
+
+    assert resp.status_code == 200
+    paths = {item["path"] for item in resp.json()["backlinks"]}
+    assert paths == {
+        "memory-vault/a/Local.md",
+        "memory-vault/Explicit.md",
+    }
+
+
+def test_vault_backlinks_accepts_absolute_target_path(client):
+    vault = client.app.state.config.vault_root
+    target = vault / "DocB.md"
+
+    resp = client.get("/api/vault/backlinks", params={"path": str(target)})
+
+    assert resp.status_code == 200
+    assert {item["title"] for item in resp.json()["backlinks"]} == {"DocA", "DocC"}

@@ -45,7 +45,7 @@ def is_rate_limit_telemetry(text: str) -> bool:
     chat-history / websocket filters. The frontend mirror is in
     ``web/src/lib/rateLimit.ts`` — keep the two in sync.
     """
-    return "Rate limit" in text and not text.startswith("Rate limit exceeded")
+    return text.strip().startswith("Rate limit:")
 
 
 @dataclass(slots=True)

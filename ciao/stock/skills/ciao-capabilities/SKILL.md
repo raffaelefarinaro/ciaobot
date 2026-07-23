@@ -52,7 +52,7 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 - **Chat annotations**: select text in any message and attach a comment that rides on your next send.
 - **Rich previews**: images inline; PDFs in the viewer; `.pptx` slides rendered as PDF (LibreOffice on the server).
 - **CSV tables**: `.csv` files render as an editable table in the viewer, and you can attach comments to individual cells (anchored by row and column) the same way you annotate document lines.
-- **Backlinks**: the markdown viewer has a Backlinks tab listing other vault notes that link to the open note via wikilinks (`[[Note]]`) or markdown links — the incoming half of the wikilink graph.
+- **Backlinks**: the markdown viewer has a Backlinks tab listing other vault notes that link to the open note via wikilinks (`[[Note]]`) — the incoming half of the wikilink graph.
 
 ### 5. Skills, subagents, and commands (extensibility)
 

@@ -1,6 +1,18 @@
 <template>
-  <div v-if="modelValue" class="modal-backdrop" @click.self="close">
-    <div class="command-palette modal-sheet" role="dialog" aria-modal="true" aria-label="Command Palette">
+  <div
+    v-if="modelValue"
+    class="modal-backdrop"
+    @click.self="close"
+    @keydown.esc.prevent.stop="close"
+  >
+    <div
+      ref="paletteEl"
+      class="command-palette modal-sheet"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Command palette"
+      @keydown.tab="trapFocus"
+    >
       <div class="palette-header">
         <span class="wordmark wordmark--sm">cmd</span>
         <input
@@ -9,6 +21,11 @@
           type="text"
           class="palette-input"
           placeholder="Type a command or search chats..."
+          role="combobox"
+          aria-autocomplete="list"
+          aria-controls="command-palette-results"
+          :aria-expanded="true"
+          :aria-activedescendant="selectedOptionId"
           @keydown.down.prevent="moveSelection(1)"
           @keydown.up.prevent="moveSelection(-1)"
           @keydown.enter.prevent="executeSelected"
@@ -17,10 +34,19 @@
         <button class="btn-chip" @click="close">Esc</button>
       </div>
 
-      <div class="palette-results">
-        <div
+      <div
+        id="command-palette-results"
+        ref="resultsEl"
+        class="palette-results"
+        role="listbox"
+      >
+        <button
           v-for="(item, index) in filteredItems"
           :key="item.id"
+          :id="optionId(item)"
+          type="button"
+          role="option"
+          :aria-selected="index === selectedIndex"
           class="palette-item"
           :class="{ active: index === selectedIndex }"
           @mouseenter="selectedIndex = index"
@@ -32,7 +58,7 @@
             <span v-if="item.subtitle" class="item-subtitle">{{ item.subtitle }}</span>
           </div>
           <span v-if="item.category" class="badge badge--muted">{{ item.category }}</span>
-        </div>
+        </button>
 
         <div v-if="filteredItems.length === 0" class="palette-empty">
           No matching actions or chats found
@@ -44,7 +70,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 
 interface CommandItem {
@@ -53,18 +79,22 @@ interface CommandItem {
   subtitle?: string
   category: string
   icon: string
-  action: () => void
+  action: () => void | Promise<void>
 }
 
 const props = defineProps<{ modelValue: boolean }>()
 const emit = defineEmits<{ (e: 'update:modelValue', val: boolean): void }>()
 
+const route = useRoute()
 const router = useRouter()
 const projectStore = useProjectStore()
 
 const query = ref('')
 const selectedIndex = ref(0)
 const searchInput = ref<HTMLInputElement | null>(null)
+const paletteEl = ref<HTMLElement | null>(null)
+const resultsEl = ref<HTMLElement | null>(null)
+let previouslyFocused: HTMLElement | null = null
 
 function close() {
   emit('update:modelValue', false)
@@ -74,11 +104,31 @@ function close() {
 
 watch(() => props.modelValue, (isOpen) => {
   if (isOpen) {
+    previouslyFocused = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null
     selectedIndex.value = 0
     query.value = ''
     nextTick(() => searchInput.value?.focus())
+  } else {
+    nextTick(() => previouslyFocused?.focus())
   }
 })
+
+function newChatProjectId(): string | null {
+  const routeProjectId = typeof route.params.projectId === 'string'
+    ? route.params.projectId
+    : ''
+  if (routeProjectId && projectStore.projects.some(p => p.project_id === routeProjectId)) {
+    return routeProjectId
+  }
+  if (projectStore.activeProject) {
+    return projectStore.activeProject.project_id
+  }
+  return projectStore.projects.find(
+    p => p.workspace === projectStore.activeWorkspace && p.is_auto && p.name === 'General',
+  )?.project_id || null
+}
 
 const defaultCommands = computed<CommandItem[]>(() => [
   {
@@ -87,20 +137,36 @@ const defaultCommands = computed<CommandItem[]>(() => [
     subtitle: 'Create a new project chat',
     category: 'Actions',
     icon: '💬',
-    action: () => {
-      close()
-      router.push('/')
+    action: async () => {
+      const projectId = newChatProjectId()
+      if (!projectId) {
+        projectStore.pushErrorToast(
+          'Could not create chat',
+          'No project is available in the current workspace.',
+        )
+        return
+      }
+      try {
+        const chat = await projectStore.createChat(projectId)
+        close()
+        await router.push(`/chat/${chat.chat_id}`)
+      } catch (error) {
+        projectStore.pushErrorToast(
+          'Could not create chat',
+          error instanceof Error ? error.message : String(error),
+        )
+      }
     },
   },
   {
     id: 'cmd-schedules',
-    title: 'Schedules & Routines',
-    subtitle: 'View active recurring schedules and loops',
+    title: 'Automations',
+    subtitle: 'View schedules, routines, and loops',
     category: 'Navigation',
     icon: '⏰',
     action: () => {
       close()
-      router.push('/schedules')
+      void router.push('/schedules')
     },
   },
   {
@@ -111,7 +177,7 @@ const defaultCommands = computed<CommandItem[]>(() => [
     icon: '⚙️',
     action: () => {
       close()
-      router.push('/settings')
+      void router.push('/settings')
     },
   },
   {
@@ -143,7 +209,7 @@ const chatItems = computed<CommandItem[]>(() => {
       icon: '📄',
       action: () => {
         close()
-        router.push(`/chat/${chat.chat_id}`)
+        void router.push(`/chat/${chat.chat_id}`)
       },
     }
   })
@@ -164,6 +230,48 @@ const filteredItems = computed(() => {
     .slice(0, 15)
 })
 
+watch(
+  () => filteredItems.value.length,
+  (length) => {
+    selectedIndex.value = length > 0
+      ? Math.min(selectedIndex.value, length - 1)
+      : 0
+  },
+)
+
+function optionId(item: CommandItem): string {
+  return `command-option-${item.id}`
+}
+
+const selectedOptionId = computed(() => {
+  const item = filteredItems.value[selectedIndex.value]
+  return item ? optionId(item) : undefined
+})
+
+watch(selectedOptionId, () => {
+  nextTick(() => {
+    const container = resultsEl.value
+    const option = selectedOptionId.value
+      ? document.getElementById(selectedOptionId.value)
+      : null
+    if (!container || !option) return
+    const optionTop = option.offsetTop
+    const optionBottom = optionTop + option.offsetHeight
+    let nextTop = container.scrollTop
+    if (optionTop < container.scrollTop) {
+      nextTop = optionTop
+    } else if (optionBottom > container.scrollTop + container.clientHeight) {
+      nextTop = optionBottom - container.clientHeight
+    }
+    if (nextTop === container.scrollTop) return
+    if (typeof container.scrollTo === 'function') {
+      container.scrollTo({ top: nextTop, behavior: 'smooth' })
+    } else {
+      container.scrollTop = nextTop
+    }
+  })
+})
+
 function moveSelection(delta: number) {
   if (filteredItems.value.length === 0) return
   const max = filteredItems.value.length
@@ -176,7 +284,23 @@ function executeSelected() {
 }
 
 function executeItem(item: CommandItem) {
-  item.action()
+  void item.action()
+}
+
+function trapFocus(event: KeyboardEvent): void {
+  const focusable = paletteEl.value?.querySelectorAll<HTMLElement>(
+    'input, button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+  )
+  if (!focusable?.length) return
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
 }
 </script>
 
@@ -201,12 +325,19 @@ function executeItem(item: CommandItem) {
 
 .palette-input {
   flex: 1;
+  min-width: 0;
   border: none;
   background: transparent;
   padding: 8px 0;
   font-size: var(--text-base);
   color: var(--fg);
   outline: none;
+}
+
+.palette-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
 }
 
 .palette-results {
@@ -216,11 +347,18 @@ function executeItem(item: CommandItem) {
 }
 
 .palette-item {
+  width: 100%;
+  min-height: var(--touch);
   display: flex;
   align-items: center;
   gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
+  border: 0;
   border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
   transition: background 120ms var(--ease);
 }
@@ -229,12 +367,18 @@ function executeItem(item: CommandItem) {
   background: var(--bg3);
 }
 
+.palette-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 .item-icon {
   font-size: 16px;
 }
 
 .item-content {
   flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
 }
@@ -255,5 +399,11 @@ function executeItem(item: CommandItem) {
   text-align: center;
   color: var(--fg2);
   font-size: var(--text-sm);
+}
+
+@media (max-width: 720px) {
+  .palette-input {
+    font-size: 16px;
+  }
 }
 </style>

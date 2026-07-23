@@ -105,6 +105,7 @@
           type="button"
         >Diff</button>
         <button
+          v-if="isMarkdown"
           class="fv-tab"
           :class="{ active: store.tab === 'backlinks' }"
           @click="loadBacklinks"
@@ -311,9 +312,15 @@
             <div v-if="loadingBacklinks" class="fv-loading">Loading backlinks…</div>
             <div v-else-if="backlinks.length === 0" class="fv-empty-backlinks">No incoming wikilinks found for this note</div>
             <ul v-else class="fv-backlinks-list">
-              <li v-for="b in backlinks" :key="b.path" class="fv-backlink-item" @click="store.open(b.path)">
-                <span class="fv-backlink-title">{{ b.title }}</span>
-                <span class="fv-backlink-path">{{ b.path }}</span>
+              <li v-for="b in backlinks" :key="b.path">
+                <button
+                  type="button"
+                  class="fv-backlink-item"
+                  @click="openBacklink(b.path)"
+                >
+                  <span class="fv-backlink-title">{{ b.title }}</span>
+                  <span class="fv-backlink-path">{{ b.path }}</span>
+                </button>
               </li>
             </ul>
           </div>
@@ -520,22 +527,45 @@ interface BacklinkItem {
 }
 const backlinks = ref<BacklinkItem[]>([])
 const loadingBacklinks = ref(false)
+let backlinksRequestId = 0
 
-async function loadBacklinks() {
-  store.setTab('backlinks')
+async function loadBacklinks(): Promise<void> {
+  await store.setTab('backlinks')
   if (!store.path) return
+  const requestedPath = store.path
+  const requestId = ++backlinksRequestId
   loadingBacklinks.value = true
   try {
     const data = await api.get<{ backlinks: BacklinkItem[] }>(
-      `/api/vault/backlinks?path=${encodeURIComponent(store.path)}`,
+      `/api/vault/backlinks?path=${encodeURIComponent(requestedPath)}`,
     )
-    backlinks.value = data.backlinks || []
+    if (requestId === backlinksRequestId && store.path === requestedPath) {
+      backlinks.value = data.backlinks || []
+    }
   } catch {
-    backlinks.value = []
+    if (requestId === backlinksRequestId && store.path === requestedPath) {
+      backlinks.value = []
+    }
   } finally {
-    loadingBacklinks.value = false
+    if (requestId === backlinksRequestId) {
+      loadingBacklinks.value = false
+    }
   }
 }
+
+async function openBacklink(path: string): Promise<void> {
+  const chatId = store.chatId
+  await store.open(path, null, chatId)
+}
+
+watch(
+  () => store.loadToken,
+  () => {
+    backlinksRequestId++
+    backlinks.value = []
+    loadingBacklinks.value = false
+  },
+)
 
 // Click Diff next to a snapshot row in History: compares it with the
 // snapshot immediately before it (or the only snapshot vs current on disk
@@ -2767,17 +2797,26 @@ if (typeof window !== 'undefined') {
   gap: 8px;
 }
 .fv-backlink-item {
+  width: 100%;
+  min-height: var(--touch);
   display: flex;
   flex-direction: column;
   padding: 10px 14px;
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
+  color: inherit;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
   transition: background 120ms var(--ease);
 }
 .fv-backlink-item:hover {
   background: var(--bg3);
+}
+.fv-backlink-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 .fv-backlink-title {
   font-weight: 600;

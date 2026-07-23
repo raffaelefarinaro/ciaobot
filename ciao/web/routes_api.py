@@ -7,6 +7,7 @@ import json
 import logging
 import mimetypes
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -3040,15 +3041,103 @@ async def vault_markdown_paths(request: Request) -> JSONResponse:
 _BACKLINKS_LIMIT = 30
 
 
-def _references_note(content: str, target_stem: str) -> bool:
-    """True if ``content`` wikilinks to the note whose filename stem is ``target_stem``.
+def _without_markdown_extension(path: str) -> str:
+    return re.sub(r"\.(?:md|markdown)$", "", path, flags=re.IGNORECASE)
+
+
+def _normalize_wikilink_ref(ref: str) -> str:
+    normalized = ref.strip().replace("\\", "/")
+    if normalized.startswith("memory-vault/"):
+        normalized = normalized[len("memory-vault/"):]
+    return _without_markdown_extension(normalized)
+
+
+def _add_backlink_index_entry(
+    index: dict[str, list[str]],
+    key: str,
+    path: str,
+) -> None:
+    if not key:
+        return
+    matches = index.setdefault(key, [])
+    if path not in matches:
+        matches.append(path)
+
+
+def _build_backlink_index(paths: Iterable[str]) -> dict[str, list[str]]:
+    """Build the same path/stem lookup keys as the frontend wikilink index."""
+    index: dict[str, list[str]] = {}
+    for path in paths:
+        no_ext = _without_markdown_extension(path)
+        _add_backlink_index_entry(index, no_ext, path)
+        _add_backlink_index_entry(index, posixpath.basename(no_ext), path)
+        marker = "memory-vault/"
+        marker_index = no_ext.find(marker)
+        if marker_index >= 0:
+            _add_backlink_index_entry(
+                index,
+                no_ext[marker_index + len(marker):],
+                path,
+            )
+    return index
+
+
+def _resolve_backlink_target(
+    ref: str,
+    current_path: str,
+    index: dict[str, list[str]],
+    path_set: set[str],
+) -> str | None:
+    """Resolve one wikilink using the frontend's relative/path/stem rules."""
+    normalized = _normalize_wikilink_ref(ref)
+    if not normalized:
+        return None
+
+    current_dir = posixpath.dirname(current_path)
+    relative_candidates = [
+        posixpath.normpath(posixpath.join(current_dir, f"{normalized}.md")),
+        posixpath.normpath(posixpath.join(current_dir, f"{normalized}.markdown")),
+    ]
+    for candidate in relative_candidates:
+        if candidate in path_set:
+            return candidate
+
+    direct = index.get(normalized, [])
+    if len(direct) == 1:
+        return direct[0]
+    if len(direct) > 1:
+        relative_pick = next(
+            (path for path in direct if path in relative_candidates),
+            None,
+        )
+        if relative_pick is not None:
+            return relative_pick
+        if "/" in normalized:
+            return direct[0]
+        return None
+
+    tail = posixpath.basename(normalized)
+    stem_matches = index.get(tail, [])
+    if len(stem_matches) == 1:
+        return stem_matches[0]
+    return None
+
+
+def _references_note(
+    content: str,
+    current_path: str,
+    target_path: str,
+    index: dict[str, list[str]],
+    path_set: set[str],
+) -> bool:
+    """True if ``content`` contains a wikilink resolving to ``target_path``.
 
     Reuses ``vault_lint._links_in`` so links documented inside code fences/spans
-    or escaped (``\\[[...]]``) don't count — only real references, matching how
-    the vault linter and index resolve the wikilink graph.
+    or escaped (``\\[[...]]``) don't count. Resolution mirrors the frontend so
+    two notes with the same filename stem do not share false backlinks.
     """
-    for target in _links_in(content):
-        if Path(target).stem.lower() == target_stem:
+    for ref in _links_in(content):
+        if _resolve_backlink_target(ref, current_path, index, path_set) == target_path:
             return True
     return False
 
@@ -3059,43 +3148,84 @@ async def vault_backlinks(request: Request) -> JSONResponse:
     if not target_path:
         return JSONResponse({"backlinks": []})
     config = request.app.state.config
-    target_stem = Path(target_path).stem.lower()
-    if not target_stem:
-        return JSONResponse({"backlinks": []})
     workspace_root = config.workspace_root.resolve()
-    backlinks: list[dict[str, str]] = []
-    seen: set[str] = set()
+    candidates: list[tuple[Path, str]] = []
+    seen_paths: set[str] = set()
 
     for root in _allowed_roots(config):
         if not root.is_dir():
             continue
-        for md_path in root.rglob("*.md"):
-            if md_path.name.startswith(".") or any(
-                p in EXCLUDE_DIRS for p in md_path.relative_to(root).parts
-            ):
-                continue
-            try:
-                display_path = str(md_path.resolve().relative_to(workspace_root))
-            except (OSError, ValueError):
-                display_path = str(md_path)
+        for pattern in ("*.md", "*.markdown"):
+            for md_path in root.rglob(pattern):
+                try:
+                    relative_parts = md_path.relative_to(root).parts
+                    resolved = md_path.resolve()
+                except (OSError, ValueError):
+                    continue
+                if any(
+                    part.startswith(".") or part in EXCLUDE_DIRS
+                    for part in relative_parts
+                ):
+                    continue
+                try:
+                    display_path = str(resolved.relative_to(workspace_root))
+                except ValueError:
+                    display_path = str(resolved)
+                display_path = display_path.replace("\\", "/")
+                if display_path in seen_paths:
+                    continue
+                seen_paths.add(display_path)
+                candidates.append((resolved, display_path))
 
-            if display_path == target_path or display_path in seen:
-                continue
+    candidates.sort(key=lambda item: item[1])
+    path_set = {display_path for _path, display_path in candidates}
+    clean_target = _LINE_SUFFIX_RE.sub("", target_path).replace("\\", "/")
+    resolved_target = next(
+        (display for _path, display in candidates if display == clean_target),
+        None,
+    )
+    if resolved_target is None:
+        try:
+            raw_target = Path(clean_target)
+            target_on_disk = (
+                raw_target.resolve()
+                if raw_target.is_absolute()
+                else (workspace_root / raw_target).resolve()
+            )
+        except (OSError, ValueError):
+            return JSONResponse({"backlinks": []})
+        resolved_target = next(
+            (display for path, display in candidates if path == target_on_disk),
+            None,
+        )
+    if resolved_target is None:
+        return JSONResponse({"backlinks": []})
 
-            try:
-                content = md_path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
+    index = _build_backlink_index(path_set)
+    target_stem = Path(resolved_target).stem.casefold()
+    backlinks: list[dict[str, str]] = []
+    for md_path, display_path in candidates:
+        if display_path == resolved_target:
+            continue
+        try:
+            content = md_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
 
-            # Cheap gate before the code-fence stripping + regex in _links_in.
-            if target_stem not in content.lower():
-                continue
+        # Cheap gate before the code-fence stripping + regex in _links_in.
+        if target_stem not in content.casefold():
+            continue
 
-            if _references_note(content, target_stem):
-                seen.add(display_path)
-                backlinks.append({"path": display_path, "title": md_path.stem})
-                if len(backlinks) >= _BACKLINKS_LIMIT:
-                    return JSONResponse({"backlinks": backlinks})
+        if _references_note(
+            content,
+            display_path,
+            resolved_target,
+            index,
+            path_set,
+        ):
+            backlinks.append({"path": display_path, "title": md_path.stem})
+            if len(backlinks) >= _BACKLINKS_LIMIT:
+                return JSONResponse({"backlinks": backlinks})
     return JSONResponse({"backlinks": backlinks})
 
 
