@@ -15,11 +15,13 @@
     />
     <router-view />
     <InAppToast />
+    <CommandPaletteModal v-model="showCommandPalette" />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import CommandPaletteModal from './components/CommandPaletteModal.vue'
 import InAppToast from './components/InAppToast.vue'
 import RestartOverlay from './components/RestartOverlay.vue'
 import StartupView from './components/StartupView.vue'
@@ -76,6 +78,15 @@ function scheduleNextPoll() {
   }, 1500)
 }
 
+const showCommandPalette = ref(false)
+
+function handleKeyDown(e: KeyboardEvent) {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+    e.preventDefault()
+    showCommandPalette.value = !showCommandPalette.value
+  }
+}
+
 function stopPolling() {
   if (pollTimer) {
     clearTimeout(pollTimer)
@@ -85,10 +96,12 @@ function stopPolling() {
 
 onMounted(() => {
   pollStartup().then(scheduleNextPoll)
+  window.addEventListener('keydown', handleKeyDown)
 })
 
 onUnmounted(() => {
   stopPolling()
+  window.removeEventListener('keydown', handleKeyDown)
 })
 
 watch(showStartup, (show) => {

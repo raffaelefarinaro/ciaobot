@@ -2006,8 +2006,26 @@ watch(() => chat.value?.chat_id, (id) => notifyChatFocused(id))
 
 const knownFilePaths = computed(() => touchedFiles.value.map(f => f.file_path))
 
+const mdCache = new Map<string, string>()
+const MAX_MD_CACHE_SIZE = 500
+// Rendered output depends on the known-file-path set (for linkification), so
+// drop the cache whenever that set actually changes — keying on text alone is
+// then safe, and avoids a stale render when paths change without the text.
+watch(() => knownFilePaths.value.join('|'), () => mdCache.clear())
+
 function renderMarkdown(text: string): string {
-  return renderSafeMarkdown(text, knownFilePaths.value)
+  if (!text) return ''
+  const cached = mdCache.get(text)
+  if (cached !== undefined) return cached
+
+  const rendered = renderSafeMarkdown(text, knownFilePaths.value)
+  if (mdCache.size >= MAX_MD_CACHE_SIZE) {
+    // Plain FIFO eviction — fine for chat scroll-back.
+    const firstKey = mdCache.keys().next().value
+    if (firstKey !== undefined) mdCache.delete(firstKey)
+  }
+  mdCache.set(text, rendered)
+  return rendered
 }
 
 function renderActivityLine(line: string): string {
