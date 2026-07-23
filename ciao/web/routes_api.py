@@ -702,7 +702,7 @@ def _local_subagent_transcripts(session_id: str, workspace_root: Path) -> list[d
 
 # ── Auth ────────────────────────────────────────────────────────────────
 
-from ciao.web.routes.routes_auth import auth_check, auth_login, auth_logout
+from ciao.web.routes_auth import auth_check, auth_login, auth_logout
 
 
 # ── Projects ─────────────────────────────────────────────────────────────
