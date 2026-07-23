@@ -141,7 +141,8 @@ def _general_project_id(pcm) -> str | None:
     for ws in workspaces:
         for project in projects:
             if project.workspace == ws and project.name == "General":
-                return project.project_id
+                project_id: str = project.project_id
+                return project_id
     return None
 
 

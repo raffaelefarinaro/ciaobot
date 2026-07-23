@@ -189,12 +189,19 @@ class BaseProvider(ABC):
         self.config = config
 
     @abstractmethod
-    async def run_streaming(
+    def run_streaming(
         self,
         request: AgentRequest,
         register_handle: Callable[[ActiveHandle | None], None],
     ) -> AsyncGenerator[StreamEvent, None]:
-        """Run one request and stream normalized events."""
+        """Run one request and stream normalized events.
+
+        Declared as a plain ``def`` returning an ``AsyncGenerator`` (not
+        ``async def``) so the type matches concrete ``async def ... yield``
+        overrides; an ``async def`` body without a ``yield`` would type as a
+        coroutine that *returns* a generator instead.
+        """
+        ...
 
     async def disconnect(self) -> None:
         """Discard any provider-side connection state."""

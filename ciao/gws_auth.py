@@ -115,7 +115,7 @@ def load_client_secret(config_dir: Path) -> dict[str, Any]:
         raise ValueError("client_secret.json not found for this profile")
     with open(secret_path, "r", encoding="utf-8") as handle:
         secret = json.load(handle)
-    installed = secret.get("installed") or secret.get("web")
+    installed: dict[str, Any] = secret.get("installed") or secret.get("web")
     if not installed:
         raise ValueError("client_secret.json missing 'installed' or 'web' section")
     return installed
@@ -209,7 +209,8 @@ def exchange_code(
     )
     try:
         with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            payload: dict[str, Any] = json.loads(resp.read().decode("utf-8"))
+            return payload
     except urllib.error.HTTPError as exc:
         try:
             err_json = json.loads(exc.read().decode("utf-8"))

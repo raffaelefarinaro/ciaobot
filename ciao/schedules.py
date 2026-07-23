@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import contextlib
 import json
 import logging
@@ -12,7 +13,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from importlib import resources
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Callable, Coroutine, Protocol
 from zoneinfo import ZoneInfo
 
 from ciao.models import BridgeMode
@@ -295,7 +296,7 @@ class ScheduleStore:
         mode: BridgeMode,
         chat_id: int,
         timezone_name: str = DEFAULT_TIMEZONE,
-        days_of_week: list[str] | None = None,
+        days_of_week: builtins.list[str] | None = None,
         thread_id: int | None = None,
         frequency: str = "weekly",
         day_of_month: int | None = None,
@@ -368,7 +369,8 @@ class ScheduleStore:
         if not self._path.exists():
             return {"schedules": []}
         try:
-            return json.loads(self._path.read_text(encoding="utf-8"))
+            data: dict = json.loads(self._path.read_text(encoding="utf-8"))
+            return data
         except json.JSONDecodeError:
             return {"schedules": []}
 
@@ -378,7 +380,7 @@ class ScheduleStore:
         tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
         tmp.replace(self._path)
 
-    def _runtime_items(self) -> list[dict]:
+    def _runtime_items(self) -> builtins.list[dict]:
         return [item for item in self._load().get("schedules", []) if isinstance(item, dict)]
 
     def _entry_from_item(self, item: dict) -> ScheduleEntry:
@@ -400,7 +402,7 @@ class ScheduleStore:
             entry.archive_policy = "manual"
         return entry
 
-    def _system_entries(self) -> list[ScheduleEntry]:
+    def _system_entries(self) -> builtins.list[ScheduleEntry]:
         state = self._load_system_state()
         entries: list[ScheduleEntry] = []
         for item in self._load_system_definitions():
@@ -416,7 +418,7 @@ class ScheduleStore:
             entries.append(entry)
         return entries
 
-    def _load_system_definitions(self) -> list[dict]:
+    def _load_system_definitions(self) -> builtins.list[dict]:
         try:
             raw = resources.files("ciao.stock").joinpath("schedules.json").read_text(encoding="utf-8")
             data = json.loads(raw)
@@ -463,6 +465,25 @@ class ScheduleStore:
         return payload
 
 
+class _DispatchToWeb(Protocol):
+    """Callback that dispatches a schedule entry through the web pipeline.
+
+    Declared as a Protocol (rather than ``Callable``) so the ``target_chat_id``
+    keyword argument is expressible and the coroutine return type is precise
+    enough for ``asyncio.create_task``.
+    """
+
+    def __call__(
+        self,
+        entry: ScheduleEntry,
+        model: str,
+        mode: BridgeMode,
+        provider: str,
+        *,
+        target_chat_id: str | None = None,
+    ) -> Coroutine[Any, Any, dict | None]: ...
+
+
 class ScheduleManager:
     """Polls daily schedules and dispatches them as chat turns."""
 
@@ -470,10 +491,7 @@ class ScheduleManager:
         self,
         store: ScheduleStore,
         resolve_target: Callable[[ScheduleEntry], tuple[str, str, BridgeMode, str]] | None = None,
-        dispatch_to_web: Callable[
-            [ScheduleEntry, str, BridgeMode, str], Awaitable[dict | None]
-        ]
-        | None = None,
+        dispatch_to_web: _DispatchToWeb | None = None,
         prepare_chat: Callable[
             [ScheduleEntry, str, str, BridgeMode, str], str | None
         ]
@@ -508,7 +526,7 @@ class ScheduleManager:
         mode: BridgeMode,
         chat_id: int,
         timezone_name: str = DEFAULT_TIMEZONE,
-        days_of_week: list[str] | None = None,
+        days_of_week: builtins.list[str] | None = None,
         thread_id: int | None = None,
         frequency: str = "weekly",
         day_of_month: int | None = None,
@@ -692,7 +710,7 @@ class ScheduleManager:
                 entry.last_dispatched_at = localized.isoformat(timespec="seconds")
                 self._store.replace(entry)
 
-    async def catch_up(self, now: datetime | None = None) -> list[str]:
+    async def catch_up(self, now: datetime | None = None) -> builtins.list[str]:
         """Fire each schedule once when its latest expected run was missed.
 
         Called once on startup so schedules recover after the server was down
@@ -778,7 +796,7 @@ class ScheduleManager:
                 last_expected.isoformat(),
                 localized.isoformat(),
             )
-            chat_id: str | None = None
+            chat_id = None
             if self._prepare_chat is not None:
                 chat_id = self._prepare_chat(entry, entry.prompt, model, mode, provider)
             await self._dispatch_entry(

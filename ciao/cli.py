@@ -15,6 +15,7 @@ import subprocess
 import sys
 from importlib import resources
 from pathlib import Path
+from typing import cast
 import urllib.error
 import urllib.request
 
@@ -1462,7 +1463,8 @@ def _make_json_request(
 
     if not body:
         return {}
-    return json.loads(body)
+    parsed: dict | list = json.loads(body)
+    return parsed
 
 
 def _resolve_project(
@@ -1490,7 +1492,7 @@ def _resolve_project(
             if project_arg.lower() in project.get("name", "").lower()
         ]
         if len(matches) == 1:
-            return matches[0]["project_id"]
+            return cast(str, matches[0]["project_id"])
         if len(matches) > 1:
             names = ", ".join(
                 f"'{project['name']}' ({project['project_id']})"
@@ -1512,8 +1514,8 @@ def _resolve_project(
 
     for project in projects:
         if project.get("is_auto") or project.get("name") == "General":
-            return project["project_id"]
-    return projects[0]["project_id"]
+            return cast(str, project["project_id"])
+    return cast(str, projects[0]["project_id"])
 
 
 def _report_bug_command(args: argparse.Namespace) -> int:
@@ -1648,7 +1650,7 @@ def _provider_chat_command(args: argparse.Namespace) -> int:
             print("Error: --model or CIAO_MODEL env var required.", file=sys.stderr)
             return 1
 
-        chat_detail = _make_json_request(opener, f"{base_url}/api/chats/{chat_id}")
+        chat_detail = cast(dict, _make_json_request(opener, f"{base_url}/api/chats/{chat_id}"))
         if isinstance(chat_detail, dict) and chat_detail.get("_error"):
             print(f"Error: Chat '{chat_id}' not found.", file=sys.stderr)
             return 1
@@ -1673,12 +1675,12 @@ def _provider_chat_command(args: argparse.Namespace) -> int:
             "user_authorized": True,
         }
 
-        res = _make_json_request(
+        res = cast(dict, _make_json_request(
             opener,
             f"{base_url}/api/chats/{chat_id}/provider-subchats",
             data=payload,
             method="POST",
-        )
+        ))
         if isinstance(res, dict) and res.get("_error"):
             return 1
 
@@ -1704,12 +1706,12 @@ def _provider_chat_command(args: argparse.Namespace) -> int:
             "message": args.message,
             "user_authorized": True,
         }
-        res = _make_json_request(
+        res = cast(dict, _make_json_request(
             opener,
             f"{base_url}/api/provider-subchats/{subchat_id}/messages",
             data=payload,
             method="POST",
-        )
+        ))
         if isinstance(res, dict) and res.get("_error"):
             return 1
 
@@ -1733,12 +1735,12 @@ def _provider_chat_command(args: argparse.Namespace) -> int:
         if args.subcommand == "extend":
             payload["user_authorized"] = True
 
-        res = _make_json_request(
+        res = cast(dict, _make_json_request(
             opener,
             f"{base_url}/api/provider-subchats/{subchat_id}/{args.subcommand}",
             data=payload,
             method="POST",
-        )
+        ))
         if isinstance(res, dict) and res.get("_error"):
             return 1
 

@@ -116,7 +116,8 @@ def remote_heads(repos) -> dict[str, str]:
 
 def _load_json(path: str) -> dict:
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
+        data: dict = json.loads(Path(path).read_text(encoding="utf-8"))
+        return data
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 

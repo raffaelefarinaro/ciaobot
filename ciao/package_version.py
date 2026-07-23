@@ -9,7 +9,11 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
-from typing import Any
+from contextlib import AbstractContextManager
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 from ciao import __version__
 
@@ -101,7 +105,7 @@ def package_status(
     *,
     current_version: str = __version__,
     repo: str | None = None,
-    opener: Callable[..., object] = urllib.request.urlopen,
+    opener: Callable[..., AbstractContextManager[Any]] = urllib.request.urlopen,
     timeout: float = 2.5,
 ) -> dict[str, object]:
     """Return installed and latest (GitHub release) package versions.
@@ -170,14 +174,14 @@ def make_cached_package_status(
         now = clock()
         current = state["value"]
         if current is not None and now < state["expires"]:
-            return current
+            return cast("dict[str, object]", current)
 
         result = fetch()
         if result.get("error") and state["good"] is not None:
             # Serve the last successful answer; retry again soon.
             state["value"] = state["good"]
             state["expires"] = now + ttl_error
-            return state["good"]
+            return cast("dict[str, object]", state["good"])
 
         state["value"] = result
         state["expires"] = now + (ttl_ok if not result.get("error") else ttl_error)
@@ -193,7 +197,7 @@ def package_changelog(
     current_version: str = __version__,
     latest_version: str = "",
     repo: str | None = None,
-    opener: Callable[..., object] = urllib.request.urlopen,
+    opener: Callable[..., AbstractContextManager[Any]] = urllib.request.urlopen,
     timeout: float = 4.0,
 ) -> dict[str, object]:
     """Return the commit subjects between the installed and latest release tags.
@@ -235,7 +239,8 @@ def package_changelog(
                     message = commit["message"]
                 lines = [line for line in message.strip().splitlines() if line.strip()]
                 subject = lines[0].strip() if lines else ""
-                sha = entry.get("sha") if isinstance(entry.get("sha"), str) else ""
+                raw_sha = entry.get("sha")
+                sha = raw_sha if isinstance(raw_sha, str) else ""
                 if subject:
                     commits.append({"sha": sha[:7], "subject": subject})
     except (OSError, urllib.error.URLError, ValueError, json.JSONDecodeError) as exc:
@@ -449,7 +454,7 @@ def running_install_present() -> bool:
 
 def _latest_wheel_url(
     *,
-    opener: Callable[..., object],
+    opener: Callable[..., AbstractContextManager[Any]],
     timeout: float,
 ) -> tuple[str, str]:
     """Return (wheel_url, error) for the latest GitHub release."""
@@ -474,7 +479,7 @@ def _latest_wheel_url(
 
 def update_package(
     *,
-    opener: Callable[..., object] = urllib.request.urlopen,
+    opener: Callable[..., AbstractContextManager[Any]] = urllib.request.urlopen,
     timeout: float = 10.0,
 ) -> dict[str, Any]:
     """Perform package upgrade based on active install mode.

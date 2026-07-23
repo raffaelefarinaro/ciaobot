@@ -195,7 +195,8 @@ def extract_json(text: str) -> dict | None:
     text = text.strip()
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE)
     try:
-        return json.loads(text)
+        parsed: dict = json.loads(text)
+        return parsed
     except Exception:
         pass
     start = text.find("{")
@@ -210,7 +211,8 @@ def extract_json(text: str) -> dict | None:
             if depth == 0:
                 blob = text[start : i + 1]
                 try:
-                    return json.loads(blob)
+                    parsed_blob: dict = json.loads(blob)
+                    return parsed_blob
                 except Exception:
                     return None
     return None
@@ -295,13 +297,19 @@ def aggregate(results: list[ModelResult]) -> dict:
     ok = [r for r in results if r.ok and r.review]
     verdict_counts: dict[str, int] = {}
     for r in ok:
-        v = r.review.get("verdict", "?")
+        review = r.review
+        if review is None:
+            continue
+        v = review.get("verdict", "?")
         verdict_counts[v] = verdict_counts.get(v, 0) + 1
     severity_weight = {"blocking": 4, "major": 3, "minor": 2, "nit": 1}
     issues: list[dict] = []
     for r in ok:
-        for it in r.review.get("issues") or []:
-            issues.append({**it, "model": r.model, "confidence": r.review.get("confidence", 3)})
+        review = r.review
+        if review is None:
+            continue
+        for it in review.get("issues") or []:
+            issues.append({**it, "model": r.model, "confidence": review.get("confidence", 3)})
     return {
         "model_count": len(results),
         "ok_count": len(ok),

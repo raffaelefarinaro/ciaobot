@@ -304,7 +304,8 @@ class TranscriptStore:
             if not path.exists():
                 return {}
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+            return data
         except json.JSONDecodeError:
             return {}
 
@@ -482,7 +483,7 @@ def _peek_cli_entrypoint(path: Path) -> bool:
                 except json.JSONDecodeError:
                     continue
                 if obj.get("type") == "user":
-                    return obj.get("entrypoint") == "cli"
+                    return bool(obj.get("entrypoint") == "cli")
     except OSError:
         return False
     return False
@@ -541,7 +542,7 @@ def _build_cli_turns(
             if not model:
                 model = msg.get("model", "")
 
-            text_parts: list[str] = []
+            text_parts = []
             if isinstance(content, list):
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "text":

@@ -18,7 +18,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ class RateLimitStore:
         or corrupt so the frontend never has to special-case "uninitialized".
         """
         try:
-            return json.loads(self.path.read_text(encoding="utf-8"))
+            return cast("dict[str, Any]", json.loads(self.path.read_text(encoding="utf-8")))
         except (FileNotFoundError, json.JSONDecodeError):
             return {"buckets": {}, "last_updated": None}
 

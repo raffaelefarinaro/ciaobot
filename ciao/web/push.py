@@ -12,7 +12,7 @@ import logging
 import time
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -86,8 +86,11 @@ class PushManager:
     @staticmethod
     def _derive_raw_from_pem(pem: str) -> str:
         from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
         key = serialization.load_pem_private_key(pem.encode("ascii"), password=None)
-        value = key.private_numbers().private_value  # type: ignore[attr-defined]
+        # VAPID keys are always EC SECP256R1 (see _load_or_create_keys).
+        ec_key = cast(ec.EllipticCurvePrivateKey, key)
+        value = ec_key.private_numbers().private_value
         return _b64url(value.to_bytes(32, "big"))
 
     @property

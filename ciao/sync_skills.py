@@ -67,7 +67,8 @@ LEGACY_REMOVED_STOCK_AGENTS = frozenset({
 
 def _load_json(path: Path) -> dict:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data: dict = json.loads(path.read_text(encoding="utf-8"))
+        return data
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 

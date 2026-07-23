@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from typing import cast
 
 logger = logging.getLogger(__name__)
 
@@ -354,10 +355,15 @@ async def upgrade_all(project_root: str) -> str | None:
         pip_changed, gws_result, defuddle_result,
         claude_result, codex_result, root_npm_result, web_npm_result,
         apfel_result, libreoffice_result, scrapling_result,
-    ) = await asyncio.gather(
-        pip_task, gws_task, defuddle_task, claude_task, codex_task,
-        root_npm_task, web_npm_task, apfel_task, libreoffice_task,
-        scrapling_task,
+    ) = cast(
+        "tuple[dict[str, tuple[str, str]], UpgradeResult, UpgradeResult, "
+        "UpgradeResult, UpgradeResult, UpgradeResult, UpgradeResult, "
+        "UpgradeResult, UpgradeResult, UpgradeResult]",
+        await asyncio.gather(
+            pip_task, gws_task, defuddle_task, claude_task, codex_task,
+            root_npm_task, web_npm_task, apfel_task, libreoffice_task,
+            scrapling_task,
+        ),
     )
 
     # Failures get logged + surfaced in the summary even when nothing changed,

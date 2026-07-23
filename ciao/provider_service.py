@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from typing import cast
+
 from ciao.config import BridgeConfig
 from ciao.models import AgentRequest, StreamEvent
 from ciao.providers import ClaudeProvider, CodexProvider
@@ -85,7 +87,7 @@ class ProviderService:
         steer = getattr(self._provider, "steer", None)
         if not callable(steer):
             return False
-        return await steer(request)
+        return cast(bool, await steer(request))
 
     @property
     def provider(self) -> ProviderImpl | None:

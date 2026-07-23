@@ -83,7 +83,8 @@ def bump_version(current: str, bump: str) -> str:
 
 def _read_json(path: Path) -> dict:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data: dict = json.loads(path.read_text(encoding="utf-8"))
+        return data
     except FileNotFoundError as exc:
         raise ReleaseError(f"missing required file: {path}") from exc
     except json.JSONDecodeError as exc:

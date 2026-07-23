@@ -358,7 +358,7 @@ class LocalSessionManager:
 
     def _scan_file_for_secrets(self, p: Path) -> tuple[list[str], list[str]]:
         blockers = []
-        warnings = []
+        warnings: list[str] = []
         name = p.name.lower()
 
         # Block env-style files

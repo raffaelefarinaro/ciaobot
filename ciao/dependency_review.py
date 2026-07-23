@@ -38,9 +38,9 @@ try:
     import tomllib
 except ImportError:
     try:
-        import tomli as tomllib
+        import tomli as tomllib  # type: ignore[no-redef]  # optional fallback for py<3.11
     except ImportError:
-        tomllib = None
+        tomllib = None  # type: ignore[assignment]  # no TOML parser available
 
 import httpx
 
@@ -200,7 +200,8 @@ def get_installed_npm_version(workspace_root: Path, name: str) -> str:
         pkg_json = workspace_root / "web" / "node_modules" / name / "package.json"
         if pkg_json.exists():
             data = json.loads(pkg_json.read_text(encoding="utf-8"))
-            return data.get("version", "unknown")
+            version: str = data.get("version", "unknown")
+            return version
     except Exception:
         pass
     return "not installed"
@@ -530,7 +531,8 @@ def _routing_env_for_research_model(model: str) -> dict[str, str]:
 
 def _read_baseline(path: Path) -> dict[str, Any]:
     try:
-        return json.loads(path.read_text())
+        baseline: dict[str, Any] = json.loads(path.read_text())
+        return baseline
     except FileNotFoundError:
         return {"_meta": {}, "tools": {}}
     except (OSError, json.JSONDecodeError) as exc:

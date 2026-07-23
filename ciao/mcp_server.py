@@ -13,11 +13,12 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, cast
 
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken
 from mcp.server.auth.settings import AuthSettings
+from pydantic import AnyHttpUrl
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from starlette.requests import Request
@@ -171,7 +172,8 @@ class CiaoMcpService:
             stateless_http=True,
             token_verifier=self.registry,
             auth=AuthSettings(
-                issuer_url=issuer,
+                # pydantic coerces the str to AnyHttpUrl during validation.
+                issuer_url=cast(AnyHttpUrl, issuer),
                 required_scopes=["ciaobot"],
                 resource_server_url=None,
             ),

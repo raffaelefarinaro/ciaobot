@@ -151,7 +151,8 @@ class LoopStore:
         if not self._path.exists():
             return {"loops": []}
         try:
-            return json.loads(self._path.read_text(encoding="utf-8"))
+            data: dict = json.loads(self._path.read_text(encoding="utf-8"))
+            return data
         except json.JSONDecodeError:
             return {"loops": []}
 

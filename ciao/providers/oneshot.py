@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncGenerator
 from pathlib import Path
+from typing import Any, cast
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -170,7 +172,9 @@ async def _run_claude_oneshot(
         # retrieved" log entry. aclose() is a no-op on an exhausted
         # generator, so the normal path is unaffected.
         try:
-            await agen.aclose()
+            # SDK types query() as AsyncIterator, but it returns an async
+            # generator that exposes aclose().
+            await cast("AsyncGenerator[Any, None]", agen).aclose()
         except Exception:  # noqa: BLE001
             logger.debug("oneshot query generator cleanup raised; already handled")
     return "".join(parts).strip()

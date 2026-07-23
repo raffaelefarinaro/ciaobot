@@ -188,13 +188,15 @@ class CiaoControlPlane:
         has to pre-resolve an id via ``projects_list`` for the common case."""
         exact = self.pcm.get_project(ref)
         if exact is not None:
-            return exact.project_id
+            exact_id: str = exact.project_id
+            return exact_id
         matches = [
             p for p in self.pcm.list_projects(principal.workspace)
             if p.name.casefold() == ref.casefold()
         ]
         if len(matches) == 1:
-            return matches[0].project_id
+            match_id: str = matches[0].project_id
+            return match_id
         if len(matches) > 1:
             raise ControlPlaneError(
                 "project_ambiguous",
@@ -905,7 +907,8 @@ class CiaoControlPlane:
             raise ControlPlaneError("schedule_not_found", f"Schedule '{schedule_id}' was not found.")
         if entry.workspace and entry.workspace != principal.workspace:
             raise ControlPlaneError("workspace_forbidden", "Schedule belongs to another workspace.")
-        return entry
+        resolved: ScheduleEntry = entry
+        return resolved
 
     def schedule_update(self, principal: McpPrincipal, schedule_id: str, **changes: Any) -> dict[str, Any]:
         entry = self._schedule(principal, schedule_id)
