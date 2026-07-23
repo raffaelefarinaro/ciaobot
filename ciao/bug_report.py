@@ -127,7 +127,7 @@ def submit_bug_report(title: str, details: str, system_info: str | None = None) 
     try:
         with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
             # Google Forms returns 200 on a successful submission.
-            return 200 <= response.status < 300
+            return bool(200 <= response.status < 300)
     except Exception as exc:  # noqa: BLE001 — reporting must degrade gracefully
         print(f"Failed to submit bug report to Google Form: {exc}", file=sys.stderr)
         return False

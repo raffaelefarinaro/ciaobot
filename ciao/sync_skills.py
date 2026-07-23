@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from ciao.jsonio import read_json_dict
 import os
 import re
 import shutil
@@ -67,7 +68,8 @@ LEGACY_REMOVED_STOCK_AGENTS = frozenset({
 
 def _load_json(path: Path) -> dict:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = read_json_dict(path)
+        return data
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
 

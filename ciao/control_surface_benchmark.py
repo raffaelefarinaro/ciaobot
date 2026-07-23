@@ -26,7 +26,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from importlib import resources
 from pathlib import Path
-from typing import Any, Callable, Iterable, Literal
+from typing import IO, Any, Callable, Iterable, Literal
 
 from ciao.loops import LoopStore
 from ciao.memory_tool import add_entry, load_entries, memory_path, remove_entry
@@ -171,7 +171,7 @@ class ArmServer:
         self.port = _free_port()
         self.base_url = f"http://127.0.0.1:{self.port}"
         self.process: subprocess.Popen[bytes] | None = None
-        self._log_handle = None
+        self._log_handle: IO[bytes] | None = None
 
     def start(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -256,12 +256,13 @@ class ArmServer:
         self._log_handle = None
 
     def create_project(self, name: str) -> dict[str, Any]:
-        return _json_request(
+        result: dict[str, Any] = _json_request(
             self.base_url,
             "/api/projects",
             method="POST",
             payload={"name": name, "workspace": self.workspace_name},
         )
+        return result
 
     def create_chat(
         self,
@@ -280,12 +281,13 @@ class ArmServer:
             payload["model"] = model
         if self.provider == "claude":
             payload["model_bucket"] = "work"
-        return _json_request(
+        result: dict[str, Any] = _json_request(
             self.base_url,
             f"/api/projects/{project_id}/chats",
             method="POST",
             payload=payload,
         )
+        return result
 
     def send(self, chat_id: str, prompt: str) -> None:
         _json_request(
@@ -306,9 +308,10 @@ class ArmServer:
             elif seen_active:
                 # Give the provider transcript writer one moment to flush.
                 time.sleep(0.2)
-                return _json_request(
+                messages: list[dict[str, Any]] = _json_request(
                     self.base_url, f"/api/chats/{chat_id}/messages", timeout=15
                 )
+                return messages
             elif self.process is not None and self.process.poll() is not None:
                 raise RuntimeError(f"server exited with {self.process.returncode}")
             time.sleep(0.25)
@@ -338,7 +341,8 @@ def _assistant_result(messages: Iterable[dict[str, Any]]) -> tuple[str, int | No
         assistant[-1],
     )
     duration = terminal.get("duration_ms")
-    usage = terminal.get("usage") if isinstance(terminal.get("usage"), dict) else {}
+    usage_raw = terminal.get("usage")
+    usage = usage_raw if isinstance(usage_raw, dict) else {}
     return (
         str(terminal.get("content") or ""),
         int(duration) if isinstance(duration, (int, float)) else None,
@@ -349,6 +353,7 @@ def _assistant_result(messages: Iterable[dict[str, Any]]) -> tuple[str, int | No
 def token_count(provider: Provider, usage: dict[str, str]) -> int | None:
     """Return a comparable provider-appropriate total, preserving raw usage too."""
     try:
+        keys: tuple[str, ...]
         if provider == "claude":
             keys = (
                 "input_tokens",
@@ -1017,7 +1022,8 @@ def run_benchmark(args: argparse.Namespace) -> int:
     )
     for provider in providers:
         arm_root = output / "workspaces" / provider
-        servers = {
+        surfaces: tuple[Surface, ...] = ("legacy", "mcp")
+        servers: dict[Surface, ArmServer] = {
             surface: ArmServer(
                 root=arm_root / surface,
                 surface=surface,
@@ -1025,7 +1031,7 @@ def run_benchmark(args: argparse.Namespace) -> int:
                 workspace_name=args.workspace,
                 startup_timeout=args.startup_timeout,
             )
-            for surface in ("legacy", "mcp")
+            for surface in surfaces
         }
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:

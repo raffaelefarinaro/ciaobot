@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ciaobot"
-version = "0.5.2"
+version = "0.5.3"
 description = "Ciaobot personal assistant server."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 dependencies = [
-  "claude-agent-sdk==0.2.124",
+  "claude-agent-sdk==0.2.126",
   # Agent-facing control plane shared by Claude Code and Codex.
   "mcp==1.28.1",
   "openai==2.46.0",
@@ -35,6 +35,9 @@ test = [
   "build==1.5.0",
   "pytest==8.4.2",
   "pytest-asyncio==0.26.0",
+  "pytest-cov>=5.0.0",
+  "mypy>=1.10.0",
+  "pip-audit>=2.7.0",
 ]
 # Local on-device voice transcription (Apple Silicon only).
 voice-local = [
@@ -87,3 +90,21 @@ packages = ["ciao", "ciao.context", "ciao.observability", "ciao.providers", "cia
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+explicit_package_bases = true
+
+[tool.coverage.run]
+source = ["ciao"]
+omit = [
+  "ciao/stock/*",
+  "tests/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+precision = 1

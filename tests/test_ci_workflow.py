@@ -12,7 +12,8 @@ def test_public_ci_matches_release_contract() -> None:
     assert "python-version: '3.12'" in workflow
     assert "npm ci" in workflow
     assert "npm run build" in workflow
-    assert "pytest tests/" in workflow
+    assert "pytest" in workflow
+    assert "tests/" in workflow
     assert "ciao package-smoke --skip-frontend" in workflow
     assert "branches: [ develop ]" in workflow
     assert "branches: [ develop, main ]" in workflow

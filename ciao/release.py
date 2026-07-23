@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from ciao.jsonio import read_json_dict
 import re
 import subprocess
 import sys
@@ -83,7 +84,8 @@ def bump_version(current: str, bump: str) -> str:
 
 def _read_json(path: Path) -> dict:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = read_json_dict(path)
+        return data
     except FileNotFoundError as exc:
         raise ReleaseError(f"missing required file: {path}") from exc
     except json.JSONDecodeError as exc:

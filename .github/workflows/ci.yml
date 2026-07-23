@@ -30,14 +30,32 @@ jobs:
         python -m pip install --upgrade pip
         pip install -e '.[test]'
 
-    - name: Run pytest
+    - name: Python static type check
       run: |
-        pytest tests/
+        mypy ciao
+
+    - name: Python dependency security audit
+      run: |
+        pip-audit --desc || true
+
+    - name: Run pytest with coverage
+      run: |
+        pytest --cov=ciao --cov-report=term-missing tests/
 
     - name: Install frontend dependencies
       run: |
         cd web
         npm ci
+
+    - name: Frontend lint check
+      run: |
+        cd web
+        npm run lint || true
+
+    - name: Frontend dependency audit
+      run: |
+        cd web
+        npm audit --audit-level=high || true
 
     - name: Run frontend tests
       run: |

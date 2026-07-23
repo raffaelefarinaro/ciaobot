@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.5.3 - 2026-07-23
+
+### Added
+- feat: command palette, vault backlinks, mypy-clean backend + quality tooling (#167) (`1cb614c`)
+
+### Fixed
+- fix(release): keep a top-level __version__ literal for the release tool (`39867b5`)
+
+### Maintenance
+- chore(release): bump service-worker cache name to v0.5.3 (`4892668`)
+
 ## v0.5.2 - 2026-07-21
 
 ### Added

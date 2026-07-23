@@ -7,11 +7,14 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable
 from pathlib import Path
+from typing import Protocol
 
 
-Runner = Callable[[list[str]], None]
+class Runner(Protocol):
+    def __call__(
+        self, cmd: list[str], *, cwd: Path, env: dict[str, str] | None = None
+    ) -> None: ...
 
 
 class PackageSmokeError(RuntimeError):
@@ -66,7 +69,7 @@ if {require_stock!r}:
 def run_package_smoke(
     repo_root: Path | str,
     *,
-    runner: Callable[[list[str]], None] = _default_runner,
+    runner: Runner = _default_runner,
     skip_frontend: bool = False,
     require_stock: bool = True,
 ) -> None:

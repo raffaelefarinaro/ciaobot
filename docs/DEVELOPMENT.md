@@ -126,6 +126,20 @@ cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 
 For chat rendering changes, verify the compact `Activity` disclosure, `Outputs` placement, readable token labels, keyboard operation, and 44px touch targets at both desktop and narrow-phone widths.
 
+## Quality gates
+
+Backend type-checking, coverage, and dependency audits run in CI and are also available locally via `scripts/dev-commands.sh`:
+
+```bash
+scripts/dev-commands.sh typecheck   # mypy ciao (blocking in CI)
+scripts/dev-commands.sh coverage    # pytest --cov=ciao --cov-report=term-missing
+scripts/dev-commands.sh lint        # eslint over web/src (advisory in CI)
+scripts/dev-commands.sh audit       # pip-audit + npm audit (advisory in CI)
+scripts/dev-commands.sh all         # everything above
+```
+
+`mypy ciao` is a blocking CI step — keep it green (config in `pyproject.toml` under `[tool.mypy]`). The frontend lint and both dependency audits are advisory (`|| true`) so a fresh upstream advisory can't block a release; review their output rather than ignoring it. Install `pip install -e '.[test]'` (Python) and `cd web && npm ci` (frontend) to get the tools. A `.pre-commit-config.yaml` wires trailing-whitespace/ruff/mypy/eslint hooks for `pre-commit install`.
+
 ## Skills, subagents, and slash commands
 
 Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `web-research`, `workspace-authoring`, …) and the upstream **`gws-*` skills** for Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories. Locked GitHub/package skills follow the upstream `skills` CLI layout: their canonical directories live under `.agents/skills/`, with provider links under `.claude/skills/`; synchronization preserves either that layout or older `.claude`-canonical installs. A workspace skill with the same name as a packaged one overrides it.

@@ -141,14 +141,14 @@ def _find_fuzzy_match(roots: list[Path], candidate: Path) -> Path | None:
 
                 # Rule 3 & 4: Suffix matches ignoring extension
                 if len(rel_parts) >= len(candidate_parts):
-                    suffix_parts = list(rel_parts[-len(candidate_parts):])
-                    suffix_parts[-1] = Path(suffix_parts[-1]).stem
+                    suffix_parts_noext = list(rel_parts[-len(candidate_parts):])
+                    suffix_parts_noext[-1] = Path(suffix_parts_noext[-1]).stem
                     cand_parts_no_ext = list(candidate_parts)
                     cand_parts_no_ext[-1] = candidate_stem
-                    if suffix_parts == cand_parts_no_ext:
+                    if suffix_parts_noext == cand_parts_no_ext:
                         matches.append((3, orig_root_idx, len(resolved_fpath.parts), resolved_fpath))
                         continue
-                    if [p.lower() for p in suffix_parts] == [p.lower() for p in cand_parts_no_ext]:
+                    if [p.lower() for p in suffix_parts_noext] == [p.lower() for p in cand_parts_no_ext]:
                         matches.append((4, orig_root_idx, len(resolved_fpath.parts), resolved_fpath))
                         continue
 

@@ -27,7 +27,7 @@ web/
     main.ts               Vue bootstrap + iOS viewport / keyboard / zoom plumbing
     App.vue               root component, global CSS tokens (--bg, --fg, --accent), wordmark + caret + noise overlay
     router.ts             routes: /login, /, /chat/:id, /project/:id, /schedules, /settings, /settings/:tab
-    components/           one Vue SFC per feature pane (e.g. SubagentPanel.vue, ProviderSubchatPanel.vue for active/historical sub-chats)
+    components/           one Vue SFC per feature pane (including CommandPaletteModal.vue and FileViewerModal.vue)
     stores/               Pinia stores (auth, projects, tasks, fileViewer)
     lib/                  pure helpers (api, time, safeMarkdown, etc.)
 ```

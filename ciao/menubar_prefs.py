@@ -22,7 +22,7 @@ def read_prefs(workspace: Path) -> dict[str, object]:
         return dict(_DEFAULTS)
     if not isinstance(data, dict):
         return dict(_DEFAULTS)
-    merged = dict(_DEFAULTS)
+    merged: dict[str, object] = dict(_DEFAULTS)
     merged.update(data)
     return merged
 
