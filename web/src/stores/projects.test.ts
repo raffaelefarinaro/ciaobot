@@ -246,10 +246,14 @@ describe('ephemeral status events', () => {
     fakeSockets[0].onmessage?.({
       data: JSON.stringify({ type: 'status', message: 'Rate limit: allowed_warning (five_hour) 90.0% used' }),
     })
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'status', message: 'Rate limit: rejected (five_hour)' }),
+    })
 
     const msgs = store.messages[chatId] || []
     expect(msgs.some(m => m.role === 'system' && m.content.includes('Rate limit: allowed (five_hour)'))).toBe(false)
     expect(msgs.some(m => m.role === 'system' && m.content.includes('Rate limit: allowed_warning'))).toBe(false)
+    expect(msgs.some(m => m.role === 'system' && m.content.includes('Rate limit: rejected'))).toBe(false)
   })
 
   test('folds repeated compacting status ticks into one live trace line, not stacked system bubbles', () => {

@@ -3261,11 +3261,10 @@ export const useProjectStore = defineStore('projects', () => {
         // those belong in the Activity trace via tool_use, not as chat lines.
         const message = (event.message || '').trim()
         const ephemeral = new Set(['thinking', 'stopped', 'requesting', 'rate_limit', 'model_rerouted'])
-        // Drop "allowed" rate-limit telemetry — the plain allowance pings and
-        // the escalating "allowed_warning … NN% used" ticks alike. They are
-        // usage status, not conversation, and one chat line per 1% is noise.
-        // A hard "Rate limit exceeded" carries no "allowed" and still shows.
-        const isAllowedRateLimit = message.includes('Rate limit: allowed')
+        // Drop rate-limit telemetry — allowance pings, warnings, and rejected ticks alike.
+        // They are usage status for Settings, not conversation. A hard "Rate limit exceeded"
+        // carries no "Rate limit:" prefix and still shows as an error.
+        const isRateLimitTelemetry = message.includes('Rate limit') && !message.startsWith('Rate limit exceeded')
         // Compaction ticks repeat several times per pass. Unlike the
         // rate-limit pings they're useful operator signal, so fold them into
         // the live Thinking/Working trace (one line, updated in place)
@@ -3273,7 +3272,7 @@ export const useProjectStore = defineStore('projects', () => {
         const isCompacting = /compact/i.test(message)
         if (isCompacting) {
           _pushStatusLine(chatId, message)
-        } else if (message && !ephemeral.has(message) && !message.startsWith('error:') && !isAllowedRateLimit) {
+        } else if (message && !ephemeral.has(message) && !message.startsWith('error:') && !isRateLimitTelemetry) {
           msgs.push({
             role: 'system',
             content: message,
