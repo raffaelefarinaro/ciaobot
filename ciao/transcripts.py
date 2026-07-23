@@ -20,6 +20,7 @@ from claude_agent_sdk import (
     list_subagents,
 )
 
+from ciao.jsonio import read_json_dict
 from ciao.models import AgentRequest, ChatContext
 
 logger = logging.getLogger(__name__)
@@ -304,7 +305,7 @@ class TranscriptStore:
             if not path.exists():
                 return {}
         try:
-            data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+            data = read_json_dict(path)
             return data
         except json.JSONDecodeError:
             return {}

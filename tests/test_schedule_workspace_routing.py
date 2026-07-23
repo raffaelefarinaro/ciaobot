@@ -101,7 +101,7 @@ def test_create_persists_workspace(tmp_path: Path) -> None:
         web_project_id="proj-abc12345",
         workspace="work",
     )
-    [entry] = store.list()
+    [entry] = store.list_entries()
     assert entry.workspace == "work"
 
 

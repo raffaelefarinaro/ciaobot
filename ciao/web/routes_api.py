@@ -40,6 +40,7 @@ from ciao.schedules import (
 )
 from ciao.setup_status import setup_status
 from ciao.cli import _auth_command_for_provider
+from ciao.rate_limits import is_rate_limit_telemetry
 from ciao.skills_inventory import build_skill_inventory
 from ciao.vault_lint import EXCLUDE_DIRS, _links_in
 from ciao.web.chat_broker import extract_file_touches
@@ -2592,7 +2593,7 @@ async def chat_messages(request: Request) -> JSONResponse:
         # Drop rate limit telemetry status events (allowed, rejected, warnings)
         # so transient usage telemetry does not pollute the chat history. A hard
         # "Rate limit exceeded" carries no "Rate limit:" prefix and still surfaces.
-        if m.type == "system" and "Rate limit" in content and not content.startswith("Rate limit exceeded"):
+        if m.type == "system" and is_rate_limit_telemetry(content):
             continue
         # Drop SDK-injected control slash commands (/model, /mode). Skipping
         # without incrementing user_idx keeps chat.user_turn_images aligned
@@ -3603,7 +3604,7 @@ def _enrich_schedule(
 async def list_schedules(request: Request) -> JSONResponse:
     sm = request.app.state.schedule_manager
     pcm = request.app.state.project_chat_manager
-    schedules = sm.list()
+    schedules = sm.list_entries()
     return JSONResponse([_enrich_schedule(s, pcm) for s in schedules])
 
 

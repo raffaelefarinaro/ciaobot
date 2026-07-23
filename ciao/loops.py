@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from ciao.jsonio import read_json_dict
 import logging
 import threading
 import uuid
@@ -151,7 +152,7 @@ class LoopStore:
         if not self._path.exists():
             return {"loops": []}
         try:
-            data: dict = json.loads(self._path.read_text(encoding="utf-8"))
+            data = read_json_dict(self._path)
             return data
         except json.JSONDecodeError:
             return {"loops": []}

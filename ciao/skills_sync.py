@@ -23,6 +23,7 @@ CLI:
 from __future__ import annotations
 
 import json
+from ciao.jsonio import read_json_dict
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -116,7 +117,7 @@ def remote_heads(repos) -> dict[str, str]:
 
 def _load_json(path: str) -> dict:
     try:
-        data: dict = json.loads(Path(path).read_text(encoding="utf-8"))
+        data = read_json_dict(Path(path))
         return data
     except (FileNotFoundError, json.JSONDecodeError):
         return {}

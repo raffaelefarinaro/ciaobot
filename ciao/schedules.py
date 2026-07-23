@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import builtins
 import contextlib
 import json
 import logging
@@ -16,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Coroutine, Protocol
 from zoneinfo import ZoneInfo
 
+from ciao.jsonio import read_json_dict
 from ciao.models import BridgeMode
 
 DEFAULT_TIMEZONE = "Europe/Zurich"
@@ -265,7 +265,7 @@ class ScheduleStore:
         self._include_system = include_system
         self._lock = threading.RLock()
 
-    def list(self, *, chat_id: int | None = None) -> list[ScheduleEntry]:
+    def list_entries(self, *, chat_id: int | None = None) -> list[ScheduleEntry]:
         with self._lock:
             raw_items = self._runtime_items()
             items: list[ScheduleEntry] = []
@@ -282,7 +282,7 @@ class ScheduleStore:
             return items
 
     def get(self, schedule_id: str) -> ScheduleEntry | None:
-        for item in self.list():
+        for item in self.list_entries():
             if item.schedule_id == schedule_id:
                 return item
         return None
@@ -296,7 +296,7 @@ class ScheduleStore:
         mode: BridgeMode,
         chat_id: int,
         timezone_name: str = DEFAULT_TIMEZONE,
-        days_of_week: builtins.list[str] | None = None,
+        days_of_week: list[str] | None = None,
         thread_id: int | None = None,
         frequency: str = "weekly",
         day_of_month: int | None = None,
@@ -369,7 +369,7 @@ class ScheduleStore:
         if not self._path.exists():
             return {"schedules": []}
         try:
-            data: dict = json.loads(self._path.read_text(encoding="utf-8"))
+            data = read_json_dict(self._path)
             return data
         except json.JSONDecodeError:
             return {"schedules": []}
@@ -380,7 +380,7 @@ class ScheduleStore:
         tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
         tmp.replace(self._path)
 
-    def _runtime_items(self) -> builtins.list[dict]:
+    def _runtime_items(self) -> list[dict]:
         return [item for item in self._load().get("schedules", []) if isinstance(item, dict)]
 
     def _entry_from_item(self, item: dict) -> ScheduleEntry:
@@ -402,7 +402,7 @@ class ScheduleStore:
             entry.archive_policy = "manual"
         return entry
 
-    def _system_entries(self) -> builtins.list[ScheduleEntry]:
+    def _system_entries(self) -> list[ScheduleEntry]:
         state = self._load_system_state()
         entries: list[ScheduleEntry] = []
         for item in self._load_system_definitions():
@@ -418,7 +418,7 @@ class ScheduleStore:
             entries.append(entry)
         return entries
 
-    def _load_system_definitions(self) -> builtins.list[dict]:
+    def _load_system_definitions(self) -> list[dict]:
         try:
             raw = resources.files("ciao.stock").joinpath("schedules.json").read_text(encoding="utf-8")
             data = json.loads(raw)
@@ -514,8 +514,8 @@ class ScheduleManager:
                 await self._loop_task
             self._loop_task = None
 
-    def list(self, *, chat_id: int | None = None) -> list[ScheduleEntry]:
-        return self._store.list(chat_id=chat_id)
+    def list_entries(self, *, chat_id: int | None = None) -> list[ScheduleEntry]:
+        return self._store.list_entries(chat_id=chat_id)
 
     def create(
         self,
@@ -526,7 +526,7 @@ class ScheduleManager:
         mode: BridgeMode,
         chat_id: int,
         timezone_name: str = DEFAULT_TIMEZONE,
-        days_of_week: builtins.list[str] | None = None,
+        days_of_week: list[str] | None = None,
         thread_id: int | None = None,
         frequency: str = "weekly",
         day_of_month: int | None = None,
@@ -653,7 +653,7 @@ class ScheduleManager:
 
     async def tick(self, now: datetime | None = None) -> None:
         current = now or _now_utc()
-        for entry in self._store.list():
+        for entry in self._store.list_entries():
             # Manual and disabled schedules never auto-fire.
             if entry.frequency == "manual" or not entry.enabled:
                 continue
@@ -710,7 +710,7 @@ class ScheduleManager:
                 entry.last_dispatched_at = localized.isoformat(timespec="seconds")
                 self._store.replace(entry)
 
-    async def catch_up(self, now: datetime | None = None) -> builtins.list[str]:
+    async def catch_up(self, now: datetime | None = None) -> list[str]:
         """Fire each schedule once when its latest expected run was missed.
 
         Called once on startup so schedules recover after the server was down
@@ -723,7 +723,7 @@ class ScheduleManager:
         """
         current = now or _now_utc()
         fired: list[str] = []
-        for entry in self._store.list():
+        for entry in self._store.list_entries():
             # Manual and disabled schedules never auto-fire.
             if entry.frequency == "manual" or not entry.enabled:
                 continue

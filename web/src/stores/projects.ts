@@ -5,6 +5,7 @@ import { getPendingBucket, normalizePendingBuckets, setPendingBucket } from '../
 import { buildFixPrompt } from '../lib/fixError'
 import { formatChatComments, formatFileComments } from '../lib/commentContext'
 import { isPlausibleFilePath } from '../lib/filePaths'
+import { isRateLimitTelemetry } from '../lib/rateLimit'
 import {
   DEFAULT_RESTART_MESSAGE,
   isRestartDrainMessage,
@@ -3263,8 +3264,8 @@ export const useProjectStore = defineStore('projects', () => {
         const ephemeral = new Set(['thinking', 'stopped', 'requesting', 'rate_limit', 'model_rerouted'])
         // Drop rate-limit telemetry — allowance pings, warnings, and rejected ticks alike.
         // They are usage status for Settings, not conversation. A hard "Rate limit exceeded"
-        // carries no "Rate limit:" prefix and still shows as an error.
-        const isRateLimitTelemetry = message.includes('Rate limit') && !message.startsWith('Rate limit exceeded')
+        // still shows as an error. Shared predicate mirrors the backend (see rateLimit.ts).
+        const isTelemetry = isRateLimitTelemetry(message)
         // Compaction ticks repeat several times per pass. Unlike the
         // rate-limit pings they're useful operator signal, so fold them into
         // the live Thinking/Working trace (one line, updated in place)
@@ -3272,7 +3273,7 @@ export const useProjectStore = defineStore('projects', () => {
         const isCompacting = /compact/i.test(message)
         if (isCompacting) {
           _pushStatusLine(chatId, message)
-        } else if (message && !ephemeral.has(message) && !message.startsWith('error:') && !isRateLimitTelemetry) {
+        } else if (message && !ephemeral.has(message) && !message.startsWith('error:') && !isTelemetry) {
           msgs.push({
             role: 'system',
             content: message,

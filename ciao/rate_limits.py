@@ -36,6 +36,18 @@ KNOWN_BUCKETS: tuple[str, ...] = (
 )
 
 
+def is_rate_limit_telemetry(text: str) -> bool:
+    """True for a transient rate-limit status line that shouldn't reach chat.
+
+    Drops the allowed / warning / rejected telemetry pings while letting a
+    genuine hard "Rate limit exceeded" through (that surfaces as an error, not
+    telemetry). Single source of truth for the Claude status handler and the
+    chat-history / websocket filters. The frontend mirror is in
+    ``web/src/lib/rateLimit.ts`` — keep the two in sync.
+    """
+    return "Rate limit" in text and not text.startswith("Rate limit exceeded")
+
+
 @dataclass(slots=True)
 class RateLimitStore:
     """JSON-backed dict of {bucket_type: snapshot}."""

@@ -840,7 +840,7 @@ class CiaoControlPlane:
         workspace = self._workspace(principal)
         rows = [
             self._schedule_payload(entry)
-            for entry in self.schedules.list()
+            for entry in self.schedules.list_entries()
             if not entry.workspace or entry.workspace == workspace
         ]
         return _ok(rows)
@@ -902,7 +902,7 @@ class CiaoControlPlane:
         return _ok(self._schedule_payload(entry))
 
     def _schedule(self, principal: McpPrincipal, schedule_id: str) -> ScheduleEntry:
-        entry = next((item for item in self.schedules.list() if item.schedule_id == schedule_id), None)
+        entry = next((item for item in self.schedules.list_entries() if item.schedule_id == schedule_id), None)
         if entry is None:
             raise ControlPlaneError("schedule_not_found", f"Schedule '{schedule_id}' was not found.")
         if entry.workspace and entry.workspace != principal.workspace:

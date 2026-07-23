@@ -80,7 +80,7 @@ from ciao.providers.base import (
     rate_limit_quota_payload,
     rate_limit_status_text,
 )
-from ciao.rate_limits import RateLimitStore, default_store_path
+from ciao.rate_limits import RateLimitStore, default_store_path, is_rate_limit_telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -1205,7 +1205,7 @@ class ClaudeProvider(BaseSDKProvider):
             # transient usage telemetry, not conversation, and clutter the turn.
             # A genuine hard block surfaces as an is_error ResultEvent, not a
             # status line, so nothing actionable is lost by dropping these.
-            if "Rate limit:" in status_str:
+            if is_rate_limit_telemetry(status_str):
                 return []
             return [SystemStatusEvent(type="system", status=status_str)]
 
