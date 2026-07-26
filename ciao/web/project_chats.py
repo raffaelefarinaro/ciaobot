@@ -5856,7 +5856,7 @@ class ProjectChatManager:
         provider = provider_service.provider
         if provider is None:
             return False
-        # Pi provider uses extension_ui_response instead of SDK permission gates
+        # Provider adapters with custom permission handling (e.g. Codex)
         if hasattr(provider, "send_permission_response"):
             return cast(bool, provider.send_permission_response(request_id, approved))
         # permission_gate is defined on the concrete SDK providers, not on

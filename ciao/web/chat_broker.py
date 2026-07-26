@@ -96,8 +96,8 @@ STREAM_KEEPALIVE_SECONDS = 5.0
 # Tool names that mutate a file on disk and carry the target path in their input.
 # `Write` and `Edit` both use `file_path`; `MultiEdit` does too. `NotebookEdit`
 # stores the path under `notebook_path`. Lowercase variants seen in some
-# providers (`write`, `edit`) are mirrored for safety. Pi tool calls use
-# `path` instead of Claude's `file_path`, so path extraction accepts aliases.
+# providers (`write`, `edit`) are mirrored for safety. Some tool calls use
+# `path` instead of `file_path`, so path extraction accepts aliases.
 _FILE_TOUCH_TOOLS: dict[str, tuple[str, ...]] = {
     "Write": ("file_path", "path"),
     "write": ("file_path", "path"),
@@ -253,8 +253,8 @@ def extract_file_touches(tool_name: str, tool_input: object) -> list[dict]:
     Accepts both shapes of ``tool_input``:
 
     - ``dict``: the raw SDK input as persisted in the session JSONL. We pick
-      the path out of ``file_path`` (Claude), ``path`` (Pi), or
-      ``notebook_path`` (NotebookEdit). For shell tools we parse ``command``.
+      the path out of ``file_path``, ``path``, or ``notebook_path``
+      (NotebookEdit). For shell tools we parse ``command``.
     - ``str``: the live stream summary produced by
       ``_summarize_tool_input`` in ``ciao/providers/claude.py``. For the
       dedicated file-touch tools it already collapses the dict into the path

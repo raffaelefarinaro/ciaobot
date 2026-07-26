@@ -9,12 +9,12 @@ Runs weekly (Sunday night) via ``.runtime/schedules.json``. The pass:
    outcome != ``success``).
 3. For each flagged skill, runs a small DAG: propose via
    ``kimi-k2.7-code:cloud`` (resolved through
-   :func:`ciao.providers.routing.routing_routine_env_for_model` —
-   not Pi, despite older references) → semantic check (LLM-as-judge,
-   same model) → test gate (pytest on ``tests/test_<skill>.py``) →
-   write a draft proposal Markdown. The DAG helper is in
-   :mod:`ciao.dag`; per-node timing lands in ``.runtime/job_runs.jsonl``
-   with ``provider='dag'`` so the Automation page can drill in.
+   :func:`ciao.providers.routing.routing_routine_env_for_model`) →
+   semantic check (LLM-as-judge, same model) → test gate (pytest on
+   ``tests/test_<skill>.py``) → write a draft proposal Markdown. The DAG
+   helper is in :mod:`ciao.dag`; per-node timing lands in
+   ``.runtime/job_runs.jsonl`` with ``provider='dag'`` so the Automation
+   page can drill in.
 4. Writes one Markdown proposal per skill to
    ``memory-vault/personal/Workspace/Skill-Proposals/YYYY-MM-DD-<skill>.md``.
 
@@ -435,8 +435,8 @@ async def propose_skill_edit(
 ) -> str | None:
     """Ask a cheap model for an edit proposal. Returns the proposal text or None.
 
-    Returns ``None`` when Pi isn't installed, the model returns nothing,
-    or the model explicitly says ``No clear improvement found.``.
+    Returns ``None`` when the model returns nothing, or the model explicitly
+    says ``No clear improvement found.``.
 
     When ``force_trim`` is true (skill is over the size cap), uses the
     trim prompt so the model is told to propose deletions that bring

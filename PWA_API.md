@@ -84,7 +84,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/debug/issues` | Runtime issue report (server error log tail + failed job runs) for the dev-mode "Fix issues in chat" flow; 404 unless `CIAO_DEV_MODE` is set |
 | GET | `/api/commands` | List slash commands |
 | GET | `/api/agent-assets` | List instruction sources, subagents, slash commands, and workspace health for Settings |
-| GET | `/api/agent-assets/audit` | AI OS context hygiene, vault link, skill budget, and rule clash audit report |
+| GET | `/api/agent-assets/audit` | Full AI OS audit report; `status` is `healthy`, `needs_attention`, or `error` |
 | GET | `/api/workspace-health` | Scan workspace/vault/discovery-file health |
 | POST | `/api/workspace-health/fix` | Apply the automatic remedies (create missing scaffold files, re-link skills); returns the fresh report |
 | POST | `/api/agent-assets/subagents` | Create a workspace-owned subagent and vault mirror |
@@ -140,6 +140,28 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/admin/skills/add` | Add an upstream skill from GitHub and synchronize it |
 | WS | `/ws/chat/{chat_id}` | Per-chat streaming socket |
 | WS | `/ws/events` | Global event socket |
+
+### AI OS audit response
+
+`GET /api/agent-assets/audit` returns HTTP 200 with the full audit report:
+
+```json
+{
+  "status": "healthy",
+  "total_issues": 0,
+  "total_errors": 0,
+  "timestamp": "2026-07-26T10:00:00+00:00",
+  "setup_audit": {},
+  "vault_hygiene": {},
+  "skill_audit": {},
+  "rule_audit": {},
+  "memory_hygiene": {},
+  "job_runs_audit": {},
+  "scan_errors": []
+}
+```
+
+`healthy` means a reliable scan found no actionable items. `needs_attention` means a reliable scan found findings. `error` means one or more required inputs could not be inspected reliably; `total_issues` includes those scan errors, while `total_errors` counts them separately. Each section object contains its detailed counts, findings, and local errors. An unexpected handler failure returns HTTP 500 with `{"error":"failed to run AI OS audit"}`.
 
 ## Agent recipes
 

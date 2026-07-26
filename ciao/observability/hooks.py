@@ -36,7 +36,7 @@ from ciao.context.entity_tagger import find_entities, format_entities
 
 logger = logging.getLogger(__name__)
 
-# The CIAO_CONTEXT wrapper (project context, canonical doc path, prior
+# The injected context wrapper (project context, canonical doc path, prior
 # entity block) is prepended to the prompt before this hook runs. Scanning
 # it makes entity detection trigger on injected file paths and boilerplate
 # instead of what the user actually typed, so strip it before matching.

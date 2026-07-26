@@ -20,7 +20,7 @@ _SAMPLE_INSIGHTS = """
 - project: Smart Label Capture - OCR product the user owns. [idx=7]
 
 ## Decisions
-- Chose Pi over Claude SDK for one-shot insights because cheaper. [idx=18]
+- Chose OpenRouter over Anthropic for one-shot insights because cheaper. [idx=18]
 
 ## Dead ends
 - Tried `gws auth login --profile work`; blocked by missing scopes. [idx=22]
@@ -31,7 +31,7 @@ def test_propose_pulls_corrections_and_decisions() -> None:
     proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
     texts = [p.text for p in proposals]
     assert any("no em dashes" in t for t in texts)
-    assert any("Chose Pi over Claude SDK" in t for t in texts)
+    assert any("Chose OpenRouter over Anthropic" in t for t in texts)
 
 
 def test_propose_routes_user_self_to_user_md() -> None:
@@ -153,7 +153,7 @@ def test_promote_writes_corrections_and_keeps_the_rest(tmp_path: Path) -> None:
     assert "no em dashes" in mem_text
     # Decisions and entities are untouched and still reviewable.
     remaining_texts = [p.text for p in remaining]
-    assert any("Chose Pi over Claude SDK" in t for t in remaining_texts)
+    assert any("Chose OpenRouter over Anthropic" in t for t in remaining_texts)
     assert all("no em dashes" not in t for t in remaining_texts)
 
 
@@ -207,7 +207,7 @@ def test_proposals_from_archive_auto_promotes_corrections(tmp_path: Path) -> Non
     assert out is not None
     proposals_text = out.read_text(encoding="utf-8")
     assert "no em dashes" not in proposals_text
-    assert "Chose Pi over Claude SDK" in proposals_text
+    assert "Chose OpenRouter over Anthropic" in proposals_text
 
 
 def test_proposals_from_archive_default_leaves_memory_untouched(tmp_path: Path) -> None:

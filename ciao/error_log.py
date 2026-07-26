@@ -1,8 +1,8 @@
 """Dedicated error log file for server errors.
 
 A RotatingFileHandler is wired into the root logger so every ERROR+
-record lands here.  A weekly schedule can tail the file, feed it to
-Pi, and clear it after a successful run.
+record lands here. A schedule can tail the file, feed it to an error-triage
+automation, and clear it after a successful run.
 """
 
 from __future__ import annotations

@@ -1379,16 +1379,46 @@ def _vault_lint_command(args: argparse.Namespace) -> int:
 def _os_audit_command(args: argparse.Namespace) -> int:
     from ciao.os_audit import format_audit_markdown, run_os_audit
 
-    workspace = (args.workspace or Path(".")).resolve()
-    vault = args.vault_root.resolve() if args.vault_root else None
-    report = run_os_audit(workspace_dir=workspace, vault_root=vault)
+    workspace_raw = args.workspace or os.environ.get("CIAO_WORKSPACE") or Path(".")
+    workspace = Path(workspace_raw).expanduser().resolve()
+
+    def resolve_under_workspace(
+        explicit: Path | None,
+        env_name: str,
+        default: str,
+    ) -> Path:
+        raw = explicit or os.environ.get(env_name) or default
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = workspace / path
+        return path.resolve()
+
+    vault = resolve_under_workspace(
+        args.vault_root,
+        "CIAO_VAULT_ROOT",
+        "memory-vault",
+    )
+    runtime = resolve_under_workspace(
+        args.runtime_root,
+        "CIAO_RUNTIME_ROOT",
+        ".runtime",
+    )
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+    )
 
     if args.json:
         print(json.dumps(report, indent=2))
     else:
         print(format_audit_markdown(report))
 
-    return 0 if report["status"] == "healthy" else 1
+    return {
+        "healthy": 0,
+        "needs_attention": 1,
+        "error": 2,
+    }.get(report["status"], 2)
 
 
 def _vault_index_command(args: argparse.Namespace) -> int:
@@ -2090,14 +2120,20 @@ def build_parser() -> argparse.ArgumentParser:
     os_audit_parser.add_argument(
         "--workspace",
         type=Path,
-        default=Path("."),
-        help="Workspace root. Defaults to current directory.",
+        default=None,
+        help="Workspace root. Defaults to CIAO_WORKSPACE or current directory.",
     )
     os_audit_parser.add_argument(
         "--vault-root",
         type=Path,
         default=None,
-        help="Vault root directory. Defaults to ./memory-vault.",
+        help="Vault root. Defaults to CIAO_VAULT_ROOT or <workspace>/memory-vault.",
+    )
+    os_audit_parser.add_argument(
+        "--runtime-root",
+        type=Path,
+        default=None,
+        help="Runtime root. Defaults to CIAO_RUNTIME_ROOT or <workspace>/.runtime.",
     )
     os_audit_parser.add_argument(
         "--json",

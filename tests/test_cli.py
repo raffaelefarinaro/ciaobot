@@ -156,6 +156,59 @@ def test_cli_vault_lint_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> N
     assert str(called[0].vault_root) == "/tmp/vault"
 
 
+def _write_healthy_audit_workspace(root: Path) -> None:
+    root.mkdir(parents=True)
+    (root / "CLAUDE.md").write_text("- Use rtk for shell commands.\n", encoding="utf-8")
+    (root / "AGENTS.md").symlink_to("CLAUDE.md")
+    (root / "memory-vault").mkdir()
+    (root / ".runtime").mkdir()
+
+
+def test_cli_os_audit_uses_workspace_and_vault_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace = tmp_path / "workspace"
+    _write_healthy_audit_workspace(workspace)
+    memory_dir = tmp_path / "bounded"
+    memory_dir.mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(workspace))
+    monkeypatch.setenv("CIAO_VAULT_ROOT", "memory-vault")
+    custom_runtime = workspace / "custom-runtime"
+    custom_runtime.mkdir()
+    monkeypatch.setenv("CIAO_RUNTIME_ROOT", "custom-runtime")
+    monkeypatch.setenv("CIAO_MEMORY_DIR", str(memory_dir))
+
+    assert cli.main(["os-audit", "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["setup_audit"]["workspace_root"] == str(workspace.resolve())
+    assert report["setup_audit"]["vault_root"] == str((workspace / "memory-vault").resolve())
+    assert report["setup_audit"]["runtime_root"] == str(custom_runtime.resolve())
+
+
+def test_cli_os_audit_exit_codes_distinguish_findings_and_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    _write_healthy_audit_workspace(workspace)
+    memory_dir = tmp_path / "bounded"
+    memory_dir.mkdir()
+    monkeypatch.setenv("CIAO_MEMORY_DIR", str(memory_dir))
+
+    (workspace / "skills" / "missing-md").mkdir(parents=True)
+    assert cli.main(["os-audit", "--workspace", str(workspace), "--json"]) == 1
+
+    assert cli.main([
+        "os-audit",
+        "--workspace",
+        str(tmp_path / "missing"),
+        "--json",
+    ]) == 2
+
+
 def test_cli_create_chat_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> None:
     called = []
 
@@ -880,4 +933,3 @@ def test_cli_provider_chat_commands_dispatch(monkeypatch: pytest.MonkeyPatch) ->
     ]) == 0
     assert called[-1].subcommand == "extend"
     assert called[-1].subchat_id == "sub-123"
-

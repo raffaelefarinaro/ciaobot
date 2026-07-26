@@ -521,8 +521,8 @@ class ClaudeProvider(BaseSDKProvider):
 
         # Bounded agent-managed memory: frozen snapshot of ~/.ciao/memory.md
         # and ~/.ciao/user.md appended to Claude Code's default system prompt.
-        # Edits go through `ciao memory` (same path Pi uses, via the script
-        # wrapper) instead of an MCP tool, so the write path stays in sync.
+        # Edits go through `ciao memory` (via the script wrapper or control
+        # plane) instead of an MCP tool, so the write path stays in sync.
         # Edits persist immediately but only appear in this block on the next
         # session, which keeps the prefix cache stable.
         memory_cfg = self._memory_config()

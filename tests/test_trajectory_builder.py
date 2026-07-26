@@ -187,10 +187,10 @@ def test_parse_command_name_tag_handles_namespaced_skills() -> None:
 _INSIGHTS = """\
 ## Errors
 - Web fetch returned 403 -> unresolved [idx=4]
-- Pi binary missing -> installed via apt [idx=5]
+- Ollama binary missing -> installed via apt [idx=5]
 
 ## Decisions
-- Chose Pi over Claude SDK because lower cost [idx=2]
+- Chose OpenRouter over Anthropic because lower cost [idx=2]
 - Use sqlite-vec for vectors [idx=7]
 
 ## User corrections
@@ -200,7 +200,7 @@ _INSIGHTS = """\
 
 def test_extract_decisions_parses_what_why() -> None:
     decisions = tb.extract_decisions(_INSIGHTS)
-    assert decisions[0] == {"what": "Chose Pi over Claude SDK", "why": "lower cost"}
+    assert decisions[0] == {"what": "Chose OpenRouter over Anthropic", "why": "lower cost"}
     assert decisions[1] == {"what": "Use sqlite-vec for vectors", "why": ""}
 
 

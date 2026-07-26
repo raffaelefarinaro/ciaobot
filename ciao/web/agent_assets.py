@@ -1104,9 +1104,22 @@ async def os_audit_endpoint(request: Request) -> JSONResponse:
 
     config = request.app.state.config
     try:
+        workspace_root = Path(config.workspace_root)
+        state_path = Path(
+            getattr(config, "state_path", workspace_root / ".runtime" / "state.json")
+        )
         report = run_os_audit(
-            workspace_dir=Path(config.workspace_root),
+            workspace_dir=workspace_root,
             vault_root=Path(config.vault_root),
+            runtime_dir=state_path.parent,
+            proposal_paths=[
+                path
+                for path, _title in _memory_proposal_paths(
+                    config,
+                    Path(config.vault_root),
+                    workspace_root,
+                )
+            ],
         )
         return JSONResponse(report)
     except Exception:  # noqa: BLE001

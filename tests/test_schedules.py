@@ -868,6 +868,23 @@ def test_system_routines_ship_descriptions_and_set(tmp_path: Path) -> None:
         assert entry.description, f"{entry.schedule_id} missing a description"
 
 
+def test_workspace_hygiene_runs_structured_os_audit(tmp_path: Path) -> None:
+    store = ScheduleStore(tmp_path, include_system=True)
+    entry = store.get("system-workspace-hygiene")
+    assert entry is not None
+    prompt = entry.prompt.lower()
+    assert "ciao vault-index --write" in entry.prompt
+    assert "ciao os-audit --json" in entry.prompt
+    assert "ciao vault-lint" not in entry.prompt
+    assert "exit code 1" in prompt
+    assert "exit code 2" in prompt
+    assert prompt.index("ciao vault-index --write") < prompt.index("ciao os-audit --json")
+    assert "summarize command output" in prompt
+    assert "run `ciao os-audit --json` again" in prompt
+    assert "if vault-index fails" in prompt
+    assert "do not claim" in prompt
+
+
 def test_user_schedule_description_round_trips(tmp_path: Path) -> None:
     store = ScheduleStore(tmp_path)
     entry = store.create(

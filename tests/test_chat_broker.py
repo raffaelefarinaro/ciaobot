@@ -86,8 +86,7 @@ def test_event_to_json_tool_use_tags_file_writes() -> None:
 
 def test_extract_file_touch_dict_input() -> None:
     """Reload-side: ``_extract_assistant_blocks`` passes the raw SDK input dict.
-    Picks ``file_path`` for Claude, ``path`` for Pi, and ``notebook_path``
-    for NotebookEdit."""
+    Picks ``file_path`` or ``path``, and ``notebook_path`` for NotebookEdit."""
     assert extract_file_touch("Write", {"file_path": "a.md", "content": "..."}) == {
         "file_path": "a.md",
         "action": "written",

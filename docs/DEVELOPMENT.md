@@ -22,6 +22,7 @@ ciao memory read --target memory
 ciao vault-index --workspace default --format json
 ciao vault-search "project keyword" --limit 5
 ciao vault-lint --vault-root memory-vault
+ciao os-audit --json
 ciao create-chat --prompt "Start here" --workspace default
 ciao cleanup-sdk-blobs --workspace .       # dry-run by default
 ciao dev                                   # backend :8543 + Vite :5173
@@ -119,6 +120,7 @@ ciao package-smoke --skip-frontend # Wheel install smoke test
 ciao vault-index --workspace default --format json  # Query the vault index
 ciao vault-search "keyword" --limit 5 # FTS search over the configured vault
 ciao vault-lint --vault-root memory-vault # Vault hygiene lint
+ciao os-audit --json # Strict AI OS setup and context-hygiene audit
 ciao benchmark-control-surfaces --provider claude --provider codex --repeats 5 # 240-turn release evaluation
 cd web && npm test             # Frontend unit tests
 cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
@@ -139,6 +141,20 @@ scripts/dev-commands.sh all         # everything above
 ```
 
 `mypy ciao` is a blocking CI step — keep it green (config in `pyproject.toml` under `[tool.mypy]`). The frontend lint and both dependency audits are advisory (`|| true`) so a fresh upstream advisory can't block a release; review their output rather than ignoring it. Install `pip install -e '.[test]'` (Python) and `cd web && npm ci` (frontend) to get the tools. A `.pre-commit-config.yaml` wires trailing-whitespace/ruff/mypy/eslint hooks for `pre-commit install`.
+
+### AI OS audit
+
+`ciao os-audit` checks required workspace roots, vault links and duplicates, skill budgets, instruction clashes, bounded-memory hygiene, pending memory proposals, and failed background jobs. Human-readable Markdown is the default; use `--json` for automation.
+
+The status and process exit code are a stable contract:
+
+| Status | Exit | Meaning |
+|---|---:|---|
+| `healthy` | 0 | The scan completed reliably and found no actionable items. |
+| `needs_attention` | 1 | The scan completed reliably and found actionable items. |
+| `error` | 2 | Required evidence could not be inspected reliably. Findings may still be present, but the report is not a clean bill of health. |
+
+The weekly `system-workspace-hygiene` schedule runs `ciao vault-index --write` before `ciao os-audit --json`. A failed index rebuild blocks link and index repairs and prevents a healthy/no-op claim. The prompt treats audit exit 1 as findings and continues, but treats exit 2 as an unreliable scan and reports the errors without claiming success.
 
 ## Skills, subagents, and slash commands
 

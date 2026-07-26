@@ -32,7 +32,7 @@
 
 Ciaobot has three memory layers. Use the right one; do not duplicate facts across layers.
 
-- **Bounded agent memory** (`~/.ciao/memory.md`, `~/.ciao/user.md`): short cross-session facts and user profile. Injected as a frozen snapshot at session start (see the labeled block below when present). Edit with `ciao memory read|add|replace|remove --target memory|user --text "…"`. Changes persist immediately but only appear in the injected block on the next session. Use `/remember` for durable learnings; route preferences and env facts to `memory`, identity and style to `user`.
+- **Bounded agent memory** (`~/.ciao/memory.md`, `~/.ciao/user.md`): short cross-session facts and user profile. Injected as a frozen snapshot at session start (see the labeled block below when present). Edit with `ciao memory read|add|replace|remove --target memory|user --text "…"`. Changes persist immediately but only appear in the injected block on the next session. Use `/remember` for durable learnings; route preferences and env facts to `memory`, identity and style to `user`. A temporary entry tagged `[expires: YYYY-MM-DD]` stays active through that date, then is hidden from later snapshots. It still uses stored character budget until daily memory curation removes it. Curation removes only entries with valid, passed dates and reports malformed tags instead of guessing.
 - **Vault notes** (`memory-vault/` or the active workspace vault root): durable markdown — people, projects, ideas, `MEMORY.md`, project folders under `projects/active/`. Search before writing duplicates.
 - **Proposal queue** (`<vault>/Workspace/Memory-Proposals.md`): draft entries from archived chats. Review and promote into bounded memory or vault pages; nothing is auto-applied.
 
@@ -52,7 +52,7 @@ Ciaobot has three memory layers. Use the right one; do not duplicate facts acros
 - Consult another provider mid-turn: `ciao provider-chat start --chat-id <id> --provider <provider> --model <model> --message "…"` (see the `handoff_*` MCP tools for the full lifecycle when MCP is available: start → send → close/cancel). **Never** search for or invoke a provider binary (like `codex` or `ollama`) directly; all cross-provider task delegation flows through `ciao provider-chat` or the `handoff_*` tools.
 - Google Workspace: always via `scripts/gws-profile.sh` (see Google Workspace section below).
 
-**Background memory routines** (Settings → Automation): archived chats get session insights and memory proposals; the daily **Memory curation** schedule processes proposals and appends to `Workspace/Learnings.md`; the weekly review promotes recurring learnings into `CLAUDE.md`. Do not promote proposals silently in normal chats unless the user asks.
+**Background memory routines** (Settings → Automation): archived chats get session insights and memory proposals; the daily **Memory curation** schedule processes proposals, removes valid expired bounded-memory entries, reports malformed expiration tags, and appends to `Workspace/Learnings.md`. Weekly **Workspace hygiene** refreshes the vault index and audits the AI OS; weekly **Skill evolution** drafts skill-edit proposals. Do not promote proposals silently in normal chats unless the user asks.
 
 ## Ciaobot Diagnostics and Issue Reports
 

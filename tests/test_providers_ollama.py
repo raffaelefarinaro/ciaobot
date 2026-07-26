@@ -212,7 +212,7 @@ def test_effective_mode_keeps_auto_for_ollama(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path, ollama_models=("glm-5.2:cloud",))
     chat = ChatInfo(
         chat_id="c", project_id="p", model="glm-5.2:cloud",
-        provider="pi", mode="auto",
+        provider="claude", mode="auto",
     )
     assert manager._effective_mode_for_chat(chat) == "auto"
 
