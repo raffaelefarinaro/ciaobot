@@ -1944,6 +1944,14 @@ async def chat_prompt(request: Request) -> JSONResponse:
     chat = pcm.get_chat(chat_id)
     if chat is None:
         return JSONResponse({"error": "not found"}, status_code=404)
+    if chat.archived:
+        # Reject before starting a doomed stream: stream_chat would raise
+        # "Cannot send messages to an archived chat" from the background
+        # task, producing a server traceback + a raw error bubble. Same
+        # guard the loop dispatcher uses (issue #126).
+        return JSONResponse(
+            {"error": "chat is archived", "archived": True}, status_code=409
+        )
 
     images: list[ImageAttachment] = []
     for ref in body.get("images", []):

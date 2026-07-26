@@ -5110,6 +5110,25 @@ class ProjectChatManager:
                         # queued follow-ups should still be sent.
                         if stream.user_stopped:
                             logger.info("Stream stopped by user for chat %s", chat_id)
+                        elif (
+                            isinstance(exc, ValueError)
+                            and "archived chat" in str(exc)
+                        ):
+                            # Lost a race with archive_chat() between the
+                            # entry-point archived guard and stream_chat. The
+                            # turn is legitimately over; log without a
+                            # traceback and surface a clean error.
+                            logger.info(
+                                "Send to archived chat %s rejected mid-stream",
+                                chat_id,
+                            )
+                            stream.publish({
+                                "type": "error",
+                                "message": "This chat has been archived.",
+                                "archived": True,
+                            })
+                            had_error = True
+                            break
                         else:
                             logger.exception("Stream error for chat %s", chat_id)
                             error_msg = str(exc)

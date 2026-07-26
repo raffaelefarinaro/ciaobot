@@ -202,6 +202,23 @@ async def ws_chat(websocket: WebSocket) -> None:
                 if not text:
                     continue
 
+                # A client with an open socket to a chat that was archived
+                # from another tab/device (or a stale UI) can still send.
+                # Reject before start_stream fires a background task that
+                # raises "Cannot send messages to an archived chat" —
+                # which logs a traceback and surfaces a raw error bubble.
+                target_chat = pcm.get_chat(chat_id)
+                if target_chat is not None and target_chat.archived:
+                    try:
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": "This chat has been archived.",
+                            "archived": True,
+                        })
+                    except (WebSocketDisconnect, RuntimeError):
+                        break
+                    continue
+
                 images = []
                 for ref in msg.get("images", []):
                     attachment = pcm.resolve_image_ref(ref)
