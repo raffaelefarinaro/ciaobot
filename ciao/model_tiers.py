@@ -194,6 +194,22 @@ def is_capability_error(result_text: str) -> bool:
     return any(needle in text for needle in _CAPABILITY_ERROR_PATTERNS)
 
 
+def model_supports_vision(model: str) -> bool:
+    """True when ``model`` supports image (vision) input."""
+    if not model:
+        return True
+    low = model.lower().strip()
+    if low in _TIER_ORDER or low.startswith("claude-") or "claude" in low:
+        return True
+    if any(k in low for k in ("minimax-m3", "vision", "gpt-4o", "gemini", "pixtral")):
+        return True
+    if any(k in low for k in ("kimi-", "deepseek-", "glm-", "llama-", "qwen-", "code")):
+        return False
+    return True
+
+
+
+
 def next_tier_for_failure(model: str, config: object) -> str | None:
     """Pick the next model id to try when ``model`` failed with a capability error.
 

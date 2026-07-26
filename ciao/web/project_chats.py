@@ -63,6 +63,7 @@ from ciao.model_tiers import (
     CODEX_FABLE_THINKING_LEVEL,
     canonical_tier,
     is_capability_error,
+    model_supports_vision,
     next_tier_for_failure,
 )
 from ciao.providers.ollama import (
@@ -4178,7 +4179,11 @@ class ProjectChatManager:
             and intended_backend(request.model) in ("anthropic", "ollama", "openrouter")
         ):
             next_model = next_tier_for_failure(request.model, self._config)
-            if next_model and next_model != request.model:
+            if (
+                next_model
+                and next_model != request.model
+                and (not images or model_supports_vision(next_model))
+            ):
                 will_fallback = True
                 logger.warning(
                     "Auto tier-fallback: %s failed (%s); retrying on %s",
@@ -4237,6 +4242,11 @@ class ProjectChatManager:
                         type="model_changed",
                         model=next_model,
                     )
+            elif next_model and next_model != request.model and images and not model_supports_vision(next_model):
+                logger.info(
+                    "Auto tier-fallback skipped: next model %s does not support vision for image input",
+                    next_model,
+                )
             else:
                 logger.info(
                     "Auto tier-fallback skipped: no neighbor tier configured for %s",

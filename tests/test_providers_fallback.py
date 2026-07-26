@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from ciao.models import AgentRequest
 from ciao.model_tiers import (
     is_capability_error,
+    model_supports_vision,
     next_tier_for_failure,
     tier_order,
 )
@@ -190,3 +191,15 @@ def test_next_tier_avoids_retrying_same_model() -> None:
     # the comparison is "candidate != model", so sonnet's "same:cloud"
     # is fine to return for opus-distinct.
     assert next_tier_for_failure("opus-distinct:cloud", cfg) == "same:cloud"
+
+
+def test_model_supports_vision() -> None:
+    assert model_supports_vision("sonnet") is True
+    assert model_supports_vision("opus") is True
+    assert model_supports_vision("haiku") is True
+    assert model_supports_vision("claude-3-5-sonnet") is True
+    assert model_supports_vision("minimax-m3:cloud") is True
+    assert model_supports_vision("kimi-k2.7-code:cloud") is False
+    assert model_supports_vision("deepseek-v4-flash:cloud") is False
+    assert model_supports_vision("glm-5.2:cloud") is False
+
