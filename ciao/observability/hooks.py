@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime
@@ -34,6 +35,12 @@ from typing import Any
 from ciao.context.entity_tagger import find_entities, format_entities
 
 logger = logging.getLogger(__name__)
+
+# The CIAO_CONTEXT wrapper (project context, canonical doc path, prior
+# entity block) is prepended to the prompt before this hook runs. Scanning
+# it makes entity detection trigger on injected file paths and boilerplate
+# instead of what the user actually typed, so strip it before matching.
+_CIAO_CONTEXT_RE = re.compile(r"(?s)^\[CIAO_CONTEXT_BEGIN\].*?\[CIAO_CONTEXT_END\]\s*")
 
 
 def _legacy_workspace_context(raw: str | None) -> str:
@@ -104,7 +111,8 @@ def build_user_prompt_submit_hook(
                 or _legacy_workspace_context(env.get("CIAO_WORKSPACE"))
                 or env.get("GWS_PROFILE")
             )
-            entities = find_entities(prompt, vault_root, workspace=workspace)
+            scan_text = _CIAO_CONTEXT_RE.sub("", prompt)
+            entities = find_entities(scan_text, vault_root, workspace=workspace)
             sections: list[str] = ["[SITUATIONAL CONTEXT: Runtime & Vault Entities]"]
             sections.append("<ciao-runtime>\n" + "\n".join(runtime) + "\n</ciao-runtime>")
             tagged = format_entities(entities)

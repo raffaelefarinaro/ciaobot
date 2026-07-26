@@ -26,6 +26,13 @@ _MAX_PROMPT_CHARS = 4000
 _MAX_MATCHES = 8
 # Aliases shorter than this produce too many false matches ("mo", "al").
 _MIN_ALIAS_LEN = 3
+# README/index represent their whole folder, so we name the entity after the
+# parent folder instead of the bare filename (otherwise one "README" token
+# lights up every project at once). log/index are structural files whose bare
+# names are also common words ("log"), so we drop them from the index entirely;
+# the folder's README already stands in for the folder.
+_FOLDER_FILENAMES = {"readme"}
+_SKIP_FILENAMES = {"log", "index"}
 
 # Bullet lines look like:
 #   - `People/Alba` (tags: person, friend; aliases: Alba)
@@ -127,6 +134,13 @@ def _parse_index(path: Path) -> list[VaultEntity]:
             continue
         category = _category_for_path(parts)
         name = parts[-1]
+        lname = name.lower()
+        if lname in _SKIP_FILENAMES:
+            continue
+        # Fold a folder's README onto its folder so the match term is the
+        # project name, not a word ("README") shared by every folder.
+        if lname in _FOLDER_FILENAMES and len(parts) >= 3:
+            name = parts[-2]
         aliases: list[str] = []
         alias_match = _ALIASES_RE.search(rest)
         if alias_match:
