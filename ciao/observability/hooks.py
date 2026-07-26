@@ -105,7 +105,7 @@ def build_user_prompt_submit_hook(
                 or env.get("GWS_PROFILE")
             )
             entities = find_entities(prompt, vault_root, workspace=workspace)
-            sections: list[str] = []
+            sections: list[str] = ["[SITUATIONAL CONTEXT: Runtime & Vault Entities]"]
             sections.append("<ciao-runtime>\n" + "\n".join(runtime) + "\n</ciao-runtime>")
             tagged = format_entities(entities)
             if tagged:

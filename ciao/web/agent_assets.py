@@ -1096,3 +1096,19 @@ async def workspace_health_fix_endpoint(request: Request) -> JSONResponse:
     except Exception:  # noqa: BLE001
         logger.exception("workspace health fix failed")
         return JSONResponse({"error": "failed to repair workspace"}, status_code=500)
+
+
+async def os_audit_endpoint(request: Request) -> JSONResponse:
+    """GET /api/agent-assets/audit — Return AI OS health and context audit report."""
+    from ciao.os_audit import run_os_audit
+
+    config = request.app.state.config
+    try:
+        report = run_os_audit(
+            workspace_dir=Path(config.workspace_root),
+            vault_root=Path(config.vault_root),
+        )
+        return JSONResponse(report)
+    except Exception:  # noqa: BLE001
+        logger.exception("AI OS audit failed")
+        return JSONResponse({"error": "failed to run AI OS audit"}, status_code=500)

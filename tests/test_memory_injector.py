@@ -176,3 +176,23 @@ def test_block_handles_load_failure_gracefully(
 
     monkeypatch.setattr(mi, "load_entries", boom)
     assert mi.build_memory_block(memory_dir=tmp_path) == ""
+
+
+def test_expired_memory_entries_filtered(tmp_path: Path) -> None:
+    import datetime
+
+    mt.add_entry(tmp_path / "memory.md", "durable fact", char_limit=200)
+    mt.add_entry(tmp_path / "memory.md", "temporary note [expires: 2026-01-01]", char_limit=200)
+
+    # With reference date 2026-07-26, the 2026-01-01 entry is expired
+    today = datetime.date(2026, 7, 26)
+    block = mi.build_memory_block(memory_dir=tmp_path, today=today)
+
+    assert "durable fact" in block
+    assert "temporary note" not in block
+
+
+def test_system_prompt_payload_includes_expertise_header() -> None:
+    payload = mi.system_prompt_payload("memory block")
+    assert payload is not None
+    assert "[SYSTEM EXPERTISE: SOPs & Durable Memory]" in payload["append"]

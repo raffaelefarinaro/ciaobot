@@ -84,6 +84,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/debug/issues` | Runtime issue report (server error log tail + failed job runs) for the dev-mode "Fix issues in chat" flow; 404 unless `CIAO_DEV_MODE` is set |
 | GET | `/api/commands` | List slash commands |
 | GET | `/api/agent-assets` | List instruction sources, subagents, slash commands, and workspace health for Settings |
+| GET | `/api/agent-assets/audit` | AI OS context hygiene, vault link, skill budget, and rule clash audit report |
 | GET | `/api/workspace-health` | Scan workspace/vault/discovery-file health |
 | POST | `/api/workspace-health/fix` | Apply the automatic remedies (create missing scaffold files, re-link skills); returns the fresh report |
 | POST | `/api/agent-assets/subagents` | Create a workspace-owned subagent and vault mirror |

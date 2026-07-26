@@ -20,6 +20,7 @@ from ciao.web.agent_assets import (
     create_subagent_endpoint,
     delete_command_endpoint,
     delete_subagent_endpoint,
+    os_audit_endpoint,
     update_command_endpoint,
     update_subagent_endpoint,
     workspace_health_endpoint,
@@ -269,6 +270,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/commands", list_commands_endpoint, methods=["GET"]),
         # Agent-facing instruction, subagent, and command assets.
         Route("/api/agent-assets", agent_assets_endpoint, methods=["GET"]),
+        Route("/api/agent-assets/audit", os_audit_endpoint, methods=["GET"]),
         Route("/api/workspace-health", workspace_health_endpoint, methods=["GET"]),
         Route("/api/workspace-health/fix", workspace_health_fix_endpoint, methods=["POST"]),
         Route("/api/agent-assets/subagents", create_subagent_endpoint, methods=["POST"]),

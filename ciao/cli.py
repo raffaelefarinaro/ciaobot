@@ -1342,6 +1342,21 @@ def _vault_lint_command(args: argparse.Namespace) -> int:
     return 1
 
 
+def _os_audit_command(args: argparse.Namespace) -> int:
+    from ciao.os_audit import format_audit_markdown, run_os_audit
+
+    workspace = (args.workspace or Path(".")).resolve()
+    vault = args.vault_root.resolve() if args.vault_root else None
+    report = run_os_audit(workspace_dir=workspace, vault_root=vault)
+
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(format_audit_markdown(report))
+
+    return 0 if report["status"] == "healthy" else 1
+
+
 def _vault_index_command(args: argparse.Namespace) -> int:
     from ciao import vault_index
 
@@ -2032,6 +2047,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Vault root. Defaults to CIAO_VAULT_ROOT or ./memory-vault.",
     )
     lint_parser.set_defaults(func=_vault_lint_command)
+
+    os_audit_parser = subparsers.add_parser(
+        "os-audit",
+        help="Run AI OS context hygiene and setup audit.",
+        description="Comprehensive auditor for vault links, skill budgets, rule clashes, and memory health.",
+    )
+    os_audit_parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=Path("."),
+        help="Workspace root. Defaults to current directory.",
+    )
+    os_audit_parser.add_argument(
+        "--vault-root",
+        type=Path,
+        default=None,
+        help="Vault root directory. Defaults to ./memory-vault.",
+    )
+    os_audit_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output raw JSON audit report.",
+    )
+    os_audit_parser.set_defaults(func=_os_audit_command)
 
     chat_parser = subparsers.add_parser(
         "create-chat",

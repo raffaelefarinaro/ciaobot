@@ -16,6 +16,7 @@ never want a malformed memory file to kill a chat.
 
 from __future__ import annotations
 
+import datetime
 import functools
 import logging
 import re
@@ -52,6 +53,19 @@ _EMPTY_STATE_NUDGE = (
 )
 
 
+def is_entry_expired(entry: str, today: datetime.date | None = None) -> bool:
+    """Check if an entry contains `[expires: YYYY-MM-DD]` and whether that date has passed."""
+    match = re.search(r"\[expires:\s*(\d{4}-\d{2}-\d{2})\]", entry, re.IGNORECASE)
+    if not match:
+        return False
+    try:
+        exp_date = datetime.date.fromisoformat(match.group(1))
+        current = today or datetime.date.today()
+        return current > exp_date
+    except ValueError:
+        return False
+
+
 def _section(title: str, entries: list[str], limit: int) -> str | None:
     """Render one labeled memory section. Empty files return None."""
     if not entries:
@@ -68,14 +82,18 @@ def build_memory_block(
     memory_dir: Path | None = None,
     memory_char_limit: int = DEFAULT_MEMORY_CHAR_LIMIT,
     user_char_limit: int = DEFAULT_USER_CHAR_LIMIT,
+    today: datetime.date | None = None,
 ) -> str:
-    """Read both files and render the combined block. Empty -> empty string."""
+    """Read both files and render the combined block. Expired entries are filtered out."""
     try:
         mem_entries = load_entries(memory_path(memory_dir))
         usr_entries = load_entries(user_path(memory_dir))
     except Exception:  # noqa: BLE001
         logger.exception("memory_injector: failed to load files")
         return ""
+
+    mem_entries = [e for e in mem_entries if not is_entry_expired(e, today)]
+    usr_entries = [e for e in usr_entries if not is_entry_expired(e, today)]
 
     sections: list[str] = []
     mem_section = _section(_MEMORY_HEADER, mem_entries, memory_char_limit)
@@ -138,6 +156,7 @@ def system_prompt_payload(
     parts = []
     if existing_append:
         parts.append(existing_append)
+    parts.append("[SYSTEM EXPERTISE: SOPs & Durable Memory]")
     instructions = _system_instructions()
     if control_surface == "mcp":
         instructions = _mcp_system_instructions(instructions)
