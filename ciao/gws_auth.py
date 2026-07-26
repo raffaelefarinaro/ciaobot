@@ -406,6 +406,9 @@ class GwsHealthMonitor:
         events_hub=None,
         runtime_root: Path | None = None,
         status_fn: Callable[..., dict[str, Any]] = auth_status,
+        consecutive_threshold: int = 2,
+        retry_count: int = 1,
+        retry_delay: float = 5.0,
     ) -> None:
         self._config = config
         self._push = push_manager
@@ -416,6 +419,9 @@ class GwsHealthMonitor:
             else Path(config.state_path).parent
         )
         self._status_fn = status_fn
+        self._consecutive_threshold = consecutive_threshold
+        self._retry_count = retry_count
+        self._retry_delay = retry_delay
         self._lock = threading.Lock()
 
     def _cache_path(self) -> Path:
@@ -464,16 +470,35 @@ class GwsHealthMonitor:
                     continue
                 token_valid = bool(status.get("token_valid"))
                 token_error = status.get("token_error", "")
+                if not token_valid and self._retry_count > 0:
+                    for _ in range(self._retry_count):
+                        if self._retry_delay > 0:
+                            time.sleep(self._retry_delay)
+                        retry_status = self._status_fn(self._config, profile)
+                        if not retry_status.get("available"):
+                            break
+                        if retry_status.get("token_valid"):
+                            status = retry_status
+                            token_valid = True
+                            token_error = ""
+                            break
+                        status = retry_status
+                        token_error = status.get("token_error", "")
+                consecutive = (prior.get("consecutive_invalid", 0) + 1) if not token_valid else 0
                 entry = {
                     "token_valid": token_valid,
                     "token_error": token_error,
                     "has_refresh_token": bool(status.get("has_refresh_token")),
                     "checked_at": time.time(),
+                    "consecutive_invalid": consecutive,
                     "notified_invalid": bool(prior.get("notified_invalid")),
                 }
                 if not token_valid:
                     summary["invalid"].append(profile)
-                    if not prior.get("notified_invalid"):
+                    if (
+                        consecutive >= self._consecutive_threshold
+                        and not prior.get("notified_invalid")
+                    ):
                         self._notify(profile, token_error)
                         entry["notified_invalid"] = True
                         summary["notified"].append(profile)

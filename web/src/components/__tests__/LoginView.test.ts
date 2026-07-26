@@ -138,11 +138,17 @@ describe('LoginView setup wizard tests', () => {
   })
 
   it('asks only for the workspace folder and explains the auto-adjust behavior', async () => {
-    mockApiGet.mockResolvedValue({
-      configured: false,
-      bootstrap: true,
-      mode: 'bootstrap',
-      providers: {}
+    mockApiGet.mockImplementation((path: string) => {
+      if (path.startsWith('/api/setup/inspect-folder')) {
+        // Empty folder: no nested workspaces, fall through to the text field.
+        return Promise.resolve({ mode: 'scratch', existing_workspaces: [] })
+      }
+      return Promise.resolve({
+        configured: false,
+        bootstrap: true,
+        mode: 'bootstrap',
+        providers: {}
+      })
     })
 
     const wrapper = await mountLoginView()
@@ -156,6 +162,60 @@ describe('LoginView setup wizard tests', () => {
     const nameInput = wrapper.find('#setup-workspace-name')
     expect(nameInput.exists()).toBe(true)
     expect((nameInput.element as HTMLInputElement).value).toBe('personal')
+  })
+
+  it('hides the "First Workspace" field and shows chips when the folder already has nested workspaces', async () => {
+    mockApiGet.mockImplementation((path: string) => {
+      if (path.startsWith('/api/setup/inspect-folder')) {
+        return Promise.resolve({
+          mode: 'existing',
+          existing_workspaces: ['personal', 'work'],
+        })
+      }
+      return Promise.resolve({
+        configured: false,
+        bootstrap: true,
+        mode: 'bootstrap',
+        providers: {}
+      })
+    })
+
+    const wrapper = await mountLoginView()
+    // The text field is gone; the detected names show as chips instead.
+    expect(wrapper.find('#setup-workspace-name').exists()).toBe(false)
+    const chips = wrapper.findAll('.workspace-chip')
+    expect(chips.map(c => c.text())).toEqual(['personal', 'work'])
+    expect(wrapper.text()).toContain('Found 2 workspaces')
+  })
+
+  it('omits workspace_name from the finish payload when the folder already has nested workspaces', async () => {
+    mockApiGet.mockImplementation((path: string) => {
+      if (path.startsWith('/api/setup/inspect-folder')) {
+        return Promise.resolve({
+          mode: 'existing',
+          existing_workspaces: ['personal', 'work'],
+        })
+      }
+      return Promise.resolve({
+        configured: false,
+        bootstrap: true,
+        mode: 'bootstrap',
+        providers: {
+          claude: { name: 'claude', ok: true, auth: 'oauth', command: 'ciao auth claude', detail: 'Ready' }
+        }
+      })
+    })
+
+    const wrapper = await mountLoginView()
+    mockApiPost.mockResolvedValue({ ok: true })
+    await wrapper.find('form').trigger('submit.prevent')
+    await flushPromises()
+
+    const body = mockApiPost.mock.calls[0][1]
+    expect(body.workspace).toBe('~/ciaobot')
+    // Server adopts the discovered workspaces via detect_nested_workspaces;
+    // we don't send a synthetic name that would otherwise be ignored.
+    expect(body).not.toHaveProperty('workspace_name')
   })
 
   it('opens the folder picker, lists directories, and writes the selection into the workspace field', async () => {

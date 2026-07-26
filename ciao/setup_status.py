@@ -23,6 +23,26 @@ from typing import Mapping, Any
 from ciao.providers.codex import codex_login_status
 
 
+def detect_nested_workspaces(vault_path: Path) -> list[str]:
+    """Return workspace names implied by the existing vault layout.
+
+    Legacy and migrated vaults keep each workspace in its own subdirectory
+    under the vault root (``memory-vault/personal/``, ``memory-vault/work/``,
+    etc.), with a ``MEMORY.md`` file inside. Detecting those subdirectories
+    lets setup adopt the existing logical workspaces instead of creating a
+    single synthetic workspace that points at the whole vault.
+    """
+    try:
+        entries = [p for p in vault_path.iterdir() if p.is_dir()]
+    except OSError:
+        return []
+    return sorted(
+        entry.name
+        for entry in entries
+        if (entry / "MEMORY.md").is_file()
+    )
+
+
 # macOS TCC (privacy) protects these home subfolders. A launchd-spawned
 # background agent has no access grant for them, so a workspace placed inside
 # one fails at runtime with EPERM ("Operation not permitted") reading its own

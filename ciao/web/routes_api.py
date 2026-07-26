@@ -4799,6 +4799,47 @@ async def setup_list_dirs_endpoint(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=400)
 
 
+async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
+    """Probe a candidate workspace folder for the first-run setup wizard.
+
+    Returns the inferred vault mode ("scratch" vs "existing"), the resolved
+    vault root, and any nested workspace directories the folder already
+    contains (e.g. ``memory-vault/personal/``, ``memory-vault/work/``). The
+    wizard uses this to decide whether to ask for a "first workspace" name
+    (scratch) or show the existing ones as read-only chips (existing).
+    """
+    from ciao.cli import detect_vault_mode
+    from ciao.setup_status import detect_nested_workspaces
+
+    guard = _setup_fs_guard(request)
+    if guard is not None:
+        return guard
+    raw = str(request.query_params.get("path") or "").strip()
+    if not raw:
+        return JSONResponse({"error": "path is required"}, status_code=400)
+    target = _resolve_setup_dir(raw)
+    if target is None:
+        return JSONResponse({"error": f"not a directory: {raw}"}, status_code=400)
+    # Reuse the same "scratch vs existing" rule the setup/finish endpoint
+    # applies, so the wizard and the server agree before the user clicks
+    # Finish. The vault root mirrors setup_workspace's logic: an existing
+    # notes folder (no prior scaffold) is the vault itself; otherwise the
+    # vault lives under memory-vault/.
+    mode = detect_vault_mode(target)
+    existing_env_path = target / ".env"
+    vault_root = target / "memory-vault"
+    if mode == "existing" and not vault_root.is_dir():
+        vault_root = target
+    nested = detect_nested_workspaces(vault_root) if mode == "existing" else []
+    return JSONResponse({
+        "path": str(target),
+        "mode": mode,
+        "vault_root": str(vault_root),
+        "existing_workspaces": nested,
+        "has_env": existing_env_path.is_file(),
+    })
+
+
 async def setup_mkdir_endpoint(request: Request) -> JSONResponse:
     """Create a folder from the first-run setup folder picker and return the refreshed listing."""
     guard = _setup_fs_guard(request)

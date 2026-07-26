@@ -94,17 +94,40 @@
         </div>
 
         <div class="form-group">
-          <label for="setup-workspace-name">First Workspace</label>
-          <input
-            id="setup-workspace-name"
-            v-model="workspaceName"
-            type="text"
-            class="form-input"
-            placeholder="personal"
-            :disabled="loading"
-          />
-          <span class="hint">A workspace is a life area — personal, work, a client. You start with
-            one and can add more later in Settings → Workspaces.</span>
+          <label>Workspaces Found</label>
+          <div v-if="folderInspecting" class="hint">
+            Checking the folder for existing workspaces…
+          </div>
+          <div v-else-if="detectedWorkspaces.length" class="detected-workspaces">
+            <p class="hint">
+              Found {{ detectedWorkspaces.length }} workspace{{ detectedWorkspaces.length === 1 ? '' : 's' }}
+              already in this folder. Ciaobot will adopt them in place —
+              no need to create one.
+            </p>
+            <ul class="workspace-chips" aria-label="Detected workspaces">
+              <li
+                v-for="name in detectedWorkspaces"
+                :key="name"
+                class="workspace-chip"
+              >{{ name }}</li>
+            </ul>
+            <p class="hint hint--muted">
+              You can rename or add more in Settings → Workspaces after setup.
+            </p>
+          </div>
+          <template v-else>
+            <label for="setup-workspace-name">First Workspace</label>
+            <input
+              id="setup-workspace-name"
+              v-model="workspaceName"
+              type="text"
+              class="form-input"
+              placeholder="personal"
+              :disabled="loading"
+            />
+            <span class="hint">A workspace is a life area — personal, work, a client. You start with
+              one and can add more later in Settings → Workspaces.</span>
+          </template>
         </div>
 
 
@@ -363,6 +386,40 @@ const workspaceName = ref('personal')
 const copyStatus = ref('')
 const advancedOpen = ref(false)
 
+// Folder inspection: when the chosen workspace folder already contains
+// nested workspace directories (e.g. memory-vault/personal/, memory-vault/work/),
+// the wizard hides the "First Workspace" text field and shows them as
+// read-only chips. The server adopts them on /api/setup/finish.
+const folderInspecting = ref(false)
+const detectedWorkspaces = ref<string[]>([])
+let inspectToken = 0
+
+async function inspectWorkspaceFolder(rawPath: string) {
+  const path = rawPath.trim()
+  if (!path) {
+    detectedWorkspaces.value = []
+    folderInspecting.value = false
+    return
+  }
+  const token = ++inspectToken
+  folderInspecting.value = true
+  try {
+    const data = await api.get<{
+      mode: string
+      existing_workspaces: string[]
+    }>(`/api/setup/inspect-folder?path=${encodeURIComponent(path)}`)
+    if (token !== inspectToken) return
+    detectedWorkspaces.value = data.existing_workspaces || []
+  } catch {
+    // Network or guard error: fall back to the text field, the same as
+    // before this probe existed.
+    if (token !== inspectToken) return
+    detectedWorkspaces.value = []
+  } finally {
+    if (token === inspectToken) folderInspecting.value = false
+  }
+}
+
 // Folder picker modal (server-backed: browsers cannot give absolute paths)
 interface DirListing {
   path: string
@@ -522,9 +579,13 @@ async function doFinish() {
   loading.value = true
   error.value = ''
   try {
-    await api.post('/api/setup/finish', {
+    // When the chosen folder already contains nested workspace directories,
+    // the server adopts them via detect_nested_workspaces. The text field is
+    // hidden in that case, so skip sending workspace_name to avoid clobbering
+    // the discovered set.
+    const sendName = detectedWorkspaces.value.length === 0
+    const finishBody: Record<string, unknown> = {
       workspace: workspace.value,
-      workspace_name: workspaceName.value.trim() || 'personal',
       // vault_root and vault_mode are intentionally omitted: the server
       // inspects the chosen folder — empty scaffolds a fresh vault at
       // memory-vault/, existing notes are adapted in place by the
@@ -536,7 +597,11 @@ async function doFinish() {
       auth_required: authRequired.value,
       provider: provider.value,
       restart: true,
-    })
+    }
+    if (sendName) {
+      finishBody.workspace_name = workspaceName.value.trim() || 'personal'
+    }
+    await api.post('/api/setup/finish', finishBody)
     isRestarting.value = true
     if (pollInterval) {
       clearInterval(pollInterval)
@@ -572,10 +637,19 @@ watch(isBootstrap, (newVal) => {
   }
 }, { immediate: true })
 
+// Re-probe whenever the chosen folder changes, so the chips ↔ text-field
+// swap is responsive to Browse… picks. Only runs in bootstrap mode.
+watch(workspace, (path) => {
+  if (isBootstrap.value) inspectWorkspaceFolder(path || '')
+})
+
 onMounted(async () => {
   bootstrapLoading.value = true
   try {
     await fetchSetupStatus()
+    if (isBootstrap.value) {
+      inspectWorkspaceFolder(workspace.value || '')
+    }
   } finally {
     bootstrapLoading.value = false
   }
@@ -839,6 +913,35 @@ onUnmounted(() => {
   color: var(--fg3);
   font-size: var(--text-xs);
   line-height: 1.4;
+}
+.hint--muted {
+  opacity: 0.75;
+}
+
+.detected-workspaces {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.workspace-chips {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.workspace-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--fg2);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: var(--text-xs);
+  letter-spacing: 0.3px;
 }
 
 .input-row {

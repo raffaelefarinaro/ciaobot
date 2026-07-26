@@ -334,6 +334,18 @@ def _next_node(
     return chosen
 
 
+def _serialize_result(res: NodeResult) -> dict[str, Any]:
+    return {"ok": res.ok, "output": res.output, "error": res.error}
+
+
+def _deserialize_result(data: dict[str, Any]) -> NodeResult:
+    return NodeResult(
+        ok=bool(data.get("ok")),
+        output=data.get("output"),
+        error=data.get("error"),
+    )
+
+
 def run(
     dag: list[Node],
     edges: list[Edge],
@@ -341,22 +353,76 @@ def run(
     job: str = "dag",
     label: str = "DAG run",
     initial_ctx: dict[str, Any] | None = None,
+    run_id: str | None = None,
+    checkpoint_dir: str | os.PathLike[str] | None = None,
 ) -> dict[str, Any]:
     """Walk a DAG from its start node, executing each step and recording
     per-node timing in ``.runtime/job_runs.jsonl`` via
     :func:`ciao.job_runs.track_sync`.
+
+    Supports durable execution: if ``run_id`` is supplied, node outcomes are
+    checkpointed to ``checkpoint_dir / f"{run_id}.json"``. On re-run with the
+    same ``run_id``, completed nodes are skipped and execution resumes from the
+    first incomplete step.
 
     Returns the final ctx (a dict of ``{node_id: NodeResult}``). On any
     non-retention node failure, the ``ok`` branch is short-circuited and
     the exception is re-raised after the run is recorded. ``retention``
     nodes always return ok=true (see ``_exec_retention``).
     """
+    import json
+    from pathlib import Path
+
     index = _validate(dag, edges)
     start = _start_node(dag, edges)
     ctx: dict[str, Any] = dict(initial_ctx or {})
+
+    chk_file: Path | None = None
+    if run_id:
+        if checkpoint_dir:
+            base_dir = Path(checkpoint_dir)
+        else:
+            base_dir = Path(".runtime") / "dag_checkpoints"
+        base_dir.mkdir(parents=True, exist_ok=True)
+        chk_file = base_dir / f"{run_id}.json"
+        if chk_file.is_file():
+            try:
+                from ciao.jsonio import read_json_dict
+                saved_data = read_json_dict(chk_file)
+                saved_nodes = saved_data.get("nodes", {})
+                if isinstance(saved_nodes, dict):
+                    for nid, res_data in saved_nodes.items():
+                        if isinstance(res_data, dict):
+                            ctx[nid] = _deserialize_result(res_data)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to load checkpoint file %s: %s", chk_file, exc)
+
+    def _save_checkpoint() -> None:
+        if not chk_file:
+            return
+        serialized_nodes = {
+            k: _serialize_result(v)
+            for k, v in ctx.items()
+            if isinstance(v, NodeResult)
+        }
+        try:
+            chk_file.write_text(
+                json.dumps({"run_id": run_id, "nodes": serialized_nodes}, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to save checkpoint file %s: %s", chk_file, exc)
+
     current: str | None = start
     while current is not None:
         node = index[current]
+
+        # Check if already completed in checkpoint
+        if current in ctx and isinstance(ctx[current], NodeResult) and ctx[current].ok:
+            logger.info("DAG node '%s' already completed in checkpoint; skipping.", current)
+            current = _next_node(current, True, edges)
+            continue
+
         executor = _EXECUTORS.get(node.kind)
         if executor is None:
             raise ValueError(f"unknown node kind '{node.kind}' for node '{node.id}'")
@@ -384,6 +450,7 @@ def run(
                 handle.error = f"{type(exc).__name__}: {exc}"[:1000]
                 result = NodeResult(ok=False, error=str(exc))
                 ctx[node.id] = result
+                _save_checkpoint()
                 if node.kind == "retention":
                     current = _next_node(node.id, True, edges)
                     continue
@@ -391,5 +458,7 @@ def run(
                 # track_sync block still records the run.
                 raise
         ctx[node.id] = result
+        _save_checkpoint()
         current = _next_node(node.id, result.ok, edges)
     return ctx
+
