@@ -300,4 +300,51 @@ describe('LoginView setup wizard tests', () => {
     expect(payload).not.toHaveProperty('push_contact')
     expect(wrapper.text()).toContain('restarting')
   })
+
+  it('shows switch-back-to-host bailout in client login mode', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/startup-status')) {
+        return {
+          ok: true,
+          json: async () => ({
+            node_role: 'client',
+            host_url: 'http://100.101.252.27:8443',
+            has_host_session: false,
+          }),
+        } as Response
+      }
+      return { ok: false, json: async () => ({}) } as Response
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    mockApiGet.mockResolvedValue({
+      configured: true,
+      bootstrap: false,
+      mode: 'configured',
+      providers: {},
+    })
+
+    const wrapper = await mountLoginView()
+    expect(wrapper.text()).toContain('host password required')
+    expect(wrapper.text()).toContain('Switch back to host')
+
+    mockApiPost.mockResolvedValue({ ok: true, status: { role: 'host' } })
+    const assign = vi.fn()
+    vi.stubGlobal('confirm', () => true)
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...window.location, assign, pathname: '/login', href: 'http://localhost/login' },
+    })
+
+    await wrapper.find('.client-bailout-btn').trigger('click')
+    await flushPromises()
+
+    expect(mockApiPost).toHaveBeenCalledWith('/api/node/handover', {
+      target_node_url: 'http://100.101.252.27:8443',
+      force: true,
+    })
+    expect(assign).toHaveBeenCalledWith('/')
+    vi.unstubAllGlobals()
+  })
 })

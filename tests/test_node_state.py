@@ -254,3 +254,72 @@ def test_node_connect_rejects_host_without_password(tmp_path: Path, monkeypatch)
     body = res.json()
     assert body["password_required_on_host"] is True
     assert "no password" in body["error"].lower()
+
+
+def test_node_connect_logs_in_via_api_auth(tmp_path: Path, monkeypatch):
+    """Host login path is /api/auth (not the non-existent /api/auth/login)."""
+    import httpx
+
+    from ciao.web.auth import SESSION_COOKIE
+
+    app = Starlette(
+        routes=[Route("/api/node/connect", node_connect_endpoint, methods=["POST"])]
+    )
+    app.state.node_state_manager = NodeStateManager(tmp_path)
+    client = TestClient(app)
+    posted: list[str] = []
+
+    class _Headers(dict):
+        def get_list(self, key: str) -> list[str]:
+            raw = self.get(key)
+            return [raw] if raw else []
+
+    class _Resp:
+        def __init__(self, status_code: int, payload: dict | None = None, *, set_cookie: str | None = None):
+            self.status_code = status_code
+            self._payload = payload or {}
+            self.headers = _Headers({"content-type": "application/json"})
+            if set_cookie:
+                self.headers["set-cookie"] = set_cookie
+            self.cookies = {SESSION_COOKIE: "host-session-token"} if set_cookie else {}
+            self.text = ""
+
+        def json(self):
+            return self._payload
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url):
+            assert url.endswith("/api/startup-status")
+            return _Resp(200, {"overall_ready": True, "auth_required": True})
+
+        async def post(self, url, json=None):
+            posted.append(url)
+            assert url.endswith("/api/auth")
+            assert not url.endswith("/api/auth/login")
+            assert json == {"token": "correct-password"}
+            return _Resp(
+                200,
+                {"ok": True},
+                set_cookie=f"{SESSION_COOKIE}=host-session-token; Path=/; HttpOnly",
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+
+    res = client.post(
+        "/api/node/connect",
+        json={"host_url": "http://10.0.0.1:8443", "password": "correct-password"},
+    )
+    assert res.status_code == 200
+    assert posted == ["http://10.0.0.1:8443/api/auth"]
+    status = res.json()["status"]
+    assert status["role"] == "client"
+    assert status["has_host_session"] is True

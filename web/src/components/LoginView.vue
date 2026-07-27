@@ -356,6 +356,19 @@
         <p v-else-if="!loading" class="line line--hint">
           <span class="caret"></span>
         </p>
+        <div v-if="isClientLogin" class="client-bailout">
+          <p class="line line--sys">
+            Can’t reach the host or don’t have the password? Stop tunneling and use this machine as host again.
+          </p>
+          <button
+            type="button"
+            class="btn-small client-bailout-btn"
+            :disabled="loading || switchingToHost"
+            @click="switchBackToHost"
+          >
+            {{ switchingToHost ? 'Switching…' : 'Switch back to host' }}
+          </button>
+        </div>
       </form>
     </div>
   </div>
@@ -371,6 +384,7 @@ const token = ref('')
 const error = ref('')
 const loading = ref(false)
 const clientHostUrl = ref('')
+const switchingToHost = ref(false)
 const isClientLogin = computed(() => Boolean(clientHostUrl.value))
 const loginModeHint = computed(() =>
   isClientLogin.value ? 'client · host password required' : 'auth required',
@@ -387,6 +401,29 @@ const loginTokenLabel = computed(() => (isClientLogin.value ? 'host_password' : 
 const loginTokenPlaceholder = computed(() =>
   isClientLogin.value ? 'password set on the host' : 'paste token',
 )
+
+async function switchBackToHost() {
+  if (switchingToHost.value) return
+  if (
+    !confirm(
+      'Stop client mode and become host on this machine? Skips asking the remote to push (use this when the host is unreachable or you do not have the password).',
+    )
+  ) {
+    return
+  }
+  switchingToHost.value = true
+  error.value = ''
+  try {
+    await api.post('/api/node/handover', {
+      target_node_url: clientHostUrl.value,
+      force: true,
+    })
+    window.location.assign('/')
+  } catch (e: any) {
+    error.value = e?.message || 'Failed to switch back to host'
+    switchingToHost.value = false
+  }
+}
 
 // Setup Wizard states
 const isBootstrap = ref(false)
@@ -903,6 +940,38 @@ onUnmounted(() => {
 }
 .line--hint {
   min-height: 1.2em;
+}
+
+.client-bailout {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.client-bailout .line--sys {
+  margin: 0;
+  opacity: 0.85;
+}
+.client-bailout-btn {
+  align-self: flex-start;
+  background: transparent;
+  border: 1px solid var(--warning, #ff9800);
+  color: var(--warning, #ff9800);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  font-family: var(--font);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+.client-bailout-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--warning, #ff9800) 14%, transparent);
+}
+.client-bailout-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Form inputs styling */

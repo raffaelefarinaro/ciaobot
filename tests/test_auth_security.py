@@ -202,3 +202,68 @@ def test_setup_token_rejects_invalid_token(tmp_path) -> None:
     assert resp.status_code == 401
     assert "set-cookie" not in resp.headers
     assert token_path.exists()
+
+
+def test_node_handover_bailout_allowed_without_session() -> None:
+    """Stuck clients on /login must force-promote without a host session."""
+    from ciao.node_state import NodeStateManager
+    from ciao.web.routes_api import node_handover_endpoint
+
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/node/handover", node_handover_endpoint, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.serializer = serializer
+    app.state.config = SimpleNamespace(pwa_auth_required=True, pwa_auth_token="x")
+    node_mgr = NodeStateManager.__new__(NodeStateManager)
+    # Minimal stub: promote clears client role.
+    state = {"role": "client", "host_url": "http://100.1.2.3:8443", "host_session": None}
+
+    def get_host_url():
+        return state["host_url"]
+
+    def get_host_session():
+        return state["host_session"]
+
+    def promote():
+        state["role"] = "host"
+        state["host_url"] = None
+        state["host_session"] = None
+        return {"role": "host", "host_url": None}
+
+    node_mgr.get_host_url = get_host_url  # type: ignore[method-assign]
+    node_mgr.get_host_session = get_host_session  # type: ignore[method-assign]
+    node_mgr.promote = promote  # type: ignore[method-assign]
+    app.state.node_state_manager = node_mgr
+    app.state.local_session_manager = None
+
+    client = TestClient(app, base_url="https://ciao.example")
+    resp = client.post(
+        "/api/node/handover",
+        json={"force": True},
+        headers={"Origin": "https://ciao.example"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    assert state["role"] == "host"
+
+
+def test_node_handover_bailout_rejects_cross_origin() -> None:
+    from ciao.web.routes_api import node_handover_endpoint
+
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/node/handover", node_handover_endpoint, methods=["POST"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.serializer = serializer
+    app.state.config = SimpleNamespace(pwa_auth_required=True)
+
+    client = TestClient(app, base_url="https://ciao.example")
+    resp = client.post(
+        "/api/node/handover",
+        json={"force": True},
+        headers={"Origin": "https://evil.example"},
+    )
+    assert resp.status_code == 403

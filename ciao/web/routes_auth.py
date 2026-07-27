@@ -68,13 +68,32 @@ async def _client_mode_login(request: Request, password: str) -> JSONResponse:
     try:
         async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
             login_res = await client.post(
-                f"{host_url}/api/auth/login",
+                f"{host_url}/api/auth",
                 json={"token": password},
             )
             if login_res.status_code != 200:
+                detail = ""
+                try:
+                    payload = login_res.json()
+                    if isinstance(payload, dict) and payload.get("error"):
+                        detail = str(payload["error"])
+                except Exception:
+                    detail = (login_res.text or "").strip()[:120]
+                if login_res.status_code in {401, 403}:
+                    return JSONResponse(
+                        {"error": "Invalid password for host", "auth_required": True},
+                        status_code=401,
+                    )
                 return JSONResponse(
-                    {"error": "Invalid password for host", "auth_required": True},
-                    status_code=401,
+                    {
+                        "error": (
+                            f"Host login failed (HTTP {login_res.status_code}"
+                            + (f": {detail}" if detail else "")
+                            + ")"
+                        ),
+                        "peer_unreachable": login_res.status_code >= 500,
+                    },
+                    status_code=400,
                 )
             cookies: list[str] = []
             try:
@@ -180,6 +199,16 @@ async def auth_check(request: Request) -> JSONResponse:
                 "has_host_session": True,
             }
         )
+
+    # Host mode: when a PWA password is required, /api/auth/check must actually
+    # verify the session. Returning ok unconditionally let the SPA mount chats
+    # while /api/chats and /ws/* correctly 401/403'd — causing a reconnect storm.
+    if getattr(config, "pwa_auth_required", False):
+        from ciao.web.auth import verify_session
+
+        serializer = getattr(request.app.state, "serializer", None)
+        if serializer is None or not verify_session(request, serializer):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     return JSONResponse({"ok": True})
 

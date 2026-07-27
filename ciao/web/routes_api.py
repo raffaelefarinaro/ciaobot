@@ -5554,13 +5554,32 @@ async def node_connect_endpoint(request: Request) -> JSONResponse:
                 )
 
             login_res = await client.post(
-                f"{host_url}/api/auth/login",
+                f"{host_url}/api/auth",
                 json={"token": password},
             )
             if login_res.status_code != 200:
+                detail = ""
+                try:
+                    payload = login_res.json()
+                    if isinstance(payload, dict) and payload.get("error"):
+                        detail = str(payload["error"])
+                except Exception:
+                    detail = (login_res.text or "").strip()[:120]
+                if login_res.status_code in {401, 403}:
+                    return JSONResponse(
+                        {"error": "Invalid password for host", "auth_required": True},
+                        status_code=401,
+                    )
                 return JSONResponse(
-                    {"error": "Invalid password for host", "auth_required": True},
-                    status_code=401,
+                    {
+                        "error": (
+                            f"Host login failed (HTTP {login_res.status_code}"
+                            + (f": {detail}" if detail else "")
+                            + ")"
+                        ),
+                        "peer_unreachable": login_res.status_code >= 500,
+                    },
+                    status_code=400,
                 )
             cookies = []
             try:

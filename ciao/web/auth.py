@@ -245,6 +245,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/api/setup/finish",
             "/api/setup/list-dirs",
             "/api/setup/mkdir",
+            # Stuck client login can force-promote without a host session.
+            "/api/node/handover",
         }
         protected = (
             (
@@ -255,6 +257,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
             or path.startswith("/ws/")
         )
         if not protected:
+            # Still require same-origin for the client bailout mutation.
+            if path == "/api/node/handover" and not _state_change_origin_allowed(request):
+                return JSONResponse({"error": "forbidden origin"}, status_code=403)
             return await call_next(request)
         if self._auth_required_now(request) and not verify_session(
             request, self._serializer_now(request)

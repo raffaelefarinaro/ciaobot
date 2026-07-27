@@ -1,5 +1,21 @@
 const BASE = ''
 
+export class ApiError extends Error {
+  status?: number
+  payload?: unknown
+
+  constructor(message: string, opts?: { status?: number; payload?: unknown }) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = opts?.status
+    this.payload = opts?.payload
+  }
+}
+
+function onLoginPage(): boolean {
+  return window.location.pathname === '/login' || window.location.pathname.startsWith('/login/')
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const opts: RequestInit = {
     method,
@@ -11,8 +27,17 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   }
   const res = await fetch(`${BASE}${path}`, opts)
   if (res.status === 401) {
-    window.location.href = '/login'
-    throw new Error('unauthorized')
+    // Never hard-reload while already on /login — that caused a refresh loop
+    // when client mode's /api/auth/check returns 401 (host password needed).
+    const isAuthProbe = path === '/api/auth/check' || path === '/api/auth'
+    if (!onLoginPage() && !isAuthProbe) {
+      window.location.href = '/login'
+    }
+    const payload = await res.json().catch(() => ({}))
+    throw new ApiError(
+      (payload as { error?: string })?.error || 'unauthorized',
+      { status: 401, payload },
+    )
   }
   if (!res.ok) {
     const err: any = await res.json().catch(() => ({}))
@@ -21,10 +46,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
           s.output ? `${s.step}: ${s.output}` : s.step).join('; ')
       : ''
     const msg = err?.error || stepDetail || res.statusText || `HTTP ${res.status}`
-    const e = new Error(msg) as Error & { payload?: unknown; status?: number }
-    e.payload = err
-    e.status = res.status
-    throw e
+    throw new ApiError(msg, { status: res.status, payload: err })
   }
   return res.json()
 }

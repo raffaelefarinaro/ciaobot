@@ -10,7 +10,21 @@
         <code>{{ clientHostLabel }}</code>
         <template v-if="!clientHasSession"> · host password needed</template>
       </span>
-      <router-link class="client-mode-banner-link" to="/settings">Manage</router-link>
+      <div class="client-mode-banner-actions">
+        <button
+          type="button"
+          class="client-mode-banner-link"
+          :disabled="switchingToHost"
+          @click="switchBackToHost"
+        >
+          {{ switchingToHost ? 'Switching…' : 'Switch to host' }}
+        </button>
+        <router-link
+          v-if="clientHasSession"
+          class="client-mode-banner-link"
+          to="/settings"
+        >Manage</router-link>
+      </div>
     </div>
     <Transition name="fade">
       <StartupView
@@ -56,6 +70,7 @@ const startupDone = ref(false)
 const clientMode = ref(false)
 const clientHostUrl = ref('')
 const clientHasSession = ref(false)
+const switchingToHost = ref(false)
 
 const showStartup = computed(() => !startupDone.value && !skipped.value)
 const clientHostLabel = computed(() => {
@@ -70,6 +85,37 @@ const clientHostLabel = computed(() => {
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 let nodePollTimer: ReturnType<typeof setInterval> | null = null
+
+async function switchBackToHost() {
+  if (switchingToHost.value) return
+  if (
+    !confirm(
+      'Stop client mode and become host on this machine? Skips asking the remote to push.',
+    )
+  ) {
+    return
+  }
+  switchingToHost.value = true
+  try {
+    const res = await fetch('/api/node/handover', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({
+        target_node_url: clientHostUrl.value,
+        force: true,
+      }),
+    })
+    if (!res.ok) {
+      const payload = await res.json().catch(() => ({}))
+      throw new Error((payload as { error?: string }).error || `HTTP ${res.status}`)
+    }
+    window.location.assign('/')
+  } catch (e: any) {
+    switchingToHost.value = false
+    window.alert(e?.message || 'Failed to switch back to host')
+  }
+}
 
 async function pollStartup() {
   try {
@@ -176,14 +222,29 @@ watch(showStartup, (show) => {
   color: var(--accent, #ff4d6d);
   font-size: inherit;
 }
+.client-mode-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
 .client-mode-banner-link {
   color: var(--accent, #ff4d6d);
   text-decoration: none;
   font-weight: 600;
   white-space: nowrap;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
 }
-.client-mode-banner-link:hover {
+.client-mode-banner-link:hover:not(:disabled) {
   text-decoration: underline;
+}
+.client-mode-banner-link:disabled {
+  opacity: 0.6;
+  cursor: wait;
 }
 
 :root {

@@ -399,6 +399,32 @@ def test_auth_check_reports_unauthenticated_in_bootstrap(tmp_path) -> None:
     assert client.get("/api/auth/check").status_code == 200
 
 
+def test_auth_check_requires_session_when_password_enabled(tmp_path) -> None:
+    """Host auth_check must mirror AuthMiddleware when PWA_AUTH_REQUIRED is on."""
+    from ciao.web.auth import SESSION_COOKIE
+    from ciao.web.routes_api import auth_check
+
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/auth/check", auth_check, methods=["GET"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.serializer = serializer
+    app.state.config = CiaoConfig.from_env(
+        {
+            "PWA_AUTH_REQUIRED": "true",
+            "PWA_AUTH_TOKEN": "secret",
+            "CIAO_WORKSPACE": str(tmp_path / "ws"),
+        }
+    )
+    client = TestClient(app, base_url="http://localhost:8443")
+
+    assert client.get("/api/auth/check").status_code == 401
+
+    cookie = {SESSION_COOKIE: serializer.dumps({"user": "owner"})}
+    assert client.get("/api/auth/check", cookies=cookie).status_code == 200
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="launchd handoff is macOS-only")
 def test_setup_finish_foreground_handoff_to_launchd(tmp_path, monkeypatch) -> None:
     """An interactive foreground `ciao run` hands the server to launchd:

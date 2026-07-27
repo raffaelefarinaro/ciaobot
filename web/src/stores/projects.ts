@@ -1765,9 +1765,11 @@ export const useProjectStore = defineStore('projects', () => {
     const ws = new WebSocket(`${proto}//${location.host}/ws/chat/${chatId}`)
     sockets.value[chatId] = ws
     lastChatFrameAt[chatId] = nowMs()
+    let opened = false
 
     ws.onopen = () => {
       if (toRaw(sockets.value[chatId]) !== ws) return
+      opened = true
       lastChatFrameAt[chatId] = nowMs()
       sendFocus(chatId)
     }
@@ -1810,6 +1812,26 @@ export const useProjectStore = defineStore('projects', () => {
       // (disconnectWs, e.g. switching chats) are skipped.
       if (typeof window === 'undefined' || typeof WebSocket === 'undefined') return
       if (activeChatId.value !== chatId) return
+
+      // Handshake never completed (auth 403 / origin reject). Do not spin
+      // reloadAndReconnectChat — that also hammers /messages and fills logs.
+      if (!opened) {
+        const attempt = (chatReconnectAttempts[chatId] = (chatReconnectAttempts[chatId] || 0) + 1)
+        if (attempt >= 5) {
+          void api.get('/api/projects').catch(() => {})
+          return
+        }
+        const delay = Math.min(2000 * 2 ** Math.min(attempt, 5), 64000)
+        if (chatReconnectTimers[chatId]) window.clearTimeout(chatReconnectTimers[chatId])
+        chatReconnectTimers[chatId] = window.setTimeout(() => {
+          delete chatReconnectTimers[chatId]
+          if (activeChatId.value === chatId && !sockets.value[chatId]) {
+            connectWs(chatId)
+          }
+        }, delay)
+        return
+      }
+
       // Keep the live Activity/timeline frozen across the gap. Clearing it
       // here made mid-turn drops look like a hard disconnect even though the
       // server broker was still running.

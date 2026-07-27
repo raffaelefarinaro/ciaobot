@@ -19,6 +19,7 @@ def test_is_local_path():
     assert is_local_path("/api/node/handover") is True
     assert is_local_path("/api/auth/login") is True
     assert is_local_path("/api/startup-status") is True
+    assert is_local_path("/api/setup-status") is True
     assert is_local_path("/api/chats") is False
     assert is_local_path("/api/projects") is False
 
