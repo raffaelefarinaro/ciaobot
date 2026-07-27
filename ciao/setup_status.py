@@ -22,6 +22,19 @@ from typing import Mapping, Any
 
 from ciao.providers.codex import codex_login_status
 
+# Claude MCP / skill discovery shells out; cache briefly so Settings refreshes
+# stay responsive without freezing status until process restart.
+_CLAUDE_DISCOVERY_TTL_SECONDS = 60.0
+_claude_mcps_cache: tuple[float, str, tuple[str, ...]] | None = None
+_claude_skills_cache: tuple[float, tuple[str, ...]] | None = None
+
+
+def clear_claude_discovery_cache() -> None:
+    """Drop Claude MCP/skill discovery caches (tests and forced refresh)."""
+    global _claude_mcps_cache, _claude_skills_cache
+    _claude_mcps_cache = None
+    _claude_skills_cache = None
+
 
 def detect_nested_workspaces(vault_path: Path) -> list[str]:
     """Return workspace names implied by the existing vault layout.
@@ -96,6 +109,8 @@ def _provider(
     version: str = "",
     account: str = "",
     protocol: str = "",
+    skills: list[str] | None = None,
+    mcps: list[str] | None = None,
 ) -> dict[str, Any]:
     row: dict[str, Any] = {
         "name": name,
@@ -111,6 +126,10 @@ def _provider(
         row["account"] = account
     if protocol:
         row["protocol"] = protocol
+    if skills is not None:
+        row["skills"] = skills
+    if mcps is not None:
+        row["mcps"] = mcps
     return row
 
 
@@ -136,15 +155,222 @@ def _ollama_daemon_ready(local_url: str) -> bool:
         return False
 
 
+def discover_claude_system_skills() -> list[str]:
+    """Discover enabled Claude Code plugins via CLI, falling back to installed_plugins.json."""
+    global _claude_skills_cache
+    now = time.monotonic()
+    if (
+        _claude_skills_cache is not None
+        and now - _claude_skills_cache[0] < _CLAUDE_DISCOVERY_TTL_SECONDS
+    ):
+        return list(_claude_skills_cache[1])
+
+    skills = _discover_claude_system_skills_uncached()
+    _claude_skills_cache = (now, tuple(skills))
+    return skills
+
+
+def _discover_claude_system_skills_uncached() -> list[str]:
+    binary = shutil.which("claude") or ""
+    if binary:
+        try:
+            res = subprocess.run(
+                [binary, "plugin", "list"],
+                capture_output=True, text=True, timeout=8.0, check=False,
+            )
+            output = (res.stdout or "") + "\n" + (res.stderr or "")
+            # Claude Code uses a multi-line block format:
+            #   ❯ plugin-name@source
+            #     Status: ✔ enabled  (or ✘ disabled)
+            skills: set[str] = set()
+            current_name: str | None = None
+            for line in output.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("❯ "):
+                    current_name = stripped[2:].split("@")[0].strip()
+                elif stripped.startswith("Status:") and current_name:
+                    if "enabled" in stripped and "disabled" not in stripped:
+                        skills.add(current_name)
+                    current_name = None
+            if skills:
+                return sorted(skills)
+        except Exception:
+            pass
+    # Fallback: read installed_plugins.json (all installed regardless of enabled state)
+    skills_fb: set[str] = set()
+    installed_json = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
+    if installed_json.is_file():
+        try:
+            data = json.loads(installed_json.read_text(encoding="utf-8"))
+            plugins = data.get("plugins", {})
+            for key in plugins.keys():
+                skills_fb.add(str(key).split("@")[0])
+        except Exception:
+            pass
+    skills_dir = Path.home() / ".claude" / "skills"
+    if skills_dir.is_dir():
+        for f in skills_dir.glob("*"):
+            if f.is_dir() or f.name.endswith(".md"):
+                skills_fb.add(f.stem)
+    return sorted(skills_fb)
+
+
+def discover_claude_mcps(
+    workspace_root: Path | str | None = None,
+    *,
+    config_path: Path | None = None,
+) -> list[str]:
+    """Discover connected+enabled Claude MCP connectors via CLI + ~/.claude.json.
+
+    ``claude mcp list`` reports health (Connected) even for connectors disabled
+    in the per-project ``/mcp`` panel. Those disables live in
+    ``~/.claude.json`` → ``projects.<path>.disabledMcpServers``.
+    """
+    global _claude_mcps_cache
+    now = time.monotonic()
+    ws_key = str(Path(workspace_root).expanduser().resolve()) if workspace_root else ""
+    if (
+        _claude_mcps_cache is not None
+        and now - _claude_mcps_cache[0] < _CLAUDE_DISCOVERY_TTL_SECONDS
+        and _claude_mcps_cache[1] == ws_key
+    ):
+        return list(_claude_mcps_cache[2])
+
+    connected = _discover_claude_mcps_uncached(
+        workspace_root=Path(ws_key) if ws_key else None,
+        config_path=config_path,
+    )
+    _claude_mcps_cache = (now, ws_key, tuple(connected))
+    return connected
+
+
+def _short_claude_mcp_name(name: str) -> str:
+    cleaned = str(name).strip()
+    if cleaned.startswith("claude.ai "):
+        return cleaned[len("claude.ai ") :].strip()
+    return cleaned
+
+
+def _disabled_claude_mcp_names(
+    *,
+    workspace_root: Path | None = None,
+    config_path: Path | None = None,
+) -> set[str]:
+    """Return short connector names disabled via the per-project ``/mcp`` panel."""
+    path = config_path or Path.home() / ".claude.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(data, dict):
+        return set()
+
+    disabled: set[str] = set()
+    for name in data.get("disabledMcpServers") or []:
+        short = _short_claude_mcp_name(str(name))
+        if short:
+            disabled.add(short)
+
+    projects = data.get("projects")
+    if not isinstance(projects, dict):
+        return disabled
+
+    roots: list[Path] = []
+    if workspace_root is not None:
+        try:
+            roots.append(Path(workspace_root).expanduser().resolve())
+        except OSError:
+            pass
+    try:
+        roots.append(Path.cwd().resolve())
+    except OSError:
+        pass
+
+    best_key: str | None = None
+    best_len = -1
+    for root in roots:
+        for key, meta in projects.items():
+            if not isinstance(meta, dict):
+                continue
+            try:
+                key_path = Path(str(key)).expanduser().resolve()
+            except OSError:
+                continue
+            try:
+                root.relative_to(key_path)
+            except ValueError:
+                continue
+            key_len = len(str(key_path))
+            if key_len > best_len:
+                best_key = str(key)
+                best_len = key_len
+
+    if best_key is not None:
+        meta = projects.get(best_key) or {}
+        if isinstance(meta, dict):
+            for name in meta.get("disabledMcpServers") or []:
+                short = _short_claude_mcp_name(str(name))
+                if short:
+                    disabled.add(short)
+    return disabled
+
+
+def _discover_claude_mcps_uncached(
+    *,
+    workspace_root: Path | None = None,
+    config_path: Path | None = None,
+) -> list[str]:
+    connected: list[str] = []
+    # Workspace project MCPs live in .mcp.json and are shown under MCP status,
+    # not as Claude Code platform connectors on the Providers tab.
+    excluded = {"n8n_mcp", "notion", "ciaobot", "ciaobot-fastmcp"}
+    disabled = _disabled_claude_mcp_names(
+        workspace_root=workspace_root,
+        config_path=config_path,
+    )
+    binary = shutil.which("claude") or ""
+    if not binary:
+        return connected
+    try:
+        res = subprocess.run(
+            [binary, "mcp", "list"],
+            capture_output=True,
+            text=True,
+            timeout=12.0,
+            check=False,
+        )
+        output = (res.stdout or "") + "\n" + (res.stderr or "")
+        for line in output.splitlines():
+            if "Connected" not in line:
+                continue
+            line_clean = (
+                line.split(":", 1)[0].replace("claude.ai", "").replace("✔", "").strip()
+            )
+            if (
+                line_clean
+                and line_clean not in connected
+                and line_clean not in excluded
+                and line_clean not in disabled
+            ):
+                connected.append(line_clean)
+    except Exception:
+        pass
+    return connected
+
+
 def _claude_status(
     env: Mapping[str, str],
     credentials_path: Path,
     config_path: Path,
+    *,
+    workspace_root: Path | None = None,
 ) -> dict[str, Any]:
     from ciao.providers.claude import get_bundled_claude_path
 
     binary = get_bundled_claude_path() or shutil.which("claude") or ""
     version = _cli_version(binary) if binary else "not installed"
+    claude_skills = discover_claude_system_skills()
+    claude_mcps = discover_claude_mcps(workspace_root, config_path=config_path)
     if env.get("ANTHROPIC_API_KEY", "").strip():
         return _provider(
             name="claude",
@@ -155,6 +381,8 @@ def _claude_status(
             version=version,
             account="Anthropic API",
             protocol="Agent SDK ready",
+            skills=claude_skills,
+            mcps=claude_mcps,
         )
     if credentials_path.is_file():
         return _provider(
@@ -166,12 +394,9 @@ def _claude_status(
             version=version,
             account="OAuth credentials",
             protocol="Agent SDK ready",
+            skills=claude_skills,
+            mcps=claude_mcps,
         )
-    # Claude Code on macOS stores the OAuth token in the Keychain and writes
-    # account metadata to ~/.claude.json. The token itself is not on disk, so
-    # treat a populated ``oauthAccount`` block as evidence of a logged-in
-    # session without attempting to read the Keychain (which may be locked or
-    # unavailable to the server process).
     account = _claude_oauth_account(config_path)
     if account:
         return _provider(
@@ -183,6 +408,8 @@ def _claude_status(
             version=version,
             account=account.removeprefix("oauthAccount: "),
             protocol="Agent SDK ready",
+            skills=claude_skills,
+            mcps=claude_mcps,
         )
     return _provider(
         name="claude",
@@ -191,6 +418,8 @@ def _claude_status(
         command="ciao auth claude",
         detail="Run Claude OAuth or set ANTHROPIC_API_KEY.",
         version=version,
+        skills=claude_skills,
+        mcps=claude_mcps,
     )
 
 
@@ -343,7 +572,9 @@ def setup_status(
         ),
     ]
     providers = {
-        "claude": _claude_status(source, credentials_path, config_path),
+        "claude": _claude_status(
+            source, credentials_path, config_path, workspace_root=workspace_root
+        ),
         "codex": codex_login_status(source),
         "ollama": _ollama_status(config, source),
         "openrouter": _openrouter_status(source),

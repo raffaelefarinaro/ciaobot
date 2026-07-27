@@ -613,3 +613,55 @@ async def test_codex_provider_steers_active_turn(tmp_path: Path) -> None:
     records = _read_log(log)
     assert any(row["kind"] == "turn/steer" for row in records)
     await provider.disconnect()
+
+
+def test_codex_mcps_and_plugins_filters_enabled_json(monkeypatch, tmp_path: Path) -> None:
+    from ciao.providers import codex as codex_mod
+
+    binary = tmp_path / "codex"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    payload = [
+        {"name": "node_repl", "enabled": True},
+        {"name": "computer-use", "enabled": False},
+        {"name": "figma", "enabled": True},
+        {"name": "ciaobot", "enabled": True},
+        {"name": "n8n_mcp", "enabled": True},
+        {"name": "notion", "enabled": True},
+    ]
+
+    class FakeResult:
+        returncode = 0
+        stdout = json.dumps(payload)
+        stderr = ""
+
+    def fake_run(cmd, **_kwargs):
+        assert cmd[-3:] == ["mcp", "list", "--json"]
+        return FakeResult()
+
+    monkeypatch.setattr(codex_mod, "resolve_codex_binary", lambda env=None: str(binary))
+    monkeypatch.setattr(codex_mod, "_codex_path_env", lambda _binary: {})
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    assert codex_mod.codex_mcps_and_plugins() == ["figma", "node_repl"]
+
+
+def test_codex_mcps_and_plugins_falls_back_to_config(monkeypatch, tmp_path: Path) -> None:
+    from ciao.providers import codex as codex_mod
+
+    config_dir = tmp_path / ".codex"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text(
+        '[mcp_servers.custom_http]\nenabled = true\n'
+        '[mcp_servers.legacy]\nenabled = false\n'
+        '[mcp_servers.stdio_tool]\ncommand = "npx"\n'
+        '[mcp_servers.n8n_mcp]\nenabled = true\n'
+        '[mcp_servers.notion]\nenabled = true\n',
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(codex_mod, "resolve_codex_binary", lambda env=None: None)
+    monkeypatch.setattr(codex_mod.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+    # Project MCPs (n8n_mcp, notion) stay excluded even if present in config.
+    assert codex_mod.codex_mcps_and_plugins() == ["custom_http", "stdio_tool"]

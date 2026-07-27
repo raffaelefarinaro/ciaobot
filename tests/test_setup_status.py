@@ -770,3 +770,88 @@ def test_tcc_protected_location_flags_desktop(monkeypatch, tmp_path) -> None:
     # Non-macOS never flags (launchd/TCC is macOS-only).
     monkeypatch.setattr(setup_status.sys, "platform", "linux")
     assert setup_status.tcc_protected_location(home / "Desktop" / "Cowork") is None
+
+
+def test_discover_claude_mcps_filters_connected_and_caches(monkeypatch, tmp_path) -> None:
+    from ciao import setup_status
+
+    setup_status.clear_claude_discovery_cache()
+    calls = {"n": 0}
+    config = tmp_path / ".claude.json"
+    config.write_text(
+        json.dumps(
+            {
+                "projects": {
+                    str(tmp_path.resolve()): {
+                        "disabledMcpServers": [
+                            "claude.ai Excalidraw",
+                            "claude.ai Gmail",
+                            "claude.ai Google Calendar",
+                            "claude.ai Google Drive",
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeResult:
+        stdout = (
+            "claude.ai Airtable: https://example - ✔ Connected\n"
+            "claude.ai Slack: https://example - ! Needs authentication\n"
+            "claude.ai Gmail: https://example - ✔ Connected\n"
+            "claude.ai Excalidraw: https://example - ✔ Connected\n"
+            "claude.ai Figma: https://example - ✔ Connected\n"
+            "n8n_mcp: ✔ Connected\n"
+            "notion: ✔ Connected\n"
+        )
+        stderr = ""
+
+    def fake_run(*_args, **_kwargs):
+        calls["n"] += 1
+        return FakeResult()
+
+    monkeypatch.setattr(setup_status.shutil, "which", lambda _name: "/bin/claude")
+    monkeypatch.setattr(setup_status.subprocess, "run", fake_run)
+
+    assert setup_status.discover_claude_mcps(
+        tmp_path, config_path=config
+    ) == ["Airtable", "Figma"]
+    assert setup_status.discover_claude_mcps(
+        tmp_path, config_path=config
+    ) == ["Airtable", "Figma"]
+    assert calls["n"] == 1
+
+    setup_status.clear_claude_discovery_cache()
+    assert setup_status.discover_claude_mcps(
+        tmp_path, config_path=config
+    ) == ["Airtable", "Figma"]
+    assert calls["n"] == 2
+
+
+def test_discover_claude_system_skills_filters_enabled_and_caches(monkeypatch) -> None:
+    from ciao import setup_status
+
+    setup_status.clear_claude_discovery_cache()
+    calls = {"n": 0}
+
+    class FakeResult:
+        stdout = (
+            "❯ skill-creator@claude-plugins-official\n"
+            "  Status: ✔ enabled\n"
+            "❯ other-plugin@source\n"
+            "  Status: ✘ disabled\n"
+        )
+        stderr = ""
+
+    def fake_run(*_args, **_kwargs):
+        calls["n"] += 1
+        return FakeResult()
+
+    monkeypatch.setattr(setup_status.shutil, "which", lambda _name: "/bin/claude")
+    monkeypatch.setattr(setup_status.subprocess, "run", fake_run)
+
+    assert setup_status.discover_claude_system_skills() == ["skill-creator"]
+    assert setup_status.discover_claude_system_skills() == ["skill-creator"]
+    assert calls["n"] == 1

@@ -30,12 +30,37 @@ export interface WorkspacesResponse {
   claude_ai_connectors?: string[]
 }
 
+export interface McpEnvKey {
+  key: string
+  configured: boolean
+  source: string
+}
+
+export interface McpProjectServer {
+  name: string
+  url?: string
+  command?: string
+  args?: string[]
+  transport?: 'http' | 'stdio' | string
+  source: string
+  config_path?: string
+  env_path?: string
+  env_keys?: McpEnvKey[]
+  ready?: boolean
+  tool_prefix?: string
+  tools?: string[]
+  tools_source?: 'observed' | 'probed' | 'none' | string
+  tools_note?: string
+}
+
 export interface McpStatus {
   enabled: boolean
   bound: boolean
   url?: string
   tool_count: number
   tools?: string[]
+  env_path?: string
+  project_servers?: McpProjectServer[]
   active_sessions?: number
   providers?: string[]
   last_error?: string
@@ -488,6 +513,8 @@ export interface ProviderConnection {
   version?: string
   account?: string
   protocol?: string
+  mcps?: string[]
+  skills?: string[]
 }
 
 export interface ProviderConfigSettings {

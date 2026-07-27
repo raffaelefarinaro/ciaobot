@@ -813,28 +813,55 @@
                 </div>
                 <div class="provider-mcps-preview">
                   <div class="ws-connectors-header">
-                    <span class="ws-label">Available MCPs &amp; Connectors</span>
+                    <span class="ws-label">Configured MCP Servers &amp; Connectors ({{ connKey === 'claude' ? claudeConnectionMcps.length : codexConnectionMcps.length }})</span>
                   </div>
                   <div class="workspace-connector-pills">
-                    <span class="connector-pill connector-pill--enabled" title="Embedded FastMCP control plane (42 tools)">
-                      <span class="pill-dot"></span> Ciaobot MCP (42 tools)
-                    </span>
                     <template v-if="connKey === 'claude'">
-                      <span
-                        v-for="connName in (projectStore.workspaceClaudeAiConnectors.length ? projectStore.workspaceClaudeAiConnectors : defaultClaudeAiConnectors)"
-                        :key="connName"
-                        class="connector-pill connector-pill--enabled"
-                        :title="`${formatConnectorLabel(connName)} claude.ai connector`"
-                      >
-                        <span class="pill-dot"></span> {{ formatConnectorLabel(connName) }}
+                      <template v-if="claudeConnectionMcps.length">
+                        <span
+                          v-for="mcpName in claudeConnectionMcps"
+                          :key="mcpName"
+                          class="connector-pill connector-pill--enabled"
+                          :title="`${mcpName} configured for Claude Code`"
+                        >
+                          <span class="pill-dot"></span> {{ mcpName }}
+                        </span>
+                      </template>
+                      <span v-else class="hint hint--compact">No MCP servers enabled</span>
+                    </template>
+                    <template v-else-if="connKey === 'codex'">
+                      <template v-if="codexConnectionMcps.length">
+                        <span
+                          v-for="mcpName in codexConnectionMcps"
+                          :key="mcpName"
+                          class="connector-pill connector-pill--enabled"
+                          :title="`${mcpName} MCP configured for Codex`"
+                        >
+                          <span class="pill-dot"></span> {{ mcpName }}
+                        </span>
+                      </template>
+                      <span v-else class="hint hint--compact">No MCP servers enabled</span>
+                    </template>
+                  </div>
+
+                  <!-- Platform System Skills -->
+                  <div class="ws-connectors-header" style="margin-top: 10px;">
+                    <span class="ws-label">Platform System Skills &amp; Plugins ({{ (conn.skills && conn.skills.length) ? conn.skills.length : 0 }})</span>
+                  </div>
+                  <div class="workspace-connector-pills">
+                    <template v-if="conn.skills && conn.skills.length">
+                      <span v-for="skill in conn.skills" :key="skill" class="connector-pill connector-pill--enabled" :title="`Installed CLI plugin/skill: ${skill}`">
+                        <span class="pill-dot"></span> {{ skill }}
+                      </span>
+                    </template>
+                    <template v-else-if="connKey === 'claude'">
+                      <span v-for="skill in ['web-search', 'code-analysis', 'git-workflow', 'bash-executor']" :key="skill" class="connector-pill connector-pill--enabled">
+                        <span class="pill-dot"></span> {{ skill }}
                       </span>
                     </template>
                     <template v-else-if="connKey === 'codex'">
-                      <span class="connector-pill connector-pill--enabled" title="Self-hosted n8n MCP (registered via .mcp.json)">
-                        <span class="pill-dot"></span> n8n_mcp
-                      </span>
-                      <span class="connector-pill connector-pill--enabled" title="Project-scoped and app-server configured MCPs (.mcp.json)">
-                        <span class="pill-dot"></span> Project .mcp.json
+                      <span v-for="skill in ['superpowers', 'build-web-apps', 'stripe', 'supabase', 'browser']" :key="skill" class="connector-pill connector-pill--enabled">
+                        <span class="pill-dot"></span> {{ skill }}
                       </span>
                     </template>
                   </div>
@@ -950,150 +977,6 @@
             </div>
           </div>
         </template>
-      </template>
-
-      <!-- USAGE TAB -->
-      <template v-if="currentTab === 'usage'">
-        <!-- AVAILABLE MCPS INSPECTOR -->
-        <div class="card">
-          <div class="settings-card-header settings-card-header--split">
-            <div>
-              <p class="section-title">available mcps per provider &amp; workspace</p>
-              <p class="hint">
-                Inspect which embedded tools and external connectors are available for a given provider and workspace.
-              </p>
-            </div>
-          </div>
-          <div class="mcp-inspector-bar">
-            <label class="settings-field mcp-inspector-field">
-              <span class="ws-label">Workspace</span>
-              <select class="routine-select" v-model="inspectorWorkspace">
-                <option v-for="ws in projectStore.workspaceOptions" :key="ws.name" :value="ws.name">
-                  {{ ws.name }}
-                </option>
-              </select>
-            </label>
-            <label class="settings-field mcp-inspector-field">
-              <span class="ws-label">Provider</span>
-              <select class="routine-select" v-model="inspectorProvider">
-                <option value="claude">Claude Code</option>
-                <option value="codex">OpenAI Codex</option>
-              </select>
-            </label>
-          </div>
-          <div class="mcp-inspector-panels">
-            <!-- Embedded Tools Panel -->
-            <div class="mcp-inspector-panel">
-              <div class="panel-header">
-                <div class="panel-title-row">
-                  <span class="panel-title">Embedded Ciaobot Tools</span>
-                  <span class="badge badge--success">{{ inspectorEmbeddedTools.length }} tools</span>
-                </div>
-                <p class="hint hint--compact">Authenticated FastMCP server at <code>/mcp/</code> (available to both Claude &amp; Codex).</p>
-              </div>
-              <div class="mcp-tag-grid">
-                <span v-for="tool in inspectorEmbeddedTools" :key="tool" class="mcp-tag mcp-tag--embedded">
-                  {{ tool }}
-                </span>
-              </div>
-            </div>
-
-            <!-- claude.ai Connectors Panel -->
-            <div class="mcp-inspector-panel">
-              <div class="panel-header">
-                <div class="panel-title-row">
-                  <span class="panel-title">claude.ai Account Connectors</span>
-                  <span class="badge" :class="inspectorConnectorsActive ? 'badge--success' : 'badge--warn'">
-                    {{ inspectorConnectorsActive ? 'Allowed' : (inspectorProvider === 'codex' ? 'N/A (Codex)' : 'Blocked') }}
-                  </span>
-                </div>
-                <p class="hint hint--compact">
-                  {{ inspectorProvider === 'codex' ? 'Codex uses embedded tools only; claude.ai connectors are omitted.' : (inspectorConnectorsActive ? 'Enabled for this workspace.' : 'Blocked by workspace claude_ai_mcps setting.') }}
-                </p>
-              </div>
-              <div class="mcp-tag-grid">
-                <span
-                  v-for="conn in (projectStore.workspaceClaudeAiConnectors.length ? projectStore.workspaceClaudeAiConnectors : defaultClaudeAiConnectors)"
-                  :key="conn"
-                  class="mcp-tag"
-                  :class="inspectorConnectorsActive ? 'mcp-tag--active' : 'mcp-tag--blocked'"
-                >
-                  <span class="pill-dot"></span>
-                  {{ formatConnectorLabel(conn) }}
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="settings-card-header settings-card-header--split">
-            <div>
-              <div class="settings-label-row">
-                <p class="section-title">MCP tool usage</p>
-                <button class="btn-small" :disabled="!mcpUsageLoaded" @click="fetchMcpUsage">Refresh</button>
-              </div>
-              <p class="hint">
-                How often each managed Ciaobot MCP tool has been called since telemetry began.
-                Every tool call &mdash; from any provider or chat &mdash; is counted here.
-              </p>
-            </div>
-            <div v-if="mcpUsage" class="usage-summary usage-summary--header">
-              <div class="usage-stat">
-                <span class="usage-stat-value">{{ mcpUsage.total_calls.toLocaleString() }}</span>
-                <span class="usage-stat-label">total calls</span>
-              </div>
-              <div class="usage-stat">
-                <span class="usage-stat-value">{{ mcpUsage.tool_count }}</span>
-                <span class="usage-stat-label">tools</span>
-              </div>
-              <div class="usage-stat">
-                <span class="usage-stat-value" :class="{ 'usage-stat-value--warn': mcpUsage.total_errors > 0 }">
-                  {{ mcpUsage.total_errors.toLocaleString() }}
-                </span>
-                <span class="usage-stat-label">errors</span>
-              </div>
-            </div>
-          </div>
-
-          <div v-if="!mcpUsageLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
-          <p v-else-if="mcpUsageError" class="hint hint--warn">{{ mcpUsageError }}</p>
-          <template v-else-if="mcpUsage">
-            <p v-if="mcpUsage.total_calls === 0" class="hint hint--info">
-              No tool calls recorded yet. Usage will appear here once chats start using MCP tools.
-            </p>
-            <div v-else class="usage-table-wrap">
-              <table class="usage-table">
-                <thead>
-                  <tr>
-                    <th class="usage-th" :class="{ 'usage-th--active': usageSortKey === 'tool' }" @click="sortUsageBy('tool')">
-                      Tool<span v-if="usageSortKey === 'tool'" class="usage-sort">{{ usageSortDir === 'desc' ? '▾' : '▴' }}</span>
-                    </th>
-                    <th class="usage-th usage-th--num" :class="{ 'usage-th--active': usageSortKey === 'calls' }" @click="sortUsageBy('calls')">
-                      Calls<span v-if="usageSortKey === 'calls'" class="usage-sort">{{ usageSortDir === 'desc' ? '▾' : '▴' }}</span>
-                    </th>
-                    <th class="usage-th usage-th--num" :class="{ 'usage-th--active': usageSortKey === 'errors' }" @click="sortUsageBy('errors')">
-                      Errors<span v-if="usageSortKey === 'errors'" class="usage-sort">{{ usageSortDir === 'desc' ? '▾' : '▴' }}</span>
-                    </th>
-                    <th class="usage-th usage-th--num" :class="{ 'usage-th--active': usageSortKey === 'avg_ms' }" @click="sortUsageBy('avg_ms')">
-                      Avg ms<span v-if="usageSortKey === 'avg_ms'" class="usage-sort">{{ usageSortDir === 'desc' ? '▾' : '▴' }}</span>
-                    </th>
-                    <th class="usage-th">Providers</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="row in sortedUsage" :key="row.tool" :class="{ 'usage-row--idle': row.calls === 0 }">
-                    <td class="usage-td usage-td--tool">{{ row.tool }}</td>
-                    <td class="usage-td usage-td--num">{{ row.calls.toLocaleString() }}</td>
-                    <td class="usage-td usage-td--num" :class="{ 'usage-td--warn': row.errors > 0 }">{{ row.errors }}</td>
-                    <td class="usage-td usage-td--num">{{ row.calls ? row.avg_ms : '—' }}</td>
-                    <td class="usage-td usage-td--providers">{{ row.providers.join(', ') || '—' }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </template>
-        </div>
       </template>
 
       <!-- AUTOMATIONS TAB -->
@@ -1318,28 +1201,7 @@
                   </select>
                 </div>
 
-                <div v-if="newWorkspaceForm.default_provider !== 'codex'" class="workspace-connectors-preview">
-                  <div class="ws-connectors-header">
-                    <span class="ws-label">Connector Availability</span>
-                    <span class="badge badge--compact" :class="newWorkspaceForm.claude_ai_mcps === 'on' ? 'badge--success' : 'badge--warn'">
-                      {{ newWorkspaceForm.claude_ai_mcps === 'on' ? '8 Connectors Enabled' : 'Connectors Blocked' }}
-                    </span>
-                  </div>
-                  <div class="workspace-connector-pills">
-                    <span
-                      v-for="conn in (projectStore.workspaceClaudeAiConnectors.length ? projectStore.workspaceClaudeAiConnectors : defaultClaudeAiConnectors)"
-                      :key="conn"
-                      class="connector-pill"
-                      :class="newWorkspaceForm.claude_ai_mcps === 'on' ? 'connector-pill--enabled' : 'connector-pill--blocked'"
-                    >
-                      <span class="pill-dot"></span>
-                      {{ formatConnectorLabel(conn) }}
-                    </span>
-                  </div>
-                </div>
-                <div v-else class="workspace-connectors-preview workspace-connectors-preview--disabled">
-                  <span class="hint hint--compact">Codex uses embedded Ciaobot tools; claude.ai connectors do not apply to Codex.</span>
-                </div>
+
 
               </div>
               <div class="action-row settings-actions">
@@ -1438,29 +1300,7 @@
                     </select>
                   </div>
 
-                  <div v-if="form.default_provider !== 'codex'" class="workspace-connectors-preview">
-                    <div class="ws-connectors-header">
-                      <span class="ws-label">Connector Availability</span>
-                      <span class="badge badge--compact" :class="form.claude_ai_mcps === 'on' ? 'badge--success' : 'badge--warn'">
-                        {{ form.claude_ai_mcps === 'on' ? '8 Connectors Enabled' : 'Connectors Blocked' }}
-                      </span>
-                    </div>
-                    <div class="workspace-connector-pills">
-                      <span
-                        v-for="conn in (projectStore.workspaceClaudeAiConnectors.length ? projectStore.workspaceClaudeAiConnectors : defaultClaudeAiConnectors)"
-                        :key="conn"
-                        class="connector-pill"
-                        :class="form.claude_ai_mcps === 'on' ? 'connector-pill--enabled' : 'connector-pill--blocked'"
-                        :title="form.claude_ai_mcps === 'on' ? `${formatConnectorLabel(conn)} connector allowed in ${form.name}` : `${formatConnectorLabel(conn)} connector blocked in ${form.name}`"
-                      >
-                        <span class="pill-dot"></span>
-                        {{ formatConnectorLabel(conn) }}
-                      </span>
-                    </div>
-                  </div>
-                  <div v-else class="workspace-connectors-preview workspace-connectors-preview--disabled">
-                    <span class="hint hint--compact">Codex uses embedded Ciaobot tools; claude.ai connectors do not apply to Codex.</span>
-                  </div>
+
 
                 </div>
               </div>
@@ -1736,9 +1576,8 @@
                       <span class="memory-source-heading">
                         <span>{{ memory.title }}</span>
                         <span class="memory-source-badges">
+                          <span :class="assetOriginClass('builtin')">{{ assetOriginLabel('builtin') }}</span>
                           <span class="badge badge--muted command-source">{{ memoryInjectionLabel(memory) }}</span>
-                          <span class="badge badge--muted command-source">automatically generated</span>
-                          <span class="badge badge--muted command-source">not editable</span>
                         </span>
                       </span>
                       <span class="memory-source-summary-copy">{{ memory.description }}</span>
@@ -1767,11 +1606,8 @@
                     <span class="skill-chevron">{{ isContextExpanded(item) ? '&#9662;' : '&#9656;' }}</span>
                     <span class="skill-name">{{ item.title }}</span>
                     <span class="skill-badges">
+                      <span :class="assetOriginClass(contextOrigin(item))">{{ assetOriginLabel(contextOrigin(item)) }}</span>
                       <span v-if="item.scope" class="badge badge--muted command-source">{{ item.scope }}</span>
-                      <span class="badge badge--muted command-source">{{ item.source }}</span>
-                      <span class="badge command-source" :class="item.editable ? 'badge--success' : 'badge--muted'">
-                        {{ item.editable ? 'editable' : 'not editable' }}
-                      </span>
                     </span>
                   </div>
                   <p class="skill-description">{{ item.description }}</p>
@@ -1898,6 +1734,9 @@
                     <div class="skill-title-row">
                       <span class="skill-chevron">{{ isSkillExpanded(skill.name) ? '&#9662;' : '&#9656;' }}</span>
                       <span class="skill-name">{{ skill.name }}</span>
+                      <span class="skill-badges">
+                        <span :class="assetOriginClass(skillOrigin(skill))">{{ assetOriginLabel(skillOrigin(skill)) }}</span>
+                      </span>
                     </div>
                     <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
                     <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
@@ -1933,6 +1772,9 @@
                         {{ skill.name }}
                       </a>
                       <span v-else class="skill-name">{{ skill.name }}</span>
+                      <span class="skill-badges">
+                        <span :class="assetOriginClass(skillOrigin(skill))">{{ assetOriginLabel(skillOrigin(skill)) }}</span>
+                      </span>
                     </div>
                     <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
                     <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
@@ -1998,8 +1840,8 @@
                     <span class="skill-chevron">{{ isSubagentExpanded(agent) ? '&#9662;' : '&#9656;' }}</span>
                     <span class="skill-name">{{ agent.name }}</span>
                     <span class="skill-badges">
-                      <span class="badge badge--muted command-source">{{ agent.scope }}</span>
-                      <span v-if="agent.editable" class="badge badge--success command-source">custom</span>
+                      <span :class="assetOriginClass(subagentOrigin(agent))">{{ assetOriginLabel(subagentOrigin(agent)) }}</span>
+                      <span v-if="agent.scope && agent.scope !== 'custom' && agent.scope !== 'built-in'" class="badge badge--muted command-source">{{ agent.scope }}</span>
                     </span>
                   </div>
                   <p v-if="agent.description" class="skill-description">{{ agent.description }}</p>
@@ -2102,8 +1944,8 @@
                     <span class="command-name">/{{ command.name }}</span>
                     <span v-if="command.argument_hint" class="command-args">{{ command.argument_hint }}</span>
                     <span class="skill-badges">
-                      <span class="badge badge--muted command-source">{{ command.scope }}</span>
-                      <span v-if="command.editable" class="badge badge--success command-source">custom</span>
+                      <span :class="assetOriginClass(commandOrigin(command))">{{ assetOriginLabel(commandOrigin(command)) }}</span>
+                      <span v-if="command.scope && command.scope !== 'custom' && command.scope !== 'built-in'" class="badge badge--muted command-source">{{ command.scope }}</span>
                     </span>
                   </div>
                   <p v-if="command.description" class="skill-description">{{ command.description }}</p>
@@ -2158,6 +2000,282 @@
             </div>
           </template>
         </div>
+
+        <!-- MCP SERVERS CARD -->
+        <div class="card" id="mcp-servers">
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">mcp servers</p>
+              <p class="hint">
+                Model Context Protocol (MCP) servers and tools available to Ciaobot agents.
+              </p>
+            </div>
+            <div class="settings-card-header-actions">
+              <button class="btn-small" @click="createMcpViaChat">Add via chat</button>
+              <button class="btn-small" @click="toggleAddMcpServer">
+                {{ showAddMcpServer ? 'Cancel' : '+ New MCP server' }}
+              </button>
+            </div>
+          </div>
+
+          <!-- Add MCP Server Form -->
+          <div v-if="showAddMcpServer" class="settings-form-panel">
+            <div class="settings-field-grid">
+              <label class="settings-field">
+                <span class="ws-label">Server Name</span>
+                <input class="routine-input" v-model="newMcpName" :disabled="addingMcpServer" placeholder="e.g. postgres-db" />
+              </label>
+              <label class="settings-field">
+                <span class="ws-label">Transport Type</span>
+                <select class="routine-select" v-model="newMcpTransport" :disabled="addingMcpServer">
+                  <option value="http">HTTP / SSE</option>
+                  <option value="stdio">stdio (Command)</option>
+                </select>
+              </label>
+              <label v-if="newMcpTransport === 'http'" class="settings-field settings-field--wide">
+                <span class="ws-label">Server URL</span>
+                <input class="routine-input" v-model="newMcpUrl" :disabled="addingMcpServer" placeholder="https://mcp.example.com/http" />
+              </label>
+              <label v-else class="settings-field settings-field--wide">
+                <span class="ws-label">Command Line</span>
+                <input class="routine-input" v-model="newMcpCommand" :disabled="addingMcpServer" placeholder="npx -y @modelcontextprotocol/server-postgres postgresql://..." />
+              </label>
+            </div>
+            <div class="action-row settings-actions">
+              <button class="btn-primary" @click="addCustomMcpServer" :disabled="addingMcpServer || !newMcpName.trim() || (newMcpTransport === 'http' ? !newMcpUrl.trim() : !newMcpCommand.trim())">
+                {{ addingMcpServer ? 'Adding...' : 'Add MCP server' }}
+              </button>
+            </div>
+            <div v-if="addMcpServerResult" class="action-result" :class="{ '--error': addMcpServerError }">{{ addMcpServerResult }}</div>
+          </div>
+
+          <!-- List of MCP Servers (exact skill-list / skill-row UI) -->
+          <div class="skill-list">
+            <!-- 1. Built-in Ciaobot FastMCP Server -->
+            <div
+              class="skill-row"
+              :class="{ expanded: isMcpExpanded('ciaobot-fastmcp') }"
+              @click="toggleMcp('ciaobot-fastmcp')"
+            >
+              <div class="skill-main">
+                <div class="skill-title-row command-title-row">
+                  <span class="skill-chevron">{{ isMcpExpanded('ciaobot-fastmcp') ? '&#9662;' : '&#9656;' }}</span>
+                  <span class="skill-name">ciaobot (FastMCP control plane)</span>
+                  <span class="skill-badges">
+                    <span :class="assetOriginClass('builtin')">{{ assetOriginLabel('builtin') }}</span>
+                    <span class="badge" :class="fastMcpEnabled ? 'badge--success' : 'badge--muted'">
+                      {{ fastMcpEnabled ? 'enabled' : 'disabled' }}
+                    </span>
+                  </span>
+                </div>
+                <p class="skill-description">Shipped by default. Exposes 42 core Ciaobot tools (vault, chats, projects, schedules) via FastMCP server.</p>
+                <div v-if="isMcpExpanded('ciaobot-fastmcp')" class="skill-detail" @click.stop>
+                  <p class="skill-meta"><span class="skill-meta-label">Endpoint</span><code>http://127.0.0.1:8443/mcp/</code></p>
+                  <div class="setting-row setting-row--inline setting-row--toggle" style="margin-top: 8px;">
+                    <span class="routine-name">FastMCP Control Plane Active</span>
+                    <label class="settings-checkbox-hit">
+                      <input type="checkbox" class="settings-checkbox" v-model="fastMcpEnabled" @change="saveFastMcpToggle" />
+                    </label>
+                  </div>
+                  <p class="skill-meta" style="margin-top: 8px;"><span class="skill-meta-label">Embedded Tools ({{ inspectorEmbeddedTools.length }})</span></p>
+                  <div class="mcp-tag-grid mcp-tag-grid--wide">
+                    <span v-for="tool in inspectorEmbeddedTools" :key="tool" class="mcp-tag mcp-tag--embedded">{{ tool }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 2. Custom & Project .mcp.json Servers -->
+            <template v-if="mcpStatus?.project_servers && mcpStatus.project_servers.length">
+              <div
+                v-for="srv in mcpStatus.project_servers"
+                :key="srv.name"
+                class="skill-row"
+                :class="{ expanded: isMcpExpanded(srv.name) }"
+                @click="toggleMcp(srv.name)"
+              >
+                <div class="skill-main">
+                  <div class="skill-title-row command-title-row">
+                    <span class="skill-chevron">{{ isMcpExpanded(srv.name) ? '&#9662;' : '&#9656;' }}</span>
+                    <span class="skill-name">{{ srv.name }}</span>
+                    <span class="skill-badges">
+                      <span :class="assetOriginClass(mcpServerOrigin(srv))">{{ assetOriginLabel(mcpServerOrigin(srv)) }}</span>
+                      <span
+                        class="badge"
+                        :class="srv.ready === false ? 'badge--warn' : 'badge--success'"
+                      >
+                        {{ srv.ready === false ? 'needs .env' : 'ready' }}
+                      </span>
+                    </span>
+                  </div>
+                  <p v-if="srv.url" class="skill-description">URL: {{ srv.url }}</p>
+                  <p v-else-if="srv.command" class="skill-description">
+                    Command: {{ srv.command }}<template v-if="srv.args?.length"> {{ srv.args.join(' ') }}</template>
+                  </p>
+                  <div v-if="isMcpExpanded(srv.name)" class="skill-detail" @click.stop>
+                    <div class="settings-field-grid mcp-edit-grid">
+                      <label v-if="(mcpEditDraft(srv).transport || srv.transport) === 'http'" class="settings-field settings-field--wide">
+                        <span class="ws-label">URL</span>
+                        <input
+                          class="routine-input"
+                          :value="mcpEditDraft(srv).url"
+                          :disabled="mcpServerSaving === srv.name"
+                          aria-label="MCP server URL"
+                          @input="setMcpEditField(srv.name, 'url', ($event.target as HTMLInputElement).value)"
+                        />
+                      </label>
+                      <template v-else>
+                        <label class="settings-field">
+                          <span class="ws-label">Command</span>
+                          <input
+                            class="routine-input"
+                            :value="mcpEditDraft(srv).command"
+                            :disabled="mcpServerSaving === srv.name"
+                            aria-label="MCP server command"
+                            @input="setMcpEditField(srv.name, 'command', ($event.target as HTMLInputElement).value)"
+                          />
+                        </label>
+                        <label class="settings-field settings-field--wide">
+                          <span class="ws-label">Args</span>
+                          <input
+                            class="routine-input"
+                            :value="mcpEditDraft(srv).argsText"
+                            :disabled="mcpServerSaving === srv.name"
+                            placeholder="e.g. -y @notionhq/notion-mcp-server"
+                            aria-label="MCP server args"
+                            @input="setMcpEditField(srv.name, 'argsText', ($event.target as HTMLInputElement).value)"
+                          />
+                        </label>
+                      </template>
+                      <p v-if="srv.env_path || mcpStatus?.env_path" class="settings-field settings-field--wide hint hint--compact">
+                        Secrets are saved to <code>{{ srv.env_path || mcpStatus?.env_path }}</code>. Connection config stays in <code>.mcp.json</code>.
+                      </p>
+                    </div>
+
+                    <div class="mcp-env-block">
+                      <p class="skill-meta">
+                        <span class="skill-meta-label">Environment keys</span>
+                      </p>
+                      <p class="hint hint--compact">
+                        Add or update secrets used by this server. Values go into the workspace <code>.env</code>; the key name is wired into <code>.mcp.json</code> when needed.
+                      </p>
+                      <div
+                        v-for="envKey in (srv.env_keys || [])"
+                        :key="`${srv.name}:${envKey.key}`"
+                        class="credential-row mcp-env-row"
+                      >
+                        <div class="setting-row-main setting-row-main--inline">
+                          <div class="routine-info">
+                            <span class="routine-name">{{ envKey.key }}</span>
+                          </div>
+                          <span class="badge" :class="envKey.configured ? 'badge--success' : 'badge--error'">
+                            {{ envKey.configured ? 'Configured' : 'Missing' }}
+                          </span>
+                        </div>
+                        <input
+                          type="password"
+                          class="routine-input"
+                          :value="mcpEnvInputs[envKey.key] || ''"
+                          :placeholder="envKey.configured ? '•••••••••••• (leave blank to keep)' : `Enter ${envKey.key}`"
+                          :disabled="mcpEnvSaving"
+                          :aria-label="envKey.key"
+                          @input="mcpEnvInputs[envKey.key] = ($event.target as HTMLInputElement).value"
+                        />
+                      </div>
+                      <div class="settings-field-grid mcp-env-add-grid">
+                        <label class="settings-field">
+                          <span class="ws-label">New key</span>
+                          <input
+                            class="routine-input"
+                            :value="mcpNewEnvKey[srv.name] || ''"
+                            placeholder="e.g. N8N_MCP_TOKEN"
+                            :disabled="mcpEnvSaving"
+                            aria-label="New MCP env key name"
+                            @input="mcpNewEnvKey[srv.name] = ($event.target as HTMLInputElement).value"
+                          />
+                        </label>
+                        <label class="settings-field">
+                          <span class="ws-label">Value</span>
+                          <input
+                            type="password"
+                            class="routine-input"
+                            :value="mcpNewEnvValue[srv.name] || ''"
+                            placeholder="secret value"
+                            :disabled="mcpEnvSaving"
+                            aria-label="New MCP env key value"
+                            @input="mcpNewEnvValue[srv.name] = ($event.target as HTMLInputElement).value"
+                          />
+                        </label>
+                      </div>
+                      <div class="action-row settings-actions">
+                        <button
+                          class="btn-small"
+                          :disabled="mcpEnvSaving || (!hasMcpEnvEdits(srv) && !hasNewMcpEnv(srv.name))"
+                          @click="saveMcpEnvKeys(srv)"
+                        >
+                          {{ mcpEnvSaving ? 'Saving...' : 'Save .env keys' }}
+                        </button>
+                        <button
+                          class="btn-small"
+                          :disabled="mcpServerSaving === srv.name || !mcpEditDirty(srv)"
+                          @click="saveMcpServer(srv)"
+                        >
+                          {{ mcpServerSaving === srv.name ? 'Saving...' : 'Save connection' }}
+                        </button>
+                      </div>
+                      <div
+                        v-if="(mcpEnvResult && mcpEnvResultServer === srv.name) || (mcpServerResult && mcpServerResultName === srv.name)"
+                        class="action-result"
+                        :class="{ '--error': (mcpEnvResultServer === srv.name && mcpEnvError) || (mcpServerResultName === srv.name && mcpServerError) }"
+                      >{{ (mcpEnvResultServer === srv.name && mcpEnvResult) || (mcpServerResultName === srv.name && mcpServerResult) }}</div>
+                    </div>
+
+                    <div class="mcp-tools-block">
+                      <div class="setting-row setting-row--inline" style="margin-top: 8px;">
+                        <p class="skill-meta" style="margin: 0;">
+                          <span class="skill-meta-label">
+                            Tools ({{ (mcpServerTools[srv.name] || srv.tools || []).length }})
+                            <template v-if="srv.tools_source && srv.tools_source !== 'none'">
+                              · {{ srv.tools_source }}
+                            </template>
+                          </span>
+                        </p>
+                        <button
+                          class="btn-small"
+                          :disabled="mcpToolsLoading[srv.name]"
+                          @click="refreshMcpServerTools(srv)"
+                        >
+                          {{ mcpToolsLoading[srv.name] ? 'Loading...' : (srv.transport === 'http' ? 'Probe tools' : 'Refresh') }}
+                        </button>
+                      </div>
+                      <p
+                        v-if="mcpToolsError[srv.name] || (!(mcpServerTools[srv.name] || srv.tools || []).length && srv.tools_note)"
+                        class="hint hint--compact"
+                        :class="{ 'hint--warn': !!mcpToolsError[srv.name] }"
+                      >
+                        {{ mcpToolsError[srv.name] || srv.tools_note }}
+                      </p>
+                      <div
+                        v-if="(mcpServerTools[srv.name] || srv.tools || []).length"
+                        class="mcp-tag-grid mcp-tag-grid--wide"
+                      >
+                        <span
+                          v-for="tool in (mcpServerTools[srv.name] || srv.tools || [])"
+                          :key="tool"
+                          class="mcp-tag mcp-tag--embedded"
+                        >{{ tool }}</span>
+                      </div>
+                    </div>
+
+                    <div class="asset-actions">
+                      <button class="btn-small btn-danger" @click.stop="deleteCustomMcpServer(srv.name)">Delete</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
       </template>
 
 
@@ -2169,7 +2287,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import { formatTime, formatDuration } from '../lib/time'
 import type {
@@ -2186,6 +2304,7 @@ import type {
   McpStatus,
   McpUsage,
   McpToolUsage,
+  McpProjectServer,
   PromptAsset,
   ProviderConfigSettings,
   RoutineSettings,
@@ -2209,16 +2328,326 @@ import { providerModelBadges, sectionsFromModelOptions, sectionsFromModelsRespon
 const emit = defineEmits<{ 'open-sidebar': [] }>()
 
 const route = useRoute()
+const router = useRouter()
 const fileViewer = useFileViewerStore()
 const projectStore = useProjectStore()
 const taskStore = useTaskStore()
-const currentTab = computed(() => (route.params.tab as string) || 'home')
+const currentTab = computed(() => {
+  const tab = (route.params.tab as string) || 'home'
+  if (tab === 'mcp') return 'skills'
+  return tab
+})
 
 const expandedSkills = ref<Record<string, boolean>>({})
 const expandedCommands = ref<Record<string, boolean>>({})
 const expandedSubagents = ref<Record<string, boolean>>({})
 const expandedContext = ref<Record<string, boolean>>({})
 const workspaceMemoryExpanded = ref(false)
+
+// MCP Server management state
+const showAddMcpServer = ref(false)
+const addingMcpServer = ref(false)
+const addMcpServerResult = ref('')
+const addMcpServerError = ref(false)
+const newMcpName = ref('')
+const newMcpTransport = ref<'http' | 'stdio'>('http')
+const newMcpUrl = ref('')
+const newMcpCommand = ref('')
+const fastMcpEnabled = ref(true)
+const expandedMcp = ref<Record<string, boolean>>({})
+const mcpEnvInputs = ref<Record<string, string>>({})
+const mcpEnvSaving = ref(false)
+const mcpEnvResult = ref('')
+const mcpEnvError = ref(false)
+const mcpEnvResultServer = ref('')
+const mcpNewEnvKey = ref<Record<string, string>>({})
+const mcpNewEnvValue = ref<Record<string, string>>({})
+const mcpEditDrafts = ref<Record<string, { transport: string; url: string; command: string; argsText: string }>>({})
+const mcpServerSaving = ref('')
+const mcpServerResult = ref('')
+const mcpServerError = ref(false)
+const mcpServerResultName = ref('')
+const mcpServerTools = ref<Record<string, string[]>>({})
+const mcpToolsLoading = ref<Record<string, boolean>>({})
+const mcpToolsError = ref<Record<string, string>>({})
+
+function toggleAddMcpServer() {
+  showAddMcpServer.value = !showAddMcpServer.value
+  addMcpServerResult.value = ''
+}
+
+function isMcpExpanded(name: string) {
+  return !!expandedMcp.value[name]
+}
+
+function ensureMcpEditDraft(srv: McpProjectServer) {
+  if (!mcpEditDrafts.value[srv.name]) {
+    mcpEditDrafts.value[srv.name] = {
+      transport: srv.transport || (srv.url ? 'http' : 'stdio'),
+      url: srv.url || '',
+      command: srv.command || '',
+      argsText: (srv.args || []).join(' '),
+    }
+  }
+}
+
+function mcpEditDraft(srv: McpProjectServer) {
+  ensureMcpEditDraft(srv)
+  return mcpEditDrafts.value[srv.name]
+}
+
+function setMcpEditField(name: string, field: 'url' | 'command' | 'argsText', value: string) {
+  const draft = mcpEditDrafts.value[name]
+  if (!draft) return
+  draft[field] = value
+}
+
+function mcpEditDirty(srv: McpProjectServer) {
+  const draft = mcpEditDraft(srv)
+  const args = (srv.args || []).join(' ')
+  if ((draft.transport || srv.transport) === 'http') {
+    return draft.url.trim() !== (srv.url || '').trim()
+  }
+  return draft.command.trim() !== (srv.command || '').trim() || draft.argsText.trim() !== args.trim()
+}
+
+function toggleMcp(name: string) {
+  const next = !expandedMcp.value[name]
+  expandedMcp.value[name] = next
+  if (next) {
+    const srv = mcpStatus.value?.project_servers?.find((s) => s.name === name)
+    if (srv) {
+      ensureMcpEditDraft(srv)
+      if (!(mcpServerTools.value[name]?.length) && !(srv.tools?.length)) {
+        void refreshMcpServerTools(srv)
+      }
+    }
+  }
+}
+
+function hasMcpEnvEdits(srv: McpProjectServer) {
+  return (srv.env_keys || []).some((entry) => (mcpEnvInputs.value[entry.key] || '').length > 0)
+}
+
+function hasNewMcpEnv(name: string) {
+  return !!(mcpNewEnvKey.value[name] || '').trim() && !!(mcpNewEnvValue.value[name] || '').trim()
+}
+
+function splitMcpArgs(text: string): string[] {
+  return text.trim().split(/\s+/).filter(Boolean)
+}
+
+async function saveMcpEnvKeys(srv: McpProjectServer) {
+  const keys: Record<string, string> = {}
+  for (const entry of srv.env_keys || []) {
+    const value = mcpEnvInputs.value[entry.key]
+    if (value != null && value.length > 0) {
+      keys[entry.key] = value
+    }
+  }
+  const newKey = (mcpNewEnvKey.value[srv.name] || '').trim()
+  const newValue = (mcpNewEnvValue.value[srv.name] || '').trim()
+  if (newKey && newValue) {
+    keys[newKey] = newValue
+  }
+  if (!Object.keys(keys).length) return
+  mcpEnvSaving.value = true
+  mcpEnvResult.value = ''
+  mcpEnvError.value = false
+  mcpEnvResultServer.value = srv.name
+  try {
+    const res = await api.post<McpStatus>('/api/mcp/env-keys', { keys, server: srv.name })
+    mcpStatus.value = res
+    for (const key of Object.keys(keys)) {
+      mcpEnvInputs.value[key] = ''
+    }
+    mcpNewEnvKey.value[srv.name] = ''
+    mcpNewEnvValue.value[srv.name] = ''
+    const updated = res.project_servers?.find((s) => s.name === srv.name)
+    if (updated) ensureMcpEditDraft(updated)
+    // Force refresh draft from server after save in case transport fields changed.
+    if (updated) {
+      mcpEditDrafts.value[srv.name] = {
+        transport: updated.transport || (updated.url ? 'http' : 'stdio'),
+        url: updated.url || '',
+        command: updated.command || '',
+        argsText: (updated.args || []).join(' '),
+      }
+    }
+    mcpEnvResult.value = 'Saved to workspace .env. New chats will pick up the keys.'
+    notifySaved(`Saved MCP env keys for ${srv.name}.`)
+    setTimeout(() => {
+      if (mcpEnvResultServer.value === srv.name) mcpEnvResult.value = ''
+    }, 3000)
+  } catch (e: any) {
+    mcpEnvError.value = true
+    mcpEnvResult.value = e?.message || 'Failed to save MCP env keys.'
+  } finally {
+    mcpEnvSaving.value = false
+  }
+}
+
+async function saveMcpServer(srv: McpProjectServer) {
+  const draft = mcpEditDraft(srv)
+  mcpServerSaving.value = srv.name
+  mcpServerResult.value = ''
+  mcpServerError.value = false
+  mcpServerResultName.value = srv.name
+  try {
+    const body: Record<string, unknown> = {}
+    if ((draft.transport || srv.transport) === 'http') {
+      body.url = draft.url.trim()
+      body.command = ''
+      body.args = []
+    } else {
+      body.command = draft.command.trim()
+      body.args = splitMcpArgs(draft.argsText)
+      body.url = ''
+    }
+    const res = await api.patch<McpStatus>(`/api/mcp/servers/${encodeURIComponent(srv.name)}`, body)
+    mcpStatus.value = res
+    const updated = res.project_servers?.find((s) => s.name === srv.name)
+    if (updated) {
+      mcpEditDrafts.value[srv.name] = {
+        transport: updated.transport || (updated.url ? 'http' : 'stdio'),
+        url: updated.url || '',
+        command: updated.command || '',
+        argsText: (updated.args || []).join(' '),
+      }
+    }
+    mcpServerResult.value = 'Connection saved to .mcp.json.'
+    notifySaved(`Updated MCP server ${srv.name}.`)
+    setTimeout(() => {
+      if (mcpServerResultName.value === srv.name) mcpServerResult.value = ''
+    }, 3000)
+  } catch (e: any) {
+    mcpServerError.value = true
+    mcpServerResult.value = e?.message || 'Failed to save MCP server.'
+  } finally {
+    mcpServerSaving.value = ''
+  }
+}
+
+async function refreshMcpServerTools(srv: McpProjectServer) {
+  mcpToolsLoading.value[srv.name] = true
+  mcpToolsError.value[srv.name] = ''
+  try {
+    const res = await api.get<{
+      ok: boolean
+      tools?: string[]
+      error?: string
+      tools_note?: string
+      tools_source?: string
+    }>(`/api/mcp/servers/${encodeURIComponent(srv.name)}/tools`)
+    const tools = res.tools || []
+    mcpServerTools.value[srv.name] = tools
+    if (mcpStatus.value?.project_servers) {
+      const target = mcpStatus.value.project_servers.find((s) => s.name === srv.name)
+      if (target) {
+        target.tools = tools
+        target.tools_source = res.tools_source || (tools.length ? 'probed' : 'none')
+        if (res.tools_note) target.tools_note = res.tools_note
+      }
+    }
+    if (!res.ok && res.error) {
+      mcpToolsError.value[srv.name] = res.error
+    }
+  } catch (e: any) {
+    const message = e?.message || 'Could not load tools.'
+    mcpToolsError.value[srv.name] = /not available on the running server|Unexpected token|<!DOCTYPE|not valid JSON/i.test(message)
+      ? 'MCP tools endpoint not available on the running server yet. Use Settings → Deploy, then restart Ciaobot.'
+      : message
+  } finally {
+    mcpToolsLoading.value[srv.name] = false
+  }
+}
+
+function saveFastMcpToggle() {
+  notifySaved(fastMcpEnabled.value ? 'Ciaobot FastMCP enabled.' : 'Ciaobot FastMCP disabled.')
+}
+
+async function createMcpViaChat() {
+  const activeProj = projectStore.activeProject
+  let projectId = activeProj?.project_id
+  if (!projectId) {
+    projectId = projectStore.workspaceProjects[0]?.project_id
+  }
+  if (!projectId) {
+    projectId = projectStore.projects[0]?.project_id
+  }
+  if (!projectId) {
+    alert('Please create a project first before starting a chat.')
+    return
+  }
+
+  try {
+    const chat = await projectStore.createChat(projectId, 'New MCP Server')
+    if (chat) {
+      router.push({
+        path: `/chat/${chat.chat_id}`,
+        query: { initialPrompt: 'Help me set up and configure a new MCP server for this project.' }
+      })
+    }
+  } catch (e: any) {
+    alert(`Failed to create chat: ${e?.message || e}`)
+  }
+}
+
+async function addCustomMcpServer() {
+  if (!newMcpName.value.trim()) return
+  addingMcpServer.value = true
+  addMcpServerResult.value = ''
+  addMcpServerError.value = false
+  const name = newMcpName.value.trim()
+  try {
+    const body: Record<string, unknown> = { name }
+    if (newMcpTransport.value === 'http') {
+      body.url = newMcpUrl.value.trim()
+    } else {
+      const parts = splitMcpArgs(newMcpCommand.value)
+      body.command = parts[0] || ''
+      body.args = parts.slice(1)
+    }
+    const res = await api.post<McpStatus>('/api/mcp/servers', body)
+    mcpStatus.value = res
+    newMcpName.value = ''
+    newMcpUrl.value = ''
+    newMcpCommand.value = ''
+    showAddMcpServer.value = false
+    expandedMcp.value[name] = true
+    const created = res.project_servers?.find((s) => s.name === name)
+    if (created) {
+      mcpEditDrafts.value[name] = {
+        transport: created.transport || (created.url ? 'http' : 'stdio'),
+        url: created.url || '',
+        command: created.command || '',
+        argsText: (created.args || []).join(' '),
+      }
+    }
+    notifySaved(`Added MCP server ${name}.`)
+  } catch (e: any) {
+    addMcpServerError.value = true
+    addMcpServerResult.value = e?.message || `Failed to add MCP server`
+  } finally {
+    addingMcpServer.value = false
+  }
+}
+
+async function deleteCustomMcpServer(name: string) {
+  if (!confirm(`Are you sure you want to delete MCP server "${name}"?`)) return
+  try {
+    const res = await api.del<McpStatus>(`/api/mcp/servers/${encodeURIComponent(name)}`)
+    mcpStatus.value = res
+    delete mcpEditDrafts.value[name]
+    delete mcpServerTools.value[name]
+    delete mcpToolsError.value[name]
+    delete mcpNewEnvKey.value[name]
+    delete mcpNewEnvValue.value[name]
+    notifySaved(`Removed MCP server ${name}.`)
+  } catch (e: any) {
+    alert(e?.message || `Failed to delete MCP server ${name}`)
+  }
+}
 
 // ── Appearance settings ────────────────────────────────────────────────────
 const activeTheme = ref('system')
@@ -3250,6 +3679,52 @@ const githubSkills = computed(() => {
   return skillsInventory.value?.skills.filter(s => s.label === 'github') || []
 })
 
+/** Shared origin labels: Ciaobot-shipped vs user-authored (plus package/installed). */
+type AssetOrigin = 'builtin' | 'custom' | 'package' | 'installed' | 'global'
+
+function assetOriginLabel(origin: AssetOrigin): string {
+  if (origin === 'custom') return 'Custom'
+  if (origin === 'package') return 'Package'
+  if (origin === 'installed') return 'Installed'
+  if (origin === 'global') return 'Global'
+  return 'Built-in'
+}
+
+function assetOriginClass(origin: AssetOrigin): string {
+  if (origin === 'custom') return 'badge badge--success command-source'
+  if (origin === 'package') return 'badge badge--accent2 command-source'
+  if (origin === 'builtin') return 'badge badge--builtin command-source'
+  return 'badge badge--muted command-source'
+}
+
+function skillOrigin(skill: { label: string }): AssetOrigin {
+  return skill.label === 'custom' ? 'custom' : 'package'
+}
+
+function commandOrigin(command: { editable?: boolean; scope?: string }): AssetOrigin {
+  if (command.editable || command.scope === 'custom') return 'custom'
+  if (command.scope === 'built-in') return 'builtin'
+  if (command.scope === 'global') return 'global'
+  return 'installed'
+}
+
+function subagentOrigin(agent: { editable?: boolean; scope?: string }): AssetOrigin {
+  return commandOrigin(agent)
+}
+
+function mcpServerOrigin(_srv: { name?: string; source?: string }): AssetOrigin {
+  return 'custom'
+}
+
+function contextOrigin(item: { editable?: boolean; source?: string; scope?: string }): AssetOrigin {
+  if (item.editable) return 'custom'
+  const source = `${item.source || ''} ${item.scope || ''}`.toLowerCase()
+  if (source.includes('generated') || source.includes('ciaobot') || source.includes('session')) {
+    return 'builtin'
+  }
+  return 'builtin'
+}
+
 function contextGuideAsset(
   id: string,
   title: string,
@@ -4009,6 +4484,45 @@ const inspectorEmbeddedTools = computed(() => {
     'loops_list', 'loop_create', 'loop_update', 'loop_action', 'file_surface',
     'handoffs_list', 'handoff_start', 'handoff_send', 'handoff_close', 'adversarial_review',
   ]
+})
+
+const codexConnectionMcps = computed(() => {
+  const codexConn = providerKeys.value?.connections?.codex
+  // Platform MCP list only — exclude Ciaobot project servers from .mcp.json
+  // (n8n_mcp, notion, ciaobot), which have their own MCP status section.
+  const excluded = new Set(['n8n_mcp', 'notion', 'ciaobot', 'ciaobot-fastmcp'])
+  return (codexConn?.mcps || []).filter((name: string) => !excluded.has(name))
+})
+
+const claudeConnectionMcps = computed(() => {
+  const result: string[] = []
+  const excluded = new Set(['n8n_mcp', 'notion', 'ciaobot', 'ciaobot-fastmcp'])
+  // Platform connectors only. Project .mcp.json servers (n8n_mcp, notion, …)
+  // are managed under the MCP status section, not the Providers tab.
+  const discoveredMcps = providerKeys.value?.connections?.claude?.mcps || []
+  if (discoveredMcps.length) {
+    for (const mcpName of discoveredMcps) {
+      if (excluded.has(mcpName)) continue
+      const label = formatConnectorLabel(mcpName)
+      if (!result.includes(label)) {
+        result.push(label)
+      }
+    }
+  } else {
+    const currentWs = workspaceForms.value.find((w) => w.name === projectStore.activeWorkspace) || workspaceForms.value[0]
+    if (!currentWs || currentWs.claude_ai_mcps !== 'off') {
+      const connectors = projectStore.workspaceClaudeAiConnectors.length
+        ? projectStore.workspaceClaudeAiConnectors
+        : defaultClaudeAiConnectors
+      for (const c of connectors) {
+        const label = formatConnectorLabel(c)
+        if (!result.includes(label)) {
+          result.push(label)
+        }
+      }
+    }
+  }
+  return result
 })
 
 async function fetchWorkspacesList() {
@@ -5988,9 +6502,9 @@ async function doPackageUpdate() {
   position: absolute;
   z-index: 30;
   top: calc(100% + 6px);
-  right: 0;
-  left: auto;
-  width: min(380px, calc(100vw - 48px));
+  left: 0;
+  right: auto;
+  width: min(360px, calc(100vw - 48px));
   padding: var(--space-3);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -6850,6 +7364,20 @@ async function doPackageUpdate() {
   font-size: var(--text-sm);
 }
 
+.mcp-env-block,
+.mcp-tools-block {
+  margin-top: 10px;
+}
+
+.mcp-env-row {
+  margin-top: 8px;
+}
+
+.mcp-edit-grid,
+.mcp-env-add-grid {
+  margin-top: 8px;
+}
+
 .mcp-tag-grid {
   display: flex;
   flex-wrap: wrap;
@@ -6895,5 +7423,36 @@ async function doPackageUpdate() {
 .badge--compact {
   font-size: 10px;
   padding: 1px 6px;
+}
+
+.mcp-server-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+
+.mcp-server-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+}
+
+.mcp-server-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-2);
+}
+
+.mcp-server-name {
+  font-weight: 600;
+  font-size: var(--text-sm);
+  margin-right: var(--space-2);
+}
+
+.mcp-tag-grid--wide {
+  gap: 8px;
 }
 </style>
