@@ -689,21 +689,24 @@ class CiaoControlPlane:
         )
         return _ok(fork.to_dict(local=True))
 
-    def chat_archive(self, principal: McpPrincipal, chat_id: str) -> dict[str, Any]:
-        chat = self._chat(principal, chat_id)
+    def chat_archive(self, principal: McpPrincipal, chat_id: str = "") -> dict[str, Any]:
+        target_id = chat_id.strip()
+        if not target_id or target_id.lower() in {"this", "this chat", "current", "self"}:
+            target_id = principal.chat_id
+        chat = self._chat(principal, target_id)
         project = self._project(principal, chat.project_id)
-        if chat_id == principal.chat_id:
+        if target_id == principal.chat_id:
             def _archive() -> dict[str, Any]:
-                outcome = self.pcm.archive_chat(chat_id)
+                outcome = self.pcm.archive_chat(target_id)
                 if outcome is not None:
-                    self.pcm.run_archive_postprocess(chat_id, outcome, chat, project)
-                return {"chat_id": chat_id, "archived_to": str(outcome.path) if outcome else None}
+                    self.pcm.run_archive_postprocess(target_id, outcome, chat, project)
+                return {"chat_id": target_id, "archived_to": str(outcome.path) if outcome else None}
 
             return self._defer_until_chat_idle(principal, "chat_archive", _archive)
-        outcome = self.pcm.archive_chat(chat_id)
+        outcome = self.pcm.archive_chat(target_id)
         if outcome is not None:
-            self.pcm.run_archive_postprocess(chat_id, outcome, chat, project)
-        return _ok({"chat_id": chat_id, "archived_to": str(outcome.path) if outcome else None})
+            self.pcm.run_archive_postprocess(target_id, outcome, chat, project)
+        return _ok({"chat_id": target_id, "archived_to": str(outcome.path) if outcome else None})
 
     def chat_delete(self, principal: McpPrincipal, chat_id: str) -> dict[str, Any]:
         self._chat(principal, chat_id)

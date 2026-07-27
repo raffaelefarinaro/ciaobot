@@ -645,8 +645,13 @@ class CiaoMcpService:
             )
 
         @tool(name="chat_archive", annotations=_WRITE, structured_output=True)
-        async def chat_archive(chat_id: str) -> dict[str, Any]:
-            """Archive a chat to the vault and trigger normal post-archive processing."""
+        async def chat_archive(chat_id: str = "") -> dict[str, Any]:
+            """Archive a chat to the vault and trigger normal post-archive processing.
+
+            Args:
+                chat_id: The ID of the chat to archive. Omit or pass empty to
+                    archive the calling chat.
+            """
             return await self._invoke(
                 "chat_archive", lambda cp, p: cp.chat_archive(p, chat_id), mutating=True
             )

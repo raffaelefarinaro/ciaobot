@@ -514,3 +514,50 @@ def test_adversarial_review_rejects_empty_artifact() -> None:
     with pytest.raises(ControlPlaneError) as excinfo:
         asyncio.run(control_plane.adversarial_review(principal, "   "))
     assert excinfo.value.code == "empty_artifact"
+
+
+@pytest.mark.asyncio
+async def test_chat_archive_defaults_to_caller_chat() -> None:
+    from ciao.config import CiaoConfig
+
+    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
+    archived_calls = []
+
+    fake_pcm = SimpleNamespace(
+        archive_chat=lambda cid: archived_calls.append(cid) or SimpleNamespace(path=Path("/tmp/chat.md")),
+        run_archive_postprocess=lambda cid, outcome, chat, project: None,
+        active_chat_ids=lambda: set(),
+    )
+    control_plane = CiaoControlPlane(
+        config,
+        project_chat_manager=fake_pcm,
+        schedule_manager=SimpleNamespace(),
+        loop_manager=SimpleNamespace(),
+    )
+    control_plane._chat = lambda p, cid: SimpleNamespace(project_id="p1")
+    control_plane._project = lambda p, pid: SimpleNamespace(name="Project")
+    principal = McpPrincipal(
+        token_id="t1",
+        chat_id="chat-active-123",
+        project_id="p1",
+        workspace="personal",
+        provider="claude",
+    )
+
+    # Calling chat_archive with empty or "this chat" targets principal.chat_id
+    res1 = control_plane.chat_archive(principal, "")
+    assert res1["ok"] is True
+    assert res1["data"]["deferred"] is True
+    assert res1["data"]["chat_id"] == "chat-active-123"
+
+    res2 = control_plane.chat_archive(principal, "this chat")
+    assert res2["ok"] is True
+    assert res2["data"]["deferred"] is True
+    assert res2["data"]["chat_id"] == "chat-active-123"
+
+    # Calling with specific another chat archives that chat directly
+    res3 = control_plane.chat_archive(principal, "chat_other_999")
+    assert res3["ok"] is True
+    assert res3["data"]["chat_id"] == "chat_other_999"
+    assert "chat_other_999" in archived_calls
+

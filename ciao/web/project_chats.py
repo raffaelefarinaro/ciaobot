@@ -3481,7 +3481,7 @@ class ProjectChatManager:
         Carries the workspace, project name, context, and canonical-doc path
         so the agent knows which project it's operating in.
         """
-        parts: list[str] = []
+        parts: list[str] = [f'[Chat ID: "{chat.chat_id}"]']
         project = self._projects.get(chat.project_id)
         if project:
             if project.workspace != "personal":
