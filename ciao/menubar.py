@@ -55,6 +55,8 @@ WORKING_POLL_SECONDS = 2.0
 class ServerStatus:
     reachable: bool
     ready: bool
+    node_role: str = "active"
+    active_peer_url: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +83,12 @@ def fetch_server_status(port: int, *, timeout: float = 2.0) -> ServerStatus:
         return ServerStatus(reachable=False, ready=False)
     if not isinstance(payload, dict):
         return ServerStatus(reachable=True, ready=False)
-    return ServerStatus(reachable=True, ready=bool(payload.get("overall_ready", True)))
+    return ServerStatus(
+        reachable=True,
+        ready=bool(payload.get("overall_ready", True)),
+        node_role=str(payload.get("node_role", "active")),
+        active_peer_url=str(payload.get("active_peer_url") or ""),
+    )
 
 
 def fetch_active_chat_ids(port: int, *, timeout: float = 2.0) -> set[str]:
@@ -118,6 +125,18 @@ def status_label(status: ServerStatus) -> str:
         return "Server: not running"
     if not status.ready:
         return "Server: starting…"
+    if status.node_role == "standby" and status.active_peer_url:
+        # Show a short peer identifier: hostname or last IP octet
+        peer = status.active_peer_url
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(peer)
+            peer = parsed.hostname or peer
+        except Exception:
+            pass
+        return f"Standby — connected to {peer}"
+    if status.node_role == "standby":
+        return "Server: standby (no peer)"
     return "Server: running"
 
 

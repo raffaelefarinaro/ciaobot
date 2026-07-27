@@ -38,6 +38,9 @@ STRIP_HEADERS: set[str] = {
 }
 
 
+from starlette.websockets import WebSocket
+
+
 def is_local_path(path: str) -> bool:
     cleaned = path.rstrip("/")
     if cleaned in EXCLUDED_LOCAL_PATHS:
@@ -49,11 +52,11 @@ def is_local_path(path: str) -> bool:
     return False
 
 
-def get_proxy_target_url(request: Request) -> str | None:
+def get_proxy_target_url(request: Request | WebSocket) -> str | None:
     """Returns target active peer URL if request should be proxied in standby mode."""
-    # Only proxy /api/ requests
+    # Proxy /api/ and /ws/ requests
     path = request.url.path
-    if not path.startswith("/api/"):
+    if not (path.startswith("/api/") or path.startswith("/ws/")):
         return None
     if is_local_path(path):
         return None
@@ -183,3 +186,61 @@ class StandbyProxyMiddleware(BaseHTTPMiddleware):
         if target_peer:
             return await proxy_http_request(request, target_peer)
         return await call_next(request)
+
+
+async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
+    """Proxy a WebSocket connection to the active leader peer node."""
+    import asyncio
+    import websockets
+
+    clean_url = active_peer_url.rstrip("/")
+    if clean_url.startswith("https://"):
+        target_ws_base = "wss://" + clean_url[8:]
+    elif clean_url.startswith("http://"):
+        target_ws_base = "ws://" + clean_url[7:]
+    else:
+        target_ws_base = "ws://" + clean_url
+
+    path_and_query = websocket.url.path
+    if websocket.url.query:
+        path_and_query += f"?{websocket.url.query}"
+    target_ws_url = f"{target_ws_base}{path_and_query}"
+
+    await websocket.accept()
+
+    try:
+        async with websockets.connect(target_ws_url) as remote_ws:
+            async def forward_client_to_remote():
+                try:
+                    while True:
+                        msg = await websocket.receive_text()
+                        await remote_ws.send(msg)
+                except Exception:
+                    pass
+
+            async def forward_remote_to_client():
+                try:
+                    async for msg in remote_ws:
+                        if isinstance(msg, bytes):
+                            await websocket.send_bytes(msg)
+                        else:
+                            await websocket.send_text(msg)
+                except Exception:
+                    pass
+
+            task1 = asyncio.create_task(forward_client_to_remote())
+            task2 = asyncio.create_task(forward_remote_to_client())
+
+            done, pending = await asyncio.wait(
+                [task1, task2],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+    except Exception as exc:
+        logger.warning("Standby WebSocket proxy to active peer %s failed: %s", target_ws_url, exc)
+        try:
+            await websocket.send_json({"type": "error", "message": f"Active peer WS unreachable: {exc}"})
+            await websocket.close(code=4004)
+        except Exception:
+            pass
