@@ -453,8 +453,8 @@ class CiaoMcpService:
             return await self._invoke("projects_list", lambda cp, p: cp.projects_list(p, include_completed))
 
         @tool(name="project_get", annotations=_READ, structured_output=True)
-        async def project_get(project_id: str) -> dict[str, Any]:
-            """Get one project by ID within the active workspace."""
+        async def project_get(project_id: str = "") -> dict[str, Any]:
+            """Get one project by ID or name within the active workspace. Omit to get the active project."""
             return await self._invoke("project_get", lambda cp, p: cp.project_get(p, project_id))
 
         @tool(name="project_create", annotations=_WRITE, structured_output=True)
@@ -464,12 +464,12 @@ class CiaoMcpService:
 
         @tool(name="project_update", annotations=_WRITE, structured_output=True)
         async def project_update(
-            project_id: str,
+            project_id: str = "",
             name: str | None = None,
             context: str | None = None,
             vault_folder: str | None = None,
         ) -> dict[str, Any]:
-            """Update project metadata or its safe vault-folder binding."""
+            """Update project metadata or its safe vault-folder binding. Omit project_id for active project."""
             return await self._invoke(
                 "project_update",
                 lambda cp, p: cp.project_update(
@@ -479,7 +479,7 @@ class CiaoMcpService:
             )
 
         @tool(name="project_complete", annotations=_DESTRUCTIVE, structured_output=True)
-        async def project_complete(project_id: str) -> dict[str, Any]:
+        async def project_complete(project_id: str = "") -> dict[str, Any]:
             """Move a vault-backed project to completed and archive its active project record."""
             return await self._invoke("project_complete", lambda cp, p: cp.project_complete(p, project_id), mutating=True)
 
@@ -489,13 +489,13 @@ class CiaoMcpService:
             return await self._invoke("project_restore", lambda cp, p: cp.project_restore(p, stem), mutating=True)
 
         @tool(name="project_delete", annotations=_DESTRUCTIVE, structured_output=True)
-        async def project_delete(project_id: str) -> dict[str, Any]:
+        async def project_delete(project_id: str = "") -> dict[str, Any]:
             """Delete a non-vault-backed project and its chats."""
             return await self._invoke("project_delete", lambda cp, p: cp.project_delete(p, project_id), mutating=True)
 
         @tool(name="project_files_list", annotations=_READ, structured_output=True)
-        async def project_files_list(project_id: str) -> dict[str, Any]:
-            """List files inside a project's vault folder."""
+        async def project_files_list(project_id: str = "") -> dict[str, Any]:
+            """List files inside a project's vault folder. Omit project_id for active project."""
             return await self._invoke("project_files_list", lambda cp, p: cp.project_files_list(p, project_id))
 
         @tool(name="chats_list", annotations=_READ, structured_output=True)
@@ -504,8 +504,8 @@ class CiaoMcpService:
             return await self._invoke("chats_list", lambda cp, p: cp.chats_list(p, project_id))
 
         @tool(name="chat_get", annotations=_READ, structured_output=True)
-        async def chat_get(chat_id: str) -> dict[str, Any]:
-            """Get one chat by ID within the active workspace."""
+        async def chat_get(chat_id: str = "") -> dict[str, Any]:
+            """Get one chat by ID within the active workspace. Omit to get the calling chat."""
             return await self._invoke("chat_get", lambda cp, p: cp.chat_get(p, chat_id))
 
         @tool(name="chat_create", annotations=_WRITE, structured_output=True)
@@ -549,7 +549,7 @@ class CiaoMcpService:
 
         @tool(name="chat_update", annotations=_WRITE, structured_output=True)
         async def chat_update(
-            chat_id: str,
+            chat_id: str = "",
             title: str | None = None,
             provider: str | None = None,
             model: str | None = None,
@@ -559,7 +559,7 @@ class CiaoMcpService:
             model_bucket: str | None = None,
             control_surface: str | None = None,
         ) -> dict[str, Any]:
-            """Update chat metadata and same-backend model settings."""
+            """Update chat metadata and same-backend model settings. Omit chat_id for calling chat."""
             return await self._invoke(
                 "chat_update",
                 lambda cp, p: cp.chat_update(
@@ -589,7 +589,7 @@ class CiaoMcpService:
 
         @tool(name="chat_retry", annotations=_WRITE, structured_output=True)
         async def chat_retry(
-            chat_id: str,
+            chat_id: str = "",
             action: str = "try_now",
             prompt: str = "",
         ) -> dict[str, Any]:
@@ -605,7 +605,7 @@ class CiaoMcpService:
 
         @tool(name="chat_handover", annotations=_WRITE, structured_output=True)
         async def chat_handover(
-            chat_id: str,
+            chat_id: str = "",
             provider: str = "",
             model: str = "",
             messages: list[dict[str, Any]] | None = None,
@@ -631,15 +631,15 @@ class CiaoMcpService:
 
         @tool(name="chat_fork", annotations=_WRITE, structured_output=True)
         async def chat_fork(
-            chat_id: str,
-            messages: list[dict[str, Any]],
-            turn_index: int,
+            chat_id: str = "",
+            messages: list[dict[str, Any]] | None = None,
+            turn_index: int = 0,
         ) -> dict[str, Any]:
             """Create an independent chat from visible history through one turn."""
             return await self._invoke(
                 "chat_fork",
                 lambda cp, p: cp.chat_fork(
-                    p, chat_id, messages=messages, turn_index=turn_index
+                    p, chat_id, messages=messages or [], turn_index=turn_index
                 ),
                 mutating=True,
             )
@@ -657,7 +657,7 @@ class CiaoMcpService:
             )
 
         @tool(name="chat_delete", annotations=_DESTRUCTIVE, structured_output=True)
-        async def chat_delete(chat_id: str) -> dict[str, Any]:
+        async def chat_delete(chat_id: str = "") -> dict[str, Any]:
             """Delete a chat; deleting the current caller is deferred until the turn finishes."""
             return await self._invoke(
                 "chat_delete", lambda cp, p: cp.chat_delete(p, chat_id), mutating=True

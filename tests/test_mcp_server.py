@@ -561,3 +561,53 @@ async def test_chat_archive_defaults_to_caller_chat() -> None:
     assert res3["data"]["chat_id"] == "chat_other_999"
     assert "chat_other_999" in archived_calls
 
+
+def test_project_and_chat_resolution_defaults() -> None:
+    from ciao.config import CiaoConfig
+
+    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
+    fake_pcm = SimpleNamespace(
+        get_chat=lambda cid: SimpleNamespace(chat_id=cid, project_id="proj-active-123", to_dict=lambda **k: {"chat_id": cid}),
+        get_project=lambda pid: SimpleNamespace(project_id=pid, name="Active Project", workspace="personal", to_dict=lambda: {"project_id": pid}),
+        list_projects=lambda ws: [SimpleNamespace(project_id="proj-active-123", name="Active Project", workspace="personal")],
+        list_project_files=lambda pid: ["file1.md"],
+        is_session_local=lambda c: True,
+    )
+    control_plane = CiaoControlPlane(
+        config,
+        project_chat_manager=fake_pcm,
+        schedule_manager=SimpleNamespace(),
+        loop_manager=SimpleNamespace(),
+    )
+    principal = McpPrincipal(
+        token_id="t1",
+        chat_id="chat-active-123",
+        project_id="proj-active-123",
+        workspace="personal",
+        provider="claude",
+    )
+
+    # project_get defaults to active project when empty or 'this project'
+    p_res1 = control_plane.project_get(principal, "")
+    assert p_res1["ok"] is True
+    assert p_res1["data"]["project_id"] == "proj-active-123"
+
+    p_res2 = control_plane.project_get(principal, "this project")
+    assert p_res2["ok"] is True
+    assert p_res2["data"]["project_id"] == "proj-active-123"
+
+    # chat_get defaults to active chat when empty or 'this chat'
+    c_res1 = control_plane.chat_get(principal, "")
+    assert c_res1["ok"] is True
+    assert c_res1["data"]["chat_id"] == "chat-active-123"
+
+    c_res2 = control_plane.chat_get(principal, "self")
+    assert c_res2["ok"] is True
+    assert c_res2["data"]["chat_id"] == "chat-active-123"
+
+    # project_files_list defaults to active project
+    pf_res = control_plane.project_files_list(principal, "")
+    assert pf_res["ok"] is True
+    assert pf_res["data"] == ["file1.md"]
+
+

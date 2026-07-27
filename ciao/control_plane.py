@@ -206,9 +206,9 @@ class CiaoControlPlane:
 
     def _resolve_project(self, principal: McpPrincipal, ref: str | None) -> Any:
         """Resolve a project by exact id, case-insensitive name, or the
-        caller's current project when ``ref`` is omitted."""
+        caller's current project when ``ref`` is omitted or self-referential."""
         value = (ref or "").strip()
-        if not value:
+        if not value or value.lower() in {"this", "this project", "current", "self"}:
             if not principal.project_id:
                 raise ControlPlaneError(
                     "project_required",
@@ -217,10 +217,24 @@ class CiaoControlPlane:
             return self._project(principal, principal.project_id)
         return self._project(principal, self._resolve_project_id(principal, value))
 
-    def _chat(self, principal: McpPrincipal, chat_id: str) -> Any:
-        chat = self.pcm.get_chat(chat_id)
+    def _resolve_chat_id(self, principal: McpPrincipal, ref: str | None) -> str:
+        """Resolve a chat ID, defaulting to principal.chat_id when ref is omitted,
+        empty, or self-referential ('this', 'this chat', 'current', 'self')."""
+        value = (ref or "").strip()
+        if not value or value.lower() in {"this", "this chat", "current", "self"}:
+            if not principal.chat_id:
+                raise ControlPlaneError(
+                    "chat_required",
+                    "No chat ID given and no active chat to default to.",
+                )
+            return principal.chat_id
+        return value
+
+    def _chat(self, principal: McpPrincipal, chat_id: str | None = None) -> Any:
+        resolved_id = self._resolve_chat_id(principal, chat_id)
+        chat = self.pcm.get_chat(resolved_id)
         if chat is None:
-            raise ControlPlaneError("chat_not_found", f"Chat '{chat_id}' was not found.")
+            raise ControlPlaneError("chat_not_found", f"Chat '{resolved_id}' was not found.")
         self._project(principal, chat.project_id)
         return chat
 
@@ -424,8 +438,9 @@ class CiaoControlPlane:
             data["completed"] = self.pcm.list_completed_projects(workspace)
         return _ok(data)
 
-    def project_get(self, principal: McpPrincipal, project_id: str) -> dict[str, Any]:
-        return _ok(self._project(principal, project_id).to_dict())
+    def project_get(self, principal: McpPrincipal, project_id: str = "") -> dict[str, Any]:
+        project = self._resolve_project(principal, project_id)
+        return _ok(project.to_dict())
 
     def project_create(self, principal: McpPrincipal, name: str, context: str = "") -> dict[str, Any]:
         workspace = self._workspace(principal)
@@ -437,52 +452,54 @@ class CiaoControlPlane:
     def project_update(
         self,
         principal: McpPrincipal,
-        project_id: str,
+        project_id: str = "",
         *,
         name: str | None = None,
         context: str | None = None,
         vault_folder: str | None = None,
     ) -> dict[str, Any]:
-        self._project(principal, project_id)
+        project = self._resolve_project(principal, project_id)
         item = self.pcm.update_project(
-            project_id, name=name, context=context, vault_folder=vault_folder
+            project.project_id, name=name, context=context, vault_folder=vault_folder
         )
         if item is None:
-            raise ControlPlaneError("project_not_found", f"Project '{project_id}' was not found.")
+            raise ControlPlaneError("project_not_found", f"Project '{project.project_id}' was not found.")
         return _ok(item.to_dict())
 
-    def project_complete(self, principal: McpPrincipal, project_id: str) -> dict[str, Any]:
-        self._project(principal, project_id)
+    def project_complete(self, principal: McpPrincipal, project_id: str = "") -> dict[str, Any]:
+        project = self._resolve_project(principal, project_id)
+        pid = project.project_id
         current_chat = self.pcm.get_chat(principal.chat_id) if principal.chat_id else None
-        if current_chat is not None and current_chat.project_id == project_id:
+        if current_chat is not None and current_chat.project_id == pid:
             return self._defer_until_chat_idle(
                 principal,
                 "project_complete",
-                lambda: self.pcm.complete_project(project_id),
+                lambda: self.pcm.complete_project(pid),
             )
-        return _ok(self.pcm.complete_project(project_id))
+        return _ok(self.pcm.complete_project(pid))
 
     def project_restore(self, principal: McpPrincipal, stem: str) -> dict[str, Any]:
         workspace = self._workspace(principal)
         return _ok(self.pcm.restore_project(workspace, stem))
 
-    def project_delete(self, principal: McpPrincipal, project_id: str) -> dict[str, Any]:
-        self._project(principal, project_id)
+    def project_delete(self, principal: McpPrincipal, project_id: str = "") -> dict[str, Any]:
+        project = self._resolve_project(principal, project_id)
+        pid = project.project_id
         current_chat = self.pcm.get_chat(principal.chat_id) if principal.chat_id else None
-        if current_chat is not None and current_chat.project_id == project_id:
+        if current_chat is not None and current_chat.project_id == pid:
             return self._defer_until_chat_idle(
                 principal,
                 "project_delete",
                 lambda: {
-                    "deleted": self.pcm.delete_project(project_id),
-                    "project_id": project_id,
+                    "deleted": self.pcm.delete_project(pid),
+                    "project_id": pid,
                 },
             )
-        return _ok({"deleted": self.pcm.delete_project(project_id), "project_id": project_id})
+        return _ok({"deleted": self.pcm.delete_project(pid), "project_id": pid})
 
-    def project_files_list(self, principal: McpPrincipal, project_id: str) -> dict[str, Any]:
-        self._project(principal, project_id)
-        return _ok(self.pcm.list_project_files(project_id))
+    def project_files_list(self, principal: McpPrincipal, project_id: str = "") -> dict[str, Any]:
+        project = self._resolve_project(principal, project_id)
+        return _ok(self.pcm.list_project_files(project.project_id))
 
     def chats_list(self, principal: McpPrincipal, project_id: str = "") -> dict[str, Any]:
         if project_id:
