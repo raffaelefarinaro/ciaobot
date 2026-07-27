@@ -1708,6 +1708,7 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   async function switchChat(chatId: string) {
+    await ensureWorkspaceForChat(chatId)
     // Always sync URL, even if activeChatId already matches (we may have
     // landed here from /settings or /schedules where the chat route isn't
     // currently active).
@@ -3588,7 +3589,7 @@ export const useProjectStore = defineStore('projects', () => {
     fetchCompletedProjects, restoreProject,
     createChat, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
-    switchChat, switchWorkspace, openChatFromDeepLink,
+    switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest,
     sendMessage, stopChat, respondPermission, respondQuestion, markResolvedQuestion, transcribeVoice, speakMessage, uploadImages, uploadImageRefs, removePendingImage, clearPendingImages,
     addPendingComment, removePendingComment, clearPendingComments,

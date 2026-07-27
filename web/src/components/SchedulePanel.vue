@@ -551,7 +551,7 @@ import NewLoopForm from './NewLoopForm.vue'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
-import { loopInWorkspace, scheduleInWorkspace } from '../lib/automationWorkspace'
+import { loopInWorkspace, scheduleInWorkspace, workspaceForLoop } from '../lib/automationWorkspace'
 
 const props = defineProps<{ showNew?: boolean }>()
 const emit = defineEmits<{ (e: 'created'): void; (e: 'open-sidebar'): void; (e: 'close'): void }>()
@@ -622,6 +622,13 @@ const schedule = computed(() =>
 const loop = computed(() =>
   store.loops.find(l => l.loop_id === scheduleId.value) || null,
 )
+
+watch([schedule, loop], ([s, l]) => {
+  const targetWs = s?.workspace || (l ? workspaceForLoop(l, projectStore.chats, projectStore.projects) : undefined)
+  if (targetWs && targetWs !== projectStore.activeWorkspace) {
+    projectStore.activeWorkspace = targetWs
+  }
+}, { immediate: true })
 
 const newType = ref<'schedule' | 'loop'>('schedule')
 const loopEditing = ref(false)

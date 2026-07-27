@@ -1495,3 +1495,28 @@ describe('promoteStreamingThinkingToAnswer', () => {
     expect(msgs.some(m => m.role === 'assistant')).toBe(false)
   })
 })
+
+describe('switchChat workspace alignment', () => {
+  test('automatically switches activeWorkspace to match target chat workspace', async () => {
+    apiGet.mockImplementation((url: string) => {
+      if (url.includes('/messages')) return Promise.resolve([])
+      if (url.includes('/subagents')) return Promise.resolve([])
+      return Promise.resolve([])
+    })
+    const store = useProjectStore()
+    store.activeWorkspace = 'personal'
+    store.projects = [
+      { project_id: 'p-personal', name: 'Personal Proj', workspace: 'personal' } as any,
+      { project_id: 'p-work', name: 'Work Proj', workspace: 'work' } as any,
+    ]
+    store.chats = [
+      { chat_id: 'c-personal', project_id: 'p-personal', title: 'Personal Chat' } as any,
+      { chat_id: 'c-work', project_id: 'p-work', title: 'Work Chat' } as any,
+    ]
+
+    await store.switchChat('c-work')
+
+    expect(store.activeWorkspace).toBe('work')
+    expect(store.activeChatId).toBe('c-work')
+  })
+})

@@ -821,6 +821,14 @@ watch(() => store.workspaceProjects, (projects) => {
   }
 }, { immediate: true })
 
+watch(() => store.activeChatId, (chatId) => {
+  if (!chatId) return
+  const project = store.projectFor(chatId)
+  if (project) {
+    expandedProjects.add(project.project_id)
+  }
+}, { immediate: true })
+
 function selectChat(chatId: string) {
   store.switchChat(chatId)
   emit('chat-selected')
