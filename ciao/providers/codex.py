@@ -36,6 +36,7 @@ from ciao.providers.base import (
     ProviderCapabilities,
     build_prompt,
 )
+from ciao.providers.connect_errors import annotate_connection_host
 from ciao.providers.stdio_rpc import RpcError, RpcProcessError, StdioJsonRpcPeer
 from ciao.tool_path import resolve_tool
 
@@ -300,6 +301,35 @@ def _codex_path_env(binary: str) -> dict[str, str]:
     if node_bin.is_dir():
         paths.append(str(node_bin))
     return {"PATH": os.pathsep.join(paths)}
+
+
+def _resolve_codex_host(env: Mapping[str, str] | None = None) -> str:
+    """Endpoint label to annotate a Codex connection error with.
+
+    Codex doesn't expose its upstream API base through Ciaobot config: the
+    app-server resolves the OpenAI/ChatGPT endpoint itself, honouring an
+    ``OPENAI_BASE_URL`` override when present. Prefer that hostname when set;
+    otherwise fall back to the resolved Codex binary path (the local endpoint
+    a "codex not in PATH" / app-server start failure is about), then to a
+    fixed label. The result is paired with an error category by
+    :func:`annotate_connection_host` so a failed schedule names the failing
+    endpoint and the failure class. See issue #178.
+    """
+    source = env if env is not None else os.environ
+    base = str(source.get("OPENAI_BASE_URL") or source.get("OPENAI_API_BASE") or "").strip()
+    if base:
+        try:
+            from urllib.parse import urlsplit
+
+            host = urlsplit(base).hostname
+            if host:
+                return host
+        except ValueError:
+            pass
+    binary = resolve_codex_binary(source)
+    if binary:
+        return binary
+    return "codex app-server"
 
 
 def codex_login_status(
@@ -1143,6 +1173,15 @@ class CodexProvider(BaseSDKProvider):
         result_text = error_text if is_error else "\n\n".join(
             part for part in final_parts if part
         )
+        if is_error and result_text:
+            # Annotate connection/auth errors with the failing Codex endpoint
+            # and a category, so a failed schedule identifies the host (the
+            # OpenAI/ChatGPT API when OPENAI_BASE_URL is set, otherwise the
+            # Codex binary path) and whether it was DNS, refused, timeout, or
+            # auth. No-op for ordinary errors and already-annotated strings.
+            result_text = annotate_connection_host(
+                result_text, _resolve_codex_host(request.extra_env or {})
+            )
         if terminal_status == "interrupted" and not result_text:
             result_text = "Interrupted by user"
         yield ResultEvent(
