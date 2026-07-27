@@ -562,9 +562,24 @@ input:focus, textarea:focus, select:focus {
   box-shadow: 0 0 0 2px rgba(255, 77, 109, 0.2);
 }
 
-@media (min-width: 769px) {
-  /* Tighten typography on desktop where iOS zoom isn't a concern */
+/* Tighten typography only when the user has a fine pointer (mouse / trackpad).
+   Gating on viewport width alone used to override inputs back to <16px on
+   wide touch devices (iPad portrait/landscape, iPhone landscape, Android
+   tablets), which makes iOS Safari auto-zoom the page on focus. Pointer
+   type is the actual signal: iOS only auto-zooms on touch input, so a
+   coarse pointer always wants the 16px default regardless of width. */
+@media (pointer: fine) {
   input, textarea, select { font-size: calc(14px * var(--font-scale)); padding: 8px 12px; }
+}
+
+/* Touch devices: keep inputs at >= 16px so iOS Safari does not auto-zoom the
+   viewport on focus. Some components (markdown editor, comment compose)
+   override the global input rule with smaller text tokens; this carve-out
+   pins every input/textarea/select to 16px when the pointer is coarse, no
+   matter what scoped styles say. Pairs with the (pointer: fine) tightening
+   above: trackpad/desktop stays tight, touch stays zoom-stable. */
+@media (pointer: coarse) {
+  input, textarea, select { font-size: 16px !important; }
 }
 
 /* ── Shared page layout (schedules, settings, login) ─────────── */

@@ -53,6 +53,16 @@ WebKit gesture-event blockers. Individual controls may use
 disabling page zoom. The in-app font scale under Settings > Appearance is an
 additional convenience, not a replacement for browser zoom.
 
+iOS Safari auto-zooms the viewport when an input/textarea/select gets focus
+if its computed `font-size` is below 16px. The global input rule in
+`App.vue` already pins mobile inputs at `16px * var(--font-scale)`, and a
+`@media (pointer: coarse)` carve-out re-pins them to a flat `16px` so
+component-level overrides (markdown editor, comment compose) cannot drop
+back below the zoom threshold. The desktop tightening override is gated on
+`(pointer: fine)` rather than `(min-width: 769px)` so wide touch devices
+(iPad portrait/landscape) never get the smaller typography. Do not weaken
+either rule.
+
 ### WebSocket suspension
 
 iOS Safari suspends JS and WebSockets when the PWA is backgrounded. On resume, `readyState` may still report `OPEN` while no events flow. Listen for `visibilitychange` (visible) and `pageshow` (bfcache restore) on any view that depends on a WebSocket, and force-disconnect + reconnect.

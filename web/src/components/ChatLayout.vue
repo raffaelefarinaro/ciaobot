@@ -41,7 +41,10 @@
           <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
             <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
           </div>
-          <div v-else class="empty-shell">
+          <!-- On mobile, the sidebar already lists every active chat. Showing the
+               homepage behind it after closing a chat would just duplicate the
+               same list. Hide the empty-state whenever the mobile sidebar is open. -->
+          <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
             <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
             <div class="empty-state">
               <div class="empty-mark">
@@ -117,7 +120,10 @@
         <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
           <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
         </div>
-        <div v-else class="empty-shell">
+        <!-- On mobile, the sidebar already lists every active chat. Showing the
+             homepage behind it after closing a chat would just duplicate the
+             same list. Hide the empty-state whenever the mobile sidebar is open. -->
+        <div v-else-if="!(isMobile && !sidebarCollapsed)" class="empty-shell">
           <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
           <div class="empty-state">
             <div class="empty-mark">
