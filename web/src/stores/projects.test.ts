@@ -442,6 +442,36 @@ describe('optimistic user bubble reconciliation', () => {
     const msgs = store.messages[chatId]
     expect(msgs.length).toBe(4) // Keeps local to avoid data loss
   })
+
+  test('loadMessages skips mid-turn assistant progress while the server is streaming', async () => {
+    // The server session file is updated in real time during a streaming turn.
+    // If /messages returns that partial progress while the live trace owns the
+    // current turn, the PWA would render two Activity rows: one historical and
+    // one live. Truncate the server response to the last known user message.
+    const store = useProjectStore()
+    const chatId = 'chat-streaming'
+    store.messages[chatId] = [
+      { role: 'user', content: 'prior question', timestamp: '', turn_index: 0 },
+      { role: 'assistant', content: 'prior reply', timestamp: '' },
+      { role: 'user', content: 'check first', timestamp: '', turn_index: 1 },
+    ]
+    store.projectStreaming[chatId] = true
+    apiGet.mockResolvedValue([
+      { role: 'user', content: 'prior question', sent_at: '', turn_index: 0 },
+      { role: 'assistant', content: 'prior reply', sent_at: '' },
+      { role: 'user', content: 'check first', sent_at: '', turn_index: 1 },
+      // Mid-turn progress that must not land in the historical timeline yet.
+      { role: 'system', content: 'Read file.md', tool_name: '_activity', sent_at: '' },
+      { role: 'system', content: 'thinking...', tool_name: '_thinking', sent_at: '' },
+    ])
+
+    await store.loadMessages(chatId)
+
+    const msgs = store.messages[chatId]
+    expect(msgs.length).toBe(3)
+    expect(msgs.some(m => m.tool_name === '_activity')).toBe(false)
+    expect(msgs.some(m => m.tool_name === '_thinking')).toBe(false)
+  })
 })
 
 describe('Codex structured questions', () => {

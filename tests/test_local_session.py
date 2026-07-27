@@ -362,3 +362,57 @@ async def test_manager_sync_skips_non_git_workspace(tmp_path: Path) -> None:
     resync = await mgr.resync()
     assert resync["ok"] is False
     assert "not a git repository" in resync["detail"]
+
+
+# ── push_branch ──────────────────────────────────────────────────────────────
+
+
+async def test_push_branch_recovers_from_non_fast_forward_via_automerge(tmp_path: Path) -> None:
+    from ciao.local_session import push_branch
+
+    local, origin = _make_world(tmp_path, branch="main")
+    # Advance origin remotely
+    _advance_origin(tmp_path, origin, "remote-commit", branch="main")
+    # Create local commit without pushing (causes non-fast-forward divergence)
+    _write(local / "local-commit.md", "local work\n")
+    _git(local, "add", "-A")
+    _git(local, "commit", "-q", "-m", "local commit")
+
+    # push_branch should detect non-fast-forward rejection, fetch + auto-merge origin/main, and push
+    ok, detail = await push_branch(local, branch="main")
+    assert ok is True
+    assert (local / "remote-commit.md").exists()
+
+    # Remote origin should now contain both local and remote commits
+    check = tmp_path / "check"
+    _git(tmp_path, "clone", "-q", str(origin), str(check))
+    assert (check / "remote-commit.md").exists()
+    assert (check / "local-commit.md").exists()
+
+
+async def test_push_branch_non_fast_forward_conflict_aborts_cleanly(tmp_path: Path) -> None:
+    from ciao.local_session import push_branch
+
+    local, origin = _make_world(tmp_path, branch="main")
+    # Advance origin remotely on README.md
+    other = tmp_path / "other"
+    _git(tmp_path, "clone", "-q", str(origin), str(other))
+    _identify(other)
+    _write(other / "README.md", "remote version\n")
+    _git(other, "add", "-A")
+    _git(other, "commit", "-q", "-m", "remote readme")
+    _git(other, "push", "-q")
+
+    # Conflicting edit on local
+    _write(local / "README.md", "local version\n")
+    _git(local, "add", "-A")
+    _git(local, "commit", "-q", "-m", "local readme")
+
+    # push_branch should attempt auto-merge, detect conflict, abort cleanly, and return ok=False
+    ok, detail = await push_branch(local, branch="main")
+    assert ok is False
+    assert "conflict" in detail.lower()
+    # Confirm merge was aborted: no conflict markers in worktree, status clean
+    assert "<<<<<<<" not in (local / "README.md").read_text()
+    assert "MERGE_HEAD" not in _git(local, "status")
+

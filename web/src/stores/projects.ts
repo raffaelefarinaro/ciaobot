@@ -1509,7 +1509,7 @@ export const useProjectStore = defineStore('projects', () => {
         return
       }
 
-      const normalizedServer = normalizeMessages(serverMsgs.map(m => ({
+      let normalizedServer = normalizeMessages(serverMsgs.map(m => ({
         role: m.role as 'user' | 'assistant' | 'system',
         content: m.content,
         // sent_at is the persisted send-time (user) or completion-time
@@ -1533,6 +1533,35 @@ export const useProjectStore = defineStore('projects', () => {
         tool: m.tool,
         phase: m.phase,
       })))
+
+      // While the server declares this chat is actively streaming, don't let
+      // /messages pull partial assistant progress into the historical timeline:
+      // the live trace already owns the current turn. Loading mid-turn activity
+      // creates a duplicate Activity row below the live one.
+      if (projectStreaming.value[chatId]) {
+        const localMsgs = messages.value[chatId] || []
+        let lastLocalUserIdx = -1
+        for (let i = localMsgs.length - 1; i >= 0; i--) {
+          if (localMsgs[i].role === 'user') {
+            lastLocalUserIdx = i
+            break
+          }
+        }
+        if (lastLocalUserIdx >= 0) {
+          const lastLocalUser = localMsgs[lastLocalUserIdx]
+          let serverLastUserIdx = -1
+          for (let i = normalizedServer.length - 1; i >= 0; i--) {
+            if (normalizedServer[i].role === 'user' && normalizedServer[i].content === lastLocalUser.content) {
+              serverLastUserIdx = i
+              break
+            }
+          }
+          if (serverLastUserIdx >= 0) {
+            normalizedServer = normalizedServer.slice(0, serverLastUserIdx + 1)
+          }
+        }
+      }
+
       let normalizedLocal = normalizeMessages(messages.value[chatId] || [])
 
       // Heal orphaned optimistic user bubbles. A send queued behind a still

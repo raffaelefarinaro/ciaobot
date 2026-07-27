@@ -143,8 +143,39 @@ async def push_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
     """Push the working branch for backup (sets upstream)."""
     rc, out, err = await _git(workspace, "push", "-u", "origin", branch, timeout=10.0)
     if rc != 0:
-        return False, err or out
+        detail = err or out
+        nff_markers = (
+            "non-fast-forward",
+            "behind its remote counterpart",
+            "fetch first",
+            "updates were rejected",
+            "[rejected]",
+        )
+        if any(marker in detail.lower() for marker in nff_markers):
+            logger.info(
+                "Push rejected (non-fast-forward) for branch '%s'; attempting auto-merge with origin/%s",
+                branch,
+                branch,
+            )
+            await _git(workspace, "fetch", "origin", timeout=10.0)
+            rc_m, out_m, err_m = await _git(
+                workspace, "merge", "--no-edit", f"origin/{branch}"
+            )
+            if rc_m != 0:
+                await _git(workspace, "merge", "--abort")
+                return (
+                    False,
+                    f"Push rejected (non-fast-forward) and auto-merge hit conflict on origin/{branch}: {err_m or out_m}",
+                )
+            rc2, out2, err2 = await _git(
+                workspace, "push", "-u", "origin", branch, timeout=10.0
+            )
+            if rc2 != 0:
+                return False, err2 or out2
+            return True, out2 or "pushed after merging origin"
+        return False, detail
     return True, out or "pushed"
+
 
 
 async def commit_pending(workspace: Path, *, branch: str) -> bool:
