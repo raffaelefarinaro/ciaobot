@@ -5337,3 +5337,98 @@ async def cli_stats(request: Request) -> JSONResponse:
     except (json.JSONDecodeError, OSError):
         return JSONResponse({"error": "failed to read stats"}, status_code=500)
     return JSONResponse(data)
+
+
+async def node_status_endpoint(request: Request) -> JSONResponse:
+    """Return node status (node_id, role, active_since, last_handover, peers)."""
+    node_mgr = getattr(request.app.state, "node_state_manager", None)
+    if node_mgr is None:
+        return JSONResponse({"error": "node_state_manager not initialized"}, status_code=500)
+    local_session = getattr(request.app.state, "local_session_manager", None)
+    git_status = local_session.status() if local_session is not None else {}
+    status = node_mgr.get_status()
+    status["git"] = git_status
+    return JSONResponse(status)
+
+
+async def node_handover_endpoint(request: Request) -> JSONResponse:
+    """Hand over active leader role to this node."""
+    node_mgr = getattr(request.app.state, "node_state_manager", None)
+    if node_mgr is None:
+        return JSONResponse({"error": "node_state_manager not initialized"}, status_code=500)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    target_url = str(body.get("target_node_url", "")).strip().rstrip("/")
+    force = bool(body.get("force", False))
+    local_session = getattr(request.app.state, "local_session_manager", None)
+
+    if target_url and not force:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                res = await client.post(f"{target_url}/api/node/demote")
+                if res.status_code != 200:
+                    return JSONResponse(
+                        {"error": f"Failed to demote active peer at {target_url} (HTTP {res.status_code})", "peer_unreachable": True},
+                        status_code=400,
+                    )
+        except Exception as exc:
+            return JSONResponse(
+                {"error": f"Failed to reach active peer at {target_url}: {exc}", "peer_unreachable": True},
+                status_code=400,
+            )
+
+    resync_result = None
+    if local_session is not None:
+        resync_result = await local_session.resync()
+
+    status = node_mgr.promote()
+    if resync_result:
+        status["resync"] = resync_result
+
+    return JSONResponse({"ok": True, "status": status})
+
+
+async def node_demote_endpoint(request: Request) -> JSONResponse:
+    """Demote this node to standby role."""
+    node_mgr = getattr(request.app.state, "node_state_manager", None)
+    if node_mgr is None:
+        return JSONResponse({"error": "node_state_manager not initialized"}, status_code=500)
+
+    local_session = getattr(request.app.state, "local_session_manager", None)
+    if local_session is not None:
+        await local_session.commit_and_sync()
+
+    status = node_mgr.demote()
+    return JSONResponse({"ok": True, "demoted": True, "status": status})
+
+
+async def node_peers_endpoint(request: Request) -> JSONResponse:
+    """Manage registered peer nodes (add/remove)."""
+    node_mgr = getattr(request.app.state, "node_state_manager", None)
+    if node_mgr is None:
+        return JSONResponse({"error": "node_state_manager not initialized"}, status_code=500)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    action = str(body.get("action", "add")).strip().lower()
+    url = str(body.get("url", "")).strip()
+    node_id = str(body.get("node_id", "")).strip()
+
+    if not url:
+        return JSONResponse({"error": "url is required"}, status_code=400)
+
+    if action == "remove":
+        status = node_mgr.remove_peer(url)
+    else:
+        status = node_mgr.add_peer(url, peer_id=node_id)
+
+    return JSONResponse({"ok": True, "status": status})
+

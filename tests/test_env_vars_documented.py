@@ -25,6 +25,8 @@ INTERNAL_VARS: dict[str, str] = {
     "CIAO_RUNTIME_ROOT": "test-only override for the runtime/ directory",
     "CIAO_PARENT_CHAT_ID": "subprocess IPC marker for the parent chat ID of an agent handoff",
     "CIAO_PROVIDER_SUBCHAT_ID": "subprocess IPC marker for the provider sub-chat ID",
+    "CIAO_DEFAULT_NODE_ROLE": "internal multi-device node failover role default",
+    "CIAO_NODE_ID": "internal multi-device node identification marker",
 }
 
 

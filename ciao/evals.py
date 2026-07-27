@@ -154,11 +154,15 @@ def run_eval_scenario(
 
     # Default: call provider oneshot if runner_fn not supplied
     try:
-        from ciao.providers.oneshot import oneshot_prompt
+        import asyncio
+        from ciao.providers.oneshot import run_oneshot
 
-        output = oneshot_prompt(
-            prompt=scenario.prompt,
-            model=scenario.model or "sonnet",
+        output = asyncio.run(
+            run_oneshot(
+                prompt=scenario.prompt,
+                system_prompt="",
+                model=scenario.model or "sonnet",
+            )
         )
         duration = time.monotonic() - start_t
         return evaluate_output(scenario, output, [], duration)

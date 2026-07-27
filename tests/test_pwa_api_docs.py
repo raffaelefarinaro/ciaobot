@@ -42,6 +42,9 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/integrations/gws/exchange": "browser GWS integration oauth token exchange",
     "/api/integrations/gws/disconnect": "browser GWS integration disconnect/removal",
     "/api/automation/backfill-insights": "browser Settings button to trigger insights backfill",
+    "/api/node/demote": "node state management endpoint; demotes active node to standby",
+    "/api/node/handover": "node state management endpoint; hands over active role to peer",
+    "/api/node/peers": "node state management endpoint; registers or updates peer nodes",
 }
 
 

@@ -496,11 +496,13 @@ class ScheduleManager:
             [ScheduleEntry, str, str, BridgeMode, str], str | None
         ]
         | None = None,
+        is_node_active: Callable[[], bool] | None = None,
     ) -> None:
         self._store = store
         self._resolve_target = resolve_target
         self._dispatch_to_web = dispatch_to_web
         self._prepare_chat = prepare_chat
+        self._is_node_active = is_node_active
         self._loop_task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
@@ -652,6 +654,8 @@ class ScheduleManager:
         return result
 
     async def tick(self, now: datetime | None = None) -> None:
+        if self._is_node_active is not None and not self._is_node_active():
+            return
         current = now or _now_utc()
         for entry in self._store.list_entries():
             # Manual and disabled schedules never auto-fire.

@@ -38,6 +38,83 @@
           </div>
         </div>
 
+        <!-- Node & Handover -->
+        <div class="card">
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">node & handover</p>
+              <p class="hint">Manage active leadership and multi-device synchronization.</p>
+            </div>
+            <span class="badge" :class="nodeStatus?.role === 'active' ? 'badge--ok' : 'badge--warn'">
+              {{ nodeStatus?.role === 'active' ? 'Active Leader' : 'Standby Mode' }}
+            </span>
+          </div>
+          <div v-if="nodeStatus" class="node-handover-body">
+            <div class="node-meta-grid">
+              <div><strong>Device ID:</strong> <code>{{ nodeStatus.node_id }}</code></div>
+              <div><strong>Role:</strong> {{ nodeStatus.role === 'active' ? '🟢 Active (schedules running)' : '🟡 Standby (schedules paused)' }}</div>
+              <div v-if="nodeStatus.active_since"><strong>Active Since:</strong> {{ nodeStatus.active_since }}</div>
+              <div v-if="nodeStatus.last_handover"><strong>Last Handover:</strong> {{ nodeStatus.last_handover }}</div>
+            </div>
+            <div class="action-row action-row--spaced">
+              <button
+                v-if="nodeStatus.role === 'standby'"
+                class="btn-primary btn-small"
+                @click="() => doNodeHandover(false)"
+                :disabled="nodePending !== null"
+              >
+                {{ nodePending === 'handover' ? 'Handing over...' : 'Take Over Active Role' }}
+              </button>
+              <button
+                v-if="nodeStatus.role === 'standby'"
+                class="btn-caution btn-small"
+                @click="() => doNodeHandover(true)"
+                :disabled="nodePending !== null"
+                title="Force promotion to active role if primary server is offline"
+              >
+                Force Takeover
+              </button>
+              <button
+                v-if="nodeStatus.role === 'active'"
+                class="btn-secondary btn-small"
+                @click="() => doNodeDemote()"
+                :disabled="nodePending !== null"
+              >
+                {{ nodePending === 'demote' ? 'Demoting...' : 'Switch to Standby' }}
+              </button>
+            </div>
+
+            <div v-if="nodeActionResult" class="action-result" :class="{ 'action-result--error': nodeActionError }">
+              {{ nodeActionResult }}
+            </div>
+
+            <div class="peers-section">
+              <p class="hint"><strong>Registered Peer Nodes:</strong></p>
+              <ul v-if="nodeStatus.peers && nodeStatus.peers.length" class="peer-list">
+                <li v-for="peer in nodeStatus.peers" :key="peer.url" class="peer-item">
+                  <span>{{ peer.node_id || peer.url }} (<code>{{ peer.url }}</code>)</span>
+                  <button class="btn-small btn-secondary" @click="() => removeNodePeer(peer.url)">Remove</button>
+                </li>
+              </ul>
+              <p v-else class="hint hint--compact">No peer nodes registered yet.</p>
+
+              <div class="add-peer-row">
+                <input
+                  v-model="peerUrlInput"
+                  type="text"
+                  placeholder="http://192.168.1.50:8543"
+                  class="peer-input"
+                  @keyup.enter="addNodePeer"
+                />
+                <button class="btn-secondary btn-small" @click="addNodePeer" :disabled="!peerUrlInput.trim()">
+                  Add Peer URL
+                </button>
+              </div>
+            </div>
+          </div>
+          <div v-else class="action-row"><span class="loading">Loading node status&hellip;</span></div>
+        </div>
+
         <!-- Workspace health -->
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
@@ -3709,6 +3786,7 @@ onMounted(async () => {
   fetchLocalStatus().then(() => {
     if (localStatus.value?.dev_mode) refreshDebugIssues()
   })
+  fetchNodeStatus()
   fetchRoutines()
   fetchAutomation()
   fetchPackageStatus()
@@ -3942,6 +4020,109 @@ async function fetchLocalStatus() {
     localStatus.value = await api.get<LocalStatus>('/api/local/status')
   } catch {
     /* leave null on failure */
+  }
+}
+
+// ── Node & Handover (Multi-device Active-Standby) ───────────────────────
+interface NodePeer {
+  node_id: string
+  url: string
+  last_seen: string
+  is_active: boolean
+}
+
+interface NodeStatus {
+  node_id: string
+  role: 'active' | 'standby'
+  active_since: string | null
+  last_handover: string | null
+  peers: NodePeer[]
+  git?: any
+}
+
+const nodeStatus = ref<NodeStatus | null>(null)
+const nodePending = ref<string | null>(null)
+const nodeActionResult = ref('')
+const nodeActionError = ref(false)
+const peerUrlInput = ref('')
+
+async function fetchNodeStatus() {
+  try {
+    nodeStatus.value = await api.get<NodeStatus>('/api/node/status')
+  } catch {
+    /* leave null on failure */
+  }
+}
+
+async function doNodeHandover(force = false) {
+  if (!force && !confirm('Take over active leadership on this device? This will sync workspace changes and activate schedules here.')) return
+
+  nodePending.value = 'handover'
+  nodeActionResult.value = ''
+  nodeActionError.value = false
+
+  try {
+    const targetUrl = nodeStatus.value?.peers?.[0]?.url || ''
+    const r = await api.post<any>('/api/node/handover', { target_node_url: targetUrl, force })
+    if (r?.ok) {
+      nodeActionResult.value = force ? 'Force takeover complete. This device is now Active Leader.' : 'Handover complete. This device is now Active Leader.'
+      await fetchNodeStatus()
+      await fetchLocalStatus()
+    } else {
+      nodeActionError.value = true
+      nodeActionResult.value = r?.error || 'Handover failed'
+    }
+  } catch (e: any) {
+    nodeActionError.value = true
+    if (e?.payload?.peer_unreachable) {
+      if (confirm('Active peer is unreachable. Perform Force Takeover?')) {
+        nodePending.value = null
+        return doNodeHandover(true)
+      }
+    }
+    nodeActionResult.value = `Error: ${e.message || 'Handover failed'}`
+  }
+  nodePending.value = null
+}
+
+async function doNodeDemote() {
+  if (!confirm('Switch this device to Standby mode? Schedules and background loops will be paused on this device.')) return
+
+  nodePending.value = 'demote'
+  nodeActionResult.value = ''
+  nodeActionError.value = false
+
+  try {
+    const r = await api.post<any>('/api/node/demote', {})
+    if (r?.ok) {
+      nodeActionResult.value = 'Device switched to Standby mode.'
+      await fetchNodeStatus()
+    }
+  } catch (e: any) {
+    nodeActionError.value = true
+    nodeActionResult.value = `Error: ${e.message || 'Demote failed'}`
+  }
+  nodePending.value = null
+}
+
+async function addNodePeer() {
+  const url = peerUrlInput.value.trim()
+  if (!url) return
+  try {
+    await api.post('/api/node/peers', { action: 'add', url })
+    peerUrlInput.value = ''
+    await fetchNodeStatus()
+  } catch (e: any) {
+    alert(`Failed to add peer: ${e.message}`)
+  }
+}
+
+async function removeNodePeer(url: string) {
+  try {
+    await api.post('/api/node/peers', { action: 'remove', url })
+    await fetchNodeStatus()
+  } catch (e: any) {
+    alert(`Failed to remove peer: ${e.message}`)
   }
 }
 

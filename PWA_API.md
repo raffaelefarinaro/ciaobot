@@ -133,6 +133,10 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/local/handback` | Commit pending work, pull from origin, push the current branch |
 | POST | `/api/local/resync` | Merge `origin/<branch>` back into the checkout |
 | POST | `/api/handover/merge` | Open an interactive chat that resolves sync conflicts on a branch |
+| GET | `/api/node/status` | Read multi-device node failover status and role |
+| POST | `/api/node/demote` | Demote active node to standby |
+| POST | `/api/node/handover` | Handover active role to another node |
+| POST | `/api/node/peers` | Register or update node peer links |
 | POST | `/api/admin/snapshot` | Git add, commit, and push snapshot |
 | POST | `/api/admin/deploy` | Reinstall deps, rebuild frontend, and restart with latest code |
 | GET | `/api/admin/status` | Read admin/deploy status |

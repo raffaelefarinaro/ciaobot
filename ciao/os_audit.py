@@ -575,7 +575,9 @@ def audit_job_runs(
     for record in history:
         job = record["job"]
         current = latest_by_job.get(job)
-        if current is None or _parsed_timestamp(record) > _parsed_timestamp(current):
+        rec_ts = _parsed_timestamp(record)
+        cur_ts = _parsed_timestamp(current) if current else None
+        if current is None or cur_ts is None or (rec_ts is not None and rec_ts > cur_ts):
             latest_by_job[job] = record
 
     if latest_path.exists():
@@ -731,6 +733,7 @@ def run_os_audit(
     ]
     scan_errors: list[dict[str, str]] = []
     seen_errors: set[tuple[str, ...]] = set()
+    key: tuple[str, ...]
     for error in collected_errors:
         if error["type"] in {
             "missing_workspace_root",

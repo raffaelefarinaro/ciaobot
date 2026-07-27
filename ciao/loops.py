@@ -185,11 +185,13 @@ class LoopManager:
         dispatch: Callable[[LoopEntry], Awaitable[dict | None]] | None = None,
         chat_busy: Callable[[str], bool] | None = None,
         chat_exists: Callable[[str], bool] | None = None,
+        is_node_active: Callable[[], bool] | None = None,
     ) -> None:
         self._store = store
         self._dispatch = dispatch
         self._chat_busy = chat_busy
         self._chat_exists = chat_exists
+        self._is_node_active = is_node_active
         self._running: set[str] = set()
         self._inflight: set[str] = set()
         self._tick_task: asyncio.Task[None] | None = None
@@ -268,6 +270,8 @@ class LoopManager:
         return (now - last) >= entry.interval()
 
     async def tick(self, now: datetime | None = None) -> None:
+        if self._is_node_active is not None and not self._is_node_active():
+            return
         current = now or _now_utc()
         entries = {entry.loop_id: entry for entry in self._store.list()}
         # Drop runtime state for loops deleted behind our back (direct file

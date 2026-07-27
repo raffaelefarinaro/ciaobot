@@ -423,11 +423,15 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         provider, model, _workspace = pcm.schedule_effective_routing(entry)
         return ("claude", model, mode, provider)
 
+    from ciao.node_state import NodeStateManager
+    node_state_manager = NodeStateManager(config.state_path.parent)
+
     schedule_manager = ScheduleManager(
         store=schedule_store,
         resolve_target=_resolve_schedule_target,
         dispatch_to_web=_dispatch_to_web,
         prepare_chat=_prepare_chat,
+        is_node_active=node_state_manager.is_active,
     )
 
     # Loop manager: minute-interval re-dispatch into a fixed chat. Iterations
@@ -449,6 +453,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         dispatch=_dispatch_loop,
         chat_busy=pcm.chat_stream_active,
         chat_exists=_loop_target_dispatchable,
+        is_node_active=node_state_manager.is_active,
     )
 
     # Create and wire up web app. MCP stays available while legacy remains
@@ -461,6 +466,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         mcp_service = CiaoMcpService(config)
     app = create_app(config, app_settings=app_settings, mcp_service=mcp_service)
     app.state.startup_tracker = tracker
+    app.state.node_state_manager = node_state_manager
     app.state.schedule_manager = schedule_manager
     app.state.loop_manager = loop_manager
     app.state.state_store = state
