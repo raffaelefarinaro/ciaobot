@@ -38,52 +38,111 @@
           </div>
         </div>
 
-        <!-- Node & Handover -->
+        <!-- PWA password -->
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
-              <p class="section-title">node & handover</p>
+              <p class="section-title">PWA password</p>
               <p class="hint">
-                <template v-if="!nodeStatus">Manage active leadership and multi-device synchronization.</template>
-                <template v-else-if="nodeStatus.role === 'standby'">
-                  Standby (Client Mode) — API & live chats proxied to active leader
-                  <template v-if="nodeStatus.active_peer_url">({{ nodeStatus.active_peer_url }})</template>.
+                Protect this Ciaobot with a password. Required before other devices can connect as clients.
+              </p>
+            </div>
+            <span
+              v-if="authSettings"
+              class="badge"
+              :class="authSettings.auth_required ? 'badge--success' : 'badge--warn'"
+            >
+              {{ authSettings.auth_required ? 'on' : 'off' }}
+            </span>
+          </div>
+          <div v-if="!authSettings" class="action-row"><span class="loading">Loading&hellip;</span></div>
+          <template v-else>
+            <div class="settings-form-panel node-peer-form">
+              <label class="choice-label checkbox-row">
+                <input type="checkbox" v-model="authRequiredDraft" :disabled="authSettingsSaving" />
+                Require password for PWA access
+              </label>
+              <label v-if="authSettings.auth_required" class="settings-field">
+                <span class="ws-label">Current password</span>
+                <input
+                  v-model="authCurrentPassword"
+                  type="password"
+                  class="routine-input"
+                  autocomplete="current-password"
+                  :disabled="authSettingsSaving"
+                />
+              </label>
+              <label class="settings-field">
+                <span class="ws-label">{{ authSettings.auth_required ? 'New password (optional)' : 'Password' }}</span>
+                <input
+                  v-model="authNewPassword"
+                  type="password"
+                  class="routine-input"
+                  :placeholder="authSettings.auth_required ? 'Leave blank to keep current' : 'Choose a password'"
+                  autocomplete="new-password"
+                  :disabled="authSettingsSaving"
+                />
+              </label>
+              <div class="action-row settings-actions">
+                <button
+                  class="btn-primary btn-small"
+                  @click="saveAuthSettings"
+                  :disabled="authSettingsSaving || !canSaveAuthSettings"
+                >
+                  {{ authSettingsSaving ? 'Saving…' : 'Save password' }}
+                </button>
+              </div>
+            </div>
+            <div v-if="authSettingsResult" class="action-result" :class="{ 'action-result--error': authSettingsError }">
+              {{ authSettingsResult }}
+            </div>
+          </template>
+        </div>
+
+        <!-- Node: host / client -->
+        <div class="card">
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">host &amp; client</p>
+              <p class="hint">
+                <template v-if="!nodeStatus">Run as host on this machine, or connect as a client tunnel to another Ciaobot.</template>
+                <template v-else-if="nodeStatus.role === 'client'">
+                  Client — menu bar and PWA tunnel to
+                  <template v-if="nodeStatus.host_url || nodeStatus.active_peer_url">
+                    {{ nodeStatus.host_url || nodeStatus.active_peer_url }}
+                  </template>
+                  <template v-else>a remote host</template>.
+                  Automations pause here.
                 </template>
-                <template v-else>Active leader — schedules and background loops run on this device.</template>
+                <template v-else>
+                  Host — schedules and background work run on this device.
+                </template>
               </p>
             </div>
             <div class="settings-card-header-actions">
               <span
                 v-if="nodeStatus"
                 class="badge"
-                :class="nodeStatus.role === 'active' ? 'badge--success' : 'badge--warn'"
+                :class="nodeStatus.role === 'host' || nodeStatus.role === 'active' ? 'badge--success' : 'badge--warn'"
               >
-                {{ nodeStatus.role === 'active' ? 'active' : 'standby' }}
+                {{ nodeRoleLabel }}
               </span>
               <button
-                v-if="nodeStatus?.role === 'standby'"
+                v-if="isNodeClient"
                 class="btn-primary btn-small"
-                @click="() => doNodeHandover(false)"
+                @click="() => doBecomeHost(false)"
                 :disabled="nodePending !== null"
               >
-                {{ nodePending === 'handover' ? 'Handing over...' : 'Take over' }}
+                {{ nodePending === 'handover' ? 'Switching…' : 'Become host' }}
               </button>
               <button
-                v-if="nodeStatus?.role === 'standby'"
+                v-if="isNodeClient"
                 class="btn-caution btn-small"
-                @click="() => doNodeHandover(true)"
+                @click="() => doBecomeHost(true)"
                 :disabled="nodePending !== null"
-                title="Force promotion to active role if primary server is offline"
+                title="Become host even if the remote is offline (skip remote push)"
               >
-                Force takeover
-              </button>
-              <button
-                v-if="nodeStatus?.role === 'active'"
-                class="btn-secondary btn-small"
-                @click="() => doNodeDemote()"
-                :disabled="nodePending !== null"
-              >
-                {{ nodePending === 'demote' ? 'Demoting...' : 'Switch to standby' }}
+                Force become host
               </button>
             </div>
           </div>
@@ -95,46 +154,60 @@
                 <code class="detail-val">{{ nodeStatus.node_id }}</code>
               </div>
               <div v-if="nodeStatus.active_since" class="detail-row">
-                <span class="detail-label">active since</span>
+                <span class="detail-label">host since</span>
                 <span class="detail-val">{{ nodeStatus.active_since }}</span>
               </div>
               <div v-if="nodeStatus.last_handover" class="detail-row">
-                <span class="detail-label">last handover</span>
+                <span class="detail-label">last switch</span>
                 <span class="detail-val">{{ nodeStatus.last_handover }}</span>
+              </div>
+              <div v-if="isNodeClient && nodeStatus.host_reachable != null" class="detail-row">
+                <span class="detail-label">host</span>
+                <span class="detail-val">{{ nodeStatus.host_reachable ? 'reachable' : 'unreachable' }}</span>
               </div>
             </div>
             <div v-if="nodeActionResult" class="action-result" :class="{ 'action-result--error': nodeActionError }">
               {{ nodeActionResult }}
             </div>
 
-            <p class="subsection-title subsection-title--spaced">peer nodes</p>
-            <p v-if="!nodeStatus.peers?.length" class="hint hint--section-empty">No peer nodes registered yet.</p>
-            <div v-else class="node-peer-list">
-              <div v-for="peer in nodeStatus.peers" :key="peer.url" class="node-peer-row">
-                <div class="node-peer-main">
-                  <span class="health-title">{{ peer.node_id || peer.url }}</span>
-                  <code class="health-path">{{ peer.url }}</code>
+            <template v-if="!isNodeClient">
+              <p class="subsection-title subsection-title--spaced">connect as client</p>
+              <p class="hint hint--section-empty">
+                Tunnel this Mac to another Ciaobot (Tailscale URL works). Set a PWA password on the host first (card above), then connect with that password. On switch-back, the host pushes then this machine pulls.
+              </p>
+              <div class="settings-form-panel node-peer-form">
+                <label class="settings-field">
+                  <span class="ws-label">Host URL</span>
+                  <input
+                    v-model="hostUrlInput"
+                    type="text"
+                    class="routine-input"
+                    placeholder="http://100.x.x.x:8443"
+                    @keyup.enter="connectAsClient"
+                  />
+                </label>
+                <label class="settings-field">
+                  <span class="ws-label">Host password</span>
+                  <input
+                    v-model="hostPasswordInput"
+                    type="password"
+                    class="routine-input"
+                    placeholder="Required — set on the host first"
+                    autocomplete="off"
+                    @keyup.enter="connectAsClient"
+                  />
+                </label>
+                <div class="action-row settings-actions">
+                  <button
+                    class="btn-primary btn-small"
+                    @click="connectAsClient"
+                    :disabled="!hostUrlInput.trim() || !hostPasswordInput || nodePending !== null"
+                  >
+                    {{ nodePending === 'connect' ? 'Connecting…' : 'Connect' }}
+                  </button>
                 </div>
-                <button class="btn-secondary btn-small" @click="() => removeNodePeer(peer.url)">Remove</button>
               </div>
-            </div>
-            <div class="settings-form-panel node-peer-form">
-              <label class="settings-field">
-                <span class="ws-label">Peer base URL</span>
-                <input
-                  v-model="peerUrlInput"
-                  type="text"
-                  class="routine-input"
-                  placeholder="http://192.168.1.50:8543"
-                  @keyup.enter="addNodePeer"
-                />
-              </label>
-              <div class="action-row settings-actions">
-                <button class="btn-secondary btn-small" @click="addNodePeer" :disabled="!peerUrlInput.trim()">
-                  Add peer
-                </button>
-              </div>
-            </div>
+            </template>
           </template>
         </div>
 
@@ -3810,6 +3883,7 @@ onMounted(async () => {
     if (localStatus.value?.dev_mode) refreshDebugIssues()
   })
   fetchNodeStatus()
+  fetchAuthSettings()
   fetchRoutines()
   fetchAutomation()
   fetchPackageStatus()
@@ -4046,7 +4120,70 @@ async function fetchLocalStatus() {
   }
 }
 
-// ── Node & Handover (Multi-device Active-Standby) ───────────────────────
+// ── PWA password (Settings → home) ─────────────────────────────────────
+interface AuthSettings {
+  auth_required: boolean
+  password_configured: boolean
+}
+
+const authSettings = ref<AuthSettings | null>(null)
+const authRequiredDraft = ref(false)
+const authCurrentPassword = ref('')
+const authNewPassword = ref('')
+const authSettingsSaving = ref(false)
+const authSettingsResult = ref('')
+const authSettingsError = ref(false)
+
+const canSaveAuthSettings = computed(() => {
+  if (!authSettings.value) return false
+  const turningOn = authRequiredDraft.value && !authSettings.value.auth_required
+  const turningOff = !authRequiredDraft.value && authSettings.value.auth_required
+  const changingPassword = Boolean(authNewPassword.value.trim())
+  if (!(turningOn || turningOff || changingPassword)) return false
+  if (turningOn && !authNewPassword.value.trim()) return false
+  if (authSettings.value.auth_required && !authCurrentPassword.value) return false
+  return true
+})
+
+async function fetchAuthSettings() {
+  try {
+    const res = await api.get<AuthSettings>('/api/auth/settings')
+    authSettings.value = res
+    authRequiredDraft.value = res.auth_required
+  } catch {
+    authSettings.value = null
+  }
+}
+
+async function saveAuthSettings() {
+  if (!authSettings.value || !canSaveAuthSettings.value) return
+  authSettingsSaving.value = true
+  authSettingsResult.value = ''
+  authSettingsError.value = false
+  try {
+    const res = await api.post<AuthSettings & { ok?: boolean }>('/api/auth/settings', {
+      auth_required: authRequiredDraft.value,
+      password: authNewPassword.value,
+      current_password: authCurrentPassword.value,
+    })
+    authSettings.value = {
+      auth_required: res.auth_required,
+      password_configured: res.password_configured,
+    }
+    authRequiredDraft.value = res.auth_required
+    authCurrentPassword.value = ''
+    authNewPassword.value = ''
+    authSettingsResult.value = res.auth_required
+      ? 'Password protection is on.'
+      : 'Password protection is off.'
+  } catch (e: any) {
+    authSettingsError.value = true
+    authSettingsResult.value = e?.payload?.error || e.message || 'Could not save password settings'
+  }
+  authSettingsSaving.value = false
+}
+
+// ── Host / client (multi-device tunnel) ────────────────────────────────
 interface NodePeer {
   node_id: string
   url: string
@@ -4056,11 +4193,15 @@ interface NodePeer {
 
 interface NodeStatus {
   node_id: string
-  role: 'active' | 'standby'
+  role: 'host' | 'client' | 'active' | 'standby'
+  mode?: 'host' | 'client'
   active_since: string | null
   last_handover: string | null
+  host_url?: string | null
   active_peer_url?: string | null
+  host_reachable?: boolean | null
   active_peer_reachable?: boolean | null
+  has_host_session?: boolean
   peers: NodePeer[]
   git?: any
 }
@@ -4069,7 +4210,15 @@ const nodeStatus = ref<NodeStatus | null>(null)
 const nodePending = ref<string | null>(null)
 const nodeActionResult = ref('')
 const nodeActionError = ref(false)
-const peerUrlInput = ref('')
+const hostUrlInput = ref('')
+const hostPasswordInput = ref('')
+
+const isNodeClient = computed(() => {
+  const role = nodeStatus.value?.role
+  return role === 'client' || role === 'standby'
+})
+
+const nodeRoleLabel = computed(() => (isNodeClient.value ? 'client' : 'host'))
 
 async function fetchNodeStatus() {
   try {
@@ -4079,76 +4228,82 @@ async function fetchNodeStatus() {
   }
 }
 
-async function doNodeHandover(force = false) {
-  if (!force && !confirm('Take over active leadership on this device? This will sync workspace changes and activate schedules here.')) return
+async function connectAsClient() {
+  const hostUrl = hostUrlInput.value.trim()
+  const password = hostPasswordInput.value
+  if (!hostUrl) return
+  if (!password) {
+    nodeActionError.value = true
+    nodeActionResult.value =
+      'Enter the host password. If the host has none yet, enable PWA password protection on that machine first.'
+    return
+  }
+  if (!confirm(`Connect as client to ${hostUrl}? This machine will tunnel to that host and pause local automations.`)) return
+
+  nodePending.value = 'connect'
+  nodeActionResult.value = ''
+  nodeActionError.value = false
+  try {
+    const r = await api.post<any>('/api/node/connect', {
+      host_url: hostUrl,
+      password,
+    })
+    if (r?.ok) {
+      hostPasswordInput.value = ''
+      nodeActionResult.value = `Connected as client to ${hostUrl}.`
+      await fetchNodeStatus()
+    } else {
+      nodeActionError.value = true
+      nodeActionResult.value = r?.error || 'Connect failed'
+    }
+  } catch (e: any) {
+    nodeActionError.value = true
+    const detail = e?.payload?.error || e.message || 'Connect failed'
+    nodeActionResult.value = e?.payload?.password_required_on_host
+      ? detail
+      : `Error: ${detail}`
+  }
+  nodePending.value = null
+}
+
+async function doBecomeHost(force = false) {
+  if (
+    !force &&
+    !confirm(
+      'Become host on this device? The remote will push its changes, then this machine pulls and takes over automations.',
+    )
+  ) {
+    return
+  }
 
   nodePending.value = 'handover'
   nodeActionResult.value = ''
   nodeActionError.value = false
 
   try {
-    const targetUrl = nodeStatus.value?.peers?.[0]?.url || ''
+    const targetUrl = nodeStatus.value?.host_url || nodeStatus.value?.active_peer_url || ''
     const r = await api.post<any>('/api/node/handover', { target_node_url: targetUrl, force })
     if (r?.ok) {
-      nodeActionResult.value = force ? 'Force takeover complete. This device is now the active leader.' : 'Handover complete. This device is now the active leader.'
+      nodeActionResult.value = force
+        ? 'Force switch complete. This device is now the host.'
+        : 'Switch complete. This device is now the host.'
       await fetchNodeStatus()
       await fetchLocalStatus()
     } else {
       nodeActionError.value = true
-      nodeActionResult.value = r?.error || 'Handover failed'
+      nodeActionResult.value = r?.error || 'Become host failed'
     }
   } catch (e: any) {
     nodeActionError.value = true
     if (e?.payload?.peer_unreachable) {
-      if (confirm('Active peer is unreachable. Perform Force Takeover?')) {
+      if (confirm('Host is unreachable. Force become host anyway (skip remote push)?')) {
         nodePending.value = null
-        return doNodeHandover(true)
+        return doBecomeHost(true)
       }
     }
-    nodeActionResult.value = `Error: ${e.message || 'Handover failed'}`
+    nodeActionResult.value = `Error: ${e?.payload?.error || e.message || 'Become host failed'}`
   }
   nodePending.value = null
-}
-
-async function doNodeDemote() {
-  if (!confirm('Switch this device to Standby mode? Schedules and background loops will be paused on this device.')) return
-
-  nodePending.value = 'demote'
-  nodeActionResult.value = ''
-  nodeActionError.value = false
-
-  try {
-    const r = await api.post<any>('/api/node/demote', {})
-    if (r?.ok) {
-      nodeActionResult.value = 'Device switched to standby.'
-      await fetchNodeStatus()
-    }
-  } catch (e: any) {
-    nodeActionError.value = true
-    nodeActionResult.value = `Error: ${e.message || 'Demote failed'}`
-  }
-  nodePending.value = null
-}
-
-async function addNodePeer() {
-  const url = peerUrlInput.value.trim()
-  if (!url) return
-  try {
-    await api.post('/api/node/peers', { action: 'add', url })
-    peerUrlInput.value = ''
-    await fetchNodeStatus()
-  } catch (e: any) {
-    alert(`Failed to add peer: ${e.message}`)
-  }
-}
-
-async function removeNodePeer(url: string) {
-  try {
-    await api.post('/api/node/peers', { action: 'remove', url })
-    await fetchNodeStatus()
-  } catch (e: any) {
-    alert(`Failed to remove peer: ${e.message}`)
-  }
 }
 
 async function localHandback(confirmWarnings = false) {

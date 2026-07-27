@@ -220,6 +220,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
         self._serializer = serializer
         self._auth_required = auth_required
 
+    def _auth_required_now(self, request: Request) -> bool:
+        config = getattr(request.app.state, "config", None)
+        if config is not None and hasattr(config, "pwa_auth_required"):
+            return bool(config.pwa_auth_required)
+        return self._auth_required
+
+    def _serializer_now(self, request: Request) -> URLSafeTimedSerializer:
+        serializer = getattr(request.app.state, "serializer", None)
+        return serializer if serializer is not None else self._serializer
+
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
         setup_token = request.query_params.get("setup")
@@ -230,6 +240,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/api/auth",
             "/api/startup-status",
             "/api/active-chats",
+            "/api/menubar-chats",
             "/api/setup-status",
             "/api/setup/finish",
             "/api/setup/list-dirs",
@@ -245,7 +256,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         )
         if not protected:
             return await call_next(request)
-        if self._auth_required and not verify_session(request, self._serializer):
+        if self._auth_required_now(request) and not verify_session(
+            request, self._serializer_now(request)
+        ):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         if path.startswith("/api/") and not _state_change_origin_allowed(request):
             return JSONResponse({"error": "forbidden origin"}, status_code=403)

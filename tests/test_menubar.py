@@ -96,12 +96,87 @@ def test_fetch_active_chat_ids_ignores_malformed_payload(monkeypatch) -> None:
     assert menubar.fetch_active_chat_ids(8443) == set()
 
 
+def test_fetch_menubar_chats_parses_snapshot(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_urlopen(url: str, timeout: float):
+        calls["url"] = url
+        calls["timeout"] = timeout
+        return _FakeResponse(
+            {
+                "attention_count": 3,
+                "chats": [
+                    {
+                        "chat_id": "c1",
+                        "title": "Briefing",
+                        "workspace": "work",
+                        "last_activity_at": "2026-07-27T12:00:00Z",
+                        "unread": True,
+                        "needs_input": False,
+                    },
+                    {
+                        "chat_id": "c2",
+                        "title": "Waiting",
+                        "workspace": "personal",
+                        "last_activity_at": "2026-07-27T11:00:00Z",
+                        "unread": False,
+                        "needs_input": True,
+                    },
+                ],
+            }
+        )
+
+    monkeypatch.setattr(menubar.urllib.request, "urlopen", fake_urlopen)
+
+    snapshot = menubar.fetch_menubar_chats(9443, limit=5)
+
+    assert calls["url"] == "http://localhost:9443/api/menubar-chats?limit=5"
+    assert snapshot is not None
+    assert snapshot.attention_count == 3
+    assert snapshot.unread_ids == {"c1"}
+    assert snapshot.needs_input_ids == {"c2"}
+    assert snapshot.chats == [
+        menubar.OpenChat(
+            chat_id="c1",
+            title="Briefing",
+            last_activity_at="2026-07-27T12:00:00Z",
+            workspace="work",
+        ),
+        menubar.OpenChat(
+            chat_id="c2",
+            title="Waiting",
+            last_activity_at="2026-07-27T11:00:00Z",
+            workspace="personal",
+        ),
+    ]
+
+
+def test_fetch_menubar_chats_handles_unreachable(monkeypatch) -> None:
+    def boom(url: str, timeout: float):
+        raise urllib.error.URLError("offline")
+
+    monkeypatch.setattr(menubar.urllib.request, "urlopen", boom)
+    assert menubar.fetch_menubar_chats(8443) is None
+
+
 def test_status_labels() -> None:
-    assert menubar.status_label(menubar.ServerStatus(True, True)) == "Server: running"
+    assert menubar.status_label(menubar.ServerStatus(True, True)) == "Server: host"
     assert menubar.status_label(menubar.ServerStatus(True, False)) == "Server: starting…"
     assert (
         menubar.status_label(menubar.ServerStatus(False, False))
         == "Server: not running"
+    )
+    assert (
+        menubar.status_label(
+            menubar.ServerStatus(
+                True, True, node_role="client", active_peer_url="http://100.1.2.3:8443"
+            )
+        )
+        == "Client — connected to 100.1.2.3"
+    )
+    assert (
+        menubar.status_label(menubar.ServerStatus(True, True, node_role="standby"))
+        == "Server: client (no host)"
     )
 
 

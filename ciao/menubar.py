@@ -125,7 +125,8 @@ def status_label(status: ServerStatus) -> str:
         return "Server: not running"
     if not status.ready:
         return "Server: starting…"
-    if status.node_role == "standby" and status.active_peer_url:
+    role = (status.node_role or "").strip().lower()
+    if role in {"client", "standby"} and status.active_peer_url:
         # Show a short peer identifier: hostname or last IP octet
         peer = status.active_peer_url
         try:
@@ -134,10 +135,10 @@ def status_label(status: ServerStatus) -> str:
             peer = parsed.hostname or peer
         except Exception:
             pass
-        return f"Standby — connected to {peer}"
-    if status.node_role == "standby":
-        return "Server: standby (no peer)"
-    return "Server: running"
+        return f"Client — connected to {peer}"
+    if role in {"client", "standby"}:
+        return "Server: client (no host)"
+    return "Server: host"
 
 
 def server_recovery_label(status: ServerStatus) -> str:
@@ -632,6 +633,71 @@ class OpenChat:
     title: str
     last_activity_at: str
     workspace: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class MenubarChatsSnapshot:
+    """Live open-chat list from the server (peer-proxied when on standby)."""
+
+    chats: list[OpenChat]
+    unread_ids: set[str]
+    needs_input_ids: set[str]
+    attention_count: int
+
+
+def fetch_menubar_chats(
+    port: int, *, limit: int = 10, timeout: float = 2.0
+) -> MenubarChatsSnapshot | None:
+    """Open chats from the live server, or ``None`` when unreachable.
+
+    Prefer this over reading ``web_projects.json`` so a standby tray matches
+    the active peer's chat list (and can mark the chats that are working).
+    """
+
+    url = f"http://localhost:{port}/api/menubar-chats?limit={limit}"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    rows = payload.get("chats")
+    if not isinstance(rows, list):
+        return None
+
+    chats: list[OpenChat] = []
+    unread_ids: set[str] = set()
+    needs_input_ids: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        chat_id = str(row.get("chat_id") or "").strip()
+        if not chat_id:
+            continue
+        chats.append(
+            OpenChat(
+                chat_id=chat_id,
+                title=str(row.get("title") or "Untitled chat"),
+                last_activity_at=str(row.get("last_activity_at") or ""),
+                workspace=str(row.get("workspace") or ""),
+            )
+        )
+        if row.get("unread"):
+            unread_ids.add(chat_id)
+        if row.get("needs_input"):
+            needs_input_ids.add(chat_id)
+    attention_raw = payload.get("attention_count")
+    if isinstance(attention_raw, int) and attention_raw >= 0:
+        attention_count = attention_raw
+    else:
+        attention_count = len(unread_ids | needs_input_ids)
+    return MenubarChatsSnapshot(
+        chats=chats,
+        unread_ids=unread_ids,
+        needs_input_ids=needs_input_ids,
+        attention_count=attention_count,
+    )
 
 
 def _notification_entry_id(entry: dict[str, object]) -> str:
@@ -1353,11 +1419,18 @@ def run_menubar(workspace: Path, port: int) -> int:
         status = fetch_server_status(port)
         state["reachable"] = status.reachable
 
-        chats = read_open_chats(workspace)
-        unread_chats = read_unread_chats(workspace)
-        unread_ids = {chat.chat_id for chat in unread_chats}
-        needs_input_ids = needs_input_chat_ids(workspace)
-        attention_count = count_attention_chats(workspace)
+        live = fetch_menubar_chats(port) if status.reachable else None
+        if live is not None:
+            chats = live.chats
+            unread_ids = live.unread_ids
+            needs_input_ids = live.needs_input_ids
+            attention_count = live.attention_count
+        else:
+            chats = read_open_chats(workspace)
+            unread_chats = read_unread_chats(workspace)
+            unread_ids = {chat.chat_id for chat in unread_chats}
+            needs_input_ids = needs_input_chat_ids(workspace)
+            attention_count = count_attention_chats(workspace)
         working_ids = set(state["working_ids"])
         addresses = server_addresses(port)
         pkg = status_fetcher()

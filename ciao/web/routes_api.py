@@ -703,7 +703,13 @@ def _local_subagent_transcripts(session_id: str, workspace_root: Path) -> list[d
 
 # ── Auth ────────────────────────────────────────────────────────────────
 
-from ciao.web.routes_auth import auth_check, auth_login, auth_logout
+from ciao.web.routes_auth import (
+    auth_check,
+    auth_login,
+    auth_logout,
+    auth_settings_get,
+    auth_settings_update,
+)
 
 
 # ── Projects ─────────────────────────────────────────────────────────────
@@ -4374,8 +4380,9 @@ async def startup_status_endpoint(request: Request) -> JSONResponse:
     from ciao import __version__
 
     node_mgr = getattr(request.app.state, "node_state_manager", None)
-    role = node_mgr.get_role() if node_mgr else "active"
+    role = node_mgr.get_role() if node_mgr else "host"
     active_peer_url = node_mgr.get_active_peer_url() if node_mgr else None
+    config = getattr(request.app.state, "config", None)
 
     tracker = getattr(request.app.state, "startup_tracker", None)
     payload = tracker.to_dict() if tracker is not None else {"phases": [], "overall_ready": True}
@@ -4383,6 +4390,7 @@ async def startup_status_endpoint(request: Request) -> JSONResponse:
         "version": __version__,
         "node_role": role,
         "active_peer_url": active_peer_url,
+        "auth_required": bool(getattr(config, "pwa_auth_required", False)) if config else False,
     })
     return JSONResponse(payload)
 
@@ -4399,6 +4407,67 @@ async def active_chats_endpoint(request: Request) -> JSONResponse:
     if pcm is None:
         return JSONResponse({"active_chat_ids": []})
     return JSONResponse({"active_chat_ids": pcm.active_chat_ids()})
+
+
+def _menubar_chat_needs_input(pending_question: str) -> bool:
+    """True when AskUserQuestion JSON is waiting for an answer."""
+    raw = (pending_question or "").strip()
+    if not raw:
+        return False
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    questions = parsed.get("questions")
+    return isinstance(questions, list) and len(questions) > 0
+
+
+async def menubar_chats_endpoint(request: Request) -> JSONResponse:
+    """Open-chat summaries for the macOS menu bar.
+
+    Unauthenticated like ``/api/active-chats``: the tray has no session cookie.
+    In standby mode the proxy forwards this to the active peer so the tray
+    list matches the chats that ``/api/active-chats`` reports as working —
+    local ``web_projects.json`` can lag the leader after handover.
+    """
+    limit_raw = request.query_params.get("limit", "10")
+    try:
+        limit = max(1, min(50, int(limit_raw)))
+    except ValueError:
+        limit = 10
+
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    if pcm is None:
+        return JSONResponse({"chats": [], "attention_count": 0})
+
+    rows: list[dict[str, object]] = []
+    attention_count = 0
+    for chat in pcm.list_chats():
+        if chat.archived:
+            continue
+        project = pcm.get_project(chat.project_id)
+        if project is None:
+            continue
+        activity = chat.last_activity_at or ""
+        read = chat.last_read_at or ""
+        unread = bool(activity) and activity > read
+        needs_input = _menubar_chat_needs_input(chat.pending_question)
+        if unread or needs_input:
+            attention_count += 1
+        rows.append(
+            {
+                "chat_id": chat.chat_id,
+                "title": chat.title or "Untitled chat",
+                "workspace": project.workspace,
+                "last_activity_at": activity,
+                "unread": unread,
+                "needs_input": needs_input,
+            }
+        )
+    rows.sort(key=lambda row: str(row.get("last_activity_at") or ""), reverse=True)
+    return JSONResponse({"chats": rows[:limit], "attention_count": attention_count})
 
 
 async def open_chat_endpoint(request: Request) -> JSONResponse:
@@ -5362,7 +5431,7 @@ async def cli_stats(request: Request) -> JSONResponse:
 
 
 async def node_status_endpoint(request: Request) -> JSONResponse:
-    """Return node status (node_id, role, active_since, last_handover, peers)."""
+    """Return node status (node_id, role, host connection, peers)."""
     node_mgr = getattr(request.app.state, "node_state_manager", None)
     if node_mgr is None:
         return JSONResponse({"error": "node_state_manager not initialized"}, status_code=500)
@@ -5371,23 +5440,52 @@ async def node_status_endpoint(request: Request) -> JSONResponse:
     status = node_mgr.get_status()
     status["git"] = git_status
 
-    if status.get("role") == "standby" and status.get("active_peer_url"):
-        active_url = status["active_peer_url"]
+    if status.get("role") == "client" and status.get("host_url"):
+        host_url = status["host_url"]
         try:
             import httpx
+            headers = {}
+            session = node_mgr.get_host_session()
+            if session:
+                from ciao.web.auth import SESSION_COOKIE
+                headers["cookie"] = f"{SESSION_COOKIE}={session}"
             async with httpx.AsyncClient(timeout=2.0) as client:
-                res = await client.get(f"{active_url}/api/startup-status")
-                status["active_peer_reachable"] = (res.status_code == 200)
+                res = await client.get(f"{host_url}/api/startup-status", headers=headers)
+                status["host_reachable"] = res.status_code == 200
+                status["active_peer_reachable"] = status["host_reachable"]
         except Exception:
+            status["host_reachable"] = False
             status["active_peer_reachable"] = False
     else:
+        status["host_reachable"] = None
         status["active_peer_reachable"] = None
 
     return JSONResponse(status)
 
 
-async def node_handover_endpoint(request: Request) -> JSONResponse:
-    """Hand over active leader role to this node."""
+def _parse_set_cookie_session(set_cookie_headers: list[str]) -> str | None:
+    from ciao.web.auth import SESSION_COOKIE
+
+    for raw in set_cookie_headers:
+        # httpx may join multiple Set-Cookie; handle one header value.
+        parts = raw.split(";")
+        if not parts:
+            continue
+        name_val = parts[0].strip()
+        if "=" not in name_val:
+            continue
+        name, value = name_val.split("=", 1)
+        if name.strip() == SESSION_COOKIE and value.strip():
+            return value.strip()
+    return None
+
+
+async def node_connect_endpoint(request: Request) -> JSONResponse:
+    """Connect this node as a client tunnel to a remote host.
+
+    Body: ``{ "host_url": "...", "password": "..." }``.
+    The host must have PWA auth enabled; password is its auth token.
+    """
     node_mgr = getattr(request.app.state, "node_state_manager", None)
     if node_mgr is None:
         return JSONResponse({"error": "node_state_manager not initialized"}, status_code=500)
@@ -5397,23 +5495,147 @@ async def node_handover_endpoint(request: Request) -> JSONResponse:
     except Exception:
         body = {}
 
-    target_url = str(body.get("target_node_url", "")).strip().rstrip("/")
+    host_url = str(body.get("host_url") or body.get("url") or "").strip()
+    password = str(body.get("password") or body.get("token") or "")
+    if not host_url:
+        return JSONResponse({"error": "host_url is required"}, status_code=400)
+    if not password.strip():
+        return JSONResponse(
+            {
+                "error": "Password is required to connect as a client",
+                "auth_required": True,
+            },
+            status_code=400,
+        )
+
+    from ciao.node_state import _normalize_peer_url
+
+    host_url = _normalize_peer_url(host_url)
+    if not host_url:
+        return JSONResponse({"error": "invalid host_url"}, status_code=400)
+
+    import httpx
+
+    host_session: str | None = None
+    try:
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
+            status_res = await client.get(f"{host_url}/api/startup-status")
+            if status_res.status_code != 200:
+                return JSONResponse(
+                    {
+                        "error": f"Host unreachable (HTTP {status_res.status_code})",
+                        "peer_unreachable": True,
+                    },
+                    status_code=400,
+                )
+            host_status = (
+                status_res.json()
+                if status_res.headers.get("content-type", "").startswith("application/json")
+                else {}
+            )
+            auth_required = (
+                bool(host_status.get("auth_required"))
+                if isinstance(host_status, dict)
+                else False
+            )
+            if not auth_required:
+                return JSONResponse(
+                    {
+                        "error": (
+                            "Host has no password set. On that machine open "
+                            "Settings → PWA password, enable protection, then connect again."
+                        ),
+                        "auth_required": False,
+                        "password_required_on_host": True,
+                    },
+                    status_code=400,
+                )
+
+            login_res = await client.post(
+                f"{host_url}/api/auth/login",
+                json={"token": password},
+            )
+            if login_res.status_code != 200:
+                return JSONResponse(
+                    {"error": "Invalid password for host", "auth_required": True},
+                    status_code=401,
+                )
+            cookies = []
+            try:
+                cookies = login_res.headers.get_list("set-cookie")
+            except Exception:
+                raw = login_res.headers.get("set-cookie")
+                if raw:
+                    cookies = [raw]
+            host_session = _parse_set_cookie_session(cookies)
+            if not host_session:
+                from ciao.web.auth import SESSION_COOKIE
+
+                host_session = login_res.cookies.get(SESSION_COOKIE)
+            if not host_session:
+                return JSONResponse(
+                    {"error": "Host login succeeded but no session cookie was returned"},
+                    status_code=502,
+                )
+    except Exception as exc:
+        return JSONResponse(
+            {"error": f"Failed to reach host at {host_url}: {exc}", "peer_unreachable": True},
+            status_code=400,
+        )
+
+    status = node_mgr.connect_as_client(host_url, host_session=host_session)
+    return JSONResponse({"ok": True, "status": status})
+
+
+async def node_handover_endpoint(request: Request) -> JSONResponse:
+    """Become host: ask the connected host to push, pull locally, then promote.
+
+    Body: ``{ "force": bool }``. When not force, the remote host is demoted
+    (commit + push) first. Session matching is not required — git sync only.
+    """
+    node_mgr = getattr(request.app.state, "node_state_manager", None)
+    if node_mgr is None:
+        return JSONResponse({"error": "node_state_manager not initialized"}, status_code=500)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
     force = bool(body.get("force", False))
+    target_url = str(body.get("target_node_url") or "").strip().rstrip("/")
+    if not target_url:
+        target_url = node_mgr.get_host_url() or ""
     local_session = getattr(request.app.state, "local_session_manager", None)
 
     if target_url and not force:
         try:
             import httpx
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                res = await client.post(f"{target_url}/api/node/demote")
+            from ciao.web.auth import SESSION_COOKIE
+
+            headers = {}
+            session = node_mgr.get_host_session()
+            if session:
+                headers["cookie"] = f"{SESSION_COOKIE}={session}"
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                res = await client.post(f"{target_url}/api/node/demote", headers=headers)
                 if res.status_code != 200:
                     return JSONResponse(
-                        {"error": f"Failed to demote active peer at {target_url} (HTTP {res.status_code})", "peer_unreachable": True},
+                        {
+                            "error": (
+                                f"Failed to ask host at {target_url} to push "
+                                f"(HTTP {res.status_code})"
+                            ),
+                            "peer_unreachable": True,
+                        },
                         status_code=400,
                     )
         except Exception as exc:
             return JSONResponse(
-                {"error": f"Failed to reach active peer at {target_url}: {exc}", "peer_unreachable": True},
+                {
+                    "error": f"Failed to reach host at {target_url}: {exc}",
+                    "peer_unreachable": True,
+                },
                 status_code=400,
             )
 
@@ -5429,7 +5651,7 @@ async def node_handover_endpoint(request: Request) -> JSONResponse:
 
 
 async def node_demote_endpoint(request: Request) -> JSONResponse:
-    """Demote this node to standby role."""
+    """Push local changes and leave host mode (become client without a tunnel)."""
     node_mgr = getattr(request.app.state, "node_state_manager", None)
     if node_mgr is None:
         return JSONResponse({"error": "node_state_manager not initialized"}, status_code=500)
@@ -5443,7 +5665,7 @@ async def node_demote_endpoint(request: Request) -> JSONResponse:
 
 
 async def node_peers_endpoint(request: Request) -> JSONResponse:
-    """Manage registered peer nodes (add/remove)."""
+    """Manage registered peer nodes (add/remove). Prefer ``/api/node/connect``."""
     node_mgr = getattr(request.app.state, "node_state_manager", None)
     if node_mgr is None:
         return JSONResponse({"error": "node_state_manager not initialized"}, status_code=500)

@@ -1,8 +1,8 @@
-"""Standby node proxy middleware for Ciaobot multi-device deployment.
+"""Client-mode proxy middleware for Ciaobot host/client deployment.
 
-When a node is in 'standby' mode and an active peer URL is registered,
-this middleware intercepts API calls and proxies them to the active leader node,
-providing a seamless remote-client experience for the PWA and macOS tray.
+When a node is in client mode and a host URL is registered, this middleware
+intercepts API/WS calls and tunnels them to the remote host so the local PWA
+and macOS tray act as a thin client.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ def is_local_path(path: str) -> bool:
 
 
 def get_proxy_target_url(request: Request | WebSocket) -> str | None:
-    """Returns target active peer URL if request should be proxied in standby mode."""
+    """Return host URL when this node should tunnel the request as a client."""
     # Proxy /api/ and /ws/ requests
     path = request.url.path
     if not (path.startswith("/api/") or path.startswith("/ws/")):
@@ -65,7 +65,8 @@ def get_proxy_target_url(request: Request | WebSocket) -> str | None:
     if node_mgr is None:
         return None
 
-    if node_mgr.get_role() != "standby":
+    # Accept legacy "standby" during rolling upgrades before state migration.
+    if node_mgr.get_role() not in {"client", "standby"}:
         return None
 
     target = node_mgr.get_active_peer_url()
@@ -92,8 +93,20 @@ def get_proxy_target_url(request: Request | WebSocket) -> str | None:
     return target
 
 
+def _host_auth_headers(request: Request | WebSocket, target_url: str) -> dict[str, str]:
+    """Cookie/Authorization to present to the host (not the local client session)."""
+    node_mgr = getattr(request.app.state, "node_state_manager", None)
+    session = node_mgr.get_host_session() if node_mgr is not None else None
+    headers: dict[str, str] = {}
+    if session:
+        from ciao.web.auth import SESSION_COOKIE
+
+        headers["cookie"] = f"{SESSION_COOKIE}={session}"
+    return headers
+
+
 async def proxy_http_request(request: Request, active_peer_url: str) -> Response:
-    """Forward an HTTP request to the active peer node."""
+    """Forward an HTTP request to the host node."""
     path_and_query = request.url.path
     if request.url.query:
         path_and_query += f"?{request.url.query}"
@@ -102,6 +115,13 @@ async def proxy_http_request(request: Request, active_peer_url: str) -> Response
     headers = {
         k: v for k, v in request.headers.items() if k.lower() not in STRIP_HEADERS
     }
+    # Replace local session cookie with the stored host session when present.
+    host_auth = _host_auth_headers(request, active_peer_url)
+    if host_auth.get("cookie"):
+        headers["cookie"] = host_auth["cookie"]
+    elif "cookie" in {k.lower() for k in headers}:
+        # Drop local-only session so we don't send a useless/wrong cookie.
+        headers = {k: v for k, v in headers.items() if k.lower() != "cookie"}
 
     clean_peer_url = active_peer_url.rstrip("/")
     if "origin" in headers or request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
@@ -166,12 +186,14 @@ async def proxy_http_request(request: Request, active_peer_url: str) -> Response
                 media_type=res.headers.get("content-type"),
             )
     except httpx.HTTPError as exc:
-        logger.warning("Standby proxy to active peer %s failed: %s", target_url, exc)
+        logger.warning("Client proxy to host %s failed: %s", target_url, exc)
         return JSONResponse(
             {
-                "error": f"Active leader at {active_peer_url} is unreachable: {exc}",
+                "error": f"Host at {active_peer_url} is unreachable: {exc}",
                 "peer_unreachable": True,
+                "client": True,
                 "standby": True,
+                "host_url": active_peer_url,
                 "active_peer_url": active_peer_url,
             },
             status_code=503,
@@ -179,7 +201,7 @@ async def proxy_http_request(request: Request, active_peer_url: str) -> Response
 
 
 class StandbyProxyMiddleware(BaseHTTPMiddleware):
-    """Starlette middleware to proxy API calls to active peer when in standby mode."""
+    """Tunnel /api requests to the host when this node is in client mode."""
 
     async def dispatch(self, request: Request, call_next: Callable[..., Any]) -> Response:
         target_peer = get_proxy_target_url(request)
@@ -189,7 +211,7 @@ class StandbyProxyMiddleware(BaseHTTPMiddleware):
 
 
 async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
-    """Proxy a WebSocket connection to the active leader peer node."""
+    """Proxy a WebSocket connection to the host node."""
     import asyncio
     import websockets
 
@@ -206,10 +228,15 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
         path_and_query += f"?{websocket.url.query}"
     target_ws_url = f"{target_ws_base}{path_and_query}"
 
+    extra_headers = _host_auth_headers(websocket, active_peer_url)
+
     await websocket.accept()
 
     try:
-        async with websockets.connect(target_ws_url) as remote_ws:
+        async with websockets.connect(
+            target_ws_url,
+            additional_headers=extra_headers or None,
+        ) as remote_ws:
             async def forward_client_to_remote():
                 try:
                     while True:
@@ -238,9 +265,11 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
             for t in pending:
                 t.cancel()
     except Exception as exc:
-        logger.warning("Standby WebSocket proxy to active peer %s failed: %s", target_ws_url, exc)
+        logger.warning("Client WebSocket proxy to host %s failed: %s", target_ws_url, exc)
         try:
-            await websocket.send_json({"type": "error", "message": f"Active peer WS unreachable: {exc}"})
+            await websocket.send_json(
+                {"type": "error", "message": f"Host WS unreachable: {exc}"}
+            )
             await websocket.close(code=4004)
         except Exception:
             pass

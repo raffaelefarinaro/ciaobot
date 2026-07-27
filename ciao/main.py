@@ -723,6 +723,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                     "branch_backup", "Branch backup",
                     category="system", extra={"branch": branch},
                 ) as run:
+                    if not node_state_manager.is_active():
+                        run.skip("client mode — host owns backup push")
+                        continue
                     ok, detail = await push_branch(git_sync_root, branch=branch)
                     if ok:
                         if last_failure_detail is not None:

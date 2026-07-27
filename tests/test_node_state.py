@@ -11,6 +11,7 @@ from ciao.node_state import NodeStateManager
 from ciao.schedules import ScheduleEntry, ScheduleManager, ScheduleStore
 from ciao.loops import LoopEntry, LoopManager, LoopStore
 from ciao.web.routes_api import (
+    node_connect_endpoint,
     node_demote_endpoint,
     node_handover_endpoint,
     node_peers_endpoint,
@@ -21,11 +22,12 @@ from ciao.web.routes_api import (
 def test_node_state_manager_defaults(tmp_path: Path):
     mgr = NodeStateManager(tmp_path)
     assert mgr.is_active() is True
-    assert mgr.get_role() == "active"
+    assert mgr.get_role() == "host"
 
     status = mgr.get_status()
     assert status["node_id"]
-    assert status["role"] == "active"
+    assert status["role"] == "host"
+    assert status["mode"] == "host"
     assert status["active_since"] is not None
     assert isinstance(status["peers"], list)
 
@@ -33,17 +35,49 @@ def test_node_state_manager_defaults(tmp_path: Path):
 def test_node_state_role_transitions(tmp_path: Path):
     mgr = NodeStateManager(tmp_path)
 
-    # Demote
+    # Demote → client
     mgr.demote()
     assert mgr.is_active() is False
-    assert mgr.get_role() == "standby"
+    assert mgr.get_role() == "client"
     assert mgr.get_status()["active_since"] is None
 
-    # Promote
+    # Promote → host
     mgr.promote()
     assert mgr.is_active() is True
-    assert mgr.get_role() == "active"
+    assert mgr.get_role() == "host"
     assert mgr.get_status()["active_since"] is not None
+
+
+def test_node_state_connect_as_client(tmp_path: Path):
+    mgr = NodeStateManager(tmp_path)
+    status = mgr.connect_as_client("100.101.252.27", host_session="sess-abc")
+    assert status["role"] == "client"
+    assert status["host_url"] == "http://100.101.252.27:8443"
+    assert status["has_host_session"] is True
+    assert mgr.get_active_peer_url() == "http://100.101.252.27:8443"
+    assert mgr.get_host_session() == "sess-abc"
+
+    mgr.promote()
+    assert mgr.get_role() == "host"
+    assert mgr.get_host_session() is None
+    assert mgr.get_active_peer_url() is None
+
+
+def test_node_state_migrates_legacy_roles(tmp_path: Path):
+    state = tmp_path / "node_state.json"
+    state.write_text(
+        json.dumps(
+            {
+                "node_id": "legacy",
+                "role": "standby",
+                "peers": [{"node_id": "home", "url": "http://10.0.0.1:8443", "is_active": True}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    mgr = NodeStateManager(tmp_path)
+    assert mgr.get_role() == "client"
+    assert mgr.get_host_url() == "http://10.0.0.1:8443"
 
 
 def test_node_state_peer_management(tmp_path: Path):
@@ -129,6 +163,7 @@ def test_node_api_routes(tmp_path: Path):
     app = Starlette(
         routes=[
             Route("/api/node/status", node_status_endpoint, methods=["GET"]),
+            Route("/api/node/connect", node_connect_endpoint, methods=["POST"]),
             Route("/api/node/handover", node_handover_endpoint, methods=["POST"]),
             Route("/api/node/demote", node_demote_endpoint, methods=["POST"]),
             Route("/api/node/peers", node_peers_endpoint, methods=["POST"]),
@@ -144,7 +179,7 @@ def test_node_api_routes(tmp_path: Path):
     res = client.get("/api/node/status")
     assert res.status_code == 200
     data = res.json()
-    assert data["role"] == "active"
+    assert data["role"] == "host"
 
     # 2. Add peer endpoint
     res_peer = client.post("/api/node/peers", json={"action": "add", "url": "http://10.0.0.5:8543", "node_id": "server-2"})
@@ -154,9 +189,68 @@ def test_node_api_routes(tmp_path: Path):
     # 3. Demote endpoint
     res_demote = client.post("/api/node/demote")
     assert res_demote.status_code == 200
-    assert res_demote.json()["status"]["role"] == "standby"
+    assert res_demote.json()["status"]["role"] == "client"
 
     # 4. Handover (Force) endpoint
     res_handover = client.post("/api/node/handover", json={"force": True})
     assert res_handover.status_code == 200
-    assert res_handover.json()["status"]["role"] == "active"
+    assert res_handover.json()["status"]["role"] == "host"
+
+
+def test_node_connect_requires_password(tmp_path: Path):
+    app = Starlette(
+        routes=[Route("/api/node/connect", node_connect_endpoint, methods=["POST"])]
+    )
+    app.state.node_state_manager = NodeStateManager(tmp_path)
+    client = TestClient(app)
+
+    res = client.post("/api/node/connect", json={"host_url": "http://10.0.0.1:8443"})
+    assert res.status_code == 400
+    assert res.json()["auth_required"] is True
+
+
+def test_node_connect_rejects_host_without_password(tmp_path: Path, monkeypatch):
+    import httpx
+
+    app = Starlette(
+        routes=[Route("/api/node/connect", node_connect_endpoint, methods=["POST"])]
+    )
+    app.state.node_state_manager = NodeStateManager(tmp_path)
+    client = TestClient(app)
+
+    class _Resp:
+        def __init__(self, status_code: int, payload: dict):
+            self.status_code = status_code
+            self._payload = payload
+            self.headers = {"content-type": "application/json"}
+
+        def json(self):
+            return self._payload
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url):
+            assert url.endswith("/api/startup-status")
+            return _Resp(200, {"overall_ready": True, "auth_required": False})
+
+        async def post(self, url, json=None):
+            raise AssertionError("login should not be attempted")
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+
+    res = client.post(
+        "/api/node/connect",
+        json={"host_url": "http://10.0.0.1:8443", "password": "secret"},
+    )
+    assert res.status_code == 400
+    body = res.json()
+    assert body["password_required_on_host"] is True
+    assert "no password" in body["error"].lower()

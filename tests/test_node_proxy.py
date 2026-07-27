@@ -73,7 +73,13 @@ def test_standby_proxy_middleware_routing(tmp_path: Path):
     assert res_status.status_code == 200
     assert res_status.json()["source"] == "local_node_status"
 
-    # Unreachable active peer should return 503
-    res_chats = client.get("/api/chats")
+    # Unreachable host should return 503 (mock connect failure; sandbox may
+    # otherwise answer with a policy 403 instead of raising).
+    import httpx
+
+    with patch("httpx.AsyncClient.request", new_callable=AsyncMock) as mock_request:
+        mock_request.side_effect = httpx.ConnectError("offline")
+        res_chats = client.get("/api/chats")
     assert res_chats.status_code == 503
     assert res_chats.json()["peer_unreachable"] is True
+    assert res_chats.json().get("client") is True

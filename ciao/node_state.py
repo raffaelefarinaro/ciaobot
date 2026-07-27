@@ -1,8 +1,9 @@
-"""Node state management for Ciaobot multi-device handover.
+"""Node state for Ciaobot host/client multi-device mode.
 
-Controls active vs standby role state for multi-device deployments.
-When a node is in 'standby' mode, background schedules, cron routines, auto loops,
-and automated git backup pushes are paused.
+Host: full local instance (schedules, loops, vault writes).
+Client: thin tunnel — PWA/tray proxy to a remote host; local automations pause.
+
+Legacy role names ``active``/``standby`` are migrated to ``host``/``client``.
 """
 
 from __future__ import annotations
@@ -17,6 +18,14 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_ROLE_ALIASES = {
+    "active": "host",
+    "standby": "client",
+    "host": "host",
+    "client": "client",
+}
+_VALID_ROLES = frozenset({"host", "client"})
+
 
 def _now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -26,9 +35,14 @@ def get_default_node_id() -> str:
     return os.environ.get("CIAO_NODE_ID", "").strip() or socket.gethostname() or "ciaobot-node"
 
 
+def normalize_role(role: str) -> str:
+    cleaned = str(role or "").strip().lower()
+    mapped = _ROLE_ALIASES.get(cleaned, "")
+    return mapped if mapped in _VALID_ROLES else "host"
+
+
 def get_default_role() -> str:
-    role = os.environ.get("CIAO_DEFAULT_NODE_ROLE", "active").strip().lower()
-    return role if role in {"active", "standby"} else "active"
+    return normalize_role(os.environ.get("CIAO_DEFAULT_NODE_ROLE", "host"))
 
 
 def _normalize_peer_url(url: str) -> str:
@@ -49,7 +63,7 @@ def _normalize_peer_url(url: str) -> str:
 
 
 class NodeStateManager:
-    """Manages local node active/standby state and peer registrations in .runtime/node_state.json."""
+    """Persists host/client role and host connection in ``.runtime/node_state.json``."""
 
     def __init__(self, runtime_root: Path) -> None:
         self.runtime_root = Path(runtime_root)
@@ -65,16 +79,43 @@ class NodeStateManager:
             data = {
                 "node_id": self.node_id,
                 "role": default_role,
-                "active_since": now if default_role == "active" else None,
+                "active_since": now if default_role == "host" else None,
                 "last_handover": now,
+                "host_url": None,
+                "host_session": None,
                 "peers": [],
             }
             self._write_raw(data)
-        else:
-            # Sync node_id if environment overrode it
-            if self.node_id and data.get("node_id") != self.node_id:
-                data["node_id"] = self.node_id
-                self._write_raw(data)
+            return data
+
+        changed = False
+        if self.node_id and data.get("node_id") != self.node_id:
+            data["node_id"] = self.node_id
+            changed = True
+        role = normalize_role(str(data.get("role", "host")))
+        if data.get("role") != role:
+            data["role"] = role
+            changed = True
+        if "host_url" not in data:
+            data["host_url"] = None
+            changed = True
+        if "host_session" not in data:
+            data["host_session"] = None
+            changed = True
+        # Prefer explicit host_url; else migrate from first/active peer.
+        if not data.get("host_url"):
+            peers = data.get("peers") or []
+            if isinstance(peers, list) and peers:
+                active = next(
+                    (p for p in peers if isinstance(p, dict) and p.get("is_active")),
+                    None,
+                )
+                pick = active if isinstance(active, dict) else peers[0]
+                if isinstance(pick, dict) and pick.get("url"):
+                    data["host_url"] = _normalize_peer_url(str(pick["url"]))
+                    changed = True
+        if changed:
+            self._write_raw(data)
         return data
 
     def _read_raw(self) -> dict[str, Any]:
@@ -94,39 +135,64 @@ class NodeStateManager:
         tmp.replace(self.state_file)
 
     def is_active(self) -> bool:
-        data = self._read_raw()
-        return str(data.get("role", "active")) == "active"
+        """True when this node is the host (runs schedules/loops)."""
+        return self.get_role() == "host"
+
+    def is_client(self) -> bool:
+        return self.get_role() == "client"
 
     def get_role(self) -> str:
         data = self._read_raw()
-        return str(data.get("role", get_default_role()))
+        return normalize_role(str(data.get("role", get_default_role())))
+
+    def get_host_url(self) -> str | None:
+        data = self._read_raw()
+        raw = str(data.get("host_url") or "").strip()
+        if raw:
+            return _normalize_peer_url(raw) or None
+        peers = data.get("peers", [])
+        if not isinstance(peers, list) or not peers:
+            return None
+        active_peer = next(
+            (p for p in peers if isinstance(p, dict) and p.get("is_active")),
+            None,
+        )
+        pick = active_peer if isinstance(active_peer, dict) else peers[0]
+        if not isinstance(pick, dict):
+            return None
+        return _normalize_peer_url(str(pick.get("url") or "")) or None
 
     def get_active_peer_url(self) -> str | None:
-        data = self._read_raw()
-        peers = data.get("peers", [])
-        if not peers:
+        """Host URL when in client mode (used by the proxy middleware)."""
+        if self.get_role() != "client":
             return None
-        # Return peer marked as active if available, otherwise first peer
-        active_peer = next((p for p in peers if p.get("is_active")), peers[0])
-        raw_url = str(active_peer.get("url", ""))
-        return _normalize_peer_url(raw_url) or None
+        return self.get_host_url()
+
+    def get_host_session(self) -> str | None:
+        data = self._read_raw()
+        session = str(data.get("host_session") or "").strip()
+        return session or None
 
     def get_status(self) -> dict[str, Any]:
         data = self._ensure_loaded()
-        active_peer = self.get_active_peer_url()
+        role = normalize_role(str(data.get("role", "host")))
+        host_url = self.get_host_url()
         return {
             "node_id": data.get("node_id", self.node_id),
-            "role": data.get("role", "active"),
+            "role": role,
+            "mode": role,
             "active_since": data.get("active_since"),
             "last_handover": data.get("last_handover"),
-            "active_peer_url": active_peer,
+            "host_url": host_url,
+            "active_peer_url": host_url if role == "client" else None,
+            "has_host_session": bool(str(data.get("host_session") or "").strip()),
             "peers": data.get("peers", []),
         }
 
     def set_role(self, role: str) -> dict[str, Any]:
-        cleaned = role.strip().lower()
-        if cleaned not in {"active", "standby"}:
-            raise ValueError(f"Invalid node role '{role}', must be 'active' or 'standby'")
+        cleaned = normalize_role(role)
+        if cleaned not in _VALID_ROLES:
+            raise ValueError(f"Invalid node role '{role}', must be 'host' or 'client'")
 
         data = self._ensure_loaded()
         old_role = data.get("role")
@@ -134,7 +200,7 @@ class NodeStateManager:
 
         data["role"] = cleaned
         data["last_handover"] = now
-        if cleaned == "active":
+        if cleaned == "host":
             data["active_since"] = now
         else:
             data["active_since"] = None
@@ -144,12 +210,61 @@ class NodeStateManager:
         return self.get_status()
 
     def demote(self) -> dict[str, Any]:
-        """Set role to standby."""
-        return self.set_role("standby")
+        """Leave host mode (client without a tunnel until connect)."""
+        return self.set_role("client")
 
     def promote(self) -> dict[str, Any]:
-        """Set role to active."""
-        return self.set_role("active")
+        """Become host and clear the client tunnel session."""
+        data = self._ensure_loaded()
+        data["host_session"] = None
+        data["role"] = "host"
+        data["active_since"] = _now_iso()
+        data["last_handover"] = data["active_since"]
+        self._write_raw(data)
+        logger.info("Node %s became host", self.node_id)
+        return self.get_status()
+
+    def connect_as_client(
+        self, host_url: str, *, host_session: str | None = None
+    ) -> dict[str, Any]:
+        """Enter client mode tunneling to ``host_url``."""
+        url = _normalize_peer_url(host_url)
+        if not url:
+            raise ValueError("host_url is required")
+
+        data = self._ensure_loaded()
+        now = _now_iso()
+        data["role"] = "client"
+        data["host_url"] = url
+        data["host_session"] = (host_session or "").strip() or None
+        data["active_since"] = None
+        data["last_handover"] = now
+
+        peers: list[dict[str, Any]] = [
+            p
+            for p in (data.get("peers") or [])
+            if isinstance(p, dict)
+            and _normalize_peer_url(str(p.get("url") or "")) != url
+        ]
+        peers.insert(
+            0,
+            {
+                "node_id": url,
+                "url": url,
+                "last_seen": now,
+                "is_active": True,
+            },
+        )
+        data["peers"] = peers
+        self._write_raw(data)
+        logger.info("Node %s connected as client to %s", self.node_id, url)
+        return self.get_status()
+
+    def set_host_session(self, session: str | None) -> dict[str, Any]:
+        data = self._ensure_loaded()
+        data["host_session"] = (session or "").strip() or None
+        self._write_raw(data)
+        return self.get_status()
 
     def add_peer(self, url: str, peer_id: str = "") -> dict[str, Any]:
         url_cleaned = _normalize_peer_url(url)
@@ -166,20 +281,31 @@ class NodeStateManager:
             if peer_id:
                 existing["node_id"] = peer_id
         else:
-            peers.append({
-                "node_id": peer_id or url_cleaned,
-                "url": url_cleaned,
-                "last_seen": now,
-                "is_active": False,
-            })
+            peers.append(
+                {
+                    "node_id": peer_id or url_cleaned,
+                    "url": url_cleaned,
+                    "last_seen": now,
+                    "is_active": False,
+                }
+            )
         data["peers"] = peers
+        if not data.get("host_url"):
+            data["host_url"] = url_cleaned
         self._write_raw(data)
         return self.get_status()
 
     def remove_peer(self, url: str) -> dict[str, Any]:
-        url_cleaned = url.strip().rstrip("/")
+        url_cleaned = _normalize_peer_url(url) or url.strip().rstrip("/")
         data = self._ensure_loaded()
-        peers = [p for p in data.get("peers", []) if p.get("url") != url_cleaned]
+        peers = [
+            p
+            for p in data.get("peers", [])
+            if _normalize_peer_url(str(p.get("url") or "")) != url_cleaned
+        ]
         data["peers"] = peers
+        if _normalize_peer_url(str(data.get("host_url") or "")) == url_cleaned:
+            data["host_url"] = None
+            data["host_session"] = None
         self._write_raw(data)
         return self.get_status()

@@ -68,3 +68,85 @@ async def auth_check(request: Request) -> JSONResponse:
     if getattr(config, "bootstrap_mode", False):
         return JSONResponse({"error": "setup required"}, status_code=401)
     return JSONResponse({"ok": True})
+
+
+async def auth_settings_get(request: Request) -> JSONResponse:
+    """Return whether PWA password protection is enabled (never the password)."""
+    config = request.app.state.config
+    return JSONResponse(
+        {
+            "auth_required": bool(getattr(config, "pwa_auth_required", False)),
+            "password_configured": bool(str(getattr(config, "pwa_auth_token", "") or "").strip()),
+        }
+    )
+
+
+async def auth_settings_update(request: Request) -> JSONResponse:
+    """Enable/disable PWA password or change it from Settings.
+
+    Body: ``{ "auth_required": bool, "password"?: str, "current_password"?: str }``.
+    When auth is already on, ``current_password`` is required to change it or turn it off.
+    """
+    from ciao.web.auth import make_serializer
+    from ciao.web.routes_api import _env_path, _write_env_values
+
+    config = request.app.state.config
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "expected object"}, status_code=400)
+
+    currently_required = bool(getattr(config, "pwa_auth_required", False))
+    current_token = str(getattr(config, "pwa_auth_token", "") or "")
+    want_required = bool(body.get("auth_required", currently_required))
+    new_password = str(body.get("password") or "")
+    current_password = str(body.get("current_password") or "")
+
+    if currently_required:
+        if not current_password or not hmac.compare_digest(current_password, current_token):
+            return JSONResponse(
+                {"error": "Current password is required (and must match)"},
+                status_code=401,
+            )
+
+    if want_required:
+        token_to_store = new_password.strip() or current_token
+        if not token_to_store:
+            return JSONResponse(
+                {"error": "Set a password before enabling protection"},
+                status_code=400,
+            )
+        if len(token_to_store) < 4:
+            return JSONResponse(
+                {"error": "Password must be at least 4 characters"},
+                status_code=400,
+            )
+    else:
+        token_to_store = current_token  # keep token in .env even if protection is off
+
+    if new_password.strip():
+        token_to_store = new_password.strip()
+
+    updates = {
+        "PWA_AUTH_REQUIRED": "true" if want_required else "false",
+        "PWA_AUTH_TOKEN": token_to_store,
+    }
+    _write_env_values(_env_path(config), updates)
+    config.pwa_auth_required = want_required
+    config.pwa_auth_token = token_to_store
+    request.app.state.serializer = make_serializer(token_to_store)
+
+    response = JSONResponse(
+        {
+            "ok": True,
+            "auth_required": want_required,
+            "password_configured": bool(token_to_store),
+        }
+    )
+    if want_required:
+        # Keep this browser logged in after rotating the signing secret.
+        signed = request.app.state.serializer.dumps({"user": "owner"})
+        response.set_cookie(SESSION_COOKIE, signed, **session_cookie_kwargs(request))
+    return response
