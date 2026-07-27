@@ -100,6 +100,12 @@ async def proxy_http_request(request: Request, active_peer_url: str) -> Response
         k: v for k, v in request.headers.items() if k.lower() not in STRIP_HEADERS
     }
 
+    clean_peer_url = active_peer_url.rstrip("/")
+    if "origin" in headers or request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+        headers["origin"] = clean_peer_url
+    if "referer" in headers:
+        headers["referer"] = f"{clean_peer_url}/"
+
     try:
         body = await request.body()
     except Exception:
