@@ -5,6 +5,7 @@ import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from starlette.applications import Starlette
@@ -111,6 +112,29 @@ def test_registry_issues_scoped_reusable_and_revocable_tokens() -> None:
     assert registry.status()["active_sessions"] == 1
     assert registry.revoke_chat("chat-1") == 1
     assert registry.status()["active_sessions"] == 0
+
+
+def test_registry_reissues_when_workspace_or_project_changes() -> None:
+    registry = McpSessionRegistry(ttl_seconds=60)
+    token, principal = registry.issue(
+        chat_id="chat-1",
+        project_id="project-1",
+        workspace="personal",
+        provider="claude",
+    )
+
+    moved_token, moved = registry.issue(
+        chat_id="chat-1",
+        project_id="project-work",
+        workspace="work",
+        provider="claude",
+    )
+
+    assert moved_token != token
+    assert moved.workspace == "work"
+    assert moved.project_id == "project-work"
+    assert principal.workspace == "personal"
+    assert registry.status()["active_sessions"] == 1
 
 
 def test_streamable_http_auth_and_structured_tool_result(tmp_path: Path) -> None:
@@ -378,14 +402,41 @@ class _ChatCreatePcm:
         self.started.append((chat_id, text))
 
 
-def _chat_create_control_plane(pcm: _ChatCreatePcm) -> CiaoControlPlane:
-    config = SimpleNamespace(workspace=lambda name: object() if name == "personal" else None)
+def _chat_create_control_plane(
+    pcm: _ChatCreatePcm,
+    *,
+    schedule_manager: Any = None,
+    workspaces: tuple[str, ...] = ("personal",),
+) -> CiaoControlPlane:
+    config = SimpleNamespace(workspace=lambda name: object() if name in workspaces else None)
     return CiaoControlPlane(
         config,
         project_chat_manager=pcm,
-        schedule_manager=SimpleNamespace(),
+        schedule_manager=SimpleNamespace() if schedule_manager is None else schedule_manager,
         loop_manager=SimpleNamespace(),
     )
+
+
+def _work_project_pcm() -> _ChatCreatePcm:
+    """A pcm holding a project in a non-Personal workspace, to prove inheritance."""
+    pcm = _ChatCreatePcm()
+    pcm.projects["project-work"] = SimpleNamespace(
+        project_id="project-work",
+        name="AI-NATIVE-SDK",
+        workspace="work",
+    )
+    return pcm
+
+
+def _schedule_control_plane(tmp_path: Path, pcm: _ChatCreatePcm) -> tuple[CiaoControlPlane, Any]:
+    """Control plane wired to a real ScheduleManager over a temp store."""
+    from ciao.schedules import ScheduleManager, ScheduleStore
+
+    schedules = ScheduleManager(store=ScheduleStore(tmp_path), dispatch_to_web=lambda *a, **k: None)
+    plane = _chat_create_control_plane(
+        pcm, schedule_manager=schedules, workspaces=("personal", "work")
+    )
+    return plane, schedules
 
 
 def _chat_create_principal(**overrides) -> McpPrincipal:
@@ -471,6 +522,120 @@ def test_schedule_create_resolves_project_by_name(tmp_path: Path) -> None:
     )
 
     assert result["data"]["web_project_id"] == "project-2"
+    assert result["data"]["workspace"] == "personal"
+    assert result["data"]["project_name"] == "Research"
+
+
+def test_schedule_create_defaults_to_callers_project_and_workspace(tmp_path: Path) -> None:
+    control_plane, schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
+    principal = _chat_create_principal(
+        project_id="project-work",
+        workspace="work",
+    )
+
+    result = control_plane.schedule_create(
+        principal,
+        prompt="Seed the weekly skills CSV.",
+        daily_time="08:00",
+        timezone="Europe/Zurich",
+        frequency="weekly",
+        days_of_week=["mon"],
+    )
+
+    assert result["data"]["web_project_id"] == "project-work"
+    assert result["data"]["workspace"] == "work"
+    assert result["data"]["project_name"] == "AI-NATIVE-SDK"
+    stored = schedules.list_entries()[0]
+    assert stored.web_project_id == "project-work"
+    assert stored.workspace == "work"
+
+
+def test_schedule_create_with_chat_id_skips_project_default(tmp_path: Path) -> None:
+    pcm = _work_project_pcm()
+    chat = SimpleNamespace(chat_id="chat-fixed", project_id="project-work")
+    pcm.get_chat = lambda cid: chat if cid == "chat-fixed" else None  # type: ignore[method-assign]
+    control_plane, _schedules = _schedule_control_plane(tmp_path, pcm)
+    principal = _chat_create_principal(
+        project_id="project-work",
+        workspace="work",
+    )
+
+    result = control_plane.schedule_create(
+        principal,
+        prompt="Continue this thread weekly.",
+        daily_time="08:00",
+        timezone="UTC",
+        frequency="weekly",
+        chat_id="chat-fixed",
+    )
+
+    assert result["data"]["web_chat_id"] == "chat-fixed"
+    assert result["data"]["web_project_id"] is None
+    assert result["data"]["workspace"] == "work"
+
+
+def test_chat_update_resolves_omitted_chat_id() -> None:
+    pcm = SimpleNamespace(
+        update_chat=lambda cid, **kwargs: SimpleNamespace(
+            chat_id=cid,
+            control_surface="",
+            to_dict=lambda local=True: {"chat_id": cid, **kwargs},
+        ),
+        is_session_local=lambda c: True,
+        get_chat=lambda cid: SimpleNamespace(chat_id=cid, project_id="project-1"),
+        get_project=lambda pid: SimpleNamespace(project_id=pid, workspace="personal"),
+    )
+    config = SimpleNamespace(workspace=lambda name: object() if name == "personal" else None)
+    control_plane = CiaoControlPlane(
+        config,
+        project_chat_manager=pcm,
+        schedule_manager=SimpleNamespace(),
+        loop_manager=SimpleNamespace(),
+    )
+    principal = _chat_create_principal()
+
+    result = control_plane.chat_update(principal, "", title="Renamed")
+
+    assert result["data"]["chat_id"] == "chat-1"
+    assert result["data"]["title"] == "Renamed"
+
+
+def test_loop_create_defaults_to_caller_and_stamps_workspace(tmp_path: Path) -> None:
+    from ciao.loops import LoopManager, LoopStore
+
+    pcm = _ChatCreatePcm()
+    pcm.projects["project-work"] = SimpleNamespace(
+        project_id="project-work",
+        name="AI-NATIVE-SDK",
+        workspace="work",
+    )
+    pcm.get_chat = lambda cid: (  # type: ignore[method-assign]
+        SimpleNamespace(chat_id="chat-work", project_id="project-work")
+        if cid == "chat-work"
+        else None
+    )
+    manager = LoopManager(store=LoopStore(tmp_path))
+    config = SimpleNamespace(
+        workspace=lambda name: object() if name in {"personal", "work"} else None
+    )
+    control_plane = CiaoControlPlane(
+        config,
+        project_chat_manager=pcm,
+        schedule_manager=SimpleNamespace(),
+        loop_manager=manager,
+    )
+    principal = _chat_create_principal(
+        chat_id="chat-work",
+        project_id="project-work",
+        workspace="work",
+    )
+
+    result = control_plane.loop_create(principal, "", "Check PRs", interval_minutes=15)
+
+    assert result["data"]["web_chat_id"] == "chat-work"
+    assert result["data"]["web_project_id"] == "project-work"
+    assert result["data"]["workspace"] == "work"
+    assert result["data"]["interval_minutes"] == 15
 
 
 def test_adversarial_review_synthesizes_panel_results(monkeypatch) -> None:

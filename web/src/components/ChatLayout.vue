@@ -796,12 +796,14 @@ onBeforeUnmount(() => {
 
 .empty-actions {
   /* Mirror the jump-back-in tile grid so the new-chat buttons line up with
-     the cards (same 560px column, same auto-fill tracks and gap). */
+     the cards (same 560px column, same auto-fit tracks and gap). auto-fit
+     collapses empty tracks so a lone workspace button — or the last one on
+     an odd-count row — stretches full width. */
   width: 100%;
   max-width: 560px;
   margin: 0 auto;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 8px;
 }
 .empty-actions .btn-primary {

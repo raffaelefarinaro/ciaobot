@@ -34,7 +34,7 @@ def _make_manager(
         store=store,
         dispatch=dispatch,
         chat_busy=lambda chat_id: busy,
-        chat_exists=lambda chat_id: exists,
+        chat_exists=lambda entry: exists,
     )
     return mgr, dispatched
 
@@ -201,7 +201,7 @@ async def test_fires_as_soon_as_chat_frees_up(store: LoopStore) -> None:
         store=store,
         dispatch=dispatch,
         chat_busy=lambda chat_id: busy_flag["busy"],
-        chat_exists=lambda chat_id: True,
+        chat_exists=lambda entry: True,
     )
     mgr.start_loop(entry.loop_id)
     t0 = datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
@@ -252,7 +252,7 @@ async def test_inflight_iteration_blocks_refire(store: LoopStore) -> None:
         store=store,
         dispatch=dispatch,
         chat_busy=lambda chat_id: False,
-        chat_exists=lambda chat_id: True,
+        chat_exists=lambda entry: True,
     )
     mgr.start_loop(entry.loop_id)
     t0 = datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
@@ -286,7 +286,7 @@ async def test_dispatch_exception_recorded_as_error(store: LoopStore) -> None:
         store=store,
         dispatch=dispatch,
         chat_busy=lambda chat_id: False,
-        chat_exists=lambda chat_id: True,
+        chat_exists=lambda entry: True,
     )
     mgr.start_loop(entry.loop_id)
     await mgr.tick()

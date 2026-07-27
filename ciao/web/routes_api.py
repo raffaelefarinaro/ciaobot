@@ -4009,14 +4009,17 @@ async def create_loop(request: Request) -> JSONResponse:
     if interval_minutes < 1:
         return JSONResponse({"error": "interval_minutes must be >= 1"}, status_code=400)
 
+    # A loop inherits the workspace of its chat's project, same as a schedule.
+    loop_project_id = getattr(chat, "project_id", "") or ""
+    loop_project = pcm.get_project(loop_project_id) if loop_project_id else None
     entry = lm.create(
         prompt=prompt,
         web_chat_id=web_chat_id,
         interval_minutes=interval_minutes,
         title=(body.get("title") or "").strip(),
         autostart=bool(body.get("autostart")),
-        web_project_id=getattr(chat, "web_project_id", "") or "",
-        workspace=getattr(chat, "workspace", "") or "",
+        web_project_id=loop_project_id,
+        workspace=getattr(loop_project, "workspace", "") or "",
     )
     if body.get("start"):
         lm.start_loop(entry.loop_id)

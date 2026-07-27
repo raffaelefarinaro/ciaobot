@@ -24,6 +24,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/auth` | Login with `PWA_AUTH_TOKEN` |
 | POST | `/api/auth/logout` | Clear session cookie |
 | GET | `/api/auth/check` | Verify current session |
+| GET, POST | `/api/auth/settings` | Read or update PWA password protection settings |
 | GET | `/api/projects` | List projects |
 | POST | `/api/projects` | Create project |
 | PATCH, DELETE | `/api/projects/{project_id}` | Update or delete project |
@@ -34,6 +35,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET, POST | `/api/projects/{project_id}/chats` | List or create project chats |
 | GET, POST | `/api/projects/{project_id}/files` | List or upload project files |
 | GET | `/api/chats` | List all chats |
+| GET | `/api/menubar-chats` | Compact chat list for the macOS tray / menubar |
 | POST | `/api/chats/read-all` | Mark all chats read |
 | PATCH, DELETE | `/api/chats/{chat_id}` | Update or delete chat |
 | POST | `/api/chats/{chat_id}/new` | Start a new provider session |
@@ -134,6 +136,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/local/resync` | Merge `origin/<branch>` back into the checkout |
 | POST | `/api/handover/merge` | Open an interactive chat that resolves sync conflicts on a branch |
 | GET | `/api/node/status` | Read multi-device node failover status and role |
+| POST | `/api/node/connect` | Connect this node as a client tunnel to a remote host |
 | POST | `/api/node/demote` | Demote active node to standby |
 | POST | `/api/node/handover` | Handover active role to another node |
 | POST | `/api/node/peers` | Register or update node peer links |

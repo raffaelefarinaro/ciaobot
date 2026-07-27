@@ -190,7 +190,7 @@ class LoopManager:
         *,
         dispatch: Callable[[LoopEntry], Awaitable[dict | None]] | None = None,
         chat_busy: Callable[[str], bool] | None = None,
-        chat_exists: Callable[[str], bool] | None = None,
+        chat_exists: Callable[[LoopEntry], bool] | None = None,
         is_node_active: Callable[[], bool] | None = None,
     ) -> None:
         self._store = store
@@ -252,10 +252,7 @@ class LoopManager:
     def _chat_is_dispatchable(self, entry: LoopEntry) -> bool:
         if self._chat_exists is None:
             return True
-        try:
-            return self._chat_exists(entry)
-        except TypeError:
-            return self._chat_exists(entry.web_chat_id)
+        return self._chat_exists(entry)
 
     async def run_now(self, loop_id: str) -> dict:
         """Fire one iteration immediately, even if the loop is stopped.

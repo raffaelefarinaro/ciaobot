@@ -1,6 +1,6 @@
 ---
 name: ciao-release
-description: How to cut a Ciaobot release — the patch/minor/major convention, the pre-release checklist (dependencies, docs, capabilities skill), the prepare-release command, what merging into main triggers, and the known traps. Trigger on "release", "cut a release", "publish", "bump the version", "ship a new version", "prepare-release", or any question about how Ciaobot versioning and publishing work.
+description: How to cut a Ciaobot release — the patch/minor/major convention, the pre-release checklist (dependencies, docs, capabilities skill, /code-review --fix gate via /pr), the prepare-release command, what merging into main triggers, and the known traps. Trigger on "release", "cut a release", "publish", "bump the version", "ship a new version", "prepare-release", or any question about how Ciaobot versioning and publishing work.
 ---
 
 # Ciaobot Release
@@ -26,17 +26,17 @@ When unsure between patch and minor, ask: "could a user notice something new or 
 Do these on `develop` (or a short prep branch merged into develop) **before** running prepare-release:
 
 1. **Survey open PRs and issues.** Before cutting, list what's outstanding — `gh pr list --state open` and `gh issue list --state open` on `raffaelefarinaro/ciaobot`. Surface them to the user and **ask** whether any open PRs should land in this release (merge into `develop` first) and whether any reported issues should be fixed before cutting. Never auto-merge PRs or auto-close issues — the user decides what's in scope for the release. Once decisions are made, merge the chosen PRs / land the fixes on `develop` before continuing.
-2. **Fresh review of the release surface — mandatory, blocking step.** Take a clean look at everything shipping since the last release tag — `git log --oneline <last-tag>..develop` and `git diff <last-tag>..develop`. Read it as a reviewer, not the author. Then, **before running `prepare-release`**, invoke both quality skills on that diff and act on their findings — this is not conditional on convenience, it's a required gate like step 1:
-   - `/simplify` — reuse/simplification/efficiency cleanups (quality only).
-   - `/code-review` (`security-review` instead if the diff touches auth, secrets, or external input) — correctness/bug hunt; pass a higher effort for a release.
-   Apply the fixes each skill surfaces (or explicitly tell the user why a finding is being deferred) before moving on to step 3. A release is the checkpoint where small messes get paid down, not deferred further. Only skip a skill if it is genuinely absent from the environment (check with the `Skill` tool / `/help`) — if so, say that explicitly to the user and do the equivalent review by hand instead of silently moving on.
+2. **Fresh review of the release surface — mandatory, blocking step.** Take a clean look at everything shipping since the last release tag — `git log --oneline <last-tag>..develop` and `git diff <last-tag>..develop`. Read it as a reviewer, not the author. Then, **before running `prepare-release`**, run the same quality gate as `/pr` on that range — this is not conditional on convenience, it's a required gate like step 1:
+   - `/code-review --fix <last-tag>..develop` — correctness plus reuse/simplification/efficiency; pass a **higher effort** (or `ultra`) for a release. If the diff touches auth, secrets, or external input, run `security-review` instead (or in addition).
+   - Inspect applied edits with `git diff`; keep, amend, or discard before committing. Explicitly tell the user why any finding is deferred.
+   A release is the checkpoint where small messes get paid down, not deferred further. `/code-review` already covers what `/simplify` used to; do not require a separate `/simplify` pass unless you specifically want cleanup-only autofix without a bug hunt. Only skip `/code-review` if it is genuinely absent from the environment (check with the `Skill` tool / `/help`) — if so, say that explicitly to the user and do the equivalent review by hand instead of silently moving on. Everyday feature PRs use `skills/pr/SKILL.md` (`/pr`) for the same gate on the branch diff.
 3. **Dependencies.** The release tool already checks PyPI/npm and prints available updates as `[auto|manual] [safe|major]`; `auto`-flagged ones (e.g. the Claude Agent SDK) are bumped on `--apply`, the rest are only reported. Run a plan-only pass first (command below, no `--apply`) to see the list, then decide whether to adopt any `manual` updates in a separate commit before releasing. Don't blanket-upgrade majors as part of a release.
 4. **Docs.** Update anything the change touched: `README.md`, `docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`, `PWA_API.md` (any new/changed state-changing route **must** be documented here).
 5. **The capabilities skill.** For any new user-facing feature, update `ciao/stock/skills/ciao-capabilities/SKILL.md` — add the feature to the right section and add trigger keywords to its frontmatter `description`. Skim the CHANGELOG since the last release tag to catch features that shipped without a catalog entry.
 6. **This skill.** If the release flow, flags, or traps changed, update `skills/ciao-release/SKILL.md` too.
 7. **CHANGELOG sanity.** The tool generates the entry from commits since the last tag. If commits landed on the release branch after `release: prepare`, append them to the entry before merging.
 
-Once the release PR is open, give its diff one more fresh read before merging — the `release: prepare` commit adds version/CHANGELOG/dependency changes that weren't in your pre-cut review.
+Once the release PR is open, give its diff one more fresh read before merging — the `release: prepare` commit adds version/CHANGELOG/dependency changes that weren't in your pre-cut review. Prefer `/code-review --comment` on the open PR so findings land as inline comments; still act on anything that should block the merge.
 
 ## Environment prerequisites
 

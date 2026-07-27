@@ -50,6 +50,18 @@ class FakeWebSocket {
   onclose: (() => void) | null = null
   onerror: (() => void) | null = null
 
+  // The store distinguishes a socket that completed its handshake from one
+  // rejected during it (auth 403 / origin reject), and only fast-reconnects
+  // the former. This fake connects instantly, so fire onopen as soon as the
+  // store attaches its handler; otherwise every simulated drop looks like a
+  // failed handshake and takes the slow backoff path.
+  #onopen: (() => void) | null = null
+  get onopen() { return this.#onopen }
+  set onopen(fn: (() => void) | null) {
+    this.#onopen = fn
+    fn?.()
+  }
+
   constructor(public url: string) {
     fakeSockets.push(this)
   }
