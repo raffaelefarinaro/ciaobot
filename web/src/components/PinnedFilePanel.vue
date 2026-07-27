@@ -192,8 +192,6 @@
               ref="mdEl"
               v-html="renderedMarkdown"
               @click="onMdClick"
-              @mouseover="onHighlightHover"
-              @mouseout="onHighlightHoverOut"
             ></div>
             <CsvViewer
               v-else-if="isCsv"
@@ -209,8 +207,6 @@
               class="pfp-pre"
               ref="preEl"
               @click="onPreClick"
-              @mouseover="onHighlightHover"
-              @mouseout="onHighlightHoverOut"
             ><code ref="preCodeEl"><span
               v-for="(line, i) in contentLines"
               :key="i"
@@ -318,20 +314,17 @@
         </div>
       </div>
 
-      <!-- Read popover: hover to preview, click to pin; edit opens the drawer. -->
+      <!-- Read popover: click a highlight to see the note; edit opens the drawer. -->
       <div
-        v-if="commentPopover?.pinned && popoverComment"
-        class="pfp-comment-backdrop pfp-comment-backdrop--dim"
-        @click="closeCommentPopover()"
+        v-if="commentPopover && popoverComment"
+        class="pfp-comment-backdrop"
+        @click="commentPopover = null"
       ></div>
       <div
         v-if="commentPopover && popoverComment"
         class="pfp-comment-pop"
-        :class="{ 'is-pinned': commentPopover.pinned }"
         :style="{ top: commentPopover.top + 'px', left: commentPopover.left + 'px' }"
         @mousedown.stop
-        @mouseenter="onPopoverEnter"
-        @mouseleave="onPopoverLeave"
       >
         <div class="pfp-pop-header">
           <span class="pfp-sidebar-card-line" v-if="commentLineLabel(popoverComment)">{{ commentLineLabel(popoverComment) }}</span>
@@ -340,6 +333,7 @@
             <button class="pfp-sidebar-card-remove" @click.stop="deleteFromPopover(popoverComment.id)" title="Delete">×</button>
           </div>
         </div>
+        <div class="pfp-sidebar-card-quote">"{{ truncate(popoverComment.selection, 120) }}"</div>
         <div v-if="popoverComment.images?.length" class="pfp-sidebar-card-images">
           <img v-for="img in popoverComment.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="card-image-thumb" @click.stop />
         </div>
@@ -774,82 +768,14 @@ const commentsForFile = computed(() =>
 
 // On-demand comment surfaces (replace the old fixed-width side column):
 //  - showCommentList: the drawer overlay listing every comment (header pill).
-//  - commentPopover: hover-preview / click-to-pin read popover on a highlight.
+//  - commentPopover: the read popover shown when a highlight/pin is clicked.
 const showCommentList = ref(false)
-const commentPopover = ref<{ id: string; top: number; left: number; pinned: boolean } | null>(null)
+const commentPopover = ref<{ id: string; top: number; left: number } | null>(null)
 const popoverComment = computed(() =>
   commentPopover.value
     ? commentsForFile.value.find(c => c.id === commentPopover.value!.id) ?? null
     : null,
 )
-
-let hoverCloseTimer: ReturnType<typeof setTimeout> | null = null
-
-function clearHoverClose(): void {
-  if (hoverCloseTimer) {
-    clearTimeout(hoverCloseTimer)
-    hoverCloseTimer = null
-  }
-}
-
-function closeCommentPopover(): void {
-  clearHoverClose()
-  commentPopover.value = null
-}
-
-function scheduleHoverClose(): void {
-  clearHoverClose()
-  hoverCloseTimer = setTimeout(() => {
-    hoverCloseTimer = null
-    if (commentPopover.value && !commentPopover.value.pinned) {
-      commentPopover.value = null
-    }
-  }, 160)
-}
-
-function canHoverPreview(): boolean {
-  return typeof window !== 'undefined' && window.matchMedia('(hover: hover)').matches
-}
-
-function highlightElFromEvent(e: MouseEvent): HTMLElement | null {
-  const target = e.target as HTMLElement | null
-  if (!target) return null
-  const hl = target.closest('.comment-highlight') as HTMLElement | null
-  if (hl?.dataset.commentId) return hl
-  const line = target.closest('.pre-line') as HTMLElement | null
-  if (line?.dataset.commentId) return line
-  return null
-}
-
-function onHighlightHover(e: MouseEvent): void {
-  if (!canHoverPreview()) return
-  const el = highlightElFromEvent(e)
-  if (!el) return
-  const id = el.dataset.commentId
-  if (!id) return
-  const related = e.relatedTarget as Node | null
-  if (related && el.contains(related)) return
-  showCommentPopover(id, el, false)
-}
-
-function onHighlightHoverOut(e: MouseEvent): void {
-  if (!commentPopover.value || commentPopover.value.pinned) return
-  const el = highlightElFromEvent(e)
-  if (!el) return
-  const related = e.relatedTarget as Node | null
-  if (related && el.contains(related)) return
-  scheduleHoverClose()
-}
-
-function onPopoverEnter(): void {
-  clearHoverClose()
-}
-
-function onPopoverLeave(): void {
-  if (commentPopover.value && !commentPopover.value.pinned) {
-    scheduleHoverClose()
-  }
-}
 
 function deleteFileComment(id: string): void {
   projectsStore.removeFileComment(cleanPath.value, id)
@@ -857,14 +783,14 @@ function deleteFileComment(id: string): void {
 }
 
 function deleteFromPopover(id: string): void {
-  closeCommentPopover()
+  commentPopover.value = null
   deleteFileComment(id)
 }
 
 // Edit lives in one place (the drawer). The read popover's Edit button opens
 // the drawer with that comment already in edit mode.
 function editFromPopover(c: { id: string; comment: string; images?: string[] }): void {
-  closeCommentPopover()
+  commentPopover.value = null
   showCommentList.value = true
   startEditComment(c)
   nextTick(() => scrollDrawerToCard(c.id))
@@ -1048,7 +974,7 @@ function onMdClick(e: MouseEvent): void {
   const highlight = target.closest('.comment-highlight') as HTMLElement | null
   if (!highlight) return
   const id = highlight.dataset.commentId
-  if (id) showCommentPopover(id, highlight, true)
+  if (id) showCommentPopover(id, highlight)
 }
 
 function onPreClick(e: MouseEvent): void {
@@ -1057,7 +983,7 @@ function onPreClick(e: MouseEvent): void {
   const line = target.closest('.pre-line') as HTMLElement | null
   if (!line) return
   const id = line.dataset.commentId
-  if (id) showCommentPopover(id, line, true)
+  if (id) showCommentPopover(id, line)
 }
 
 // Reapply highlights on content / comment changes.
@@ -1191,7 +1117,7 @@ function updateSelectionAnchorFromRange(range: Range): void {
 function onScrollReanchor(): void {
   // A read popover is pinned to a highlight's screen position, so scrolling
   // the document underneath it would leave it floating detached. Close it.
-  if (commentPopover.value) closeCommentPopover()
+  if (commentPopover.value) commentPopover.value = null
   if (commentDraft.value || !lastSelectionRange) return
   try {
     if (!lastSelectionRange.startContainer.isConnected) {
@@ -1246,7 +1172,7 @@ const editingCommentImages = ref<string[]>([])
 
 function openCommentForSelection(): void {
   if (!selectionAnchor.value || !lastSelectionText) return
-  closeCommentPopover()
+  commentPopover.value = null
   draftAnchor.value = selectionAnchor.value
   commentDraft.value = {
     selection: lastSelectionText,
@@ -1293,21 +1219,11 @@ function anchorFromElement(el: HTMLElement): Anchor | null {
   return { top, left }
 }
 
-function showCommentPopover(id: string, el: HTMLElement, pinned: boolean): void {
-  // Don't demote a pinned popover to hover-preview for the same comment.
-  if (
-    !pinned
-    && commentPopover.value?.pinned
-    && commentPopover.value.id === id
-  ) {
-    clearHoverClose()
-    return
-  }
+function showCommentPopover(id: string, el: HTMLElement): void {
   const anchor = anchorFromElement(el)
   if (!anchor) return
-  clearHoverClose()
-  if (pinned) cancelEditComment()
-  commentPopover.value = { id, top: anchor.top, left: anchor.left, pinned }
+  cancelEditComment()
+  commentPopover.value = { id, top: anchor.top, left: anchor.left }
 }
 
 function onCsvCellSelect(cell: CsvCellRef, rect: DOMRect): void {
@@ -1328,7 +1244,7 @@ function onCsvCellActivate(cell: CsvCellRef): void {
 
 function openCommentForCsvCell(): void {
   if (!selectionAnchor.value || !lastCsvCell) return
-  closeCommentPopover()
+  commentPopover.value = null
   draftAnchor.value = selectionAnchor.value
   commentDraft.value = {
     selection: lastCsvCell.value,
@@ -1491,7 +1407,6 @@ onMounted(() => {
   bodyEl.value?.addEventListener('scroll', onScrollReanchor, { passive: true })
 })
 onBeforeUnmount(() => {
-  clearHoverClose()
   if (typeof document !== 'undefined') {
     document.removeEventListener('selectionchange', onSelectionChange)
   }
@@ -1550,7 +1465,7 @@ watch(
     if (isStreaming) {
       cancelComment()
       editingCommentId.value = null
-      closeCommentPopover()
+      commentPopover.value = null
     } else {
       const justStoppedStreaming = wasStreaming && !isStreaming
       const justFlippedModified = !wasModified && isModified
@@ -1566,7 +1481,7 @@ watch(() => props.filePath, () => {
   selectionAnchor.value = null
   draftAnchor.value = null
   commentDraft.value = null
-  closeCommentPopover()
+  commentPopover.value = null
   showCommentList.value = false
   lastSelectionText = ''
   lastSelectionLines = null
@@ -1942,10 +1857,6 @@ watch(() => props.filePath, () => {
   z-index: 20;
   background: transparent;
 }
-.pfp-comment-backdrop--dim {
-  z-index: 31;
-  background: rgba(0, 0, 0, 0.32);
-}
 .pfp-comment-drawer {
   position: absolute;
   top: 0;
@@ -2212,16 +2123,12 @@ watch(() => props.filePath, () => {
   z-index: 32;
   width: 280px;
   max-width: calc(100% - 16px);
-  background: var(--bg);
-  border: 1px solid var(--border-strong);
-  border-left: 3px solid var(--accent, #60a5fa);
+  background: var(--bg2, rgba(20, 20, 40, 0.98));
+  border: 1px solid var(--border);
   border-radius: 8px;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.32);
   padding: 10px 12px;
   box-sizing: border-box;
-}
-.pfp-comment-pop.is-pinned {
-  z-index: 33;
 }
 .pfp-comment-compose { z-index: 33; }
 .pfp-pop-quote {
