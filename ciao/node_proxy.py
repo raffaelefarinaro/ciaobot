@@ -62,10 +62,28 @@ def get_proxy_target_url(request: Request) -> str | None:
     if node_mgr is None:
         return None
 
-    if node_mgr.get_role() != "standby":
+    target = node_mgr.get_active_peer_url()
+    if not target:
         return None
 
-    return node_mgr.get_active_peer_url()
+    # Self-proxy check: avoid proxying to ourselves
+    req_host = request.url.hostname or ""
+    req_port = request.url.port or 8443
+
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(target)
+        target_host = parsed.hostname or ""
+        target_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+        if (target_host in {"localhost", "127.0.0.1"} and req_host in {"localhost", "127.0.0.1"}) and target_port == req_port:
+            return None
+        if target_host == req_host and target_port == req_port:
+            return None
+    except Exception:
+        pass
+
+    return target
 
 
 async def proxy_http_request(request: Request, active_peer_url: str) -> Response:

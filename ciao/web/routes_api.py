@@ -3991,7 +3991,10 @@ async def create_loop(request: Request) -> JSONResponse:
     if not prompt:
         return JSONResponse({"error": "prompt is required"}, status_code=400)
     web_chat_id = (body.get("web_chat_id") or "").strip()
-    if not web_chat_id or pcm.get_chat(web_chat_id) is None:
+    if not web_chat_id:
+        return JSONResponse({"error": "web_chat_id must point to an existing chat"}, status_code=400)
+    chat = pcm.get_chat(web_chat_id)
+    if chat is None:
         return JSONResponse({"error": "web_chat_id must point to an existing chat"}, status_code=400)
     try:
         interval_minutes = int(body.get("interval_minutes", 10))
@@ -4006,6 +4009,8 @@ async def create_loop(request: Request) -> JSONResponse:
         interval_minutes=interval_minutes,
         title=(body.get("title") or "").strip(),
         autostart=bool(body.get("autostart")),
+        web_project_id=getattr(chat, "web_project_id", "") or "",
+        workspace=getattr(chat, "workspace", "") or "",
     )
     if body.get("start"):
         lm.start_loop(entry.loop_id)
@@ -4050,7 +4055,16 @@ async def loop_detail(request: Request) -> JSONResponse:
     if "running" in body:
         if body["running"]:
             chat = pcm.get_chat(entry.web_chat_id)
-            if chat is not None and chat.archived:
+            if chat is None:
+                project = pcm._resolve_loop_project(entry)
+                if project is not None:
+                    new_chat = pcm.create_chat(
+                        project.project_id,
+                        title=entry.title or f"Loop: {entry.prompt[:30]}",
+                    )
+                    entry.web_chat_id = new_chat.chat_id
+                    lm.replace(entry)
+            elif chat.archived:
                 # The target chat was archived (e.g. by an auto-archive
                 # policy) while the loop was stopped. Resuming into a dead
                 # chat would just auto-stop again on the next tick, so fork
