@@ -31,6 +31,15 @@ def get_default_role() -> str:
     return role if role in {"active", "standby"} else "active"
 
 
+def _normalize_peer_url(url: str) -> str:
+    cleaned = url.strip().rstrip("/")
+    if not cleaned:
+        return ""
+    if not (cleaned.startswith("http://") or cleaned.startswith("https://")):
+        cleaned = f"http://{cleaned}"
+    return cleaned
+
+
 class NodeStateManager:
     """Manages local node active/standby state and peer registrations in .runtime/node_state.json."""
 
@@ -91,7 +100,8 @@ class NodeStateManager:
             return None
         # Return peer marked as active if available, otherwise first peer
         active_peer = next((p for p in peers if p.get("is_active")), peers[0])
-        return str(active_peer.get("url", "")).strip().rstrip("/") or None
+        raw_url = str(active_peer.get("url", ""))
+        return _normalize_peer_url(raw_url) or None
 
     def get_status(self) -> dict[str, Any]:
         data = self._ensure_loaded()
@@ -134,7 +144,7 @@ class NodeStateManager:
         return self.set_role("active")
 
     def add_peer(self, url: str, peer_id: str = "") -> dict[str, Any]:
-        url_cleaned = url.strip().rstrip("/")
+        url_cleaned = _normalize_peer_url(url)
         if not url_cleaned:
             return self.get_status()
 
