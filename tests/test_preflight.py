@@ -121,3 +121,22 @@ async def test_preflight_blockers_and_warnings(tmp_path: Path) -> None:
     
     assert len(result["warnings"]) == 1
     assert "credentials.json" in result["warnings"][0]
+
+
+@pytest.mark.asyncio
+async def test_preflight_env_example_and_test_files_ignored(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    mgr = LocalSessionManager(workspace=repo, runtime_root=tmp_path / "rt")
+
+    # .env.example should not trigger secret blockers
+    _write(repo / ".env.example", "API_KEY=sample_placeholder\n")
+
+    # Nested test file with mock credential string should not trigger secret blockers
+    _write(
+        repo / "submodule" / "tests" / "test_mock.py",
+        'mock = {"type": "service_account", "private_key": "x", "client_email": "a@b.com"}\n',
+    )
+
+    result = await mgr.preflight()
+    assert result["blockers"] == []
+

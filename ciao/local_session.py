@@ -373,7 +373,9 @@ class LocalSessionManager:
                 categories["other"].append(rel_path)
 
             # Scan for secrets (skip test files to prevent mock test keys/certs from blocking commits)
-            if not rel_path.startswith("tests/"):
+            rel_parts = Path(rel_path).parts
+            is_test = "tests" in rel_parts or p.name.startswith("test_") or p.name.endswith("_test.py")
+            if not is_test:
                 file_blockers, file_warnings = self._scan_file_for_secrets(p)
                 blockers.extend(file_blockers)
                 warnings.extend(file_warnings)
@@ -392,8 +394,8 @@ class LocalSessionManager:
         warnings: list[str] = []
         name = p.name.lower()
 
-        # Block env-style files
-        if name.startswith(".env") or name.endswith(".env"):
+        # Block env-style files (except template/example files)
+        if (name.startswith(".env") or name.endswith(".env")) and not name.startswith((".env.example", ".env.sample", ".env.template", ".env.schema")):
             blockers.append(f"Blocked file '{p.name}': .env configuration files containing credentials must not be tracked.")
             return blockers, warnings
 
