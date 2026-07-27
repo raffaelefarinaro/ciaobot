@@ -11,6 +11,17 @@
       </template>
       <template #actions>
         <button
+          v-if="commentsForFile.length"
+          class="pfp-comments-toggle"
+          :class="{ active: showCommentList }"
+          @click="showCommentList = !showCommentList"
+          :title="`${commentsForFile.length} comment${commentsForFile.length === 1 ? '' : 's'}`"
+          aria-label="Comments"
+        >
+          <span class="pfp-comments-toggle-icon">💬</span>
+          <span class="pfp-comments-toggle-count">{{ commentsForFile.length }}</span>
+        </button>
+        <button
           v-if="kind === 'excalidraw'"
           class="btn-icon"
           :class="{ active: isEditingExcalidraw }"
@@ -207,53 +218,21 @@
         </template>
       </div>
 
-      <!-- Comment sidebar -->
-      <div v-if="commentsForFile.length || commentDraft" class="pfp-comment-sidebar">
+      <!-- On-demand comment drawer (toggled from the header pill). -->
+      <div v-if="showCommentList" class="pfp-comment-backdrop" @click="showCommentList = false"></div>
+      <div v-if="showCommentList" class="pfp-comment-drawer" @mousedown.stop>
         <div class="pfp-sidebar-header">
           <span class="pfp-sidebar-title">Comments</span>
-          <span class="pfp-sidebar-count">{{ commentsForFile.length + (commentDraft ? 1 : 0) }}</span>
+          <span class="pfp-sidebar-count">{{ commentsForFile.length }}</span>
+          <button class="pfp-drawer-close" @click="showCommentList = false" title="Close">×</button>
         </div>
-
-        <!-- Draft composer -->
-        <div v-if="commentDraft" class="pfp-sidebar-draft" @mousedown.stop>
-          <div class="pfp-sidebar-draft-header">
-            <span class="pfp-sidebar-draft-label">New comment</span>
-            <button class="pfp-sidebar-card-remove" @click="cancelComment" title="Cancel">×</button>
-          </div>
-          <div class="pfp-sidebar-card-quote">"{{ truncate(commentDraft.selection, 120) }}"</div>
-          <textarea
-            ref="commentInputEl"
-            v-model="commentDraft.text"
-            class="pfp-sidebar-draft-input"
-            placeholder="Add a comment…"
-            rows="3"
-            @keydown="onCommentKeydown"
-          ></textarea>
-          <div v-if="commentDraftImages.length" class="pfp-sidebar-draft-images">
-            <span v-for="(img, i) in commentDraftImages" :key="img" class="draft-image-preview">
-              <img :src="`/api/images/${img}`" :alt="img" class="draft-image-thumb" />
-              <button class="draft-image-remove" @click="removeDraftImage(i)" title="Remove">×</button>
-            </span>
-          </div>
-          <div class="pfp-sidebar-draft-actions">
-            <label class="image-btn-sm" title="Upload images">
-              <input type="file" accept="image/*" multiple hidden @change="handleDraftImageUpload" />
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-            </label>
-            <button class="pfp-btn-sm" @click="cancelComment" type="button">Cancel</button>
-            <button
-              class="pfp-btn-sm primary"
-              :disabled="!commentDraft.text.trim()"
-              @click="saveComment"
-              type="button"
-            >Add comment</button>
-          </div>
-        </div>
+        <div v-if="!commentsForFile.length" class="pfp-drawer-empty">No comments yet. Select text in the document to add one.</div>
 
         <div class="pfp-sidebar-list">
           <div
             v-for="c in commentsForFile"
             :key="c.id"
+            :data-card-id="c.id"
             class="pfp-sidebar-card"
             :class="{ 'is-editing': editingCommentId === c.id }"
             @click="editingCommentId !== c.id && scrollToHighlight(c.id)"
@@ -296,6 +275,69 @@
             </div>
           </div>
         </div>
+      </div>
+
+      <!-- Compose popover: anchored at the selection, where you type the note. -->
+      <div
+        v-if="commentDraft && draftAnchor"
+        class="pfp-comment-pop pfp-comment-compose"
+        :style="{ top: draftAnchor.top + 'px', left: draftAnchor.left + 'px' }"
+        @mousedown.stop
+      >
+        <div class="pfp-pop-quote">"{{ truncate(commentDraft.selection, 120) }}"</div>
+        <textarea
+          ref="commentInputEl"
+          v-model="commentDraft.text"
+          class="pfp-sidebar-draft-input"
+          placeholder="Add a comment…"
+          rows="3"
+          @keydown="onCommentKeydown"
+        ></textarea>
+        <div v-if="commentDraftImages.length" class="pfp-sidebar-draft-images">
+          <span v-for="(img, i) in commentDraftImages" :key="img" class="draft-image-preview">
+            <img :src="`/api/images/${img}`" :alt="img" class="draft-image-thumb" />
+            <button class="draft-image-remove" @click="removeDraftImage(i)" title="Remove">×</button>
+          </span>
+        </div>
+        <div class="pfp-sidebar-draft-actions">
+          <label class="image-btn-sm" title="Upload images">
+            <input type="file" accept="image/*" multiple hidden @change="handleDraftImageUpload" />
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+          </label>
+          <button class="pfp-btn-sm" @click="cancelComment" type="button">Cancel</button>
+          <button
+            class="pfp-btn-sm primary"
+            :disabled="!commentDraft.text.trim()"
+            @click="saveComment"
+            type="button"
+          >Add comment</button>
+        </div>
+      </div>
+
+      <!-- Read popover: click a highlight to see the note; edit opens the drawer. -->
+      <div
+        v-if="commentPopover && popoverComment"
+        class="pfp-comment-backdrop"
+        @click="commentPopover = null"
+      ></div>
+      <div
+        v-if="commentPopover && popoverComment"
+        class="pfp-comment-pop"
+        :style="{ top: commentPopover.top + 'px', left: commentPopover.left + 'px' }"
+        @mousedown.stop
+      >
+        <div class="pfp-pop-header">
+          <span class="pfp-sidebar-card-line" v-if="commentLineLabel(popoverComment)">{{ commentLineLabel(popoverComment) }}</span>
+          <div v-if="!projectsStore.isStreaming" class="pfp-sidebar-card-actions pfp-pop-actions">
+            <button class="pfp-sidebar-card-edit" @click.stop="editFromPopover(popoverComment)" title="Edit">✎</button>
+            <button class="pfp-sidebar-card-remove" @click.stop="deleteFromPopover(popoverComment.id)" title="Delete">×</button>
+          </div>
+        </div>
+        <div class="pfp-sidebar-card-quote">"{{ truncate(popoverComment.selection, 120) }}"</div>
+        <div v-if="popoverComment.images?.length" class="pfp-sidebar-card-images">
+          <img v-for="img in popoverComment.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="card-image-thumb" @click.stop />
+        </div>
+        <div class="pfp-sidebar-card-note">{{ popoverComment.comment }}</div>
       </div>
 
       <!-- Floating "Comment" button anchored near the active selection. -->
@@ -724,9 +766,43 @@ const commentsForFile = computed(() =>
   projectsStore.fileCommentsFor(cleanPath.value)
 )
 
+// On-demand comment surfaces (replace the old fixed-width side column):
+//  - showCommentList: the drawer overlay listing every comment (header pill).
+//  - commentPopover: the read popover shown when a highlight/pin is clicked.
+const showCommentList = ref(false)
+const commentPopover = ref<{ id: string; top: number; left: number } | null>(null)
+const popoverComment = computed(() =>
+  commentPopover.value
+    ? commentsForFile.value.find(c => c.id === commentPopover.value!.id) ?? null
+    : null,
+)
+
 function deleteFileComment(id: string): void {
   projectsStore.removeFileComment(cleanPath.value, id)
   nextTick(() => applyHighlights())
+}
+
+function deleteFromPopover(id: string): void {
+  commentPopover.value = null
+  deleteFileComment(id)
+}
+
+// Edit lives in one place (the drawer). The read popover's Edit button opens
+// the drawer with that comment already in edit mode.
+function editFromPopover(c: { id: string; comment: string; images?: string[] }): void {
+  commentPopover.value = null
+  showCommentList.value = true
+  startEditComment(c)
+  nextTick(() => scrollDrawerToCard(c.id))
+}
+
+function scrollDrawerToCard(id: string): void {
+  const list = rootEl.value?.querySelector('.pfp-comment-drawer .pfp-sidebar-list') as HTMLElement | null
+  const card = list?.querySelector(`[data-card-id="${id}"]`) as HTMLElement | null
+  if (!list || !card) return
+  const listRect = list.getBoundingClientRect()
+  const cardRect = card.getBoundingClientRect()
+  list.scrollTop += cardRect.top - listRect.top - 8
 }
 
 const lineCommentMap = computed(() => {
@@ -898,7 +974,7 @@ function onMdClick(e: MouseEvent): void {
   const highlight = target.closest('.comment-highlight') as HTMLElement | null
   if (!highlight) return
   const id = highlight.dataset.commentId
-  if (id) scrollToHighlight(id)
+  if (id) showCommentPopover(id, highlight)
 }
 
 function onPreClick(e: MouseEvent): void {
@@ -907,7 +983,7 @@ function onPreClick(e: MouseEvent): void {
   const line = target.closest('.pre-line') as HTMLElement | null
   if (!line) return
   const id = line.dataset.commentId
-  if (id) scrollToHighlight(id)
+  if (id) showCommentPopover(id, line)
 }
 
 // Reapply highlights on content / comment changes.
@@ -928,6 +1004,9 @@ type CommentDraft = {
   cell: CellRef
 }
 const selectionAnchor = ref<Anchor | null>(null)
+// Where the compose popover renders, captured from selectionAnchor when the
+// draft opens (so it stays put even after the selection is cleared).
+const draftAnchor = ref<Anchor | null>(null)
 const commentDraft = ref<CommentDraft | null>(null)
 let lastSelectionText = ''
 let lastSelectionLines: LineRange = null
@@ -1036,6 +1115,9 @@ function updateSelectionAnchorFromRange(range: Range): void {
 }
 
 function onScrollReanchor(): void {
+  // A read popover is pinned to a highlight's screen position, so scrolling
+  // the document underneath it would leave it floating detached. Close it.
+  if (commentPopover.value) commentPopover.value = null
   if (commentDraft.value || !lastSelectionRange) return
   try {
     if (!lastSelectionRange.startContainer.isConnected) {
@@ -1090,6 +1172,8 @@ const editingCommentImages = ref<string[]>([])
 
 function openCommentForSelection(): void {
   if (!selectionAnchor.value || !lastSelectionText) return
+  commentPopover.value = null
+  draftAnchor.value = selectionAnchor.value
   commentDraft.value = {
     selection: lastSelectionText,
     text: '',
@@ -1120,6 +1204,28 @@ function anchorFromCellRect(rect: DOMRect): Anchor | null {
   return { top, left }
 }
 
+// Anchor the read popover just below a clicked highlight/pin, clamped to the
+// panel so it never spills past the right or bottom edge.
+function anchorFromElement(el: HTMLElement): Anchor | null {
+  const main = mainEl.value
+  const body = bodyEl.value
+  if (!main || !body) return null
+  const rect = el.getBoundingClientRect()
+  const mainRect = main.getBoundingClientRect()
+  const popWidth = 280
+  const pad = 8
+  const top = Math.min(Math.max(rect.bottom - mainRect.top + 6, pad), Math.max(pad, main.clientHeight - 60))
+  const left = Math.min(Math.max(rect.left - mainRect.left, pad), Math.max(pad, main.clientWidth - popWidth - pad))
+  return { top, left }
+}
+
+function showCommentPopover(id: string, el: HTMLElement): void {
+  const anchor = anchorFromElement(el)
+  if (!anchor) return
+  cancelEditComment()
+  commentPopover.value = { id, top: anchor.top, left: anchor.left }
+}
+
 function onCsvCellSelect(cell: CsvCellRef, rect: DOMRect): void {
   if (commentDraft.value) return
   lastCsvCell = cell
@@ -1138,6 +1244,8 @@ function onCsvCellActivate(cell: CsvCellRef): void {
 
 function openCommentForCsvCell(): void {
   if (!selectionAnchor.value || !lastCsvCell) return
+  commentPopover.value = null
+  draftAnchor.value = selectionAnchor.value
   commentDraft.value = {
     selection: lastCsvCell.value,
     text: '',
@@ -1156,6 +1264,7 @@ function openCommentForCsvCell(): void {
 
 function cancelComment(): void {
   commentDraft.value = null
+  draftAnchor.value = null
   commentDraftImages.value = []
   lastSelectionText = ''
   lastSelectionLines = null
@@ -1179,6 +1288,7 @@ function saveComment(): void {
     images: commentDraftImages.value.length ? commentDraftImages.value : undefined,
   })
   commentDraft.value = null
+  draftAnchor.value = null
   commentDraftImages.value = []
   lastSelectionText = ''
   lastSelectionLines = null
@@ -1355,6 +1465,7 @@ watch(
     if (isStreaming) {
       cancelComment()
       editingCommentId.value = null
+      commentPopover.value = null
     } else {
       const justStoppedStreaming = wasStreaming && !isStreaming
       const justFlippedModified = !wasModified && isModified
@@ -1368,7 +1479,10 @@ watch(
 // Reset draft when the file changes.
 watch(() => props.filePath, () => {
   selectionAnchor.value = null
+  draftAnchor.value = null
   commentDraft.value = null
+  commentPopover.value = null
+  showCommentList.value = false
   lastSelectionText = ''
   lastSelectionLines = null
   lastSelectionRange = null
@@ -1734,14 +1848,45 @@ watch(() => props.filePath, () => {
 }
 
 /* ── Comment sidebar ──────────────────────────────────────────────── */
-.pfp-comment-sidebar {
-  width: 240px;
-  flex-shrink: 0;
+/* On-demand comment drawer: an overlay pinned to the right edge of the panel,
+   toggled from the header pill. It is out of flow, so the document body keeps
+   its full width. (The old fixed-width column used to crush the text.) */
+.pfp-comment-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  background: transparent;
+}
+.pfp-comment-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 21;
+  width: 300px;
+  max-width: 85%;
   border-left: 1px solid var(--border);
-  background: var(--bg2, rgba(255, 255, 255, 0.02));
+  background: var(--bg2, rgba(20, 20, 40, 0.98));
+  box-shadow: -6px 0 20px rgba(0, 0, 0, 0.28);
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+.pfp-drawer-close {
+  background: transparent;
+  border: none;
+  color: var(--fg2);
+  cursor: pointer;
+  font-size: calc(16px * var(--font-scale));
+  line-height: 1;
+  padding: 0 4px;
+  margin-left: 6px;
+}
+.pfp-drawer-close:hover { color: var(--fg); }
+.pfp-drawer-empty {
+  padding: 16px 14px;
+  color: var(--fg2);
+  font-size: var(--text-sm);
 }
 .pfp-sidebar-header {
   display: flex;
@@ -1951,6 +2096,59 @@ watch(() => props.filePath, () => {
 .pfp-comment-trigger:hover { filter: brightness(1.08); }
 .pfp-comment-trigger-icon { font-size: var(--text-sm); line-height: 1; }
 
+/* Header "💬 N" pill: toggles the comment drawer. */
+.pfp-comments-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg2);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  transition: background 120ms var(--ease), color 120ms var(--ease), border-color 120ms var(--ease);
+}
+.pfp-comments-toggle:hover { background: var(--bg3); color: var(--fg); }
+.pfp-comments-toggle.active { border-color: var(--accent, #60a5fa); color: var(--fg); }
+.pfp-comments-toggle-icon { font-size: var(--text-sm); line-height: 1; }
+.pfp-comments-toggle-count { font-variant-numeric: tabular-nums; }
+
+/* Floating comment popovers: compose (at the selection) and read (at a pin). */
+.pfp-comment-pop {
+  position: absolute;
+  z-index: 32;
+  width: 280px;
+  max-width: calc(100% - 16px);
+  background: var(--bg2, rgba(20, 20, 40, 0.98));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.32);
+  padding: 10px 12px;
+  box-sizing: border-box;
+}
+.pfp-comment-compose { z-index: 33; }
+.pfp-pop-quote {
+  color: var(--fg2);
+  font-style: italic;
+  margin-bottom: 8px;
+  word-break: break-word;
+  font-size: var(--text-sm);
+}
+.pfp-pop-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.pfp-pop-actions {
+  opacity: 1 !important;
+  margin-left: auto;
+}
+
 /* Sidebar draft composer: sits between header and the scrollable list. */
 .pfp-sidebar-draft {
   padding: 10px 12px 12px;
@@ -2045,6 +2243,26 @@ watch(() => props.filePath, () => {
 
 /* ── Mobile fallback ─────────────────────────────────────────────── */
 @media (max-width: 720px) {
-  .pfp-comment-sidebar { display: none; }
+  /* Drawer becomes a bottom sheet; comments stay reachable (they used to be
+     display:none here, i.e. unreachable). */
+  .pfp-comment-drawer {
+    left: 0;
+    top: auto;
+    width: auto;
+    max-width: none;
+    max-height: 60vh;
+    border-left: none;
+    border-top: 1px solid var(--border);
+    border-top-left-radius: 14px;
+    border-top-right-radius: 14px;
+    box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.32);
+  }
+  /* Popovers span the width so the note is readable on a phone. */
+  .pfp-comment-pop {
+    left: 8px !important;
+    right: 8px;
+    width: auto;
+    max-width: none;
+  }
 }
 </style>
