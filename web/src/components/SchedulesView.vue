@@ -20,7 +20,7 @@
 
     <!-- One-offs (delete after run) -->
     <section v-if="oneOffSchedules.length" class="schedule-section">
-      <h3 class="section-heading">One-offs <span class="section-hint">delete after run</span></h3>
+      <h3 class="section-heading">One-offs <span class="badge badge--success">Custom</span></h3>
       <div v-for="schedule in oneOffSchedules" :key="schedule.schedule_id" class="schedule-card">
         <div class="schedule-summary" @click="toggle(schedule.schedule_id)">
           <div class="summary-row-1">
@@ -102,7 +102,7 @@
 
     <!-- User routines -->
     <section v-if="userRoutines.length" class="schedule-section">
-      <h3 class="section-heading">Routines <span class="section-hint">recurring</span></h3>
+      <h3 class="section-heading">Routines <span class="badge badge--success">Custom</span></h3>
       <div v-for="schedule in userRoutines" :key="schedule.schedule_id" class="schedule-card">
         <!-- Summary (two rows) -->
         <div class="schedule-summary" @click="toggle(schedule.schedule_id)">
@@ -217,7 +217,7 @@
 
     <!-- System automations -->
     <section v-if="systemAutomations.length" class="schedule-section">
-      <h3 class="section-heading">System Automations <span class="section-hint">built-in</span></h3>
+      <h3 class="section-heading">System Automations <span class="badge badge--builtin">Built-in</span></h3>
       <div v-for="schedule in systemAutomations" :key="schedule.schedule_id" class="schedule-card">
         <!-- Summary (two rows) -->
         <div class="schedule-summary" @click="toggle(schedule.schedule_id)">

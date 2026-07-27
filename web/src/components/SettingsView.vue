@@ -1673,27 +1673,6 @@
             Ciaobot runs chats through Claude Code or Codex. Ciaobot-managed skills are synchronized into both CLIs where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed custom and GitHub/package skills.
           </p>
 
-          <!-- Auto-update GitHub skills -->
-          <div class="setting-row setting-row--inline setting-row--toggle">
-            <div class="routine-info">
-              <span class="routine-name">Auto-update GitHub skills</span>
-              <p class="hint hint--compact">
-                If enabled, Ciaobot checks GitHub for updates to locked package skills on boot.
-              </p>
-            </div>
-            <label class="settings-checkbox-hit">
-              <input
-                type="checkbox"
-                class="settings-checkbox"
-                v-model="autoUpdateGithubSkills"
-                :disabled="autoUpdateSaving"
-                aria-label="Auto-update GitHub skills"
-                @change="saveAutoUpdateGithubSkills"
-              />
-            </label>
-          </div>
-          <div v-if="autoUpdateResult" class="action-result">{{ autoUpdateResult }}</div>
-
           <!-- Add Github Skill Form -->
           <div
             v-if="showAddGithubSkill"
@@ -1734,9 +1713,6 @@
                     <div class="skill-title-row">
                       <span class="skill-chevron">{{ isSkillExpanded(skill.name) ? '&#9662;' : '&#9656;' }}</span>
                       <span class="skill-name">{{ skill.name }}</span>
-                      <span class="skill-badges">
-                        <span :class="assetOriginClass(skillOrigin(skill))">{{ assetOriginLabel(skillOrigin(skill)) }}</span>
-                      </span>
                     </div>
                     <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
                     <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
@@ -1746,6 +1722,27 @@
                 </div>
               </div>
             </div>
+
+            <!-- Auto-update GitHub skills -->
+            <div class="setting-row setting-row--inline setting-row--toggle">
+              <div class="routine-info">
+                <span class="routine-name">Auto-update GitHub skills</span>
+                <p class="hint hint--compact">
+                  If enabled, Ciaobot checks GitHub for updates to locked package skills on boot.
+                </p>
+              </div>
+              <label class="settings-checkbox-hit">
+                <input
+                  type="checkbox"
+                  class="settings-checkbox"
+                  v-model="autoUpdateGithubSkills"
+                  :disabled="autoUpdateSaving"
+                  aria-label="Auto-update GitHub skills"
+                  @change="saveAutoUpdateGithubSkills"
+                />
+              </label>
+            </div>
+            <div v-if="autoUpdateResult" class="action-result">{{ autoUpdateResult }}</div>
 
             <!-- GitHub Skills Section -->
             <div class="skill-section skill-section--spaced">
@@ -1772,9 +1769,6 @@
                         {{ skill.name }}
                       </a>
                       <span v-else class="skill-name">{{ skill.name }}</span>
-                      <span class="skill-badges">
-                        <span :class="assetOriginClass(skillOrigin(skill))">{{ assetOriginLabel(skillOrigin(skill)) }}</span>
-                      </span>
                     </div>
                     <p v-if="skill.description" class="skill-description">{{ skill.description }}</p>
                     <div v-if="isSkillExpanded(skill.name)" class="skill-detail">
@@ -1893,7 +1887,6 @@
               </p>
             </div>
             <div class="settings-card-header-actions">
-              <span class="badge badge--muted">{{ commandAssets.length || commands.length }} loaded</span>
               <button class="btn-small" @click="toggleAddCommand">
                 {{ showAddCommand ? 'Cancel' : '+ New command' }}
               </button>
@@ -2060,7 +2053,7 @@
               <div class="skill-main">
                 <div class="skill-title-row command-title-row">
                   <span class="skill-chevron">{{ isMcpExpanded('ciaobot-fastmcp') ? '&#9662;' : '&#9656;' }}</span>
-                  <span class="skill-name">ciaobot (FastMCP control plane)</span>
+                  <span class="skill-name">ciaobot</span>
                   <span class="skill-badges">
                     <span :class="assetOriginClass('builtin')">{{ assetOriginLabel('builtin') }}</span>
                     <span class="badge" :class="fastMcpEnabled ? 'badge--success' : 'badge--muted'">
@@ -2068,7 +2061,7 @@
                     </span>
                   </span>
                 </div>
-                <p class="skill-description">Shipped by default. Exposes 42 core Ciaobot tools (vault, chats, projects, schedules) via FastMCP server.</p>
+                <p class="skill-description">Vault, chats, projects, and schedules.</p>
                 <div v-if="isMcpExpanded('ciaobot-fastmcp')" class="skill-detail" @click.stop>
                   <p class="skill-meta"><span class="skill-meta-label">Endpoint</span><code>http://127.0.0.1:8443/mcp/</code></p>
                   <div class="setting-row setting-row--inline setting-row--toggle" style="margin-top: 8px;">
@@ -2154,19 +2147,20 @@
 
                     <div class="mcp-env-block">
                       <p class="skill-meta">
-                        <span class="skill-meta-label">Environment keys</span>
+                        <span class="skill-meta-label">Secrets for this server</span>
                       </p>
                       <p class="hint hint--compact">
-                        Add or update secrets used by this server. Values go into the workspace <code>.env</code>; the key name is wired into <code>.mcp.json</code> when needed.
+                        Paste the token into the field below. It is saved to the workspace <code>.env</code> (not into <code>.mcp.json</code>).
                       </p>
                       <div
-                        v-for="envKey in (srv.env_keys || [])"
+                        v-for="envKey in mcpEnvKeysFor(srv)"
                         :key="`${srv.name}:${envKey.key}`"
                         class="credential-row mcp-env-row"
                       >
                         <div class="setting-row-main setting-row-main--inline">
                           <div class="routine-info">
                             <span class="routine-name">{{ envKey.key }}</span>
+                            <p v-if="envKey.hint" class="hint hint--compact">{{ envKey.hint }}</p>
                           </div>
                           <span class="badge" :class="envKey.configured ? 'badge--success' : 'badge--error'">
                             {{ envKey.configured ? 'Configured' : 'Missing' }}
@@ -2176,44 +2170,22 @@
                           type="password"
                           class="routine-input"
                           :value="mcpEnvInputs[envKey.key] || ''"
-                          :placeholder="envKey.configured ? '•••••••••••• (leave blank to keep)' : `Enter ${envKey.key}`"
+                          :placeholder="envKey.configured ? '•••••••••••• (leave blank to keep)' : `Paste ${envKey.key}`"
                           :disabled="mcpEnvSaving"
                           :aria-label="envKey.key"
                           @input="mcpEnvInputs[envKey.key] = ($event.target as HTMLInputElement).value"
                         />
                       </div>
-                      <div class="settings-field-grid mcp-env-add-grid">
-                        <label class="settings-field">
-                          <span class="ws-label">New key</span>
-                          <input
-                            class="routine-input"
-                            :value="mcpNewEnvKey[srv.name] || ''"
-                            placeholder="e.g. N8N_MCP_TOKEN"
-                            :disabled="mcpEnvSaving"
-                            aria-label="New MCP env key name"
-                            @input="mcpNewEnvKey[srv.name] = ($event.target as HTMLInputElement).value"
-                          />
-                        </label>
-                        <label class="settings-field">
-                          <span class="ws-label">Value</span>
-                          <input
-                            type="password"
-                            class="routine-input"
-                            :value="mcpNewEnvValue[srv.name] || ''"
-                            placeholder="secret value"
-                            :disabled="mcpEnvSaving"
-                            aria-label="New MCP env key value"
-                            @input="mcpNewEnvValue[srv.name] = ($event.target as HTMLInputElement).value"
-                          />
-                        </label>
-                      </div>
+                      <p v-if="!mcpEnvKeysFor(srv).length" class="hint hint--compact">
+                        No secrets referenced by this server's <code>.mcp.json</code> config.
+                      </p>
                       <div class="action-row settings-actions">
                         <button
                           class="btn-small"
-                          :disabled="mcpEnvSaving || (!hasMcpEnvEdits(srv) && !hasNewMcpEnv(srv.name))"
+                          :disabled="mcpEnvSaving || !hasMcpEnvEdits(srv)"
                           @click="saveMcpEnvKeys(srv)"
                         >
-                          {{ mcpEnvSaving ? 'Saving...' : 'Save .env keys' }}
+                          {{ mcpEnvSaving ? 'Saving...' : 'Save secrets' }}
                         </button>
                         <button
                           class="btn-small"
@@ -2305,6 +2277,7 @@ import type {
   McpUsage,
   McpToolUsage,
   McpProjectServer,
+  McpEnvKey,
   PromptAsset,
   ProviderConfigSettings,
   RoutineSettings,
@@ -2360,8 +2333,6 @@ const mcpEnvSaving = ref(false)
 const mcpEnvResult = ref('')
 const mcpEnvError = ref(false)
 const mcpEnvResultServer = ref('')
-const mcpNewEnvKey = ref<Record<string, string>>({})
-const mcpNewEnvValue = ref<Record<string, string>>({})
 const mcpEditDrafts = ref<Record<string, { transport: string; url: string; command: string; argsText: string }>>({})
 const mcpServerSaving = ref('')
 const mcpServerResult = ref('')
@@ -2426,11 +2397,41 @@ function toggleMcp(name: string) {
 }
 
 function hasMcpEnvEdits(srv: McpProjectServer) {
-  return (srv.env_keys || []).some((entry) => (mcpEnvInputs.value[entry.key] || '').length > 0)
+  return mcpEnvKeysFor(srv).some((entry) => (mcpEnvInputs.value[entry.key] || '').length > 0)
 }
 
-function hasNewMcpEnv(name: string) {
-  return !!(mcpNewEnvKey.value[name] || '').trim() && !!(mcpNewEnvValue.value[name] || '').trim()
+/** Well-known secrets when the status API has not returned env_keys yet. */
+const MCP_DEFAULT_ENV_KEYS: Record<string, { key: string; hint: string }> = {
+  n8n_mcp: {
+    key: 'N8N_MCP_TOKEN',
+    hint: 'Bearer token for your n8n MCP HTTP endpoint.',
+  },
+  notion: {
+    key: 'NOTION_TOKEN',
+    hint: 'Notion internal integration secret.',
+  },
+}
+
+type McpEnvKeyView = McpEnvKey & { hint?: string }
+
+function mcpEnvKeysFor(srv: McpProjectServer): McpEnvKeyView[] {
+  if (srv.env_keys?.length) {
+    return srv.env_keys.map((entry) => {
+      const fallback = MCP_DEFAULT_ENV_KEYS[srv.name]
+      return {
+        ...entry,
+        hint: fallback?.key === entry.key ? fallback.hint : undefined,
+      }
+    })
+  }
+  const fallback = MCP_DEFAULT_ENV_KEYS[srv.name]
+  if (!fallback) return []
+  return [{
+    key: fallback.key,
+    configured: false,
+    source: 'suggested',
+    hint: fallback.hint,
+  }]
 }
 
 function splitMcpArgs(text: string): string[] {
@@ -2439,16 +2440,11 @@ function splitMcpArgs(text: string): string[] {
 
 async function saveMcpEnvKeys(srv: McpProjectServer) {
   const keys: Record<string, string> = {}
-  for (const entry of srv.env_keys || []) {
+  for (const entry of mcpEnvKeysFor(srv)) {
     const value = mcpEnvInputs.value[entry.key]
     if (value != null && value.length > 0) {
       keys[entry.key] = value
     }
-  }
-  const newKey = (mcpNewEnvKey.value[srv.name] || '').trim()
-  const newValue = (mcpNewEnvValue.value[srv.name] || '').trim()
-  if (newKey && newValue) {
-    keys[newKey] = newValue
   }
   if (!Object.keys(keys).length) return
   mcpEnvSaving.value = true
@@ -2461,11 +2457,7 @@ async function saveMcpEnvKeys(srv: McpProjectServer) {
     for (const key of Object.keys(keys)) {
       mcpEnvInputs.value[key] = ''
     }
-    mcpNewEnvKey.value[srv.name] = ''
-    mcpNewEnvValue.value[srv.name] = ''
     const updated = res.project_servers?.find((s) => s.name === srv.name)
-    if (updated) ensureMcpEditDraft(updated)
-    // Force refresh draft from server after save in case transport fields changed.
     if (updated) {
       mcpEditDrafts.value[srv.name] = {
         transport: updated.transport || (updated.url ? 'http' : 'stdio'),
@@ -2475,13 +2467,13 @@ async function saveMcpEnvKeys(srv: McpProjectServer) {
       }
     }
     mcpEnvResult.value = 'Saved to workspace .env. New chats will pick up the keys.'
-    notifySaved(`Saved MCP env keys for ${srv.name}.`)
+    notifySaved(`Saved MCP secrets for ${srv.name}.`)
     setTimeout(() => {
       if (mcpEnvResultServer.value === srv.name) mcpEnvResult.value = ''
     }, 3000)
   } catch (e: any) {
     mcpEnvError.value = true
-    mcpEnvResult.value = e?.message || 'Failed to save MCP env keys.'
+    mcpEnvResult.value = e?.message || 'Failed to save MCP secrets.'
   } finally {
     mcpEnvSaving.value = false
   }
@@ -2641,8 +2633,6 @@ async function deleteCustomMcpServer(name: string) {
     delete mcpEditDrafts.value[name]
     delete mcpServerTools.value[name]
     delete mcpToolsError.value[name]
-    delete mcpNewEnvKey.value[name]
-    delete mcpNewEnvValue.value[name]
     notifySaved(`Removed MCP server ${name}.`)
   } catch (e: any) {
     alert(e?.message || `Failed to delete MCP server ${name}`)
@@ -3679,12 +3669,11 @@ const githubSkills = computed(() => {
   return skillsInventory.value?.skills.filter(s => s.label === 'github') || []
 })
 
-/** Shared origin labels: Ciaobot-shipped vs user-authored (plus package/installed). */
-type AssetOrigin = 'builtin' | 'custom' | 'package' | 'installed' | 'global'
+/** Shared origin labels: Ciaobot-shipped vs user-authored. */
+type AssetOrigin = 'builtin' | 'custom' | 'installed' | 'global'
 
 function assetOriginLabel(origin: AssetOrigin): string {
   if (origin === 'custom') return 'Custom'
-  if (origin === 'package') return 'Package'
   if (origin === 'installed') return 'Installed'
   if (origin === 'global') return 'Global'
   return 'Built-in'
@@ -3692,13 +3681,8 @@ function assetOriginLabel(origin: AssetOrigin): string {
 
 function assetOriginClass(origin: AssetOrigin): string {
   if (origin === 'custom') return 'badge badge--success command-source'
-  if (origin === 'package') return 'badge badge--accent2 command-source'
   if (origin === 'builtin') return 'badge badge--builtin command-source'
   return 'badge badge--muted command-source'
-}
-
-function skillOrigin(skill: { label: string }): AssetOrigin {
-  return skill.label === 'custom' ? 'custom' : 'package'
 }
 
 function commandOrigin(command: { editable?: boolean; scope?: string }): AssetOrigin {
@@ -7373,8 +7357,7 @@ async function doPackageUpdate() {
   margin-top: 8px;
 }
 
-.mcp-edit-grid,
-.mcp-env-add-grid {
+.mcp-edit-grid {
   margin-top: 8px;
 }
 

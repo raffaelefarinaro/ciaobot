@@ -274,21 +274,14 @@
           class="settings-nav-item"
           :class="{ active: route.path === '/settings/context' }"
         >
-          agent context
+          context
         </router-link>
         <router-link
           to="/settings/skills"
           class="settings-nav-item"
           :class="{ active: route.path === '/settings/skills' }"
         >
-          agent assets
-        </router-link>
-        <router-link
-          to="/settings/usage"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/usage' }"
-        >
-          tool usage
+          assets
         </router-link>
         <router-link
           to="/settings/automations"

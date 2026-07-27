@@ -96,8 +96,13 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/rate-limits` | Read Claude rate-limit snapshots |
 | GET | `/api/models` | List configured models |
 | GET, PATCH | `/api/status` | Read or update status |
-| GET | `/api/mcp/status` | Embedded Ciaobot MCP readiness, tool catalog, and active-session counts (no credentials) |
+| GET | `/api/mcp/status` | Embedded Ciaobot MCP readiness, tool catalog, project MCP servers (env-key status + observed tools), and active-session counts (no credentials) |
 | GET | `/api/mcp/usage` | Embedded Ciaobot MCP per-tool call/error counters (no credentials) |
+| POST | `/api/mcp/env-keys` | Save project-MCP env secrets into the workspace `.env` (optionally bind new keys into a server via `server`); values never returned |
+| POST | `/api/mcp/servers` | Create a project MCP server in `.mcp.json` |
+| PATCH | `/api/mcp/servers/{name}` | Update a project MCP server connection (and optional env keys) |
+| DELETE | `/api/mcp/servers/{name}` | Remove a project MCP server from `.mcp.json` |
+| GET | `/api/mcp/servers/{name}/tools` | Lazy tool discovery for one project MCP server (HTTP `tools/list` probe, or observed telemetry for stdio) |
 | GET | `/api/startup-status` | Read startup phase progress |
 | GET | `/api/active-chats` | List chat IDs with in-flight work (streaming or background subagents); drives the macOS menu bar spinner |
 | GET | `/api/setup-status` | Read first-run setup checks and provider readiness |

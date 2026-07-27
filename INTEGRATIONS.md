@@ -151,7 +151,9 @@ Workspace-specific integrations can still be set in `.env`, but the public `.env
 
 **OpenAI:** `OPENAI_API_KEY` (used by voice transcription and other OpenAI-integrated features).
 
-**n8n MCP:** `N8N_MCP_TOKEN` (bearer token for the self-hosted `n8n_mcp` HTTP server in `.mcp.json`). Lives in `.env` only, value redacted.
+**n8n MCP:** `N8N_MCP_TOKEN` (bearer token for the self-hosted `n8n_mcp` HTTP server in `.mcp.json`). Lives in `.env` only, value redacted. Settings → Skills → MCP servers shows the key status and can write it into `.env`.
+
+**Notion MCP:** `NOTION_TOKEN` (internal integration secret from https://www.notion.so/profile/integrations, used by the official `@notionhq/notion-mcp-server` stdio MCP registered in `.mcp.json`). Lives in `.env` only, value redacted. Settings → Skills → MCP servers shows the key status and can write it into `.env`. Workspace-scoped: add `mcp__notion` to a workspace's `disallowed_tools` to keep it out of that workspace — for example, to make Notion personal-only, set the **work** workspace's denylist to the harness defaults plus `mcp__notion`. Tools surface as `mcp__notion__*`.
 
 **OpenRouter:** `OPENROUTER_API_KEY` (optional). When set, OpenRouter is available as a model backend: the Anthropic-compatible endpoint (`https://openrouter.ai/api`) is reached via `ANTHROPIC_BASE_URL` env injection, so chats and one-shot automations can route `owner/model` ids (e.g. `anthropic/claude-haiku-4.5`) through OpenRouter. The picker exposes the per-tier alias defaults plus dynamically discovered anthropic-family models. The `adversarial_review` MCP tool (`ciao.critique`) defaults to an OpenRouter panel when this key is set.
 

@@ -630,6 +630,7 @@ def list_subagents(config: Any) -> list[AgentAsset]:
     root = Path(config.workspace_root)
     vault_root = Path(config.vault_root)
     items: list[AgentAsset] = []
+    from ciao.sync_skills import _is_managed_stock_agent
 
     for path in _iter_markdown_files(root / "subagents"):
         items.append(_agent_asset_from_file(
@@ -638,8 +639,14 @@ def list_subagents(config: Any) -> list[AgentAsset]:
     for path in _iter_markdown_files(root / ".claude" / "agents"):
         if (root / "subagents" / path.name).exists():
             continue
+        stock = _is_managed_stock_agent(path)
         items.append(_agent_asset_from_file(
-            path, root=root, source="project", scope="installed", editable=False, vault_root=vault_root,
+            path,
+            root=root,
+            source="ciaobot" if stock else "project",
+            scope="built-in" if stock else "installed",
+            editable=False,
+            vault_root=vault_root,
         ))
     for path in _iter_markdown_files(Path.home() / ".claude" / "agents"):
         items.append(_agent_asset_from_file(

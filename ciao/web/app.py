@@ -13,7 +13,14 @@ from starlette.responses import FileResponse, Response
 
 from ciao.node_proxy import StandbyProxyMiddleware
 from ciao.package_version import make_cached_package_status
-from ciao.mcp_server import mcp_status_endpoint, mcp_usage_endpoint
+from ciao.mcp_server import (
+    mcp_env_keys_endpoint,
+    mcp_server_item_endpoint,
+    mcp_server_tools_endpoint,
+    mcp_servers_collection_endpoint,
+    mcp_status_endpoint,
+    mcp_usage_endpoint,
+)
 from ciao.web.auth import AuthMiddleware, make_serializer
 from ciao.web.agent_assets import (
     agent_assets_endpoint,
@@ -335,6 +342,10 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/stats", cli_stats, methods=["GET"]),
         Route("/api/mcp/status", mcp_status_endpoint, methods=["GET"]),
         Route("/api/mcp/usage", mcp_usage_endpoint, methods=["GET"]),
+        Route("/api/mcp/env-keys", mcp_env_keys_endpoint, methods=["POST"]),
+        Route("/api/mcp/servers", mcp_servers_collection_endpoint, methods=["POST"]),
+        Route("/api/mcp/servers/{name}", mcp_server_item_endpoint, methods=["PATCH", "DELETE"]),
+        Route("/api/mcp/servers/{name}/tools", mcp_server_tools_endpoint, methods=["GET"]),
         # Push notifications
         Route("/api/push/public-key", push_public_key, methods=["GET"]),
         Route("/api/push/subscribe", push_subscribe, methods=["POST"]),

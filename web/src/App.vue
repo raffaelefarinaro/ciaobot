@@ -710,6 +710,16 @@ input:focus, textarea:focus, select:focus {
   color: var(--fg2);
   border: 1px solid var(--border);
 }
+.badge--builtin {
+  background: color-mix(in srgb, var(--accent2) 14%, var(--bg3));
+  color: var(--fg2);
+  border: 1px solid color-mix(in srgb, var(--accent2) 40%, var(--border));
+}
+.theme-light .badge--builtin {
+  background: color-mix(in srgb, var(--light-secondary, #512da8) 10%, var(--light-surface-interactive, #e6e8f4));
+  color: var(--light-text-muted, #5f607d);
+  border-color: color-mix(in srgb, var(--light-secondary, #512da8) 28%, var(--light-border, #d2d4e3));
+}
 .badge--success { background: rgba(76, 175, 80, 0.15); color: var(--success); }
 .badge--warn { background: rgba(255, 152, 0, 0.15); color: var(--warning); }
 .badge--error { background: rgba(244, 67, 54, 0.15); color: var(--error); }

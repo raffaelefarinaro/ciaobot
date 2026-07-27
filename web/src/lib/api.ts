@@ -39,8 +39,21 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       { status: 401, payload },
     )
   }
+  const contentType = (res.headers.get('content-type') || '').toLowerCase()
+  const raw = await res.text()
+  const looksLikeHtml = raw.trimStart().startsWith('<!') || raw.trimStart().startsWith('<html')
+  const looksLikeJson = contentType.includes('application/json') || raw.trimStart().startsWith('{') || raw.trimStart().startsWith('[')
   if (!res.ok) {
-    const err: any = await res.json().catch(() => ({}))
+    let err: any = {}
+    if (looksLikeJson) {
+      try { err = JSON.parse(raw) } catch { err = {} }
+    }
+    if (looksLikeHtml || (!looksLikeJson && !err?.error)) {
+      throw new ApiError(
+        `API route ${path} is not available on the running server yet. Use Settings → Deploy, then restart Ciaobot.`,
+        { status: res.status, payload: err },
+      )
+    }
     const stepDetail = Array.isArray(err?.steps)
       ? err.steps.filter((s: any) => s && !s.ok).map((s: any) =>
           s.output ? `${s.step}: ${s.output}` : s.step).join('; ')
@@ -48,7 +61,17 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     const msg = err?.error || stepDetail || res.statusText || `HTTP ${res.status}`
     throw new ApiError(msg, { status: res.status, payload: err })
   }
-  return res.json()
+  if (looksLikeHtml || !looksLikeJson) {
+    throw new ApiError(
+      `API route ${path} is not available on the running server yet. Use Settings → Deploy, then restart Ciaobot.`,
+      { status: res.status },
+    )
+  }
+  try {
+    return JSON.parse(raw) as T
+  } catch {
+    throw new ApiError(`Invalid JSON from ${path}`, { status: res.status })
+  }
 }
 
 export const api = {

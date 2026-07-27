@@ -517,9 +517,9 @@ describe('component mount smoke', () => {
       'Durable notes from whichever workspace the chat uses. This file is not inserted automatically.',
     ])
     expect(wrapper.findAll('.memory-source-badges').map((row) => row.text())).toEqual([
-      'session startautomatically generatednot editable',
-      'session startautomatically generatednot editable',
-      'on demandautomatically generatednot editable',
+      'Built-insession start',
+      'Built-insession start',
+      'Built-inon demand',
     ])
     expect(wrapper.findAll('.memory-source-file .inline-path-button').map((row) => row.text())).toEqual([
       '/tmp/.ciao/memory.md',
@@ -547,7 +547,7 @@ describe('component mount smoke', () => {
     const instructionRow = wrapper.findAll('.skill-list > .instruction-row')
       .find((row) => row.text().includes('CLI instructions (CLAUDE.md · AGENTS.md)'))
     expect(instructionRow).toBeTruthy()
-    expect(instructionRow!.text()).toContain('editable')
+    expect(instructionRow!.text()).toContain('Custom')
     expect(instructionRow!.text()).toContain('CLAUDE.md and AGENTS.md are linked')
     await instructionRow!.trigger('click')
     await nextTick()
@@ -560,7 +560,7 @@ describe('component mount smoke', () => {
     const systemRow = wrapper.findAll('.skill-list > .instruction-row')
       .find((row) => row.text().includes('Ciaobot system instructions'))
     expect(systemRow).toBeTruthy()
-    expect(systemRow!.text()).toContain('not editable')
+    expect(systemRow!.text()).toContain('Built-in')
     await systemRow!.trigger('click')
     await nextTick()
     expect(systemRow!.find('.inline-path-button').text()).toBe('ciao/system_prompt.md')

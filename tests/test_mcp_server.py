@@ -776,3 +776,112 @@ def test_project_and_chat_resolution_defaults() -> None:
     assert pf_res["data"] == ["file1.md"]
 
 
+
+
+def test_collect_env_refs_from_headers_and_env_block() -> None:
+    from ciao.mcp_server import _collect_env_refs
+
+    refs = _collect_env_refs(
+        {
+            "url": "https://example.test/mcp",
+            "headers": {"Authorization": "Bearer ${N8N_MCP_TOKEN}"},
+            "env": {"NOTION_TOKEN": "${NOTION_TOKEN}"},
+        }
+    )
+    by_key = dict(refs)
+    assert by_key["N8N_MCP_TOKEN"] == "headers"
+    assert by_key["NOTION_TOKEN"] == "env"
+
+
+def test_discover_project_servers_reports_env_and_observed_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runtime = workspace / ".runtime"
+    runtime.mkdir()
+    (workspace / ".env").write_text("N8N_MCP_TOKEN=secret-token\n", encoding="utf-8")
+    (workspace / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "n8n_mcp": {
+                        "type": "http",
+                        "url": "https://example.test/mcp-server/http",
+                        "headers": {"Authorization": "Bearer ${N8N_MCP_TOKEN}"},
+                    },
+                    "notion": {
+                        "command": "npx",
+                        "args": ["-y", "@notionhq/notion-mcp-server"],
+                        "env": {"NOTION_TOKEN": "${NOTION_TOKEN}"},
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (runtime / "agent_tool_calls.jsonl").write_text(
+        json.dumps({"tool": "mcp__notion__API-retrieve-a-page"}) + "\n"
+        + json.dumps({"tool": "Bash"}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("N8N_MCP_TOKEN", raising=False)
+    monkeypatch.delenv("NOTION_TOKEN", raising=False)
+
+    config = SimpleNamespace(
+        state_path=runtime / "state.json",
+        pwa_port=18443,
+        mcp_enabled=True,
+        workspace_root=workspace,
+    )
+    service = CiaoMcpService(config)
+    payload = service.status_for_api()
+    by_name = {row["name"]: row for row in payload["project_servers"]}
+
+    assert payload["env_path"] == str(workspace / ".env")
+    assert "_meta" not in by_name["n8n_mcp"]
+    assert by_name["n8n_mcp"]["ready"] is True
+    assert by_name["n8n_mcp"]["env_keys"][0]["key"] == "N8N_MCP_TOKEN"
+    assert by_name["n8n_mcp"]["env_keys"][0]["configured"] is True
+    assert by_name["notion"]["ready"] is False
+    assert by_name["notion"]["command"] == "npx"
+    assert by_name["notion"]["args"] == ["-y", "@notionhq/notion-mcp-server"]
+    assert by_name["notion"]["tools"] == ["mcp__notion__API-retrieve-a-page"]
+    assert by_name["notion"]["tools_source"] == "observed"
+    assert service.project_server_env_keys() == {"N8N_MCP_TOKEN", "NOTION_TOKEN"}
+
+
+def test_probe_stdio_server_returns_observed_tools_only(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runtime = workspace / ".runtime"
+    runtime.mkdir()
+    (workspace / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "notion": {
+                        "command": "npx",
+                        "args": ["-y", "@notionhq/notion-mcp-server"],
+                        "env": {"NOTION_TOKEN": "${NOTION_TOKEN}"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (runtime / "agent_tool_calls.jsonl").write_text(
+        json.dumps({"tool": "mcp__notion__search"}) + "\n",
+        encoding="utf-8",
+    )
+    config = SimpleNamespace(
+        state_path=runtime / "state.json",
+        pwa_port=18443,
+        mcp_enabled=True,
+        workspace_root=workspace,
+    )
+    service = CiaoMcpService(config)
+    result = service.probe_project_server_tools("notion")
+    assert result["ok"] is True
+    assert result["tools"] == ["mcp__notion__search"]
+    assert "Stdio" in result["tools_note"]

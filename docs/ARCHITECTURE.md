@@ -39,7 +39,7 @@ ciao/                          Python backend (Starlette).
   models.py                    Shared data models (ChatContext, AgentRequest, etc.).
   provider_service.py          Provider request builder and execution wrapper.
   control_plane.py             Provider-neutral, scope-enforcing application operations shared by MCP and PWA-owned managers.
-  mcp_server.py                Embedded authenticated Streamable HTTP MCP adapter and scoped token registry.
+  mcp_server.py                Embedded authenticated Streamable HTTP MCP adapter, scoped token registry, and project `.mcp.json` discovery (env-key status + observed/probed tools for Settings).
   control_surfaces.py          Persist/read promoted per-provider legacy-vs-MCP decisions for Auto chats.
   control_surface_benchmark.py Paired live 12-scenario evaluator (latency, correctness, tools, tokens) and guarded winner promotion.
   signals.py                   Restart / deploy signals.
