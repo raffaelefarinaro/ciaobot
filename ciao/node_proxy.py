@@ -62,6 +62,9 @@ def get_proxy_target_url(request: Request) -> str | None:
     if node_mgr is None:
         return None
 
+    if node_mgr.get_role() != "standby":
+        return None
+
     target = node_mgr.get_active_peer_url()
     if not target:
         return None
