@@ -10,12 +10,15 @@ Shape (sequential, because :mod:`ciao.dag` has no fan-out):
     read_baseline ──always──▶ installed ──always──▶ research ──ok──▶ write_baseline
                                                         └─fail─▶ (stop; baseline untouched)
 
-Release research stays parallel by living *inside* one ``subagent`` node: the
-spawned ``claude -p`` process fans out its own Agent calls, one per source,
-exactly like the old prompt. PyPI/npm remain authoritative for installable
-package versions. The DAG isolates the deterministic
-edges around it (load the baseline, persist the merged baseline) so a research
-hiccup can't corrupt ``.runtime/dependency_baseline.json``.
+Release research is done *before* the model call: Python fetches the latest
+registry versions and GitHub release notes for a focused list of curated tools,
+then asks the ``subagent`` node to synthesize the structured baseline update.
+This avoids asking the bundled ``claude -p`` process to browse the web or spawn
+its own Agent calls, which is unreliable in headless/Ollama-routed environments.
+PyPI/npm remain authoritative for installable package versions. The DAG
+isolates the deterministic edges around it (load the baseline, persist the
+merged baseline) so a research hiccup can't corrupt
+``.runtime/dependency_baseline.json``.
 
 Trigger: ``python3 -m ciao.dependency_review`` (the schedule prompt runs this,
 mirroring how ``sched-skillevo`` invokes ``ciao.skill_evolution``).
@@ -402,6 +405,236 @@ def get_latest_npm_version(package_name: str) -> str | None:
     return None
 
 
+def _repo_owner_repo(releases_url: str) -> tuple[str, str] | None:
+    """Extract (owner, repo) from a GitHub releases page URL."""
+    match = re.search(r"github\.com/([^/]+)/([^/]+)/releases", releases_url)
+    if not match:
+        return None
+    owner, repo = match.group(1), match.group(2)
+    # Strip common suffixes like .git
+    repo = repo.removesuffix(".git")
+    return owner, repo
+
+
+def _github_latest_release(releases_url: str) -> dict[str, Any] | None:
+    """Fetch the latest GitHub release for a releases page URL.
+
+    Returns a dict with ``tag_name``, ``version`` (without leading v),
+    ``published_at`` (YYYY-MM-DD), ``body`` (release notes), and ``html_url``,
+    or ``None`` on any failure. Uses anonymous API requests, so callers should
+    avoid firing this for huge unbounded lists.
+    """
+    owner_repo = _repo_owner_repo(releases_url)
+    if not owner_repo:
+        return None
+    owner, repo = owner_repo
+    try:
+        r = httpx.get(
+            f"https://api.github.com/repos/{owner}/{repo}/releases/latest",
+            timeout=10.0,
+            headers={"Accept": "application/vnd.github.v3+json"},
+        )
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        tag = data.get("tag_name", "")
+        version = tag.lstrip("vV")
+        published = data.get("published_at", "")[:10]
+        return {
+            "tag_name": tag,
+            "version": version,
+            "published_at": published,
+            "body": data.get("body", "") or "",
+            "html_url": data.get("html_url", releases_url),
+        }
+    except Exception:
+        return None
+
+
+def _fetch_release_data(tools: list[dict[str, str]]) -> dict[str, dict[str, Any]]:
+    """Fetch latest release info for a focused list of tools.
+
+    Returns a dict keyed by tool key. Each value contains ``version``,
+    ``published_at``, ``body`` and ``html_url`` when available. Failures are
+    logged and omitted so the caller can fall back to baseline values.
+    """
+    data: dict[str, dict[str, Any]] = {}
+    seen_repos: dict[str, dict[str, Any]] = {}
+    for tool in tools:
+        key = tool["key"]
+        repo_url = tool.get("repo", "")
+        if not repo_url:
+            continue
+        # Dedupe by repo URL so react/react-dom and similar pairs share one request
+        if repo_url in seen_repos:
+            data[key] = dict(seen_repos[repo_url])
+            continue
+        release = _github_latest_release(repo_url)
+        if release:
+            seen_repos[repo_url] = release
+            data[key] = dict(release)
+        else:
+            logger.debug("no GitHub release data for %s", key)
+    return data
+
+
+def _collect_update_candidates(
+    tools: list[dict[str, str]],
+    baseline: dict[str, Any],
+    workspace_root: Path,
+) -> list[dict[str, Any]]:
+    """Identify tools with a newer registry version and fetch release notes.
+
+    Returns one entry per tool (including those with no update). Each entry has
+    ``key``, ``ecosystem``, ``baseline_version``, ``registry_version``,
+    ``is_newer``, and optional ``release`` data for newer releases.
+    """
+    pyproject_path = workspace_root / "pyproject.toml"
+    package_json_path = workspace_root / "web" / "package.json"
+    python_deps = parse_pyproject_dependencies(pyproject_path)
+    npm_deps = parse_npm_dependencies(package_json_path)
+    base_tools = baseline.get("tools", {})
+
+    # Fetch release data for all tools in one pass (with repo dedupe)
+    release_data = _fetch_release_data(tools)
+
+    candidates: list[dict[str, Any]] = []
+    for tool in tools:
+        key = tool["key"]
+        ecosystem = ""
+        current_spec = ""
+        if key in npm_deps:
+            ecosystem = "npm"
+            current_spec = npm_deps[key]
+        elif key in python_deps:
+            ecosystem = "python"
+            current_spec = python_deps[key]
+
+        baseline_version = base_tools.get(key, {}).get("version", "unknown")
+        registry_version: str | None = None
+        if ecosystem == "python":
+            registry_version = get_latest_pypi_version(key)
+        elif ecosystem == "npm":
+            registry_version = get_latest_npm_version(workspace_root, key)
+
+        # Use GitHub release version as fallback when registry is unavailable
+        release = release_data.get(key, {})
+        github_version = release.get("version")
+        latest_version = registry_version or github_version
+
+        is_newer = False
+        if latest_version and baseline_version != "unknown":
+            is_newer = parse_semver(latest_version) > parse_semver(baseline_version)
+
+        candidates.append(
+            {
+                "key": key,
+                "ecosystem": ecosystem,
+                "baseline_version": baseline_version,
+                "registry_version": registry_version,
+                "github_version": github_version,
+                "latest_version": latest_version,
+                "is_newer": is_newer,
+                "release": release if is_newer else {},
+            }
+        )
+    return candidates
+
+
+def _build_research_prompt(
+    baseline: dict[str, Any],
+    first_run: bool,
+    candidates: list[dict[str, Any]] | None = None,
+) -> str:
+    if candidates is None:
+        candidates = []
+    base_tools = baseline.get("tools", {})
+
+    updated: list[str] = []
+    unchanged: list[str] = []
+    for c in candidates:
+        key = c["key"]
+        bv = c["baseline_version"]
+        lv = c.get("latest_version") or bv
+        if c.get("is_newer") and c.get("release"):
+            rel = c["release"]
+            body = rel.get("body", "") or "No release notes provided."
+            # Truncate long bodies to keep the prompt small
+            if len(body) > 1200:
+                body = body[:1200].rsplit("\n", 1)[0] + "\n...[truncated]"
+            updated.append(
+                f"- {key}: baseline={bv} | latest={lv} | "
+                f"published={rel.get('published_at', '')}\n"
+                f"  notes:\n{body}"
+            )
+        else:
+            unchanged.append(f"- {key}: baseline={bv} | latest={lv}")
+
+    tools_block = "\n".join(updated + unchanged)
+    depth = "the last 2 releases" if first_run else "releases newer than the baseline version"
+    rendered = f"""Dependency changelog review. The release data below was already fetched; do NOT use tools or browse the web.
+
+Tracked tools:
+{tools_block}
+
+For each tool, review the provided release notes (if any) and the latest installable version.
+When a PyPI or npm registry URL is listed, treat that registry as authoritative
+for the latest installable version. A GitHub tag without a matching registry
+artifact is not an available dependency update: keep the version field at the
+latest registry version and call out the unpublished tag in notes/actionable.
+Write package versions without a leading "v".
+Verify:
+1. Version and release date of the latest release.
+2. Breaking changes, deprecation warnings, or compatibility requirements affecting a Python web/agent server or a Vue PWA.
+3. Bug fixes and new features/APIs we should adopt to make use of those new versions.
+
+Return ONLY a JSON object in a ```json fenced block with this exact shape:
+{{
+  "tools": {{
+    "<tool-key>": {{
+      "version": "<latest reviewed version>",
+      "release_date": "<YYYY-MM-DD or empty>",
+      "notes": "<one-line summary, or 'Nothing notable.'>",
+      "actionable": "<a concrete next step if any, else empty string>"
+    }}
+  }},
+  "summary": "<2-3 sentence overall review highlighting updates, potential breaking compatibility issues, and recommendations for new API adoption>"
+}}
+Use the exact tool keys listed above. Include every tracked tool, even when nothing changed (carry the baseline version forward)."""
+    return rendered.replace("{", "{{").replace("}", "}}")
+
+
+def _focused_tracked_tools(
+    baseline: dict[str, Any], workspace_root: Path
+) -> list[dict[str, str]]:
+    """Return a curated, de-duplicated list of tools to review.
+
+    The review is not useful if it tries to research every transitive dependency.
+    Focus on the curated fallback list, the manually-always-tracked tools, and
+    any tools that were previously added to the baseline.
+    """
+    always = {"gws", "claude-code", "defuddle", "apfel"}
+    base_keys = set(baseline.get("tools", {}).keys())
+    curated = {t["key"]: t for t in DEFAULT_TRACKED_TOOLS}
+    for key in always | base_keys:
+        if key not in curated:
+            # Try to resolve a repo URL from the workspace manifests or KNOWN_REPOS
+            repo = KNOWN_REPOS.get(key)
+            registry = ""
+            pyproject_path = workspace_root / "pyproject.toml"
+            package_json_path = workspace_root / "web" / "package.json"
+            if not repo:
+                if key in parse_npm_dependencies(package_json_path):
+                    repo = get_npm_github_url(key) or ""
+                    registry = f"https://www.npmjs.com/package/{key}"
+                elif key in parse_pyproject_dependencies(pyproject_path):
+                    repo = get_pypi_github_url(key) or ""
+                    registry = f"https://pypi.org/project/{key}/"
+            if repo:
+                curated[key] = {"key": key, "repo": repo, "registry": registry}
+    return list(curated.values())
+
+
 def _pinned_version(spec: str) -> str | None:
     """Extract a concrete version from a dependency spec.
 
@@ -558,48 +791,6 @@ def _extract_json_block(text: str) -> dict[str, Any] | None:
     return None
 
 
-def _build_research_prompt(baseline: dict[str, Any], first_run: bool) -> str:
-    tools_lines = []
-    base_tools = baseline.get("tools", {})
-    for t in TRACKED_TOOLS:
-        bv = base_tools.get(t["key"], {}).get("version", "unknown")
-        registry = t.get("registry")
-        registry_text = f" | registry: {registry}" if registry else ""
-        tools_lines.append(
-            f"- {t['key']}: baseline={bv} | releases: {t['repo']}{registry_text}"
-        )
-    tools_block = "\n".join(tools_lines)
-    depth = "the last 2 releases" if first_run else "releases newer than the baseline version"
-    rendered = f"""Dependency changelog review. Compare each tool's GitHub releases against our tracked BASELINE version (NOT the installed version).
-
-Tracked tools:
-{tools_block}
-
-For each tool, dispatch a parallel web lookup of its releases page and inspect {depth}.
-When a PyPI or npm registry URL is listed, treat that registry as authoritative
-for the latest installable version. A GitHub tag without a matching registry
-artifact is not an available dependency update: keep the version field at the
-latest registry version and call out the unpublished tag in notes/actionable.
-Write package versions without a leading "v".
-Verify:
-1. Version and release date of the latest release.
-2. Breaking changes, deprecation warnings, or compatibility requirements affecting a Python web/agent server or a Vue PWA.
-3. Bug fixes and new features/APIs we should adopt to make use of those new versions.
-
-Return ONLY a JSON object in a ```json fenced block with this exact shape:
-{{
-  "tools": {{
-    "<tool-key>": {{
-      "version": "<latest reviewed version>",
-      "release_date": "<YYYY-MM-DD or empty>",
-      "notes": "<one-line summary, or 'Nothing notable.'>",
-      "actionable": "<a concrete next step if any, e.g. code/compatibility updates to adopt, else empty string>"
-    }}
-  }},
-  "summary": "<2-3 sentence overall review highlighting updates, potential breaking compatibility issues, and recommendations for new API adoption>"
-}}
-Use the exact tool keys listed above. Include every tracked tool, even when nothing changed (carry the baseline version forward)."""
-    return rendered.replace("{", "{{").replace("}", "}}")
 
 
 def build_review_dag(
@@ -610,16 +801,19 @@ def build_review_dag(
 ) -> tuple[list[Node], list[Edge], dict[str, Any]]:
     global TRACKED_TOOLS
     workspace_root = get_workspace_root(baseline_path)
+
+    # Load baseline first so we can focus the review on curated/known tools
+    baseline = _read_baseline(baseline_path)
     try:
-        TRACKED_TOOLS = tuple(compile_tracked_tools(workspace_root))
+        TRACKED_TOOLS = tuple(_focused_tracked_tools(baseline, workspace_root))
     except Exception:
         pass
 
-    holder: dict[str, Any] = {"baseline": {}, "written": None, "research_json": None}
+    holder: dict[str, Any] = {"baseline": baseline, "written": None, "research_json": None}
 
     def read_baseline_node(ctx: dict[str, Any]) -> tuple[bool, str]:
-        holder["baseline"] = _read_baseline(baseline_path)
-        n = len(holder["baseline"].get("tools", {}))
+        holder["baseline"] = baseline
+        n = len(baseline.get("tools", {}))
         return True, f"baseline loaded: {n} tracked tool(s)"
 
     def collect_installed_versions_node(ctx: dict[str, Any]) -> tuple[bool, str]:
@@ -791,8 +985,11 @@ def build_review_dag(
 
         return True, msg
 
-    first_run = not bool(_read_baseline(baseline_path).get("tools"))
-    research_prompt = _build_research_prompt(_read_baseline(baseline_path), first_run)
+    first_run = not bool(baseline.get("tools"))
+    candidates = _collect_update_candidates(
+        list(TRACKED_TOOLS), baseline, workspace_root
+    )
+    research_prompt = _build_research_prompt(baseline, first_run, candidates)
 
     from ciao.providers.claude import get_bundled_claude_path
     import shutil
