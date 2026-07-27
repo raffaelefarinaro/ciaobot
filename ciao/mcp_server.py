@@ -82,7 +82,17 @@ class McpSessionRegistry:
             existing_token = self._by_key.get(key)
             existing = self._by_token.get(existing_token or "")
             if existing is not None and existing.expires_at > now:
-                return existing.token, existing.principal
+                prior = existing.principal
+                # Reuse only when scope still matches. A moved project or
+                # corrected workspace must not keep minting stale-scoped tools.
+                if (
+                    prior.project_id == project_id
+                    and prior.workspace == workspace
+                    and prior.handoff_depth == handoff_depth
+                ):
+                    return existing.token, existing.principal
+                self._by_token.pop(existing.token, None)
+                self._by_key.pop(key, None)
             token = secrets.token_urlsafe(36)
             principal = McpPrincipal(
                 token_id=secrets.token_hex(8),
@@ -790,10 +800,10 @@ class CiaoMcpService:
             """Validate a schedule and compute its next run without saving it.
 
             Call this before schedule_create for a new recurring schedule and
-            show the user the resulting next_run as part of the draft. A
-            missing or invalid next_run means the fields don't validate as
-            given — don't create it yet. See schedule_create's docstring for
-            field semantics (they're identical here)."""
+            show the user the resulting next_run, workspace, and project as
+            part of the draft. A missing or invalid next_run means the fields
+            don't validate as given — don't create it yet. See schedule_create's
+            docstring for field semantics (they're identical here)."""
             values = {key: value for key, value in locals().items() if key != "self"}
             return await self._invoke("schedule_preview", lambda cp, p: cp.schedule_preview(p, **values))
 
@@ -818,7 +828,11 @@ class CiaoMcpService:
 
             Show the user a concise draft and get confirmation before creating
             it, unless they already explicitly asked you to apply it — call
-            schedule_preview first and include its next_run in the draft.
+            schedule_preview first. The draft must include next_run, the
+            target workspace, and the target project (or chat). Ask if they
+            want a different workspace/project when that isn't obvious from
+            the request. Schedules always belong to one logical workspace
+            (Personal, Work, …) and show under Automations for that workspace.
 
             Args:
                 prompt: The prompt dispatched each run. Start with the goal in
@@ -841,12 +855,15 @@ class CiaoMcpService:
                 day_of_month: 1-31, monthly only.
                 run_at_date: "YYYY-MM-DD", once only, must be in the future.
                 project_id: Project id or case-insensitive name — creates a
-                    fresh chat in that project per run. Preferred for
+                    fresh chat in that project per run. When omitted (and
+                    chat_id is also omitted), defaults to this chat's project
+                    and stamps that project's workspace. Preferred for
                     vault-aware automation.
                 chat_id: Posts into one existing chat instead. Use only when
                     conversation continuity across runs matters; resolve it
                     via chats_list first (chat titles aren't unique, unlike
                     project names, so there's no name lookup for this one).
+                    When set, project_id is not auto-inherited.
                 model: Empty inherits the target workspace's default model at
                     dispatch time; override only when necessary.
                 provider: Empty inherits the target workspace's default
@@ -925,8 +942,8 @@ class CiaoMcpService:
 
         @tool(name="loop_create", annotations=_WRITE, structured_output=True)
         async def loop_create(
-            chat_id: str,
             prompt: str,
+            chat_id: str = "",
             interval_minutes: int = 10,
             title: str = "",
             autostart: bool = False,
@@ -938,9 +955,9 @@ class CiaoMcpService:
             should get a fresh project chat.
 
             Args:
-                chat_id: An existing chat id. Resolve it via chats_list first
-                    — chat titles aren't unique, so there's no name lookup
-                    here (unlike schedule_create's project_id).
+                chat_id: An existing chat id, or omit / pass empty / "this" for
+                    the calling chat. If you must target another chat, resolve
+                    its id via chats_list first — chat titles aren't unique.
                 prompt: Give a short, fixed no-change response for a no-op
                     tick, so repeated iterations stay cheap and scannable.
                 interval_minutes: There is no model field — each iteration

@@ -41,7 +41,7 @@ Ciaobot has three memory layers. Use the right one; do not duplicate facts acros
 - Direct CLI fallback: `ciao vault-search "<query>" --limit 5`; rebuild stale search/entity data with `ciao vault-index`.
 - Vault hygiene: `ciao vault-lint` for broken wikilinks, orphans, and near-duplicates.
 
-**Automations**: Ciaobot has its own timezone-aware scheduler (`schedule_*` tools) and sub-day chat loops (`loop_*` tools) — see their tool descriptions for field semantics and the schedule-vs-loop choice. Never use cloud-side claude.ai Routines or a provider's own `/schedule` for a Ciaobot automation; they bypass Ciaobot's project/vault dispatch entirely, so a recurring task set up that way silently loses vault-aware context. Prefer the user's task system for a one-off reminder they will action manually themselves, when one is configured.
+**Automations**: Ciaobot has its own timezone-aware scheduler (`schedule_*` tools) and sub-day chat loops (`loop_*` tools) — see their tool descriptions for field semantics and the schedule-vs-loop choice. New schedules inherit this chat's workspace and project when you omit `project_id`; always confirm workspace + project (or chat) in the draft before creating. Never use cloud-side claude.ai Routines or a provider's own `/schedule` for a Ciaobot automation; they bypass Ciaobot's project/vault dispatch entirely, so a recurring task set up that way silently loses vault-aware context. Prefer the user's task system for a one-off reminder they will action manually themselves, when one is configured.
 
 **Other agent CLIs** (run from the workspace root, non-interactive)
 
