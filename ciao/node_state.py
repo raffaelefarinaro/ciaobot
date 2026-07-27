@@ -37,6 +37,14 @@ def _normalize_peer_url(url: str) -> str:
         return ""
     if not (cleaned.startswith("http://") or cleaned.startswith("https://")):
         cleaned = f"http://{cleaned}"
+
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(cleaned)
+        if not parsed.port and parsed.scheme == "http":
+            cleaned = f"{cleaned}:8443"
+    except Exception:
+        pass
     return cleaned
 
 
