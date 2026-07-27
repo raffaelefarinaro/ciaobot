@@ -6392,13 +6392,42 @@ class ProjectChatManager:
 
         Unlike schedules, loops never override the chat's model or mode:
         each iteration runs with whatever the user configured on the chat.
+        If the target chat is missing or archived, auto-fork or create a fresh
+        chat in the loop's project and re-point entry.web_chat_id.
         Returns a status dict: "ok", "error", "busy" (active turn already
         in flight), or "missing-chat".
         """
         chat_id = entry.web_chat_id
-        if self._chats.get(chat_id) is None:
-            logger.warning("Loop target chat %s not found, skipping", chat_id)
-            return {"status": "missing-chat"}
+        chat = self._chats.get(chat_id)
+        if chat is None or chat.archived:
+            if chat is not None and chat.archived:
+                try:
+                    new_chat = self.continue_archived_chat(chat_id)
+                    entry.web_chat_id = new_chat.chat_id
+                    chat_id = new_chat.chat_id
+                except Exception:
+                    project = self._resolve_loop_project(entry)
+                    if project is None:
+                        logger.warning("Loop target chat %s archived and project unresolvable, skipping", chat_id)
+                        return {"status": "missing-chat"}
+                    new_chat = self.create_chat(
+                        project.project_id,
+                        title=getattr(entry, "title", "") or f"Loop: {prompt[:30]}",
+                    )
+                    entry.web_chat_id = new_chat.chat_id
+                    chat_id = new_chat.chat_id
+            else:
+                project = self._resolve_loop_project(entry)
+                if project is None:
+                    logger.warning("Loop target chat %s not found, skipping", chat_id)
+                    return {"status": "missing-chat"}
+                new_chat = self.create_chat(
+                    project.project_id,
+                    title=getattr(entry, "title", "") or f"Loop: {prompt[:30]}",
+                )
+                entry.web_chat_id = new_chat.chat_id
+                chat_id = new_chat.chat_id
+
         if self.chat_stream_active(chat_id):
             return {"status": "busy", "chat_id": chat_id}
         is_error = False
@@ -6642,6 +6671,23 @@ class ProjectChatManager:
                     stale_id, p.project_id, workspace,
                 )
                 return p
+        return None
+
+    def _resolve_loop_project(self, entry: object) -> ProjectInfo | None:
+        """Resolve the target project for a loop entry."""
+        web_project_id = getattr(entry, "web_project_id", "") or ""
+        if web_project_id and web_project_id in self._projects:
+            return self._projects[web_project_id]
+        workspace = getattr(entry, "workspace", "") or ""
+        if workspace:
+            for p in self._projects.values():
+                if p.workspace == workspace and p.name == "General":
+                    return p
+            for p in self._projects.values():
+                if p.workspace == workspace:
+                    return p
+        if self._projects:
+            return next(iter(self._projects.values()))
         return None
 
     # ── Voice ────────────────────────────────────────────────────────────

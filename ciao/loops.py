@@ -74,6 +74,8 @@ class LoopEntry:
     # "user" for loops the user creates; "system" is reserved for packaged
     # loops (mirrors ScheduleEntry.scope so the UI can group them apart).
     scope: str = "user"
+    web_project_id: str = ""
+    workspace: str = ""
 
     def interval(self) -> timedelta:
         return timedelta(minutes=max(MIN_INTERVAL_MINUTES, self.interval_minutes))
@@ -110,6 +112,8 @@ class LoopStore:
         interval_minutes: int = 10,
         title: str = "",
         autostart: bool = False,
+        web_project_id: str = "",
+        workspace: str = "",
     ) -> LoopEntry:
         entry = LoopEntry(
             loop_id=f"loop-{uuid.uuid4().hex[:8]}",
@@ -119,6 +123,8 @@ class LoopStore:
             interval_minutes=max(MIN_INTERVAL_MINUTES, int(interval_minutes)),
             title=title,
             autostart=autostart,
+            web_project_id=web_project_id,
+            workspace=workspace,
         )
         with self._lock:
             data = self._load()
@@ -243,6 +249,14 @@ class LoopManager:
     def stop_loop(self, loop_id: str) -> None:
         self._running.discard(loop_id)
 
+    def _chat_is_dispatchable(self, entry: LoopEntry) -> bool:
+        if self._chat_exists is None:
+            return True
+        try:
+            return self._chat_exists(entry)
+        except TypeError:
+            return self._chat_exists(entry.web_chat_id)
+
     async def run_now(self, loop_id: str) -> dict:
         """Fire one iteration immediately, even if the loop is stopped.
 
@@ -252,7 +266,7 @@ class LoopManager:
         entry = self._store.get(loop_id)
         if entry is None:
             raise ValueError(f"Loop '{loop_id}' not found.")
-        if self._chat_exists is not None and not self._chat_exists(entry.web_chat_id):
+        if not self._chat_is_dispatchable(entry):
             return {"loop_id": loop_id, "status": "missing-chat"}
         if loop_id in self._inflight or (
             self._chat_busy is not None and self._chat_busy(entry.web_chat_id)
@@ -283,7 +297,7 @@ class LoopManager:
                 continue
             if not self._due(entry, current):
                 continue
-            if self._chat_exists is not None and not self._chat_exists(entry.web_chat_id):
+            if not self._chat_is_dispatchable(entry):
                 # Target chat is gone; stop the loop instead of logging every
                 # tick forever.
                 logger.warning(

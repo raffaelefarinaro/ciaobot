@@ -38,7 +38,7 @@ Steps:
 1. Identify the conflicting files via `git status`.
 2. Inspect the conflict markers and resolve them with judgment:
    - `memory-vault/**`: keep BOTH sides' content (union the notes; never drop entries).
-   - `.runtime/schedules.json`: union the schedule entries.
+   - `.runtime/schedules.json` and `.runtime/loops.json`: union the schedule and loop entries.
    - If a conflict is ambiguous or risky (you might drop real work), STOP and ask me with
      AskUserQuestion before deciding.
 3. Stage the resolved files: `git add <file>`.

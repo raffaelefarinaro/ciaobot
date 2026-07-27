@@ -444,9 +444,18 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # archived (or deleted) target as not-dispatchable so LoopManager
     # auto-stops the loop instead of erroring every interval with
     # "Cannot send messages to an archived chat" (issue #126).
-    def _loop_target_dispatchable(chat_id: str) -> bool:
+    def _loop_target_dispatchable(target: Any) -> bool:
+        if hasattr(target, "web_chat_id"):
+            chat_id = target.web_chat_id
+        else:
+            chat_id = str(target)
+            target = None
         chat = pcm.get_chat(chat_id)
-        return chat is not None and not chat.archived
+        if chat is not None and not chat.archived:
+            return True
+        if target is not None and pcm._resolve_loop_project(target) is not None:
+            return True
+        return False
 
     loop_manager = LoopManager(
         store=LoopStore(config.state_path.parent),
