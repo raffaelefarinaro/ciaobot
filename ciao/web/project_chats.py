@@ -377,7 +377,9 @@ _TITLE_SYSTEM_PROMPT = (
     "it. Reply with ONLY a title for the conversation: 3 to 6 words, no "
     "quotes, no trailing punctuation, no emoji, in the same language as the "
     "excerpt. Capture the topic, not the meta (don't say 'chat about', 'help "
-    "with', etc). Never write in the first person."
+    "with', etc). When the excerpt includes an assistant reply, title what "
+    "the conversation is actually about from the reply, not a literal "
+    "restatement of an opening question. Never write in the first person."
 )
 
 # A title that opens like an assistant reply means the model answered the
@@ -411,6 +413,33 @@ def _is_contentless_prompt(text: str) -> bool:
     """True for bare openers ("continue", "ok", "go on") with no topic."""
     normalized = re.sub(r"[\s.!?,:;]+", " ", (text or "").strip().lower()).strip()
     return normalized in _CONTENTLESS_PROMPTS
+
+
+# Question-shaped openers ("why is X broken?", "what does Y mean?") are often
+# meta-inquiries whose real topic only emerges in the assistant's reply: the
+# user asks "why no recent sessions?" to diagnose something, the assistant
+# pivots to the actual cause, and a title built from the question alone ("No
+# Recent Sessions") misnames the chat. Defer those to the post-reply path so
+# the titler sees both sides and can prefer the assistant's framing (#176).
+_QUESTION_OPENER_RE = re.compile(
+    r"^(why|what|how|when|where|who|whom|whose|which|"
+    r"is|are|am|was|were|"
+    r"do|does|did|can|could|will|would|shall|should|may|might|must|"
+    r"has|have|had)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_question_shaped_prompt(text: str) -> bool:
+    """True for meta-inquiry openers. We defer titling these until the first
+    assistant reply so the title reflects the conclusion, not the question.
+    """
+    snippet = (text or "").strip()
+    if not snippet:
+        return False
+    if snippet.endswith("?"):
+        return True
+    return bool(_QUESTION_OPENER_RE.match(snippet))
 
 
 def _fallback_title(user_text: str) -> str | None:
@@ -541,9 +570,10 @@ async def _generate_chat_title_with_engine(
         user_prompt = (
             "First user message:\n"
             f"{user_snippet}\n\n"
-            "Assistant reply (for context):\n"
+            "Assistant reply:\n"
             f"{assistant_snippet}\n\n"
-            "Title:"
+            "Title the conversation the reply is about, not the opening "
+            "question if they differ:\n"
         )
     else:
         user_prompt = f"User message:\n{user_snippet}\n\nTitle:"
@@ -4873,6 +4903,13 @@ class ProjectChatManager:
         # question") yields a vaguer title than the full-exchange path
         # would have, but the cheap Ollama free-tier title model
         # absorbs that cost easily and we can always rename manually.
+        #
+        # Exception: question-shaped meta-inquiries ("why no recent sessions?")
+        # get deferred until the first assistant reply. Their real topic only
+        # emerges in the reply, so a title from the prompt alone would name
+        # the question, not the conclusion (#176). `defer_title` is closed
+        # over by _drive below, which fires the title once the turn lands.
+        defer_title = False
         if chat_meta and chat_meta.title == "New Chat" and prompt.strip():
             chat_meta.title_status = "pending"
             self._events.publish({
@@ -4881,9 +4918,14 @@ class ProjectChatManager:
                 "title": chat_meta.title,
                 "status": "pending",
             })
-            asyncio.create_task(
-                self._auto_title_and_publish(chat_id, prompt, "")
-            )
+            if _is_question_shaped_prompt(prompt):
+                # Wait for the first assistant reply so the titler can prefer
+                # its framing; _drive fires the title after the turn ends.
+                defer_title = True
+            else:
+                asyncio.create_task(
+                    self._auto_title_and_publish(chat_id, prompt, "")
+                )
 
         # Announce stream start to the global awareness hub so non-active
         # clients (different chat selected, sidebar only) can render the
@@ -5284,6 +5326,17 @@ class ProjectChatManager:
                     current_images = merged_images or None
                     current_turn_index = turn_index2
             finally:
+                # Question-shaped openers deferred title generation until the
+                # first reply landed (#176). Fire it now with both sides of
+                # the exchange so the title reflects the conclusion, not the
+                # question. Fire-and-forget like the early path; an empty
+                # reply (error / abort) falls back to the user-only prompt.
+                if defer_title:
+                    asyncio.create_task(
+                        self._auto_title_and_publish(
+                            chat_id, prompt, last_assistant_text
+                        )
+                    )
                 # Drop any perf-clock entry that didn't get consumed by a
                 # ResultEvent (errored / aborted turn) so the dict stays bounded.
                 if current_turn_index is not None:

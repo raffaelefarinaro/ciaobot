@@ -202,6 +202,76 @@ def test_is_contentless_prompt() -> None:
         assert _is_contentless_prompt(prompt) is False, prompt
 
 
+def test_is_question_shaped_prompt() -> None:
+    """Meta-inquiry openers defer to the post-reply title path (#176)."""
+    from ciao.web.project_chats import _is_question_shaped_prompt
+
+    for prompt in (
+        "why no recent sessions?",
+        "Why is X broken?",
+        "what does Y mean?",
+        "how do I fix the Automation page?",
+        "where are the job logs?",
+        "who owns this schedule?",
+        "is the title job running?",
+        "can the titler see the reply?",
+        # No trailing "?" but a question opener still counts.
+        "why no recent sessions",
+        "How do I write Python unit tests",
+    ):
+        assert _is_question_shaped_prompt(prompt) is True, prompt
+    for prompt in (
+        "Create google tasks for my wedding checklist please",
+        "Write a PRD about barcode scanning",
+        "Summarize this article",
+        "continue",
+        "",
+        "   ",
+        "Add traction and pilot state to the delivery intelligence slides",
+    ):
+        assert _is_question_shaped_prompt(prompt) is False, prompt
+
+
+@pytest.mark.asyncio
+async def test_title_prefers_assistant_framing_for_meta_question(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A meta-question whose reply pivots to a different topic should yield a
+    title for the topic, not the question (#176). The titler is fed both the
+    first user message and the first assistant reply; the prompt biases it
+    toward the reply's framing."""
+    from ciao.web.project_chats import _generate_chat_title_with_engine
+
+    monkeypatch.setattr(shutil, "which", lambda _cmd: None)
+
+    captured: dict = {}
+
+    async def fake_oneshot(user_prompt: str, **kwargs):
+        captured["prompt"] = user_prompt
+        # The model titles the reply's topic, not the opening question.
+        return "Automation Page Job Log"
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+
+    title, engine, detail = await _generate_chat_title_with_engine(
+        "why no recent sessions?",
+        assistant_text=(
+            "The Automation page only shows runs from the last 7 days. "
+            "Your job log rotated at 2 MB, so older title runs dropped out "
+            "of the view, not because they stopped running."
+        ),
+        model="haiku",
+    )
+    assert title == "Automation Page Job Log"
+    assert engine == "claude:haiku"
+    assert detail is None
+    # Both sides of the exchange are fed in, and the prompt steers toward the
+    # reply's topic when the question and reply differ.
+    assert "why no recent sessions?" in captured["prompt"]
+    assert "Assistant reply:" in captured["prompt"]
+    assert "reply is about" in captured["prompt"]
+
+
 @pytest.mark.asyncio
 async def test_generate_title_skips_model_for_contentless_prompt(
     monkeypatch: pytest.MonkeyPatch,
