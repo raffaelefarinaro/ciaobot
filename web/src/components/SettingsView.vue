@@ -811,6 +811,34 @@
                     {{ conn.ok ? `Connected · ${conn.auth}` : 'Not connected' }}
                   </span>
                 </div>
+                <div class="provider-mcps-preview">
+                  <div class="ws-connectors-header">
+                    <span class="ws-label">Available MCPs &amp; Connectors</span>
+                  </div>
+                  <div class="workspace-connector-pills">
+                    <span class="connector-pill connector-pill--enabled" title="Embedded FastMCP control plane (42 tools)">
+                      <span class="pill-dot"></span> Ciaobot MCP (42 tools)
+                    </span>
+                    <template v-if="connKey === 'claude'">
+                      <span
+                        v-for="connName in (projectStore.workspaceClaudeAiConnectors.length ? projectStore.workspaceClaudeAiConnectors : defaultClaudeAiConnectors)"
+                        :key="connName"
+                        class="connector-pill connector-pill--enabled"
+                        :title="`${formatConnectorLabel(connName)} claude.ai connector`"
+                      >
+                        <span class="pill-dot"></span> {{ formatConnectorLabel(connName) }}
+                      </span>
+                    </template>
+                    <template v-else-if="connKey === 'codex'">
+                      <span class="connector-pill connector-pill--enabled" title="Self-hosted n8n MCP (registered via .mcp.json)">
+                        <span class="pill-dot"></span> n8n_mcp
+                      </span>
+                      <span class="connector-pill connector-pill--enabled" title="Project-scoped and app-server configured MCPs (.mcp.json)">
+                        <span class="pill-dot"></span> Project .mcp.json
+                      </span>
+                    </template>
+                  </div>
+                </div>
                 <div class="action-row provider-connection-actions">
                   <button class="btn-primary btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'connect')">
                     {{ conn.ok ? 'Reconnect' : 'Connect' }}
@@ -820,21 +848,6 @@
                 </div>
               </div>
               <div v-if="providerConnectionResult" class="action-result">{{ providerConnectionResult }}</div>
-            </div>
-
-            <div v-if="mcpStatus" class="credential-row">
-              <div class="setting-row-main setting-row-main--inline">
-                <div class="routine-info">
-                  <span class="routine-name">Ciaobot MCP</span>
-                  <p class="hint hint--compact">
-                    {{ mcpStatus.tool_count }} scoped tools · {{ mcpStatus.active_sessions || 0 }} active managed session{{ (mcpStatus.active_sessions || 0) === 1 ? '' : 's' }}
-                  </p>
-                </div>
-                <span class="badge" :class="mcpStatus.enabled && mcpStatus.bound ? 'badge--success' : 'badge--error'">
-                  {{ mcpStatus.enabled && mcpStatus.bound ? 'Ready' : 'Unavailable' }}
-                </span>
-              </div>
-              <p v-if="mcpStatus.last_error" class="hint hint--warn">Last tool error: {{ mcpStatus.last_error }}</p>
             </div>
 
             <div v-for="(meta, key) in providerKeys.service_keys" :key="key" class="credential-row">
@@ -941,6 +954,78 @@
 
       <!-- USAGE TAB -->
       <template v-if="currentTab === 'usage'">
+        <!-- AVAILABLE MCPS INSPECTOR -->
+        <div class="card">
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">available mcps per provider &amp; workspace</p>
+              <p class="hint">
+                Inspect which embedded tools and external connectors are available for a given provider and workspace.
+              </p>
+            </div>
+          </div>
+          <div class="mcp-inspector-bar">
+            <label class="settings-field mcp-inspector-field">
+              <span class="ws-label">Workspace</span>
+              <select class="routine-select" v-model="inspectorWorkspace">
+                <option v-for="ws in projectStore.workspaceOptions" :key="ws.name" :value="ws.name">
+                  {{ ws.name }}
+                </option>
+              </select>
+            </label>
+            <label class="settings-field mcp-inspector-field">
+              <span class="ws-label">Provider</span>
+              <select class="routine-select" v-model="inspectorProvider">
+                <option value="claude">Claude Code</option>
+                <option value="codex">OpenAI Codex</option>
+              </select>
+            </label>
+          </div>
+          <div class="mcp-inspector-panels">
+            <!-- Embedded Tools Panel -->
+            <div class="mcp-inspector-panel">
+              <div class="panel-header">
+                <div class="panel-title-row">
+                  <span class="panel-title">Embedded Ciaobot Tools</span>
+                  <span class="badge badge--success">{{ inspectorEmbeddedTools.length }} tools</span>
+                </div>
+                <p class="hint hint--compact">Authenticated FastMCP server at <code>/mcp/</code> (available to both Claude &amp; Codex).</p>
+              </div>
+              <div class="mcp-tag-grid">
+                <span v-for="tool in inspectorEmbeddedTools" :key="tool" class="mcp-tag mcp-tag--embedded">
+                  {{ tool }}
+                </span>
+              </div>
+            </div>
+
+            <!-- claude.ai Connectors Panel -->
+            <div class="mcp-inspector-panel">
+              <div class="panel-header">
+                <div class="panel-title-row">
+                  <span class="panel-title">claude.ai Account Connectors</span>
+                  <span class="badge" :class="inspectorConnectorsActive ? 'badge--success' : 'badge--warn'">
+                    {{ inspectorConnectorsActive ? 'Allowed' : (inspectorProvider === 'codex' ? 'N/A (Codex)' : 'Blocked') }}
+                  </span>
+                </div>
+                <p class="hint hint--compact">
+                  {{ inspectorProvider === 'codex' ? 'Codex uses embedded tools only; claude.ai connectors are omitted.' : (inspectorConnectorsActive ? 'Enabled for this workspace.' : 'Blocked by workspace claude_ai_mcps setting.') }}
+                </p>
+              </div>
+              <div class="mcp-tag-grid">
+                <span
+                  v-for="conn in (projectStore.workspaceClaudeAiConnectors.length ? projectStore.workspaceClaudeAiConnectors : defaultClaudeAiConnectors)"
+                  :key="conn"
+                  class="mcp-tag"
+                  :class="inspectorConnectorsActive ? 'mcp-tag--active' : 'mcp-tag--blocked'"
+                >
+                  <span class="pill-dot"></span>
+                  {{ formatConnectorLabel(conn) }}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
@@ -1233,6 +1318,29 @@
                   </select>
                 </div>
 
+                <div v-if="newWorkspaceForm.default_provider !== 'codex'" class="workspace-connectors-preview">
+                  <div class="ws-connectors-header">
+                    <span class="ws-label">Connector Availability</span>
+                    <span class="badge badge--compact" :class="newWorkspaceForm.claude_ai_mcps === 'on' ? 'badge--success' : 'badge--warn'">
+                      {{ newWorkspaceForm.claude_ai_mcps === 'on' ? '8 Connectors Enabled' : 'Connectors Blocked' }}
+                    </span>
+                  </div>
+                  <div class="workspace-connector-pills">
+                    <span
+                      v-for="conn in (projectStore.workspaceClaudeAiConnectors.length ? projectStore.workspaceClaudeAiConnectors : defaultClaudeAiConnectors)"
+                      :key="conn"
+                      class="connector-pill"
+                      :class="newWorkspaceForm.claude_ai_mcps === 'on' ? 'connector-pill--enabled' : 'connector-pill--blocked'"
+                    >
+                      <span class="pill-dot"></span>
+                      {{ formatConnectorLabel(conn) }}
+                    </span>
+                  </div>
+                </div>
+                <div v-else class="workspace-connectors-preview workspace-connectors-preview--disabled">
+                  <span class="hint hint--compact">Codex uses embedded Ciaobot tools; claude.ai connectors do not apply to Codex.</span>
+                </div>
+
               </div>
               <div class="action-row settings-actions">
                 <button class="btn-primary" @click="createNewWorkspace" :disabled="workspacesSaving === 'new'">
@@ -1328,6 +1436,30 @@
                       <option value="on">On (connectors allowed)</option>
                       <option value="off">Off (connectors blocked)</option>
                     </select>
+                  </div>
+
+                  <div v-if="form.default_provider !== 'codex'" class="workspace-connectors-preview">
+                    <div class="ws-connectors-header">
+                      <span class="ws-label">Connector Availability</span>
+                      <span class="badge badge--compact" :class="form.claude_ai_mcps === 'on' ? 'badge--success' : 'badge--warn'">
+                        {{ form.claude_ai_mcps === 'on' ? '8 Connectors Enabled' : 'Connectors Blocked' }}
+                      </span>
+                    </div>
+                    <div class="workspace-connector-pills">
+                      <span
+                        v-for="conn in (projectStore.workspaceClaudeAiConnectors.length ? projectStore.workspaceClaudeAiConnectors : defaultClaudeAiConnectors)"
+                        :key="conn"
+                        class="connector-pill"
+                        :class="form.claude_ai_mcps === 'on' ? 'connector-pill--enabled' : 'connector-pill--blocked'"
+                        :title="form.claude_ai_mcps === 'on' ? `${formatConnectorLabel(conn)} connector allowed in ${form.name}` : `${formatConnectorLabel(conn)} connector blocked in ${form.name}`"
+                      >
+                        <span class="pill-dot"></span>
+                        {{ formatConnectorLabel(conn) }}
+                      </span>
+                    </div>
+                  </div>
+                  <div v-else class="workspace-connectors-preview workspace-connectors-preview--disabled">
+                    <span class="hint hint--compact">Codex uses embedded Ciaobot tools; claude.ai connectors do not apply to Codex.</span>
                   </div>
 
                 </div>
@@ -3836,6 +3968,48 @@ function disallowedToolsPayload(raw: string): string[] | null {
   if (!cleaned) return null
   return cleaned.split(',').map((s) => s.trim()).filter(Boolean)
 }
+
+const defaultClaudeAiConnectors = [
+  'mcp__claude_ai_Airtable',
+  'mcp__claude_ai_Asana',
+  'mcp__claude_ai_Atlassian',
+  'mcp__claude_ai_Google_Cloud_BigQuery',
+  'mcp__claude_ai_Salesforce',
+  'mcp__claude_ai_Sentry',
+  'mcp__claude_ai_Slack',
+  'mcp__claude_ai_incident_io',
+]
+
+function formatConnectorLabel(name: string): string {
+  let clean = name.replace(/^mcp__claude_ai_/, '').replace(/^mcp__/, '')
+  if (clean === 'Google_Cloud_BigQuery') return 'BigQuery'
+  if (clean === 'incident_io') return 'incident.io'
+  return clean
+}
+
+const inspectorWorkspace = ref(projectStore.activeWorkspace || 'personal')
+const inspectorProvider = ref<WorkspaceProvider>('claude')
+
+const inspectorConnectorsActive = computed(() => {
+  if (inspectorProvider.value === 'codex') return false
+  const targetForm = workspaceForms.value.find((f) => f.name === inspectorWorkspace.value)
+  if (!targetForm) return true
+  return targetForm.claude_ai_mcps !== 'off'
+})
+
+const inspectorEmbeddedTools = computed(() => {
+  if (mcpStatus.value?.tools && mcpStatus.value.tools.length) {
+    return mcpStatus.value.tools
+  }
+  return [
+    'context_get', 'vault_search', 'projects_list', 'project_get', 'project_create',
+    'project_update', 'chats_list', 'chat_get', 'chat_create', 'chat_send',
+    'chat_continue', 'chat_retry', 'chat_handover', 'chat_archive', 'chat_delete',
+    'schedules_list', 'schedule_create', 'schedule_update', 'schedule_action',
+    'loops_list', 'loop_create', 'loop_update', 'loop_action', 'file_surface',
+    'handoffs_list', 'handoff_start', 'handoff_send', 'handoff_close', 'adversarial_review',
+  ]
+})
 
 async function fetchWorkspacesList() {
   workspacesError.value = ''
@@ -6553,5 +6727,173 @@ async function doPackageUpdate() {
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 350px;
+}
+
+/* Provider & Workspace MCP Connectors Bar */
+.provider-mcps-preview {
+  margin-top: var(--space-3);
+  margin-bottom: var(--space-3);
+  padding: var(--space-3);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.workspace-connectors-preview {
+  grid-column: 1 / -1;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  margin-top: var(--space-2);
+}
+
+.workspace-connectors-preview--disabled {
+  background: var(--bg);
+}
+
+.ws-connectors-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-2);
+}
+
+.workspace-connector-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.connector-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  font-weight: 500;
+}
+
+.connector-pill--enabled {
+  background: var(--bg);
+  color: var(--fg);
+  border-color: rgba(46, 160, 67, 0.4);
+}
+
+.connector-pill--enabled .pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: #2ea44f;
+}
+
+.connector-pill--blocked {
+  background: var(--bg);
+  color: var(--fg3);
+  opacity: 0.6;
+  text-decoration: line-through;
+}
+
+.connector-pill--blocked .pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: var(--fg3);
+}
+
+/* MCP Inspector */
+.mcp-inspector-bar {
+  display: flex;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.mcp-inspector-field {
+  flex: 1;
+  max-width: 250px;
+}
+
+.mcp-inspector-panels {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4);
+}
+
+@media (max-width: 768px) {
+  .mcp-inspector-panels {
+    grid-template-columns: 1fr;
+  }
+}
+
+.mcp-inspector-panel {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+}
+
+.panel-header {
+  margin-bottom: var(--space-3);
+}
+
+.panel-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2px;
+}
+
+.panel-title {
+  font-weight: 600;
+  font-size: var(--text-sm);
+}
+
+.mcp-tag-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mcp-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono, monospace);
+}
+
+.mcp-tag--embedded {
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.mcp-tag--active {
+  background: rgba(46, 160, 67, 0.1);
+  color: var(--fg);
+  border-color: rgba(46, 160, 67, 0.4);
+}
+
+.mcp-tag--active .pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: #2ea44f;
+}
+
+.mcp-tag--blocked {
+  background: var(--bg);
+  color: var(--fg3);
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+
+.badge--compact {
+  font-size: 10px;
+  padding: 1px 6px;
 }
 </style>

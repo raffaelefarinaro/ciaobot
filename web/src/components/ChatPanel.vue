@@ -93,6 +93,16 @@
           <span class="bg-agents-dot" aria-hidden="true"></span>
           {{ store.activeBackgroundAgents }} agent{{ store.activeBackgroundAgents === 1 ? '' : 's' }}
         </span>
+        <button
+          v-if="store.pendingChatComments.length"
+          class="chat-comments-toggle"
+          :class="{ active: showCommentList }"
+          @click="showCommentList = !showCommentList"
+          title="Toggle chat comments"
+        >
+          <span class="chat-comments-toggle-icon">💬</span>
+          <span class="chat-comments-toggle-count">{{ store.pendingChatComments.length }}</span>
+        </button>
         <div class="model-picker-wrap" ref="modelPickerRef" data-tour="model-picker">
           <button
             class="model-picker-btn touch-hit"
@@ -489,8 +499,7 @@
       <div ref="scrollAnchor"></div>
 
       <!-- Floating "Comment" pill is teleported to body so it isn't clipped by
-           .messages (position: relative + overflow-y: auto). The composer
-           itself lives in the right-side comment sidebar, not as a popover. -->
+           .messages (position: relative + overflow-y: auto). -->
       <Teleport to="body">
         <button
           v-if="selectionAnchor"
@@ -504,6 +513,45 @@
           <span class="chat-comment-trigger-icon">💬</span>
           Comment
         </button>
+
+        <!-- Floating compose popover: anchored to selection -->
+        <div
+          v-if="commentDraft && draftAnchor"
+          class="chat-comment-pop chat-comment-compose"
+          :style="{ top: draftAnchor.top + 'px', left: draftAnchor.left + 'px' }"
+          @mousedown.stop
+        >
+          <div class="chat-pop-quote">"{{ truncate(commentDraft.selection, 120) }}"</div>
+          <textarea
+            ref="chatCommentInputEl"
+            v-model="commentDraft.text"
+            class="chat-sidebar-draft-input"
+            placeholder="Add a comment…"
+            rows="3"
+            @keydown="onChatCommentKeydown"
+          ></textarea>
+          <div v-if="commentDraftImages.length" class="chat-sidebar-draft-images">
+            <span v-for="(img, i) in commentDraftImages" :key="img" class="draft-image-preview">
+              <img :src="`/api/images/${img}`" :alt="img" class="draft-image-thumb" />
+              <button class="draft-image-remove" @click="removeDraftImage(i)" title="Remove">&times;</button>
+            </span>
+          </div>
+          <div class="chat-sidebar-draft-actions">
+            <label class="image-btn-sm" title="Upload images">
+              <input type="file" accept="image/*" multiple hidden @change="handleDraftImageUpload" />
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+            </label>
+            <button class="btn-sm" @click="cancelChatComment" type="button">Cancel</button>
+            <button
+              class="btn-sm primary"
+              :disabled="!commentDraft.text.trim()"
+              @click="saveChatComment"
+              type="button"
+            >Add comment</button>
+          </div>
+        </div>
+
+        <!-- Read popover: shown when clicking a comment highlight pin -->
         <div
           v-if="chatCommentPopover?.pinned && chatPopoverComment"
           class="chat-comment-backdrop"
@@ -534,49 +582,15 @@
       </div>
     </div>
 
-    <!-- Right-side comment sidebar: shows pending chat comments (and the
-         in-flight draft) while you're composing the next message. Cleared
-         on send, same lifecycle as the existing pending-chip strip. -->
-    <aside v-if="commentSidebarVisible" class="chat-comment-sidebar">
+    <!-- On-demand right-side comment drawer overlay (toggled from header pill) -->
+    <div v-if="showCommentList" class="chat-comment-backdrop" @click="showCommentList = false"></div>
+    <aside v-if="showCommentList" class="chat-comment-drawer" @mousedown.stop>
       <div class="chat-sidebar-header">
         <span class="chat-sidebar-title">Comments</span>
-        <span class="chat-sidebar-count">{{ store.pendingChatComments.length + (commentDraft ? 1 : 0) }}</span>
+        <span class="chat-sidebar-count">{{ store.pendingChatComments.length }}</span>
+        <button class="chat-drawer-close" @click="showCommentList = false" title="Close">&times;</button>
       </div>
-
-      <div v-if="commentDraft" class="chat-sidebar-draft" @mousedown.stop>
-        <div class="chat-sidebar-draft-header">
-          <span class="chat-sidebar-draft-label">New comment</span>
-          <button class="chat-sidebar-card-remove" @click="cancelChatComment" title="Cancel">&times;</button>
-        </div>
-        <div class="chat-sidebar-card-quote">"{{ truncate(commentDraft.selection, 120) }}"</div>
-        <textarea
-          ref="chatCommentInputEl"
-          v-model="commentDraft.text"
-          class="chat-sidebar-draft-input"
-          placeholder="Add a comment…"
-          rows="3"
-          @keydown="onChatCommentKeydown"
-        ></textarea>
-        <div v-if="commentDraftImages.length" class="chat-sidebar-draft-images">
-          <span v-for="(img, i) in commentDraftImages" :key="img" class="draft-image-preview">
-            <img :src="`/api/images/${img}`" :alt="img" class="draft-image-thumb" />
-            <button class="draft-image-remove" @click="removeDraftImage(i)" title="Remove">&times;</button>
-          </span>
-        </div>
-        <div class="chat-sidebar-draft-actions">
-          <label class="image-btn-sm" title="Upload images">
-            <input type="file" accept="image/*" multiple hidden @change="handleDraftImageUpload" />
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-          </label>
-          <button class="btn-sm" @click="cancelChatComment" type="button">Cancel</button>
-          <button
-            class="btn-sm primary"
-            :disabled="!commentDraft.text.trim()"
-            @click="saveChatComment"
-            type="button"
-          >Add comment</button>
-        </div>
-      </div>
+      <div v-if="!store.pendingChatComments.length" class="chat-drawer-empty">No comments yet. Select text in a message to add one.</div>
 
       <div class="chat-sidebar-list" ref="sidebarListEl">
         <div
@@ -1505,6 +1519,8 @@ const inputPlaceholder = computed(() => {
 // ── Chat comment selection UX ─────────────────────────────────────────
 type ChatCommentDraft = { selection: string; text: string }
 const selectionAnchor = ref<{ top: number; left: number } | null>(null)
+const draftAnchor = ref<{ top: number; left: number } | null>(null)
+const showCommentList = ref(false)
 const commentDraft = ref<ChatCommentDraft | null>(null)
 const chatCommentInputEl = ref<HTMLTextAreaElement>()
 const sidebarEditInputEl = ref<HTMLTextAreaElement>()
@@ -1626,6 +1642,7 @@ function onChatSelectionChange(): void {
 function openCommentForSelection(): void {
   if (!selectionAnchor.value || !lastChatSelectionText) return
   closeChatCommentPopover()
+  draftAnchor.value = selectionAnchor.value
   draftBubbleEl = lastChatSelectionBubble
   commentDraft.value = {
     selection: lastChatSelectionText,
@@ -1642,6 +1659,7 @@ function openCommentForSelection(): void {
 
 function cancelChatComment(): void {
   commentDraft.value = null
+  draftAnchor.value = null
   commentDraftImages.value = []
   draftBubbleEl = null
   lastChatSelectionText = ''
@@ -1659,6 +1677,7 @@ function saveChatComment(): void {
   if (draftBubbleEl) commentBubbleById.set(id, draftBubbleEl)
   draftBubbleEl = null
   commentDraft.value = null
+  draftAnchor.value = null
   commentDraftImages.value = []
   lastChatSelectionText = ''
   lastChatSelectionBubble = null
@@ -5157,27 +5176,68 @@ details[open] > .activity-summary::before {
   cursor: not-allowed;
 }
 
-/* Comment sidebar: messages on the left, comments on the right. Sibling of
- * .messages inside .chat-with-sidebar so the input bar (which sits below
- * this wrapper) keeps its full chat-panel width. */
+/* Comment drawer: messages container takes full width; drawer overlays on demand. */
 .chat-with-sidebar {
   flex: 1;
+  position: relative;
   display: flex;
   min-height: 0;
   overflow: hidden;
 }
 .chat-with-sidebar > .messages {
+  flex: 1;
   min-width: 0;
 }
-.chat-comment-sidebar {
-  width: 280px;
-  flex-shrink: 0;
+.chat-comment-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 31;
+  width: 300px;
+  max-width: 85%;
   border-left: 1px solid var(--border);
-  background: var(--bg2, rgba(255, 255, 255, 0.04));
+  background: var(--bg2, rgba(20, 20, 40, 0.98));
+  box-shadow: -6px 0 20px rgba(0, 0, 0, 0.28);
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  min-height: 0;
 }
+.chat-drawer-close {
+  background: transparent;
+  border: none;
+  color: var(--fg2);
+  cursor: pointer;
+  font-size: calc(16px * var(--font-scale));
+  line-height: 1;
+  padding: 0 4px;
+  margin-left: auto;
+}
+.chat-drawer-close:hover { color: var(--fg); }
+.chat-drawer-empty {
+  padding: 16px 14px;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+}
+.chat-comments-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg2);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  transition: background 120ms var(--ease), color 120ms var(--ease), border-color 120ms var(--ease);
+}
+.chat-comments-toggle:hover { background: var(--bg3); color: var(--fg); }
+.chat-comments-toggle.active { border-color: var(--accent, #60a5fa); color: var(--fg); }
+.chat-comments-toggle-icon { font-size: var(--text-sm); line-height: 1; }
+.chat-comments-toggle-count { font-variant-numeric: tabular-nums; }
 .chat-sidebar-header {
   display: flex;
   align-items: center;
@@ -5445,12 +5505,17 @@ details[open] > .activity-summary::before {
  * a bottom drawer so both stay usable. Mirrors FileViewerModal's mobile
  * handling at the same breakpoint. */
 @media (max-width: 640px) {
-  .chat-with-sidebar { flex-direction: column; }
-  .chat-comment-sidebar {
+  .chat-comment-drawer {
+    left: 0;
+    top: auto;
     width: auto;
+    max-width: none;
+    max-height: 50vh;
     border-left: none;
     border-top: 1px solid var(--border);
-    max-height: 45vh;
+    border-top-left-radius: 14px;
+    border-top-right-radius: 14px;
+    box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.32);
   }
 }
 

@@ -35,6 +35,7 @@ export interface McpStatus {
   bound: boolean
   url?: string
   tool_count: number
+  tools?: string[]
   active_sessions?: number
   providers?: string[]
   last_error?: string

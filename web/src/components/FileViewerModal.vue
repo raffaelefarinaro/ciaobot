@@ -71,6 +71,16 @@
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4z"/></svg>
           </button>
+          <button
+            v-if="activeFileComments.length"
+            class="fv-comments-toggle"
+            :class="{ active: showSidebar }"
+            @click="showSidebar = !showSidebar"
+            title="Toggle comments"
+          >
+            <span class="fv-comments-toggle-icon">💬</span>
+            <span class="fv-comments-toggle-count">{{ activeFileComments.length }}</span>
+          </button>
           <button class="btn-icon" @click="store.close()" title="Close (Esc)" aria-label="Close">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
@@ -327,58 +337,23 @@
 
         </div>
 
-        <!-- Comment sidebar (desktop only) -->
-        <div v-if="showSidebar" class="fv-comment-sidebar" ref="sidebarEl">
+        <!-- On-demand comment drawer overlay -->
+        <div v-if="showSidebar" class="fv-comment-backdrop" @click="showSidebar = false"></div>
+        <div v-if="showSidebar" class="fv-comment-drawer" @mousedown.stop>
           <div class="fv-sidebar-header">
             <span class="fv-sidebar-title">Comments</span>
-            <span class="fv-sidebar-count">{{ activeFileComments.length + (commentDraft ? 1 : 0) }}</span>
+            <span class="fv-sidebar-count">{{ activeFileComments.length }}</span>
+            <button class="fv-drawer-close" @click="showSidebar = false" title="Close">×</button>
           </div>
-
-          <!-- Draft composer: appears here instead of a floating popover -->
-          <div v-if="commentDraft" class="fv-sidebar-draft" @mousedown.stop>
-            <div class="fv-sidebar-draft-header">
-              <span class="fv-sidebar-draft-label">New comment</span>
-              <button class="fv-sidebar-card-remove" @click="cancelComment" title="Cancel">×</button>
-            </div>
-            <div class="fv-sidebar-card-quote">"{{ truncate(commentDraft.selection, 120) }}"</div>
-            <textarea
-              ref="sidebarDraftInputEl"
-              v-model="commentDraft.text"
-              class="fv-sidebar-draft-input"
-              placeholder="Add a comment…"
-              rows="3"
-              @keydown="onCommentKeydown"
-            ></textarea>
-            <div v-if="commentDraftImages.length" class="fv-sidebar-draft-images">
-              <span v-for="(img, i) in commentDraftImages" :key="img" class="draft-image-preview">
-                <img :src="`/api/images/${img}`" :alt="img" class="draft-image-thumb" />
-                <button class="draft-image-remove" @click="removeDraftImage(i)" title="Remove">×</button>
-              </span>
-            </div>
-            <div class="fv-sidebar-draft-actions">
-              <label class="image-btn-sm" title="Upload images">
-                <input type="file" accept="image/*" multiple hidden @change="handleDraftImageUpload" />
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-              </label>
-              <button class="fv-btn-sm" @click="cancelComment" type="button">Cancel</button>
-              <button
-                class="fv-btn-sm primary"
-                :disabled="!commentDraft.text.trim()"
-                @click="saveComment"
-                type="button"
-              >Add comment</button>
-            </div>
-          </div>
+          <div v-if="!activeFileComments.length" class="fv-drawer-empty">No comments yet. Select text in the document to add one.</div>
 
           <div class="fv-sidebar-list" ref="sidebarListEl">
             <div
-              v-for="c in sidebarCards"
+              v-for="c in activeFileComments"
               :key="c.id"
               class="fv-sidebar-card"
               :class="{ 'is-pending': isPending(c.id), 'is-editing': editingCommentId === c.id }"
-              :style="{ top: c.top + 'px' }"
               :data-card-id="c.id"
-              :data-desired-top="c.top"
               @click="editingCommentId !== c.id && scrollToHighlight(c.id)"
             >
               <div class="fv-sidebar-card-header">
@@ -418,12 +393,47 @@
                 </div>
               </div>
             </div>
-            <div ref="sidebarSpacerEl" class="fv-sidebar-spacer"></div>
           </div>
         </div>
 
-        <!-- Floating "Comment" button anchored near the active selection.
-             Clicking it opens the sidebar draft composer. -->
+        <!-- Floating compose popover: anchored at selection -->
+        <div
+          v-if="commentDraft && draftAnchor"
+          class="fv-comment-pop fv-comment-compose"
+          :style="{ top: draftAnchor.top + 'px', left: draftAnchor.left + 'px' }"
+          @mousedown.stop
+        >
+          <div class="fv-pop-quote">"{{ truncate(commentDraft.selection, 120) }}"</div>
+          <textarea
+            ref="commentInputEl"
+            v-model="commentDraft.text"
+            class="fv-sidebar-draft-input"
+            placeholder="Add a comment…"
+            rows="3"
+            @keydown="onCommentKeydown"
+          ></textarea>
+          <div v-if="commentDraftImages.length" class="fv-sidebar-draft-images">
+            <span v-for="(img, i) in commentDraftImages" :key="img" class="draft-image-preview">
+              <img :src="`/api/images/${img}`" :alt="img" class="draft-image-thumb" />
+              <button class="draft-image-remove" @click="removeDraftImage(i)" title="Remove">×</button>
+            </span>
+          </div>
+          <div class="fv-sidebar-draft-actions">
+            <label class="image-btn-sm" title="Upload images">
+              <input type="file" accept="image/*" multiple hidden @change="handleDraftImageUpload" />
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+            </label>
+            <button class="fv-btn-sm" @click="cancelComment" type="button">Cancel</button>
+            <button
+              class="fv-btn-sm primary"
+              :disabled="!commentDraft.text.trim()"
+              @click="saveComment"
+              type="button"
+            >Add comment</button>
+          </div>
+        </div>
+
+        <!-- Floating "Comment" button anchored near the active selection. -->
         <button
           v-if="selectionAnchor"
           class="fv-comment-trigger"
@@ -437,19 +447,26 @@
           Comment
         </button>
 
-        <!-- Mobile read-only comment popup. Triggered by tapping a highlight. -->
+        <!-- Read-only comment popover. Triggered by tapping/clicking a highlight. -->
         <div
           v-if="activePopupComment"
-          class="fv-comment-popover read-only"
+          class="fv-comment-backdrop"
+          @click="closePopupComment"
+        ></div>
+        <div
+          v-if="activePopupComment"
+          class="fv-comment-pop"
           :style="{ top: popupAnchor.top + 'px', left: popupAnchor.left + 'px' }"
           @mousedown.stop
         >
-          <div class="fv-comment-quote">{{ truncate(activePopupComment.selection, 240) }}</div>
-          <div class="fv-comment-note">{{ activePopupComment.comment }}</div>
-          <div class="fv-comment-actions">
-            <button class="fv-btn-sm" @click="closePopupComment" type="button">Close</button>
-            <button class="fv-btn-sm danger" @click="deletePopupComment" type="button">Delete</button>
+          <div class="fv-pop-header">
+            <span class="fv-sidebar-card-line" v-if="commentLineLabel(activePopupComment)">{{ commentLineLabel(activePopupComment) }}</span>
+            <div class="fv-sidebar-card-actions fv-pop-actions">
+              <button class="fv-sidebar-card-remove" @click.stop="deletePopupComment" title="Delete">×</button>
+            </div>
           </div>
+          <div class="fv-sidebar-card-quote">"{{ truncate(activePopupComment.selection, 120) }}"</div>
+          <div class="fv-sidebar-card-note">{{ activePopupComment.comment }}</div>
         </div>
       </div>
     </div>
@@ -1163,6 +1180,8 @@ type CommentDraft = {
   cell: CellRef
 }
 const selectionAnchor = ref<Anchor | null>(null)
+const draftAnchor = ref<Anchor | null>(null)
+const commentInputEl = ref<HTMLTextAreaElement>()
 const commentDraft = ref<CommentDraft | null>(null)
 let lastSelectionText = ''
 let lastSelectionLines: LineRange = null
@@ -1466,6 +1485,7 @@ const editingCommentImages = ref<string[]>([])
 
 function openCommentForSelection(): void {
   if (!selectionAnchor.value || !lastSelectionText) return
+  draftAnchor.value = selectionAnchor.value
   commentDraft.value = {
     selection: lastSelectionText,
     anchor: selectionAnchor.value,
@@ -1477,10 +1497,8 @@ function openCommentForSelection(): void {
   selectionAnchor.value = null
   lastSelectionRange = null
   lastCsvCell = null
-  // Clear the native selection — the sidebar now "owns" the highlighted
-  // text, and leaving it selected makes the page look noisy.
   window.getSelection()?.removeAllRanges()
-  nextTick(() => sidebarDraftInputEl.value?.focus())
+  nextTick(() => commentInputEl.value?.focus())
 }
 
 function anchorFromCellRect(rect: DOMRect): Anchor | null {
@@ -1517,6 +1535,7 @@ function onCsvCellActivate(cell: CsvCellRef): void {
 
 function openCommentForCsvCell(): void {
   if (!selectionAnchor.value || !lastCsvCell) return
+  draftAnchor.value = selectionAnchor.value
   commentDraft.value = {
     selection: lastCsvCell.value,
     anchor: selectionAnchor.value,
@@ -1531,11 +1550,12 @@ function openCommentForCsvCell(): void {
   commentDraftImages.value = []
   selectionAnchor.value = null
   lastSelectionRange = null
-  nextTick(() => sidebarDraftInputEl.value?.focus())
+  nextTick(() => commentInputEl.value?.focus())
 }
 
 function cancelComment(): void {
   commentDraft.value = null
+  draftAnchor.value = null
   commentDraftImages.value = []
   lastSelectionText = ''
   lastSelectionLines = null
@@ -1559,6 +1579,7 @@ function saveComment(): void {
     images: commentDraftImages.value.length ? commentDraftImages.value : undefined,
   })
   commentDraft.value = null
+  draftAnchor.value = null
   commentDraftImages.value = []
   lastSelectionText = ''
   lastSelectionLines = null
@@ -2445,8 +2466,9 @@ if (typeof window !== 'undefined') {
   color: var(--bg);
 }
 
-/* Main layout: content + optional comment sidebar */
+/* Comment drawer overlay */
 .fv-main {
+  position: relative;
   flex: 1;
   display: flex;
   overflow: hidden;
@@ -2459,16 +2481,93 @@ if (typeof window !== 'undefined') {
   position: relative;
   min-width: 0;
 }
-
-/* Comment sidebar */
-.fv-comment-sidebar {
-  width: 280px;
-  flex-shrink: 0;
+.fv-comment-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  background: transparent;
+}
+.fv-comment-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 21;
+  width: 300px;
+  max-width: 85%;
   border-left: 1px solid var(--border);
-  background: var(--bg2, rgba(255, 255, 255, 0.04));
+  background: var(--bg2, rgba(20, 20, 40, 0.98));
+  box-shadow: -6px 0 20px rgba(0, 0, 0, 0.28);
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  min-height: 0;
+}
+.fv-drawer-close {
+  background: transparent;
+  border: none;
+  color: var(--fg2);
+  cursor: pointer;
+  font-size: calc(16px * var(--font-scale));
+  line-height: 1;
+  padding: 0 4px;
+  margin-left: auto;
+}
+.fv-drawer-close:hover { color: var(--fg); }
+.fv-drawer-empty {
+  padding: 16px 14px;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+}
+
+.fv-comments-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg2);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  transition: background 120ms var(--ease), color 120ms var(--ease), border-color 120ms var(--ease);
+}
+.fv-comments-toggle:hover { background: var(--bg3); color: var(--fg); }
+.fv-comments-toggle.active { border-color: var(--accent, #60a5fa); color: var(--fg); }
+.fv-comments-toggle-icon { font-size: var(--text-sm); line-height: 1; }
+.fv-comments-toggle-count { font-variant-numeric: tabular-nums; }
+
+.fv-comment-pop {
+  position: absolute;
+  z-index: 32;
+  width: 280px;
+  max-width: calc(100% - 16px);
+  background: var(--bg2, rgba(20, 20, 40, 0.98));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.32);
+  padding: 10px 12px;
+  box-sizing: border-box;
+}
+.fv-comment-compose { z-index: 33; }
+.fv-pop-quote {
+  color: var(--fg2);
+  font-style: italic;
+  margin-bottom: 8px;
+  word-break: break-word;
+  font-size: var(--text-sm);
+}
+.fv-pop-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.fv-pop-actions {
+  opacity: 1 !important;
+  margin-left: auto;
 }
 .fv-sidebar-header {
   display: flex;
@@ -2759,11 +2858,6 @@ if (typeof window !== 'undefined') {
   .fv-backdrop { padding: 0; }
   .fv-modal {
     border-radius: 0;
-    /* Pull the top and bottom edges in by the iOS safe-area insets so the
-       header (with the × close button) and any scroll content don't slide
-       under the status bar / home indicator. Without this, the close
-       button gets covered by the status bar on notched phones and the
-       bottom of the file gets covered by the home indicator. */
     max-height: calc(100dvh - var(--safe-top) - var(--safe-bottom));
     height: calc(100dvh - var(--safe-top) - var(--safe-bottom));
     margin-top: var(--safe-top);
@@ -2772,9 +2866,24 @@ if (typeof window !== 'undefined') {
   }
   .fv-body { padding: 14px 16px; }
   .fv-md { max-width: none; }
-  .fv-comment-popover { width: calc(100% - 20px); left: 10px !important; }
-  .fv-comment-sidebar { display: none; }
-  .fv-main { flex-direction: column; }
+  .fv-comment-drawer {
+    left: 0;
+    top: auto;
+    width: auto;
+    max-width: none;
+    max-height: 60vh;
+    border-left: none;
+    border-top: 1px solid var(--border);
+    border-top-left-radius: 14px;
+    border-top-right-radius: 14px;
+    box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.32);
+  }
+  .fv-comment-pop {
+    left: 8px !important;
+    right: 8px;
+    width: auto;
+    max-width: none;
+  }
 }
 
 /* Backlinks Pane */
