@@ -4015,8 +4015,12 @@ async def create_loop(request: Request) -> JSONResponse:
         interval_minutes=interval_minutes,
         title=(body.get("title") or "").strip(),
         autostart=bool(body.get("autostart")),
-        web_project_id=getattr(chat, "web_project_id", "") or "",
-        workspace=getattr(chat, "workspace", "") or "",
+        web_project_id=getattr(chat, "project_id", "") or "",
+        workspace=(
+            getattr(pcm.get_project(chat.project_id), "workspace", "")
+            if getattr(chat, "project_id", None) and pcm.get_project(chat.project_id)
+            else ""
+        ),
     )
     if body.get("start"):
         lm.start_loop(entry.loop_id)
