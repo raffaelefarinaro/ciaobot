@@ -8,12 +8,15 @@ and macOS tray act as a thin client.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, cast
+from typing import TYPE_CHECKING
 
 import httpx
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
+
+if TYPE_CHECKING:
+    from ciao.node_state import NodeStateManager
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +66,7 @@ def get_proxy_target_url(request: Request | WebSocket) -> str | None:
     if is_local_path(path):
         return None
 
-    node_mgr = getattr(request.app.state, "node_state_manager", None)
+    node_mgr: NodeStateManager | None = getattr(request.app.state, "node_state_manager", None)
     if node_mgr is None:
         return None
 
@@ -92,8 +95,7 @@ def get_proxy_target_url(request: Request | WebSocket) -> str | None:
     except Exception:
         pass
 
-    # node_mgr comes from getattr → Any; narrow after the truthiness guard above.
-    return cast(str, target)
+    return target
 
 
 def _host_auth_headers(request: Request | WebSocket, target_url: str) -> dict[str, str]:
@@ -206,11 +208,11 @@ async def proxy_http_request(request: Request, active_peer_url: str) -> Response
 class StandbyProxyMiddleware(BaseHTTPMiddleware):
     """Tunnel /api requests to the host when this node is in client mode."""
 
-    async def dispatch(self, request: Request, call_next: Callable[..., Any]) -> Response:
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         target_peer = get_proxy_target_url(request)
         if target_peer:
             return await proxy_http_request(request, target_peer)
-        return cast(Response, await call_next(request))
+        return await call_next(request)
 
 
 async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:

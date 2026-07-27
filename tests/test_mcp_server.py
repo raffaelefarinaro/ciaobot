@@ -5,6 +5,7 @@ import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from starlette.applications import Starlette
@@ -401,14 +402,41 @@ class _ChatCreatePcm:
         self.started.append((chat_id, text))
 
 
-def _chat_create_control_plane(pcm: _ChatCreatePcm) -> CiaoControlPlane:
-    config = SimpleNamespace(workspace=lambda name: object() if name == "personal" else None)
+def _chat_create_control_plane(
+    pcm: _ChatCreatePcm,
+    *,
+    schedule_manager: Any = None,
+    workspaces: tuple[str, ...] = ("personal",),
+) -> CiaoControlPlane:
+    config = SimpleNamespace(workspace=lambda name: object() if name in workspaces else None)
     return CiaoControlPlane(
         config,
         project_chat_manager=pcm,
-        schedule_manager=SimpleNamespace(),
+        schedule_manager=SimpleNamespace() if schedule_manager is None else schedule_manager,
         loop_manager=SimpleNamespace(),
     )
+
+
+def _work_project_pcm() -> _ChatCreatePcm:
+    """A pcm holding a project in a non-Personal workspace, to prove inheritance."""
+    pcm = _ChatCreatePcm()
+    pcm.projects["project-work"] = SimpleNamespace(
+        project_id="project-work",
+        name="AI-NATIVE-SDK",
+        workspace="work",
+    )
+    return pcm
+
+
+def _schedule_control_plane(tmp_path: Path, pcm: _ChatCreatePcm) -> tuple[CiaoControlPlane, Any]:
+    """Control plane wired to a real ScheduleManager over a temp store."""
+    from ciao.schedules import ScheduleManager, ScheduleStore
+
+    schedules = ScheduleManager(store=ScheduleStore(tmp_path), dispatch_to_web=lambda *a, **k: None)
+    plane = _chat_create_control_plane(
+        pcm, schedule_manager=schedules, workspaces=("personal", "work")
+    )
+    return plane, schedules
 
 
 def _chat_create_principal(**overrides) -> McpPrincipal:
@@ -499,27 +527,7 @@ def test_schedule_create_resolves_project_by_name(tmp_path: Path) -> None:
 
 
 def test_schedule_create_defaults_to_callers_project_and_workspace(tmp_path: Path) -> None:
-    from ciao.schedules import ScheduleManager, ScheduleStore
-
-    pcm = _ChatCreatePcm()
-    pcm.projects["project-work"] = SimpleNamespace(
-        project_id="project-work",
-        name="AI-NATIVE-SDK",
-        workspace="work",
-    )
-    schedules = ScheduleManager(
-        store=ScheduleStore(tmp_path),
-        dispatch_to_web=lambda *a, **k: None,
-    )
-    config = SimpleNamespace(
-        workspace=lambda name: object() if name in {"personal", "work"} else None
-    )
-    control_plane = CiaoControlPlane(
-        config,
-        project_chat_manager=pcm,
-        schedule_manager=schedules,
-        loop_manager=SimpleNamespace(),
-    )
+    control_plane, schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
     principal = _chat_create_principal(
         project_id="project-work",
         workspace="work",
@@ -543,29 +551,10 @@ def test_schedule_create_defaults_to_callers_project_and_workspace(tmp_path: Pat
 
 
 def test_schedule_create_with_chat_id_skips_project_default(tmp_path: Path) -> None:
-    from ciao.schedules import ScheduleManager, ScheduleStore
-
-    pcm = _ChatCreatePcm()
-    pcm.projects["project-work"] = SimpleNamespace(
-        project_id="project-work",
-        name="AI-NATIVE-SDK",
-        workspace="work",
-    )
+    pcm = _work_project_pcm()
     chat = SimpleNamespace(chat_id="chat-fixed", project_id="project-work")
     pcm.get_chat = lambda cid: chat if cid == "chat-fixed" else None  # type: ignore[method-assign]
-    schedules = ScheduleManager(
-        store=ScheduleStore(tmp_path),
-        dispatch_to_web=lambda *a, **k: None,
-    )
-    config = SimpleNamespace(
-        workspace=lambda name: object() if name in {"personal", "work"} else None
-    )
-    control_plane = CiaoControlPlane(
-        config,
-        project_chat_manager=pcm,
-        schedule_manager=schedules,
-        loop_manager=SimpleNamespace(),
-    )
+    control_plane, _schedules = _schedule_control_plane(tmp_path, pcm)
     principal = _chat_create_principal(
         project_id="project-work",
         workspace="work",

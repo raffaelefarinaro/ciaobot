@@ -29,7 +29,8 @@ web/
     router.ts             routes: /login, /, /chat/:id, /project/:id, /schedules, /settings, /settings/:tab
     components/           one Vue SFC per feature pane (including CommandPaletteModal.vue and FileViewerModal.vue)
     stores/               Pinia stores (auth, projects, tasks, fileViewer)
-    lib/                  pure helpers (api, time, safeMarkdown, etc.)
+    composables/          reactive logic shared between components (useHoverPinPopover)
+    lib/                  pure helpers (api, time, safeMarkdown, etc.) — no Vue imports
 ```
 
 ## iOS PWA gotchas

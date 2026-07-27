@@ -230,13 +230,29 @@ class CiaoControlPlane:
             return principal.chat_id
         return value
 
-    def _chat(self, principal: McpPrincipal, chat_id: str | None = None) -> Any:
+    def _chat_scope(self, principal: McpPrincipal, chat_id: str | None = None) -> tuple[Any, Any]:
+        """Resolve a chat plus the project that owns it, in one authorization pass.
+
+        Callers that need the workspace should take the project from here rather
+        than looking it up again: ``_chat`` already resolves and authorizes it.
+        """
         resolved_id = self._resolve_chat_id(principal, chat_id)
         chat = self.pcm.get_chat(resolved_id)
         if chat is None:
             raise ControlPlaneError("chat_not_found", f"Chat '{resolved_id}' was not found.")
-        self._project(principal, chat.project_id)
-        return chat
+        return chat, self._project(principal, chat.project_id)
+
+    def _chat(self, principal: McpPrincipal, chat_id: str | None = None) -> Any:
+        return self._chat_scope(principal, chat_id)[0]
+
+    def _chat_id(self, principal: McpPrincipal, chat_id: str | None = None) -> str:
+        """Authorize a chat reference and return its real id.
+
+        ``_chat`` resolves ``""``/``"this"``/``"self"`` internally but returns
+        only the chat, so callers that echo the id back had to remember a second
+        line to recover it. Use this when the chat object itself is not needed.
+        """
+        return str(self._chat(principal, chat_id).chat_id)
 
     def chat_mode(self, principal: McpPrincipal) -> str:
         chat = self.pcm.get_chat(principal.chat_id) if principal.chat_id else None
@@ -560,8 +576,7 @@ class CiaoControlPlane:
         model_bucket: str | None = None,
         control_surface: str | None = None,
     ) -> dict[str, Any]:
-        chat = self._chat(principal, chat_id)
-        chat_id = chat.chat_id
+        chat_id = self._chat_id(principal, chat_id)
         if project_id is not None:
             self._project(principal, project_id)
         updated = self.pcm.update_chat(
@@ -619,8 +634,7 @@ class CiaoControlPlane:
         return _ok(chat.to_dict(local=True))
 
     def chat_retry(self, principal: McpPrincipal, chat_id: str) -> dict[str, Any]:
-        chat = self._chat(principal, chat_id)
-        chat_id = chat.chat_id
+        chat_id = self._chat_id(principal, chat_id)
         stream = self.pcm.try_chat_retry_now(chat_id)
         return _ok({"chat_id": chat_id, "status": "started" if stream else "not_pending"})
 
@@ -631,8 +645,7 @@ class CiaoControlPlane:
         action: Literal["set", "stop", "try_now"],
         prompt: str = "",
     ) -> dict[str, Any]:
-        chat = self._chat(principal, chat_id)
-        chat_id = chat.chat_id
+        chat_id = self._chat_id(principal, chat_id)
         if action == "set":
             chat = self.pcm.set_chat_retry(chat_id, prompt, image_refs=[], reason="mcp")
             if chat is None:
@@ -648,8 +661,7 @@ class CiaoControlPlane:
         raise ControlPlaneError("invalid_action", "action must be set, stop, or try_now.")
 
     def chat_new_session(self, principal: McpPrincipal, chat_id: str) -> dict[str, Any]:
-        chat = self._chat(principal, chat_id)
-        chat_id = chat.chat_id
+        chat_id = self._chat_id(principal, chat_id)
         if chat_id == principal.chat_id:
             return self._defer_until_chat_idle(
                 principal, "chat_new_session", lambda: self.pcm.new_session(chat_id)
@@ -669,8 +681,7 @@ class CiaoControlPlane:
         messages: list[dict[str, Any]] | None = None,
         model_bucket: str = "",
     ) -> dict[str, Any]:
-        chat = self._chat(principal, chat_id)
-        chat_id = chat.chat_id
+        chat_id = self._chat_id(principal, chat_id)
         if chat_id == principal.chat_id:
             return self._defer_until_chat_idle(
                 principal,
@@ -702,8 +713,7 @@ class CiaoControlPlane:
         messages: list[dict[str, Any]],
         turn_index: int,
     ) -> dict[str, Any]:
-        chat = self._chat(principal, chat_id)
-        chat_id = chat.chat_id
+        chat_id = self._chat_id(principal, chat_id)
         if turn_index < 0:
             raise ControlPlaneError("invalid_turn", "turn_index must be non-negative.")
         fork = self.pcm.fork_chat(
@@ -733,8 +743,7 @@ class CiaoControlPlane:
         return _ok({"chat_id": target_id, "archived_to": str(outcome.path) if outcome else None})
 
     def chat_delete(self, principal: McpPrincipal, chat_id: str) -> dict[str, Any]:
-        chat = self._chat(principal, chat_id)
-        chat_id = chat.chat_id
+        chat_id = self._chat_id(principal, chat_id)
         if chat_id == principal.chat_id:
             return self._defer_until_chat_idle(
                 principal,
@@ -744,14 +753,12 @@ class CiaoControlPlane:
         return _ok({"chat_id": chat_id, "deleted": self.pcm.delete_chat(chat_id)})
 
     def chat_mark_read(self, principal: McpPrincipal, chat_id: str) -> dict[str, Any]:
-        chat = self._chat(principal, chat_id)
-        chat_id = chat.chat_id
+        chat_id = self._chat_id(principal, chat_id)
         chat = self.pcm.mark_read(chat_id)
         return _ok({"chat_id": chat_id, "last_read_at": chat.last_read_at if chat else ""})
 
     async def chat_stop(self, principal: McpPrincipal, chat_id: str) -> dict[str, Any]:
-        chat = self._chat(principal, chat_id)
-        chat_id = chat.chat_id
+        chat_id = self._chat_id(principal, chat_id)
         if chat_id == principal.chat_id:
             raise ControlPlaneError(
                 "self_stop_forbidden",
@@ -774,8 +781,7 @@ class CiaoControlPlane:
         return record
 
     def handoffs_list(self, principal: McpPrincipal, chat_id: str = "") -> dict[str, Any]:
-        parent_id = self._resolve_chat_id(principal, chat_id)
-        self._chat(principal, parent_id)
+        parent_id = self._chat_id(principal, chat_id)
         return _ok([item.to_dict() for item in self._handoff_manager().list_records(parent_id)])
 
     async def handoff_start(
@@ -859,11 +865,15 @@ class CiaoControlPlane:
 
     # ---- schedules/loops ----------------------------------------------
 
-    @staticmethod
-    def _schedule_payload(entry: ScheduleEntry) -> dict[str, Any]:
+    def _schedule_payload(self, entry: ScheduleEntry) -> dict[str, Any]:
         data = asdict(entry)
         next_run = compute_next_run(entry)
         data["next_run"] = next_run.isoformat() if next_run else None
+        # Name the target project here so every schedule tool reports it the
+        # same way; enriching at the call site left it missing from list/update.
+        if entry.web_project_id:
+            project = self.pcm.get_project(entry.web_project_id)
+            data["project_name"] = getattr(project, "name", "") or ""
         return data
 
     def schedules_list(self, principal: McpPrincipal) -> dict[str, Any]:
@@ -886,21 +896,22 @@ class CiaoControlPlane:
         chat_ref = values.get("chat_id")
         project_ref = values.get("project_id")
         web_chat_id: str | None = None
-        web_project_id: str | None = None
+        project: Any | None = None
 
         if chat_ref:
             chat = self._chat(principal, str(chat_ref))
             web_chat_id = chat.chat_id
             if project_ref:
-                web_project_id = self._resolve_project_id(principal, str(project_ref))
-                project = self._project(principal, web_project_id)
-                workspace = self._workspace(principal, project.workspace)
+                project = self._resolve_project(principal, str(project_ref))
         else:
             # Inherit the active project when omitted — preferred for vault-aware
             # automation and keeps the schedule in the same workspace as this chat.
             project = self._resolve_project(
                 principal, None if project_ref is None else str(project_ref)
             )
+
+        web_project_id: str | None = None
+        if project is not None:
             web_project_id = project.project_id
             workspace = self._workspace(principal, project.workspace)
 
@@ -925,12 +936,7 @@ class CiaoControlPlane:
             archive_policy=str(values.get("archive_policy") or "manual"),
             title=str(values.get("title") or ""),
         )
-        payload = self._schedule_payload(entry)
-        if web_project_id:
-            project = self.pcm.get_project(web_project_id)
-            if project is not None:
-                payload["project_name"] = getattr(project, "name", "") or ""
-        return _ok(payload)
+        return _ok(self._schedule_payload(entry))
 
     def schedule_create(self, principal: McpPrincipal, **values: Any) -> dict[str, Any]:
         preview = self.schedule_preview(principal, **values)["data"]
@@ -953,10 +959,7 @@ class CiaoControlPlane:
             title=preview["title"],
             description=str(values.get("description") or ""),
         )
-        payload = self._schedule_payload(entry)
-        if preview.get("project_name"):
-            payload["project_name"] = preview["project_name"]
-        return _ok(payload)
+        return _ok(self._schedule_payload(entry))
 
     def _schedule(self, principal: McpPrincipal, schedule_id: str) -> ScheduleEntry:
         entry = next((item for item in self.schedules.list_entries() if item.schedule_id == schedule_id), None)
@@ -1025,8 +1028,7 @@ class CiaoControlPlane:
         title: str = "",
         autostart: bool = False,
     ) -> dict[str, Any]:
-        chat = self._chat(principal, chat_id)
-        project = self._project(principal, chat.project_id)
+        chat, project = self._chat_scope(principal, chat_id)
         text = prompt.strip()
         if not text:
             raise ControlPlaneError("empty_prompt", "Prompt is required.")
@@ -1053,8 +1055,7 @@ class CiaoControlPlane:
         aliases = {"chat_id": "web_chat_id"}
         normalized = {aliases.get(key, key): value for key, value in changes.items() if value is not None}
         if "web_chat_id" in normalized:
-            chat = self._chat(principal, str(normalized["web_chat_id"]))
-            project = self._project(principal, chat.project_id)
+            chat, project = self._chat_scope(principal, str(normalized["web_chat_id"]))
             normalized["web_chat_id"] = chat.chat_id
             normalized["web_project_id"] = chat.project_id
             normalized["workspace"] = project.workspace
@@ -1147,8 +1148,7 @@ class CiaoControlPlane:
     async def file_snapshot_restore(
         self, principal: McpPrincipal, chat_id: str, file_path: str, seq: int
     ) -> dict[str, Any]:
-        chat = self._chat(principal, chat_id)
-        chat_id = chat.chat_id
+        chat_id = self._chat_id(principal, chat_id)
         root = Path(self.config.workspace_root).resolve()
         raw = Path(file_path)
         target = raw.resolve() if raw.is_absolute() else self._safe_relative(root, file_path)

@@ -372,6 +372,7 @@ import { buildMarkdownIndex, resolveWikilinkTarget } from '../lib/wikilinks'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { isCsvPath } from '../lib/csv'
 import { formatCommentLocation } from '../lib/commentContext'
+import { useHoverPinPopover } from '../composables/useHoverPinPopover'
 import { api } from '../lib/api'
 import PaneHeader from './PaneHeader.vue'
 import { useFileViewerStore } from '../stores/fileViewer'
@@ -776,41 +777,8 @@ const commentsForFile = computed(() =>
 //  - showCommentList: the drawer overlay listing every comment (header pill).
 //  - commentPopover: hover-preview / click-to-pin read popover on a highlight.
 const showCommentList = ref(false)
-const commentPopover = ref<{ id: string; top: number; left: number; pinned: boolean } | null>(null)
-const popoverComment = computed(() =>
-  commentPopover.value
-    ? commentsForFile.value.find(c => c.id === commentPopover.value!.id) ?? null
-    : null,
-)
 
-let hoverCloseTimer: ReturnType<typeof setTimeout> | null = null
-
-function clearHoverClose(): void {
-  if (hoverCloseTimer) {
-    clearTimeout(hoverCloseTimer)
-    hoverCloseTimer = null
-  }
-}
-
-function closeCommentPopover(): void {
-  clearHoverClose()
-  commentPopover.value = null
-}
-
-function scheduleHoverClose(): void {
-  clearHoverClose()
-  hoverCloseTimer = setTimeout(() => {
-    hoverCloseTimer = null
-    if (commentPopover.value && !commentPopover.value.pinned) {
-      commentPopover.value = null
-    }
-  }, 160)
-}
-
-function canHoverPreview(): boolean {
-  return typeof window !== 'undefined' && window.matchMedia('(hover: hover)').matches
-}
-
+// A markdown highlight span, or a whole line in the plain-text viewer.
 function highlightElFromEvent(e: MouseEvent): HTMLElement | null {
   const target = e.target as HTMLElement | null
   if (!target) return null
@@ -821,35 +789,23 @@ function highlightElFromEvent(e: MouseEvent): HTMLElement | null {
   return null
 }
 
-function onHighlightHover(e: MouseEvent): void {
-  if (!canHoverPreview()) return
-  const el = highlightElFromEvent(e)
-  if (!el) return
-  const id = el.dataset.commentId
-  if (!id) return
-  const related = e.relatedTarget as Node | null
-  if (related && el.contains(related)) return
-  showCommentPopover(id, el, false)
-}
-
-function onHighlightHoverOut(e: MouseEvent): void {
-  if (!commentPopover.value || commentPopover.value.pinned) return
-  const el = highlightElFromEvent(e)
-  if (!el) return
-  const related = e.relatedTarget as Node | null
-  if (related && el.contains(related)) return
-  scheduleHoverClose()
-}
-
-function onPopoverEnter(): void {
-  clearHoverClose()
-}
-
-function onPopoverLeave(): void {
-  if (commentPopover.value && !commentPopover.value.pinned) {
-    scheduleHoverClose()
-  }
-}
+const {
+  popover: commentPopover,
+  comment: popoverComment,
+  show: showCommentPopover,
+  close: closeCommentPopover,
+  clearPendingClose: clearHoverClose,
+  onTargetOver: onHighlightHover,
+  onTargetOut: onHighlightHoverOut,
+  onPopoverEnter,
+  onPopoverLeave,
+} = useHoverPinPopover({
+  resolveTarget: highlightElFromEvent,
+  anchorFor: el => anchorFromElement(el),
+  findComment: id => commentsForFile.value.find(c => c.id === id) ?? null,
+  hasTargets: () => commentsForFile.value.length > 0,
+  onPin: () => cancelEditComment(),
+})
 
 function deleteFileComment(id: string): void {
   projectsStore.removeFileComment(cleanPath.value, id)
@@ -1291,23 +1247,6 @@ function anchorFromElement(el: HTMLElement): Anchor | null {
   const top = Math.min(Math.max(rect.bottom - mainRect.top + 6, pad), Math.max(pad, main.clientHeight - 60))
   const left = Math.min(Math.max(rect.left - mainRect.left, pad), Math.max(pad, main.clientWidth - popWidth - pad))
   return { top, left }
-}
-
-function showCommentPopover(id: string, el: HTMLElement, pinned: boolean): void {
-  // Don't demote a pinned popover to hover-preview for the same comment.
-  if (
-    !pinned
-    && commentPopover.value?.pinned
-    && commentPopover.value.id === id
-  ) {
-    clearHoverClose()
-    return
-  }
-  const anchor = anchorFromElement(el)
-  if (!anchor) return
-  clearHoverClose()
-  if (pinned) cancelEditComment()
-  commentPopover.value = { id, top: anchor.top, left: anchor.left, pinned }
 }
 
 function onCsvCellSelect(cell: CsvCellRef, rect: DOMRect): void {

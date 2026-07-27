@@ -91,8 +91,9 @@ class McpSessionRegistry:
                     and prior.handoff_depth == handoff_depth
                 ):
                     return existing.token, existing.principal
-                self._by_token.pop(existing.token, None)
-                self._by_key.pop(key, None)
+                # revoke() owns the _by_token/_by_key pairing; the lock is an
+                # RLock so re-entering it here is safe.
+                self.revoke(existing.token)
             token = secrets.token_urlsafe(36)
             principal = McpPrincipal(
                 token_id=secrets.token_hex(8),

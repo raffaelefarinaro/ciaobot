@@ -13,12 +13,12 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Callable, Literal
 
 from ciao.config import CiaoConfig
 from ciao.git_sync import sync_workspace
 from ciao.models import ChatContext
-from ciao.loops import LoopManager, LoopStore
+from ciao.loops import LoopEntry, LoopManager, LoopStore
 from ciao.schedules import ScheduleManager, ScheduleStore
 from ciao.sessions import StateStore
 from ciao.signals import RestartRequested
@@ -444,18 +444,11 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # archived (or deleted) target as not-dispatchable so LoopManager
     # auto-stops the loop instead of erroring every interval with
     # "Cannot send messages to an archived chat" (issue #126).
-    def _loop_target_dispatchable(target: Any) -> bool:
-        if hasattr(target, "web_chat_id"):
-            chat_id = target.web_chat_id
-        else:
-            chat_id = str(target)
-            target = None
-        chat = pcm.get_chat(chat_id)
+    def _loop_target_dispatchable(target: LoopEntry) -> bool:
+        chat = pcm.get_chat(target.web_chat_id)
         if chat is not None and not chat.archived:
             return True
-        if target is not None and pcm._resolve_loop_project(target) is not None:
-            return True
-        return False
+        return pcm._resolve_loop_project(target) is not None
 
     loop_manager = LoopManager(
         store=LoopStore(config.state_path.parent),

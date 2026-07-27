@@ -126,34 +126,34 @@
           </div>
           <div v-if="!nodeStatus" class="action-row"><span class="loading">Loading node status&hellip;</span></div>
           <template v-else>
-            <!-- Client: this device → host, with reachability on the link -->
-            <div v-if="isNodeClient" class="node-path" aria-label="Client connection">
+            <!-- Client: this device → host, with reachability on the link.
+                 Host: this device alone, plus how long it has held the role. -->
+            <div
+              class="node-path"
+              :class="{ 'node-path--solo': !isNodeClient }"
+              :aria-label="isNodeClient ? 'Client connection' : 'Host identity'"
+            >
               <div class="node-path-endpoint">
                 <span class="node-path-label">this device</span>
                 <code class="node-path-value" :title="nodeStatus.node_id">{{ nodeStatus.node_id }}</code>
               </div>
-              <div class="node-path-link">
-                <span class="node-path-arrow" aria-hidden="true">→</span>
-                <span
-                  v-if="nodeStatus.host_reachable != null"
-                  class="node-path-status"
-                  :class="nodeStatus.host_reachable ? 'node-path-status--ok' : 'node-path-status--bad'"
-                >
-                  {{ nodeStatus.host_reachable ? 'reachable' : 'unreachable' }}
-                </span>
-              </div>
-              <div class="node-path-endpoint node-path-endpoint--host">
-                <span class="node-path-label">host</span>
-                <code class="node-path-value" :title="connectedHostUrl || undefined">{{ connectedHostUrl || '—' }}</code>
-              </div>
-            </div>
-            <!-- Host: local identity -->
-            <div v-else class="node-path node-path--solo">
-              <div class="node-path-endpoint">
-                <span class="node-path-label">this device</span>
-                <code class="node-path-value" :title="nodeStatus.node_id">{{ nodeStatus.node_id }}</code>
-              </div>
-              <div v-if="nodeStatus.active_since" class="node-path-meta">
+              <template v-if="isNodeClient">
+                <div class="node-path-link">
+                  <span class="node-path-arrow" aria-hidden="true">→</span>
+                  <span
+                    v-if="nodeStatus.host_reachable != null"
+                    class="badge"
+                    :class="nodeStatus.host_reachable ? 'badge--success' : 'badge--warn'"
+                  >
+                    {{ nodeStatus.host_reachable ? 'reachable' : 'unreachable' }}
+                  </span>
+                </div>
+                <div class="node-path-endpoint node-path-endpoint--host">
+                  <span class="node-path-label">host</span>
+                  <code class="node-path-value" :title="connectedHostUrl || undefined">{{ connectedHostUrl || '—' }}</code>
+                </div>
+              </template>
+              <div v-else-if="nodeStatus.active_since" class="node-path-meta">
                 <span class="node-path-label">host since</span>
                 <span class="node-path-value">{{ nodeStatus.active_since }}</span>
               </div>
@@ -4789,19 +4789,6 @@ async function doPackageUpdate() {
   font-size: calc(18px * var(--font-scale));
   font-weight: 700;
   line-height: 1;
-}
-.node-path-status {
-  font-size: var(--text-xs);
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  text-align: center;
-  white-space: nowrap;
-}
-.node-path-status--ok {
-  color: var(--success);
-}
-.node-path-status--bad {
-  color: var(--warning);
 }
 .node-path-meta {
   display: flex;

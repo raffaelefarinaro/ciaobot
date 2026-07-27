@@ -73,7 +73,7 @@ def _make_client(tmp_path: Path) -> tuple[TestClient, LoopManager]:
         store=LoopStore(runtime),
         dispatch=dispatch,
         chat_busy=pcm.chat_stream_active,
-        chat_exists=lambda chat_id: pcm.get_chat(chat_id) is not None,
+        chat_exists=lambda entry: pcm.get_chat(entry.web_chat_id) is not None,
     )
     app = Starlette(
         routes=[

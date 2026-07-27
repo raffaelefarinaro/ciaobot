@@ -910,6 +910,7 @@ import { formatTime, formatDuration } from '../lib/time'
 import { buildTurnParts, collectTraceOutputs, formatTokenUsage, isAnswerBubble, traceSummaryMeta, traceSummaryMetaParts, type TraceOutput } from '../lib/chatActivity'
 import { buildForkSnapshot } from '../lib/chatFork'
 import { formatCommentLocation } from '../lib/commentContext'
+import { useHoverPinPopover } from '../composables/useHoverPinPopover'
 
 type RenderItem =
   | { kind: 'user'; msg: ChatMessage; turnIndex?: number }
@@ -1921,42 +1922,16 @@ function applyHighlights(): void {
 }
 
 // ── Click / hover sync between highlights, read popover, and sidebar ──
-const chatCommentPopover = ref<{ id: string; top: number; left: number; pinned: boolean } | null>(null)
-const chatPopoverComment = computed(() =>
-  chatCommentPopover.value
-    ? store.pendingChatComments.find(c => c.id === chatCommentPopover.value!.id) ?? null
-    : null,
-)
-
-let chatHoverCloseTimer: ReturnType<typeof setTimeout> | null = null
-
-function clearChatHoverClose(): void {
-  if (chatHoverCloseTimer) {
-    clearTimeout(chatHoverCloseTimer)
-    chatHoverCloseTimer = null
-  }
+// The draft highlight has no saved comment to preview, so it is never a target.
+function chatHighlightFromEvent(e: MouseEvent): HTMLElement | null {
+  const target = e.target as HTMLElement | null
+  const highlight = target?.closest('.comment-highlight') as HTMLElement | null
+  const id = highlight?.dataset.commentId
+  return highlight && id && id !== DRAFT_COMMENT_ID ? highlight : null
 }
 
-function closeChatCommentPopover(): void {
-  clearChatHoverClose()
-  chatCommentPopover.value = null
-}
-
-function scheduleChatHoverClose(): void {
-  clearChatHoverClose()
-  chatHoverCloseTimer = setTimeout(() => {
-    chatHoverCloseTimer = null
-    if (chatCommentPopover.value && !chatCommentPopover.value.pinned) {
-      chatCommentPopover.value = null
-    }
-  }, 160)
-}
-
-function canChatHoverPreview(): boolean {
-  return typeof window !== 'undefined' && window.matchMedia('(hover: hover)').matches
-}
-
-function anchorChatPopoverFromElement(el: HTMLElement): { top: number; left: number } | null {
+// Clamped to the viewport: the transcript popover is position: fixed.
+function anchorChatPopoverFromElement(el: HTMLElement): { top: number; left: number } {
   const rect = el.getBoundingClientRect()
   const popWidth = 280
   const pad = 8
@@ -1965,63 +1940,27 @@ function anchorChatPopoverFromElement(el: HTMLElement): { top: number; left: num
   return { top, left }
 }
 
-function showChatCommentPopover(id: string, el: HTMLElement, pinned: boolean): void {
-  if (id === DRAFT_COMMENT_ID) return
-  if (
-    !pinned
-    && chatCommentPopover.value?.pinned
-    && chatCommentPopover.value.id === id
-  ) {
-    clearChatHoverClose()
-    return
-  }
-  const anchor = anchorChatPopoverFromElement(el)
-  if (!anchor) return
-  clearChatHoverClose()
-  chatCommentPopover.value = { id, top: anchor.top, left: anchor.left, pinned }
-}
-
-function onChatHighlightHover(e: MouseEvent): void {
-  if (!canChatHoverPreview()) return
-  const target = e.target as HTMLElement | null
-  if (!target) return
-  const highlight = target.closest('.comment-highlight') as HTMLElement | null
-  if (!highlight) return
-  const id = highlight.dataset.commentId
-  if (!id || id === DRAFT_COMMENT_ID) return
-  const related = e.relatedTarget as Node | null
-  if (related && highlight.contains(related)) return
-  showChatCommentPopover(id, highlight, false)
-}
-
-function onChatHighlightHoverOut(e: MouseEvent): void {
-  if (!chatCommentPopover.value || chatCommentPopover.value.pinned) return
-  const target = e.target as HTMLElement | null
-  if (!target) return
-  const highlight = target.closest('.comment-highlight') as HTMLElement | null
-  if (!highlight) return
-  const related = e.relatedTarget as Node | null
-  if (related && highlight.contains(related)) return
-  scheduleChatHoverClose()
-}
-
-function onChatPopoverEnter(): void {
-  clearChatHoverClose()
-}
-
-function onChatPopoverLeave(): void {
-  if (chatCommentPopover.value && !chatCommentPopover.value.pinned) {
-    scheduleChatHoverClose()
-  }
-}
+const {
+  popover: chatCommentPopover,
+  comment: chatPopoverComment,
+  show: showChatCommentPopover,
+  close: closeChatCommentPopover,
+  clearPendingClose: clearChatHoverClose,
+  onTargetOver: onChatHighlightHover,
+  onTargetOut: onChatHighlightHoverOut,
+  onPopoverEnter: onChatPopoverEnter,
+  onPopoverLeave: onChatPopoverLeave,
+} = useHoverPinPopover({
+  resolveTarget: chatHighlightFromEvent,
+  anchorFor: anchorChatPopoverFromElement,
+  findComment: id => store.pendingChatComments.find(c => c.id === id) ?? null,
+  hasTargets: () => store.pendingChatComments.length > 0,
+})
 
 function handleHighlightClick(e: MouseEvent): void {
-  const target = e.target as HTMLElement | null
-  if (!target) return
-  const highlight = target.closest('.comment-highlight') as HTMLElement | null
-  if (!highlight) return
-  const id = highlight.dataset.commentId
-  if (!id || id === DRAFT_COMMENT_ID) return
+  const highlight = chatHighlightFromEvent(e)
+  const id = highlight?.dataset.commentId
+  if (!highlight || !id) return
   e.stopPropagation()
   showChatCommentPopover(id, highlight, true)
   scrollSidebarToCard(id)
