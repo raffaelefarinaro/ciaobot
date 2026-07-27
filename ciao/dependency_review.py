@@ -515,7 +515,7 @@ def _collect_update_candidates(
         if ecosystem == "python":
             registry_version = get_latest_pypi_version(key)
         elif ecosystem == "npm":
-            registry_version = get_latest_npm_version(workspace_root, key)
+            registry_version = get_latest_npm_version(key)
 
         # Use GitHub release version as fallback when registry is unavailable
         release = release_data.get(key, {})

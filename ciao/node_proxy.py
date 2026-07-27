@@ -8,7 +8,7 @@ and macOS tray act as a thin client.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 import httpx
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -92,7 +92,8 @@ def get_proxy_target_url(request: Request | WebSocket) -> str | None:
     except Exception:
         pass
 
-    return target
+    # node_mgr comes from getattr → Any; narrow after the truthiness guard above.
+    return cast(str, target)
 
 
 def _host_auth_headers(request: Request | WebSocket, target_url: str) -> dict[str, str]:
@@ -209,7 +210,7 @@ class StandbyProxyMiddleware(BaseHTTPMiddleware):
         target_peer = get_proxy_target_url(request)
         if target_peer:
             return await proxy_http_request(request, target_peer)
-        return await call_next(request)
+        return cast(Response, await call_next(request))
 
 
 async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:

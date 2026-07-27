@@ -190,7 +190,9 @@ class LoopManager:
         *,
         dispatch: Callable[[LoopEntry], Awaitable[dict | None]] | None = None,
         chat_busy: Callable[[str], bool] | None = None,
-        chat_exists: Callable[[str], bool] | None = None,
+        # Prefer Callable[[LoopEntry], bool]; str-only callables are still
+        # accepted via the TypeError fallback in _chat_is_dispatchable.
+        chat_exists: Callable[..., bool] | None = None,
         is_node_active: Callable[[], bool] | None = None,
     ) -> None:
         self._store = store

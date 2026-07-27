@@ -13,7 +13,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Any, Callable, Literal
 
 from ciao.config import CiaoConfig
 from ciao.git_sync import sync_workspace
