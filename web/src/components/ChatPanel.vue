@@ -4782,6 +4782,7 @@ details[open] > .activity-summary::before {
   position: relative;
   display: inline-flex;
   align-items: center;
+  height: 30px;
 }
 
 .model-picker-btn {

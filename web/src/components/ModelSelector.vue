@@ -399,6 +399,9 @@ onBeforeUnmount(() => {
 
 .model-selector--triggerless {
   width: auto;
+  height: 100%;
+  min-height: 30px;
+  align-self: stretch;
 }
 
 .model-selector__trigger {

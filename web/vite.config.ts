@@ -15,6 +15,7 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
+    allowedHosts: true,
     proxy: {
       // Object form keeps changeOrigin off so the browser's Host header
       // reaches the backend; its same-origin check compares Origin against
