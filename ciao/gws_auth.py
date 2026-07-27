@@ -538,7 +538,7 @@ class GwsHealthMonitor:
         title = "Google Workspace login needs attention"
         body = (
             f"The '{profile}' Google login may have expired or been revoked. "
-            "Re-authenticate in Settings → Integrations to restore Gmail, "
+            "Re-authenticate in Settings → Workspaces to restore Gmail, "
             "Calendar, Drive, and scheduled Google tasks."
         )
         if self._push is not None:

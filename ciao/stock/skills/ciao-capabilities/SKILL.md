@@ -33,9 +33,9 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 
 ### 2. Memory and the vault (second brain)
 
-- Chats are **archived into a markdown vault** (e.g. `memory-vault/Logs/Chats/`). From archived sessions Ciaobot extracts insights and drafts **memory proposals** — the user reviews and approves them before anything is promoted into durable memory (`MEMORY.md`). Nothing is memorized silently.
-- The vault is standard, open markdown: notes, project folders, `CLAUDE.md`, `MEMORY.md`, a generated `INDEX.md` from frontmatter and wikilinks. It is agent-agnostic and remains useful without Ciaobot.
-- Vault tooling: search (`vault_search`) before adding duplicate facts, and refresh the index (`ciao index`) after larger edits. Read-only recall (search, read matches, admit when nothing is found) is inline system-prompt policy, not a separate skill. For the live list of typed Ciaobot tools (projects, chats, schedules, loops, handoffs), read the MCP `tools/list` rather than reciting a static tool list; bounded-memory and vault-maintenance edits are the `ciao` CLI (`ciao memory …`, `ciao index`, `ciao lint`).
+- Chats are **archived into a markdown vault** (e.g. `memory-vault/Logs/Chats/`). From archived sessions Ciaobot extracts insights and drafts **memory proposals** — the user reviews and approves them before anything is promoted into bounded durable memory (`~/.ciao/memory.md` for env/conventions/lessons, `~/.ciao/user.md` for identity and preferences). Accept/reject via the `memory_proposal_resolve` MCP tool (or `ciao memory …` on the CLI). Nothing is memorized silently.
+- The vault is standard, open markdown: notes, project folders, `CLAUDE.md`, a vault `MEMORY.md` (curator notes — separate from bounded `~/.ciao` memory), a generated `INDEX.md` from frontmatter and wikilinks. It is agent-agnostic and remains useful without Ciaobot.
+- Vault tooling: search (`vault_search`) before adding duplicate facts, and refresh the index (`ciao index`) after larger edits. Read-only recall (search, read matches, admit when nothing is found) is inline system-prompt policy, not a separate skill. For the live list of typed Ciaobot tools (projects, chats, schedules, loops, handoffs), read the MCP `tools/list` rather than reciting a static tool list; bounded-memory CRUD and vault-maintenance edits are the `ciao` CLI (`ciao memory …`, `ciao index`, `ciao lint`).
 
 ### 3. Schedules, loops, and automations
 
@@ -70,14 +70,14 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 ### 7. Google Workspace (`gws`)
 
 - Ciaobot integrates with Gmail, Calendar, Drive, Docs, Sheets, Slides, and Tasks through the [`gws` CLI](https://github.com/googleworkspace/cli).
-- **Settings → Integrations**: install `gws`, upload a GCP OAuth `client_secret.json` per profile, and connect Google accounts from the browser (no terminal required).
-- Separate **personal** and **work** profiles; each workspace picks which profile to use (Settings → Workspaces).
-- Stock **`gws-*` skills** ship with the app (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). Setup details: `gws-shared` skill and the ⓘ panel on the Integrations page.
+- **Settings → Workspaces**: install `gws`, upload a GCP OAuth `client_secret.json` per profile, and connect Google accounts from the browser (no terminal required). The Google Workspace card (and its ⓘ panel) lives on that tab.
+- Separate **personal** and **work** profiles; each workspace picks which profile to use on the same Workspaces tab.
+- Stock **`gws-*` skills** ship with the app (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). Setup details: `gws-shared` skill and the ⓘ panel on the Google Workspace card.
 
 ### App and system surface
 
 - **Command palette**: press ⌘K (Ctrl+K on Windows/Linux) anywhere to open a quick palette — search and jump to any chat, hop to Schedules or Settings, or toggle the theme.
-- **Settings page**: provider keys, model lists, skill/agent inventory, the injected system prompt (read-only), and local package updates from the UI.
+- **Settings page**: Home (deploy, notifications, appearance, **host & client** multi-device role, workspace health), Providers, Workspaces (including Google Workspace), Models, Context (injected prompt layers), Assets (skill/agent/command inventory plus editable **project MCP servers** and secrets), and Automations.
 - **macOS extras**: a menu bar companion (`ciao menubar`) with server status, a Start at Login status/toggle, and open/restart/logs actions (the Ciaobot face turns scared when the server is down), a distinct `Ciaobot Server.app` recovery launcher, and LaunchAgents so everything starts on login.
 - **Local HTTP API**: the app exposes an API an in-chat agent can drive (create chats, subagents, commands) — recipes are in `PWA_API.md` in the Ciaobot GitHub repo (`raffaelefarinaro/ciaobot`); fetch it when you need the raw API surface. For the common cases, the `chat_create` and `schedule_*`/`loop_*` MCP tools already carry the working recipes in their own docstrings.
 

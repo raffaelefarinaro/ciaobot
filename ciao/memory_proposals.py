@@ -293,7 +293,8 @@ _STUB_HEADER = (
     "# Memory Proposals\n\n"
     "Auto-generated proposals from session-insights curation. Each batch is "
     "timestamped. Review and promote durable facts to `~/.ciao/memory.md` or "
-    "`~/.ciao/user.md` via the `memory` MCP tool.\n"
+    "`~/.ciao/user.md` via the `memory_proposal_resolve` MCP tool "
+    "(or `ciao memory add` on the CLI).\n"
 )
 
 

@@ -9,7 +9,7 @@ metadata:
 
 ## Installation
 
-Install `gws` from Settings → Integrations (or see the Ciaobot README). The binary must be on `$PATH`.
+Install `gws` from Settings → Workspaces (or see the Ciaobot README). The binary must be on `$PATH`.
 
 ## Authentication (Ciaobot)
 
@@ -21,7 +21,7 @@ scripts/gws-profile.sh <personal|work> <service> <subcommand> [flags]
 
 Use the chat's `GWS_PROFILE` unless the user asks otherwise. The wrapper routes credentials and execs `gws`. Do not `source` it and do not repeat the `gws` binary after the profile name.
 
-OAuth setup: Settings → Integrations. Config dirs: `secrets/gws-personal/` (personal), `secrets/gws/` (work).
+OAuth setup: Settings → Workspaces (Google Workspace card). Config dirs: `secrets/gws-personal/` (personal), `secrets/gws/` (work).
 
 ## Global Flags
 

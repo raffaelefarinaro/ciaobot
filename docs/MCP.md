@@ -54,8 +54,15 @@ flowchart LR
 
 ## Managed Claude Code configuration
 
-Users do not maintain a static `.mcp.json` for Ciaobot. For an MCP chat,
-`ClaudeProvider` constructs the equivalent of:
+Users do not maintain a static `.mcp.json` for the **embedded Ciaobot** HTTP
+adapter — that server is injected at chat spawn with a scoped bearer token.
+Separately, Settings → Assets → MCP servers can create, update, and delete
+**project** MCP server entries in the workspace `.mcp.json` (stdio/HTTP), write
+matching env-key secrets into `.env`, and probe tools (`POST/PATCH/DELETE
+/api/mcp/servers`, `GET /api/mcp/servers/{name}/tools`). Those third-party
+servers are distinct from the managed `ciaobot` control-plane adapter.
+
+For an MCP chat, `ClaudeProvider` constructs the equivalent of:
 
 ```python
 ClaudeAgentOptions(
