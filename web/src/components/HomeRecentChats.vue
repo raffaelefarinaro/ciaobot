@@ -73,7 +73,9 @@ function workspaceOf(chat: ChatInfo): string {
 }
 .home-recent-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  /* auto-fit (not auto-fill): empty tracks collapse so a lone card — or the
+     last card on an odd-count row — stretches to the full column width. */
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 8px;
 }
 .home-recent-card {
