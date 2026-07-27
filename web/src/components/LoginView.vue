@@ -326,18 +326,18 @@
       <form v-else class="login-body" @submit.prevent="doLogin">
         <p class="line line--banner">
           <span class="wordmark wordmark--md">ciaobot</span>
-          <span class="banner-meta">// personal assistant · auth required</span>
+          <span class="banner-meta">// personal assistant · {{ loginModeHint }}</span>
         </p>
-        <p class="line line--sys">connecting to Ciaobot<span v-if="loading"> ...</span></p>
+        <p class="line line--sys">{{ loginConnectingText }}<span v-if="loading"> ...</span></p>
         <p class="line">
           <span class="prompt">$</span>
-          <label class="prompt-label" for="login-token">auth_token:</label>
+          <label class="prompt-label" for="login-token">{{ loginTokenLabel }}:</label>
           <input
             id="login-token"
             v-model="token"
             type="password"
             class="prompt-input"
-            placeholder="paste token"
+            :placeholder="loginTokenPlaceholder"
             autofocus
             autocomplete="current-password"
             :disabled="loading"
@@ -370,6 +370,23 @@ const auth = useAuthStore()
 const token = ref('')
 const error = ref('')
 const loading = ref(false)
+const clientHostUrl = ref('')
+const isClientLogin = computed(() => Boolean(clientHostUrl.value))
+const loginModeHint = computed(() =>
+  isClientLogin.value ? 'client · host password required' : 'auth required',
+)
+const loginConnectingText = computed(() => {
+  if (!isClientLogin.value) return 'connecting to Ciaobot'
+  try {
+    return `connecting to host ${new URL(clientHostUrl.value).host}`
+  } catch {
+    return `connecting to host ${clientHostUrl.value}`
+  }
+})
+const loginTokenLabel = computed(() => (isClientLogin.value ? 'host_password' : 'auth_token'))
+const loginTokenPlaceholder = computed(() =>
+  isClientLogin.value ? 'password set on the host' : 'paste token',
+)
 
 // Setup Wizard states
 const isBootstrap = ref(false)
@@ -646,6 +663,15 @@ watch(workspace, (path) => {
 onMounted(async () => {
   bootstrapLoading.value = true
   try {
+    try {
+      const startup = await fetch('/api/startup-status').then((r) => r.json())
+      const role = String(startup?.node_role || '')
+      if (role === 'client' || role === 'standby') {
+        clientHostUrl.value = String(startup?.host_url || startup?.active_peer_url || '')
+      }
+    } catch {
+      /* ignore */
+    }
     await fetchSetupStatus()
     if (isBootstrap.value) {
       inspectWorkspaceFolder(workspace.value || '')

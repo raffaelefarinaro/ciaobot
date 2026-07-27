@@ -35,7 +35,12 @@ async def auth_login(request: Request) -> JSONResponse:
     if not _check_login_rate_limit(client_ip):
         return JSONResponse({"error": "rate limited"}, status_code=429)
     body = await request.json()
-    token = body.get("token", "")
+    token = str(body.get("token", "") or "")
+
+    node_mgr = getattr(app.state, "node_state_manager", None)
+    if node_mgr is not None and node_mgr.is_client():
+        return await _client_mode_login(request, token)
+
     if not hmac.compare_digest(token, app.state.config.pwa_auth_token):
         return JSONResponse({"error": "invalid token"}, status_code=401)
     signed = app.state.serializer.dumps({"user": "owner"})
@@ -44,7 +49,68 @@ async def auth_login(request: Request) -> JSONResponse:
     return response
 
 
+async def _client_mode_login(request: Request, password: str) -> JSONResponse:
+    """Authenticate to the remote host and store its session for the tunnel."""
+    import httpx
+
+    from ciao.web.routes_api import _parse_set_cookie_session
+
+    node_mgr = request.app.state.node_state_manager
+    host_url = node_mgr.get_host_url()
+    if not host_url:
+        return JSONResponse(
+            {"error": "Client mode has no host URL configured"},
+            status_code=400,
+        )
+    if not password.strip():
+        return JSONResponse({"error": "Host password required"}, status_code=400)
+
+    try:
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
+            login_res = await client.post(
+                f"{host_url}/api/auth/login",
+                json={"token": password},
+            )
+            if login_res.status_code != 200:
+                return JSONResponse(
+                    {"error": "Invalid password for host", "auth_required": True},
+                    status_code=401,
+                )
+            cookies: list[str] = []
+            try:
+                cookies = login_res.headers.get_list("set-cookie")
+            except Exception:
+                raw = login_res.headers.get("set-cookie")
+                if raw:
+                    cookies = [raw]
+            host_session = _parse_set_cookie_session(cookies)
+            if not host_session:
+                host_session = login_res.cookies.get(SESSION_COOKIE)
+            if not host_session:
+                return JSONResponse(
+                    {"error": "Host login succeeded but no session cookie was returned"},
+                    status_code=502,
+                )
+    except Exception as exc:
+        return JSONResponse(
+            {"error": f"Failed to reach host at {host_url}: {exc}", "peer_unreachable": True},
+            status_code=400,
+        )
+
+    node_mgr.set_host_session(host_session)
+    # Keep a local session too so local AuthMiddleware stays happy if enabled.
+    signed = request.app.state.serializer.dumps({"user": "owner"})
+    response = JSONResponse(
+        {"ok": True, "mode": "client", "host_url": host_url},
+    )
+    response.set_cookie(SESSION_COOKIE, signed, **session_cookie_kwargs(request))
+    return response
+
+
 async def auth_logout(request: Request) -> JSONResponse:
+    node_mgr = getattr(request.app.state, "node_state_manager", None)
+    if node_mgr is not None and node_mgr.is_client():
+        node_mgr.set_host_session(None)
     response = JSONResponse({"ok": True})
     cookie_kwargs = session_cookie_kwargs(request)
     response.delete_cookie(
@@ -67,6 +133,54 @@ async def auth_check(request: Request) -> JSONResponse:
     config = getattr(request.app.state, "config", None)
     if getattr(config, "bootstrap_mode", False):
         return JSONResponse({"error": "setup required"}, status_code=401)
+
+    node_mgr = getattr(request.app.state, "node_state_manager", None)
+    if node_mgr is not None and node_mgr.is_client():
+        host_url = node_mgr.get_host_url()
+        if not host_url:
+            return JSONResponse(
+                {"error": "client mode missing host", "client": True},
+                status_code=401,
+            )
+        if not node_mgr.get_host_session():
+            # Legacy standby→client migrations have no stored session. If the
+            # host does not require auth, allow the tunnel; otherwise ask for
+            # the host password via the login screen.
+            try:
+                import httpx
+
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    res = await client.get(f"{host_url}/api/startup-status")
+                    if res.status_code == 200:
+                        payload = res.json() if res.headers.get("content-type", "").startswith("application/json") else {}
+                        if isinstance(payload, dict) and not payload.get("auth_required"):
+                            return JSONResponse(
+                                {
+                                    "ok": True,
+                                    "mode": "client",
+                                    "host_url": host_url,
+                                    "has_host_session": False,
+                                }
+                            )
+            except Exception:
+                pass
+            return JSONResponse(
+                {
+                    "error": "host session required",
+                    "client": True,
+                    "host_url": host_url,
+                },
+                status_code=401,
+            )
+        return JSONResponse(
+            {
+                "ok": True,
+                "mode": "client",
+                "host_url": host_url,
+                "has_host_session": True,
+            }
+        )
+
     return JSONResponse({"ok": True})
 
 

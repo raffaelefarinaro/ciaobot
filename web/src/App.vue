@@ -1,5 +1,17 @@
 <template>
   <div id="ciao-app">
+    <div
+      v-if="clientMode"
+      class="client-mode-banner"
+      role="status"
+    >
+      <span>
+        Client mode — viewing
+        <code>{{ clientHostLabel }}</code>
+        <template v-if="!clientHasSession"> · host password needed</template>
+      </span>
+      <router-link class="client-mode-banner-link" to="/settings">Manage</router-link>
+    </div>
     <Transition name="fade">
       <StartupView
         v-if="showStartup"
@@ -41,10 +53,23 @@ const overallReady = ref(false)
 const serverVersion = ref('')
 const skipped = ref(false)
 const startupDone = ref(false)
+const clientMode = ref(false)
+const clientHostUrl = ref('')
+const clientHasSession = ref(false)
 
 const showStartup = computed(() => !startupDone.value && !skipped.value)
+const clientHostLabel = computed(() => {
+  const raw = clientHostUrl.value
+  if (!raw) return 'remote host'
+  try {
+    return new URL(raw).host || raw
+  } catch {
+    return raw
+  }
+})
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null
+let nodePollTimer: ReturnType<typeof setInterval> | null = null
 
 async function pollStartup() {
   try {
@@ -65,8 +90,26 @@ async function pollStartup() {
     if (overallReady.value) {
       startupDone.value = true
     }
+    refreshClientBanner(data)
   } catch {
     // ignore fetch errors during startup
+  }
+}
+
+function refreshClientBanner(data: Record<string, unknown>) {
+  const role = String(data.node_role || '')
+  clientMode.value = role === 'client' || role === 'standby'
+  clientHostUrl.value = String(data.host_url || data.active_peer_url || '')
+  clientHasSession.value = Boolean(data.has_host_session)
+}
+
+async function pollClientBanner() {
+  try {
+    const res = await fetch('/api/startup-status')
+    if (!res.ok) return
+    refreshClientBanner(await res.json())
+  } catch {
+    /* ignore */
   }
 }
 
@@ -96,11 +139,17 @@ function stopPolling() {
 
 onMounted(() => {
   pollStartup().then(scheduleNextPoll)
+  void pollClientBanner()
+  nodePollTimer = setInterval(() => { void pollClientBanner() }, 5000)
   window.addEventListener('keydown', handleKeyDown)
 })
 
 onUnmounted(() => {
   stopPolling()
+  if (nodePollTimer) {
+    clearInterval(nodePollTimer)
+    nodePollTimer = null
+  }
   window.removeEventListener('keydown', handleKeyDown)
 })
 
@@ -110,6 +159,33 @@ watch(showStartup, (show) => {
 </script>
 
 <style>
+.client-mode-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  background: color-mix(in srgb, var(--warn, #ff9800) 18%, var(--bg2));
+  border-bottom: 1px solid var(--border);
+  color: var(--fg);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.client-mode-banner code {
+  color: var(--accent, #ff4d6d);
+  font-size: inherit;
+}
+.client-mode-banner-link {
+  color: var(--accent, #ff4d6d);
+  text-decoration: none;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.client-mode-banner-link:hover {
+  text-decoration: underline;
+}
+
 :root {
   /* Font scale multiplier */
   --font-scale: 1.0;

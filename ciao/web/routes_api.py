@@ -4390,6 +4390,8 @@ async def startup_status_endpoint(request: Request) -> JSONResponse:
         "version": __version__,
         "node_role": role,
         "active_peer_url": active_peer_url,
+        "host_url": node_mgr.get_host_url() if node_mgr else None,
+        "has_host_session": bool(node_mgr.get_host_session()) if node_mgr else False,
         "auth_required": bool(getattr(config, "pwa_auth_required", False)) if config else False,
     })
     return JSONResponse(payload)

@@ -155,8 +155,34 @@
             <!-- Client mode: disconnect only (no connect form) -->
             <template v-if="isNodeClient">
               <p class="hint hint--section-empty">
+                You are tunneling to the host below — chats and automations are that machine’s, not this one’s.
                 Disconnect asks the host to push, then this machine pulls and becomes host again.
               </p>
+              <div v-if="!nodeStatus.has_host_session" class="action-result action-result--error">
+                Host password session missing. Enter the host password below to finish connecting.
+              </div>
+              <div v-if="!nodeStatus.has_host_session" class="settings-form-panel node-peer-form">
+                <label class="settings-field">
+                  <span class="ws-label">Host password</span>
+                  <input
+                    v-model="hostPasswordInput"
+                    type="password"
+                    class="routine-input"
+                    placeholder="Password set on the host"
+                    autocomplete="off"
+                    @keyup.enter="reconnectHostSession"
+                  />
+                </label>
+                <div class="action-row settings-actions">
+                  <button
+                    class="btn-primary btn-small"
+                    @click="reconnectHostSession"
+                    :disabled="!hostPasswordInput || nodePending !== null"
+                  >
+                    {{ nodePending === 'reconnect' ? 'Reconnecting…' : 'Reconnect' }}
+                  </button>
+                </div>
+              </div>
               <div class="action-row settings-actions">
                 <button
                   class="btn-primary btn-small"
@@ -4276,8 +4302,9 @@ async function connectAsClient() {
     if (r?.ok) {
       hostPasswordInput.value = ''
       showConnectForm.value = false
-      nodeActionResult.value = `Connected as client to ${hostUrl}.`
-      await fetchNodeStatus()
+      // Full reload so stores/chats pick up the tunneled host and the client banner appears.
+      window.location.assign('/')
+      return
     } else {
       nodeActionError.value = true
       nodeActionResult.value = r?.error || 'Connect failed'
@@ -4288,6 +4315,24 @@ async function connectAsClient() {
     nodeActionResult.value = e?.payload?.password_required_on_host
       ? detail
       : `Error: ${detail}`
+  }
+  nodePending.value = null
+}
+
+async function reconnectHostSession() {
+  const password = hostPasswordInput.value
+  if (!password) return
+  nodePending.value = 'reconnect'
+  nodeActionResult.value = ''
+  nodeActionError.value = false
+  try {
+    await api.post('/api/auth', { token: password })
+    hostPasswordInput.value = ''
+    window.location.assign('/')
+    return
+  } catch (e: any) {
+    nodeActionError.value = true
+    nodeActionResult.value = `Error: ${e?.payload?.error || e.message || 'Reconnect failed'}`
   }
   nodePending.value = null
 }
