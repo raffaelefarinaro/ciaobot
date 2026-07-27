@@ -10,6 +10,7 @@ from pathlib import Path
 BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/auth": "browser login flow; the recipe's auth step covers this",
     "/api/auth/logout": "browser logout; clears the session cookie",
+    "/api/auth/settings": "browser Settings auth form; enable/disable or change PWA password",
     "/api/setup/finish": "browser first-run setup handoff; writes local config and requests restart",
     "/api/setup/mkdir": "browser first-run setup folder picker; creates a local folder (bootstrap + localhost only)",
     "/api/projects/{project_id}/files": "browser multipart upload; agents edit vault files directly",
@@ -42,6 +43,7 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/integrations/gws/exchange": "browser GWS integration oauth token exchange",
     "/api/integrations/gws/disconnect": "browser GWS integration disconnect/removal",
     "/api/automation/backfill-insights": "browser Settings button to trigger insights backfill",
+    "/api/node/connect": "browser Settings host/client connect; tunnels this node to a remote host",
     "/api/node/demote": "node state management endpoint; demotes active node to standby",
     "/api/node/handover": "node state management endpoint; hands over active role to peer",
     "/api/node/peers": "node state management endpoint; registers or updates peer nodes",
