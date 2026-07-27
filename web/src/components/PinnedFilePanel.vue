@@ -327,7 +327,6 @@
       <div
         v-if="commentPopover && popoverComment"
         class="pfp-comment-pop"
-        :class="{ 'is-pinned': commentPopover.pinned }"
         :style="{ top: commentPopover.top + 'px', left: commentPopover.left + 'px' }"
         @mousedown.stop
         @mouseenter="onPopoverEnter"
@@ -2158,9 +2157,6 @@ watch(() => props.filePath, () => {
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
   padding: 10px 12px;
   box-sizing: border-box;
-}
-.pfp-comment-pop.is-pinned {
-  z-index: 33;
 }
 .pfp-comment-compose { z-index: 33; }
 .pfp-pop-quote {
