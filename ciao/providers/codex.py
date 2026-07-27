@@ -493,7 +493,7 @@ def codex_mcps_and_plugins(env: Mapping[str, str] | None = None) -> list[str]:
             if res.returncode == 0 and raw.startswith("["):
                 entries = json.loads(raw)
                 if isinstance(entries, list):
-                    servers = sorted(
+                    return sorted(
                         {
                             str(item.get("name") or "").strip()
                             for item in entries
@@ -503,7 +503,6 @@ def codex_mcps_and_plugins(env: Mapping[str, str] | None = None) -> list[str]:
                             and str(item.get("name") or "").strip() not in excluded
                         }
                     )
-                    return servers
         except Exception:
             pass
 

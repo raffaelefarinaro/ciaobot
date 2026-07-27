@@ -488,6 +488,37 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/setti
   -d '{"title_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","transcription_engine":"local"}'
 ```
 
+**Project MCP servers (Settings → Providers tab)**
+
+```bash
+# Create a project MCP server in .mcp.json. Pass url for an HTTP server, or
+# command (+ optional args) for a stdio one; one of the two is required.
+# env_keys binds placeholder names to .env keys the server needs.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/mcp/servers" \
+  -H 'content-type: application/json' \
+  -d '{"name":"linear","url":"https://mcp.linear.app/sse","env_keys":{"LINEAR_API_KEY":""}}'
+
+# Update one server. Omitted transport fields (url, command, args) keep their
+# current values, so a PATCH can change env bindings alone.
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/mcp/servers/linear" \
+  -H 'content-type: application/json' \
+  -d '{"env_keys":{"LINEAR_API_KEY":"LINEAR_TOKEN"}}'
+
+# Delete one server. 404 when the name is not in .mcp.json.
+curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/mcp/servers/linear"
+
+# Discover a server's tools on demand (HTTP probe, or previously observed names).
+curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/mcp/servers/linear/tools"
+
+# Save MCP secrets into the workspace .env. Values are write-only: they are
+# never returned by any endpoint. Keys already known from a discovered server
+# are accepted bare; an unknown key needs "server" so it can be bound into that
+# server's .mcp.json env map.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/mcp/env-keys" \
+  -H 'content-type: application/json' \
+  -d '{"server":"linear","keys":{"LINEAR_API_KEY":"lin_api_..."}}'
+```
+
 **Workspace git sync**
 
 Ciaobot never creates or switches local branches: it works on whatever branch the workspace

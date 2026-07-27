@@ -447,8 +447,10 @@ class CiaoMcpService:
                 "tool_prefix": server.get("tool_prefix"),
             }
         workspace_root = Path(getattr(self.config, "workspace_root", Path.cwd())).resolve()
-        meta = server.get("_meta") if isinstance(server.get("_meta"), dict) else {}
-        headers_raw = meta.get("headers") if isinstance(meta.get("headers"), dict) else {}
+        raw_meta = server.get("_meta")
+        meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
+        raw_headers = meta.get("headers")
+        headers_raw: dict[str, Any] = raw_headers if isinstance(raw_headers, dict) else {}
         headers = {
             str(k): _resolve_env_template(str(v), workspace_root)
             for k, v in headers_raw.items()
@@ -614,15 +616,15 @@ class CiaoMcpService:
         if raw is None:
             raw = data.get("mcp_servers")
         if raw is None:
-            data["mcpServers"] = {}
-            return data["mcpServers"]
+            servers: dict[str, Any] = {}
+            data["mcpServers"] = servers
+            return servers
         if not isinstance(raw, dict):
             raise ValueError(".mcp.json mcpServers must be an object")
         if "mcpServers" not in data and "mcp_servers" in data:
             # Normalize legacy key on write.
             data["mcpServers"] = raw
             data.pop("mcp_servers", None)
-            return data["mcpServers"]
         return raw
 
     def _find_server_file(self, name: str) -> tuple[Path, dict[str, Any], dict[str, Any]] | None:
@@ -666,8 +668,10 @@ class CiaoMcpService:
             meta = servers.get(server_name)
             meta = dict(meta) if isinstance(meta, dict) else {}
         else:
-            path = self._preferred_mcp_json_path(create=True)
-            assert path is not None
+            preferred = self._preferred_mcp_json_path(create=True)
+            if preferred is None:
+                raise ValueError("no writable .mcp.json location is available")
+            path = preferred
             data = self._read_mcp_json(path) if path.is_file() else {}
             servers = self._mcp_servers_dict(data)
             if server_name in servers:
@@ -693,8 +697,8 @@ class CiaoMcpService:
         if env_keys:
             keys_to_bind.extend(str(k).strip() for k in env_keys if str(k).strip())
         if keys_to_bind:
-            env_map = meta.get("env") if isinstance(meta.get("env"), dict) else {}
-            env_map = dict(env_map)
+            raw_env = meta.get("env")
+            env_map: dict[str, Any] = dict(raw_env) if isinstance(raw_env, dict) else {}
             for key in keys_to_bind:
                 if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
                     raise ValueError(f"invalid env key '{key}'")
