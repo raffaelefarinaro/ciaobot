@@ -470,7 +470,8 @@ def test_claude_convert_result_message(
 def test_claude_error_result_gets_host_annotation(
     claude_provider: ClaudeProvider,
 ) -> None:
-    """A hostless connection error gains the resolved endpoint host (#162)."""
+    """A hostless connection error gains the endpoint host and a DNS
+    category, so a failed schedule names what failed and how (#162, #178)."""
     from claude_agent_sdk import ResultMessage
 
     claude_provider._api_host = "api.anthropic.com"
@@ -485,7 +486,8 @@ def test_claude_error_result_gets_host_annotation(
     )
     result = claude_provider._convert_message(msg)[0]
     assert result.is_error is True
-    assert "(host: api.anthropic.com)" in result.result
+    assert "host: api.anthropic.com" in result.result
+    assert "category: dns" in result.result
 
 
 def test_claude_error_result_annotation_is_selective(
@@ -510,14 +512,21 @@ def test_claude_error_result_annotation_is_selective(
         )
     )[0]
     assert "host:" not in other.result
+    assert "category:" not in other.result
 
-    # Already naming the host: no double-annotation.
+    # Already naming the host: the host is not duplicated, but the category
+    # is still added so the operator can tell DNS from refused/auth (#178).
     assert (
         _annotate_connection_host(
             "getaddrinfo ENOTFOUND api.anthropic.com", "api.anthropic.com"
         )
-        == "getaddrinfo ENOTFOUND api.anthropic.com"
+        == "getaddrinfo ENOTFOUND api.anthropic.com (category: dns)"
     )
+    # Idempotent: a second pass over an already-annotated string is a no-op.
+    annotated = _annotate_connection_host(
+        "API Error: Unable to connect to API (ENOTFOUND)", "api.anthropic.com"
+    )
+    assert _annotate_connection_host(annotated, "api.anthropic.com") == annotated
     # A per-turn ANTHROPIC_BASE_URL override (Ollama/OpenRouter) wins.
     assert (
         _resolve_api_host({"ANTHROPIC_BASE_URL": "https://openrouter.ai/api/v1"})

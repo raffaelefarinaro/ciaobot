@@ -365,6 +365,95 @@ async def test_codex_provider_excludes_commentary_from_final_result(
     await provider.disconnect()
 
 
+FAKE_APP_SERVER_CONNECT_ERROR = r'''#!/usr/bin/env python3
+import json
+import sys
+
+turn_id = "turn-1"
+
+def send(payload):
+    print(json.dumps(payload, separators=(",", ":")), flush=True)
+
+for raw in sys.stdin:
+    message = json.loads(raw)
+    method = message.get("method")
+    request_id = message.get("id")
+    if method == "initialize":
+        send({"id": request_id, "result": {"userAgent": "fake-codex"}})
+    elif method == "initialized":
+        pass
+    elif method in {"thread/start", "thread/resume", "thread/fork"}:
+        send({"id": request_id, "result": {
+            "thread": {"id": "thread-1", "turns": []},
+            "model": "gpt-test", "modelProvider": "openai",
+        }})
+    elif method == "turn/start":
+        send({"id": request_id, "result": {"turn": {"id": turn_id, "status": "inProgress", "items": []}}})
+        send({"method": "error", "params": {"willRetry": False, "error": {
+            "message": "API Error: Unable to connect to API (ENOTFOUND)",
+        }}})
+        send({"method": "turn/completed", "params": {"threadId": "thread-1", "turn": {
+            "id": turn_id, "status": "failed", "items": [],
+        }}})
+'''
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_error_result_names_host_and_category(tmp_path: Path) -> None:
+    """A connection-error result from the Codex app-server is annotated with
+    the failing endpoint (OPENAI_BASE_URL host) and a DNS category, so a failed
+    codex schedule names what failed and how (#178)."""
+    script = tmp_path / "fake_codex_connect_error.py"
+    script.write_text(FAKE_APP_SERVER_CONNECT_ERROR, encoding="utf-8")
+    provider = CodexProvider(tmp_path, command=[sys.executable, str(script)])
+    request = AgentRequest(
+        prompt="do the thing",
+        model="gpt-test",
+        mode="auto",
+        provider="codex",
+        extra_env={"OPENAI_BASE_URL": "https://api.openai.com/v1"},
+    )
+    events = []
+    async for event in provider.run_streaming(request, lambda _handle: None):
+        events.append(event)
+
+    result = next(event for event in events if isinstance(event, ResultEvent))
+    assert result.is_error is True
+    assert "host: api.openai.com" in result.result
+    assert "category: dns" in result.result
+    await provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_non_connection_error_passes_through(tmp_path: Path) -> None:
+    """A non-connection error from Codex is not annotated (#178)."""
+    script = tmp_path / "fake_codex_auth_error.py"
+    script.write_text(
+        FAKE_APP_SERVER_CONNECT_ERROR.replace(
+            "Unable to connect to API (ENOTFOUND)",
+            "Model refused the request: policy violation",
+        ),
+        encoding="utf-8",
+    )
+    provider = CodexProvider(tmp_path, command=[sys.executable, str(script)])
+    request = AgentRequest(
+        prompt="do the thing",
+        model="gpt-test",
+        mode="auto",
+        provider="codex",
+        extra_env={"OPENAI_BASE_URL": "https://api.openai.com/v1"},
+    )
+    events = []
+    async for event in provider.run_streaming(request, lambda _handle: None):
+        events.append(event)
+
+    result = next(event for event in events if isinstance(event, ResultEvent))
+    assert result.is_error is True
+    assert "host:" not in result.result
+    assert "category:" not in result.result
+    await provider.disconnect()
+
+
 @pytest.mark.asyncio
 async def test_codex_provider_discovers_models_and_reads_thread(tmp_path: Path) -> None:
     command, _log = _fake_command(tmp_path)

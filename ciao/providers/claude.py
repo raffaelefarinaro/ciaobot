@@ -127,19 +127,16 @@ def _is_connection_drop_text(text: str) -> bool:
 
 
 # A name-resolution / connect failure surfaces from the Claude CLI as a generic
-# "API Error: Unable to connect to API (ENOTFOUND)" with no host, so an operator
-# reading a failed schedule can't tell which endpoint failed to resolve (the
-# Anthropic API, an OpenRouter/Ollama gateway, a custom ANTHROPIC_BASE_URL...).
-# We know the endpoint the turn was pointed at, so annotate the error with it.
-# See issue #162.
-_HOSTLESS_CONNECT_MARKERS = (
-    "unable to connect",
-    "enotfound",
-    "econnrefused",
-    "etimedout",
-    "getaddrinfo",
-    "name resolution",
-    "failed to fetch",
+# "API Error: Unable to connect to API (ENOTFOUND)" with no host and no error
+# category, so an operator reading a failed schedule can't tell which endpoint
+# failed to resolve (the Anthropic API, an OpenRouter/Ollama gateway, a custom
+# ANTHROPIC_BASE_URL...) or whether it was DNS, a refused connection, a timeout,
+# or auth. We know the endpoint the turn was pointed at, so annotate the error
+# with it and classify the failure. See issues #162 and #178. The annotation
+# helpers are shared with the Codex provider in ``ciao.providers.connect_errors``
+# so every provider a schedule can dispatch through surfaces the same context.
+from ciao.providers.connect_errors import (  # noqa: E402
+    annotate_connection_host as _annotate_connection_host,
 )
 
 
@@ -158,23 +155,6 @@ def _resolve_api_host(env: dict[str, str]) -> str:
         return urlsplit(base).hostname or ""
     except ValueError:
         return ""
-
-
-def _annotate_connection_host(text: str, host: str) -> str:
-    """Append ``host`` to a hostless connection-error result string.
-
-    No-op unless the text reads as a DNS/connect failure and doesn't already
-    name the host, so ordinary errors and already-annotated ones pass through
-    untouched.
-    """
-    if not host or not text:
-        return text
-    low = text.lower()
-    if not any(marker in low for marker in _HOSTLESS_CONNECT_MARKERS):
-        return text
-    if host.lower() in low:
-        return text
-    return f"{text} (host: {host})"
 
 # The claude-agent-sdk reads the CLI subprocess stdout into a bounded decode
 # buffer (default 1 MiB, ``_DEFAULT_MAX_BUFFER_SIZE``) and raises a fatal,
