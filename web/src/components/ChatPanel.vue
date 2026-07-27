@@ -2241,11 +2241,13 @@ const liveTraceMetaParts = computed(() => {
 // almost certainly the reply, not background reasoning. The length gate keeps
 // short model introspection from flashing the affordance on well-behaved
 // models.
-const LIKELY_ANSWER_THINKING_CHARS = 200
+const LIKELY_ANSWER_THINKING_CHARS = 1000
 const thinkingIsLikelyAnswer = computed(() => {
   const thinking = store.currentStreamingThinking
   if (!thinking || thinking.length < LIKELY_ANSWER_THINKING_CHARS) return false
   if (store.currentStreamingText) return false
+  if (store.activeBackgroundAgents > 0) return false
+  if (store.currentTimeline.some(entry => entry.kind === 'tool')) return false
   return true
 })
 
@@ -2386,6 +2388,14 @@ const renderData = computed<{
     // bookkeeping tools (TodoWrite, etc.) that produce no further user-facing
     // text. In that case the answer text is the real reply and must render as
     // a normal assistant bubble; the trailing tools just join the trace.
+    // While streaming, any in-progress turn buffer without a completed answer bubble
+    // is actively rendered by the live stream trace block below (`store.currentTimeline`).
+    // Clear the buffer so activity steps do not duplicate as a static reasoning trace.
+    if (store.isStreaming && !finalMsg) {
+      buffer = []
+      return
+    }
+
     const trailingHasThinking = trailing.some(m => m.tool_name === '_thinking')
     const turnSubchats = currentTurnIndex !== null ? subchatsByTurn.get(currentTurnIndex) || [] : []
     if (trailingHasThinking && finalMsg) {
@@ -2402,10 +2412,6 @@ const renderData = computed<{
       return
     }
 
-    // While streaming, the final buffer in activeMessages is an incomplete turn
-    // that was already persisted to the server session file. The active turn's
-    // activity and text are already fully rendered in the live "Working..." block
-    // below. Clear the buffer so we don't duplicate it as a collapsed reasoning trace.
     if (isFinal && store.isStreaming) {
       buffer = []
       return
