@@ -84,13 +84,24 @@ class NodeStateManager:
         data = self._read_raw()
         return str(data.get("role", get_default_role()))
 
+    def get_active_peer_url(self) -> str | None:
+        data = self._read_raw()
+        peers = data.get("peers", [])
+        if not peers:
+            return None
+        # Return peer marked as active if available, otherwise first peer
+        active_peer = next((p for p in peers if p.get("is_active")), peers[0])
+        return str(active_peer.get("url", "")).strip().rstrip("/") or None
+
     def get_status(self) -> dict[str, Any]:
         data = self._ensure_loaded()
+        active_peer = self.get_active_peer_url()
         return {
             "node_id": data.get("node_id", self.node_id),
             "role": data.get("role", "active"),
             "active_since": data.get("active_since"),
             "last_handover": data.get("last_handover"),
+            "active_peer_url": active_peer,
             "peers": data.get("peers", []),
         }
 

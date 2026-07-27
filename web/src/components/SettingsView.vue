@@ -45,7 +45,10 @@
               <p class="section-title">node & handover</p>
               <p class="hint">
                 <template v-if="!nodeStatus">Manage active leadership and multi-device synchronization.</template>
-                <template v-else-if="nodeStatus.role === 'standby'">Standby — schedules and background loops are paused on this device.</template>
+                <template v-else-if="nodeStatus.role === 'standby'">
+                  Standby (Client Mode) — API & live chats proxied to active leader
+                  <template v-if="nodeStatus.active_peer_url">({{ nodeStatus.active_peer_url }})</template>.
+                </template>
                 <template v-else>Active leader — schedules and background loops run on this device.</template>
               </p>
             </div>
@@ -4056,6 +4059,8 @@ interface NodeStatus {
   role: 'active' | 'standby'
   active_since: string | null
   last_handover: string | null
+  active_peer_url?: string | null
+  active_peer_reachable?: boolean | null
   peers: NodePeer[]
   git?: any
 }

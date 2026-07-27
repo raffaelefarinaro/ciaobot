@@ -4356,13 +4356,21 @@ async def status_endpoint(request: Request) -> JSONResponse:
 
 
 async def startup_status_endpoint(request: Request) -> JSONResponse:
-    """Return startup phase progress."""
+    """Return startup phase progress and node role state."""
     from ciao import __version__
 
+    node_mgr = getattr(request.app.state, "node_state_manager", None)
+    role = node_mgr.get_role() if node_mgr else "active"
+    active_peer_url = node_mgr.get_active_peer_url() if node_mgr else None
+
     tracker = getattr(request.app.state, "startup_tracker", None)
-    if tracker is None:
-        return JSONResponse({"phases": [], "overall_ready": True, "version": __version__})
-    return JSONResponse({**tracker.to_dict(), "version": __version__})
+    payload = tracker.to_dict() if tracker is not None else {"phases": [], "overall_ready": True}
+    payload.update({
+        "version": __version__,
+        "node_role": role,
+        "active_peer_url": active_peer_url,
+    })
+    return JSONResponse(payload)
 
 
 async def active_chats_endpoint(request: Request) -> JSONResponse:
@@ -5348,6 +5356,19 @@ async def node_status_endpoint(request: Request) -> JSONResponse:
     git_status = local_session.status() if local_session is not None else {}
     status = node_mgr.get_status()
     status["git"] = git_status
+
+    if status.get("role") == "standby" and status.get("active_peer_url"):
+        active_url = status["active_peer_url"]
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                res = await client.get(f"{active_url}/api/startup-status")
+                status["active_peer_reachable"] = (res.status_code == 200)
+        except Exception:
+            status["active_peer_reachable"] = False
+    else:
+        status["active_peer_reachable"] = None
+
     return JSONResponse(status)
 
 

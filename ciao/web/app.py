@@ -11,6 +11,7 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.responses import FileResponse, Response
 
+from ciao.node_proxy import StandbyProxyMiddleware
 from ciao.package_version import make_cached_package_status
 from ciao.mcp_server import mcp_status_endpoint, mcp_usage_endpoint
 from ciao.web.auth import AuthMiddleware, make_serializer
@@ -366,6 +367,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     middleware = [
         Middleware(SecurityHeadersMiddleware),
         Middleware(AuthMiddleware, serializer=serializer, auth_required=config.pwa_auth_required),
+        Middleware(StandbyProxyMiddleware),
     ]
 
     lifespan = None
