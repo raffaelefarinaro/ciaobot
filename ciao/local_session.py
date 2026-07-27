@@ -446,7 +446,7 @@ class LocalSessionManager:
             blockers.append(f"Blocked file '{p.name}': High-confidence Slack API token detected.")
 
         # Suspicious file names (warnings)
-        if name in ("config.json", "credentials.json", "settings.yaml") or "password" in name or "secret" in name:
+        if name in ("config.json", "credentials.json", "settings.yaml") or re.search(r"(?:^|[\W_])(secrets?|passwords?)(?:[\W_]|$)", name):
             warnings.append(f"Suspicious file name '{p.name}' could contain configuration or credentials.")
 
         return blockers, warnings

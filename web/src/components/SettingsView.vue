@@ -43,76 +43,96 @@
           <div class="settings-card-header settings-card-header--split">
             <div>
               <p class="section-title">node & handover</p>
-              <p class="hint">Manage active leadership and multi-device synchronization.</p>
+              <p class="hint">
+                <template v-if="!nodeStatus">Manage active leadership and multi-device synchronization.</template>
+                <template v-else-if="nodeStatus.role === 'standby'">Standby — schedules and background loops are paused on this device.</template>
+                <template v-else>Active leader — schedules and background loops run on this device.</template>
+              </p>
             </div>
-            <span class="badge" :class="nodeStatus?.role === 'active' ? 'badge--ok' : 'badge--warn'">
-              {{ nodeStatus?.role === 'active' ? 'Active Leader' : 'Standby Mode' }}
-            </span>
-          </div>
-          <div v-if="nodeStatus" class="node-handover-body">
-            <div class="node-meta-grid">
-              <div><strong>Device ID:</strong> <code>{{ nodeStatus.node_id }}</code></div>
-              <div><strong>Role:</strong> {{ nodeStatus.role === 'active' ? '🟢 Active (schedules running)' : '🟡 Standby (schedules paused)' }}</div>
-              <div v-if="nodeStatus.active_since"><strong>Active Since:</strong> {{ nodeStatus.active_since }}</div>
-              <div v-if="nodeStatus.last_handover"><strong>Last Handover:</strong> {{ nodeStatus.last_handover }}</div>
-            </div>
-            <div class="action-row action-row--spaced">
+            <div class="settings-card-header-actions">
+              <span
+                v-if="nodeStatus"
+                class="badge"
+                :class="nodeStatus.role === 'active' ? 'badge--success' : 'badge--warn'"
+              >
+                {{ nodeStatus.role === 'active' ? 'active' : 'standby' }}
+              </span>
               <button
-                v-if="nodeStatus.role === 'standby'"
+                v-if="nodeStatus?.role === 'standby'"
                 class="btn-primary btn-small"
                 @click="() => doNodeHandover(false)"
                 :disabled="nodePending !== null"
               >
-                {{ nodePending === 'handover' ? 'Handing over...' : 'Take Over Active Role' }}
+                {{ nodePending === 'handover' ? 'Handing over...' : 'Take over' }}
               </button>
               <button
-                v-if="nodeStatus.role === 'standby'"
+                v-if="nodeStatus?.role === 'standby'"
                 class="btn-caution btn-small"
                 @click="() => doNodeHandover(true)"
                 :disabled="nodePending !== null"
                 title="Force promotion to active role if primary server is offline"
               >
-                Force Takeover
+                Force takeover
               </button>
               <button
-                v-if="nodeStatus.role === 'active'"
+                v-if="nodeStatus?.role === 'active'"
                 class="btn-secondary btn-small"
                 @click="() => doNodeDemote()"
                 :disabled="nodePending !== null"
               >
-                {{ nodePending === 'demote' ? 'Demoting...' : 'Switch to Standby' }}
+                {{ nodePending === 'demote' ? 'Demoting...' : 'Switch to standby' }}
               </button>
             </div>
-
+          </div>
+          <div v-if="!nodeStatus" class="action-row"><span class="loading">Loading node status&hellip;</span></div>
+          <template v-else>
+            <div class="last-run-info">
+              <div class="detail-row">
+                <span class="detail-label">device</span>
+                <code class="detail-val">{{ nodeStatus.node_id }}</code>
+              </div>
+              <div v-if="nodeStatus.active_since" class="detail-row">
+                <span class="detail-label">active since</span>
+                <span class="detail-val">{{ nodeStatus.active_since }}</span>
+              </div>
+              <div v-if="nodeStatus.last_handover" class="detail-row">
+                <span class="detail-label">last handover</span>
+                <span class="detail-val">{{ nodeStatus.last_handover }}</span>
+              </div>
+            </div>
             <div v-if="nodeActionResult" class="action-result" :class="{ 'action-result--error': nodeActionError }">
               {{ nodeActionResult }}
             </div>
 
-            <div class="peers-section">
-              <p class="hint"><strong>Registered Peer Nodes:</strong></p>
-              <ul v-if="nodeStatus.peers && nodeStatus.peers.length" class="peer-list">
-                <li v-for="peer in nodeStatus.peers" :key="peer.url" class="peer-item">
-                  <span>{{ peer.node_id || peer.url }} (<code>{{ peer.url }}</code>)</span>
-                  <button class="btn-small btn-secondary" @click="() => removeNodePeer(peer.url)">Remove</button>
-                </li>
-              </ul>
-              <p v-else class="hint hint--compact">No peer nodes registered yet.</p>
-
-              <div class="add-peer-row">
+            <p class="subsection-title subsection-title--spaced">peer nodes</p>
+            <p v-if="!nodeStatus.peers?.length" class="hint hint--section-empty">No peer nodes registered yet.</p>
+            <div v-else class="node-peer-list">
+              <div v-for="peer in nodeStatus.peers" :key="peer.url" class="node-peer-row">
+                <div class="node-peer-main">
+                  <span class="health-title">{{ peer.node_id || peer.url }}</span>
+                  <code class="health-path">{{ peer.url }}</code>
+                </div>
+                <button class="btn-secondary btn-small" @click="() => removeNodePeer(peer.url)">Remove</button>
+              </div>
+            </div>
+            <div class="settings-form-panel node-peer-form">
+              <label class="settings-field">
+                <span class="ws-label">Peer base URL</span>
                 <input
                   v-model="peerUrlInput"
                   type="text"
+                  class="routine-input"
                   placeholder="http://192.168.1.50:8543"
-                  class="peer-input"
                   @keyup.enter="addNodePeer"
                 />
+              </label>
+              <div class="action-row settings-actions">
                 <button class="btn-secondary btn-small" @click="addNodePeer" :disabled="!peerUrlInput.trim()">
-                  Add Peer URL
+                  Add peer
                 </button>
               </div>
             </div>
-          </div>
-          <div v-else class="action-row"><span class="loading">Loading node status&hellip;</span></div>
+          </template>
         </div>
 
         <!-- Workspace health -->
@@ -4065,7 +4085,7 @@ async function doNodeHandover(force = false) {
     const targetUrl = nodeStatus.value?.peers?.[0]?.url || ''
     const r = await api.post<any>('/api/node/handover', { target_node_url: targetUrl, force })
     if (r?.ok) {
-      nodeActionResult.value = force ? 'Force takeover complete. This device is now Active Leader.' : 'Handover complete. This device is now Active Leader.'
+      nodeActionResult.value = force ? 'Force takeover complete. This device is now the active leader.' : 'Handover complete. This device is now the active leader.'
       await fetchNodeStatus()
       await fetchLocalStatus()
     } else {
@@ -4095,7 +4115,7 @@ async function doNodeDemote() {
   try {
     const r = await api.post<any>('/api/node/demote', {})
     if (r?.ok) {
-      nodeActionResult.value = 'Device switched to Standby mode.'
+      nodeActionResult.value = 'Device switched to standby.'
       await fetchNodeStatus()
     }
   } catch (e: any) {
@@ -4471,6 +4491,33 @@ async function doPackageUpdate() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.node-peer-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+.node-peer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.node-peer-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.node-peer-form {
+  margin-top: 0;
+  margin-bottom: 0;
 }
 
 .deploy-steps {

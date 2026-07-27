@@ -140,3 +140,28 @@ async def test_preflight_env_example_and_test_files_ignored(tmp_path: Path) -> N
     result = await mgr.preflight()
     assert result["blockers"] == []
 
+
+@pytest.mark.asyncio
+async def test_preflight_suspicious_filename_boundaries(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    mgr = LocalSessionManager(workspace=repo, runtime_root=tmp_path / "rt")
+
+    # Files that should NOT trigger suspicious filename warnings
+    _write(repo / "secretary.md", "# Secretary notes\n")
+    _write(repo / "secretariat.txt", "Secretariat\n")
+
+    # Files that SHOULD trigger suspicious filename warnings
+    _write(repo / "my_secret.txt", "secret note\n")
+    _write(repo / "password.txt", "some text\n")
+
+    result = await mgr.preflight()
+
+    # Verify only genuine secret/password files trigger warnings
+    warning_files = [w for w in result["warnings"] if "Suspicious file name" in w]
+    assert len(warning_files) == 2
+    assert any("my_secret.txt" in w for w in warning_files)
+    assert any("password.txt" in w for w in warning_files)
+    assert not any("secretary.md" in w for w in warning_files)
+    assert not any("secretariat.txt" in w for w in warning_files)
+
+
