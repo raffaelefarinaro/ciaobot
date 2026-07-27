@@ -3221,6 +3221,12 @@ class ProjectChatManager:
                 chat.archive_path = str(result)
             self._append_subchats_to_transcript(result, chat_id)
         self._save()
+        self._events.publish({
+            "type": "chat_archived",
+            "chat_id": chat_id,
+            "project_id": chat.project_id,
+            "archive_path": chat.archive_path,
+        })
         if result is None:
             return None
         return ArchiveOutcome(

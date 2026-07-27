@@ -2244,6 +2244,18 @@ export const useProjectStore = defineStore('projects', () => {
         }
         break
       }
+      case 'chat_archived': {
+        disconnectWs(msg.chat_id)
+        const chat = chats.value.find(c => c.chat_id === msg.chat_id)
+        if (chat) {
+          chat.archived = true
+          if (msg.archive_path) chat.archive_path = msg.archive_path
+        }
+        if (activeChatId.value === msg.chat_id) {
+          activeChatId.value = null
+        }
+        break
+      }
       case 'chat_deleted': {
         // Fires when the server prunes an empty chat (user created a "New
         // Chat" and never sent a message, then moved on) or when another

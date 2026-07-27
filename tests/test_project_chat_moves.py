@@ -281,3 +281,17 @@ def test_delete_chat_publishes_event(tmp_path: Path) -> None:
     assert len(deleted) == 1
     assert deleted[0]["chat_id"] == chat.chat_id
     assert deleted[0]["reason"] == "user"
+
+
+def test_archive_chat_publishes_event(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("2026-q2-archive", workspace="work")
+    chat = pcm.create_chat(project.project_id)
+
+    cap = _EventCapture(pcm)
+    pcm.archive_chat(chat.chat_id)
+
+    archived = [e for e in cap.drain() if e.get("type") == "chat_archived"]
+    assert len(archived) == 1
+    assert archived[0]["chat_id"] == chat.chat_id
+    assert archived[0]["project_id"] == project.project_id

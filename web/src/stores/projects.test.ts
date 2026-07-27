@@ -1104,6 +1104,27 @@ describe('deep-link chat navigation', () => {
     })
     expect(routerPush).toHaveBeenCalledWith('/chat/c2')
   })
+
+  test('chat_archived event over /ws/events marks chat archived and clears active chat', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p1', name: 'Proj', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = [
+      { chat_id: 'c1', project_id: 'p1', title: 'Chat 1', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeChatId = 'c1'
+    store.connectEventsWs()
+    const sock = fakeSockets[fakeSockets.length - 1]
+
+    sock.onmessage?.({
+      data: JSON.stringify({ type: 'chat_archived', chat_id: 'c1', project_id: 'p1', archive_path: 'archive/c1.md' }),
+    })
+
+    expect(store.chats[0].archived).toBe(true)
+    expect(store.chats[0].archive_path).toBe('archive/c1.md')
+    expect(store.activeChatId).toBeNull()
+  })
 })
 
 describe('workspace and chat transitions', () => {

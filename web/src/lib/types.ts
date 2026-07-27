@@ -272,6 +272,7 @@ export type EventsWsMessage =
   | { type: 'chat_read'; chat_id: string; last_read_at: string }
   | { type: 'chat_title'; chat_id: string; title: string; status?: 'pending' | 'ready' }
   | { type: 'chat_moved'; chat_id: string; project_id: string; old_project_id: string }
+  | { type: 'chat_archived'; chat_id: string; project_id: string; archive_path?: string }
   | { type: 'chat_deleted'; chat_id: string; project_id: string; reason?: string }
   | { type: 'chat_retry'; chat_id: string; project_id: string; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number }
   | { type: 'project_created'; project: ProjectInfo }
