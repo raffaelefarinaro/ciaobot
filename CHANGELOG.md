@@ -1,5 +1,68 @@
 # Changelog
 
+## v0.5.4 - 2026-07-28
+
+### Added
+- **Host/client nodes.** A Ciaobot instance can now run as a *client* that tunnels to a
+  *host* over a passworded connection. The client proxies API calls and WebSocket streams
+  to the active leader, rewrites `Origin`/`Referer` on state-changing requests, and keeps
+  the menu bar tray in sync with standby/leader status. Peer URLs are normalised
+  (protocol prefix, default port 8443) so a bare hostname is enough
+  (`257022b`, `66b04b5`, `0374c97`, `c8f31ba`, `8b58041`, `1a8ef5d`).
+- **Comments as overlays.** The legacy comment sidebars are gone. Comments now open as an
+  on-demand drawer with floating, hover-pinned popovers in both the transcript and the
+  pinned-file panel (`501a01a`, `25f31ea`, `82d60dd`).
+- **MCP settings you can actually edit.** Servers, secrets, and asset labels are editable
+  from Settings, and the Providers page lists only the platform connectors and skills that
+  are enabled (`9c42f5e`, `5afe526`).
+- **AI OS context hygiene.** Entity tagging, memory expiration, and an `os-audit` suite for
+  workspace roots, vault links, skill budgets, instruction clashes, and stale memory
+  (`7ae596d`).
+- `/pr` skill, and releases are now gated on `/code-review --fix` (`1cbd8e8`).
+
+### Changed
+- Host and client settings are simplified for host mode, with the card moved lower in
+  Settings (`1aeb3e8`, `2baee33`).
+- Hovering a comment no longer re-renders the whole transcript (`ae41941`).
+- Trimmed over-constraint from the system prompt for Claude 5-generation context
+  engineering (`094b0cd`).
+- Dependency refresh across backend and frontend (`3843eaa`).
+
+### Fixed
+- **Node/auth:** stop client login loops and the host auth-check storm; restore
+  host-password login; guard against self-proxying; restore the standby role check in
+  `get_proxy_target_url` (`4db2291`, `2abf265`, `e7436e0`, `7859140`).
+- **MCP:** schedules and loops inherit the calling chat's project and workspace;
+  project/chat resolution defaults to the active session; `chat_archive` targets the caller
+  chat (`7a32a9c`, `6211c44`, `f5205c2`).
+- **Loops:** preserve project context and auto-create a chat when the loop target is gone
+  (`276c2d8`).
+- **Chat:** reject prompts and WebSocket requests to archived chats early; skip non-vision
+  model fallbacks for image prompts; broadcast `chat_archived` over `/ws/events` for
+  cross-tab sync; defer meta-question openers to the first assistant reply
+  (`2732fab`, `a28323f`, `8f46354`, `65ac6cd`).
+- **Mobile/UI:** stop iOS auto-zoom on input focus and hide the homepage under an open
+  sidebar; stretch lone home tiles with an auto-fit grid; keep the model selector dropdown
+  clear of header controls; anchor late subagent panels to their spawning turn; auto-align
+  the active workspace and expand the parent project when navigating
+  (`5bbcb11`, `a518af9`, `33b3b02`, `b5d260b`, `feba77b`).
+- **Streaming:** refine trace-buffer clearing and the thinking threshold (`8ebf888`).
+- **Providers/GWS:** name the host and error category on connection failures; require
+  confirmation before a GWS health "re-authenticate" push; debounce GWS health monitor
+  false alarms (`31652ec`, `3cd67ca`, `5ba9a18`).
+- **Preflight secret scan:** use word boundaries for suspicious filenames and ignore
+  worktrees, env templates, and nested test files (`30e00b1`, `aeaa77b`).
+- **Sessions:** recover from a non-fast-forward push rejection via auto-merge (`041b84a`).
+- Entity tagger no longer false-positives on README collisions and self-scans (`51616b3`).
+- Removed stale Pi references from engine comments, docstrings, and tests (`88e1fa0`).
+- CI: cleared the mypy and PWA-docs errors blocking Ciao CI (`3c00005`, `989cb5c`, `cb7ee30`).
+
+### Maintenance
+- Documented auth settings, menu bar chats, and node connect in the API docs (`4df84ca`).
+- Added #agentswelcome AI agent contribution guidelines (`e14cabc`).
+- Aligned docs and the capability skill with shipped Settings and MCP memory (`5524f29`).
+- Bumped the service-worker cache name to v0.5.4 so clients pick up the new build.
+
 ## v0.5.3 - 2026-07-23
 
 ### Added
