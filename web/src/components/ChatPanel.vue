@@ -886,10 +886,10 @@ import { buildForkSnapshot } from '../lib/chatFork'
 import { formatCommentLocation } from '../lib/commentContext'
 
 type RenderItem =
-  | { kind: 'user'; msg: ChatMessage }
-  | { kind: 'assistant'; msg: ChatMessage; outputs?: TraceOutput[]; subchats?: ProviderSubchatRecord[] }
+  | { kind: 'user'; msg: ChatMessage; turnIndex?: number }
+  | { kind: 'assistant'; msg: ChatMessage; outputs?: TraceOutput[]; subchats?: ProviderSubchatRecord[]; turnIndex?: number }
   | { kind: 'system'; msg: ChatMessage }
-  | { kind: 'trace'; steps: ChatMessage[]; subs?: SubagentTranscript[]; outputs?: TraceOutput[]; subchats?: ProviderSubchatRecord[] }
+  | { kind: 'trace'; steps: ChatMessage[]; subs?: SubagentTranscript[]; outputs?: TraceOutput[]; subchats?: ProviderSubchatRecord[]; turnIndex?: number }
 
 type ChatComment = {
   id: string
@@ -2393,6 +2393,7 @@ const renderData = computed<{
       items.push({
         kind: 'trace',
         steps: buffer.slice(),
+        turnIndex: currentTurnIndex ?? undefined,
         ...(traceSubs.length ? { subs: traceSubs } : {}),
         ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
         ...(turnSubchats.length ? { subchats: turnSubchats } : {}),
@@ -2423,8 +2424,8 @@ const renderData = computed<{
     // with the turn's outputs/subchats attached.
     const turnItems: RenderItem[] = buildTurnParts(buffer, finalIdx).map((part) =>
       part.kind === 'assistant'
-        ? { kind: 'assistant', msg: part.msg }
-        : { kind: 'trace', steps: part.steps },
+        ? { kind: 'assistant', msg: part.msg, turnIndex: currentTurnIndex ?? undefined }
+        : { kind: 'trace', steps: part.steps, turnIndex: currentTurnIndex ?? undefined },
     )
     // Foreground subagents / (when there's no answer bubble) file outputs and
     // handoffs belong to the one Activity trace that sits right before the
@@ -2437,7 +2438,7 @@ const renderData = computed<{
     const last = turnItems[turnItems.length - 1]
     let host = last && last.kind === 'trace' ? last : null
     if (!host && needsHost) {
-      host = { kind: 'trace', steps: [] }
+      host = { kind: 'trace', steps: [], turnIndex: currentTurnIndex ?? undefined }
       turnItems.push(host)
     }
     if (host) {
@@ -2450,6 +2451,7 @@ const renderData = computed<{
       items.push({
         kind: 'assistant',
         msg: finalMsg,
+        turnIndex: currentTurnIndex ?? undefined,
         ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
         ...(turnSubchats.length ? { subchats: turnSubchats } : {}),
       })
@@ -2463,7 +2465,7 @@ const renderData = computed<{
       currentTurnIndex = typeof msg.turn_index === 'number'
         ? msg.turn_index
         : currentTurnIndex === null ? 0 : currentTurnIndex + 1
-      items.push({ kind: 'user', msg })
+      items.push({ kind: 'user', msg, turnIndex: currentTurnIndex })
     } else if (
       msg.role === 'system'
       && msg.tool_name !== '_activity'
@@ -2485,20 +2487,66 @@ const renderData = computed<{
     return { items, liveSubs: all, liveStandaloneSubs: [] }
   }
   // Anything still unplaced (turn not in history yet, or no turn info):
-  // attach to the last turn's trace block so a background subagent reads as
-  // part of that turn's activity — the same single "Activity" group the live
-  // "Working…" view shows — instead of a dangling standalone block. Fall back
-  // to a fresh trace block only when there's no prior trace to attach to.
+  // attach anchored subagents to their actual user-turn's trace block so a
+  // late-finishing agent doesn't drift to the most recent trace. Unanchored
+  // leftovers still fall back to the last trace block, or a fresh block if
+  // there is none.
   const leftovers = [...subsByTurn.values()].flat().concat(unanchoredSubs)
   if (leftovers.length) {
-    let lastTrace: RenderItem | undefined
-    for (let i = items.length - 1; i >= 0; i--) {
-      if (items[i].kind === 'trace') { lastTrace = items[i]; break }
+    const anchored = new Map<number, SubagentTranscript[]>()
+    const unanchored: SubagentTranscript[] = []
+    for (const sub of leftovers) {
+      if (typeof sub.turn_index === 'number') {
+        const list = anchored.get(sub.turn_index) || []
+        list.push(sub)
+        anchored.set(sub.turn_index, list)
+      } else {
+        unanchored.push(sub)
+      }
     }
-    if (lastTrace && lastTrace.kind === 'trace') {
-      lastTrace.subs = [...(lastTrace.subs || []), ...leftovers]
-    } else {
-      items.push({ kind: 'trace', steps: [], subs: leftovers })
+
+    // Attach each anchored group to the matching turn's trace block. If the
+    // turn has no trace block (e.g. the model replied with plain text), mint
+    // one right before the first assistant/system item of that turn.
+    for (const [turnIdx, subs] of anchored) {
+      let turnStart = -1
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i]
+        if (it.kind === 'user' && it.turnIndex === turnIdx) {
+          turnStart = i
+        }
+      }
+      if (turnStart === -1) {
+        // Matching user turn isn't rendered yet; keep with unanchored fallback.
+        unanchored.push(...subs)
+        continue
+      }
+      let traceIdx = -1
+      for (let i = turnStart + 1; i < items.length && items[i].kind !== 'user'; i++) {
+        if (items[i].kind === 'trace') traceIdx = i
+      }
+      if (traceIdx >= 0) {
+        const host = items[traceIdx]
+        if (host.kind === 'trace') {
+          host.subs = [...(host.subs || []), ...subs]
+        }
+      } else {
+        let insertAt = turnStart + 1
+        while (insertAt < items.length && items[insertAt].kind === 'user') insertAt++
+        items.splice(insertAt, 0, { kind: 'trace', steps: [], subs, turnIndex: turnIdx })
+      }
+    }
+
+    if (unanchored.length) {
+      let lastTrace: RenderItem | undefined
+      for (let i = items.length - 1; i >= 0; i--) {
+        if (items[i].kind === 'trace') { lastTrace = items[i]; break }
+      }
+      if (lastTrace && lastTrace.kind === 'trace') {
+        lastTrace.subs = [...(lastTrace.subs || []), ...unanchored]
+      } else {
+        items.push({ kind: 'trace', steps: [], subs: unanchored })
+      }
     }
   }
   return { items, liveSubs: [], liveStandaloneSubs: [] }
