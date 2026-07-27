@@ -141,7 +141,7 @@
 
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
-    <div class="messages" ref="messagesEl" data-tour="chat-messages" @click="handleHighlightClick">
+    <div class="messages" ref="messagesEl" data-tour="chat-messages" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
       <div class="messages-content">
       <template v-for="(item, i) in renderItems" :key="i">
         <!-- Reasoning trace: intermediate assistant text + tool calls grouped -->
@@ -504,6 +504,32 @@
           <span class="chat-comment-trigger-icon">💬</span>
           Comment
         </button>
+        <div
+          v-if="chatCommentPopover?.pinned && chatPopoverComment"
+          class="chat-comment-backdrop"
+          @click="closeChatCommentPopover()"
+        ></div>
+        <div
+          v-if="chatCommentPopover && chatPopoverComment"
+          class="chat-comment-pop"
+          :class="{ 'is-pinned': chatCommentPopover.pinned }"
+          :style="{ top: chatCommentPopover.top + 'px', left: chatCommentPopover.left + 'px' }"
+          @mousedown.stop
+          @mouseenter="onChatPopoverEnter"
+          @mouseleave="onChatPopoverLeave"
+        >
+          <div v-if="chatPopoverComment.images?.length" class="chat-sidebar-card-images">
+            <img
+              v-for="img in chatPopoverComment.images"
+              :key="img"
+              :src="`/api/images/${img}`"
+              :alt="img"
+              class="card-image-thumb"
+              @click.stop
+            />
+          </div>
+          <div class="chat-sidebar-card-note">{{ chatPopoverComment.comment }}</div>
+        </div>
       </Teleport>
       </div>
     </div>
@@ -1536,6 +1562,7 @@ function updateChatSelectionAnchorFromRange(range: Range): void {
 }
 
 function onChatScrollReanchor(): void {
+  if (chatCommentPopover.value) closeChatCommentPopover()
   if (commentDraft.value || !lastChatSelectionRange) return
   try {
     if (!lastChatSelectionRange.startContainer.isConnected) {
@@ -1597,6 +1624,7 @@ function onChatSelectionChange(): void {
 
 function openCommentForSelection(): void {
   if (!selectionAnchor.value || !lastChatSelectionText) return
+  closeChatCommentPopover()
   draftBubbleEl = lastChatSelectionBubble
   commentDraft.value = {
     selection: lastChatSelectionText,
@@ -1731,6 +1759,7 @@ function onEditChatCommentKeydown(e: KeyboardEvent, id: string): void {
   }
 }
 function deleteChatComment(id: string): void {
+  if (chatCommentPopover.value?.id === id) closeChatCommentPopover()
   store.removePendingChatComment(id)
   commentBubbleById.delete(id)
   if (editingChatCommentId.value === id) cancelEditChatComment()
@@ -1891,15 +1920,110 @@ function applyHighlights(): void {
   }
 }
 
-// ── Click sync between highlights and sidebar cards ──────────────────
+// ── Click / hover sync between highlights, read popover, and sidebar ──
+const chatCommentPopover = ref<{ id: string; top: number; left: number; pinned: boolean } | null>(null)
+const chatPopoverComment = computed(() =>
+  chatCommentPopover.value
+    ? store.pendingChatComments.find(c => c.id === chatCommentPopover.value!.id) ?? null
+    : null,
+)
+
+let chatHoverCloseTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearChatHoverClose(): void {
+  if (chatHoverCloseTimer) {
+    clearTimeout(chatHoverCloseTimer)
+    chatHoverCloseTimer = null
+  }
+}
+
+function closeChatCommentPopover(): void {
+  clearChatHoverClose()
+  chatCommentPopover.value = null
+}
+
+function scheduleChatHoverClose(): void {
+  clearChatHoverClose()
+  chatHoverCloseTimer = setTimeout(() => {
+    chatHoverCloseTimer = null
+    if (chatCommentPopover.value && !chatCommentPopover.value.pinned) {
+      chatCommentPopover.value = null
+    }
+  }, 160)
+}
+
+function canChatHoverPreview(): boolean {
+  return typeof window !== 'undefined' && window.matchMedia('(hover: hover)').matches
+}
+
+function anchorChatPopoverFromElement(el: HTMLElement): { top: number; left: number } | null {
+  const rect = el.getBoundingClientRect()
+  const popWidth = 280
+  const pad = 8
+  const top = Math.min(Math.max(rect.bottom + 6, pad), Math.max(pad, window.innerHeight - 80))
+  const left = Math.min(Math.max(rect.left, pad), Math.max(pad, window.innerWidth - popWidth - pad))
+  return { top, left }
+}
+
+function showChatCommentPopover(id: string, el: HTMLElement, pinned: boolean): void {
+  if (id === DRAFT_COMMENT_ID) return
+  if (
+    !pinned
+    && chatCommentPopover.value?.pinned
+    && chatCommentPopover.value.id === id
+  ) {
+    clearChatHoverClose()
+    return
+  }
+  const anchor = anchorChatPopoverFromElement(el)
+  if (!anchor) return
+  clearChatHoverClose()
+  chatCommentPopover.value = { id, top: anchor.top, left: anchor.left, pinned }
+}
+
+function onChatHighlightHover(e: MouseEvent): void {
+  if (!canChatHoverPreview()) return
+  const target = e.target as HTMLElement | null
+  if (!target) return
+  const highlight = target.closest('.comment-highlight') as HTMLElement | null
+  if (!highlight) return
+  const id = highlight.dataset.commentId
+  if (!id || id === DRAFT_COMMENT_ID) return
+  const related = e.relatedTarget as Node | null
+  if (related && highlight.contains(related)) return
+  showChatCommentPopover(id, highlight, false)
+}
+
+function onChatHighlightHoverOut(e: MouseEvent): void {
+  if (!chatCommentPopover.value || chatCommentPopover.value.pinned) return
+  const target = e.target as HTMLElement | null
+  if (!target) return
+  const highlight = target.closest('.comment-highlight') as HTMLElement | null
+  if (!highlight) return
+  const related = e.relatedTarget as Node | null
+  if (related && highlight.contains(related)) return
+  scheduleChatHoverClose()
+}
+
+function onChatPopoverEnter(): void {
+  clearChatHoverClose()
+}
+
+function onChatPopoverLeave(): void {
+  if (chatCommentPopover.value && !chatCommentPopover.value.pinned) {
+    scheduleChatHoverClose()
+  }
+}
+
 function handleHighlightClick(e: MouseEvent): void {
   const target = e.target as HTMLElement | null
   if (!target) return
   const highlight = target.closest('.comment-highlight') as HTMLElement | null
   if (!highlight) return
   const id = highlight.dataset.commentId
-  if (!id) return
+  if (!id || id === DRAFT_COMMENT_ID) return
   e.stopPropagation()
+  showChatCommentPopover(id, highlight, true)
   scrollSidebarToCard(id)
 }
 
@@ -1985,6 +2109,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  clearChatHoverClose()
   if (typeof document !== 'undefined') {
     document.removeEventListener('selectionchange', onChatSelectionChange)
   }
@@ -5040,6 +5165,35 @@ details[open] > .activity-summary::before {
 }
 .chat-comment-trigger:hover { filter: brightness(1.08); }
 .chat-comment-trigger-icon { font-size: var(--text-sm); line-height: 1; }
+
+.chat-comment-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(0, 0, 0, 0.32);
+}
+.chat-comment-pop {
+  position: fixed;
+  z-index: 41;
+  width: 280px;
+  max-width: calc(100vw - 16px);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent, #60a5fa);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+  padding: 10px 12px;
+  box-sizing: border-box;
+}
+.chat-comment-pop.is-pinned {
+  z-index: 42;
+}
+.chat-comment-pop .chat-sidebar-card-note {
+  margin: 0;
+}
+.chat-comment-pop .chat-sidebar-card-images {
+  margin-bottom: 8px;
+}
 
 .btn-sm {
   display: inline-flex;

@@ -126,27 +126,37 @@
           </div>
           <div v-if="!nodeStatus" class="action-row"><span class="loading">Loading node status&hellip;</span></div>
           <template v-else>
-            <div class="last-run-info">
-              <div class="detail-row">
-                <span class="detail-label">device</span>
-                <code class="detail-val">{{ nodeStatus.node_id }}</code>
+            <!-- Client: this device → host, with reachability on the link -->
+            <div v-if="isNodeClient" class="node-path" aria-label="Client connection">
+              <div class="node-path-endpoint">
+                <span class="node-path-label">this device</span>
+                <code class="node-path-value" :title="nodeStatus.node_id">{{ nodeStatus.node_id }}</code>
               </div>
-              <template v-if="isNodeClient">
-                <div class="detail-row">
-                  <span class="detail-label">connected to</span>
-                  <code class="detail-val">{{ connectedHostUrl || '—' }}</code>
-                </div>
-                <div v-if="nodeStatus.host_reachable != null" class="detail-row">
-                  <span class="detail-label">reachability</span>
-                  <span class="detail-val">{{ nodeStatus.host_reachable ? 'reachable' : 'unreachable' }}</span>
-                </div>
-              </template>
-              <template v-else>
-                <div v-if="nodeStatus.active_since" class="detail-row">
-                  <span class="detail-label">host since</span>
-                  <span class="detail-val">{{ nodeStatus.active_since }}</span>
-                </div>
-              </template>
+              <div class="node-path-link">
+                <span class="node-path-arrow" aria-hidden="true">→</span>
+                <span
+                  v-if="nodeStatus.host_reachable != null"
+                  class="node-path-status"
+                  :class="nodeStatus.host_reachable ? 'node-path-status--ok' : 'node-path-status--bad'"
+                >
+                  {{ nodeStatus.host_reachable ? 'reachable' : 'unreachable' }}
+                </span>
+              </div>
+              <div class="node-path-endpoint node-path-endpoint--host">
+                <span class="node-path-label">host</span>
+                <code class="node-path-value" :title="connectedHostUrl || undefined">{{ connectedHostUrl || '—' }}</code>
+              </div>
+            </div>
+            <!-- Host: local identity -->
+            <div v-else class="node-path node-path--solo">
+              <div class="node-path-endpoint">
+                <span class="node-path-label">this device</span>
+                <code class="node-path-value" :title="nodeStatus.node_id">{{ nodeStatus.node_id }}</code>
+              </div>
+              <div v-if="nodeStatus.active_since" class="node-path-meta">
+                <span class="node-path-label">host since</span>
+                <span class="node-path-value">{{ nodeStatus.active_since }}</span>
+              </div>
             </div>
             <div v-if="nodeActionResult" class="action-result" :class="{ 'action-result--error': nodeActionError }">
               {{ nodeActionResult }}
@@ -4722,6 +4732,98 @@ async function doPackageUpdate() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.node-path {
+  display: flex;
+  align-items: stretch;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-top: var(--space-1);
+}
+.node-path--solo {
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.node-path-endpoint {
+  flex: 1 1 140px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.node-path-endpoint--host {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+  background: color-mix(in srgb, var(--accent) 5%, var(--bg));
+}
+.node-path-label {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--fg3, var(--fg2));
+}
+.node-path-value {
+  color: var(--fg);
+  font-size: var(--text-sm);
+  font-family: var(--font);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.node-path-link {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 2px;
+  min-width: 72px;
+}
+.node-path-arrow {
+  color: var(--accent);
+  font-size: calc(18px * var(--font-scale));
+  font-weight: 700;
+  line-height: 1;
+}
+.node-path-status {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-align: center;
+  white-space: nowrap;
+}
+.node-path-status--ok {
+  color: var(--success);
+}
+.node-path-status--bad {
+  color: var(--warning);
+}
+.node-path-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 var(--space-1);
+}
+@container (max-width: 720px) {
+  .node-path:not(.node-path--solo) {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .node-path-link {
+    flex-direction: row;
+    justify-content: flex-start;
+    min-width: 0;
+    padding: 2px 0;
+    gap: var(--space-2);
+  }
+  .node-path:not(.node-path--solo) .node-path-arrow {
+    transform: rotate(90deg);
+  }
 }
 
 .node-peer-list {
