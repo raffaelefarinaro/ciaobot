@@ -105,17 +105,12 @@
             <div>
               <p class="section-title">host &amp; client</p>
               <p class="hint">
-                <template v-if="!nodeStatus">Run as host on this machine, or connect as a client tunnel to another Ciaobot.</template>
-                <template v-else-if="nodeStatus.role === 'client'">
-                  Client — menu bar and PWA tunnel to
-                  <template v-if="nodeStatus.host_url || nodeStatus.active_peer_url">
-                    {{ nodeStatus.host_url || nodeStatus.active_peer_url }}
-                  </template>
-                  <template v-else>a remote host</template>.
-                  Automations pause here.
+                <template v-if="!nodeStatus">Loading mode…</template>
+                <template v-else-if="isNodeClient">
+                  This device is a <strong>client</strong> — tray and PWA tunnel to the host below. Automations run on the host, not here.
                 </template>
                 <template v-else>
-                  Host — schedules and background work run on this device.
+                  This device is the <strong>host</strong> — schedules and background work run here. Other machines can connect to it as clients.
                 </template>
               </p>
             </div>
@@ -123,27 +118,10 @@
               <span
                 v-if="nodeStatus"
                 class="badge"
-                :class="nodeStatus.role === 'host' || nodeStatus.role === 'active' ? 'badge--success' : 'badge--warn'"
+                :class="isNodeClient ? 'badge--warn' : 'badge--success'"
               >
                 {{ nodeRoleLabel }}
               </span>
-              <button
-                v-if="isNodeClient"
-                class="btn-primary btn-small"
-                @click="() => doBecomeHost(false)"
-                :disabled="nodePending !== null"
-              >
-                {{ nodePending === 'handover' ? 'Switching…' : 'Become host' }}
-              </button>
-              <button
-                v-if="isNodeClient"
-                class="btn-caution btn-small"
-                @click="() => doBecomeHost(true)"
-                :disabled="nodePending !== null"
-                title="Become host even if the remote is offline (skip remote push)"
-              >
-                Force become host
-              </button>
             </div>
           </div>
           <div v-if="!nodeStatus" class="action-row"><span class="loading">Loading node status&hellip;</span></div>
@@ -153,60 +131,101 @@
                 <span class="detail-label">device</span>
                 <code class="detail-val">{{ nodeStatus.node_id }}</code>
               </div>
-              <div v-if="nodeStatus.active_since" class="detail-row">
-                <span class="detail-label">host since</span>
-                <span class="detail-val">{{ nodeStatus.active_since }}</span>
-              </div>
-              <div v-if="nodeStatus.last_handover" class="detail-row">
-                <span class="detail-label">last switch</span>
-                <span class="detail-val">{{ nodeStatus.last_handover }}</span>
-              </div>
-              <div v-if="isNodeClient && nodeStatus.host_reachable != null" class="detail-row">
-                <span class="detail-label">host</span>
-                <span class="detail-val">{{ nodeStatus.host_reachable ? 'reachable' : 'unreachable' }}</span>
-              </div>
+              <template v-if="isNodeClient">
+                <div class="detail-row">
+                  <span class="detail-label">connected to</span>
+                  <code class="detail-val">{{ connectedHostUrl || '—' }}</code>
+                </div>
+                <div v-if="nodeStatus.host_reachable != null" class="detail-row">
+                  <span class="detail-label">reachability</span>
+                  <span class="detail-val">{{ nodeStatus.host_reachable ? 'reachable' : 'unreachable' }}</span>
+                </div>
+              </template>
+              <template v-else>
+                <div v-if="nodeStatus.active_since" class="detail-row">
+                  <span class="detail-label">host since</span>
+                  <span class="detail-val">{{ nodeStatus.active_since }}</span>
+                </div>
+              </template>
             </div>
             <div v-if="nodeActionResult" class="action-result" :class="{ 'action-result--error': nodeActionError }">
               {{ nodeActionResult }}
             </div>
 
-            <template v-if="!isNodeClient">
-              <p class="subsection-title subsection-title--spaced">connect as client</p>
+            <!-- Client mode: disconnect only (no connect form) -->
+            <template v-if="isNodeClient">
               <p class="hint hint--section-empty">
-                Tunnel this Mac to another Ciaobot (Tailscale URL works). Set a PWA password on the host first (card above), then connect with that password. On switch-back, the host pushes then this machine pulls.
+                Disconnect asks the host to push, then this machine pulls and becomes host again.
               </p>
-              <div class="settings-form-panel node-peer-form">
-                <label class="settings-field">
-                  <span class="ws-label">Host URL</span>
-                  <input
-                    v-model="hostUrlInput"
-                    type="text"
-                    class="routine-input"
-                    placeholder="http://100.x.x.x:8443"
-                    @keyup.enter="connectAsClient"
-                  />
-                </label>
-                <label class="settings-field">
-                  <span class="ws-label">Host password</span>
-                  <input
-                    v-model="hostPasswordInput"
-                    type="password"
-                    class="routine-input"
-                    placeholder="Required — set on the host first"
-                    autocomplete="off"
-                    @keyup.enter="connectAsClient"
-                  />
-                </label>
-                <div class="action-row settings-actions">
-                  <button
-                    class="btn-primary btn-small"
-                    @click="connectAsClient"
-                    :disabled="!hostUrlInput.trim() || !hostPasswordInput || nodePending !== null"
-                  >
-                    {{ nodePending === 'connect' ? 'Connecting…' : 'Connect' }}
-                  </button>
-                </div>
+              <div class="action-row settings-actions">
+                <button
+                  class="btn-primary btn-small"
+                  @click="() => doBecomeHost(false)"
+                  :disabled="nodePending !== null"
+                >
+                  {{ nodePending === 'handover' ? 'Disconnecting…' : 'Disconnect' }}
+                </button>
+                <button
+                  class="btn-caution btn-small"
+                  @click="() => doBecomeHost(true)"
+                  :disabled="nodePending !== null"
+                  title="Become host even if the remote is offline (skip remote push)"
+                >
+                  Force disconnect
+                </button>
               </div>
+            </template>
+
+            <!-- Host mode: optional connect form, collapsed until asked -->
+            <template v-else>
+              <div class="action-row settings-actions">
+                <button
+                  class="btn-secondary btn-small"
+                  @click="showConnectForm = !showConnectForm"
+                  :disabled="nodePending !== null"
+                >
+                  {{ showConnectForm ? 'Cancel' : 'Connect as client…' }}
+                </button>
+              </div>
+              <template v-if="showConnectForm">
+                <p class="hint hint--section-empty">
+                  This pauses local automations and tunnels tray + PWA to another Ciaobot.
+                  That host must have a PWA password (card above). Tailscale URLs work
+                  (e.g. http://100.x.x.x:8443).
+                </p>
+                <div class="settings-form-panel node-peer-form">
+                  <label class="settings-field">
+                    <span class="ws-label">Host URL</span>
+                    <input
+                      v-model="hostUrlInput"
+                      type="text"
+                      class="routine-input"
+                      placeholder="http://100.x.x.x:8443"
+                      @keyup.enter="connectAsClient"
+                    />
+                  </label>
+                  <label class="settings-field">
+                    <span class="ws-label">Host password</span>
+                    <input
+                      v-model="hostPasswordInput"
+                      type="password"
+                      class="routine-input"
+                      placeholder="Password set on the host"
+                      autocomplete="off"
+                      @keyup.enter="connectAsClient"
+                    />
+                  </label>
+                  <div class="action-row settings-actions">
+                    <button
+                      class="btn-primary btn-small"
+                      @click="connectAsClient"
+                      :disabled="!hostUrlInput.trim() || !hostPasswordInput || nodePending !== null"
+                    >
+                      {{ nodePending === 'connect' ? 'Connecting…' : 'Connect' }}
+                    </button>
+                  </div>
+                </div>
+              </template>
             </template>
           </template>
         </div>
@@ -4212,6 +4231,7 @@ const nodeActionResult = ref('')
 const nodeActionError = ref(false)
 const hostUrlInput = ref('')
 const hostPasswordInput = ref('')
+const showConnectForm = ref(false)
 
 const isNodeClient = computed(() => {
   const role = nodeStatus.value?.role
@@ -4220,9 +4240,14 @@ const isNodeClient = computed(() => {
 
 const nodeRoleLabel = computed(() => (isNodeClient.value ? 'client' : 'host'))
 
+const connectedHostUrl = computed(
+  () => nodeStatus.value?.host_url || nodeStatus.value?.active_peer_url || '',
+)
+
 async function fetchNodeStatus() {
   try {
     nodeStatus.value = await api.get<NodeStatus>('/api/node/status')
+    if (isNodeClient.value) showConnectForm.value = false
   } catch {
     /* leave null on failure */
   }
@@ -4238,7 +4263,7 @@ async function connectAsClient() {
       'Enter the host password. If the host has none yet, enable PWA password protection on that machine first.'
     return
   }
-  if (!confirm(`Connect as client to ${hostUrl}? This machine will tunnel to that host and pause local automations.`)) return
+  if (!confirm(`Connect as client to ${hostUrl}? This machine will stop being host and tunnel to that Ciaobot.`)) return
 
   nodePending.value = 'connect'
   nodeActionResult.value = ''
@@ -4250,6 +4275,7 @@ async function connectAsClient() {
     })
     if (r?.ok) {
       hostPasswordInput.value = ''
+      showConnectForm.value = false
       nodeActionResult.value = `Connected as client to ${hostUrl}.`
       await fetchNodeStatus()
     } else {
@@ -4270,7 +4296,7 @@ async function doBecomeHost(force = false) {
   if (
     !force &&
     !confirm(
-      'Become host on this device? The remote will push its changes, then this machine pulls and takes over automations.',
+      'Disconnect and become host here? The remote will push its changes, then this machine pulls and resumes automations.',
     )
   ) {
     return
@@ -4281,27 +4307,27 @@ async function doBecomeHost(force = false) {
   nodeActionError.value = false
 
   try {
-    const targetUrl = nodeStatus.value?.host_url || nodeStatus.value?.active_peer_url || ''
+    const targetUrl = connectedHostUrl.value
     const r = await api.post<any>('/api/node/handover', { target_node_url: targetUrl, force })
     if (r?.ok) {
       nodeActionResult.value = force
-        ? 'Force switch complete. This device is now the host.'
-        : 'Switch complete. This device is now the host.'
+        ? 'Force disconnect complete. This device is now the host.'
+        : 'Disconnected. This device is now the host.'
       await fetchNodeStatus()
       await fetchLocalStatus()
     } else {
       nodeActionError.value = true
-      nodeActionResult.value = r?.error || 'Become host failed'
+      nodeActionResult.value = r?.error || 'Disconnect failed'
     }
   } catch (e: any) {
     nodeActionError.value = true
     if (e?.payload?.peer_unreachable) {
-      if (confirm('Host is unreachable. Force become host anyway (skip remote push)?')) {
+      if (confirm('Host is unreachable. Force disconnect anyway (skip remote push)?')) {
         nodePending.value = null
         return doBecomeHost(true)
       }
     }
-    nodeActionResult.value = `Error: ${e?.payload?.error || e.message || 'Become host failed'}`
+    nodeActionResult.value = `Error: ${e?.payload?.error || e.message || 'Disconnect failed'}`
   }
   nodePending.value = null
 }
