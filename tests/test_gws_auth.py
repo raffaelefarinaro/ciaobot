@@ -244,35 +244,168 @@ def test_health_monitor_debounces_and_rearms(tmp_path: Path) -> None:
         events_hub=events,
         runtime_root=runtime,
         status_fn=lambda config, profile: state["value"],
+        retry_delay=0,  # skip the in-process backoff in tests
+        notify_threshold=2,
     )
 
-    # First invalid check → one notification for the affected profile.
+    # First invalid check → counted but not yet notified (needs 2 consecutive).
     s1 = monitor.check_once()
     assert s1["invalid"] == ["personal"]
-    assert s1["notified"] == ["personal"]
+    assert s1["notified"] == []
+    assert push.sent == []
+    cache = gws_auth.read_health_cache(runtime)
+    assert cache["personal"]["consecutive_invalid"] == 1
+    assert cache["personal"]["notified_invalid"] is False
+
+    # Second consecutive invalid → now notify.
+    s2 = monitor.check_once()
+    assert s2["notified"] == ["personal"]
     assert len(push.sent) == 1
     assert push.sent[0]["profile"] == "personal"
     assert "personal" in push.sent[0]["body"]
+    assert "may have expired or been revoked" in push.sent[0]["body"]
     assert len(events.published) == 1
     assert events.published[0]["type"] == "gws_health"
+    cache = gws_auth.read_health_cache(runtime)
+    assert cache["personal"]["consecutive_invalid"] == 2
+    assert cache["personal"]["notified_invalid"] is True
 
     # Still invalid → debounced, no new notification.
-    s2 = monitor.check_once()
-    assert s2["notified"] == []
+    s3 = monitor.check_once()
+    assert s3["notified"] == []
     assert len(push.sent) == 1
 
-    # Recovered → clears the alert (re-arms).
+    # Recovered → clears the alert (re-arms) and resets the counter.
     state["value"] = valid
     monitor.check_once()
     cache = gws_auth.read_health_cache(runtime)
     assert cache["personal"]["token_valid"] is True
     assert cache["personal"]["notified_invalid"] is False
+    assert cache["personal"]["consecutive_invalid"] == 0
 
-    # Breaks again → re-notifies.
+    # Breaks again → needs 2 consecutive again before re-notifying.
     state["value"] = invalid
     s4 = monitor.check_once()
-    assert s4["notified"] == ["personal"]
+    assert s4["notified"] == []
+    assert len(push.sent) == 1
+    s5 = monitor.check_once()
+    assert s5["notified"] == ["personal"]
     assert len(push.sent) == 2
+
+
+def test_health_monitor_in_process_retry_suppresses_transient_invalid(tmp_path: Path) -> None:
+    """A single transient token_valid=false that recovers on retry must not
+    advance the consecutive-failure counter or notify (issue #173)."""
+    cfg = _config(tmp_path)
+    config_dir = gws_auth.profile_config_dir(cfg, "personal")
+    config_dir.mkdir(parents=True)
+    (config_dir / "credentials.json").write_text("{}", encoding="utf-8")
+
+    calls: list[str] = []
+    valid = {"available": True, "token_valid": True, "token_error": "", "has_refresh_token": True}
+    invalid = {
+        "available": True,
+        "token_valid": False,
+        "token_error": "Token has been expired or revoked.",
+        "has_refresh_token": True,
+    }
+    seq = {"i": 0}
+
+    def status_fn(config, profile):
+        calls.append("call")
+        seq["i"] += 1
+        # First probe invalid, retry (same run) valid.
+        return invalid if seq["i"] == 1 else valid
+
+    push = _FakePush()
+    monitor = gws_auth.GwsHealthMonitor(
+        cfg,
+        push_manager=push,
+        runtime_root=tmp_path / ".runtime",
+        status_fn=status_fn,
+        retry_delay=0,
+        notify_threshold=2,
+    )
+    summary = monitor.check_once()
+    # The retry recovered, so the run reports a valid token and no notify.
+    assert summary["invalid"] == []
+    assert summary["notified"] == []
+    assert push.sent == []
+    cache = gws_auth.read_health_cache(tmp_path / ".runtime")
+    assert cache["personal"]["token_valid"] is True
+    assert cache["personal"]["consecutive_invalid"] == 0
+    # status_fn was invoked twice: initial probe + in-process retry.
+    assert len(calls) == 2
+
+
+def test_health_monitor_retry_unavailable_skips(tmp_path: Path) -> None:
+    """If the in-process retry itself becomes unavailable, treat the run as
+    inconclusive: leave prior state untouched (no counter bump, no notify)."""
+    cfg = _config(tmp_path)
+    config_dir = gws_auth.profile_config_dir(cfg, "personal")
+    config_dir.mkdir(parents=True)
+    (config_dir / "credentials.json").write_text("{}", encoding="utf-8")
+
+    invalid = {
+        "available": True,
+        "token_valid": False,
+        "token_error": "Token has been expired or revoked.",
+        "has_refresh_token": True,
+    }
+    unavailable = {"available": False, "reason": "gws missing"}
+    seq = {"i": 0}
+
+    def status_fn(config, profile):
+        seq["i"] += 1
+        return invalid if seq["i"] == 1 else unavailable
+
+    push = _FakePush()
+    monitor = gws_auth.GwsHealthMonitor(
+        cfg,
+        push_manager=push,
+        runtime_root=tmp_path / ".runtime",
+        status_fn=status_fn,
+        retry_delay=0,
+        notify_threshold=2,
+    )
+    summary = monitor.check_once()
+    assert summary["invalid"] == []
+    assert summary["notified"] == []
+    assert push.sent == []
+    # No state persisted for the profile on an inconclusive run.
+    assert gws_auth.read_health_cache(tmp_path / ".runtime") == {}
+
+
+def test_health_monitor_single_invalid_does_not_notify_with_default_threshold(
+    tmp_path: Path,
+) -> None:
+    """Default threshold (2) holds even when retry_delay is disabled: one
+    invalid run alone never fires a notification."""
+    cfg = _config(tmp_path)
+    config_dir = gws_auth.profile_config_dir(cfg, "personal")
+    config_dir.mkdir(parents=True)
+    (config_dir / "credentials.json").write_text("{}", encoding="utf-8")
+
+    invalid = {
+        "available": True,
+        "token_valid": False,
+        "token_error": "Token has been expired or revoked.",
+        "has_refresh_token": True,
+    }
+    push = _FakePush()
+    monitor = gws_auth.GwsHealthMonitor(
+        cfg,
+        push_manager=push,
+        runtime_root=tmp_path / ".runtime",
+        status_fn=lambda config, profile: invalid,
+        retry_delay=0,
+    )
+    s1 = monitor.check_once()
+    assert s1["invalid"] == ["personal"]
+    assert s1["notified"] == []
+    assert push.sent == []
+    cache = gws_auth.read_health_cache(tmp_path / ".runtime")
+    assert cache["personal"]["consecutive_invalid"] == 1
 
 
 def test_health_monitor_skips_unavailable(tmp_path: Path) -> None:
