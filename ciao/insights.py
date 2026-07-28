@@ -425,12 +425,14 @@ async def extract_and_append(
                     "memory_proposals", "Memory proposals",
                     extra={"archive": archive_path.name},
                 ) as run:
+                    primary = getattr(config, "primary_workspace", None)
                     proposals_result = proposals_from_archive(
                         archive_path,
                         proposals_vault_root,
                         auto_promote_memory=bool(
                             getattr(config, "memory_enabled", True)
                         ),
+                        default_workspace=primary() if callable(primary) else "",
                     )
                     run.extra["wrote"] = bool(proposals_result)
             except Exception:  # noqa: BLE001 — fire-and-forget, never crash

@@ -788,8 +788,14 @@ class CodexProvider(BaseSDKProvider):
         vault_root = Path(getattr(self.config, "vault_root", self.workspace_root / "memory-vault"))
         workspace = str((request.extra_env or {}).get("CIAO_ACTIVE_WORKSPACE") or "")
         try:
+            primary = getattr(self.config, "primary_workspace", None)
             entities = format_entities(
-                find_entities(request.prompt, vault_root, workspace=workspace)
+                find_entities(
+                    request.prompt,
+                    vault_root,
+                    workspace=workspace,
+                    legacy_workspace=primary() if callable(primary) else "",
+                )
             )
         except Exception:  # noqa: BLE001 - context enrichment is fail-open
             logger.debug("Codex entity context failed", exc_info=True)

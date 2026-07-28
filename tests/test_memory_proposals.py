@@ -53,17 +53,25 @@ def test_propose_drops_dead_ends() -> None:
     assert all("tried" not in p.text.lower() for p in proposals)
 
 
-def test_append_proposals_uses_the_vaults_own_workspace_dir(tmp_path: Path) -> None:
-    """The default workspace is read off the layout, not assumed to be "personal"."""
+def test_append_proposals_uses_the_caller_supplied_default_workspace(tmp_path: Path) -> None:
+    """The owner comes from the registry, not from vault directory order.
+
+    Picking the first directory filed a personal chat's proposals into whichever
+    workspace sorted first, where the curator could promote them into that
+    workspace's memory.
+    """
     vault = tmp_path / "vault"
-    (vault / "research").mkdir(parents=True)
-    (vault / "research" / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+    (vault / "acme").mkdir(parents=True)
+    (vault / "personal").mkdir(parents=True)
 
     out = mp.append_proposals(
-        mp.propose_from_insights(_SAMPLE_INSIGHTS), vault, source_path=None
+        mp.propose_from_insights(_SAMPLE_INSIGHTS),
+        vault,
+        source_path=None,
+        default_workspace="personal",
     )
 
-    assert out == vault / "research" / "Workspace" / "Memory-Proposals.md"
+    assert out == vault / "personal" / "Workspace" / "Memory-Proposals.md"
 
 
 def test_propose_handles_empty_input() -> None:

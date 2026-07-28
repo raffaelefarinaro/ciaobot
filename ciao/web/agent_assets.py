@@ -1105,6 +1105,7 @@ async def os_audit_endpoint(request: Request) -> JSONResponse:
                     workspace_root,
                 )
             ],
+            config=config,
         )
         return JSONResponse(report)
     except Exception:  # noqa: BLE001

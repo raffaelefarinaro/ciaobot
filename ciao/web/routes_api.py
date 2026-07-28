@@ -24,7 +24,13 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
 from ciao import subagent_tracking
-from ciao.config import WorkspaceConfig, CLAUDE_AI_CONNECTORS, coerce_claude_ai_mcps
+from ciao.config import (
+    WorkspaceConfig,
+    CLAUDE_AI_CONNECTORS,
+    DEFAULT_WORKSPACE_COLOR,
+    coerce_claude_ai_mcps,
+    coerce_workspace_color,
+)
 from ciao.loops import publish_loops_changed
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.model_tiers import codex_tier_models
@@ -278,6 +284,19 @@ def _tool_icon(name: str) -> str:
     return _TOOL_ICONS.get(name, "\u2699\uFE0F")
 
 
+# Tools whose failure means nothing reached disk. A refused or errored `Write`
+# either wrote the file or did not run at all, so suppressing its file card on
+# error is safe. A `Bash` non-zero exit says no such thing — `printf x > f &&
+# exit 1` leaves the file behind — so its card stands, or history would hide a
+# file the agent really created.
+_ATOMIC_WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+
+
+def _touches_survive_failure(tool_name: str) -> bool:
+    """Whether a failed call's file cards should still render."""
+    return tool_name not in _ATOMIC_WRITE_TOOLS
+
+
 def _failed_tool_use_ids(msgs: list) -> set[str]:
     """Tool-call ids whose ``tool_result`` came back as an error.
 
@@ -286,6 +305,9 @@ def _failed_tool_use_ids(msgs: list) -> set[str]:
     for a file that was never created (this is what made a permission-denied
     `skills-monitor.md` look written). Results live on the following user
     message, so they can only be matched in a pre-pass over the whole session.
+
+    Which ids actually suppress a card is decided per tool — see
+    ``_touches_survive_failure``.
     """
     failed: set[str] = set()
     for m in msgs:
@@ -594,10 +616,14 @@ def _render_subagent_messages(msgs: Iterable[object]) -> list[dict]:
                     if not isinstance(touches, list) or not touches:
                         touch = blk.get("file_touch")
                         touches = [touch] if touch else []
-                    if touches and blk.get("id") in failed_tool_ids:
-                        # Denied or errored: nothing reached disk, so render a
-                        # plain activity row instead of a file card that implies
-                        # the write happened.
+                    if (
+                        touches
+                        and blk.get("id") in failed_tool_ids
+                        and not _touches_survive_failure(name)
+                    ):
+                        # Denied or errored write: nothing reached disk, so
+                        # render a plain activity row instead of a file card
+                        # that implies the write happened.
                         touches = []
                     if touches:
                         flush_tools()
@@ -766,6 +792,10 @@ async def list_workspaces(request: Request) -> JSONResponse:
 
 
 def _workspace_to_dict(workspace: WorkspaceConfig) -> dict:
+    try:
+        color = coerce_workspace_color(getattr(workspace, "color", DEFAULT_WORKSPACE_COLOR))
+    except ValueError:
+        color = DEFAULT_WORKSPACE_COLOR
     return {
         "name": getattr(workspace, "name", ""),
         "vault_root": getattr(workspace, "vault_root", ""),
@@ -782,6 +812,7 @@ def _workspace_to_dict(workspace: WorkspaceConfig) -> dict:
         "claude_ai_mcps": getattr(workspace, "claude_ai_mcps", None),
         "gws_profile": getattr(workspace, "gws_profile", ""),
         "model_bucket": getattr(workspace, "model_bucket", ""),
+        "color": color,
     }
 
 
@@ -843,9 +874,27 @@ def _workspace_from_request(
         claude_ai_mcps = existing.claude_ai_mcps
     else:
         claude_ai_mcps = None
+    if "color" in data:
+        color = coerce_workspace_color(data.get("color"))
+    elif existing is not None:
+        try:
+            color = coerce_workspace_color(existing.color)
+        except ValueError:
+            color = DEFAULT_WORKSPACE_COLOR
+    else:
+        color = DEFAULT_WORKSPACE_COLOR
     return WorkspaceConfig(
         name=name,
-        vault_root=name,
+        # Honour what the caller sent, then what is already stored, and only
+        # fall back to the name. Hardcoding the name here silently flattened a
+        # setup-created `memory-vault/<name>` root — or an absolute external
+        # vault — on *any* unrelated save, pointing the workspace at a directory
+        # that does not exist while its real content stayed put.
+        vault_root=(
+            str(data.get("vault_root", "")).strip()
+            or (existing.vault_root if existing else "")
+            or name
+        ),
         default_provider=provider,
         default_model=str(
             data.get("default_model", existing.default_model if existing else "")
@@ -856,6 +905,7 @@ def _workspace_from_request(
         model_bucket=str(
             data.get("model_bucket", existing.model_bucket if existing else "")
         ).strip(),
+        color=color,
     )
 
 
@@ -2611,10 +2661,14 @@ async def chat_messages(request: Request) -> JSONResponse:
                     if not isinstance(touches, list) or not touches:
                         touch = blk.get("file_touch")
                         touches = [touch] if touch else []
-                    if touches and blk.get("id") in failed_tool_ids:
-                        # Denied or errored: nothing reached disk, so render a
-                        # plain activity row instead of a file card that implies
-                        # the write happened.
+                    if (
+                        touches
+                        and blk.get("id") in failed_tool_ids
+                        and not _touches_survive_failure(name)
+                    ):
+                        # Denied or errored write: nothing reached disk, so
+                        # render a plain activity row instead of a file card
+                        # that implies the write happened.
                         touches = []
                     if touches:
                         flush_tools()

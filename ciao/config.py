@@ -60,19 +60,44 @@ _DEFAULT_HARNESS_DISALLOWED_TOOLS: tuple[str, ...] = (
     *(f"Skill({name})" for name in HARNESS_DISABLED_SKILLS),
 )
 
-# Non-connector tools blocked by default on top of the harness set. The
-# self-hosted n8n MCP is project-scoped in ``.mcp.json``, so a workspace that
-# actually uses it configures it deliberately; denying it by default everywhere
-# keeps it out of the workspaces that did not. This used to be keyed on a
-# workspace literally named ``personal``, which meant any other private
-# workspace silently went unprotected.
+# The self-hosted n8n MCP used to be denied by default in a workspace literally
+# named ``personal``. Ciaobot no longer ships an opinion about it: n8n is
+# project-scoped in ``.mcp.json``, so it exists only where someone configured it
+# deliberately, and *which* workspaces should see it is a per-workspace
+# preference — which is exactly what the "Extra disallowed tools" field is for.
 #
-# To use n8n in a workspace, clear that workspace's "Extra disallowed tools"
-# field in Settings (or the per-workspace disallowed-tools env var; the literal
-# ``none`` clears it), which replaces this default outright.
-_DEFAULT_EXTRA_DISALLOWED_TOOLS: tuple[str, ...] = (
-    "mcp__n8n_mcp",
-)
+# Keying it on a name meant any other private workspace went unprotected, and
+# universalising the deny instead gave users a documented escape hatch that did
+# not work: clearing the field sends null, which restores the defaults, and the
+# value that does clear them drops the harness denies too.
+
+
+def _clean_relative_path(raw: str) -> str:
+    """Normalize a stored path so equivalent spellings resolve alike.
+
+    ``research``, ``research/`` and ``./research`` all name one segment; without
+    this they took different branches and two of them put the vault outside the
+    vault root. The free-text "Vault name" field in Settings invites exactly
+    that trailing slash.
+    """
+    cleaned = (raw or "").strip()
+    if not cleaned:
+        return ""
+    path = Path(cleaned)
+    if path.is_absolute():
+        return str(path)
+    parts = [part for part in path.parts if part not in {".", ""}]
+    return str(Path(*parts)) if parts else ""
+
+
+def _looks_like_vault(path: Path) -> bool:
+    """Whether a directory is plausibly a workspace vault, not a stray folder."""
+    try:
+        if not path.is_dir():
+            return False
+    except OSError:
+        return False
+    return (path / "MEMORY.md").is_file() or (path / "Workspace").is_dir()
 
 
 def coerce_claude_ai_mcps(raw: object) -> bool | None:
@@ -96,6 +121,26 @@ def coerce_claude_ai_mcps(raw: object) -> bool | None:
     return None
 
 
+# Accent presets for the PWA. Missing/unknown values resolve to pink
+# (Ciao brand). Only accents shift; canvas tokens stay stable.
+WORKSPACE_COLOR_IDS = ("pink", "cyan", "amber", "emerald", "violet")
+DEFAULT_WORKSPACE_COLOR = "pink"
+
+
+def coerce_workspace_color(raw: object) -> str:
+    """Normalize a workspace accent id. Empty/missing → pink."""
+    if raw is None:
+        return DEFAULT_WORKSPACE_COLOR
+    cleaned = str(raw).strip().lower()
+    if not cleaned:
+        return DEFAULT_WORKSPACE_COLOR
+    if cleaned in WORKSPACE_COLOR_IDS:
+        return cleaned
+    raise ValueError(
+        f"color must be one of: {', '.join(WORKSPACE_COLOR_IDS)}"
+    )
+
+
 @dataclass(slots=True)
 class WorkspaceConfig:
     """Config for one logical chat workspace."""
@@ -116,6 +161,8 @@ class WorkspaceConfig:
     claude_ai_mcps: bool | None = None
     gws_profile: str = ""
     model_bucket: str = ""
+    # PWA accent preset id. Defaults to Ciao pink.
+    color: str = DEFAULT_WORKSPACE_COLOR
 
 
 def _coerce_workspace_disallowed(raw: object) -> list[str] | None:
@@ -133,6 +180,10 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
     if not name:
         return None
     vault_root = str(data.get("vault_root", name)).strip() or name
+    try:
+        color = coerce_workspace_color(data.get("color"))
+    except ValueError:
+        color = DEFAULT_WORKSPACE_COLOR
     return WorkspaceConfig(
         name=name,
         vault_root=vault_root,
@@ -142,6 +193,7 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         claude_ai_mcps=coerce_claude_ai_mcps(data.get("claude_ai_mcps")),
         gws_profile=str(data.get("gws_profile", "")).strip(),
         model_bucket=str(data.get("model_bucket", "")).strip(),
+        color=color,
     )
 
 
@@ -412,6 +464,7 @@ class CiaoConfig:
                 claude_ai_mcps_work=self.claude_ai_mcps_work,
                 gws_default_profile=self.gws_default_profile,
             )
+        self._normalize_workspace_vault_roots()
 
     def workspace(self, name: str | None) -> WorkspaceConfig | None:
         if not name:
@@ -438,37 +491,73 @@ class CiaoConfig:
     def workspace_vault_root(self, workspace: str | None) -> Path:
         """Absolute vault directory for one logical workspace.
 
+        Pure: the answer depends only on the registry, never on what happens to
+        exist on disk right now. An earlier version chose between two candidate
+        paths by probing the filesystem on every call, which meant an install's
+        vault silently relocated the moment the other candidate appeared —
+        stranding everything written at the first one. Legacy layouts are
+        reconciled once, at load (see ``_normalize_workspace_vault_roots``).
+
         Three shapes of registered ``vault_root``:
 
         - absolute — used as given.
-        - a bare workspace name (what Settings writes) — nested under
-          ``vault_root``, i.e. ``memory-vault/<name>``. This used to apply only
-          to workspaces literally named ``personal`` or ``work``; every other
-          name landed in ``workspace_root/<name>``, a sibling of the vault that
-          ``vault_index``, ``vault_lint`` and the memory-proposal scans never
-          look at.
-        - an explicit relative path (``memory-vault/clientA``, which setup
-          writes when it adopts nested workspaces) — resolved against
-          ``workspace_root`` so it is not nested twice.
-
-        A bare name whose *legacy* sibling path already exists keeps resolving
-        there: an install created before this was fixed must not appear to lose
-        its vault. New workspaces get the correct location.
+        - one path segment (``research``; what Settings writes) — nested under
+          the vault, i.e. ``memory-vault/research``. This used to apply only to
+          workspaces literally named ``personal`` or ``work``; every other name
+          landed beside the vault where the index, the linter and the proposal
+          scans never look.
+        - several segments (``memory-vault/clientA``, which setup writes when it
+          adopts nested workspaces) — resolved against ``workspace_root`` so it
+          is not nested twice.
         """
         name = workspace or ""
         workspace_config = self.workspace(name)
         raw_root = (workspace_config.vault_root if workspace_config else name) or name
-        root = Path(raw_root).expanduser()
+        return self._resolve_vault_root(raw_root)
+
+    def _resolve_vault_root(self, raw_root: str) -> Path:
+        root = Path(_clean_relative_path(raw_root)).expanduser()
         if root.is_absolute():
             return root.resolve()
-        if raw_root != name:
-            # An explicit relative path already says where it lives.
-            return (self.workspace_root / root).resolve()
-        nested = (self.vault_root / root).resolve()
-        legacy = (self.workspace_root / root).resolve()
-        if not nested.exists() and legacy.exists():
-            return legacy
-        return nested
+        if len(root.parts) == 1:
+            return (self.vault_root / root).resolve()
+        return (self.workspace_root / root).resolve()
+
+    def _normalize_workspace_vault_roots(self) -> None:
+        """Pin a legacy vault's location into the registry, once.
+
+        Before vault nesting applied to every workspace, a workspace named
+        anything but ``personal``/``work`` kept its vault beside ``memory-vault/``
+        rather than inside it. Such an install must not appear to lose its data,
+        but it also must not have its location re-decided on every call. So the
+        one-segment ``vault_root`` is rewritten to the absolute legacy path here:
+        resolution downstream stays pure, and the change is visible in
+        ``.runtime/workspaces.json`` the next time it is written.
+
+        The legacy directory has to actually look like a vault. Gating on mere
+        existence would capture an unrelated sibling — naming a workspace after
+        a ``clients/`` or ``skills/`` folder that already sits in the workspace
+        root would silently adopt it, and the agent would then write memory into
+        someone's document folder.
+        """
+        for name, workspace_config in self.workspaces.items():
+            raw_root = _clean_relative_path(workspace_config.vault_root or name)
+            root = Path(raw_root)
+            if root.is_absolute() or len(root.parts) != 1:
+                continue
+            nested = (self.vault_root / root).resolve()
+            legacy = (self.workspace_root / root).resolve()
+            if nested == legacy or nested.exists() or not _looks_like_vault(legacy):
+                continue
+            self.workspaces[name] = replace(
+                workspace_config, vault_root=str(legacy)
+            )
+            logger.info(
+                "Workspace %s keeps its vault at the pre-nesting location %s; "
+                "pinned in the registry. Move it under %s to bring it into vault "
+                "search, link linting and memory proposals.",
+                name, legacy, self.vault_root,
+            )
 
     def default_model_for_workspace(self, workspace: str | None) -> str:
         """Pick the new-chat / new-schedule default for a workspace.
@@ -557,32 +646,31 @@ class CiaoConfig:
         * the claude.ai connector set (``CLAUDE_AI_CONNECTORS``) when
           ``claude_ai_mcps`` resolves to False, and
         * the workspace's extra tools (``disallowed_tools``), which defaults to
-          the harness set (``_DEFAULT_HARNESS_DISALLOWED_TOOLS``) plus n8n
-          (``_DEFAULT_EXTRA_DISALLOWED_TOOLS``) for every workspace.
+          the harness set (``_DEFAULT_HARNESS_DISALLOWED_TOOLS``) for every
+          workspace.
 
         So, with the toggle at its default (on), every chat blocks the
         PWA-irrelevant harness tools (plan mode, cron, /loop wakeup, routine
-        trigger, push, notebook edit, design-system sync), a personal chat
-        additionally blocks n8n, and the 8 claude.ai connectors are allowed in
-        both until the toggle is flipped off. Both are overridable: the toggle
-        via ``CIAO_CLAUDE_AI_MCPS_PERSONAL`` / ``CIAO_CLAUDE_AI_MCPS_WORK`` /
-        the PWA switch, the extras via ``CIAO_DISALLOWED_TOOLS_PERSONAL`` /
-        ``CIAO_DISALLOWED_TOOLS_WORK`` / the "Extra disallowed tools" field.
+        trigger, push, notebook edit, design-system sync) and the 8 claude.ai
+        connectors are allowed until the toggle is flipped off. Both are
+        overridable: the toggle via the per-workspace claude.ai env var or the
+        PWA switch, the extras via the per-workspace disallowed-tools env var or
+        the "Extra disallowed tools" field (the literal ``none`` denies nothing
+        at all).
+
+        An unregistered workspace name — a stale reference, or a renamed or
+        deleted workspace — gets the defaults rather than an empty denylist. It
+        was the one input that reached the model with nothing denied.
         """
         workspace_config = self.workspace(workspace)
-        if workspace_config is None:
-            return []
         connectors = (
             list(CLAUDE_AI_CONNECTORS)
             if not self.claude_ai_mcps_for_workspace(workspace)
             else []
         )
-        extras = workspace_config.disallowed_tools
+        extras = workspace_config.disallowed_tools if workspace_config else None
         if extras is None:
-            extras = [
-                *_DEFAULT_HARNESS_DISALLOWED_TOOLS,
-                *_DEFAULT_EXTRA_DISALLOWED_TOOLS,
-            ]
+            extras = list(_DEFAULT_HARNESS_DISALLOWED_TOOLS)
         # Union, preserving order, deduped.
         seen: set[str] = set()
         effective: list[str] = []

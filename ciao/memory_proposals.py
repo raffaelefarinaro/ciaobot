@@ -43,23 +43,6 @@ logger = logging.getLogger(__name__)
 _PROPOSALS_RELATIVE = "Workspace/Memory-Proposals.md"
 
 
-def _default_workspace(vault_root: Path) -> str:
-    """The workspace to file proposals under when the source names none.
-
-    Read off the vault layout instead of assuming a workspace called
-    ``personal``: workspace names belong to the user, and an install may have
-    none by that name.
-    """
-    try:
-        names = sorted(
-            entry.name
-            for entry in vault_root.iterdir()
-            if entry.is_dir() and (entry / "MEMORY.md").is_file()
-        )
-    except OSError:
-        return ""
-    return names[0] if names else ""
-
 # Insight sections safe to apply to bounded memory without review: rare,
 # behavioral, and durable by construction. Everything else stays in the
 # proposals file for the daily curator.
@@ -242,7 +225,7 @@ def _extract_workspace_context(archive_path: Path, vault_root: Path) -> str:
                             return context_val
     except Exception:  # noqa: BLE001
         pass
-    return _default_workspace(vault_root)
+    return ""
 
 
 def append_proposals(
@@ -250,6 +233,7 @@ def append_proposals(
     vault_root: Path,
     *,
     source_path: Path | None = None,
+    default_workspace: str = "",
 ) -> Path | None:
     """Append a timestamped batch to ``Workspace/Memory-Proposals.md``.
 
@@ -257,15 +241,20 @@ def append_proposals(
     recurring corrections don't stack up batch after batch. Returns the
     proposals file path when a batch was written, or None when the list is
     empty or every proposal was already present.
+
+    ``default_workspace`` is used when the source names none — pass
+    ``config.primary_workspace()``. Picking one off the vault's directory order
+    instead filed a personal chat's proposals into whichever workspace sorted
+    first, where the curator could promote them into that workspace's memory.
+    Empty means the queue lands at the vault root.
     """
     if not proposals:
         return None
 
-    workspace = (
-        _extract_workspace_context(source_path, vault_root)
-        if source_path is not None
-        else _default_workspace(vault_root)
-    )
+    workspace = ""
+    if source_path is not None:
+        workspace = _extract_workspace_context(source_path, vault_root)
+    workspace = workspace or default_workspace
 
     out_path = (
         vault_root / workspace / _PROPOSALS_RELATIVE
@@ -338,6 +327,7 @@ def proposals_from_archive(
     *,
     auto_promote_memory: bool = False,
     memory_dir: Path | None = None,
+    default_workspace: str = "",
 ) -> Path | None:
     """Read an archived chat, extract its ``## Session insights`` body, propose, write.
 
@@ -367,7 +357,12 @@ def proposals_from_archive(
                     len(promoted),
                     archive_path.name,
                 )
-        return append_proposals(proposals, vault_root, source_path=archive_path)
+        return append_proposals(
+            proposals,
+            vault_root,
+            source_path=archive_path,
+            default_workspace=default_workspace,
+        )
     except Exception:  # noqa: BLE001 — never crash the pipeline
         logger.exception("memory proposals failed for %s", archive_path)
         return None

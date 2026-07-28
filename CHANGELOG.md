@@ -51,19 +51,36 @@
 ### Security
 - **Workspace names are the user's, not the app's.** Nine sites branched on a
   workspace being called literally `personal` or `work` — the names the first
-  release happened to ship. Most consequentially, a workspace with any other
-  name had its vault placed *next to* `memory-vault/` instead of inside it,
-  where the vault index, the linter and the memory-proposal scans never looked;
-  and the Settings form silently discarded the vault path you typed. Also fixed:
-  the sync-conflict chat no longer hard-errors without a `personal` project,
-  title/insights model routing resolves against the primary workspace, a new
-  project with no workspace lands in one that exists, the vault linter checks
-  every workspace root, entity mentions attribute legacy unprefixed vault
-  content by layout, and the n8n MCP is denied by default in every workspace
-  rather than only one named `personal`. An install whose vault already sits at
-  the old sibling path keeps resolving there, so nothing appears to move.
-  **If you use the n8n MCP, clear that workspace's "Extra disallowed tools"
-  field in Settings** — the default now denies it everywhere (#197).
+  release happened to ship (#197).
+
+  Most consequentially, a workspace with any other name had its vault placed
+  *next to* `memory-vault/` instead of inside it, where the vault index, the
+  linter and the memory-proposal scans never looked. Vault resolution now lives
+  once on the config, is the same for every name, and is *pure* — it reads the
+  workspace registry and never probes the filesystem, so a vault cannot silently
+  relocate mid-life. An install whose vault sits at the old location has that
+  location pinned into `.runtime/workspaces.json` on first load: nothing moves,
+  and `ciao os-audit` (and PWA diagnostics) now reports it with the exact `mv`
+  command to bring it into vault search and linting.
+
+  Saving *any* workspace setting used to rewrite that workspace's `vault_root`
+  to its bare name, which pointed a setup-created or external vault at a
+  directory that did not exist while the real content stayed put. Fixed, and the
+  "Vault name" field in Settings is no longer discarded.
+
+  Also: the sync-conflict chat no longer hard-errors without a `personal`
+  project; title/insights model routing resolves against the primary workspace;
+  a new project with no workspace lands in one that exists; the vault linter
+  checks every workspace root; the model-bucket fallback no longer keys on the
+  name `work`; an unregistered workspace name gets the default denylist instead
+  of an empty one; and legacy unprefixed vault entries plus the memory-proposal
+  queue take their owner from the registry rather than from directory order,
+  which could file a private chat's proposals into a client workspace.
+- Ciaobot no longer ships an opinion about the self-hosted n8n MCP. It was
+  denied by default in a workspace named `personal` and nowhere else; it is
+  project-scoped in `.mcp.json`, so it exists only where you configured it, and
+  which workspaces see it belongs in that workspace's "Extra disallowed tools"
+  field.
 - **Local-only endpoints are gated on the peer address, not the `Host` header.**
   `/api/node/handover` and `/api/menubar-chats` were reachable unauthenticated from the
   network: the first could force-promote a node — demoting the real host, pushing its vault

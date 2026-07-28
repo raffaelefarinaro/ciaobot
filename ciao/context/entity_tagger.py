@@ -70,7 +70,7 @@ class VaultEntity:
 class _Index:
     """Parsed INDEX.md held in memory with mtime-based invalidation."""
 
-    __slots__ = ("_path", "_mtime", "_entities", "_match_terms", "_legacy_workspace")
+    __slots__ = ("_path", "_mtime", "_entities", "_match_terms")
 
     def __init__(self, path: Path) -> None:
         self._path = path
@@ -78,8 +78,6 @@ class _Index:
         self._entities: list[VaultEntity] = []
         # One compiled regex per distinct matchable term, keyed by lowercase.
         self._match_terms: list[tuple[re.Pattern[str], VaultEntity]] = []
-        # Which workspace owns unprefixed legacy entries; see `find`.
-        self._legacy_workspace: str = ""
 
     def _refresh_if_stale(self) -> None:
         try:
@@ -93,13 +91,18 @@ class _Index:
         self._mtime = stat.st_mtime
         self._entities = list(_parse_index(self._path))
         self._match_terms = list(_compile_terms(self._entities))
-        self._legacy_workspace = _legacy_workspace_for(self._path.parent)
         logger.debug(
             "vault entity index refreshed: %d entities, %d match terms",
             len(self._entities), len(self._match_terms),
         )
 
-    def find(self, prompt: str, *, workspace: str | None = None) -> list[VaultEntity]:
+    def find(
+        self,
+        prompt: str,
+        *,
+        workspace: str | None = None,
+        legacy_workspace: str = "",
+    ) -> list[VaultEntity]:
         """Return entities whose name/alias appears as a whole word in ``prompt``."""
         self._refresh_if_stale()
         if not self._match_terms or not prompt:
@@ -111,7 +114,7 @@ class _Index:
             if entity.path in seen:
                 continue
             if not _entity_visible_in_workspace(
-                entity, workspace, legacy_workspace=self._legacy_workspace
+                entity, workspace, legacy_workspace=legacy_workspace
             ):
                 continue
             if pattern.search(snippet):
@@ -189,27 +192,6 @@ def _compile_terms(entities: list[VaultEntity]) -> list[tuple[re.Pattern[str], V
     return terms
 
 
-def _legacy_workspace_for(vault_root: Path) -> str:
-    """Which workspace owns the vault's unprefixed legacy content.
-
-    Unprefixed paths predate multi-workspace vaults, so they belong to whatever
-    the single workspace was then. That name is not recoverable, so attribute
-    them to the first workspace directory in the vault: deterministic, and for
-    an install with the original `personal`/`work` pair it picks `personal`,
-    exactly as the hardcoded check used to. Showing them in every workspace
-    instead would leak a personal vault's contacts into work chats.
-    """
-    try:
-        names = sorted(
-            entry.name
-            for entry in vault_root.iterdir()
-            if entry.is_dir() and (entry / "MEMORY.md").is_file()
-        )
-    except OSError:
-        return ""
-    return names[0] if names else ""
-
-
 def _entity_visible_in_workspace(
     entity: VaultEntity,
     workspace: str | None,
@@ -220,9 +202,15 @@ def _entity_visible_in_workspace(
 
     Workspace-scoped vaults index paths as ``<workspace>/...``. Shared roots
     use ``shared/...`` and are visible everywhere. Older single-workspace
-    indexes used unprefixed paths like ``People/Alba``; those are visible when
-    no workspace filter is requested, or to whichever workspace owns the
-    vault's legacy content (see ``_legacy_workspace_for``).
+    indexes used unprefixed paths like ``People/Alba``; those belong to
+    ``legacy_workspace``, which the caller reads off the workspace registry.
+
+    An unknown ``legacy_workspace`` leaves them visible rather than hiding them:
+    a vault that never migrated has *only* unprefixed entries, and suppressing
+    those everywhere would silently switch entity mentions off for the exact
+    install the branch exists to serve. Guessing an owner from directory order
+    instead was worse — on an install with `acme` and `personal` it handed a
+    personal contact to the client workspace and hid it from its own.
     """
     workspace = (workspace or "").strip()
     if not workspace:
@@ -234,7 +222,7 @@ def _entity_visible_in_workspace(
     if "/" in entity.path:
         first = entity.path.split("/", 1)[0]
         if first in {"People", "Projects", "Places", "Ideas", "Resources"}:
-            return workspace == legacy_workspace
+            return not legacy_workspace or workspace == legacy_workspace
     return False
 
 
@@ -255,9 +243,16 @@ def find_entities(
     vault_root: Path,
     *,
     workspace: str | None = None,
+    legacy_workspace: str = "",
 ) -> list[VaultEntity]:
-    """Scan ``prompt`` and return whole-word matches against INDEX.md."""
-    return get_index(vault_root).find(prompt, workspace=workspace)
+    """Scan ``prompt`` and return whole-word matches against INDEX.md.
+
+    ``legacy_workspace`` is the workspace that owns unprefixed pre-migration
+    vault entries — pass ``config.primary_workspace()``.
+    """
+    return get_index(vault_root).find(
+        prompt, workspace=workspace, legacy_workspace=legacy_workspace
+    )
 
 
 def format_entities(entities: list[VaultEntity]) -> str:

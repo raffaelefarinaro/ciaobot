@@ -139,6 +139,7 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
         "claude_ai_mcps": None,
         "gws_profile": "work",
         "model_bucket": "anthropic",
+        "color": "pink",
     }
 
 
@@ -170,6 +171,7 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "claude_ai_mcps": None,
             "gws_profile": "personal",
             "model_bucket": "personal",
+            "color": "pink",
         },
         {
             "name": "work",
@@ -180,6 +182,7 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
             "claude_ai_mcps": None,
             "gws_profile": "work",
             "model_bucket": "work",
+            "color": "pink",
         },
     ]
     assert pcm.refresh_count == 3
@@ -230,10 +233,10 @@ def test_claude_ai_mcps_toggle_persists_and_resolves(tmp_path):
     connector portion of the effective denylist (union with extras)."""
     client, config, _pcm = _client(tmp_path)
 
-    # Personal default: toggle on -> connectors allowed, n8n extra blocked.
+    # Personal default: toggle on -> connectors allowed, harness tools blocked.
     personal = config.disallowed_tools_for_workspace("personal")
     assert "mcp__claude_ai_Airtable" not in personal
-    assert "mcp__n8n_mcp" in personal
+    assert "EnterPlanMode" in personal
 
     # Flip the personal toggle off via PATCH; keep n8n as an explicit extra.
     resp = client.patch(
@@ -266,6 +269,48 @@ def test_claude_ai_mcps_toggle_persists_and_resolves(tmp_path):
     # The payload advertises the connector set for the PWA label.
     payload = client.get("/api/workspaces").json()
     assert "mcp__claude_ai_Airtable" in payload["claude_ai_connectors"]
+
+
+def test_workspace_color_defaults_persists_and_validates(tmp_path):
+    """Accent color defaults to pink, persists on write, and rejects unknowns."""
+    client, config, _pcm = _client(tmp_path)
+
+    listed = client.get("/api/workspaces").json()
+    personal = next(w for w in listed["workspaces"] if w["name"] == "personal")
+    assert personal["color"] == "pink"
+
+    create = client.post(
+        "/api/workspaces",
+        json={"name": "client-a", "color": "cyan"},
+    )
+    assert create.status_code == 201
+    created = next(w for w in create.json()["workspaces"] if w["name"] == "client-a")
+    assert created["color"] == "cyan"
+    assert config.workspace("client-a").color == "cyan"
+
+    patch = client.patch(
+        "/api/workspaces/client-a",
+        json={"color": "emerald"},
+    )
+    assert patch.status_code == 200
+    updated = next(w for w in patch.json()["workspaces"] if w["name"] == "client-a")
+    assert updated["color"] == "emerald"
+    assert config.workspace("client-a").color == "emerald"
+
+    stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
+    assert next(w for w in stored if w["name"] == "client-a")["color"] == "emerald"
+
+    # Other fields can update without resetting color.
+    keep = client.patch(
+        "/api/workspaces/client-a",
+        json={"default_model": "sonnet"},
+    )
+    assert keep.status_code == 200
+    assert config.workspace("client-a").color == "emerald"
+
+    bad = client.patch("/api/workspaces/client-a", json={"color": "neon"})
+    assert bad.status_code == 400
+    assert "color" in bad.json()["error"]
 
 
 def test_provider_config_status_and_write_only_patch(tmp_path):

@@ -35,20 +35,42 @@ def test_bare_name_nests_under_the_vault_for_any_workspace(tmp_path: Path) -> No
     assert config.workspace_vault_root("research") == tmp_path / "memory-vault" / "research"
 
 
-def test_a_legacy_sibling_vault_keeps_resolving_where_its_data_is(tmp_path: Path) -> None:
-    """An install created before the fix must not appear to lose its vault."""
+def test_a_legacy_sibling_vault_is_pinned_into_the_registry(tmp_path: Path) -> None:
+    """An install created before the fix must not appear to lose its vault.
+
+    The location is pinned once, at load, so resolution stays pure — deciding
+    per call from live filesystem state meant the vault silently relocated the
+    moment the other candidate path appeared.
+    """
     legacy = tmp_path / "research"
     (legacy / "Workspace").mkdir(parents=True)
     config = _config(tmp_path, {"research": "research"})
 
     assert config.workspace_vault_root("research") == legacy
+    # Pinned as an absolute path in the registry, not re-derived.
+    assert config.workspace("research").vault_root == str(legacy)
 
-    # Once the correct location exists it wins, so a migrated install moves on.
+    # The nested path appearing later must not move the workspace off its data.
     (tmp_path / "memory-vault" / "research").mkdir(parents=True)
-    assert (
-        config.workspace_vault_root("research")
-        == tmp_path / "memory-vault" / "research"
-    )
+    assert config.workspace_vault_root("research") == legacy
+
+
+def test_an_unrelated_sibling_directory_is_not_adopted_as_a_vault(tmp_path: Path) -> None:
+    """Gating on mere existence would capture someone's document folder."""
+    (tmp_path / "clients").mkdir()
+    config = _config(tmp_path, {"clients": "clients"})
+
+    assert config.workspace_vault_root("clients") == tmp_path / "memory-vault" / "clients"
+
+
+def test_equivalent_path_spellings_resolve_alike(tmp_path: Path) -> None:
+    """`research/` and `./research` name one segment, like `research`."""
+    config = _config(tmp_path, {"a": "research", "b": "research/", "c": "./research"})
+    expected = tmp_path / "memory-vault" / "research"
+
+    assert config.workspace_vault_root("a") == expected
+    assert config.workspace_vault_root("b") == expected
+    assert config.workspace_vault_root("c") == expected
 
 
 def test_an_explicit_relative_root_is_not_nested_twice(tmp_path: Path) -> None:
@@ -98,3 +120,39 @@ def test_model_bucket_fallback_does_not_key_on_the_name_work(tmp_path: Path) -> 
     assert config.model_bucket_for_workspace("research") == "openrouter"
     # Previously any name but the literal "work" fell through to "personal".
     assert config.model_bucket_for_workspace("unknown") == "openrouter"
+
+
+def test_upgrade_notice_reports_a_vault_left_outside_the_vault_root(tmp_path: Path) -> None:
+    """The install tells the operator, instead of a release note hoping they read it."""
+    from ciao.os_audit import audit_upgrade_notices
+
+    legacy = tmp_path / "research"
+    (legacy / "Workspace").mkdir(parents=True)
+    config = _config(tmp_path, {"research": "research"})
+
+    result = audit_upgrade_notices(config)
+
+    assert result["notices_found"] == 1
+    notice = result["notices"][0]
+    assert notice["type"] == "vault_outside_vault_root"
+    assert notice["workspace"] == "research"
+    # The remedy has to be the actual command, not advice to go read something.
+    assert str(legacy) in notice["remedy"]
+    assert str(tmp_path / "memory-vault" / "research") in notice["remedy"]
+
+
+def test_upgrade_notices_stay_quiet_for_a_correctly_placed_vault(tmp_path: Path) -> None:
+    from ciao.os_audit import audit_upgrade_notices
+
+    (tmp_path / "memory-vault" / "research" / "Workspace").mkdir(parents=True)
+    config = _config(tmp_path, {"research": "memory-vault/research"})
+
+    assert audit_upgrade_notices(config)["notices_found"] == 0
+
+
+def test_upgrade_notices_tolerate_a_config_without_a_registry() -> None:
+    """Advisory only: a stub config must not turn the audit red."""
+    from ciao.os_audit import audit_upgrade_notices
+
+    assert audit_upgrade_notices(None)["notices_found"] == 0
+    assert audit_upgrade_notices(object())["errors"] == []

@@ -112,6 +112,9 @@ def build_user_prompt_submit_hook(
                 or env.get("GWS_PROFILE")
             )
             scan_text = _CIAO_CONTEXT_RE.sub("", prompt)
+            # No workspace registry out here (hooks run with env only), so
+            # legacy unprefixed entries stay visible rather than being
+            # attributed by guesswork — see find_entities.
             entities = find_entities(scan_text, vault_root, workspace=workspace)
             sections: list[str] = ["[SITUATIONAL CONTEXT: Runtime & Vault Entities]"]
             sections.append("<ciao-runtime>\n" + "\n".join(runtime) + "\n</ciao-runtime>")

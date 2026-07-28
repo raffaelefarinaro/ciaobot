@@ -697,6 +697,72 @@ def _vault_audit(vault_root: Path) -> dict[str, Any]:
     return result
 
 
+def audit_upgrade_notices(config: Any | None) -> dict[str, Any]:
+    """Actions an upgrade left for the operator, detected from the install.
+
+    A release note only works if someone reads it and then remembers to act.
+    These are the same conditions stated as facts about *this* machine, so the
+    PWA can show them and the operator can act without consulting a changelog.
+
+    Each notice carries the exact remedy. Detected, never applied: both of these
+    involve the user's data or their tool policy, so the app reports and the
+    operator decides.
+    """
+    notices: list[dict[str, str]] = []
+    errors: list[dict[str, str]] = []
+    if config is None:
+        return {"notices": notices, "notices_found": 0, "errors": errors}
+
+    # Advisory section: a config that does not expose a workspace registry has
+    # nothing to report, and must not turn the whole audit red.
+    vault_raw = getattr(config, "vault_root", None)
+    workspace_raw = getattr(config, "workspace_root", None)
+    lister = getattr(config, "workspace_names", None)
+    if vault_raw is None or workspace_raw is None or not callable(lister):
+        return {"notices": notices, "notices_found": 0, "errors": errors}
+    vault_root = Path(vault_raw)
+    workspace_root = Path(workspace_raw)
+    names = list(lister())
+
+    resolver = getattr(config, "workspace_vault_root", None)
+    if not callable(resolver):
+        return {"notices": notices, "notices_found": 0, "errors": errors}
+
+    for name in names:
+        # Before vault nesting applied to every workspace, a workspace named
+        # anything but personal/work kept its vault beside memory-vault/ rather
+        # than inside it. Such an install keeps working — the location is pinned
+        # in the registry so nothing moves — but the vault index, the linter and
+        # the memory-proposal scans only walk the vault root, so that content is
+        # invisible to all three.
+        #
+        # Detected by comparing where the vault actually resolves against that
+        # pre-nesting location. An absolute path somewhere else entirely is the
+        # operator's deliberate choice and not worth nagging about.
+        legacy = (workspace_root / name).resolve()
+        nested = (vault_root / name).resolve()
+        if legacy == nested:
+            continue
+        try:
+            actual = Path(resolver(name)).resolve()
+        except Exception:  # noqa: BLE001 — advisory section
+            continue
+        if actual == legacy and legacy.is_dir():
+            notices.append({
+                "type": "vault_outside_vault_root",
+                "workspace": name,
+                "detail": (
+                    f"Workspace '{name}' keeps its vault at {legacy}, outside "
+                    f"{vault_root}. It still works, but vault search, link "
+                    f"linting and memory proposals only scan inside the vault "
+                    f"root."
+                ),
+                "remedy": f"mv {legacy} {nested}",
+            })
+
+    return {"notices": notices, "notices_found": len(notices), "errors": errors}
+
+
 def run_os_audit(
     workspace_dir: Path | None = None,
     vault_root: Path | None = None,
@@ -705,8 +771,13 @@ def run_os_audit(
     *,
     proposal_paths: list[Path] | None = None,
     today: datetime.date | None = None,
+    config: Any | None = None,
 ) -> dict[str, Any]:
-    """Execute a complete AI OS audit pass."""
+    """Execute a complete AI OS audit pass.
+
+    ``config`` is optional so the standalone CLI path keeps working; without it
+    the upgrade-notice section is simply empty.
+    """
     workspace = (workspace_dir or Path.cwd()).expanduser().resolve()
     vault = (vault_root or (workspace / "memory-vault")).expanduser().resolve()
     runtime = (runtime_dir or (workspace / ".runtime")).expanduser().resolve()
@@ -722,6 +793,7 @@ def run_os_audit(
         today=today,
     )
     job_result = audit_job_runs(workspace, runtime_dir=runtime)
+    upgrade_result = audit_upgrade_notices(config)
 
     collected_errors = [
         *setup_result["errors"],
@@ -730,6 +802,7 @@ def run_os_audit(
         *rule_result["errors"],
         *memory_result["errors"],
         *job_result["errors"],
+        *upgrade_result["errors"],
     ]
     scan_errors: list[dict[str, str]] = []
     seen_errors: set[tuple[str, ...]] = set()
@@ -764,6 +837,7 @@ def run_os_audit(
         + memory_result["invalid_expiration_entries"]
         + memory_result["pending_memory_proposals"]
         + job_result["failed_runs"]
+        + upgrade_result["notices_found"]
     )
     total_errors = len(scan_errors)
     total_issues = actionable_count + total_errors
@@ -785,6 +859,7 @@ def run_os_audit(
         "rule_audit": rule_result,
         "memory_hygiene": memory_result,
         "job_runs_audit": job_result,
+        "upgrade_notices": upgrade_result,
         "scan_errors": scan_errors,
     }
 
@@ -869,6 +944,13 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
             f"  - 🔴 [{failure.get('job')} at {failure.get('ts')}]: "
             f"{failure.get('error')}"
         )
+
+    notices = report.get("upgrade_notices", {}).get("notices", [])
+    if notices:
+        lines.extend(["", "## Upgrade Actions"])
+        for notice in notices:
+            lines.append(f"- ⚠️ **{notice['workspace']}**: {notice['detail']}")
+            lines.append(f"  - Fix: `{notice['remedy']}`")
 
     if report["scan_errors"]:
         lines.extend(["", "## Scan Errors"])

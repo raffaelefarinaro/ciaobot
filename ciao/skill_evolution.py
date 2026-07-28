@@ -107,30 +107,15 @@ def _resolve_proposals_dir() -> Path:
     """
     workspace = os.environ.get("CIAO_WORKSPACE", "").strip()
     root = Path(workspace).expanduser() if workspace else _REPO_ROOT
-    vault = root / "memory-vault"
-    return _first_workspace_dir(vault) / "Workspace" / "Skill-Proposals"
+    return root / "memory-vault" / "Workspace" / "Skill-Proposals"
 
 
-def _first_workspace_dir(vault: Path) -> Path:
-    """The vault subdirectory to file proposals under.
-
-    Discovered from the layout rather than assuming a workspace named
-    ``personal`` — workspace names are the user's. Falls back to the vault root
-    itself when nothing looks like a workspace yet, so a fresh install still
-    gets a usable path instead of one under a directory that will never exist.
-    """
-    try:
-        names = sorted(
-            entry
-            for entry in vault.iterdir()
-            if entry.is_dir() and (entry / "MEMORY.md").is_file()
-        )
-    except OSError:
-        return vault
-    return names[0] if names else vault
-
-
-_DEFAULT_PROPOSALS_DIR: Path = _resolve_proposals_dir()
+# Resolved per call, not at import: an import-time constant that depended on
+# vault layout relocated the queue whenever the layout changed, orphaning
+# proposals already written to the old location. The path itself is now
+# layout-independent, and this keeps it that way if that ever changes.
+def _default_proposals_dir() -> Path:
+    return _resolve_proposals_dir()
 _DEFAULT_TESTS_ROOT = _REPO_ROOT / "tests"
 
 MAX_SKILL_BYTES = 15 * 1024
@@ -823,7 +808,7 @@ async def run_evolution_pass(
     timing lands in ``.runtime/job_runs.jsonl`` with label
     ``skillevo:<skill>:<node>``.
     """
-    output_dir = output_dir or _DEFAULT_PROPOSALS_DIR
+    output_dir = output_dir or _default_proposals_dir()
     if env is None:
         env = routine_env_for_model(model, ollama_settings) if ollama_settings is not None else {}
     now = now or datetime.now(UTC)
