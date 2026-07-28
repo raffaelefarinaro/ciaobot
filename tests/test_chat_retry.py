@@ -41,7 +41,7 @@ async def test_quota_error_marks_turn_for_hourly_retry(tmp_path: Path) -> None:
     project = pcm.create_project("retry", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="retry-test")
 
-    async def fake_stream_chat(chat_id, prompt, images=None):
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         yield ResultEvent(
             type="result",
             result="API Error: Request rejected (429): reached your session usage limit",
@@ -94,7 +94,7 @@ async def test_try_retry_now_starts_stream_when_chat_is_idle(tmp_path: Path) -> 
 
     calls: list[str] = []
 
-    async def fake_stream_chat(chat_id, prompt, images=None):
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         calls.append(prompt)
         yield ResultEvent(
             type="result",
@@ -128,7 +128,7 @@ async def test_try_retry_now_refuses_active_chat(tmp_path: Path) -> None:
 
     release = asyncio.Event()
 
-    async def fake_stream_chat(chat_id, prompt, images=None):
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         await release.wait()
         yield ResultEvent(
             type="result",
@@ -463,7 +463,7 @@ async def test_connection_error_marks_turn_for_fast_retry(tmp_path: Path) -> Non
     project = pcm.create_project("retry", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="retry-test")
 
-    async def fake_stream_chat(chat_id, prompt, images=None):
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         yield ResultEvent(
             type="result",
             result="API Error: Unable to connect to API (ENOTFOUND)",
@@ -496,7 +496,7 @@ async def test_connection_error_exception_marks_turn_for_fast_retry(tmp_path: Pa
     project = pcm.create_project("retry", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="retry-test")
 
-    async def fake_stream_chat(chat_id, prompt, images=None):
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         raise Exception("Unable to connect to API (ENOTFOUND)")
         yield ResultEvent(type="result", result="not reached")  # type: ignore[unreachable]
 
@@ -571,7 +571,7 @@ async def test_midresponse_drop_resumes_with_continue_not_replay(tmp_path: Path)
     chat.session_id = "sess-drop"
     pcm._save()
 
-    async def fake_stream_chat(chat_id, prompt, images=None):
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         # Stream some output first so had_provider_progress flips True.
         yield AssistantTextDelta(type="assistant", text="Working on it… ")
         yield ResultEvent(
@@ -619,7 +619,7 @@ async def test_quota_error_with_progress_resumes_continue(tmp_path: Path) -> Non
     chat.session_id = "sess-live"
     pcm._save()
 
-    async def fake_stream_chat(chat_id, prompt, images=None):
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         # A tool ran / text streamed before the limit hit → had progress.
         yield AssistantTextDelta(type="assistant", text="sending the email… ")
         yield ResultEvent(
@@ -657,7 +657,7 @@ async def test_midresponse_drop_without_session_falls_back_to_replay(tmp_path: P
     chat = pcm.create_chat(project.project_id, title="retry-test")
     # No session_id set — nothing to resume.
 
-    async def fake_stream_chat(chat_id, prompt, images=None):
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         yield AssistantTextDelta(type="assistant", text="starting… ")
         yield ResultEvent(
             type="result",
@@ -696,7 +696,7 @@ async def test_midresponse_drop_stops_after_retry_cap(tmp_path: Path) -> None:
     chat.retry_attempts = _MAX_CONNECTION_DROP_RETRIES
     pcm._save()
 
-    async def fake_stream_chat(chat_id, prompt, images=None):
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         yield AssistantTextDelta(type="assistant", text="partial… ")
         yield ResultEvent(
             type="result",
@@ -731,7 +731,7 @@ async def test_billing_spend_limit_error_with_progress_arms_retry(tmp_path: Path
     project = pcm.create_project("retry", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="retry-test")
 
-    async def fake_stream_chat(chat_id, prompt, images=None):
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         yield AssistantTextDelta(type="assistant", text="some progress... ")
         yield ResultEvent(
             type="result",
@@ -767,7 +767,7 @@ async def test_rate_limit_error_with_progress_does_not_arm_retry(tmp_path: Path)
     project = pcm.create_project("retry", workspace="personal")
     chat = pcm.create_chat(project.project_id, title="retry-test")
 
-    async def fake_stream_chat(chat_id, prompt, images=None):
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         yield AssistantTextDelta(type="assistant", text="some progress... ")
         yield ResultEvent(
             type="result",

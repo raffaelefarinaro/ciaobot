@@ -48,7 +48,7 @@ What that looks like in practice:
 - **Files and automations** — create, preview, edit, and restore vault files from the UI; run recurring routines on a cron you choose (schedules) or re-run a prompt inside one chat every N minutes (loops).
 - **Voice, notifications, and updates** — transcription, push alerts, model settings, and in-app package updates. On macOS: menu bar companion, `Ciaobot Server.app`, and background service after setup.
 - **Provider choice** — Claude Code or Codex with your existing login; Ollama, OpenRouter, and on-device models for lighter tasks (see [Providers](#providers)).
-- **Agent-safe control plane** — an authenticated, chat-scoped MCP surface lets managed Claude Code and Codex processes operate Ciaobot memory, vault, projects, chats, schedules, loops, agent handoffs, and file history without curl or direct runtime-JSON edits. MCP is the default transport, with the legacy CLI path retained as an automatic fallback. See [docs/MCP.md](docs/MCP.md).
+- **Agent-safe control plane** — an authenticated, chat-scoped MCP surface lets managed Claude Code and Codex processes operate Ciaobot memory, vault, projects, chats, schedules, loops, agent handoffs, and file history without curl or direct runtime-JSON edits. MCP is the default transport, with the legacy CLI path retained as an automatic fallback. Reads and non-destructive writes on this surface run without an approval card (they are the twins of buttons in the UI); deletes and lifecycle actions still ask. See [docs/MCP.md](docs/MCP.md).
 
 Pick a workspace folder, choose a provider, and work — Ciaobot is the interface on top; the vault is yours to keep.
 
@@ -95,7 +95,7 @@ When your message mentions a name that appears in the vault index, the agent get
 **Automations**
 
 - Schedules: recurring or one-off cron routines that dispatch fresh prompts into a project or chat.
-- Loops: re-run a prompt inside one chat every N minutes, keeping the conversation's context between iterations.
+- Loops: re-run a prompt inside one chat every N minutes, keeping the conversation's context between iterations. A loop-driven chat is marked with `↻` in the sidebar and on the home grid, and carries a banner with start/stop controls; the harness's own `/schedule` and `/loop` skills are removed from the model's context and denied, so automations land in Ciaobot instead of a cloud routine it cannot see.
 - System routines ship enabled (memory curation, workspace hygiene, skill evolution); every background run is visible under **Settings → Automation**.
 
 **Extensibility — skills, subagents, commands**

@@ -27,6 +27,37 @@ logger = logging.getLogger(__name__)
 
 BACKUP_PUSH_INTERVAL = 30  # seconds between background backup pushes
 
+# Workspace roots holding user data rather than app source.
+_VAULT_ROOT = "memory-vault"
+_SECRETS_ROOT = "secrets"
+_USER_DATA_ROOTS = (_VAULT_ROOT, _SECRETS_ROOT)
+
+# Suffixes a test-*named* file may carry to earn the fixture exemption. A
+# `test_config.json` is far more likely to be a real config someone named badly
+# than a fixture, so it stays in scope for the scanner.
+_TEST_SOURCE_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".jsx", ".vue"}
+
+
+def _is_test_fixture(rel_path: str) -> bool:
+    """Whether a workspace-relative path is exempt from the secret scan.
+
+    Test fixtures may legitimately carry mock keys and certs. Two carve-outs
+    keep that from becoming a hole: the exemption never applies under a
+    user-data root (a `tests/` folder in someone's vault is their notes, not
+    pytest), and a merely test-*named* file has to be source to qualify —
+    `memory-vault/.../tests/credentials.json` and a stray `test_config.json`
+    are real credentials.
+    """
+    parts = Path(rel_path).parts
+    if not parts or parts[0] in _USER_DATA_ROOTS:
+        return False
+    if "tests" in parts or "__tests__" in parts:
+        return True
+    name = parts[-1]
+    return (name.startswith("test_") or name.endswith("_test.py")) and (
+        Path(name).suffix in _TEST_SOURCE_SUFFIXES
+    )
+
 
 # The prompt dispatched into a chat when an automatic pull/merge conflicts.
 # Filled with the branch via str.replace.
@@ -363,19 +394,16 @@ class LocalSessionManager:
             # Categorize
             if rel_path.startswith("ciao/") or (rel_path.startswith("web/") and not rel_path.startswith(("web/package", "web/tsconfig", "web/vite.config"))):
                 categories["code"].append(rel_path)
-            elif rel_path.startswith("memory-vault/"):
+            elif rel_path.startswith(f"{_VAULT_ROOT}/"):
                 categories["vault"].append(rel_path)
             elif rel_path.startswith("scripts/"):
                 categories["scripts"].append(rel_path)
-            elif rel_path in (".env", "pyproject.toml", "package.json", "package-lock.json", "skills/skills-lock.json", ".gitignore") or rel_path.startswith(("secrets/", "web/package", "web/tsconfig", "web/vite.config")):
+            elif rel_path in (".env", "pyproject.toml", "package.json", "package-lock.json", "skills/skills-lock.json", ".gitignore") or rel_path.startswith((f"{_SECRETS_ROOT}/", "web/package", "web/tsconfig", "web/vite.config")):
                 categories["config"].append(rel_path)
             else:
                 categories["other"].append(rel_path)
 
-            # Scan for secrets (skip test files to prevent mock test keys/certs from blocking commits)
-            rel_parts = Path(rel_path).parts
-            is_test = "tests" in rel_parts or p.name.startswith("test_") or p.name.endswith("_test.py")
-            if not is_test:
+            if not _is_test_fixture(rel_path):
                 file_blockers, file_warnings = self._scan_file_for_secrets(p)
                 blockers.extend(file_blockers)
                 warnings.extend(file_warnings)
@@ -445,8 +473,10 @@ class LocalSessionManager:
         if slack_tokens:
             blockers.append(f"Blocked file '{p.name}': High-confidence Slack API token detected.")
 
-        # Suspicious file names (warnings)
-        if name in ("config.json", "credentials.json", "settings.yaml") or re.search(r"(?:^|[\W_])(secrets?|passwords?)(?:[\W_]|$)", name):
+        # Suspicious file names (warnings). The trailing boundary is what keeps
+        # `secretary.md` quiet; there is deliberately no leading boundary, so
+        # `mysecrets.txt` and `dbpassword.json` still warn.
+        if name in ("config.json", "credentials.json", "settings.yaml") or re.search(r"(secrets?|passwords?)(?:[\W_]|$)", name):
             warnings.append(f"Suspicious file name '{p.name}' could contain configuration or credentials.")
 
         return blockers, warnings

@@ -117,7 +117,12 @@ def _auth_client() -> TestClient:
     return TestClient(app, base_url="https://ciao.example")
 
 
-def _setup_token_client(tmp_path, *, base_url: str = "http://localhost:8443") -> TestClient:
+def _setup_token_client(
+    tmp_path,
+    *,
+    base_url: str = "http://localhost:8443",
+    peer: tuple[str, int] = ("127.0.0.1", 5555),
+) -> TestClient:
     serializer = URLSafeTimedSerializer("test-secret")
     app = Starlette(
         routes=[Route("/", _ok, methods=["GET"])],
@@ -128,7 +133,7 @@ def _setup_token_client(tmp_path, *, base_url: str = "http://localhost:8443") ->
         pwa_auth_token="test-token",
         workspace_root=tmp_path,
     )
-    return TestClient(app, base_url=base_url)
+    return TestClient(app, base_url=base_url, client=peer)
 
 
 def test_login_cookie_is_secure_and_host_only() -> None:
@@ -177,15 +182,29 @@ def test_setup_token_redeems_localhost_session_and_deletes_token(tmp_path) -> No
     assert not token_path.exists()
 
 
-def test_setup_token_rejects_non_localhost_host(tmp_path) -> None:
+def test_setup_token_rejects_remote_peer(tmp_path) -> None:
     token_path = tmp_path / ".runtime" / "setup-token"
     token_path.parent.mkdir()
     token_path.write_text("setup-secret\n", encoding="utf-8")
 
-    resp = _setup_token_client(tmp_path, base_url="https://ciao.example").get(
-        "/?setup=setup-secret",
-        follow_redirects=False,
-    )
+    resp = _setup_token_client(
+        tmp_path, base_url="https://ciao.example", peer=("10.0.0.9", 5555)
+    ).get("/?setup=setup-secret", follow_redirects=False)
+
+    assert resp.status_code == 403
+    assert "set-cookie" not in resp.headers
+    assert token_path.exists()
+
+
+def test_setup_token_rejects_remote_peer_spoofing_localhost_host(tmp_path) -> None:
+    """The redemption gate reads the peer address, not the Host header."""
+    token_path = tmp_path / ".runtime" / "setup-token"
+    token_path.parent.mkdir()
+    token_path.write_text("setup-secret\n", encoding="utf-8")
+
+    resp = _setup_token_client(
+        tmp_path, base_url="http://localhost:8443", peer=("10.0.0.9", 5555)
+    ).get("/?setup=setup-secret", follow_redirects=False)
 
     assert resp.status_code == 403
     assert "set-cookie" not in resp.headers
@@ -204,8 +223,8 @@ def test_setup_token_rejects_invalid_token(tmp_path) -> None:
     assert token_path.exists()
 
 
-def test_node_handover_bailout_allowed_without_session() -> None:
-    """Stuck clients on /login must force-promote without a host session."""
+def _handover_app(host_url: str = "http://100.1.2.3:8443", host_session=None):
+    """App exposing /api/node/handover over a stubbed NodeStateManager."""
     from ciao.node_state import NodeStateManager
     from ciao.web.routes_api import node_handover_endpoint
 
@@ -217,14 +236,7 @@ def test_node_handover_bailout_allowed_without_session() -> None:
     app.state.serializer = serializer
     app.state.config = SimpleNamespace(pwa_auth_required=True, pwa_auth_token="x")
     node_mgr = NodeStateManager.__new__(NodeStateManager)
-    # Minimal stub: promote clears client role.
-    state = {"role": "client", "host_url": "http://100.1.2.3:8443", "host_session": None}
-
-    def get_host_url():
-        return state["host_url"]
-
-    def get_host_session():
-        return state["host_session"]
+    state = {"role": "client", "host_url": host_url, "host_session": host_session}
 
     def promote():
         state["role"] = "host"
@@ -232,13 +244,19 @@ def test_node_handover_bailout_allowed_without_session() -> None:
         state["host_session"] = None
         return {"role": "host", "host_url": None}
 
-    node_mgr.get_host_url = get_host_url  # type: ignore[method-assign]
-    node_mgr.get_host_session = get_host_session  # type: ignore[method-assign]
+    node_mgr.get_host_url = lambda: state["host_url"]  # type: ignore[method-assign]
+    node_mgr.get_host_session = lambda: state["host_session"]  # type: ignore[method-assign]
     node_mgr.promote = promote  # type: ignore[method-assign]
     app.state.node_state_manager = node_mgr
     app.state.local_session_manager = None
+    return app, state
 
-    client = TestClient(app, base_url="https://ciao.example")
+
+def test_node_handover_bailout_allowed_from_loopback_without_session() -> None:
+    """Stuck clients on /login must force-promote without a host session."""
+    app, state = _handover_app()
+
+    client = TestClient(app, base_url="https://ciao.example", client=("127.0.0.1", 5555))
     resp = client.post(
         "/api/node/handover",
         json={"force": True},
@@ -249,21 +267,73 @@ def test_node_handover_bailout_allowed_without_session() -> None:
     assert state["role"] == "host"
 
 
-def test_node_handover_bailout_rejects_cross_origin() -> None:
-    from ciao.web.routes_api import node_handover_endpoint
+def test_node_handover_rejects_remote_peer_without_session() -> None:
+    """Force-promote is identity-less, so the network must not reach it."""
+    app, state = _handover_app()
 
-    serializer = URLSafeTimedSerializer("test-secret")
-    app = Starlette(
-        routes=[Route("/api/node/handover", node_handover_endpoint, methods=["POST"])],
-        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    client = TestClient(app, base_url="https://ciao.example", client=("10.0.0.9", 5555))
+    resp = client.post(
+        "/api/node/handover",
+        json={"force": True},
+        headers={"Origin": "https://ciao.example"},
     )
-    app.state.serializer = serializer
-    app.state.config = SimpleNamespace(pwa_auth_required=True)
+    assert resp.status_code == 401
+    assert state["role"] == "client"
 
-    client = TestClient(app, base_url="https://ciao.example")
+
+def test_node_handover_ignores_a_spoofed_localhost_host_header() -> None:
+    """The gate reads the peer address, not the caller-supplied Host header."""
+    app, state = _handover_app()
+
+    client = TestClient(app, base_url="http://10.0.0.9:8443", client=("10.0.0.9", 5555))
+    resp = client.post("/api/node/handover", json={"force": True}, headers={"Host": "localhost"})
+    assert resp.status_code == 401
+    assert state["role"] == "client"
+
+
+def test_node_handover_rejects_target_url_other_than_the_connected_host() -> None:
+    """The demote call carries the host session, so the URL must not be free-form."""
+    app, state = _handover_app(host_session="host-cookie")
+
+    client = TestClient(app, base_url="https://ciao.example", client=("127.0.0.1", 5555))
+    resp = client.post(
+        "/api/node/handover",
+        json={"target_node_url": "http://attacker.example.com", "force": False},
+        headers={"Origin": "https://ciao.example"},
+    )
+    assert resp.status_code == 400
+    assert "connected host" in resp.json()["error"]
+    assert state["role"] == "client"
+
+
+def test_node_handover_bailout_rejects_cross_origin() -> None:
+    app, _state = _handover_app()
+
+    client = TestClient(app, base_url="https://ciao.example", client=("127.0.0.1", 5555))
     resp = client.post(
         "/api/node/handover",
         json={"force": True},
         headers={"Origin": "https://evil.example"},
     )
     assert resp.status_code == 403
+
+
+def test_menubar_chats_requires_loopback_or_session() -> None:
+    """Titles and workspace names must not be readable from the network."""
+
+    async def stub(request):
+        return JSONResponse({"chats": [{"title": "private", "workspace": "personal"}]})
+
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/menubar-chats", stub, methods=["GET"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.serializer = serializer
+    app.state.config = SimpleNamespace(pwa_auth_required=True, pwa_auth_token="x")
+
+    local = TestClient(app, base_url="http://localhost:8443", client=("127.0.0.1", 5555))
+    assert local.get("/api/menubar-chats").status_code == 200
+
+    remote = TestClient(app, base_url="http://ciao.example", client=("10.0.0.9", 5555))
+    assert remote.get("/api/menubar-chats").status_code == 401

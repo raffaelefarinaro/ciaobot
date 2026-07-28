@@ -131,6 +131,11 @@ export const useProjectStore = defineStore('projects', () => {
     selection: string
     comment: string
     images?: string[]
+    messageId?: string
+    messageIndex?: number
+    messageRole?: string
+    occurrenceIndex?: number
+    paragraphIndex?: number
   }
   const pendingChatCommentsByChat = ref<Record<string, PendingChatComment[]>>({})
   const pendingChatComments = computed<PendingChatComment[]>({
@@ -151,7 +156,7 @@ export const useProjectStore = defineStore('projects', () => {
     | { kind: 'tool'; content: string }
     | { kind: 'thinking'; content: string }
     | { kind: 'text'; content: string; phase?: ChatMessage['phase'] }
-    | { kind: 'filecard'; content: string; file_path: string; action: string; tool: string }
+    | { kind: 'filecard'; content: string; file_path: string; action: string; tool: string; tool_use_id?: string }
     | { kind: 'status'; content: string }
   const streamingTimeline = ref<Record<string, StreamEntry[]>>({})  // per-chat interleaved tool/text entries
   const unread = ref<Record<string, number>>({})  // per-chat unread assistant message count
@@ -2408,6 +2413,17 @@ export const useProjectStore = defineStore('projects', () => {
         })
         break
       }
+      case 'loops_changed': {
+        // A loop was created/edited/started/stopped/deleted elsewhere (the
+        // model mid-turn, the Schedules page, another tab). Refetch so the
+        // chat's loop banner and the sidebar/home loop markers appear without
+        // a manual reload. Imported lazily to keep the tasks store out of
+        // this module's import graph.
+        void import('./tasks')
+          .then(({ useTaskStore }) => useTaskStore().fetchLoops())
+          .catch(() => {})
+        break
+      }
       case 'gws_health': {
         // A Google Workspace login went dead (revoked/expired token). The
         // server debounces to one event per breakage; surface it as a
@@ -2834,13 +2850,35 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   // ── Pending chat comments ─────────────────────────────────────────
-  function addPendingChatComment(c: { selection: string; comment: string; images?: string[] }): string {
+  function addPendingChatComment(c: {
+    selection: string
+    comment: string
+    images?: string[]
+    messageId?: string
+    messageIndex?: number
+    messageRole?: string
+    occurrenceIndex?: number
+    paragraphIndex?: number
+  }): string {
     const id = (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
       ? (crypto as { randomUUID: () => string }).randomUUID()
       : `cc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
     if (activeChatId.value) {
       const existing = getPendingBucket(pendingChatCommentsByChat.value, activeChatId.value)
-      setPendingBucket(pendingChatCommentsByChat.value, activeChatId.value, [...existing, { id, selection: c.selection, comment: c.comment, images: c.images }])
+      setPendingBucket(pendingChatCommentsByChat.value, activeChatId.value, [
+        ...existing,
+        {
+          id,
+          selection: c.selection,
+          comment: c.comment,
+          images: c.images,
+          messageId: c.messageId,
+          messageIndex: c.messageIndex,
+          messageRole: c.messageRole,
+          occurrenceIndex: c.occurrenceIndex,
+          paragraphIndex: c.paragraphIndex,
+        },
+      ])
       persistPendingChatComments()
     }
     return id
@@ -2991,7 +3029,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   function _pushFileCard(
     chatId: string,
-    payload: { file_path: string; action: string; tool: string },
+    payload: { file_path: string; action: string; tool: string; tool_use_id?: string },
   ) {
     // Ignore shell false positives ("There") that are not real paths.
     if (!isPlausibleFilePath(payload.file_path)) return
@@ -3002,6 +3040,7 @@ export const useProjectStore = defineStore('projects', () => {
       file_path: payload.file_path,
       action: payload.action,
       tool: payload.tool,
+      tool_use_id: payload.tool_use_id,
     })
   }
 
@@ -3083,6 +3122,7 @@ export const useProjectStore = defineStore('projects', () => {
             // Already rendered (either from loadMessages on reload or from a
             // previous receipt of the same echo). Don't push a duplicate, but
             // do reflect the implied streaming state and clear queue chips.
+            if (event.unattended) existingWithTurn.unattended = true
             if (queuedMessages.value[chatId]?.length) clearQueued(chatId)
             if (!streaming.value[chatId]) streaming.value[chatId] = true
             break
@@ -3115,6 +3155,7 @@ export const useProjectStore = defineStore('projects', () => {
                 break
               }
               m.turn_index = turnIndex
+              if (event.unattended) m.unattended = true
               upgraded = true
               break
             }
@@ -3137,6 +3178,9 @@ export const useProjectStore = defineStore('projects', () => {
           timestamp: event.sent_at || new Date().toISOString(),
           images: event.images?.length ? event.images : undefined,
           turn_index: turnIndex,
+          // Loop/schedule tick: marked so the bubble reads as self-driven
+          // rather than something the user typed.
+          unattended: event.unattended || undefined,
         })
         messages.value[chatId] = normalizeMessages([...msgs])
         // The server echoes the flushed queue as one combined user_echo. Clear
@@ -3281,6 +3325,7 @@ export const useProjectStore = defineStore('projects', () => {
               file_path: touch.file_path,
               action: touch.action || 'touched',
               tool: event.tool_name,
+              tool_use_id: event.tool_use_id,
             })
           }
           _maybeAutoPin(chatId, touches)
@@ -3301,6 +3346,20 @@ export const useProjectStore = defineStore('projects', () => {
           : `${_toolIcon(event.tool_name)} ${event.tool_name}`
 
         _pushToolLine(chatId, line)
+        break
+      }
+
+      case 'tool_denied': {
+        // The call was refused, so it never ran. Drop the file card it already
+        // painted: the chip is emitted on request, which made a denied Write
+        // look like a created file. Its activity line stays, so the attempt is
+        // still visible in the trace.
+        const timeline = streamingTimeline.value[chatId]
+        if (timeline?.length && event.tool_use_id) {
+          streamingTimeline.value[chatId] = timeline.filter(
+            e => !(e.kind === 'filecard' && e.tool_use_id === event.tool_use_id),
+          )
+        }
         break
       }
 

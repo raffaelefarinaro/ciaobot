@@ -324,6 +324,7 @@ class LoopManager:
 
     async def _run_dispatch(self, entry: LoopEntry) -> None:
         status = "ok"
+        dispatched_chat_id = entry.web_chat_id
         try:
             result = await self._dispatch(entry) if self._dispatch is not None else None
             if isinstance(result, dict) and result.get("status"):
@@ -340,6 +341,12 @@ class LoopManager:
         latest = self._store.get(entry.loop_id)
         if latest is not None:
             latest.last_status = status
+            # `dispatch` re-points the entry when the target chat was gone or
+            # archived. Carry only that change onto the re-read copy — without
+            # it the loop forgets its replacement chat and builds a new one
+            # every interval. Anything else on `latest` is the user's edit.
+            if entry.web_chat_id != dispatched_chat_id:
+                latest.web_chat_id = entry.web_chat_id
             self._store.replace(latest)
 
     async def _loop(self) -> None:

@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { buildTurnParts, collectTraceOutputs, formatTokenUsage, isAnswerBubble, traceSummaryMeta } from './chatActivity'
+import {
+  buildTurnParts,
+  collectTraceOutputs,
+  findFinalAnswerIndex,
+  formatTokenUsage,
+  isAnswerBubble,
+  isProgressCommentary,
+  traceSummaryMeta,
+} from './chatActivity'
 import type { ChatMessage } from './types'
 
 // Minimal ChatMessage factory for the grouping tests.
@@ -75,6 +83,60 @@ describe('formatTokenUsage', () => {
   })
 })
 
+describe('isProgressCommentary', () => {
+  it('folds Claude progress narration like the screenshot case', () => {
+    expect(isProgressCommentary('Now let me make the edits.')).toBe(true)
+    expect(isProgressCommentary('Now the script side:')).toBe(true)
+    expect(isProgressCommentary('Now the CSS: make the chip body a real button and update the stale comment.')).toBe(true)
+    expect(isProgressCommentary('Now let me typecheck and run the tests.')).toBe(true)
+    expect(isProgressCommentary("I'll dig into the ciaobot code for each of these.")).toBe(true)
+    expect(isProgressCommentary('Let me look at how chat comments work today before giving an opinion.')).toBe(true)
+  })
+
+  it('keeps real mid-turn answers, blockers, and answer-shaped openings', () => {
+    expect(isProgressCommentary('Done. Option 2 is implemented in ChatPanel.vue.')).toBe(false)
+    expect(isProgressCommentary(
+      "The classifier is blocking edits to permission-bypass logic (fittingly). I'll continue with the rest.",
+    )).toBe(false)
+    expect(isProgressCommentary(
+      'Both moves are right in the same way: a pending comment is staged input, not a chat-level control.',
+    )).toBe(false)
+    // Short substantive plan — must stay visible (5c6410f regression guard).
+    expect(isProgressCommentary('the plan')).toBe(false)
+    // Long enough mid-turn update.
+    expect(isProgressCommentary('x'.repeat(200))).toBe(false)
+  })
+})
+
+describe('findFinalAnswerIndex', () => {
+  it('prefers the last non-progress text over a trailing narration line', () => {
+    const buffer = [
+      text('Done. Option 2 is implemented with the chip popover.'),
+      text('Now update the docs:'),
+      activity('Edit README.md'),
+    ]
+    expect(findFinalAnswerIndex(buffer)).toBe(0)
+  })
+
+  it('falls back to the last text when the whole turn is progress narration', () => {
+    const buffer = [
+      text('Now let me make the edits.'),
+      activity('Edit a.vue'),
+      text('Now the script side:'),
+    ]
+    expect(findFinalAnswerIndex(buffer)).toBe(2)
+  })
+
+  it('respects Codex final_answer phase', () => {
+    const buffer = [
+      text('working', { phase: 'commentary' }),
+      text('Done.', { phase: 'final_answer' }),
+      text('Now tidy up:'),
+    ]
+    expect(findFinalAnswerIndex(buffer)).toBe(1)
+  })
+})
+
 describe('isAnswerBubble', () => {
   it('accepts substantive assistant text', () => {
     expect(isAnswerBubble(text('hello'))).toBe(true)
@@ -107,20 +169,29 @@ describe('buildTurnParts', () => {
     ])
   })
 
-  it('interleaves every message with the activity that ran between them (agentic turn)', () => {
-    // Real shape: each short narration is its own assistant text block followed
-    // by an Edit. Every message shows as a bubble; the Edit between two messages
-    // becomes the Activity trace bubble that sits between them.
+  it('folds Claude progress narration into Activity and keeps the final answer', () => {
+    // Screenshot shape: short "Now…" notes between tool batches, then Done.
     const buffer = [
-      text('Now the geometry parser:'), filecard('parser.py'),
-      text('Now storage and the runner.'), filecard('storage.py'),
+      text('Now let me make the edits.'), activity('Edit ChatPanel.vue'),
+      text('Now the script side:'), filecard('ChatPanel.vue'),
+      text('Now let me typecheck and run the tests.'), activity('Bash'),
+      text('Done. Option 2 is implemented in ChatPanel.vue.'),
+    ]
+    const finalIdx = findFinalAnswerIndex(buffer)
+    expect(finalIdx).toBe(6)
+    expect(buildTurnParts(buffer, finalIdx)).toEqual([
+      { kind: 'trace', steps: [buffer[0], buffer[1], buffer[2], buffer[3], buffer[4], buffer[5]] },
+    ])
+  })
+
+  it('keeps substantive mid-turn answers as bubbles between activity', () => {
+    const buffer = [
+      text('the plan'), activity('Read doc.md'),
       text('Done. Aligned the backend to the confirmed contract.'),
     ]
-    expect(buildTurnParts(buffer, 4)).toEqual([
+    expect(buildTurnParts(buffer, 2)).toEqual([
       { kind: 'assistant', msg: buffer[0] },
       { kind: 'trace', steps: [buffer[1]] },
-      { kind: 'assistant', msg: buffer[2] },
-      { kind: 'trace', steps: [buffer[3]] },
     ])
   })
 
@@ -157,6 +228,25 @@ describe('buildTurnParts', () => {
     const buffer = [text('t1'), text('t2')]
     expect(buildTurnParts(buffer, 1)).toEqual([
       { kind: 'assistant', msg: buffer[0] },
+    ])
+  })
+
+  it('keeps a mid-turn blocker visible even when it starts like progress', () => {
+    const blocker =
+      "The classifier is blocking edits to permission-bypass logic (fittingly). I'll continue with the rest."
+    const buffer = [
+      text('Now wire it into the provider:'),
+      activity('Edit provider.py'),
+      text(blocker),
+      activity('Edit routes.py'),
+      text("All restored. Now the one piece I couldn't apply — I need your call on it:"),
+    ]
+    const finalIdx = findFinalAnswerIndex(buffer)
+    expect(finalIdx).toBe(4)
+    expect(buildTurnParts(buffer, finalIdx)).toEqual([
+      { kind: 'trace', steps: [buffer[0], buffer[1]] },
+      { kind: 'assistant', msg: buffer[2] },
+      { kind: 'trace', steps: [buffer[3]] },
     ])
   })
 })

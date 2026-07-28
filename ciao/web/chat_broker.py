@@ -537,6 +537,24 @@ class ChatStream:
             except asyncio.QueueFull:
                 logger.warning("Chat stream subscriber queue full, dropping event")
 
+    def deny_tool_use(self, tool_use_id: str) -> None:
+        """Retract the file card for a tool call that was refused.
+
+        ``file_touch`` is attached when a call is *requested*, so a refused
+        Write still painted an Outputs chip for a file that was never created.
+        The permission gate keys requests by ``tool_use_id`` — the same id the
+        ``tool_use`` event carries — so the two can be matched here: strip the
+        touch from the replay buffer (reload, second tab) and tell live clients
+        to drop the chip they already rendered.
+        """
+        if not tool_use_id:
+            return
+        for ev in self._events:
+            if ev.get("type") == "tool_use" and ev.get("tool_use_id") == tool_use_id:
+                ev.pop("file_touch", None)
+                ev.pop("file_touches", None)
+        self.publish({"type": "tool_denied", "tool_use_id": tool_use_id})
+
     def resolve_permission(self, request_id: str) -> bool:
         """Drop a previously-published ``permission_request`` from replay.
 

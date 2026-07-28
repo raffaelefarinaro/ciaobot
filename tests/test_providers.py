@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from ciao.execution_modes import harness_skill_overrides
 from ciao.models import AgentRequest, ImageAttachment
 from ciao.providers.base import (
     build_claude_message_content,
@@ -85,6 +87,58 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
     }
     # The MCP path carries the slim prefer-typed-tools nudge, not the old block.
     assert "prefer them over curl, the ciao CLI" in options.system_prompt["append"]
+    # Ciaobot's own non-destructive control plane is pre-approved so Auto
+    # mode's classifier stops raising an Approve/Deny card for "create the
+    # loop you just asked for". Destructive tools stay off the allowlist.
+    assert "mcp__ciaobot__loop_create" in options.allowed_tools
+    assert "mcp__ciaobot__schedule_create" in options.allowed_tools
+    assert "mcp__ciaobot__chat_delete" not in options.allowed_tools
+    assert "mcp__ciaobot__loop_action" not in options.allowed_tools
+    # The bundled schedule/loop skills are removed from the model's context
+    # (not merely denied): a denied-but-listed skill still gets picked, which
+    # is how "create a loop" ended up as a cloud-routine Skill call.
+    settings = json.loads(options.settings)
+    # Derived from HARNESS_DISABLED_SKILLS, not hardcoded: the list grows as
+    # bundled skills are evaluated, and this assertion is about the wiring.
+    assert settings["skillOverrides"] == harness_skill_overrides()
+    assert settings["skillOverrides"]["schedule"] == "off"
+    assert settings["skillOverrides"]["loop"] == "off"
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_gets_no_control_plane_allowlist(tmp_path: Path, monkeypatch) -> None:
+    """Plan mode's contract is "propose, don't act"; an allow rule would
+    punch a hole in it, so the allowlist is withheld there even though the
+    ciaobot MCP server is still mounted."""
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+    config = SimpleNamespace(
+        memory_enabled=False,
+        memory_char_limit=2200,
+        user_char_limit=1375,
+        vault_root=tmp_path / "memory-vault",
+    )
+    provider = ClaudeProvider(tmp_path, config=config)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="plan",
+        provider="claude",
+        control_surface="mcp",
+        mcp_url="http://127.0.0.1:8443/mcp/",
+        mcp_token="secret-session-token",
+    )
+
+    await provider._ensure_connected(request)
+
+    assert captured["options"].mcp_servers  # server still mounted
+    assert captured["options"].allowed_tools == []
 
 
 def test_route_cli_stderr_demotes_known_benign_lines(caplog) -> None:

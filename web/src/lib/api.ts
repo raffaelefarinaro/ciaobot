@@ -48,7 +48,11 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     if (looksLikeJson) {
       try { err = JSON.parse(raw) } catch { err = {} }
     }
-    if (looksLikeHtml || (!looksLikeJson && !err?.error)) {
+    // A server running older code answers an unknown route with the SPA shell
+    // (HTML) or a 404. Only those warrant the redeploy hint — a plain-text 500
+    // from Starlette, or a 502/503 from a proxy, is a real failure and has to
+    // surface as itself, or the user redeploys a healthy build chasing it.
+    if (looksLikeHtml || res.status === 404) {
       throw new ApiError(
         `API route ${path} is not available on the running server yet. Use Settings → Deploy, then restart Ciaobot.`,
         { status: res.status, payload: err },
@@ -58,7 +62,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       ? err.steps.filter((s: any) => s && !s.ok).map((s: any) =>
           s.output ? `${s.step}: ${s.output}` : s.step).join('; ')
       : ''
-    const msg = err?.error || stepDetail || res.statusText || `HTTP ${res.status}`
+    const bodyDetail = !looksLikeJson ? raw.trim().slice(0, 200) : ''
+    const msg = err?.error || stepDetail || bodyDetail || res.statusText || `HTTP ${res.status}`
     throw new ApiError(msg, { status: res.status, payload: err })
   }
   if (looksLikeHtml || !looksLikeJson) {

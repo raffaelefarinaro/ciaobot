@@ -22,6 +22,13 @@
             aria-label="Generating title"
           />
           <span v-else class="home-recent-title">{{ chat.title }}</span>
+          <span
+            v-if="loopBadge(chat.chat_id)"
+            class="loop-mark"
+            :class="{ stopped: !loopBadge(chat.chat_id)!.running }"
+            :title="loopBadge(chat.chat_id)!.title"
+            :aria-label="loopBadge(chat.chat_id)!.title"
+          >&#10227;</span>
           <span v-if="store.isChatStreaming(chat.chat_id)" class="spinner-dot" title="Working" />
           <span v-else-if="store.chatHasBackgroundAgents(chat.chat_id)" class="spinner-dot bg-agents" title="Background agents running" />
           <span v-else-if="store.chatNeedsInput(chat.chat_id)" class="needs-input-badge" title="Needs your answer">?</span>
@@ -40,10 +47,39 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useProjectStore } from '../stores/projects'
+import { useTaskStore } from '../stores/tasks'
 import type { ChatInfo } from '../lib/types'
 
 const store = useProjectStore()
+const taskStore = useTaskStore()
+
+// Loop marker, same semantics as the sidebar: a loop-driven chat produces new
+// turns on its own, which is worth knowing before you open it. ChatLayout
+// fetches loops on mount and the `loops_changed` event keeps them fresh.
+const loopsByChat = computed(() => {
+  const byChat = new Map<string, { count: number; running: boolean }>()
+  for (const l of taskStore.loops) {
+    const prev = byChat.get(l.web_chat_id)
+    byChat.set(l.web_chat_id, {
+      count: (prev?.count || 0) + 1,
+      running: (prev?.running || false) || !!l.running,
+    })
+  }
+  return byChat
+})
+function loopBadge(chatId: string): { running: boolean; title: string } | null {
+  const info = loopsByChat.value.get(chatId)
+  if (!info) return null
+  const plural = info.count > 1 ? `${info.count} loops` : 'A loop'
+  return {
+    running: info.running,
+    title: info.running
+      ? `${plural} running in this chat`
+      : `${plural} attached to this chat (stopped)`,
+  }
+}
 
 // Workspace label for a chat's project, normalized like the sidebar
 // workspace pills ("personal"/"work"). Empty when the project is unknown.
@@ -146,6 +182,16 @@ function workspaceOf(chat: ChatInfo): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.loop-mark {
+  flex: 0 0 auto;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--accent);
+}
+.loop-mark.stopped {
+  color: var(--fg2);
+  opacity: 0.7;
 }
 .unread-dot {
   width: 8px;
