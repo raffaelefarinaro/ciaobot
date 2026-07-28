@@ -18,6 +18,8 @@ export interface WorkspaceInfo {
   claude_ai_mcps?: boolean | null
   gws_profile: string
   model_bucket: string
+  // PWA accent preset: pink | cyan | amber | emerald | violet. Missing → pink.
+  color?: string
 }
 
 export interface WorkspacesResponse {

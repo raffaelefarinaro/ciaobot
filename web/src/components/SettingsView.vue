@@ -1159,6 +1159,29 @@
                 <label class="settings-field"><span class="ws-label">Vault name</span>
                   <input class="routine-input" v-model="newWorkspaceForm.vault_root" :disabled="workspacesSaving === 'new'" placeholder="(defaults to name)" />
                 </label>
+                <div class="settings-field settings-field--wide">
+                  <span class="ws-label" id="new-workspace-color-label">Accent color</span>
+                  <div
+                    class="workspace-color-swatches"
+                    role="radiogroup"
+                    aria-labelledby="new-workspace-color-label"
+                  >
+                    <button
+                      v-for="preset in WORKSPACE_COLOR_PRESETS"
+                      :key="`new-color-${preset.id}`"
+                      type="button"
+                      class="workspace-color-swatch"
+                      role="radio"
+                      :aria-checked="newWorkspaceForm.color === preset.id"
+                      :aria-label="preset.label"
+                      :title="preset.label"
+                      :disabled="workspacesSaving === 'new'"
+                      :class="{ active: newWorkspaceForm.color === preset.id }"
+                      :style="{ '--swatch': preset.swatch }"
+                      @click="newWorkspaceForm.color = preset.id"
+                    />
+                  </div>
+                </div>
                 <label class="settings-field"><span class="ws-label">Provider</span>
                   <select class="routine-input workspace-select" v-model="newWorkspaceForm.default_provider" :disabled="workspacesSaving === 'new'">
                     <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
@@ -1258,6 +1281,29 @@
                 </div>
 
                 <div class="settings-field-grid">
+                  <div class="settings-field settings-field--wide">
+                    <span class="ws-label" :id="`workspace-color-${form.name}`">Accent color</span>
+                    <div
+                      class="workspace-color-swatches"
+                      role="radiogroup"
+                      :aria-labelledby="`workspace-color-${form.name}`"
+                    >
+                      <button
+                        v-for="preset in WORKSPACE_COLOR_PRESETS"
+                        :key="`${form.name}-color-${preset.id}`"
+                        type="button"
+                        class="workspace-color-swatch"
+                        role="radio"
+                        :aria-checked="form.color === preset.id"
+                        :aria-label="preset.label"
+                        :title="preset.label"
+                        :disabled="workspacesSaving === form.name"
+                        :class="{ active: form.color === preset.id }"
+                        :style="{ '--swatch': preset.swatch }"
+                        @click="form.color = preset.id"
+                      />
+                    </div>
+                  </div>
                   <label class="settings-field"><span class="ws-label">Provider</span>
                     <select class="routine-input workspace-select" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
                       <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
@@ -2316,6 +2362,12 @@ import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import OnboardingCard from './OnboardingCard.vue'
 import { providerModelBadges, sectionsFromModelOptions, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
+import {
+  DEFAULT_WORKSPACE_COLOR,
+  WORKSPACE_COLOR_PRESETS,
+  normalizeWorkspaceColor,
+  type WorkspaceColorId,
+} from '../lib/workspaceColors'
 
 const emit = defineEmits<{ 'open-sidebar': [] }>()
 
@@ -4317,6 +4369,7 @@ type WorkspaceForm = {
   model_bucket: string
   disallowed_tools: string
   claude_ai_mcps: 'on' | 'off'
+  color: WorkspaceColorId
 }
 
 function defaultWorkspaceProvider(): WorkspaceProvider {
@@ -4333,6 +4386,7 @@ function blankWorkspaceForm(): WorkspaceForm {
     model_bucket: '',
     disallowed_tools: '',
     claude_ai_mcps: 'on',
+    color: DEFAULT_WORKSPACE_COLOR,
   }
 }
 
@@ -4347,6 +4401,7 @@ function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
     model_bucket: ws.model_bucket || '',
     disallowed_tools: Array.isArray(ws.disallowed_tools) ? ws.disallowed_tools.join(', ') : '',
     claude_ai_mcps: mcps === false ? 'off' : 'on',
+    color: normalizeWorkspaceColor(ws.color),
   }
 }
 
@@ -4568,6 +4623,7 @@ async function saveWorkspace(name: string) {
       model_bucket: form.model_bucket,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
       claude_ai_mcps: claudeAiMcpsPayload(form.claude_ai_mcps),
+      color: form.color,
     })
     notifySaved(`Workspace "${name}" saved.`, 'Workspaces')
     await fetchWorkspacesList()
@@ -4597,6 +4653,7 @@ async function createNewWorkspace() {
       model_bucket: form.model_bucket,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
       claude_ai_mcps: claudeAiMcpsPayload(form.claude_ai_mcps),
+      color: form.color,
     })
     notifySaved(`Workspace "${form.name.trim()}" created.`, 'Workspaces')
     showNewWorkspace.value = false
@@ -6452,6 +6509,43 @@ async function doPackageUpdate() {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-3);
 }
+.settings-field--wide {
+  grid-column: 1 / -1;
+}
+.workspace-color-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+.workspace-color-swatch {
+  width: var(--touch);
+  height: var(--touch);
+  padding: 0;
+  border: 2px solid var(--border);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at center, var(--swatch) 0 58%, transparent 60%),
+    var(--bg);
+  cursor: pointer;
+  transition: border-color 120ms var(--ease), transform 120ms var(--ease);
+}
+.workspace-color-swatch:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+}
+.workspace-color-swatch.active {
+  border-color: var(--swatch);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--swatch) 35%, transparent);
+}
+.workspace-color-swatch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.workspace-color-swatch:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 .settings-field {
   display: flex;
   flex-direction: column;
@@ -6526,9 +6620,6 @@ async function doPackageUpdate() {
 }
 .field-info-panel a {
   color: var(--accent);
-}
-.settings-field--wide {
-  grid-column: 1 / -1;
 }
 .settings-field .routine-input {
   max-width: none;

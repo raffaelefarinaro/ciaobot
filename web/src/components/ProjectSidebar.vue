@@ -97,6 +97,7 @@
           :key="workspace.name"
           :class="{ active: store.activeWorkspace === workspace.name }"
           :aria-pressed="store.activeWorkspace === workspace.name"
+          :data-workspace-color="colorForWorkspace(workspace)"
           @click="selectAutomationWorkspace(workspace.name)"
         >
           {{ workspaceLabel(workspace.name) }}
@@ -301,6 +302,7 @@
           :key="workspace.name"
           :class="{ active: store.activeWorkspace === workspace.name }"
           :aria-pressed="store.activeWorkspace === workspace.name"
+          :data-workspace-color="colorForWorkspace(workspace)"
           @click="store.switchWorkspace(workspace.name)"
         >
           {{ workspaceLabel(workspace.name) }}
@@ -591,6 +593,7 @@ import { useTaskStore } from '../stores/tasks'
 import { useFileViewerStore } from '../stores/fileViewer'
 import NotificationBell from './NotificationBell.vue'
 import { loopInWorkspace, scheduleInWorkspace } from '../lib/automationWorkspace'
+import { colorForWorkspace } from '../lib/workspaceColors'
 
 const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' }>()
 const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }>()
@@ -1457,6 +1460,7 @@ async function confirmDeleteChat(chatId: string) {
 
 .workspace-toggle button.active {
   border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg3));
 }
 
 .project-list {
@@ -1748,11 +1752,15 @@ async function confirmDeleteChat(chatId: string) {
 
 
 .sidebar-footer {
+  /* Match the sidebar/pane headers: 44px controls + 8px pad + 1px border. */
+  height: 61px;
   padding: 8px;
   border-top: 1px solid var(--border);
   display: flex;
   gap: 6px;
   align-items: center;
+  flex-shrink: 0;
+  box-sizing: border-box;
 }
 
 .add-project-btn {

@@ -1,5 +1,5 @@
 <template>
-  <div id="ciao-app">
+  <div id="ciao-app" :data-workspace-color="workspaceColor">
     <div
       v-if="clientMode"
       class="client-mode-banner"
@@ -51,6 +51,7 @@ import CommandPaletteModal from './components/CommandPaletteModal.vue'
 import InAppToast from './components/InAppToast.vue'
 import RestartOverlay from './components/RestartOverlay.vue'
 import StartupView from './components/StartupView.vue'
+import { normalizeWorkspaceColor } from './lib/workspaceColors'
 import { useProjectStore } from './stores/projects'
 
 interface Phase {
@@ -73,6 +74,11 @@ const clientHasSession = ref(false)
 const switchingToHost = ref(false)
 
 const showStartup = computed(() => !startupDone.value && !skipped.value)
+const workspaceColor = computed(() => {
+  const active = projectStore.activeWorkspace
+  const ws = projectStore.workspaces.find((item) => item.name === active)
+  return normalizeWorkspaceColor(ws?.color)
+})
 const clientHostLabel = computed(() => {
   const raw = clientHostUrl.value
   if (!raw) return 'remote host'
@@ -324,6 +330,52 @@ watch(showStartup, (show) => {
   --success: #2e7d32;
   --warning: #ef6c00;
   --error: #c62828;
+}
+
+/* Per-workspace accent overrides (Option A: accents only).
+   Applied on #ciao-app for the active workspace, and on individual
+   controls (home new-chat buttons, workspace pills, chat badges) that
+   belong to another workspace. Pink is explicit so a pink-target control
+   inside a non-pink active workspace does not inherit the parent accent. */
+[data-workspace-color="pink"] {
+  --accent: #ff4d6d;
+  --accent-strong: #ff2e54;
+}
+[data-workspace-color="cyan"] {
+  --accent: #38bdf8;
+  --accent-strong: #0284c7;
+}
+[data-workspace-color="amber"] {
+  --accent: #fb923c;
+  --accent-strong: #ea580c;
+}
+[data-workspace-color="emerald"] {
+  --accent: #34d399;
+  --accent-strong: #059669;
+}
+[data-workspace-color="violet"] {
+  --accent: #a78bfa;
+  --accent-strong: #7c3aed;
+}
+:root.theme-light [data-workspace-color="pink"] {
+  --accent: #d81b60;
+  --accent-strong: #b00d46;
+}
+:root.theme-light [data-workspace-color="cyan"] {
+  --accent: #0284c7;
+  --accent-strong: #0369a1;
+}
+:root.theme-light [data-workspace-color="amber"] {
+  --accent: #ea580c;
+  --accent-strong: #c2410c;
+}
+:root.theme-light [data-workspace-color="emerald"] {
+  --accent: #059669;
+  --accent-strong: #047857;
+}
+:root.theme-light [data-workspace-color="violet"] {
+  --accent: #7c3aed;
+  --accent-strong: #6d28d9;
 }
 
 /* In standalone/fullscreen PWA the home indicator is live, so restore the

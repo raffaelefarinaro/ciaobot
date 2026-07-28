@@ -120,7 +120,7 @@ The installed PWA owns the `Ciaobot` name and orange mascot tile. The native rec
 
 Dark mode is the primary visual expression. It uses layered indigo surfaces instead of neutral black, keeping long sessions comfortable while preserving clear hierarchy.
 
-- **Primary pink (`#ff4d6d`):** The brand accent and primary-action color. Use it for the current location, focus, progress, and the single most important action in a region.
+- **Primary pink (`#ff4d6d`):** The brand accent and primary-action color. Use it for the current location, focus, progress, and the single most important action in a region. Workspaces may override this with a saved accent preset (`pink`, `cyan`, `amber`, `emerald`, `violet`); canvas and surface tokens stay fixed.
 - **Violet (`#6a47b8`):** A secondary accent for selected filters, contextual information, and supporting distinctions. It must not compete with the primary action.
 - **Background (`#1a1a2e`):** The deepest application canvas.
 - **Surfaces (`#1f2240`, `#23264a`, `#2a2e54`):** Cards, elevated controls, hover, and pressed states. Prefer tonal separation and borders over large shadows.

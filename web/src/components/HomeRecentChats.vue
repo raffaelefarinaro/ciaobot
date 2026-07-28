@@ -35,7 +35,11 @@
           <span v-else-if="store.chatUnread(chat.chat_id) > 0" class="unread-dot" title="Unread" />
         </span>
         <span class="home-recent-meta">
-          <span class="home-recent-ws" v-if="workspaceOf(chat)">{{ workspaceOf(chat) }}</span>
+          <span
+            class="home-recent-ws"
+            v-if="workspaceOf(chat)"
+            :data-workspace-color="colorOf(chat)"
+          >{{ workspaceOf(chat) }}</span>
           <span class="home-recent-project" v-if="store.projectFor(chat.chat_id)?.name">
             {{ store.projectFor(chat.chat_id)?.name }}
           </span>
@@ -51,6 +55,7 @@ import { computed } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
 import type { ChatInfo } from '../lib/types'
+import { colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
 
 const store = useProjectStore()
 const taskStore = useTaskStore()
@@ -81,15 +86,24 @@ function loopBadge(chatId: string): { running: boolean; title: string } | null {
   }
 }
 
+function workspaceNameOf(chat: ChatInfo): string {
+  return store.projectFor(chat.chat_id)?.workspace || ''
+}
+
 // Workspace label for a chat's project, normalized like the sidebar
 // workspace pills ("personal"/"work"). Empty when the project is unknown.
 function workspaceOf(chat: ChatInfo): string {
-  const ws = store.projectFor(chat.chat_id)?.workspace || ''
-  return ws
+  return workspaceNameOf(chat)
     .split(/[-_\s]+/)
     .filter(Boolean)
     .join(' ')
     .toLowerCase()
+}
+
+function colorOf(chat: ChatInfo): WorkspaceColorId {
+  const name = workspaceNameOf(chat)
+  const ws = store.workspaceOptions.find((item) => item.name === name)
+  return colorForWorkspace(ws)
 }
 </script>
 

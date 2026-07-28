@@ -164,6 +164,7 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "model_bucket": "personal",
                 "disallowed_tools": None,
                 "claude_ai_mcps": None,
+                "color": "pink",
             },
             {
                 "name": "work",
@@ -174,6 +175,7 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "model_bucket": "work",
                 "disallowed_tools": [],
                 "claude_ai_mcps": None,
+                "color": "pink",
             },
         ],
         "active": "personal",

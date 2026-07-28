@@ -385,7 +385,8 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/provid
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
 
 # Upsert — body keys: name, vault_root, default_provider, default_model,
-# gws_profile, model_bucket, disallowed_tools (extra non-connector tools,
+# gws_profile, model_bucket, color (pink|cyan|amber|emerald|violet; default
+# pink — PWA accent only), disallowed_tools (extra non-connector tools,
 # CSV or list, null = defaults), claude_ai_mcps (true|false|null where null
 # = per-workspace default: personal off, else on). The effective denylist is
 # the union of the claude.ai connector set (when the toggle is off) and the

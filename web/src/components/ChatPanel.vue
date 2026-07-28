@@ -1474,7 +1474,7 @@ const filteredThinkingLevels = computed(() => {
 
 const inputPlaceholder = computed(() => {
   if (store.isStreaming) return 'Follow-up...'
-  return 'Message'
+  return 'message'
 })
 
 // ── Chat comment selection UX ─────────────────────────────────────────
@@ -2784,7 +2784,10 @@ function autoResize() {
   const el = inputEl.value
   if (!el) return
   el.style.height = 'auto'
-  el.style.height = Math.min(el.scrollHeight, 200) + 'px'
+  // Floor at the shared touch target so an empty composer stays aligned
+  // with the sidebar "+ New Project" row (both 44px inside 61px footers).
+  const next = Math.min(Math.max(el.scrollHeight, 44), 200)
+  el.style.height = next + 'px'
   const bar = el.closest('.input-bar')
   if (!bar) return
   const isTall = bar.classList.contains('tall')
@@ -4668,8 +4671,11 @@ details[open] > .activity-summary::before {
 /* Input bar */
 .input-bar {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   gap: 8px;
+  /* Match sidebar-footer / pane headers: 44px controls + 8px pad + 1px border.
+     Grows past 61px when the textarea becomes multi-line (.tall). */
+  min-height: 61px;
   padding: 8px 12px;
   /* Do not add the bottom safe-area inset: in PWA standalone mode this
      would reserve ~34px below the input for the home indicator, which
@@ -4680,6 +4686,11 @@ details[open] > .activity-summary::before {
   border-top: 1px solid var(--border);
   background: var(--bg);
   flex-shrink: 0;
+  box-sizing: border-box;
+}
+
+.input-bar.tall {
+  align-items: flex-end;
 }
 
 /* Buttons sit in a row at the bottom by default; once the textarea grows
@@ -4705,7 +4716,8 @@ details[open] > .activity-summary::before {
 .chat-input {
   flex: 1;
   resize: none;
-  min-height: 44px;
+  height: var(--touch);
+  min-height: var(--touch);
   max-height: 200px;
   /* Textareas top-align text; symmetric padding optically centers one
      line inside the 44px touch target (14px × 1.25 line-height). */
@@ -5302,9 +5314,11 @@ details[open] > .activity-summary::before {
      slightly truncated placeholder. */
   .chat-input { font-size: 16px; padding: 12px 12px; line-height: 1.25; }
   .chat-input::placeholder { font-size: 16px; }
-  /* Keep every composer action at the shared touch-target minimum. */
-  .input-bar { padding-top: 5px; padding-bottom: 5px; }
-  .chat-input { min-height: var(--touch); }
+  /* Keep every composer action at the shared touch-target minimum.
+     Preserve the 61px footer lock (44 + 8 + 8 + 1) used on desktop so the
+     sidebar "+ New Project" row still lines up on coarse pointers. */
+  .input-bar { min-height: 61px; padding-top: 8px; padding-bottom: 8px; }
+  .chat-input { height: var(--touch); min-height: var(--touch); }
   .input-actions .send-btn {
     min-width: var(--touch);
     min-height: var(--touch);
