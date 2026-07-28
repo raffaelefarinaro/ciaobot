@@ -131,6 +131,11 @@ export const useProjectStore = defineStore('projects', () => {
     selection: string
     comment: string
     images?: string[]
+    messageId?: string
+    messageIndex?: number
+    messageRole?: string
+    occurrenceIndex?: number
+    paragraphIndex?: number
   }
   const pendingChatCommentsByChat = ref<Record<string, PendingChatComment[]>>({})
   const pendingChatComments = computed<PendingChatComment[]>({
@@ -2845,13 +2850,35 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   // ── Pending chat comments ─────────────────────────────────────────
-  function addPendingChatComment(c: { selection: string; comment: string; images?: string[] }): string {
+  function addPendingChatComment(c: {
+    selection: string
+    comment: string
+    images?: string[]
+    messageId?: string
+    messageIndex?: number
+    messageRole?: string
+    occurrenceIndex?: number
+    paragraphIndex?: number
+  }): string {
     const id = (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
       ? (crypto as { randomUUID: () => string }).randomUUID()
       : `cc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
     if (activeChatId.value) {
       const existing = getPendingBucket(pendingChatCommentsByChat.value, activeChatId.value)
-      setPendingBucket(pendingChatCommentsByChat.value, activeChatId.value, [...existing, { id, selection: c.selection, comment: c.comment, images: c.images }])
+      setPendingBucket(pendingChatCommentsByChat.value, activeChatId.value, [
+        ...existing,
+        {
+          id,
+          selection: c.selection,
+          comment: c.comment,
+          images: c.images,
+          messageId: c.messageId,
+          messageIndex: c.messageIndex,
+          messageRole: c.messageRole,
+          occurrenceIndex: c.occurrenceIndex,
+          paragraphIndex: c.paragraphIndex,
+        },
+      ])
       persistPendingChatComments()
     }
     return id

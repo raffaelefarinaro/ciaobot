@@ -41,6 +41,22 @@ describe('comment context formatting', () => {
     expect(out).toContain('<user-comment>is that right?</user-comment>')
   })
 
+  it('formats a grounded chat comment with role and paragraph source anchor', () => {
+    const out = formatChatComments([
+      {
+        selection: 'OpenAI',
+        comment: 'check this term',
+        messageRole: 'assistant',
+        paragraphIndex: 2,
+      },
+    ])
+
+    expect(out).toContain('<user-comment-reference>')
+    expect(out).toContain('<reference-source>assistant message, paragraph 3</reference-source>')
+    expect(out).toContain('<quoted-text>OpenAI</quoted-text>')
+    expect(out).toContain('<user-comment>check this term</user-comment>')
+  })
+
   it('neutralizes our own tags embedded in untrusted selection text', () => {
     const zwsp = '\u200b'
     const out = formatChatComments([

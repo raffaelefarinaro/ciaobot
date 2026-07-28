@@ -38,6 +38,11 @@ export interface ChatCommentInput {
   selection: string
   comment: string
   images?: string[]
+  messageId?: string
+  messageIndex?: number
+  messageRole?: string
+  occurrenceIndex?: number
+  paragraphIndex?: number
 }
 
 // The custom elements we emit. Exported so the renderer allow-list and the CSS
@@ -119,9 +124,20 @@ export function formatFileComments(comments: FileCommentInput[]): string {
     .join('\n')
 }
 
+function formatChatReferenceSource(c: ChatCommentInput): string | null {
+  const parts: string[] = []
+  if (c.messageRole) {
+    parts.push(c.messageRole === 'user' ? 'user message' : 'assistant message')
+  }
+  if (c.paragraphIndex != null && c.paragraphIndex >= 0) {
+    parts.push(`paragraph ${c.paragraphIndex + 1}`)
+  }
+  return parts.length ? parts.join(', ') : null
+}
+
 export function formatChatComments(comments: ChatCommentInput[]): string {
   if (!comments.length) return ''
-  // No source anchor: the quoted text is from a reply already in the visible
-  // conversation history the model can see, so a locator adds little.
-  return comments.map((c) => referenceBlock(null, c.selection, c.comment, c.images)).join('\n')
+  return comments
+    .map((c) => referenceBlock(formatChatReferenceSource(c), c.selection, c.comment, c.images))
+    .join('\n')
 }
