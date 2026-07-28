@@ -901,7 +901,7 @@ import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
 import { formatTime, formatDuration } from '../lib/time'
-import { buildTurnParts, collectTraceOutputs, formatTokenUsage, isAnswerBubble, traceSummaryMeta, traceSummaryMetaParts, type TraceOutput } from '../lib/chatActivity'
+import { buildTurnParts, collectTraceOutputs, findFinalAnswerIndex, formatTokenUsage, traceSummaryMeta, traceSummaryMetaParts, type TraceOutput } from '../lib/chatActivity'
 import { buildForkSnapshot } from '../lib/chatFork'
 import { formatCommentLocation } from '../lib/commentContext'
 import ChatCommentPopover from './ChatCommentPopover.vue'
@@ -2407,18 +2407,10 @@ const renderData = computed<{
   const flushTurn = (isFinal = false) => {
     if (!buffer.length) return
     const turnOutputs = collectTraceOutputs(buffer)
-    // Find index of the LAST assistant text message (the final answer).
-    // _activity (tool calls) and _thinking (model reasoning) are part of
-    // the trace, never the final user-facing reply. `isAnswerBubble` is the
-    // same predicate `buildTurnParts` uses, so the two never disagree on
-    // which steps are bubbles vs trace material.
-    let finalIdx = -1
-    for (let k = buffer.length - 1; k >= 0; k--) {
-      if (isAnswerBubble(buffer[k])) {
-        finalIdx = k
-        break
-      }
-    }
+    // Prefer the last non-progress assistant text as the final reply so Claude
+    // "Now let me…" narration folds into Activity; fall back to the last text
+    // so a short clarifying question still surfaces. Matches buildTurnParts.
+    const finalIdx = findFinalAnswerIndex(buffer)
     const finalMsg = finalIdx >= 0 ? buffer[finalIdx] : null
     const trailing = finalIdx >= 0 ? buffer.slice(finalIdx + 1) : []
 
