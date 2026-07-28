@@ -41,6 +41,11 @@ class ReleaseFiles:
     web_package: Path
     web_lock: Path
     changelog: Path
+    # Both copies of the service worker: the source under web/public/ and the
+    # built copy under ciao/web/static/, which is tracked because the packaged
+    # wheel serves from there. They must agree or a `ciao deploy` that does not
+    # rebuild leaves the old cache name live.
+    service_workers: tuple[Path, ...]
 
     @classmethod
     def for_root(cls, root: Path) -> "ReleaseFiles":
@@ -50,6 +55,10 @@ class ReleaseFiles:
             web_package=root / "web" / "package.json",
             web_lock=root / "web" / "package-lock.json",
             changelog=root / "CHANGELOG.md",
+            service_workers=(
+                root / "web" / "public" / "sw.js",
+                root / "ciao" / "web" / "static" / "sw.js",
+            ),
         )
 
     def tracked(self) -> list[Path]:
@@ -59,6 +68,7 @@ class ReleaseFiles:
             self.web_package,
             self.web_lock,
             self.changelog,
+            *(p for p in self.service_workers if p.exists()),
         ]
 
 
@@ -234,6 +244,8 @@ def apply_release_files(
         packages[""]["version"] = version
     _dump_json(files.web_lock, web_lock)
 
+    _bump_service_worker_caches(files, version)
+
     existing_changelog = (
         files.changelog.read_text(encoding="utf-8") if files.changelog.exists() else ""
     )
@@ -242,6 +254,29 @@ def apply_release_files(
         encoding="utf-8",
     )
     return files.tracked()
+
+
+def _bump_service_worker_caches(files: ReleaseFiles, version: str) -> None:
+    """Retarget the service-worker cache names at the new version.
+
+    The PWA keys its caches by version (``ciaobot-vX.Y.Z``). Ship a release
+    without bumping them and every existing client keeps serving the previous
+    build's assets out of its old cache until something else evicts them — the
+    upgrade looks like it silently did nothing. This was a manual step for the
+    first releases and got missed, so it happens here with the rest of the
+    version bumps.
+    """
+    for path in files.service_workers:
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        bumped = re.sub(
+            r"(['\"])ciaobot-((?:[a-z]+-)*)v\d+\.\d+\.\d+\1",
+            lambda m: f"{m.group(1)}ciaobot-{m.group(2)}v{version}{m.group(1)}",
+            text,
+        )
+        if bumped != text:
+            path.write_text(bumped, encoding="utf-8")
 
 
 def _run(
