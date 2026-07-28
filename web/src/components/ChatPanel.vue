@@ -514,44 +514,16 @@
           Comment
         </button>
 
-        <!-- Floating compose popover: anchored to selection -->
-        <div
-          v-if="commentDraft && draftAnchor"
-          class="chat-comment-pop chat-comment-compose"
-          :style="{ top: draftAnchor.top + 'px', left: draftAnchor.left + 'px' }"
-          @mousedown.stop
-        >
-          <div class="chat-pop-quote">"{{ truncate(commentDraft.selection, 120) }}"</div>
-          <textarea
-            ref="chatCommentInputEl"
-            v-model="commentDraft.text"
-            class="chat-sidebar-draft-input"
-            placeholder="Add a comment…"
-            rows="3"
-            @keydown="onChatCommentKeydown"
-          ></textarea>
-          <div v-if="commentDraftImages.length" class="chat-sidebar-draft-images">
-            <span v-for="(img, i) in commentDraftImages" :key="img" class="draft-image-preview">
-              <img :src="`/api/images/${img}`" :alt="img" class="draft-image-thumb" />
-              <button class="draft-image-remove" @click="removeDraftImage(i)" title="Remove">&times;</button>
-            </span>
-          </div>
-          <div class="chat-sidebar-draft-actions">
-            <label class="image-btn-sm" title="Upload images">
-              <input type="file" accept="image/*" multiple hidden @change="handleDraftImageUpload" />
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-            </label>
-            <button class="btn-sm" @click="cancelChatComment" type="button">Cancel</button>
-            <button
-              class="btn-sm primary"
-              :disabled="!commentDraft.text.trim()"
-              @click="saveChatComment"
-              type="button"
-            >Add comment</button>
-          </div>
-        </div>
-
       </Teleport>
+      <CommentComposePopover
+        :anchor="commentDraft && draftAnchor ? draftAnchor : null"
+        v-model="composeText"
+        :images="commentDraftImages"
+        @cancel="cancelChatComment"
+        @save="saveChatComment"
+        @upload="handleDraftImageUpload"
+        @remove-image="removeDraftImage"
+      />
       <!-- Read popover for a comment highlight. Owns its own state so hovering
            a highlight doesn't re-render the transcript; see the component. -->
       <ChatCommentPopover
@@ -905,6 +877,7 @@ import { buildTurnParts, collectTraceOutputs, formatTokenUsage, isAnswerBubble, 
 import { buildForkSnapshot } from '../lib/chatFork'
 import { formatCommentLocation } from '../lib/commentContext'
 import ChatCommentPopover from './ChatCommentPopover.vue'
+import CommentComposePopover from './CommentComposePopover.vue'
 
 type RenderItem =
   | { kind: 'user'; msg: ChatMessage; turnIndex?: number }
@@ -1502,13 +1475,18 @@ const selectionAnchor = ref<{ top: number; left: number } | null>(null)
 const draftAnchor = ref<{ top: number; left: number } | null>(null)
 const showCommentList = ref(false)
 const commentDraft = ref<ChatCommentDraft | null>(null)
-const chatCommentInputEl = ref<HTMLTextAreaElement>()
 const sidebarEditInputEl = ref<HTMLTextAreaElement>()
 const sidebarListEl = ref<HTMLElement>()
 const editingChatCommentId = ref<string | null>(null)
 const editingChatCommentText = ref('')
 const commentDraftImages = ref<string[]>([])
 const editingChatCommentImages = ref<string[]>([])
+const composeText = computed({
+  get: () => commentDraft.value?.text ?? '',
+  set: (v: string) => {
+    if (commentDraft.value) commentDraft.value.text = v
+  },
+})
 let lastChatSelectionText = ''
 let lastChatSelectionRange: Range | null = null
 // Bubble element the current selection originated in. Captured at selection
@@ -1631,10 +1609,7 @@ function openCommentForSelection(): void {
   selectionAnchor.value = null
   lastChatSelectionRange = null
   window.getSelection()?.removeAllRanges()
-  nextTick(() => {
-    chatCommentInputEl.value?.focus()
-    applyHighlights()
-  })
+  nextTick(() => applyHighlights())
 }
 
 function cancelChatComment(): void {
@@ -1681,18 +1656,6 @@ async function handleDraftImageUpload(e: Event): Promise<void> {
 
 function removeDraftImage(index: number): void {
   commentDraftImages.value.splice(index, 1)
-}
-
-function onChatCommentKeydown(e: KeyboardEvent): void {
-  if (e.key === 'Escape') {
-    e.preventDefault()
-    cancelChatComment()
-    return
-  }
-  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-    e.preventDefault()
-    saveChatComment()
-  }
 }
 
 // ── Edit / remove pending chat comments from the sidebar ─────────────
@@ -5089,19 +5052,6 @@ details[open] > .activity-summary::before {
   inset: 0;
   z-index: 40;
   background: rgba(0, 0, 0, 0.32);
-}
-.chat-comment-pop {
-  position: fixed;
-  z-index: 41;
-  width: 280px;
-  max-width: calc(100vw - 16px);
-  background: var(--bg);
-  border: 1px solid var(--border-strong);
-  border-left: 3px solid var(--accent, #60a5fa);
-  border-radius: 8px;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
-  padding: 10px 12px;
-  box-sizing: border-box;
 }
 .btn-sm {
   display: inline-flex;
