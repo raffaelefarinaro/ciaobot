@@ -1178,17 +1178,16 @@ function onSelectionChange(): void {
 const commentDraftImages = ref<string[]>([])
 const editingCommentImages = ref<string[]>([])
 
-/** Convert a panel-relative anchor to viewport coords for the shared compose popover. */
+/** Convert a panel-relative anchor to viewport coords for the shared compose popover.
+ *
+ * Only translates; CommentComposePopover clamps itself to the viewport, since
+ * it is the only thing that knows its rendered height.
+ */
 function toViewportAnchor(local: Anchor): Anchor {
   const main = mainEl.value
   if (!main) return local
   const r = main.getBoundingClientRect()
-  const popWidth = 280
-  const pad = 8
-  return {
-    top: Math.min(Math.max(r.top + local.top, pad), Math.max(pad, window.innerHeight - 120)),
-    left: Math.min(Math.max(r.left + local.left, pad), Math.max(pad, window.innerWidth - popWidth - pad)),
-  }
+  return { top: r.top + local.top, left: r.left + local.left }
 }
 
 function openCommentForSelection(): void {

@@ -40,10 +40,10 @@
 - Hovering a comment no longer re-renders the whole transcript (`ae41941`).
 - Claude's mid-turn progress narration folds into Activity instead of interrupting the
   reply (`7e60815`).
-- Creating a loop over MCP starts its cadence immediately, and loop mutations broadcast
-  `loops_changed` so open tabs stop showing stale state until a reload. `autostart` only
-  ever governed server boot, so a fresh loop used to sit stopped while the model reported
-  it running (`556263c`).
+- Creating a loop over MCP starts its cadence immediately and arms it for the next server
+  boot, and loop mutations broadcast `loops_changed` so open tabs stop showing stale state
+  until a reload. `autostart` only ever governed server boot, so a fresh loop used to sit
+  stopped while the model reported it running (`556263c`).
 - Trimmed over-constraint from the system prompt for Claude 5-generation context
   engineering (`094b0cd`).
 - Dependency refresh across backend and frontend (`3843eaa`).
@@ -55,10 +55,11 @@
   — and forward the stored host session cookie to a URL of the caller's choosing; the
   second leaked chat titles and workspace names. Both now require a loopback peer or a
   session, and the handover target must be the host the node is actually connected to.
-  Turning password protection *on* also requires a local caller, since with protection off
-  there is no credential to prove authority with and any network peer could set a password
-  and lock the owner out. Setup-token redemption moved to the same check — its old gate
-  read the caller-supplied `Host` header (`4fad3a2`).
+  Setup-token redemption moved to the same check — its old gate read the caller-supplied
+  `Host` header. Enabling password protection from a non-local device is still allowed and
+  now logged with the peer address: a headless host reached over a tailnet has no localhost
+  browser, so requiring a local caller would leave it permanently unprotectable
+  (`4fad3a2`).
 - The pre-commit secret scan no longer exempts everything under any `tests` directory or
   any file merely named `test_*`. A `tests/credentials.json` inside the vault, or a stray
   `test_config.json`, was being committed and pushed unscanned (`4fad3a2`).
@@ -69,14 +70,21 @@
   write-back — and an orphaned loop is no longer re-homed into an arbitrary workspace
   (`4fad3a2`).
 - **Transcript:** past turns keep their Activity trace while a later reply streams, and a
-  tool call that was denied no longer leaves an Outputs card for a file it never wrote
+  tool call that was denied no longer leaves an Outputs card for a file it never wrote —
+  including on Codex, whose approval ids needed mapping to the tool call they gate
   (`4fad3a2`, `556263c`).
-- **Comment composer:** the popover is clamped to the viewport, so commenting on the newest
-  message no longer puts Save below the fold where a fixed-position element cannot be
-  scrolled to (`4fad3a2`).
-- **API errors:** a plain-text 500 or a proxy 502/503 reports itself instead of being
-  reported as a stale route, which had been sending people to redeploy a healthy build
-  (`4fad3a2`).
+- **Unattended turns really do run in bypass.** The mode was documented and plumbed but
+  never applied, so a loop that fetched a page and wrote a file auto-denied its own first
+  tool call and did nothing, every interval. A message you type while a tick is in flight
+  is no longer treated as unattended either, so it keeps its approval prompts.
+- **Comment editing works again.** Clicking a staged comment's chip reopens it in the
+  shared composer; the edit popover had lost its markup.
+- **Comment composer:** the popover clamps itself to the viewport, so commenting near the
+  bottom of a transcript or file no longer puts Save below the fold where a fixed-position
+  element cannot be scrolled to (`4fad3a2`).
+- **API errors:** the "redeploy your server" hint is now reserved for a genuinely missing
+  route. A plain-text 500, a proxy 502/503, and a real `404 {"error": …}` each report
+  themselves, instead of sending people to redeploy a healthy build (`4fad3a2`).
 - **Node/auth:** stop client login loops and the host auth-check storm; restore
   host-password login; guard against self-proxying; restore the standby role check in
   `get_proxy_target_url` (`4db2291`, `2abf265`, `e7436e0`, `7859140`).

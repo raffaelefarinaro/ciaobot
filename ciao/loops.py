@@ -34,6 +34,24 @@ MIN_INTERVAL_MINUTES = 1
 TICK_SECONDS = 20
 
 
+def publish_loops_changed(pcm) -> None:
+    """Nudge every open tab to refetch loops.
+
+    Loops are read over REST when a chat or the Schedules page mounts, so
+    without this a loop created in another tab (or by the model mid-turn) stays
+    invisible until a reload. Fire-and-forget: the events hub has no replay
+    buffer and a missed frame heals on the next mount, and a fan-out failure
+    must never fail the operation that triggered it.
+    """
+    events = getattr(pcm, "events", None)
+    if events is None:
+        return
+    try:
+        events.publish({"type": "loops_changed"})
+    except Exception:  # noqa: BLE001 — never fail an operation on fan-out
+        logger.exception("loops_changed publish failed")
+
+
 def _now_utc() -> datetime:
     return datetime.now(UTC)
 

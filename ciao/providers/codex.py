@@ -939,6 +939,22 @@ class CodexProvider(BaseSDKProvider):
             logger.info("Codex active turn rejected steer", exc_info=True)
             return False
 
+    def tool_use_id_for_request(self, request_id: str) -> str:
+        """Map one of our ``codex-N`` request ids to the Codex item it gates.
+
+        The SDK providers use the tool_use_id itself as the request id, so a
+        caller holding a request id can address the tool call directly. Codex
+        mints its own counter-based ids while its tool events are keyed by
+        ``itemId``, so anything wanting to act on the *call* (retracting the
+        file card for a refused patch, say) has to come through here. Returns
+        "" when the id is stale or the request names no item.
+        """
+        pending = self._permission_requests.get(request_id)
+        if pending is None:
+            return ""
+        _rpc_id, _method, params = pending
+        return str(params.get("itemId") or "")
+
     def send_permission_response(self, request_id: str, approved: bool) -> bool:
         pending = self._permission_requests.pop(request_id, None)
         peer = self._peer

@@ -3,7 +3,7 @@ import { ref, computed, watch, toRaw } from 'vue'
 import { api } from '../lib/api'
 import { getPendingBucket, normalizePendingBuckets, setPendingBucket } from '../lib/pendingBuckets'
 import { buildFixPrompt } from '../lib/fixError'
-import { formatChatComments, formatFileComments } from '../lib/commentContext'
+import { formatChatComments, formatFileComments, type ChatCommentAnchor } from '../lib/commentContext'
 import { isPlausibleFilePath } from '../lib/filePaths'
 import { isRateLimitTelemetry } from '../lib/rateLimit'
 import {
@@ -126,16 +126,11 @@ export const useProjectStore = defineStore('projects', () => {
   const fileComments = ref<Record<string, FileComment[]>>({})
   // Chat comments: ephemeral references to text selected inside a chat bubble.
   // Formatted as XML-tagged reference blocks (see lib/commentContext.ts).
-  type PendingChatComment = {
+  type PendingChatComment = ChatCommentAnchor & {
     id: string
     selection: string
     comment: string
     images?: string[]
-    messageId?: string
-    messageIndex?: number
-    messageRole?: string
-    occurrenceIndex?: number
-    paragraphIndex?: number
   }
   const pendingChatCommentsByChat = ref<Record<string, PendingChatComment[]>>({})
   const pendingChatComments = computed<PendingChatComment[]>({
@@ -2125,6 +2120,21 @@ export const useProjectStore = defineStore('projects', () => {
     }
   }
 
+  // A single loop lifecycle call can fan out several `loops_changed` frames
+  // (create-then-start), and each one would otherwise cost a full GET /api/loops
+  // per open tab. Coalesce a burst into one refetch. The tasks store is imported
+  // lazily to keep it out of this module's import graph.
+  let loopsRefetchTimer: ReturnType<typeof setTimeout> | null = null
+  function scheduleLoopsRefetch(): void {
+    if (loopsRefetchTimer !== null) return
+    loopsRefetchTimer = setTimeout(() => {
+      loopsRefetchTimer = null
+      void import('./tasks')
+        .then(({ useTaskStore }) => useTaskStore().fetchLoops())
+        .catch(() => {})
+    }, 150)
+  }
+
   function handleEventsMessage(msg: EventsWsMessage) {
     switch (msg.type) {
       case 'snapshot': {
@@ -2417,11 +2427,8 @@ export const useProjectStore = defineStore('projects', () => {
         // A loop was created/edited/started/stopped/deleted elsewhere (the
         // model mid-turn, the Schedules page, another tab). Refetch so the
         // chat's loop banner and the sidebar/home loop markers appear without
-        // a manual reload. Imported lazily to keep the tasks store out of
-        // this module's import graph.
-        void import('./tasks')
-          .then(({ useTaskStore }) => useTaskStore().fetchLoops())
-          .catch(() => {})
+        // a manual reload.
+        scheduleLoopsRefetch()
         break
       }
       case 'gws_health': {
@@ -2850,16 +2857,7 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   // ── Pending chat comments ─────────────────────────────────────────
-  function addPendingChatComment(c: {
-    selection: string
-    comment: string
-    images?: string[]
-    messageId?: string
-    messageIndex?: number
-    messageRole?: string
-    occurrenceIndex?: number
-    paragraphIndex?: number
-  }): string {
+  function addPendingChatComment(c: Omit<PendingChatComment, 'id'>): string {
     const id = (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
       ? (crypto as { randomUUID: () => string }).randomUUID()
       : `cc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
@@ -2867,17 +2865,7 @@ export const useProjectStore = defineStore('projects', () => {
       const existing = getPendingBucket(pendingChatCommentsByChat.value, activeChatId.value)
       setPendingBucket(pendingChatCommentsByChat.value, activeChatId.value, [
         ...existing,
-        {
-          id,
-          selection: c.selection,
-          comment: c.comment,
-          images: c.images,
-          messageId: c.messageId,
-          messageIndex: c.messageIndex,
-          messageRole: c.messageRole,
-          occurrenceIndex: c.occurrenceIndex,
-          paragraphIndex: c.paragraphIndex,
-        },
+        { id, ...c },
       ])
       persistPendingChatComments()
     }

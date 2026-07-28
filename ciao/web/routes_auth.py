@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import hmac
+import logging
 from datetime import UTC, datetime
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ciao.web.auth import SESSION_COOKIE, session_cookie_kwargs
+
+logger = logging.getLogger(__name__)
 
 _login_attempts: dict[str, list[tuple[float, int]]] = {}
 _MAX_LOGIN_ATTEMPTS = 10
@@ -229,9 +232,16 @@ async def auth_settings_update(request: Request) -> JSONResponse:
 
     Body: ``{ "auth_required": bool, "password"?: str, "current_password"?: str }``.
     When auth is already on, ``current_password`` is required to change it or turn it off.
-    When it is off there is no credential to prove authority with, so the call
-    must come from this machine — otherwise any network peer could set a
-    password of its own and lock the owner out.
+
+    Turning it *on* deliberately needs no proof of authority: when protection is
+    off there is no credential to offer, and a headless host reached over a
+    tailnet from a phone (a documented setup — see INTEGRATIONS.md) has no
+    localhost browser to fall back to, so requiring a local caller would leave
+    that install permanently unprotectable. The exposure this accepts is small
+    next to the state it is fixing: an unprotected instance already lets anyone
+    who can reach it read and write everything, so a hostile enable costs the
+    owner a lockout, recoverable by editing ``PWA_AUTH_TOKEN`` in the workspace
+    ``.env``. A caller that is not local is logged with its peer address.
     """
     from ciao.web.auth import is_loopback_client, make_serializer
     from ciao.web.routes_api import _env_path, _write_env_values
@@ -257,14 +267,11 @@ async def auth_settings_update(request: Request) -> JSONResponse:
                 status_code=401,
             )
     elif not is_loopback_client(request):
-        return JSONResponse(
-            {
-                "error": (
-                    "Turn on password protection from the machine running "
-                    "Ciaobot (open http://localhost:8443 there)"
-                )
-            },
-            status_code=403,
+        client = request.client
+        logger.warning(
+            "PWA password protection enabled by a non-local caller (peer=%s). "
+            "Recover with PWA_AUTH_TOKEN in the workspace .env if this was not you.",
+            client.host if client else "unknown",
         )
 
     if want_required:

@@ -25,6 +25,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 
 from ciao import subagent_tracking
 from ciao.config import WorkspaceConfig, CLAUDE_AI_CONNECTORS, coerce_claude_ai_mcps
+from ciao.loops import publish_loops_changed
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.model_tiers import codex_tier_models
 from ciao.package_version import package_changelog, package_status, update_package
@@ -4037,22 +4038,6 @@ def _enrich_loop(entry, manager, pcm=None) -> dict:
     return entry_dict
 
 
-def _publish_loops_changed(pcm) -> None:
-    """Nudge every open tab to refetch loops (see EventsHub, no replay buffer).
-
-    Loops are read over REST when a chat or the Schedules page mounts, so
-    without this a loop created in another tab (or by the model mid-turn)
-    stays invisible until a reload.
-    """
-    events = getattr(pcm, "events", None)
-    if events is None:
-        return
-    try:
-        events.publish({"type": "loops_changed"})
-    except Exception:  # noqa: BLE001 — fan-out must not fail the request
-        logger.exception("loops_changed publish failed")
-
-
 async def list_loops(request: Request) -> JSONResponse:
     lm = request.app.state.loop_manager
     pcm = request.app.state.project_chat_manager
@@ -4088,13 +4073,15 @@ async def create_loop(request: Request) -> JSONResponse:
         web_chat_id=web_chat_id,
         interval_minutes=interval_minutes,
         title=(body.get("title") or "").strip(),
-        autostart=bool(body.get("autostart")),
+        # Starting implies autostart, so a running loop survives a restart
+        # instead of going quietly dead (see CiaoControlPlane.loop_create).
+        autostart=bool(body.get("autostart")) or bool(body.get("start")),
         web_project_id=loop_project_id,
         workspace=getattr(loop_project, "workspace", "") or "",
     )
     if body.get("start"):
         lm.start_loop(entry.loop_id)
-    _publish_loops_changed(pcm)
+    publish_loops_changed(pcm)
     return JSONResponse(_enrich_loop(entry, lm, pcm), status_code=201)
 
 
@@ -4105,7 +4092,7 @@ async def loop_detail(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     if request.method == "DELETE":
         deleted = lm.delete(loop_id)
-        _publish_loops_changed(pcm)
+        publish_loops_changed(pcm)
         return JSONResponse({"ok": deleted})
     # PATCH
     entry = lm.get(loop_id)
@@ -4174,7 +4161,7 @@ async def loop_detail(request: Request) -> JSONResponse:
             lm.start_loop(loop_id)
         else:
             lm.stop_loop(loop_id)
-    _publish_loops_changed(pcm)
+    publish_loops_changed(pcm)
     return JSONResponse(_enrich_loop(entry, lm, pcm))
 
 

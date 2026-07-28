@@ -521,6 +521,18 @@
         @upload="handleDraftImageUpload"
         @remove-image="removeDraftImage"
       />
+      <!-- Same popover, editing an existing comment. Anchored to the chip that
+           opened it rather than to a selection, since the text it annotates may
+           be scrolled out of view. -->
+      <CommentComposePopover
+        :anchor="editingChatCommentId ? chipEditAnchor : null"
+        v-model="editingChatCommentText"
+        :images="editingChatCommentImages"
+        @cancel="cancelEditChatComment"
+        @save="editingChatCommentId && saveEditChatComment(editingChatCommentId)"
+        @upload="editingChatCommentId && handleEditImageUpload($event, editingChatCommentId)"
+        @remove-image="removeEditImage"
+      />
       <!-- Read popover for a comment highlight. Owns its own state so hovering
            a highlight doesn't re-render the transcript; see the component. -->
       <ChatCommentPopover
@@ -841,7 +853,7 @@ import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
 import { formatTime, formatDuration } from '../lib/time'
 import { buildTurnParts, collectTraceOutputs, findFinalAnswerIndex, formatTokenUsage, traceSummaryMeta, traceSummaryMetaParts, type TraceOutput } from '../lib/chatActivity'
 import { buildForkSnapshot } from '../lib/chatFork'
-import { formatCommentLocation } from '../lib/commentContext'
+import { formatCommentLocation, type ChatCommentAnchor } from '../lib/commentContext'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
@@ -1464,26 +1476,17 @@ const inputPlaceholder = computed(() => {
 })
 
 // ── Chat comment selection UX ─────────────────────────────────────────
-type ChatCommentDraft = {
+type ChatCommentDraft = ChatCommentAnchor & {
   selection: string
   text: string
-  messageId?: string
-  messageIndex?: number
-  messageRole?: string
-  occurrenceIndex?: number
-  paragraphIndex?: number
 }
 const selectionAnchor = ref<{ top: number; left: number } | null>(null)
 const draftAnchor = ref<{ top: number; left: number } | null>(null)
 
 const COMMENT_PILL_H = 44
-const COMMENT_COMPOSE_H = 208
 const commentDraft = ref<ChatCommentDraft | null>(null)
-const sidebarEditInputEl = ref<HTMLTextAreaElement>()
-const chipEditPopEl = ref<HTMLElement>()
 const editingChatCommentId = ref<string | null>(null)
 const editingChatCommentText = ref('')
-const editingChatCommentSelection = ref('')
 const chipEditAnchor = ref<{ top: number; left: number } | null>(null)
 const commentDraftImages = ref<string[]>([])
 const editingChatCommentImages = ref<string[]>([])
@@ -1659,10 +1662,7 @@ function onChatSelectionChange(): void {
 function openCommentForSelection(): void {
   if (!selectionAnchor.value || !lastChatSelectionText) return
   closeChatCommentPopover()
-  draftAnchor.value = {
-    left: selectionAnchor.value.left,
-    top: clampAnchorTop(selectionAnchor.value.top, COMMENT_COMPOSE_H),
-  }
+  draftAnchor.value = { ...selectionAnchor.value }
   draftBubbleEl = lastChatSelectionBubble
   commentDraft.value = {
     selection: lastChatSelectionText,
@@ -1748,13 +1748,11 @@ function removeDraftImage(index: number): void {
 function startEditChatComment(c: { id: string; selection: string; comment: string; images?: string[] }): void {
   editingChatCommentId.value = c.id
   editingChatCommentText.value = c.comment
-  editingChatCommentSelection.value = c.selection
   editingChatCommentImages.value = c.images ? [...c.images] : []
 }
 function cancelEditChatComment(): void {
   editingChatCommentId.value = null
   editingChatCommentText.value = ''
-  editingChatCommentSelection.value = ''
   editingChatCommentImages.value = []
   chipEditAnchor.value = null
 }
@@ -2072,11 +2070,6 @@ function jumpToCommentHighlight(id: string): void {
 // and opens an edit popover anchored to the chip, which holds the full quote
 // and the editable note. Anchored rather than a drawer so the thing you are
 // editing stays next to the thing you clicked.
-// Width matches .chat-comment-pop; the height is only a first estimate that
-// reclampChipEditAnchor() replaces with the measured value.
-const CHIP_EDIT_POP_W = 280
-const CHIP_EDIT_POP_H = 232
-
 function openChatCommentChip(id: string, e: MouseEvent): void {
   if (editingChatCommentId.value === id) {
     cancelEditChatComment()
@@ -2088,30 +2081,11 @@ function openChatCommentChip(id: string, e: MouseEvent): void {
   startEditChatComment(c)
   const chip = (e.currentTarget as HTMLElement).closest('.comment-chip') as HTMLElement | null
   const rect = (chip ?? (e.currentTarget as HTMLElement)).getBoundingClientRect()
-  chipEditAnchor.value = {
-    // Open upward: the chip row sits directly above the composer, so there is
-    // never room below it.
-    top: clampAnchorTop(rect.top - CHIP_EDIT_POP_H - 6, CHIP_EDIT_POP_H),
-    left: clampAnchorLeft(rect.left, CHIP_EDIT_POP_W),
-  }
-  nextTick(() => {
-    reclampChipEditAnchor()
-    sidebarEditInputEl.value?.focus()
-  })
+  // Open upward: the chip row sits directly above the composer, so there is
+  // never room below it. The popover pulls itself back on screen if the chip is
+  // too near the top.
+  chipEditAnchor.value = { top: rect.top - 6, left: rect.left }
 }
-
-/** Re-clamp against the popover's real height once it has rendered. */
-function reclampChipEditAnchor(): void {
-  const el = chipEditPopEl.value
-  const anchor = chipEditAnchor.value
-  if (!el || !anchor) return
-  const height = el.offsetHeight || CHIP_EDIT_POP_H
-  const top = clampAnchorTop(anchor.top, height)
-  if (top !== anchor.top) chipEditAnchor.value = { ...anchor, top }
-}
-
-// Adding an image grows the popover past its estimate.
-watch(editingChatCommentImages, () => nextTick(reclampChipEditAnchor))
 
 // Sending the turn clears every pending comment, and switching chats swaps the
 // bucket. Either way the chip the popover is anchored to is gone, so close it
@@ -5350,76 +5324,6 @@ details[open] > .activity-summary::before {
   flex: 1;
   min-width: 0;
 }
-.chat-sidebar-draft-input {
-  width: 100%;
-  resize: vertical;
-  min-height: 60px;
-  font-family: inherit;
-  font-size: var(--text-base);
-  line-height: 1.45;
-  color: var(--fg);
-  background: var(--bg2, rgba(255, 255, 255, 0.04));
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 8px;
-  outline: none;
-  box-sizing: border-box;
-  margin-bottom: 8px;
-}
-.chat-sidebar-draft-input:focus { border-color: var(--accent, #60a5fa); }
-.chat-sidebar-draft-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 6px;
-  align-items: center;
-}
-.chat-sidebar-draft-images {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 8px;
-}
-.draft-image-preview {
-  position: relative;
-  display: inline-flex;
-}
-.draft-image-thumb {
-  height: 40px;
-  width: 40px;
-  object-fit: cover;
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  background: var(--bg);
-}
-.draft-image-remove {
-  position: absolute;
-  top: -4px;
-  right: -4px;
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  border: none;
-  border-radius: 50%;
-  background: var(--bg3);
-  color: var(--fg);
-  font-size: 12px;
-  line-height: 14px;
-  cursor: pointer;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
-}
-.image-btn-sm {
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--fg2);
-  transition: background 120ms var(--ease), color 120ms var(--ease), border-color 120ms var(--ease);
-}
-.image-btn-sm:hover { background: var(--bg3); color: var(--fg); border-color: var(--fg2); }
 /* Inline text highlights inside message bubbles. Use :deep() because
  * highlight spans are inserted via DOM manipulation in applyHighlights()
  * and don't carry Vue's scoped attribute. */
