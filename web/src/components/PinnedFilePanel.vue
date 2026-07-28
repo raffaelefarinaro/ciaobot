@@ -281,42 +281,15 @@
         </div>
       </div>
 
-      <!-- Compose popover: anchored at the selection, where you type the note. -->
-      <div
-        v-if="commentDraft && draftAnchor"
-        class="pfp-comment-pop pfp-comment-compose"
-        :style="{ top: draftAnchor.top + 'px', left: draftAnchor.left + 'px' }"
-        @mousedown.stop
-      >
-        <div class="pfp-pop-quote">"{{ truncate(commentDraft.selection, 120) }}"</div>
-        <textarea
-          ref="commentInputEl"
-          v-model="commentDraft.text"
-          class="pfp-sidebar-draft-input"
-          placeholder="Add a comment…"
-          rows="3"
-          @keydown="onCommentKeydown"
-        ></textarea>
-        <div v-if="commentDraftImages.length" class="pfp-sidebar-draft-images">
-          <span v-for="(img, i) in commentDraftImages" :key="img" class="draft-image-preview">
-            <img :src="`/api/images/${img}`" :alt="img" class="draft-image-thumb" />
-            <button class="draft-image-remove" @click="removeDraftImage(i)" title="Remove">×</button>
-          </span>
-        </div>
-        <div class="pfp-sidebar-draft-actions">
-          <label class="image-btn-sm" title="Upload images">
-            <input type="file" accept="image/*" multiple hidden @change="handleDraftImageUpload" />
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-          </label>
-          <button class="pfp-btn-sm" @click="cancelComment" type="button">Cancel</button>
-          <button
-            class="pfp-btn-sm primary"
-            :disabled="!commentDraft.text.trim()"
-            @click="saveComment"
-            type="button"
-          >Add comment</button>
-        </div>
-      </div>
+      <CommentComposePopover
+        :anchor="commentDraft && draftAnchor ? draftAnchor : null"
+        v-model="composeText"
+        :images="commentDraftImages"
+        @cancel="cancelComment"
+        @save="saveComment"
+        @upload="handleDraftImageUpload"
+        @remove-image="removeDraftImage"
+      />
 
       <!-- Read popover: hover to preview, click to pin; edit opens the drawer. -->
       <div
@@ -374,6 +347,7 @@ import { formatCommentLocation } from '../lib/commentContext'
 import { useHoverPinPopover } from '../composables/useHoverPinPopover'
 import { api } from '../lib/api'
 import PaneHeader from './PaneHeader.vue'
+import CommentComposePopover from './CommentComposePopover.vue'
 import { useFileViewerStore } from '../stores/fileViewer'
 const ExcalidrawViewer = defineAsyncComponent(() => import('./ExcalidrawViewer.vue'))
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
@@ -452,7 +426,6 @@ const bodyEl = ref<HTMLElement>()
 const mdEl = ref<HTMLElement>()
 const preEl = ref<HTMLElement>()
 const preCodeEl = ref<HTMLElement>()
-const commentInputEl = ref<HTMLTextAreaElement>()
 
 const cleanPath = computed(() => props.filePath.replace(/:\d+$/, ''))
 const basename = computed(() => {
@@ -1037,6 +1010,12 @@ const selectionAnchor = ref<Anchor | null>(null)
 // draft opens (so it stays put even after the selection is cleared).
 const draftAnchor = ref<Anchor | null>(null)
 const commentDraft = ref<CommentDraft | null>(null)
+const composeText = computed({
+  get: () => commentDraft.value?.text ?? '',
+  set: (v: string) => {
+    if (commentDraft.value) commentDraft.value.text = v
+  },
+})
 let lastSelectionText = ''
 let lastSelectionLines: LineRange = null
 let lastSelectionRange: Range | null = null
@@ -1199,10 +1178,23 @@ function onSelectionChange(): void {
 const commentDraftImages = ref<string[]>([])
 const editingCommentImages = ref<string[]>([])
 
+/** Convert a panel-relative anchor to viewport coords for the shared compose popover. */
+function toViewportAnchor(local: Anchor): Anchor {
+  const main = mainEl.value
+  if (!main) return local
+  const r = main.getBoundingClientRect()
+  const popWidth = 280
+  const pad = 8
+  return {
+    top: Math.min(Math.max(r.top + local.top, pad), Math.max(pad, window.innerHeight - 120)),
+    left: Math.min(Math.max(r.left + local.left, pad), Math.max(pad, window.innerWidth - popWidth - pad)),
+  }
+}
+
 function openCommentForSelection(): void {
   if (!selectionAnchor.value || !lastSelectionText) return
   closeCommentPopover()
-  draftAnchor.value = selectionAnchor.value
+  draftAnchor.value = toViewportAnchor(selectionAnchor.value)
   commentDraft.value = {
     selection: lastSelectionText,
     text: '',
@@ -1214,7 +1206,6 @@ function openCommentForSelection(): void {
   lastSelectionRange = null
   lastCsvCell = null
   window.getSelection()?.removeAllRanges()
-  nextTick(() => commentInputEl.value?.focus())
 }
 
 function anchorFromCellRect(rect: DOMRect): Anchor | null {
@@ -1267,7 +1258,7 @@ function onCsvCellActivate(cell: CsvCellRef): void {
 function openCommentForCsvCell(): void {
   if (!selectionAnchor.value || !lastCsvCell) return
   closeCommentPopover()
-  draftAnchor.value = selectionAnchor.value
+  draftAnchor.value = toViewportAnchor(selectionAnchor.value)
   commentDraft.value = {
     selection: lastCsvCell.value,
     text: '',
@@ -1281,7 +1272,6 @@ function openCommentForCsvCell(): void {
   commentDraftImages.value = []
   selectionAnchor.value = null
   lastSelectionRange = null
-  nextTick(() => commentInputEl.value?.focus())
 }
 
 function cancelComment(): void {
@@ -1333,18 +1323,6 @@ async function handleDraftImageUpload(e: Event): Promise<void> {
 
 function removeDraftImage(index: number): void {
   commentDraftImages.value.splice(index, 1)
-}
-
-function onCommentKeydown(e: KeyboardEvent): void {
-  if (e.key === 'Escape') {
-    e.preventDefault()
-    cancelComment()
-    return
-  }
-  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-    e.preventDefault()
-    saveComment()
-  }
 }
 
 // ── Edit existing comment ────────────────────────────────────────────
@@ -2157,14 +2135,6 @@ watch(() => props.filePath, () => {
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
   padding: 10px 12px;
   box-sizing: border-box;
-}
-.pfp-comment-compose { z-index: 33; }
-.pfp-pop-quote {
-  color: var(--fg2);
-  font-style: italic;
-  margin-bottom: 8px;
-  word-break: break-word;
-  font-size: var(--text-sm);
 }
 .pfp-pop-header {
   display: flex;
