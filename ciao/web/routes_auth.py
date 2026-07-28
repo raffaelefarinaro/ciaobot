@@ -229,8 +229,11 @@ async def auth_settings_update(request: Request) -> JSONResponse:
 
     Body: ``{ "auth_required": bool, "password"?: str, "current_password"?: str }``.
     When auth is already on, ``current_password`` is required to change it or turn it off.
+    When it is off there is no credential to prove authority with, so the call
+    must come from this machine — otherwise any network peer could set a
+    password of its own and lock the owner out.
     """
-    from ciao.web.auth import make_serializer
+    from ciao.web.auth import is_loopback_client, make_serializer
     from ciao.web.routes_api import _env_path, _write_env_values
 
     config = request.app.state.config
@@ -253,6 +256,16 @@ async def auth_settings_update(request: Request) -> JSONResponse:
                 {"error": "Current password is required (and must match)"},
                 status_code=401,
             )
+    elif not is_loopback_client(request):
+        return JSONResponse(
+            {
+                "error": (
+                    "Turn on password protection from the machine running "
+                    "Ciaobot (open http://localhost:8443 there)"
+                )
+            },
+            status_code=403,
+        )
 
     if want_required:
         token_to_store = new_password.strip() or current_token

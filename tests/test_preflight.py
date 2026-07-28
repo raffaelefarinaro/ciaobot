@@ -165,3 +165,48 @@ async def test_preflight_suspicious_filename_boundaries(tmp_path: Path) -> None:
     assert not any("secretariat.txt" in w for w in warning_files)
 
 
+@pytest.mark.asyncio
+async def test_preflight_warns_on_suffix_attached_secret_names(tmp_path: Path) -> None:
+    """Only the trailing boundary matters, so a prefix still warns."""
+    repo = _init_repo(tmp_path)
+    mgr = LocalSessionManager(workspace=repo, runtime_root=tmp_path / "rt")
+
+    _write(repo / "mysecrets.txt", "notes\n")
+    _write(repo / "dbpassword.json", "{}\n")
+
+    result = await mgr.preflight()
+
+    warning_files = [w for w in result["warnings"] if "Suspicious file name" in w]
+    assert any("mysecrets.txt" in w for w in warning_files)
+    assert any("dbpassword.json" in w for w in warning_files)
+
+
+@pytest.mark.asyncio
+async def test_preflight_scans_vault_paths_named_like_tests(tmp_path: Path) -> None:
+    """A `tests/` folder inside the vault is user data, not pytest fixtures."""
+    repo = _init_repo(tmp_path)
+    mgr = LocalSessionManager(workspace=repo, runtime_root=tmp_path / "rt")
+
+    _write(
+        repo / "memory-vault" / "personal" / "tests" / "server.key",
+        "-----BEGIN PRIVATE KEY-----\nnope\n",
+    )
+
+    result = await mgr.preflight()
+
+    assert any("server.key" in b for b in result["blockers"])
+
+
+@pytest.mark.asyncio
+async def test_preflight_scans_test_named_non_source_files(tmp_path: Path) -> None:
+    """`test_*` earns the fixture exemption only for source files."""
+    repo = _init_repo(tmp_path)
+    mgr = LocalSessionManager(workspace=repo, runtime_root=tmp_path / "rt")
+
+    _write(repo / "test_config.pem", "-----BEGIN PRIVATE KEY-----\nnope\n")
+
+    result = await mgr.preflight()
+
+    assert any("test_config.pem" in b for b in result["blockers"])
+
+

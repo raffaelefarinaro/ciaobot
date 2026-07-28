@@ -5,21 +5,18 @@ from __future__ import annotations
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from ciao.web.auth import is_loopback_client
+
 
 async def push_public_key(request: Request) -> JSONResponse:
     pm = request.app.state.push_manager
     return JSONResponse({"public_key": pm.public_key})
 
 
-def _is_loopback(request: Request) -> bool:
-    """True when the request came from this machine (localhost).
-
-    Distinguishes a subscription created by the local browser/PWA from one on
-    a remote device (a phone reaching the server over LAN/tunnel), so the menu
-    bar only stands down for a subscription that actually covers this Mac.
-    """
-    host = (request.client.host if request.client else "") or ""
-    return host in ("127.0.0.1", "::1", "localhost")
+# Distinguishes a subscription created by the local browser/PWA from one on a
+# remote device (a phone reaching the server over LAN/tunnel), so the menu bar
+# only stands down for a subscription that actually covers this Mac.
+_is_loopback = is_loopback_client
 
 
 async def push_subscribe(request: Request) -> JSONResponse:

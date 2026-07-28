@@ -17,6 +17,28 @@ logger = logging.getLogger(__name__)
 SESSION_COOKIE = "ciao_session"
 SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
+_LOOPBACK_ADDRESSES = {"127.0.0.1", "::1", "localhost"}
+
+# Endpoints reachable with no session at all, from anywhere.
+_PUBLIC_API = {
+    "/api/auth",
+    "/api/startup-status",
+    "/api/active-chats",
+    "/api/setup-status",
+    "/api/setup/finish",
+    "/api/setup/list-dirs",
+    "/api/setup/mkdir",
+}
+
+# Endpoints usable without a session, but only from a process on this machine.
+# `/api/menubar-chats` is how the tray reads chat titles (it holds no cookie),
+# and `/api/node/handover` is the client-mode escape hatch offered on the login
+# screen, which by definition runs before any session exists. Both are gated on
+# the peer address rather than the Host header, which a caller controls.
+_LOOPBACK_ONLY_API = {
+    "/api/menubar-chats",
+    "/api/node/handover",
+}
 
 
 def make_serializer(secret: str) -> URLSafeTimedSerializer:
@@ -163,15 +185,17 @@ async def authorize_websocket(websocket: WebSocket) -> bool:
     return True
 
 
-def _request_host(request: Request) -> str:
-    host, _port = _split_host(request.headers.get("host", ""))
-    if not host:
-        host = (request.url.hostname or "").lower()
-    return host.rstrip(".")
+def is_loopback_client(request: Request) -> bool:
+    """True when the TCP peer is on this machine.
 
-
-def _is_localhost_request(request: Request) -> bool:
-    return _request_host(request) in {"localhost", "127.0.0.1", "::1"}
+    Reads the connection's source address, never the Host header — a remote
+    caller can set `Host: localhost` freely. This is the only "is it local"
+    check in the codebase; anything that grants access must use it.
+    """
+    client = request.client
+    if client is None or not client.host:
+        return False
+    return client.host in _LOOPBACK_ADDRESSES
 
 
 def _setup_token_path(request: Request) -> Path | None:
@@ -185,7 +209,7 @@ def _setup_token_path(request: Request) -> Path | None:
 def _redeem_setup_token(request: Request, token: str):
     if request.method.upper() not in {"GET", "HEAD"}:
         return JSONResponse({"error": "method not allowed"}, status_code=405)
-    if not _is_localhost_request(request):
+    if not is_loopback_client(request):
         return JSONResponse({"error": "setup token is localhost-only"}, status_code=403)
     token_path = _setup_token_path(request)
     if token_path is None or not token_path.exists():
@@ -236,29 +260,18 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if path == "/" and setup_token:
             return _redeem_setup_token(request, setup_token)
 
-        public_api = {
-            "/api/auth",
-            "/api/startup-status",
-            "/api/active-chats",
-            "/api/menubar-chats",
-            "/api/setup-status",
-            "/api/setup/finish",
-            "/api/setup/list-dirs",
-            "/api/setup/mkdir",
-            # Stuck client login can force-promote without a host session.
-            "/api/node/handover",
-        }
         protected = (
             (
                 path.startswith("/api/")
-                and path not in public_api
+                and path not in _PUBLIC_API
                 and not path.startswith("/api/open-chat/")
             )
             or path.startswith("/ws/")
         )
         if not protected:
-            # Still require same-origin for the client bailout mutation.
-            if path == "/api/node/handover" and not _state_change_origin_allowed(request):
+            return await call_next(request)
+        if path in _LOOPBACK_ONLY_API and is_loopback_client(request):
+            if not _state_change_origin_allowed(request):
                 return JSONResponse({"error": "forbidden origin"}, status_code=403)
             return await call_next(request)
         if self._auth_required_now(request) and not verify_session(

@@ -43,6 +43,7 @@
 // at event time rather than render time so the ref is not a render dependency.
 import { computed } from 'vue'
 import { useHoverPinPopover } from '../composables/useHoverPinPopover'
+import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
 
 type ChatComment = { id: string; comment: string; images?: string[] }
 
@@ -59,14 +60,16 @@ function highlightFromEvent(e: MouseEvent): HTMLElement | null {
   return highlight && id && id !== props.draftId ? highlight : null
 }
 
+const POP_WIDTH = 280
+const POP_HEIGHT = 80
+
 // Clamped to the viewport, since the popover is position: fixed.
 function anchorFromElement(el: HTMLElement): { top: number; left: number } {
   const rect = el.getBoundingClientRect()
-  const popWidth = 280
-  const pad = 8
-  const top = Math.min(Math.max(rect.bottom + 6, pad), Math.max(pad, window.innerHeight - 80))
-  const left = Math.min(Math.max(rect.left, pad), Math.max(pad, window.innerWidth - popWidth - pad))
-  return { top, left }
+  return {
+    top: clampAnchorTop(rect.bottom + 6, POP_HEIGHT),
+    left: clampAnchorLeft(rect.left, POP_WIDTH),
+  }
 }
 
 const {

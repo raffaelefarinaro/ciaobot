@@ -37,7 +37,7 @@ def test_auth_settings_get(tmp_path: Path) -> None:
 
 def test_auth_settings_enable_password(tmp_path: Path) -> None:
     app = _app(tmp_path, auth_required=False, token="")
-    client = TestClient(app)
+    client = TestClient(app, client=("127.0.0.1", 5555))
 
     res = client.post(
         "/api/auth/settings",
@@ -70,3 +70,30 @@ def test_auth_settings_change_requires_current_password(tmp_path: Path) -> None:
     )
     assert ok.status_code == 200
     assert ok.json()["auth_required"] is True
+
+
+def test_auth_settings_enable_rejected_from_remote_peer(tmp_path: Path) -> None:
+    """With protection off there is no credential, so only this machine may turn it on."""
+    app = _app(tmp_path, auth_required=False, token="")
+    client = TestClient(app, client=("10.0.0.9", 5555))
+
+    res = client.post(
+        "/api/auth/settings",
+        json={"auth_required": True, "password": "hunter2"},
+    )
+    assert res.status_code == 403
+    assert app.state.config.pwa_auth_required is False
+    assert not (tmp_path / ".env").exists()
+
+
+def test_auth_settings_change_from_remote_peer_still_works(tmp_path: Path) -> None:
+    """Once protection is on, the current password is the proof — location is not."""
+    app = _app(tmp_path, auth_required=True, token="old-secret")
+    client = TestClient(app, client=("10.0.0.9", 5555))
+
+    res = client.post(
+        "/api/auth/settings",
+        json={"auth_required": True, "password": "new-secret", "current_password": "old-secret"},
+    )
+    assert res.status_code == 200
+    assert app.state.config.pwa_auth_token == "new-secret"
