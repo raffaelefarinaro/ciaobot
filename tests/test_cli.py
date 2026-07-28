@@ -209,6 +209,35 @@ def test_cli_os_audit_exit_codes_distinguish_findings_and_errors(
     ]) == 2
 
 
+def test_cli_os_audit_passes_the_workspace_registry_to_upgrade_notices(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace = tmp_path / "workspace"
+    _write_healthy_audit_workspace(workspace)
+    legacy = workspace / "research"
+    (legacy / "projects" / "active" / "general").mkdir(parents=True)
+    (workspace / ".runtime" / "workspaces.json").write_text(
+        json.dumps([{"name": "research", "vault_root": "research"}]),
+        encoding="utf-8",
+    )
+    memory_dir = tmp_path / "bounded"
+    memory_dir.mkdir()
+    monkeypatch.setenv("CIAO_MEMORY_DIR", str(memory_dir))
+
+    assert cli.main([
+        "os-audit",
+        "--workspace",
+        str(workspace),
+        "--json",
+    ]) == 1
+    report = json.loads(capsys.readouterr().out)
+    notices = report["upgrade_notices"]["notices"]
+    assert notices[0]["workspace"] == "research"
+    assert "Open a Ciaobot chat" in notices[0]["remedy"]
+
+
 def test_cli_create_chat_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> None:
     called = []
 
@@ -268,6 +297,8 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
             "setup",
             "--workspace",
             str(workspace),
+            "--workspace-name",
+            "research",
             "--auth-token",
             "test-token",
             "--push-contact",
@@ -305,7 +336,12 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     # Canonical user-asset sources exist so Workspace Health starts warning-free.
     assert (workspace / "subagents").is_dir()
     assert (workspace / "commands").is_dir()
-    assert (workspace / "memory-vault" / "MEMORY.md").is_file()
+    assert (workspace / "memory-vault" / "research" / "MEMORY.md").is_file()
+    registry = json.loads(
+        (workspace / ".runtime" / "workspaces.json").read_text(encoding="utf-8")
+    )
+    assert registry[0]["name"] == "research"
+    assert registry[0]["vault_root"] == "memory-vault/research"
     plist = launch_agents / "com.ciao.server.plist"
     assert plist.is_file()
     plist_text = plist.read_text(encoding="utf-8")

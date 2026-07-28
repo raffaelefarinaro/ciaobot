@@ -132,7 +132,7 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
     client_workspace = next(item for item in stored if item["name"] == "client-a")
     assert client_workspace == {
         "name": "client-a",
-        "vault_root": "client-a",
+        "vault_root": "memory-vault/client-a",
         "default_provider": "claude",
         "default_model": "kimi-k2.7-code:cloud",
         "disallowed_tools": ["mcp__claude_ai_Slack", "Bash"],
@@ -164,7 +164,7 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
     assert json.loads((tmp_path / ".runtime" / "workspaces.json").read_text()) == [
         {
             "name": "personal",
-            "vault_root": "personal",
+            "vault_root": "memory-vault/personal",
             "default_provider": "claude",
             "default_model": "",
             "disallowed_tools": None,
@@ -175,7 +175,7 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
         },
         {
             "name": "work",
-            "vault_root": "work",
+            "vault_root": "memory-vault/work",
             "default_provider": "claude",
             "default_model": "",
             "disallowed_tools": None,
@@ -186,6 +186,70 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
         },
     ]
     assert pcm.refresh_count == 3
+
+
+def test_workspace_save_never_accepts_a_request_body_vault_path(tmp_path):
+    client, config, _pcm = _client(tmp_path)
+
+    created = client.post(
+        "/api/workspaces",
+        json={"name": "research", "vault_root": "/"},
+    )
+    assert created.status_code == 201
+    assert (
+        config.workspace_vault_root("research")
+        == tmp_path / "memory-vault" / "research"
+    )
+
+    existing = config.workspace("research")
+    assert existing is not None
+    existing.vault_root = str(tmp_path / "external-vault")
+    patched = client.patch(
+        "/api/workspaces/research",
+        json={"vault_root": "../outside", "default_model": "sonnet"},
+    )
+    assert patched.status_code == 200
+    assert config.workspace("research").vault_root == str(
+        tmp_path / "external-vault"
+    )
+
+
+def test_workspace_creation_rejects_a_symlinked_vault_folder(tmp_path):
+    target = tmp_path / "outside"
+    target.mkdir()
+    vault = tmp_path / "memory-vault"
+    vault.mkdir()
+    (vault / "research").symlink_to(target, target_is_directory=True)
+    client, config, pcm = _client(tmp_path)
+
+    response = client.post("/api/workspaces", json={"name": "research"})
+
+    assert response.status_code == 400
+    assert "symlink" in response.json()["error"]
+    assert config.workspace("research") is None
+    assert pcm.refresh_count == 0
+
+
+def test_workspace_creation_rejects_case_and_vault_owner_collisions(tmp_path):
+    client, config, _pcm = _client(tmp_path)
+    assert client.post("/api/workspaces", json={"name": "Research"}).status_code == 201
+
+    case_collision = client.post(
+        "/api/workspaces",
+        json={"name": "research"},
+    )
+    assert case_collision.status_code == 400
+    assert "conflicts" in case_collision.json()["error"]
+
+    existing = config.workspace("work")
+    assert existing is not None
+    existing.vault_root = str(tmp_path / "memory-vault" / "client")
+    root_collision = client.post(
+        "/api/workspaces",
+        json={"name": "client"},
+    )
+    assert root_collision.status_code == 400
+    assert "already owned" in root_collision.json()["error"]
 
 
 def test_workspace_validation_rejects_bad_name_and_provider(tmp_path):

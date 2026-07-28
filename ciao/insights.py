@@ -278,6 +278,7 @@ async def extract_and_append(
     trajectory_meta: dict[str, str] | None = None,
     workspace_root: Path | None = None,
     vault_root: Path | None = None,
+    proposal_vault_root: Path | None = None,
     trajectories_enabled: bool = True,
     memory_proposals_enabled: bool = True,
     provider: str = "claude",
@@ -307,6 +308,10 @@ async def extract_and_append(
     Decisions or Open loops, the doc is updated in place right away via
     :mod:`ciao.project_doc_update` instead of waiting for the nightly
     curation schedule.
+
+    ``proposal_vault_root`` must be the archive owner's registry-resolved vault.
+    When ownership is unavailable, proposal persistence is skipped rather than
+    filing one workspace's facts into another workspace's queue.
     """
     output = ""
     try:
@@ -414,10 +419,11 @@ async def extract_and_append(
         # "User corrections" are auto-promoted to bounded memory (gated on
         # the config's memory_enabled); everything else waits for the
         # curator agent to promote via `ciao memory` on the next session.
-        proposals_vault_root = vault_root or (
-            workspace_root / "memory-vault" if workspace_root is not None else None
-        )
-        if memory_proposals_enabled and proposals_vault_root is not None and output:
+        if (
+            memory_proposals_enabled
+            and proposal_vault_root is not None
+            and output
+        ):
             try:
                 from ciao.memory_proposals import proposals_from_archive
 
@@ -425,20 +431,23 @@ async def extract_and_append(
                     "memory_proposals", "Memory proposals",
                     extra={"archive": archive_path.name},
                 ) as run:
-                    primary = getattr(config, "primary_workspace", None)
                     proposals_result = proposals_from_archive(
                         archive_path,
-                        proposals_vault_root,
+                        proposal_vault_root,
                         auto_promote_memory=bool(
                             getattr(config, "memory_enabled", True)
                         ),
-                        default_workspace=primary() if callable(primary) else "",
                     )
                     run.extra["wrote"] = bool(proposals_result)
             except Exception:  # noqa: BLE001 — fire-and-forget, never crash
                 logger.exception(
                     "Memory proposals failed for %s", archive_path
                 )
+        elif memory_proposals_enabled and output:
+            logger.info(
+                "Memory proposals skipped for %s: workspace owner unavailable",
+                archive_path,
+            )
 
 
 def _has_insights_section(path: Path) -> bool:
@@ -645,6 +654,11 @@ async def backfill_insights_task(
                         session_id=session_id,
                         workspace_root=config.workspace_root,
                         vault_root=config.vault_root,
+                        proposal_vault_root=(
+                            config.workspace_vault_root(workspace)
+                            if workspace and config.workspace(workspace) is not None
+                            else None
+                        ),
                         trajectories_enabled=getattr(config, "trajectories_enabled", True),
                     )
                     logger.info("Backfilled [full] insights for %s", archive_path.name)

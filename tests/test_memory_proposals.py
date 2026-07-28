@@ -53,25 +53,18 @@ def test_propose_drops_dead_ends() -> None:
     assert all("tried" not in p.text.lower() for p in proposals)
 
 
-def test_append_proposals_uses_the_caller_supplied_default_workspace(tmp_path: Path) -> None:
-    """The owner comes from the registry, not from vault directory order.
-
-    Picking the first directory filed a personal chat's proposals into whichever
-    workspace sorted first, where the curator could promote them into that
-    workspace's memory.
-    """
+def test_append_proposals_uses_the_resolved_workspace_vault(tmp_path: Path) -> None:
+    """The caller supplies the registry-owned root; this module never guesses."""
     vault = tmp_path / "vault"
-    (vault / "acme").mkdir(parents=True)
-    (vault / "personal").mkdir(parents=True)
+    personal = vault / "personal"
 
     out = mp.append_proposals(
         mp.propose_from_insights(_SAMPLE_INSIGHTS),
-        vault,
+        personal,
         source_path=None,
-        default_workspace="personal",
     )
 
-    assert out == vault / "personal" / "Workspace" / "Memory-Proposals.md"
+    assert out == personal / "Workspace" / "Memory-Proposals.md"
 
 
 def test_propose_handles_empty_input() -> None:
@@ -128,18 +121,22 @@ def test_append_proposals_dedups_against_existing_file(tmp_path: Path) -> None:
 
 
 def test_append_proposals_routes_by_workspace(tmp_path: Path) -> None:
-    """Proposals from a 'work' chat archive go to vault/work/Workspace/Memory-Proposals.md."""
+    """A transcript label cannot redirect a registry-resolved queue."""
     vault = tmp_path / "vault"
-    (vault / "work").mkdir(parents=True)
+    work = vault / "work"
     archive = tmp_path / "chat.md"
     archive.write_text(
-        "---\ntype: transcript\ncontext: work\n---\n# chat\n\n## Session insights\n" + _SAMPLE_INSIGHTS,
+        "---\ntype: transcript\ncontext: personal\n---\n# chat\n\n## Session insights\n"
+        + _SAMPLE_INSIGHTS,
         encoding="utf-8",
     )
     proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
-    out = mp.append_proposals(proposals, vault, source_path=archive)
+    out = mp.append_proposals(proposals, work, source_path=archive)
     assert out is not None
     assert out == vault / "work" / "Workspace" / "Memory-Proposals.md"
+    assert not (
+        vault / "personal" / "Workspace" / "Memory-Proposals.md"
+    ).exists()
 
 
 def test_proposals_from_archive_extracts_insights_section(tmp_path: Path) -> None:

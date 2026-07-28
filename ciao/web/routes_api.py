@@ -852,6 +852,24 @@ def _workspace_from_request(
     name = str(data.get("name", existing.name if existing else "")).strip()
     if not _WORKSPACE_NAME_RE.match(name):
         raise ValueError("workspace name must use letters, numbers, dashes, or underscores")
+    if existing is None:
+        for configured_name in config.workspace_names():
+            if configured_name.casefold() == name.casefold():
+                raise ValueError(
+                    f"workspace name conflicts with existing workspace "
+                    f"'{configured_name}'"
+                )
+        target_root = config.canonical_workspace_vault_root(name)
+        for configured_name in config.workspace_names():
+            try:
+                configured_root = config.workspace_vault_root(configured_name)
+            except ValueError:
+                continue
+            if configured_root == target_root:
+                raise ValueError(
+                    f"workspace vault folder is already owned by "
+                    f"'{configured_name}'"
+                )
     provider = str(
         data.get(
             "default_provider",
@@ -885,15 +903,16 @@ def _workspace_from_request(
         color = DEFAULT_WORKSPACE_COLOR
     return WorkspaceConfig(
         name=name,
-        # Honour what the caller sent, then what is already stored, and only
-        # fall back to the name. Hardcoding the name here silently flattened a
-        # setup-created `memory-vault/<name>` root — or an absolute external
-        # vault — on *any* unrelated save, pointing the workspace at a directory
-        # that does not exist while its real content stayed put.
+        # Vault locations are not an editable Settings field. Updating a
+        # workspace must preserve setup-created/external roots exactly; a new
+        # user-named workspace always receives its standard folder beneath the
+        # configured vault. Accepting request-body paths here allowed `/` and
+        # `..` to turn one authenticated save into filesystem-wide writes and
+        # scans.
         vault_root=(
-            str(data.get("vault_root", "")).strip()
-            or (existing.vault_root if existing else "")
-            or name
+            existing.vault_root
+            if existing is not None
+            else config.stored_workspace_vault_root(name)
         ),
         default_provider=provider,
         default_model=str(
@@ -914,6 +933,10 @@ def _workspaces_path(config) -> Path:
 
 
 def _persist_workspaces(config) -> None:
+    persist = getattr(config, "persist_workspace_registry", None)
+    if callable(persist):
+        persist()
+        return
     path = _workspaces_path(config)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = [_workspace_to_dict(workspace) for workspace in config.workspaces.values()]
@@ -4889,6 +4912,17 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     # with visible content is an existing notes folder the onboarding agent
     # adapts in place.
     vault_mode = str(body.get("vault_mode", "")).strip().lower() or detect_vault_mode(workspace)
+    workspace_name = str(body.get("workspace_name", "")).strip() or "personal"
+    if not _WORKSPACE_NAME_RE.fullmatch(workspace_name):
+        return JSONResponse(
+            {
+                "error": (
+                    "workspace name must use letters, numbers, dashes, "
+                    "or underscores"
+                )
+            },
+            status_code=400,
+        )
 
     written = setup_workspace(
         workspace,
@@ -4897,7 +4931,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         push_contact=push_contact,
         vault_root=str(body.get("vault_root", "")).strip() or None,
         vault_mode=vault_mode,
-        workspace_name=str(body.get("workspace_name", "")).strip() or "personal",
+        workspace_name=workspace_name,
         default_provider=default_provider,
         python_path=str(body.get("python", "")).strip() or None,
         port=port,
@@ -5874,4 +5908,3 @@ async def node_peers_endpoint(request: Request) -> JSONResponse:
         status = node_mgr.add_peer(url, peer_id=node_id)
 
     return JSONResponse({"ok": True, "status": status})
-

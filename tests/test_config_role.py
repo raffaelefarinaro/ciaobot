@@ -59,7 +59,7 @@ def test_legacy_workspaces_are_exposed_as_workspace_configs(tmp_path: Path) -> N
     )
 
     assert list(config.workspaces) == ["personal", "work"]
-    assert config.workspace("personal").vault_root == "personal"
+    assert config.workspace("personal").vault_root == "memory-vault/personal"
     assert config.workspace("personal").model_bucket == "personal"
     assert config.workspace("work").gws_profile == "work"
     assert config.default_model_for_workspace("personal") == "deepseek-v4-flash:cloud"
@@ -128,7 +128,10 @@ def test_runtime_workspaces_json_is_used_when_env_is_absent(tmp_path: Path) -> N
     )
 
     assert config.workspace_names() == ["default"]
-    assert config.workspace("default").vault_root == "memory-vault"
+    assert config.workspace("default").vault_root == str(
+        tmp_path / "memory-vault"
+    )
+    assert config.workspace_vault_root("default") == tmp_path / "memory-vault"
     assert config.default_model_for_workspace("default") == "haiku"
 
 

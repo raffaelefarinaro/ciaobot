@@ -205,12 +205,9 @@ def _entity_visible_in_workspace(
     indexes used unprefixed paths like ``People/Alba``; those belong to
     ``legacy_workspace``, which the caller reads off the workspace registry.
 
-    An unknown ``legacy_workspace`` leaves them visible rather than hiding them:
-    a vault that never migrated has *only* unprefixed entries, and suppressing
-    those everywhere would silently switch entity mentions off for the exact
-    install the branch exists to serve. Guessing an owner from directory order
-    instead was worse — on an install with `acme` and `personal` it handed a
-    personal contact to the client workspace and hid it from its own.
+    An unknown ``legacy_workspace`` fails closed. Showing an unprefixed entity
+    in every workspace is a cross-workspace disclosure; the provider request
+    carries the registry-selected owner explicitly for normal PWA chats.
     """
     workspace = (workspace or "").strip()
     if not workspace:
@@ -222,7 +219,7 @@ def _entity_visible_in_workspace(
     if "/" in entity.path:
         first = entity.path.split("/", 1)[0]
         if first in {"People", "Projects", "Places", "Ideas", "Resources"}:
-            return not legacy_workspace or workspace == legacy_workspace
+            return bool(legacy_workspace) and workspace == legacy_workspace
     return False
 
 

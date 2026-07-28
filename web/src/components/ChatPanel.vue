@@ -133,6 +133,7 @@
           <strong>{{ l.title || 'Loop' }}</strong>
           · every {{ l.interval_minutes }}m
           · {{ l.running ? 'running' : 'stopped' }}<template v-if="l.last_status === 'busy'"> (waiting, chat busy)</template>
+          <template v-if="l.running && loopCountdown(l)"> · next {{ loopCountdown(l) }}</template>
         </span>
         <button class="btn-small" @click="toggleLoop(l)">{{ l.running ? 'Stop loop' : 'Start loop' }}</button>
         <router-link :to="`/schedules/${l.loop_id}`" class="btn-small loop-banner-manage">Manage</router-link>
@@ -1003,6 +1004,34 @@ onMounted(() => {
 })
 async function toggleLoop(l: Loop) {
   await taskStore.updateLoop(l.loop_id, { running: !l.running })
+}
+
+// Lightweight 30-second tick powering the "next in Xm" countdown in the loop
+// banner.  Only runs while there are running loops bound to this chat.
+const loopNow = ref(Date.now())
+let loopTick: ReturnType<typeof setInterval> | null = null
+watch(chatLoops, (loops) => {
+  const hasRunning = loops.some(l => l.running)
+  if (hasRunning && !loopTick) {
+    loopNow.value = Date.now()
+    loopTick = setInterval(() => { loopNow.value = Date.now() }, 30_000)
+  } else if (!hasRunning && loopTick) {
+    clearInterval(loopTick)
+    loopTick = null
+  }
+}, { immediate: true })
+onBeforeUnmount(() => { if (loopTick) clearInterval(loopTick) })
+
+function loopCountdown(l: Loop): string {
+  if (!l.next_run) return ''
+  // Touch loopNow so Vue re-evaluates when the tick fires.
+  const diffMs = new Date(l.next_run).getTime() - loopNow.value
+  if (diffMs <= 0) return 'soon'
+  const mins = Math.ceil(diffMs / 60_000)
+  if (mins < 60) return `in ${mins}m`
+  const hrs = Math.floor(mins / 60)
+  const rm = mins % 60
+  return rm ? `in ${hrs}h ${rm}m` : `in ${hrs}h`
 }
 const project = computed(() => store.activeProject)
 const models = ref<string[]>(['haiku', 'sonnet', 'opus', 'fable'])

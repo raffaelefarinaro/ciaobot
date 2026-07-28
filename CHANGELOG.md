@@ -61,24 +61,32 @@
   linter and the memory-proposal scans never looked. Vault resolution now lives
   once on the config, is the same for every name, and is *pure* — it reads the
   workspace registry and never probes the filesystem, so a vault cannot silently
-  relocate mid-life. An install whose vault sits at the old location has that
-  location pinned into `.runtime/workspaces.json` on first load: nothing moves,
-  and `ciao os-audit` (and PWA diagnostics) now reports it with the exact `mv`
-  command to bring it into vault search and linting.
+  relocate mid-life. New workspaces — including a fresh first workspace from
+  setup — always receive `<CIAO_VAULT_ROOT>/<workspace-name>`. An adopted notes
+  folder or install whose vault sits at an older location keeps that location
+  pinned and persisted: nothing moves silently, and `ciao os-audit` (and PWA
+  diagnostics) direct the operator to an interactive Ciaobot migration chat
+  that can inspect conflicts, back up the source, update the registry, and
+  restart into the standard layout.
 
   Saving *any* workspace setting used to rewrite that workspace's `vault_root`
   to its bare name, which pointed a setup-created or external vault at a
-  directory that did not exist while the real content stayed put. Fixed, and the
-  "Vault name" field in Settings is no longer discarded.
+  directory that did not exist while the real content stayed put. Fixed:
+  workspace locations are read-only in Settings, existing locations are
+  preserved, and request-body paths such as `/` or `..` cannot redirect agent
+  writes or filesystem scans. Named vault children are also rejected when a
+  symlink would resolve them outside the configured vault.
 
   Also: the sync-conflict chat no longer hard-errors without a `personal`
   project; title/insights model routing resolves against the primary workspace;
   a new project with no workspace lands in one that exists; the vault linter
   checks every workspace root; the model-bucket fallback no longer keys on the
   name `work`; an unregistered workspace name gets the default denylist instead
-  of an empty one; and legacy unprefixed vault entries plus the memory-proposal
-  queue take their owner from the registry rather than from directory order,
-  which could file a private chat's proposals into a client workspace.
+  of an empty one; and legacy unprefixed vault entries, memory proposals, and
+  skill proposals take an explicit owner from the registry rather than from
+  directory order, transcript labels, or a workspace literally named
+  `personal`, which could expose or file a private workspace's data in a client
+  workspace.
 - Ciaobot no longer ships an opinion about the self-hosted n8n MCP. It was
   denied by default in a workspace named `personal` and nowhere else; it is
   project-scoped in `.mcp.json`, so it exists only where you configured it, and

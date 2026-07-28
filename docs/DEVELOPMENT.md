@@ -14,10 +14,16 @@ ciao run
 
 `ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies the editable `CLAUDE.md` workspace guide, links `AGENTS.md` to that same guide for Codex, copies `CIAO_CUSTOMIZATION.md`, renders the server and menu bar plists under `~/Library/LaunchAgents/`, and creates `~/Applications/Ciaobot Server.app`, which starts the local service when needed and opens the `Ciaobot` PWA. Existing custom `AGENTS.md` files are preserved. By default setup does not load launchd; add `--load-launchd` when you want it to run `launchctl`.
 
+A fresh first logical workspace and workspaces added later in Settings live at
+`<CIAO_VAULT_ROOT>/<workspace-name>/`. Their registry path is read-only in the
+PWA. Existing-folder setup preserves the selected notes in place so the
+onboarding agent can inspect them; `ciao os-audit` then offers a model-guided,
+backed-up migration into the standard named folder.
+
 Common package CLI entry points:
 
 ```bash
-ciao setup --workspace ~/ciao --load-launchd
+ciao setup --workspace ~/ciao --workspace-name personal --load-launchd
 ciao memory read --target memory
 ciao vault-index --workspace default --format json
 ciao vault-search "project keyword" --limit 5

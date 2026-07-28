@@ -13,11 +13,11 @@ heuristic pass over the existing section:
 * Other facts go to memory.md if they look durable (no dates, no per-turn
   noise).
 
-The output is written as a Markdown bullet list to
-``memory-vault/personal/Workspace/Memory-Proposals.md``. A human (or the agent on the
-next session, via the ``memory`` tool) reviews and promotes them. Auto-apply
-is intentionally NOT the default — the agent layer is the right place to make
-the consolidation call.
+The output is written as a Markdown bullet list to the archive owner's
+``<workspace-vault>/Workspace/Memory-Proposals.md``. A human (or the agent on
+the next session, via the ``memory`` tool) reviews and promotes them.
+Auto-apply is intentionally NOT the default — the agent layer is the right
+place to make the consolidation call.
 
 One exception: "User corrections" are rare, inherently durable, and
 highest-signal, so :func:`promote_user_corrections` applies them straight to
@@ -209,31 +209,11 @@ def promote_user_corrections(
 # ── Persistence ───────────────────────────────────────────────────────────
 
 
-def _extract_workspace_context(archive_path: Path, vault_root: Path) -> str:
-    """Read the archive file and extract the context (workspace) from YAML frontmatter."""
-    try:
-        text = archive_path.read_text(encoding="utf-8")
-        if text.startswith("---"):
-            end_fm = text.find("---", 3)
-            if end_fm > 0:
-                fm_text = text[3:end_fm]
-                for line in fm_text.splitlines():
-                    parts = line.split(":", 1)
-                    if len(parts) == 2 and parts[0].strip() == "context":
-                        context_val = parts[1].strip().strip("'\"")
-                        if context_val and (vault_root / context_val).is_dir():
-                            return context_val
-    except Exception:  # noqa: BLE001
-        pass
-    return ""
-
-
 def append_proposals(
     proposals: list[MemoryProposal],
-    vault_root: Path,
+    workspace_vault_root: Path,
     *,
     source_path: Path | None = None,
-    default_workspace: str = "",
 ) -> Path | None:
     """Append a timestamped batch to ``Workspace/Memory-Proposals.md``.
 
@@ -242,25 +222,15 @@ def append_proposals(
     proposals file path when a batch was written, or None when the list is
     empty or every proposal was already present.
 
-    ``default_workspace`` is used when the source names none — pass
-    ``config.primary_workspace()``. Picking one off the vault's directory order
-    instead filed a personal chat's proposals into whichever workspace sorted
-    first, where the curator could promote them into that workspace's memory.
-    Empty means the queue lands at the vault root.
+    ``workspace_vault_root`` is already resolved from the workspace registry
+    by the archive owner. Transcript ``context`` is a chat/project label, not
+    a trustworthy workspace identifier, so this module never guesses ownership
+    from archive frontmatter or directory layout.
     """
     if not proposals:
         return None
 
-    workspace = ""
-    if source_path is not None:
-        workspace = _extract_workspace_context(source_path, vault_root)
-    workspace = workspace or default_workspace
-
-    out_path = (
-        vault_root / workspace / _PROPOSALS_RELATIVE
-        if workspace
-        else vault_root / _PROPOSALS_RELATIVE
-    )
+    out_path = workspace_vault_root / _PROPOSALS_RELATIVE
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # File is append-only; new batches stack at the end with their own
@@ -323,11 +293,10 @@ def _proposals_header_block(source_path: Path | None) -> str:
 
 def proposals_from_archive(
     archive_path: Path,
-    vault_root: Path,
+    workspace_vault_root: Path,
     *,
     auto_promote_memory: bool = False,
     memory_dir: Path | None = None,
-    default_workspace: str = "",
 ) -> Path | None:
     """Read an archived chat, extract its ``## Session insights`` body, propose, write.
 
@@ -359,9 +328,8 @@ def proposals_from_archive(
                 )
         return append_proposals(
             proposals,
-            vault_root,
+            workspace_vault_root,
             source_path=archive_path,
-            default_workspace=default_workspace,
         )
     except Exception:  # noqa: BLE001 — never crash the pipeline
         logger.exception("memory proposals failed for %s", archive_path)

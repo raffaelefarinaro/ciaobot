@@ -1533,7 +1533,12 @@ class ProjectChatManager:
     def _create_onboarding_chat(self, project_id: str) -> None:
         import os
         vault_mode = os.environ.get("CIAO_VAULT_MODE", "scratch").strip().lower()
-        vault_root = str(self._config.vault_root)
+        project = self._projects.get(project_id)
+        vault_root = str(
+            self._workspace_vault_root(project.workspace)
+            if project is not None
+            else self._config.vault_root
+        )
 
         if vault_mode == "existing":
             title = "Connect Existing Vault 👋"
@@ -3372,6 +3377,11 @@ class ProjectChatManager:
                     trajectories_enabled=trajectories_enabled,
                     workspace_root=config.workspace_root,
                     vault_root=config.vault_root,
+                    proposal_vault_root=(
+                        self._workspace_vault_root(workspace)
+                        if workspace
+                        else None
+                    ),
                     provider=chat_meta.provider if chat_meta else "claude",
                     project_doc_path=project_doc_path,
                 )
@@ -3947,6 +3957,9 @@ class ProjectChatManager:
         workspace = project.workspace if project else ""
         env["GWS_PROFILE"] = self._workspace_gws_profile(workspace)
         env["CIAO_ACTIVE_WORKSPACE"] = workspace or self._config.gws_default_profile
+        env["CIAO_LEGACY_ENTITY_WORKSPACE"] = (
+            self._config.legacy_entity_workspace()
+        )
         if project:
             env["CIAO_ACTIVE_PROJECT"] = project.project_id
         env["CIAO_MODEL"] = chat.model

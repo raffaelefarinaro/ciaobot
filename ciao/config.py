@@ -73,20 +73,32 @@ _DEFAULT_HARNESS_DISALLOWED_TOOLS: tuple[str, ...] = (
 
 
 def _clean_relative_path(raw: str) -> str:
-    """Normalize a stored path so equivalent spellings resolve alike.
+    """Normalize a safe relative path so equivalent spellings resolve alike.
 
     ``research``, ``research/`` and ``./research`` all name one segment; without
     this they took different branches and two of them put the vault outside the
     vault root. The free-text "Vault name" field in Settings invites exactly
     that trailing slash.
+
+    Absolute paths are preserved for setup-created external vaults. Relative
+    paths may never contain ``..``: a workspace registry is trusted
+    configuration, but resolving a malformed value outside ``workspace_root``
+    would turn one bad setting into filesystem-wide reads and writes.
     """
     cleaned = (raw or "").strip()
     if not cleaned:
         return ""
+    # Setup uses "." deliberately when the selected notes folder is both the
+    # operational workspace and the vault. It is a safe, exact location (the
+    # resolved workspace root), not an empty or traversal path.
+    if cleaned in {".", "./"}:
+        return "."
     path = Path(cleaned)
     if path.is_absolute():
         return str(path)
     parts = [part for part in path.parts if part not in {".", ""}]
+    if ".." in parts:
+        raise ValueError("relative vault_root must not contain '..'")
     return str(Path(*parts)) if parts else ""
 
 
@@ -97,7 +109,28 @@ def _looks_like_vault(path: Path) -> bool:
             return False
     except OSError:
         return False
-    return (path / "MEMORY.md").is_file() or (path / "Workspace").is_dir()
+    return any(
+        (
+            (path / "MEMORY.md").is_file(),
+            (path / "INDEX.md").is_file(),
+            (path / "Workspace").is_dir(),
+            (path / "projects").is_dir(),
+            (path / "Logs").is_dir(),
+        )
+    )
+
+
+def _vault_evidence_score(path: Path) -> int:
+    """Rank vault evidence when both legacy and standard locations exist."""
+    if not _looks_like_vault(path):
+        return 0
+    score = 0
+    score += 8 if (path / "MEMORY.md").is_file() else 0
+    score += 4 if (path / "INDEX.md").is_file() else 0
+    score += 4 if (path / "projects").is_dir() else 0
+    score += 2 if (path / "Logs").is_dir() else 0
+    score += 1 if (path / "Workspace").is_dir() else 0
+    return score
 
 
 def coerce_claude_ai_mcps(raw: object) -> bool | None:
@@ -372,6 +405,9 @@ class CiaoConfig:
     claude_ai_mcps_personal: bool | None = None
     claude_ai_mcps_work: bool | None = None
     workspaces: dict[str, WorkspaceConfig] = field(default_factory=dict)
+    _workspace_registry_changed: bool = field(
+        init=False, default=False, repr=False
+    )
     claude_mode: BridgeMode = "auto"
     restart_exit_code: int = 75
     auto_sync_on_start: bool = True
@@ -464,7 +500,7 @@ class CiaoConfig:
                 claude_ai_mcps_work=self.claude_ai_mcps_work,
                 gws_default_profile=self.gws_default_profile,
             )
-        self._normalize_workspace_vault_roots()
+        self._workspace_registry_changed = self._normalize_workspace_vault_roots()
 
     def workspace(self, name: str | None) -> WorkspaceConfig | None:
         if not name:
@@ -488,6 +524,31 @@ class CiaoConfig:
         names = self.workspace_names()
         return names[0] if names else ""
 
+    def legacy_entity_workspace(self) -> str:
+        """Workspace that owns unprefixed entries in the global vault index.
+
+        First-run setup historically pointed the user's chosen logical
+        workspace at ``CIAO_VAULT_ROOT`` itself. If a workspace literally named
+        ``personal`` is added later, it must not steal those legacy entities
+        merely because :meth:`primary_workspace` prefers that name.
+        """
+        owners: list[str] = []
+        for name in self.workspace_names():
+            try:
+                if self.workspace_vault_root(name) == self.vault_root:
+                    owners.append(name)
+            except ValueError:
+                continue
+        if len(owners) == 1:
+            return owners[0]
+        if len(owners) > 1:
+            logger.warning(
+                "Legacy entity ownership is ambiguous across workspaces: %s",
+                ", ".join(owners),
+            )
+            return ""
+        return self.primary_workspace()
+
     def workspace_vault_root(self, workspace: str | None) -> Path:
         """Absolute vault directory for one logical workspace.
 
@@ -498,32 +559,82 @@ class CiaoConfig:
         stranding everything written at the first one. Legacy layouts are
         reconciled once, at load (see ``_normalize_workspace_vault_roots``).
 
-        Three shapes of registered ``vault_root``:
+        Registered ``vault_root`` shapes:
 
-        - absolute — used as given.
-        - one path segment (``research``; what Settings writes) — nested under
-          the vault, i.e. ``memory-vault/research``. This used to apply only to
-          workspaces literally named ``personal`` or ``work``; every other name
-          landed beside the vault where the index, the linter and the proposal
-          scans never look.
-        - several segments (``memory-vault/clientA``, which setup writes when it
-          adopts nested workspaces) — resolved against ``workspace_root`` so it
-          is not nested twice.
+        - absolute — preserved setup/external roots and pinned legacy vaults.
+        - ``.`` — existing-folder setup where the operational workspace itself
+          is the vault.
+        - one path segment — a legacy ambiguous value, normalized and persisted
+          at load.
+        - several segments (normally ``memory-vault/clientA``) — the standard
+          named workspace path, resolved against ``workspace_root`` so it is not
+          nested twice.
         """
         name = workspace or ""
         workspace_config = self.workspace(name)
         raw_root = (workspace_config.vault_root if workspace_config else name) or name
         return self._resolve_vault_root(raw_root)
 
-    def _resolve_vault_root(self, raw_root: str) -> Path:
-        root = Path(_clean_relative_path(raw_root)).expanduser()
-        if root.is_absolute():
-            return root.resolve()
-        if len(root.parts) == 1:
-            return (self.vault_root / root).resolve()
-        return (self.workspace_root / root).resolve()
+    def canonical_workspace_vault_root(self, workspace: str) -> Path:
+        """Standard location for a user-named workspace under the vault."""
+        name = _clean_relative_path(workspace)
+        if not name or len(Path(name).parts) != 1:
+            raise ValueError("workspace name must identify one vault folder")
+        candidate = self.vault_root / name
+        if candidate.is_symlink():
+            raise ValueError("workspace vault folder must not be a symlink")
+        resolved = candidate.resolve()
+        if resolved.parent != self.vault_root:
+            raise ValueError("workspace vault folder must stay inside the vault root")
+        if resolved.exists() and not resolved.is_dir():
+            raise ValueError("workspace vault folder must be a directory")
+        return resolved
 
-    def _normalize_workspace_vault_roots(self) -> None:
+    def stored_workspace_vault_root(self, workspace: str) -> str:
+        """Portable registry value for a workspace's standard vault folder."""
+        root = self.canonical_workspace_vault_root(workspace)
+        try:
+            return str(root.relative_to(self.workspace_root))
+        except ValueError:
+            return str(root)
+
+    def _resolve_vault_root(self, raw_root: str) -> Path:
+        cleaned = _clean_relative_path(raw_root)
+        if not cleaned:
+            raise ValueError("vault_root must not be empty")
+        root = Path(cleaned).expanduser()
+        if root.is_absolute():
+            resolved = root.resolve()
+            if resolved == Path(resolved.anchor):
+                raise ValueError("vault_root must not be the filesystem root")
+            # Absolute compatibility roots are canonicalized when the registry
+            # loads. If that pinned path (or one of its descendants below the
+            # already-resolved workspace root) later becomes a symlink, do not
+            # silently redirect agent reads and writes to a different vault.
+            if resolved != root:
+                raise ValueError("workspace vault path must not contain symlinks")
+            return resolved
+        if len(root.parts) == 1:
+            candidate = self.vault_root / root
+            if candidate.is_symlink():
+                raise ValueError("workspace vault folder must not be a symlink")
+            resolved = candidate.resolve()
+            if resolved.parent != self.vault_root:
+                raise ValueError(
+                    "workspace vault folder must stay inside the vault root"
+                )
+            return resolved
+        candidate = self.workspace_root / root
+        resolved = candidate.resolve()
+        if resolved == Path(resolved.anchor):
+            raise ValueError("vault_root must not be the filesystem root")
+        if resolved != candidate:
+            raise ValueError("workspace vault path must not contain symlinks")
+        if not resolved.is_relative_to(self.workspace_root):
+            raise ValueError("relative vault_root must stay inside workspace_root")
+        return resolved
+
+    def _normalize_workspace_vault_roots(self) -> bool:
         """Pin a legacy vault's location into the registry, once.
 
         Before vault nesting applied to every workspace, a workspace named
@@ -540,24 +651,136 @@ class CiaoConfig:
         root would silently adopt it, and the agent would then write memory into
         someone's document folder.
         """
-        for name, workspace_config in self.workspaces.items():
-            raw_root = _clean_relative_path(workspace_config.vault_root or name)
-            root = Path(raw_root)
-            if root.is_absolute() or len(root.parts) != 1:
+        changed = False
+        for name, workspace_config in list(self.workspaces.items()):
+            try:
+                raw_root = _clean_relative_path(workspace_config.vault_root or name)
+                if not raw_root:
+                    raise ValueError("vault_root must not be empty")
+                canonical = self.canonical_workspace_vault_root(name)
+            except ValueError:
+                logger.warning(
+                    "Workspace %s has an unsafe vault_root %r; using its "
+                    "standard folder under %s",
+                    name,
+                    workspace_config.vault_root,
+                    self.vault_root,
+                )
+                try:
+                    canonical = self.canonical_workspace_vault_root(name)
+                except ValueError:
+                    continue
+                workspace_config.vault_root = self.stored_workspace_vault_root(name)
+                changed = True
                 continue
-            nested = (self.vault_root / root).resolve()
+            root = Path(raw_root).expanduser()
+            if root.is_absolute():
+                absolute = root.resolve()
+                if absolute == Path(absolute.anchor):
+                    workspace_config.vault_root = (
+                        self.stored_workspace_vault_root(name)
+                    )
+                    changed = True
+                    continue
+                # Preserve a setup-selected symlink by pinning its current
+                # target. Resolution can then fail closed if the pinned path
+                # itself is replaced by a symlink after startup/restart.
+                if workspace_config.vault_root != str(absolute):
+                    workspace_config.vault_root = str(absolute)
+                    changed = True
+                # Backward compatibility for an older/manual sibling move:
+                # when the pinned source disappeared and the standard folder
+                # now has vault evidence, follow the completed move. The
+                # current guided migration updates the registry explicitly.
+                if (
+                    absolute != self.vault_root
+                    and absolute.parent == self.workspace_root
+                    and not absolute.exists()
+                    and _looks_like_vault(canonical)
+                ):
+                    workspace_config.vault_root = self.stored_workspace_vault_root(name)
+                    changed = True
+                continue
+            if len(root.parts) != 1:
+                candidate = self.workspace_root / root
+                absolute = candidate.resolve()
+                if absolute == Path(absolute.anchor):
+                    workspace_config.vault_root = (
+                        self.stored_workspace_vault_root(name)
+                    )
+                    changed = True
+                    continue
+                # A relative setup path may run through the configured vault
+                # alias (for example memory-vault -> an external notes
+                # directory). Pin the alias's current target exactly once;
+                # later resolver calls can then reject any replacement without
+                # breaking an intentional symlink that existed at setup time.
+                if absolute != candidate:
+                    workspace_config.vault_root = str(absolute)
+                    changed = True
+                continue
             legacy = (self.workspace_root / root).resolve()
-            if nested == legacy or nested.exists() or not _looks_like_vault(legacy):
+            if legacy == self.vault_root:
+                # A one-segment value equal to CIAO_VAULT_ROOT is the
+                # setup-era "this workspace owns the whole vault" shape. Pin
+                # it absolutely; leaving it as ``memory-vault`` would make the
+                # generic one-segment resolver nest it a second time.
+                stored = str(legacy)
+                if workspace_config.vault_root != stored:
+                    workspace_config.vault_root = stored
+                    changed = True
                 continue
-            self.workspaces[name] = replace(
-                workspace_config, vault_root=str(legacy)
-            )
-            logger.info(
-                "Workspace %s keeps its vault at the pre-nesting location %s; "
-                "pinned in the registry. Move it under %s to bring it into vault "
-                "search, link linting and memory proposals.",
-                name, legacy, self.vault_root,
-            )
+            if legacy == canonical:
+                continue
+            if (
+                _looks_like_vault(legacy)
+                and _vault_evidence_score(legacy)
+                >= _vault_evidence_score(canonical)
+            ):
+                workspace_config.vault_root = str(legacy)
+                changed = True
+                logger.info(
+                    "Workspace %s keeps its vault at the pre-nesting location "
+                    "%s; pinned in the registry until an interactive migration "
+                    "moves it under %s.",
+                    name,
+                    legacy,
+                    self.vault_root,
+                )
+                continue
+
+            # New workspaces and already-nested legacy workspaces get an
+            # explicit registry path. That removes the old ambiguous
+            # one-segment shape, so later filesystem changes cannot relocate
+            # the workspace.
+            stored = self.stored_workspace_vault_root(name)
+            if workspace_config.vault_root != stored:
+                workspace_config.vault_root = stored
+                changed = True
+        return changed
+
+    def persist_workspace_registry(self) -> None:
+        """Atomically persist the live workspace registry."""
+        path = self.state_path.parent / "workspaces.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = [
+            {
+                "name": workspace.name,
+                "vault_root": workspace.vault_root,
+                "default_provider": workspace.default_provider,
+                "default_model": workspace.default_model,
+                "disallowed_tools": workspace.disallowed_tools,
+                "claude_ai_mcps": workspace.claude_ai_mcps,
+                "gws_profile": workspace.gws_profile,
+                "model_bucket": workspace.model_bucket,
+                "color": workspace.color,
+            }
+            for workspace in self.workspaces.values()
+        ]
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(path)
+        self._workspace_registry_changed = False
 
     def default_model_for_workspace(self, workspace: str | None) -> str:
         """Pick the new-chat / new-schedule default for a workspace.

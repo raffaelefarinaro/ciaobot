@@ -704,9 +704,9 @@ def audit_upgrade_notices(config: Any | None) -> dict[str, Any]:
     These are the same conditions stated as facts about *this* machine, so the
     PWA can show them and the operator can act without consulting a changelog.
 
-    Each notice carries the exact remedy. Detected, never applied: both of these
-    involve the user's data or their tool policy, so the app reports and the
-    operator decides.
+    Each notice carries an interactive Ciaobot-chat remedy. Detected, never
+    applied: moving an existing vault can involve conflicts or user-owned
+    layout decisions, so a normal chat inspects it and asks before acting.
     """
     notices: list[dict[str, str]] = []
     errors: list[dict[str, str]] = []
@@ -720,44 +720,45 @@ def audit_upgrade_notices(config: Any | None) -> dict[str, Any]:
     lister = getattr(config, "workspace_names", None)
     if vault_raw is None or workspace_raw is None or not callable(lister):
         return {"notices": notices, "notices_found": 0, "errors": errors}
-    vault_root = Path(vault_raw)
-    workspace_root = Path(workspace_raw)
     names = list(lister())
 
     resolver = getattr(config, "workspace_vault_root", None)
     if not callable(resolver):
         return {"notices": notices, "notices_found": 0, "errors": errors}
+    standardizer = getattr(config, "canonical_workspace_vault_root", None)
+    if not callable(standardizer):
+        return {"notices": notices, "notices_found": 0, "errors": errors}
 
     for name in names:
-        # Before vault nesting applied to every workspace, a workspace named
-        # anything but personal/work kept its vault beside memory-vault/ rather
-        # than inside it. Such an install keeps working — the location is pinned
-        # in the registry so nothing moves — but the vault index, the linter and
-        # the memory-proposal scans only walk the vault root, so that content is
-        # invisible to all three.
-        #
-        # Detected by comparing where the vault actually resolves against that
-        # pre-nesting location. An absolute path somewhere else entirely is the
-        # operator's deliberate choice and not worth nagging about.
-        legacy = (workspace_root / name).resolve()
-        nested = (vault_root / name).resolve()
-        if legacy == nested:
-            continue
+        # Compare the registry-resolved path with the standard folder supplied
+        # by config. Setup-created whole-vault roots, adopted external folders,
+        # and pre-nesting siblings all remain usable until the user approves an
+        # interactive migration, but all should receive the same guided path
+        # into the standard named folder.
         try:
             actual = Path(resolver(name)).resolve()
+            standard = Path(standardizer(name)).resolve()
         except Exception:  # noqa: BLE001 — advisory section
             continue
-        if actual == legacy and legacy.is_dir():
+        if actual != standard and actual.is_dir():
             notices.append({
                 "type": "vault_outside_vault_root",
                 "workspace": name,
                 "detail": (
-                    f"Workspace '{name}' keeps its vault at {legacy}, outside "
-                    f"{vault_root}. It still works, but vault search, link "
-                    f"linting and memory proposals only scan inside the vault "
-                    f"root."
+                    f"Workspace '{name}' keeps its vault at the nonstandard "
+                    f"location {actual}; its standard location is {standard}."
                 ),
-                "remedy": f"mv {legacy} {nested}",
+                "remedy": (
+                    f"Open a Ciaobot chat in workspace '{name}' and ask it to "
+                    f"migrate the vault from {actual} to {standard}. It should "
+                    "inspect both locations, ask before resolving conflicts, "
+                    "identify which files are vault content when the source also "
+                    "contains Ciaobot runtime files, and make a backup before "
+                    "moving anything. After confirmation it should move the "
+                    "approved content, atomically update the active workspace "
+                    "registry to the standard path, and restart Ciaobot as its "
+                    "final step. Verify the workspace before removing the backup."
+                ),
             })
 
     return {"notices": notices, "notices_found": len(notices), "errors": errors}
@@ -775,8 +776,8 @@ def run_os_audit(
 ) -> dict[str, Any]:
     """Execute a complete AI OS audit pass.
 
-    ``config`` is optional so the standalone CLI path keeps working; without it
-    the upgrade-notice section is simply empty.
+    ``config`` is optional for programmatic callers. The CLI and PWA both pass
+    the live registry so upgrade notices are consistent across surfaces.
     """
     workspace = (workspace_dir or Path.cwd()).expanduser().resolve()
     vault = (vault_root or (workspace / "memory-vault")).expanduser().resolve()
