@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from ciao.execution_modes import normalize_claude_mode
+from ciao.execution_modes import HARNESS_DISABLED_SKILLS, normalize_claude_mode
 from ciao.models import BridgeMode
 from ciao.providers.codex import CodexSettings
 from ciao.providers.ollama import OllamaSettings
@@ -51,6 +51,13 @@ _DEFAULT_HARNESS_DISALLOWED_TOOLS: tuple[str, ...] = (
     "ScheduleWakeup",
     "PushNotification",
     "RemoteTrigger",
+    # The CLI's bundled `schedule` / `loop` skills. They're already hidden
+    # from the model by the `skillOverrides` settings layer (see
+    # HARNESS_DISABLED_SKILLS in ciao/execution_modes.py for why); these
+    # `Skill(<name>)` deny rules are the second lever, blocking execution
+    # ("Skill execution blocked by permission rules") if one is re-enabled
+    # downstream.
+    *(f"Skill({name})" for name in HARNESS_DISABLED_SKILLS),
 )
 
 # Non-connector tools blocked by default in the personal workspace on top of

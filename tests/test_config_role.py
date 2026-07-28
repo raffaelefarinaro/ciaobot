@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from ciao.config import CiaoConfig, _DEFAULT_HARNESS_DISALLOWED_TOOLS
+from ciao.execution_modes import HARNESS_DISABLED_SKILLS, harness_skill_overrides
 
 
 def _config(**overrides: str) -> CiaoConfig:
@@ -184,3 +185,15 @@ def test_explicit_auth_token_stays_out_of_bootstrap_mode(tmp_path: Path) -> None
     config = _config(CIAO_WORKSPACE=str(tmp_path))
 
     assert config.bootstrap_mode is False
+
+
+def test_harness_denylist_covers_superseded_bundled_skills() -> None:
+    """The `Skill(...)` deny entries must stay in step with the skills hidden
+    by the `skillOverrides` layer. Hiding without denying leaves an execution
+    path open if a downstream settings file re-enables the skill; denying
+    without hiding is what let the model pick `Skill(schedule)` in the first
+    place."""
+    entries = set(_DEFAULT_HARNESS_DISALLOWED_TOOLS)
+    for name in HARNESS_DISABLED_SKILLS:
+        assert f"Skill({name})" in entries
+    assert harness_skill_overrides() == {name: "off" for name in HARNESS_DISABLED_SKILLS}

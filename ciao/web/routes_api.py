@@ -277,6 +277,36 @@ def _tool_icon(name: str) -> str:
     return _TOOL_ICONS.get(name, "\u2699\uFE0F")
 
 
+def _failed_tool_use_ids(msgs: list) -> set[str]:
+    """Tool-call ids whose ``tool_result`` came back as an error.
+
+    A denied or failed ``Write``/``Edit`` never touched the file, but the file
+    card is emitted from the *request*, so history would show an Outputs chip
+    for a file that was never created (this is what made a permission-denied
+    `skills-monitor.md` look written). Results live on the following user
+    message, so they can only be matched in a pre-pass over the whole session.
+    """
+    failed: set[str] = set()
+    for m in msgs:
+        # Both SDK objects and raw JSONL dicts flow through here (the subagent
+        # renderer accepts either).
+        mtype = m.get("type") if isinstance(m, dict) else getattr(m, "type", None)
+        if mtype != "user":
+            continue
+        message = m.get("message") if isinstance(m, dict) else getattr(m, "message", None)
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            if block.get("is_error") and block.get("tool_use_id"):
+                failed.add(str(block["tool_use_id"]))
+    return failed
+
+
 def _extract_assistant_blocks(raw: object) -> list[dict]:
     """Return ordered text/tool_use blocks for an assistant message.
 
@@ -331,6 +361,10 @@ def _extract_assistant_blocks(raw: object) -> list[dict]:
             summary = _summarize_tool_input(name, tinput)
             touches = extract_file_touches(name, tinput)
             entry = {"kind": "tool_use", "name": name, "summary": summary}
+            # Kept so the history builder can match this call against its
+            # tool_result and drop the file card when the call failed.
+            if block.get("id"):
+                entry["id"] = str(block["id"])
             if touches:
                 entry["file_touch"] = touches[0]
                 if len(touches) > 1:
@@ -522,6 +556,10 @@ def _summarize_task_notification(content: str) -> str | None:
 def _render_subagent_messages(msgs: Iterable[object]) -> list[dict]:
     """Render SDK or JSONL message objects for the subagent transcript UI."""
     rendered: list[dict] = []
+    # Materialised because the failed-tool pre-pass has to see the results,
+    # which arrive after the calls they belong to.
+    msgs = list(msgs)
+    failed_tool_ids = _failed_tool_use_ids(msgs)
     for m in msgs:
         mtype = getattr(m, "type", None)
         message = getattr(m, "message", None)
@@ -555,6 +593,11 @@ def _render_subagent_messages(msgs: Iterable[object]) -> list[dict]:
                     if not isinstance(touches, list) or not touches:
                         touch = blk.get("file_touch")
                         touches = [touch] if touch else []
+                    if touches and blk.get("id") in failed_tool_ids:
+                        # Denied or errored: nothing reached disk, so render a
+                        # plain activity row instead of a file card that implies
+                        # the write happened.
+                        touches = []
                     if touches:
                         flush_tools()
                         for touch in touches:
@@ -2310,6 +2353,8 @@ def _render_codex_thread(thread: dict, chat) -> list[dict]:
                 timing = chat.user_turn_timings.get(str(user_idx)) or {}
                 if timing.get("sent_at"):
                     entry["sent_at"] = timing["sent_at"]
+                if chat.user_turn_unattended.get(str(user_idx)):
+                    entry["unattended"] = True
                 result.append(entry)
                 user_idx += 1
                 continue
@@ -2513,6 +2558,7 @@ async def chat_messages(request: Request) -> JSONResponse:
         return JSONResponse(handover_messages)
 
     user_idx = 0
+    failed_tool_ids = _failed_tool_use_ids(msgs)
     for m in msgs:
         if m.type == "assistant":
             blocks = _extract_assistant_blocks(m.message)
@@ -2560,6 +2606,11 @@ async def chat_messages(request: Request) -> JSONResponse:
                     if not isinstance(touches, list) or not touches:
                         touch = blk.get("file_touch")
                         touches = [touch] if touch else []
+                    if touches and blk.get("id") in failed_tool_ids:
+                        # Denied or errored: nothing reached disk, so render a
+                        # plain activity row instead of a file card that implies
+                        # the write happened.
+                        touches = []
                     if touches:
                         flush_tools()
                         for touch in touches:
@@ -2668,6 +2719,10 @@ async def chat_messages(request: Request) -> JSONResponse:
             timing = chat.user_turn_timings.get(str(user_idx)) or chat.user_turn_timings.get(user_idx)
             if timing and timing.get("sent_at"):
                 entry["sent_at"] = timing["sent_at"]
+            # Loop/schedule ticks are user turns in the session file too, so the
+            # flag has to come from our own per-turn record.
+            if chat.user_turn_unattended.get(str(user_idx)) or chat.user_turn_unattended.get(user_idx):
+                entry["unattended"] = True
             user_idx += 1
         result.append(entry)
     _overlay_assistant_timings(result, chat.user_turn_timings)
@@ -3982,6 +4037,22 @@ def _enrich_loop(entry, manager, pcm=None) -> dict:
     return entry_dict
 
 
+def _publish_loops_changed(pcm) -> None:
+    """Nudge every open tab to refetch loops (see EventsHub, no replay buffer).
+
+    Loops are read over REST when a chat or the Schedules page mounts, so
+    without this a loop created in another tab (or by the model mid-turn)
+    stays invisible until a reload.
+    """
+    events = getattr(pcm, "events", None)
+    if events is None:
+        return
+    try:
+        events.publish({"type": "loops_changed"})
+    except Exception:  # noqa: BLE001 — fan-out must not fail the request
+        logger.exception("loops_changed publish failed")
+
+
 async def list_loops(request: Request) -> JSONResponse:
     lm = request.app.state.loop_manager
     pcm = request.app.state.project_chat_manager
@@ -4023,6 +4094,7 @@ async def create_loop(request: Request) -> JSONResponse:
     )
     if body.get("start"):
         lm.start_loop(entry.loop_id)
+    _publish_loops_changed(pcm)
     return JSONResponse(_enrich_loop(entry, lm, pcm), status_code=201)
 
 
@@ -4032,7 +4104,9 @@ async def loop_detail(request: Request) -> JSONResponse:
     lm = request.app.state.loop_manager
     pcm = request.app.state.project_chat_manager
     if request.method == "DELETE":
-        return JSONResponse({"ok": lm.delete(loop_id)})
+        deleted = lm.delete(loop_id)
+        _publish_loops_changed(pcm)
+        return JSONResponse({"ok": deleted})
     # PATCH
     entry = lm.get(loop_id)
     if entry is None:
@@ -4066,13 +4140,25 @@ async def loop_detail(request: Request) -> JSONResponse:
             chat = pcm.get_chat(entry.web_chat_id)
             if chat is None:
                 project = pcm._resolve_loop_project(entry)
-                if project is not None:
-                    new_chat = pcm.create_chat(
-                        project.project_id,
-                        title=entry.title or f"Loop: {entry.prompt[:30]}",
+                if project is None:
+                    # Nothing left to dispatch into: the target chat is gone and
+                    # the loop's project/workspace no longer resolves. Starting
+                    # it would mark it running while every tick no-ops.
+                    return JSONResponse(
+                        {
+                            "error": (
+                                "This loop's chat and project are both gone. "
+                                "Point it at an existing chat before starting it."
+                            )
+                        },
+                        status_code=409,
                     )
-                    entry.web_chat_id = new_chat.chat_id
-                    lm.replace(entry)
+                new_chat = pcm.create_chat(
+                    project.project_id,
+                    title=entry.title or f"Loop: {entry.prompt[:30]}",
+                )
+                entry.web_chat_id = new_chat.chat_id
+                lm.replace(entry)
             elif chat.archived:
                 # The target chat was archived (e.g. by an auto-archive
                 # policy) while the loop was stopped. Resuming into a dead
@@ -4088,6 +4174,7 @@ async def loop_detail(request: Request) -> JSONResponse:
             lm.start_loop(loop_id)
         else:
             lm.stop_loop(loop_id)
+    _publish_loops_changed(pcm)
     return JSONResponse(_enrich_loop(entry, lm, pcm))
 
 
@@ -4432,10 +4519,14 @@ def _menubar_chat_needs_input(pending_question: str) -> bool:
 async def menubar_chats_endpoint(request: Request) -> JSONResponse:
     """Open-chat summaries for the macOS menu bar.
 
-    Unauthenticated like ``/api/active-chats``: the tray has no session cookie.
-    In standby mode the proxy forwards this to the active peer so the tray
-    list matches the chats that ``/api/active-chats`` reports as working —
-    local ``web_projects.json`` can lag the leader after handover.
+    Usable without a session, but only from a loopback peer (the tray holds no
+    session cookie) — see ``_LOOPBACK_ONLY_API`` in ``ciao.web.auth``. Unlike
+    ``/api/active-chats`` this returns titles and workspace names, so it must
+    not be reachable from the network.
+
+    In client mode the proxy forwards this to the active peer so the tray list
+    matches the chats that ``/api/active-chats`` reports as working — local
+    ``web_projects.json`` can lag the leader after handover.
     """
     limit_raw = request.query_params.get("limit", "10")
     try:
@@ -5616,6 +5707,10 @@ async def node_handover_endpoint(request: Request) -> JSONResponse:
 
     Body: ``{ "force": bool }``. When not force, the remote host is demoted
     (commit + push) first. Session matching is not required — git sync only.
+
+    ``target_node_url`` may only name the host this node is already connected
+    to. The demote call carries the stored host session cookie, so accepting an
+    arbitrary URL here would hand that session to whoever supplied it.
     """
     node_mgr = getattr(request.app.state, "node_state_manager", None)
     if node_mgr is None:
@@ -5626,10 +5721,17 @@ async def node_handover_endpoint(request: Request) -> JSONResponse:
     except Exception:
         body = {}
 
+    from ciao.node_state import _normalize_peer_url
+
     force = bool(body.get("force", False))
-    target_url = str(body.get("target_node_url") or "").strip().rstrip("/")
-    if not target_url:
-        target_url = node_mgr.get_host_url() or ""
+    host_url = node_mgr.get_host_url() or ""
+    requested_url = str(body.get("target_node_url") or "").strip()
+    if requested_url and _normalize_peer_url(requested_url) != _normalize_peer_url(host_url):
+        return JSONResponse(
+            {"error": "target_node_url does not match the connected host"},
+            status_code=400,
+        )
+    target_url = host_url.rstrip("/")
     local_session = getattr(request.app.state, "local_session_manager", None)
 
     if target_url and not force:

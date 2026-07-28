@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import mimetypes
+import copy
 import os
 import re
 import shutil
@@ -772,6 +773,13 @@ class ChatInfo:
     # Drives the per-message footer in the PWA (time of send, agent latency).
     # Recorded at the orchestration layer so it stays provider-agnostic.
     user_turn_timings: dict = field(default_factory=dict)
+    # Map of user-turn index (as str) → True for turns fired by a loop or
+    # schedule rather than typed by the user. Without it a loop tick renders as
+    # an ordinary user bubble, so neither the reader nor the model can tell the
+    # difference (the model narrated "even though you're actively messaging me"
+    # while replying to its own loop prompt). Absent key = interactive turn, so
+    # pre-feature chats degrade to today's behaviour.
+    user_turn_unattended: dict = field(default_factory=dict)
     # Relative workspace path to the archived markdown transcript.
     # Set when archive_chat() succeeds; cleared on new_session().
     archive_path: str = ""
@@ -1103,6 +1111,7 @@ class ProjectChatManager:
                 user_turn_count=cd.get("user_turn_count", 0),
                 user_turn_images=dict(cd.get("user_turn_images", {})),
                 user_turn_timings=dict(cd.get("user_turn_timings", {})),
+                user_turn_unattended=dict(cd.get("user_turn_unattended", {})),
                 archive_path=cd.get("archive_path", ""),
                 retry_status=cd.get("retry_status", "") if cd.get("retry_status", "") in _RETRY_STATUSES else "",
                 retry_prompt=cd.get("retry_prompt", ""),
@@ -1128,7 +1137,7 @@ class ProjectChatManager:
             len(self._projects),
             len(self._chats),
         )
-        self._last_local_payload = self._state_payload()
+        self._last_local_payload = copy.deepcopy(self._state_payload())
 
     def _migrate_remove_claude_code_cli_project(self) -> None:
         """Remove the retired CLI-import project from persisted PWA state."""
@@ -1188,6 +1197,7 @@ class ProjectChatManager:
                     "user_turn_count": c.user_turn_count,
                     "user_turn_images": c.user_turn_images,
                     "user_turn_timings": c.user_turn_timings,
+                    "user_turn_unattended": c.user_turn_unattended,
                     "archive_path": c.archive_path,
                     "retry_status": c.retry_status,
                     "retry_prompt": c.retry_prompt,
@@ -1410,7 +1420,14 @@ class ProjectChatManager:
                 )
             finally:
                 tmp.unlink(missing_ok=True)
-        self._last_local_payload = current
+        # Deep copy, not the payload itself: ``_state_payload`` embeds the live
+        # container objects (``user_turn_timings``, ``user_turn_images``,
+        # ``handover_messages``, ...), so keeping a reference makes the baseline
+        # alias current state. The field-level diff in ``_merge_local_map`` then
+        # sees ``before == value`` for every in-place mutation and drops it, and
+        # the value never reaches disk. That silently lost per-turn send times
+        # and image refs whenever they were the only change in a save.
+        self._last_local_payload = copy.deepcopy(current)
 
     # ── Defaults and auto-discovery ──────────────────────────────────────
 
@@ -3475,11 +3492,12 @@ class ProjectChatManager:
         if callable(revoke):
             revoke(chat_id)
 
-    def _build_prompt_prefix(self, chat: ChatInfo) -> str:
+    def _build_prompt_prefix(self, chat: ChatInfo, *, unattended: bool = False) -> str:
         """Build context prefix for a web chat message.
 
         Carries the workspace, project name, context, and canonical-doc path
-        so the agent knows which project it's operating in.
+        so the agent knows which project it's operating in. ``unattended`` adds
+        a line telling the model this turn came from a loop or schedule.
         """
         parts: list[str] = [f'[Chat ID: "{chat.chat_id}"]']
         project = self._projects.get(chat.project_id)
@@ -3518,6 +3536,20 @@ class ProjectChatManager:
                     )
                 reminder_lines.append("Use handoff_send or handoff_close to send answers or close them.]")
                 parts.append("\n".join(reminder_lines))
+
+        if unattended:
+            # Without this the model reads a loop tick as a message the user
+            # just typed, and answers accordingly ("even though you're actively
+            # messaging me" while replying to its own loop prompt). Lives inside
+            # the injected-context block so the existing history strip keeps it
+            # out of the rendered transcript.
+            parts.append(
+                "[Unattended run: this turn was fired automatically by a "
+                "Ciaobot loop or schedule, not typed by the user. Nobody is "
+                "watching it. Do not ask questions or wait for an approval, "
+                "and do not address the user as if they just spoke. If "
+                "something blocks you, state it plainly and stop.]"
+            )
 
         if not parts:
             return ""
@@ -3939,8 +3971,23 @@ class ProjectChatManager:
         env["CLAUDE_CODE_DISABLE_ARTIFACT"] = "1"
         return env
 
-    def _effective_mode_for_chat(self, chat: ChatInfo) -> BridgeMode:
+    def _effective_mode_for_chat(
+        self, chat: ChatInfo, *, unattended: bool = False
+    ) -> BridgeMode:
         """Pick the runtime permission mode for ``chat``.
+
+        ``unattended`` (a schedule or loop tick) forces ``bypass``. Nobody is
+        watching such a turn, so every mode that can escalate resolves to an
+        unanswerable prompt: ``_drive`` auto-denies it with "Scheduled runs
+        cannot wait for interactive approval", and the automation fails while
+        reporting success. A loop that fetches a page and writes a snapshot
+        died on its first tool call under the previous default (chats inherit
+        `auto`; ``ScheduleEntry.mode`` also defaults to `auto`). The
+        authorization for these turns happened when the user created the
+        schedule or loop, which is the same trade every cron runner makes.
+        Deny rules still apply — they are evaluated before the callback — so
+        the per-workspace denylist (claude.ai connectors, `Skill(schedule)`,
+        harness tools) is not weakened by this.
 
         Auto mode relies on Anthropic's server-side classifier to decide
         which tool calls run silently and which escalate. Ollama-routed
@@ -4062,9 +4109,14 @@ class ProjectChatManager:
         display_prompt: str = "",
         images: list[ImageAttachment] | None = None,
         resume_session: str | None = None,
+        unattended: bool = False,
     ) -> AgentRequest:
-        """Resolve all routing parameters and construct an AgentRequest."""
-        prefix = self._build_prompt_prefix(chat)
+        """Resolve all routing parameters and construct an AgentRequest.
+
+        ``unattended`` marks a schedule- or loop-driven turn, which changes
+        the permission mode (see ``_effective_mode_for_chat``).
+        """
+        prefix = self._build_prompt_prefix(chat, unattended=unattended)
         if chat.provider == "codex":
             provider_prompt = (
                 expand_slash_command(prompt, self._config.workspace_root) or prompt
@@ -4142,6 +4194,8 @@ class ProjectChatManager:
         chat_id: str,
         prompt: str,
         images: list[ImageAttachment] | None = None,
+        *,
+        unattended: bool = False,
     ) -> AsyncGenerator[StreamEvent, None]:
         chat = self._chats.get(chat_id)
         if chat is None:
@@ -4160,6 +4214,7 @@ class ProjectChatManager:
             display_prompt=prompt,
             images=images,
             resume_session=chat.session_id or None,
+            unattended=unattended,
         )
 
         response_text = ""
@@ -4876,6 +4931,11 @@ class ProjectChatManager:
             chat_meta.last_activity_at = sent_at_iso
             chat_meta.last_read_at = sent_at_iso  # user sending = implicitly read
             chat_meta.user_turn_timings[str(turn_index)] = {"sent_at": sent_at_iso}
+            if unattended:
+                # Persisted so the ↻ marker survives a reload; /messages reads
+                # this back because the SDK session file has no notion of who
+                # sent a turn.
+                chat_meta.user_turn_unattended[str(turn_index)] = True
             self._turn_perf_started[(chat_id, turn_index)] = time.perf_counter()
 
         # First buffered event: echo the user prompt so any client subscribing
@@ -4887,6 +4947,8 @@ class ProjectChatManager:
             "text": prompt,
             "images": image_refs,
         }
+        if unattended:
+            echo_payload["unattended"] = True
         if turn_index is not None:
             echo_payload["turn_index"] = turn_index
         if sent_at_iso:
@@ -4966,7 +5028,10 @@ class ProjectChatManager:
                     question_paused = False
                     try:
                         async for event in self.stream_chat(
-                            chat_id, current_prompt, images=current_images
+                            chat_id,
+                            current_prompt,
+                            images=current_images,
+                            unattended=unattended,
                         ):
                             payload = event_to_json(event)
                             if payload:
@@ -5903,6 +5968,10 @@ class ProjectChatManager:
         stream = self._broker.get(chat_id)
         if stream is not None:
             stream.resolve_permission(request_id)
+            if not approved:
+                # The refused call never ran, so retract any file card it
+                # already painted (request_id is the tool_use_id).
+                stream.deny_tool_use(request_id)
         provider_service = self._providers.get(chat_id)
         if provider_service is None:
             return False
@@ -6674,7 +6743,13 @@ class ProjectChatManager:
         return None
 
     def _resolve_loop_project(self, entry: object) -> ProjectInfo | None:
-        """Resolve the target project for a loop entry."""
+        """Resolve the target project for a loop entry.
+
+        Returns None when the loop names no project or workspace we still know
+        about. Callers treat that as "stop this loop" — re-homing it into an
+        arbitrary project would run the user's prompt against the wrong
+        workspace, on a schedule, unattended.
+        """
         web_project_id = getattr(entry, "web_project_id", "") or ""
         if web_project_id and web_project_id in self._projects:
             return self._projects[web_project_id]
@@ -6686,8 +6761,6 @@ class ProjectChatManager:
             for p in self._projects.values():
                 if p.workspace == workspace:
                     return p
-        if self._projects:
-            return next(iter(self._projects.values()))
         return None
 
     # ── Voice ────────────────────────────────────────────────────────────

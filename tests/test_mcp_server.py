@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +13,9 @@ from starlette.applications import Starlette
 from starlette.routing import Mount
 from starlette.testclient import TestClient
 
+from ciao import mcp_server
 from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
+from ciao.execution_modes import AUTO_APPROVED_MCP_TOOLS, auto_approved_mcp_tool_names
 from ciao.mcp_server import CiaoMcpService, McpSessionRegistry
 
 
@@ -885,3 +888,23 @@ def test_probe_stdio_server_returns_observed_tools_only(tmp_path: Path) -> None:
     assert result["ok"] is True
     assert result["tools"] == ["mcp__notion__search"]
     assert "Stdio" in result["tools_note"]
+
+
+def test_auto_approved_policy_matches_tool_annotations() -> None:
+    """The allowed_tools policy must track the annotations on the tools.
+
+    ``AUTO_APPROVED_MCP_TOOLS`` bypasses the PermissionGate, so a new tool
+    silently inheriting either policy is the failure mode worth catching. The
+    contract: every ``_READ``/``_WRITE`` tool is auto-approved, every
+    ``_DESTRUCTIVE`` one still raises an approval card.
+    """
+    source = Path(mcp_server.__file__).read_text(encoding="utf-8")
+    declared = re.findall(r'@tool\(name="([a-z_]+)", annotations=(_[A-Z]+)', source)
+    assert declared, "no annotated @tool declarations found in ciao/mcp_server.py"
+
+    expected = [name for name, ann in declared if ann in {"_READ", "_WRITE"}]
+    destructive = {name for name, ann in declared if ann == "_DESTRUCTIVE"}
+
+    assert list(AUTO_APPROVED_MCP_TOOLS) == expected
+    assert destructive.isdisjoint(AUTO_APPROVED_MCP_TOOLS)
+    assert auto_approved_mcp_tool_names()[0] == f"mcp__ciaobot__{expected[0]}"

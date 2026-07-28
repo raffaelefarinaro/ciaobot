@@ -444,3 +444,41 @@ def test_events_hub_subscribe_emits_keepalive(monkeypatch) -> None:
         await agen.aclose()
 
     asyncio.run(_run())
+
+
+def test_deny_tool_use_retracts_the_file_card() -> None:
+    """A refused Write never reached disk, so the file card it painted on
+    *request* must not survive: it made a permission-denied snapshot file look
+    created. The activity line stays; only the touch is stripped."""
+    stream = ChatStream("hi")
+    stream.publish({
+        "type": "tool_use",
+        "tool_name": "Write",
+        "tool_use_id": "toolu-1",
+        "file_touch": {"file_path": "notes.md", "action": "written"},
+    })
+    stream.publish({
+        "type": "tool_use",
+        "tool_name": "Write",
+        "tool_use_id": "toolu-2",
+        "file_touch": {"file_path": "kept.md", "action": "written"},
+    })
+
+    stream.deny_tool_use("toolu-1")
+
+    buffered = stream.buffered_events()
+    denied = next(ev for ev in buffered if ev.get("tool_use_id") == "toolu-1")
+    survivor = next(ev for ev in buffered if ev.get("tool_use_id") == "toolu-2")
+    assert "file_touch" not in denied
+    assert "file_touches" not in denied
+    assert denied["tool_name"] == "Write"  # the attempt is still in the trace
+    assert survivor["file_touch"]["file_path"] == "kept.md"
+    # Live clients already rendered the chip, so they need an explicit retraction.
+    assert {"type": "tool_denied", "tool_use_id": "toolu-1"} in buffered
+
+
+def test_deny_tool_use_ignores_empty_id() -> None:
+    stream = ChatStream("hi")
+    stream.publish({"type": "text_delta", "text": "x"})
+    stream.deny_tool_use("")
+    assert all(ev.get("type") != "tool_denied" for ev in stream.buffered_events())

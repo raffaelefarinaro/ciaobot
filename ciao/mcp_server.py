@@ -1510,6 +1510,7 @@ class CiaoMcpService:
             interval_minutes: int = 10,
             title: str = "",
             autostart: bool = False,
+            start: bool = True,
         ) -> dict[str, Any]:
             """Create an interval loop: re-sends one prompt into a fixed chat
             every N minutes, retaining that chat's context. Use a loop rather
@@ -1525,9 +1526,15 @@ class CiaoMcpService:
                     tick, so repeated iterations stay cheap and scannable.
                 interval_minutes: There is no model field — each iteration
                     uses the target chat's current model and mode.
-                autostart: Only controls whether the loop starts on server
-                    boot; live running/stopped state is set separately via
-                    loop_start/loop_stop.
+                autostart: Only controls whether the loop starts again on
+                    server boot. It does NOT start the loop now — `start`
+                    does that.
+                start: True (default) begins the cadence immediately, so the
+                    first tick fires within a minute. Pass False only when the
+                    user asked for a loop they will start by hand later; say
+                    which you did instead of claiming a stopped loop is
+                    running. The returned payload carries the real `running`
+                    flag — report that, not your intent.
 
             If the target chat is busy when a tick fires, that iteration is
             skipped and retried on the next tick (not queued). If the target
@@ -1537,7 +1544,9 @@ class CiaoMcpService:
             """
             return await self._invoke(
                 "loop_create",
-                lambda cp, p: cp.loop_create(p, chat_id, prompt, interval_minutes, title, autostart),
+                lambda cp, p: cp.loop_create(
+                    p, chat_id, prompt, interval_minutes, title, autostart, start
+                ),
                 mutating=True,
             )
 

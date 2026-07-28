@@ -156,6 +156,22 @@ an in-place new session, `schedule_action`, `loop_action`).
 | Loops | `loops_list`, `loop_create`, `loop_update`, `loop_action` |
 | Workspace files | `file_surface` |
 
+`loop_create` starts the cadence immediately (`start=true` by default) and
+returns the real `running` flag. `autostart` is a separate axis: it only decides
+whether the loop comes back up after a server restart. They were previously
+conflated, so a loop created with `autostart=true` reported as running while the
+PWA banner correctly said `stopped`.
+
+**Approval policy.** Every `_READ`/`_WRITE` tool in this catalog is passed to the
+SDK's `allowed_tools` (see `AUTO_APPROVED_MCP_TOOLS` in
+`ciao/execution_modes.py`), so Auto mode does not raise an approval card for the
+app's own control plane: these are the programmatic twins of PWA buttons, scoped
+by bearer token, and visible/reversible in the UI. The `_DESTRUCTIVE` tools
+(`project_complete`, `project_delete`, `chat_delete`, `chat_stop`,
+`handoff_cancel`, `schedule_action`, `loop_action`) are deliberately excluded and
+still prompt. Plan mode gets no allowlist at all. `tests/test_mcp_server.py`
+fails if a new tool is added without placing it on one side of that line.
+
 The catalog covers application actions that are safe and meaningful for a
 scoped agent. Browser-session administration, login/OAuth secrets, Web Push
 subscriptions, microphone/audio blobs, setup-wizard actions, arbitrary runtime
