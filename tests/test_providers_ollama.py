@@ -14,7 +14,7 @@ from pathlib import Path
 from ciao.config import (
     CiaoConfig,
     WorkspaceConfig,
-    _DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL,
+    _DEFAULT_EXTRA_DISALLOWED_TOOLS,
     _DEFAULT_HARNESS_DISALLOWED_TOOLS,
 )
 from ciao.providers.ollama import (
@@ -478,11 +478,14 @@ def test_personal_workspace_allows_claude_ai_mcps_by_default(monkeypatch) -> Non
     config = CiaoConfig.from_env()
     personal = config.disallowed_tools_for_workspace("personal")
     assert "mcp__claude_ai_Airtable" not in personal
-    # Self-hosted n8n MCP (project-scoped in .mcp.json) is work-only, so it is blocked.
+    # Self-hosted n8n MCP is project-scoped in .mcp.json, so it is denied by
+    # default and opted into per workspace — for *every* workspace, not only one
+    # named "personal", which left any other private workspace unprotected.
     assert "mcp__n8n_mcp" in personal
-    # Every workspace denies the PWA-irrelevant harness tools by default;
-    # personal adds n8n on top. Work has no extra beyond the harness set.
-    assert config.disallowed_tools_for_workspace("work") == list(_DEFAULT_HARNESS_DISALLOWED_TOOLS)
+    assert config.disallowed_tools_for_workspace("work") == [
+        *_DEFAULT_HARNESS_DISALLOWED_TOOLS,
+        *_DEFAULT_EXTRA_DISALLOWED_TOOLS,
+    ]
 
 
 def test_disallowed_tools_env_override_unions_with_toggle(monkeypatch) -> None:
@@ -510,7 +513,7 @@ def test_claude_ai_mcps_toggle_env_override(monkeypatch) -> None:
     config = CiaoConfig.from_env()
     assert config.disallowed_tools_for_workspace("personal") == [
         *_DEFAULT_HARNESS_DISALLOWED_TOOLS,
-        *_DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL,
+        *_DEFAULT_EXTRA_DISALLOWED_TOOLS,
     ]
     assert config.claude_ai_mcps_for_workspace("personal") is True
     # Flip work off → connectors blocked on top of any extras.
@@ -609,9 +612,10 @@ def test_pcm_disallowed_tools_for_chat_routes_by_workspace(
     p_disallowed = pcm.disallowed_tools_for_chat(p_chat)
     w_disallowed = pcm.disallowed_tools_for_chat(w_chat)
     assert "mcp__claude_ai_Airtable" not in p_disallowed
+    # Denied in both, not just in a workspace named "personal".
     assert "mcp__n8n_mcp" in p_disallowed
-    # Work denies the PWA-irrelevant harness tools; personal adds n8n on top.
-    assert w_disallowed == list(_DEFAULT_HARNESS_DISALLOWED_TOOLS)
+    assert "mcp__n8n_mcp" in w_disallowed
+    assert set(_DEFAULT_HARNESS_DISALLOWED_TOOLS).issubset(set(w_disallowed))
     assert set(_DEFAULT_HARNESS_DISALLOWED_TOOLS).issubset(set(p_disallowed))
 
 

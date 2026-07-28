@@ -1442,18 +1442,10 @@ class ProjectChatManager:
     def _workspace_vault_root(self, workspace: str) -> Path:
         """Return the vault root for one logical workspace.
 
-        Legacy ``personal``/``work`` workspace configs store ``vault_root`` as
-        the workspace name and are rooted under ``CIAO_VAULT_ROOT``. Custom
-        workspace roots are workspace-relative unless absolute.
+        Thin wrapper over ``CiaoConfig.workspace_vault_root``, which owns the
+        registry and the legacy-path handling.
         """
-        workspace_config = self._config.workspace(workspace)
-        raw_root = workspace_config.vault_root if workspace_config else workspace
-        root = Path(raw_root).expanduser()
-        if root.is_absolute():
-            return root.resolve()
-        if workspace in {"personal", "work"} and raw_root == workspace:
-            return (self._config.vault_root / workspace).resolve()
-        return (self._config.workspace_root / root).resolve()
+        return self._config.workspace_vault_root(workspace)
 
     def _ensure_defaults(self) -> None:
         """Ensure each workspace has its auto-managed `General` project.

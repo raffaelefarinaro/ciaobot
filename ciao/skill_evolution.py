@@ -106,9 +106,28 @@ def _resolve_proposals_dir() -> Path:
     for tests and installs without a workspace.
     """
     workspace = os.environ.get("CIAO_WORKSPACE", "").strip()
-    if workspace:
-        return Path(workspace).expanduser() / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
-    return _REPO_ROOT / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
+    root = Path(workspace).expanduser() if workspace else _REPO_ROOT
+    vault = root / "memory-vault"
+    return _first_workspace_dir(vault) / "Workspace" / "Skill-Proposals"
+
+
+def _first_workspace_dir(vault: Path) -> Path:
+    """The vault subdirectory to file proposals under.
+
+    Discovered from the layout rather than assuming a workspace named
+    ``personal`` — workspace names are the user's. Falls back to the vault root
+    itself when nothing looks like a workspace yet, so a fresh install still
+    gets a usable path instead of one under a directory that will never exist.
+    """
+    try:
+        names = sorted(
+            entry
+            for entry in vault.iterdir()
+            if entry.is_dir() and (entry / "MEMORY.md").is_file()
+        )
+    except OSError:
+        return vault
+    return names[0] if names else vault
 
 
 _DEFAULT_PROPOSALS_DIR: Path = _resolve_proposals_dir()

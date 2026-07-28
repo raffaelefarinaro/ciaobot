@@ -4558,7 +4558,10 @@ async function saveWorkspace(name: string) {
   workspacesResult.value = ''
   try {
     await projectStore.updateWorkspace(name, {
-      vault_root: name,
+      // Send what the form holds. Overwriting it with the workspace name
+      // silently discarded any vault path the user had set, and reset an
+      // adopted workspace's `memory-vault/<name>` root to a bare name.
+      vault_root: form.vault_root.trim() || name,
       default_provider: form.default_provider,
       default_model: form.default_model,
       gws_profile: form.gws_profile,
@@ -4586,7 +4589,8 @@ async function createNewWorkspace() {
   try {
     await projectStore.createWorkspace({
       name: form.name.trim(),
-      vault_root: form.name.trim(),
+      // The "Vault name" field is optional and defaults to the workspace name.
+      vault_root: form.vault_root.trim() || form.name.trim(),
       default_provider: form.default_provider,
       default_model: form.default_model,
       gws_profile: form.gws_profile,

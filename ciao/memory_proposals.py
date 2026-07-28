@@ -40,7 +40,25 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-_PROPOSALS_PATH = "personal/Workspace/Memory-Proposals.md"
+_PROPOSALS_RELATIVE = "Workspace/Memory-Proposals.md"
+
+
+def _default_workspace(vault_root: Path) -> str:
+    """The workspace to file proposals under when the source names none.
+
+    Read off the vault layout instead of assuming a workspace called
+    ``personal``: workspace names belong to the user, and an install may have
+    none by that name.
+    """
+    try:
+        names = sorted(
+            entry.name
+            for entry in vault_root.iterdir()
+            if entry.is_dir() and (entry / "MEMORY.md").is_file()
+        )
+    except OSError:
+        return ""
+    return names[0] if names else ""
 
 # Insight sections safe to apply to bounded memory without review: rare,
 # behavioral, and durable by construction. Everything else stays in the
@@ -220,11 +238,11 @@ def _extract_workspace_context(archive_path: Path, vault_root: Path) -> str:
                     parts = line.split(":", 1)
                     if len(parts) == 2 and parts[0].strip() == "context":
                         context_val = parts[1].strip().strip("'\"")
-                        if context_val and (context_val in {"personal", "work"} or (vault_root / context_val).is_dir()):
+                        if context_val and (vault_root / context_val).is_dir():
                             return context_val
     except Exception:  # noqa: BLE001
         pass
-    return "personal"
+    return _default_workspace(vault_root)
 
 
 def append_proposals(
@@ -243,11 +261,17 @@ def append_proposals(
     if not proposals:
         return None
 
-    workspace = "personal"
-    if source_path is not None:
-        workspace = _extract_workspace_context(source_path, vault_root)
+    workspace = (
+        _extract_workspace_context(source_path, vault_root)
+        if source_path is not None
+        else _default_workspace(vault_root)
+    )
 
-    out_path = vault_root / workspace / "Workspace/Memory-Proposals.md"
+    out_path = (
+        vault_root / workspace / _PROPOSALS_RELATIVE
+        if workspace
+        else vault_root / _PROPOSALS_RELATIVE
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # File is append-only; new batches stack at the end with their own

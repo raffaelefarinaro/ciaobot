@@ -53,6 +53,19 @@ def test_propose_drops_dead_ends() -> None:
     assert all("tried" not in p.text.lower() for p in proposals)
 
 
+def test_append_proposals_uses_the_vaults_own_workspace_dir(tmp_path: Path) -> None:
+    """The default workspace is read off the layout, not assumed to be "personal"."""
+    vault = tmp_path / "vault"
+    (vault / "research").mkdir(parents=True)
+    (vault / "research" / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+
+    out = mp.append_proposals(
+        mp.propose_from_insights(_SAMPLE_INSIGHTS), vault, source_path=None
+    )
+
+    assert out == vault / "research" / "Workspace" / "Memory-Proposals.md"
+
+
 def test_propose_handles_empty_input() -> None:
     assert mp.propose_from_insights("") == []
     assert mp.propose_from_insights("## Errors\n\n") == []
@@ -61,11 +74,12 @@ def test_propose_handles_empty_input() -> None:
 def test_append_proposals_writes_bullet_list(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
-    # Without a source_path with known frontmatter, defaults to "personal" workspace.
+    # No source frontmatter and no workspace directories in the vault yet, so
+    # the queue lands at the vault root rather than under a guessed name.
     out = mp.append_proposals(proposals, vault, source_path=None)
     assert out is not None
     assert out.exists()
-    assert out == vault / "personal" / "Workspace" / "Memory-Proposals.md"
+    assert out == vault / "Workspace" / "Memory-Proposals.md"
     text = out.read_text(encoding="utf-8")
     assert "Memory Proposals" in text
     # Each proposal lands as one bullet line.

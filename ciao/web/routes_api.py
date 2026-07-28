@@ -1599,10 +1599,14 @@ async def list_projects(request: Request) -> JSONResponse:
 
 async def create_project(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
+    config = request.app.state.config
     body = await request.json()
     project = pcm.create_project(
         name=body["name"],
-        workspace=body.get("workspace", "personal"),
+        # An omitted workspace has to resolve to one that exists: create_project
+        # does not validate the name, so an unknown one yields a project that is
+        # filtered out of every workspace's sidebar.
+        workspace=body.get("workspace") or config.primary_workspace(),
         context=body.get("context", ""),
     )
     return JSONResponse(project.to_dict(), status_code=201)
@@ -4309,14 +4313,16 @@ def _routines_payload(config, app_settings) -> dict:
         # Automatic resolves to the workspace haiku tier — apfel is opt-in
         # (choose "Apple" explicitly), not the auto default just because the
         # binary is on PATH (it fails when Apple Intelligence is disabled).
-        title_effective = config.haiku_model_for_workspace("personal")
+        title_effective = config.haiku_model_for_workspace(config.primary_workspace())
     from ciao.critique import critique_models_effective
 
     critique_effective = critique_models_effective(config)
     if config.insights_model_override:
         insights_effective = config.insights_model_override
     else:
-        insights_effective = config.sonnet_model_for_workspace("personal")
+        insights_effective = config.sonnet_model_for_workspace(
+            config.primary_workspace()
+        )
 
     return {
         # Overrides as stored ("" = automatic default).
@@ -5361,10 +5367,23 @@ def _open_merge_chat(request: Request, branch: str) -> dict:
     with the user. Returns {ok, chat_id, project_id} or {error}."""
     config = request.app.state.config
     pcm = request.app.state.project_chat_manager
-    projects = pcm.list_projects("personal")
-    project = next((p for p in projects if p.name == "General"), None)
+    # Any workspace can host this; prefer the primary one, then settle for the
+    # first workspace that has a General project. Keying on a workspace named
+    # "personal" meant the whole sync-conflict flow failed on installs whose
+    # workspaces are named anything else.
+    workspace = config.primary_workspace()
+    project = next(
+        (p for p in pcm.list_projects(workspace) if p.name == "General"), None
+    )
     if project is None:
-        return {"error": "no personal project to host the merge chat"}
+        for candidate in config.workspace_names():
+            project = next(
+                (p for p in pcm.list_projects(candidate) if p.name == "General"), None
+            )
+            if project is not None:
+                break
+    if project is None:
+        return {"error": "no General project in any workspace to host the merge chat"}
 
     from datetime import UTC, datetime
     from ciao.local_session import MERGE_PROMPT

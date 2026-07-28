@@ -60,13 +60,17 @@ _DEFAULT_HARNESS_DISALLOWED_TOOLS: tuple[str, ...] = (
     *(f"Skill({name})" for name in HARNESS_DISABLED_SKILLS),
 )
 
-# Non-connector tools blocked by default in the personal workspace on top of
-# the harness set. The self-hosted n8n MCP (project-scoped in .mcp.json) is
-# work-only, so it stays blocked even when the claude.ai MCP toggle is on.
-# Operators add or remove entries via the per-workspace "Extra disallowed
-# tools" field (PWA) or ``CIAO_DISALLOWED_TOOLS_PERSONAL`` (CSV; literal
-# ``none`` clears).
-_DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL: tuple[str, ...] = (
+# Non-connector tools blocked by default on top of the harness set. The
+# self-hosted n8n MCP is project-scoped in ``.mcp.json``, so a workspace that
+# actually uses it configures it deliberately; denying it by default everywhere
+# keeps it out of the workspaces that did not. This used to be keyed on a
+# workspace literally named ``personal``, which meant any other private
+# workspace silently went unprotected.
+#
+# To use n8n in a workspace, clear that workspace's "Extra disallowed tools"
+# field in Settings (or the per-workspace disallowed-tools env var; the literal
+# ``none`` clears it), which replaces this default outright.
+_DEFAULT_EXTRA_DISALLOWED_TOOLS: tuple[str, ...] = (
     "mcp__n8n_mcp",
 )
 
@@ -417,6 +421,55 @@ class CiaoConfig:
     def workspace_names(self) -> list[str]:
         return list(self.workspaces.keys())
 
+    def primary_workspace(self) -> str:
+        """The workspace to use when a caller has no better idea.
+
+        Prefers one literally named ``personal`` for continuity with installs
+        that predate a configurable registry, then falls back to whatever is
+        registered first. Callers must not hardcode ``"personal"`` themselves:
+        workspace names are the user's, and an install may have none by that
+        name at all.
+        """
+        if "personal" in self.workspaces:
+            return "personal"
+        names = self.workspace_names()
+        return names[0] if names else ""
+
+    def workspace_vault_root(self, workspace: str | None) -> Path:
+        """Absolute vault directory for one logical workspace.
+
+        Three shapes of registered ``vault_root``:
+
+        - absolute — used as given.
+        - a bare workspace name (what Settings writes) — nested under
+          ``vault_root``, i.e. ``memory-vault/<name>``. This used to apply only
+          to workspaces literally named ``personal`` or ``work``; every other
+          name landed in ``workspace_root/<name>``, a sibling of the vault that
+          ``vault_index``, ``vault_lint`` and the memory-proposal scans never
+          look at.
+        - an explicit relative path (``memory-vault/clientA``, which setup
+          writes when it adopts nested workspaces) — resolved against
+          ``workspace_root`` so it is not nested twice.
+
+        A bare name whose *legacy* sibling path already exists keeps resolving
+        there: an install created before this was fixed must not appear to lose
+        its vault. New workspaces get the correct location.
+        """
+        name = workspace or ""
+        workspace_config = self.workspace(name)
+        raw_root = (workspace_config.vault_root if workspace_config else name) or name
+        root = Path(raw_root).expanduser()
+        if root.is_absolute():
+            return root.resolve()
+        if raw_root != name:
+            # An explicit relative path already says where it lives.
+            return (self.workspace_root / root).resolve()
+        nested = (self.vault_root / root).resolve()
+        legacy = (self.workspace_root / root).resolve()
+        if not nested.exists() and legacy.exists():
+            return legacy
+        return nested
+
     def default_model_for_workspace(self, workspace: str | None) -> str:
         """Pick the new-chat / new-schedule default for a workspace.
 
@@ -447,8 +500,13 @@ class CiaoConfig:
                 return "work"
             if provider == "codex":
                 return ""
-        if workspace == "work":
-            return "work"
+        # An unregistered name (typo, stale reference, renamed workspace) has
+        # no bucket of its own; fall back to the primary workspace's rather
+        # than guessing from the name, which only ever worked for the two
+        # names the first release happened to ship.
+        primary = self.workspace(self.primary_workspace())
+        if primary and primary.model_bucket and workspace != self.primary_workspace():
+            return primary.model_bucket
         return "personal"
 
     def sonnet_model_for_workspace(self, workspace: str | None) -> str:
@@ -499,9 +557,8 @@ class CiaoConfig:
         * the claude.ai connector set (``CLAUDE_AI_CONNECTORS``) when
           ``claude_ai_mcps`` resolves to False, and
         * the workspace's extra tools (``disallowed_tools``), which defaults to
-          the harness set (``_DEFAULT_HARNESS_DISALLOWED_TOOLS``) for every
-          workspace plus n8n (``_DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL``) for
-          personal.
+          the harness set (``_DEFAULT_HARNESS_DISALLOWED_TOOLS``) plus n8n
+          (``_DEFAULT_EXTRA_DISALLOWED_TOOLS``) for every workspace.
 
         So, with the toggle at its default (on), every chat blocks the
         PWA-irrelevant harness tools (plan mode, cron, /loop wakeup, routine
@@ -522,10 +579,10 @@ class CiaoConfig:
         )
         extras = workspace_config.disallowed_tools
         if extras is None:
-            # The harness set applies to every workspace; personal adds n8n.
-            extras = list(_DEFAULT_HARNESS_DISALLOWED_TOOLS)
-            if workspace_config.name == "personal":
-                extras += _DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL
+            extras = [
+                *_DEFAULT_HARNESS_DISALLOWED_TOOLS,
+                *_DEFAULT_EXTRA_DISALLOWED_TOOLS,
+            ]
         # Union, preserving order, deduped.
         seen: set[str] = set()
         effective: list[str] = []

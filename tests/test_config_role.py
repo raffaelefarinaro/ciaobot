@@ -98,8 +98,12 @@ def test_ciao_workspaces_json_defines_named_workspaces(tmp_path: Path) -> None:
     assert config.default_model_for_workspace("home") == "haiku"
     assert config.disallowed_tools_for_workspace("home") == ["Bash", "mcp__example"]
     assert config.default_model_for_workspace("client") == "opus"
-    # Non-personal workspaces still deny the PWA-irrelevant harness tools.
-    assert config.disallowed_tools_for_workspace("client") == list(_DEFAULT_HARNESS_DISALLOWED_TOOLS)
+    # A workspace with no explicit denylist gets the defaults — harness tools
+    # plus n8n — whatever it is named. This used to hand n8n's default deny only
+    # to a workspace called "personal", so `client` went unprotected.
+    client_denied = config.disallowed_tools_for_workspace("client")
+    assert set(_DEFAULT_HARNESS_DISALLOWED_TOOLS).issubset(set(client_denied))
+    assert "mcp__n8n_mcp" in client_denied
 
 
 def test_runtime_workspaces_json_is_used_when_env_is_absent(tmp_path: Path) -> None:
