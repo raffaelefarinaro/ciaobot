@@ -367,7 +367,7 @@
         <div
           v-if="activePopupComment"
           class="fv-comment-backdrop"
-          @click="closePopupComment"
+          @click="handleBackdropClick"
         ></div>
         <div
           v-if="activePopupComment"
@@ -792,18 +792,39 @@ const sidebarCards = computed(() => {
   return cards
 })
 
+let popupOpenTimestamp = 0
+
+function openPopupCommentForElement(el: HTMLElement, id: string): void {
+  const rect = el.getBoundingClientRect()
+  const modal = modalEl.value
+  if (!modal) return
+  const modalRect = modal.getBoundingClientRect()
+  popupAnchor.value = {
+    top: rect.bottom - modalRect.top + 6,
+    left: Math.max(8, rect.left - modalRect.left),
+  }
+  activePopupId.value = id
+  popupOpenTimestamp = Date.now()
+}
+
 function scrollToHighlight(id: string): void {
   if (!bodyEl.value) return
   const highlights = bodyEl.value.querySelectorAll('[data-comment-id]')
   for (const el of Array.from(highlights)) {
     if ((el as HTMLElement).dataset.commentId === id) {
-      const top = (el as HTMLElement).offsetTop - 60
-      bodyEl.value.scrollTo({ top: Math.max(top, 0), behavior: 'smooth' })
       const targetEl = el as HTMLElement
+      const top = targetEl.offsetTop - 60
+      bodyEl.value.scrollTo({ top: Math.max(top, 0), behavior: 'smooth' })
       targetEl.classList.remove('comment-pulse')
       void targetEl.offsetWidth
       targetEl.classList.add('comment-pulse')
       window.setTimeout(() => targetEl.classList.remove('comment-pulse'), 1200)
+
+      window.setTimeout(() => {
+        if (targetEl) {
+          openPopupCommentForElement(targetEl, id)
+        }
+      }, 350)
       break
     }
   }
@@ -940,6 +961,11 @@ function openPopupComment(e: MouseEvent, id: string): void {
 
 function closePopupComment(): void {
   activePopupId.value = null
+}
+
+function handleBackdropClick(): void {
+  if (Date.now() - popupOpenTimestamp < 150) return
+  closePopupComment()
 }
 
 function deletePopupComment(): void {
@@ -2095,7 +2121,7 @@ if (typeof window !== 'undefined') {
 }
 
 .fv-md {
-  font-size: 14px;
+  font-size: var(--text-base);
   line-height: 1.6;
   max-width: 88ch;
 }
@@ -2103,28 +2129,30 @@ if (typeof window !== 'undefined') {
 .fv-md :deep(:first-child) { margin-top: 0; }
 .fv-md :deep(:last-child) { margin-bottom: 0; }
 .fv-md :deep(pre) {
-  background: var(--bg2, rgba(255, 255, 255, 0.04));
-  padding: 10px 12px;
-  border-radius: 6px;
+  background: var(--bg);
+  padding: 8px 12px;
+  border-radius: var(--radius-sm, 6px);
   overflow-x: auto;
-  font-size: 12px;
+  font-size: var(--text-sm);
+  font-family: var(--font-mono);
 }
 .fv-md :deep(code) {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
 }
 .fv-md :deep(:not(pre) > code) {
-  background: var(--bg2, rgba(255, 255, 255, 0.06));
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
   padding: 1px 5px;
   border-radius: 4px;
-  font-size: 0.92em;
+  font-size: 0.9em;
 }
 .fv-md :deep(:is(h1, h2, h3, h4)) {
   margin-top: 1.2em;
   margin-bottom: 0.4em;
-  line-height: 1.3;
+  line-height: 1.35;
+  font-weight: 700;
 }
-.fv-md :deep(h1) { font-size: 1.6em; }
-.fv-md :deep(h2) { font-size: 1.3em; }
+.fv-md :deep(h1) { font-size: 1.5em; }
+.fv-md :deep(h2) { font-size: 1.25em; }
 .fv-md :deep(h3) { font-size: 1.1em; }
 .fv-md :deep(a) {
   color: var(--accent);

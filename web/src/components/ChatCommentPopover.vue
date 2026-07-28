@@ -4,7 +4,7 @@
     <div
       v-if="popover?.pinned && comment"
       class="pop-backdrop"
-      @click="close()"
+      @click="onBackdropClick"
     ></div>
     <div
       v-if="popover && comment"
@@ -14,6 +14,12 @@
       @mouseenter="onPopoverEnter"
       @mouseleave="onPopoverLeave"
     >
+      <div class="pop-header">
+        <div class="pop-actions">
+          <button class="pop-btn-edit" @click.stop="onEdit" title="Edit">✎</button>
+          <button class="pop-btn-remove" @click.stop="onDelete" title="Delete">×</button>
+        </div>
+      </div>
       <div v-if="comment.images?.length" class="pop-images">
         <img
           v-for="img in comment.images"
@@ -41,11 +47,16 @@
 //
 // The parent drives it imperatively through the exposed handlers, which it binds
 // at event time rather than render time so the ref is not a render dependency.
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
 import { useHoverPinPopover } from '../composables/useHoverPinPopover'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
 
 type ChatComment = { id: string; comment: string; images?: string[] }
+
+const emit = defineEmits<{
+  (e: 'edit', comment: ChatComment): void
+  (e: 'delete', id: string): void
+}>()
 
 const props = defineProps<{
   comments: ChatComment[]
@@ -89,6 +100,16 @@ const {
   hasTargets: () => props.comments.length > 0,
 })
 
+let pinTimestamp = 0
+watch(() => popover.value?.pinned, (pinned) => {
+  if (pinned) pinTimestamp = Date.now()
+})
+
+function onBackdropClick(): void {
+  if (Date.now() - pinTimestamp < 150) return
+  close()
+}
+
 const openId = computed(() => popover.value?.id ?? null)
 
 /**
@@ -102,6 +123,20 @@ function pinFromEvent(e: MouseEvent): string | null {
   if (!highlight || !id) return null
   show(id, highlight, true)
   return id
+}
+
+function onEdit(): void {
+  if (!comment.value) return
+  const c = comment.value
+  close()
+  emit('edit', c)
+}
+
+function onDelete(): void {
+  if (!comment.value) return
+  const id = comment.value.id
+  close()
+  emit('delete', id)
 }
 
 defineExpose({ show, close, clearPendingClose, onTargetOver, onTargetOut, pinFromEvent, openId })
@@ -124,8 +159,35 @@ defineExpose({ show, close, clearPendingClose, onTargetOver, onTargetOut, pinFro
   border-left: 3px solid var(--accent, #60a5fa);
   border-radius: 8px;
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
-  padding: 10px 12px;
+  padding: 8px 12px 10px;
   box-sizing: border-box;
+}
+.pop-header {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  margin-bottom: 2px;
+}
+.pop-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.pop-btn-edit,
+.pop-btn-remove {
+  background: transparent;
+  border: none;
+  color: var(--fg2);
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.pop-btn-edit:hover,
+.pop-btn-remove:hover {
+  background: var(--bg2);
+  color: var(--fg);
 }
 .pop-images {
   display: flex;

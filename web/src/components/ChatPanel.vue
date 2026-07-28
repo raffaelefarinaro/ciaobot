@@ -539,6 +539,8 @@
         ref="commentPopover"
         :comments="store.pendingChatComments"
         :draft-id="DRAFT_COMMENT_ID"
+        @edit="openEditFromChatPopover"
+        @delete="deleteChatComment"
       />
       </div>
     </div>
@@ -720,20 +722,20 @@
         <button
           type="button"
           class="comment-chip-body"
-          @click="openChatCommentChip(c.id, $event)"
+          @click.stop.prevent="openChatCommentChip(c.id, $event)"
           :title="`${c.selection}\n\n${c.comment}`"
         >
           <span class="comment-chip-quote">"{{ truncate(c.selection, 40) }}"</span>
           <span class="comment-chip-note">{{ truncate(c.comment, 40) }}</span>
         </button>
-        <button class="comment-chip-remove" @click="deleteChatComment(c.id)" title="Remove">&times;</button>
+        <button class="comment-chip-remove" @click.stop.prevent="deleteChatComment(c.id)" title="Remove">&times;</button>
       </span>
       <span v-for="c in store.pendingComments" :key="`fc-${c.id}`" class="comment-chip">
         <span class="comment-chip-icon" aria-hidden="true">&#128196;</span>
         <button
           type="button"
           class="comment-chip-body"
-          @click="openFileCommentChip(c)"
+          @click.stop.prevent="openFileCommentChip(c)"
           :title="`${c.path}\n\n${c.selection}\n\n${c.comment}`"
         >
           <span class="comment-chip-file">
@@ -1590,7 +1592,11 @@ function updateChatSelectionAnchorFromRange(range: Range): void {
   }
 }
 
+const isProgrammaticScrolling = ref(false)
+let programmaticScrollTimer: ReturnType<typeof setTimeout> | null = null
+
 function onChatScrollReanchor(): void {
+  if (isProgrammaticScrolling.value) return
   closeChatCommentPopover()
   if (commentDraft.value || !lastChatSelectionRange) return
   try {
@@ -2053,7 +2059,8 @@ function scrollToHighlight(id: string): void {
 
 // Click from a pending chat-comment chip: scroll the conversation to the
 // highlighted text AND flash it briefly so the eye lands on the right span.
-function jumpToCommentHighlight(id: string): void {
+function jumpToCommentHighlight(id: string, onComplete?: () => void): void {
+  isProgrammaticScrolling.value = true
   scrollToHighlight(id)
   const root = messagesEl.value
   if (!root) return
@@ -2064,27 +2071,46 @@ function jumpToCommentHighlight(id: string): void {
   void hl.offsetWidth
   hl.classList.add('comment-highlight--pulse')
   setTimeout(() => hl.classList.remove('comment-highlight--pulse'), 1200)
+
+  if (programmaticScrollTimer) clearTimeout(programmaticScrollTimer)
+  programmaticScrollTimer = setTimeout(() => {
+    isProgrammaticScrolling.value = false
+    programmaticScrollTimer = null
+    if (onComplete) onComplete()
+  }, 350)
 }
 
-// A chip is a summary. Clicking it flashes the source text in the transcript
-// and opens an edit popover anchored to the chip, which holds the full quote
-// and the editable note. Anchored rather than a drawer so the thing you are
-// editing stays next to the thing you clicked.
-function openChatCommentChip(id: string, e: MouseEvent): void {
-  if (editingChatCommentId.value === id) {
-    cancelEditChatComment()
-    return
+function anchorFromElement(el: HTMLElement): { top: number; left: number } {
+  const rect = el.getBoundingClientRect()
+  return {
+    top: clampAnchorTop(rect.bottom + 6, 80),
+    left: clampAnchorLeft(rect.left, 280),
   }
+}
+
+function openEditFromChatPopover(c: { id: string; comment: string; images?: string[] }): void {
+  const hl = messagesEl.value?.querySelector(`.comment-highlight[data-comment-id="${c.id}"]`) as HTMLElement | null
+  const anchor = hl ? anchorFromElement(hl) : null
+  chipEditAnchor.value = anchor
+  const target = store.pendingChatComments.find(x => x.id === c.id)
+  if (target) startEditChatComment(target)
+}
+
+// Clicking a pending comment chip scrolls to the commented text in the transcript,
+// pulses the highlight, and pins the read popover over the highlight.
+function openChatCommentChip(id: string, _e: MouseEvent): void {
   const c = store.pendingChatComments.find(x => x.id === id)
   if (!c) return
-  jumpToCommentHighlight(id)
-  startEditChatComment(c)
-  const chip = (e.currentTarget as HTMLElement).closest('.comment-chip') as HTMLElement | null
-  const rect = (chip ?? (e.currentTarget as HTMLElement)).getBoundingClientRect()
-  // Open upward: the chip row sits directly above the composer, so there is
-  // never room below it. The popover pulls itself back on screen if the chip is
-  // too near the top.
-  chipEditAnchor.value = { top: rect.top - 6, left: rect.left }
+  cancelEditChatComment()
+
+  jumpToCommentHighlight(id, () => {
+    const rootEl = messagesEl.value
+    if (!rootEl) return
+    const hl = rootEl.querySelector(`.comment-highlight[data-comment-id="${id}"]`) as HTMLElement | null
+    if (hl) {
+      commentPopover.value?.show(id, hl, true)
+    }
+  })
 }
 
 // Sending the turn clears every pending comment, and switching chats swaps the
@@ -2099,9 +2125,17 @@ watch(
 
 // File comments have no highlight in the transcript, so the chip opens the
 // document at the commented line instead.
-function openFileCommentChip(c: { path: string; lineStart?: number | null }): void {
+function openFileCommentChip(c: { id?: string; path: string; lineStart?: number | null }): void {
   if (!c.path) return
-  fileViewer.open(c.path, c.lineStart ?? null, chat.value?.chat_id || '')
+  const activePinKey = chat.value?.chat_id || store.activeChatId
+  const pinnedPath = activePinKey ? store.pinnedFileFor(activePinKey) : ''
+  if (pinnedPath && pinnedPath === c.path) {
+    window.dispatchEvent(new CustomEvent('ciao:jump-pinned-comment', {
+      detail: { id: c.id, line: c.lineStart }
+    }))
+  } else {
+    fileViewer.open(c.path, c.lineStart ?? null, chat.value?.chat_id || '')
+  }
 }
 
 if (typeof document !== 'undefined') {
@@ -4191,18 +4225,38 @@ details[open] > .activity-summary::before {
 }
 .message-content :deep(pre) {
   background: var(--bg);
-  padding: 8px;
-  border-radius: 4px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm, 6px);
   overflow-x: auto;
-  margin: 4px 0;
+  margin: 6px 0;
   white-space: pre-wrap;
   max-width: 100%;
+  font-family: var(--font-mono);
 }
 
 .message-content :deep(code) {
-  font-family: var(--font);
-  font-size: var(--text-base);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
 }
+
+.message-content :deep(pre code) {
+  padding: 0;
+  background: transparent;
+  font-size: var(--text-sm);
+}
+
+.message-content :deep(:is(h1, h2, h3, h4)) {
+  margin-top: 1.2em;
+  margin-bottom: 0.4em;
+  line-height: 1.35;
+  font-weight: 700;
+}
+.message-content :deep(h1) { font-size: 1.5em; }
+.message-content :deep(h2) { font-size: 1.25em; }
+.message-content :deep(h3) { font-size: 1.1em; }
 
 .message-content :deep(p) { margin: 4px 0; }
 .message-content :deep(ul),
@@ -4435,8 +4489,10 @@ details[open] > .activity-summary::before {
   display: inline-flex;
   align-items: flex-start;
   gap: 6px;
-  max-width: min(280px, 100%);
-  padding: 6px 8px 6px 8px;
+  width: 220px;
+  max-width: min(220px, 100%);
+  height: 48px;
+  padding: 6px 8px;
   background: var(--bg);
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
@@ -4444,6 +4500,7 @@ details[open] > .activity-summary::before {
   font-size: 11px;
   line-height: 1.35;
   color: var(--fg);
+  box-sizing: border-box;
 }
 /* The chip whose edit popover is open. */
 .comment-chip.is-editing {

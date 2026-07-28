@@ -11,17 +11,6 @@
       </template>
       <template #actions>
         <button
-          v-if="commentsForFile.length"
-          class="pfp-comments-toggle"
-          :class="{ active: showCommentList }"
-          @click="showCommentList = !showCommentList"
-          :title="`${commentsForFile.length} comment${commentsForFile.length === 1 ? '' : 's'}`"
-          aria-label="Comments"
-        >
-          <span class="pfp-comments-toggle-icon">💬</span>
-          <span class="pfp-comments-toggle-count">{{ commentsForFile.length }}</span>
-        </button>
-        <button
           v-if="kind === 'excalidraw'"
           class="btn-icon"
           :class="{ active: isEditingExcalidraw }"
@@ -222,64 +211,15 @@
         </template>
       </div>
 
-      <!-- On-demand comment drawer (toggled from the header pill). -->
-      <div v-if="showCommentList" class="pfp-comment-backdrop" @click="showCommentList = false"></div>
-      <div v-if="showCommentList" class="pfp-comment-drawer" @mousedown.stop>
-        <div class="pfp-sidebar-header">
-          <span class="pfp-sidebar-title">Comments</span>
-          <span class="pfp-sidebar-count">{{ commentsForFile.length }}</span>
-          <button class="pfp-drawer-close" @click="showCommentList = false" title="Close">×</button>
-        </div>
-        <div v-if="!commentsForFile.length" class="pfp-drawer-empty">No comments yet. Select text in the document to add one.</div>
-
-        <div class="pfp-sidebar-list">
-          <div
-            v-for="c in commentsForFile"
-            :key="c.id"
-            :data-card-id="c.id"
-            class="pfp-sidebar-card"
-            :class="{ 'is-editing': editingCommentId === c.id }"
-            @click="editingCommentId !== c.id && scrollToHighlight(c.id)"
-          >
-            <div class="pfp-sidebar-card-header">
-              <span class="pfp-sidebar-card-line" v-if="commentLineLabel(c)">{{ commentLineLabel(c) }}</span>
-              <div v-if="!projectsStore.isStreaming" class="pfp-sidebar-card-actions">
-                <button class="pfp-sidebar-card-edit" @click.stop="startEditComment(c)" title="Edit">✎</button>
-                <button class="pfp-sidebar-card-remove" @click.stop="deleteFileComment(c.id)" title="Delete">×</button>
-              </div>
-            </div>
-            <div class="pfp-sidebar-card-quote">"{{ truncate(c.selection, 120) }}"</div>
-            <div v-if="editingCommentId !== c.id && c.images?.length" class="pfp-sidebar-card-images">
-              <img v-for="img in c.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="card-image-thumb" @click.stop />
-            </div>
-            <div v-if="editingCommentId !== c.id" class="pfp-sidebar-card-note">{{ c.comment }}</div>
-            <div v-if="editingCommentId === c.id" class="pfp-sidebar-edit-body" @mousedown.stop>
-              <textarea
-                ref="editCommentInputEl"
-                v-model="editDraftText"
-                class="pfp-sidebar-edit-input"
-                placeholder="Edit comment…"
-                rows="2"
-                @keydown="onEditKeydown"
-              ></textarea>
-              <div v-if="editingCommentImages.length" class="pfp-sidebar-edit-images">
-                <span v-for="(img, i) in editingCommentImages" :key="img" class="draft-image-preview">
-                  <img :src="`/api/images/${img}`" :alt="img" class="draft-image-thumb" />
-                  <button class="draft-image-remove" @click="removeEditImage(i)" title="Remove">×</button>
-                </span>
-              </div>
-              <div class="pfp-sidebar-edit-actions">
-                <label class="image-btn-sm" title="Upload images">
-                  <input type="file" accept="image/*" multiple hidden @change="handleEditImageUpload($event, c.id)" />
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-                </label>
-                <button class="pfp-btn-sm" @click="cancelEditComment" type="button">Cancel</button>
-                <button class="pfp-btn-sm primary" @click="saveEditComment(c.id)" type="button">Save</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
+      <CommentComposePopover
+        :anchor="editingCommentId && editAnchor ? editAnchor : null"
+        v-model="editDraftText"
+        :images="editingCommentImages"
+        @cancel="cancelEditComment"
+        @save="editingCommentId && saveEditComment(editingCommentId)"
+        @upload="editingCommentId && handleEditImageUpload($event, editingCommentId)"
+        @remove-image="removeEditImage"
+      />
 
       <CommentComposePopover
         :anchor="commentDraft && draftAnchor ? draftAnchor : null"
@@ -295,7 +235,7 @@
       <div
         v-if="commentPopover?.pinned && popoverComment"
         class="pfp-comment-backdrop pfp-comment-backdrop--dim"
-        @click="closeCommentPopover()"
+        @click="handlePfpBackdropClick"
       ></div>
       <div
         v-if="commentPopover && popoverComment"
@@ -779,6 +719,16 @@ const {
   onPin: () => cancelEditComment(),
 })
 
+let pfpPinTimestamp = 0
+watch(() => commentPopover.value?.pinned, (pinned) => {
+  if (pinned) pfpPinTimestamp = Date.now()
+})
+
+function handlePfpBackdropClick(): void {
+  if (Date.now() - pfpPinTimestamp < 150) return
+  closeCommentPopover()
+}
+
 function deleteFileComment(id: string): void {
   projectsStore.removeFileComment(cleanPath.value, id)
   nextTick(() => applyHighlights())
@@ -789,26 +739,25 @@ function deleteFromPopover(id: string): void {
   deleteFileComment(id)
 }
 
-// Edit lives in one place (the drawer). The read popover's Edit button opens
-// the drawer with that comment already in edit mode.
 function editFromPopover(c: { id: string; comment: string; images?: string[] }): void {
+  const popAnchor = commentPopover.value
+    ? toViewportAnchor({ top: commentPopover.value.top, left: commentPopover.value.left })
+    : null
   closeCommentPopover()
-  showCommentList.value = true
-  startEditComment(c)
-  nextTick(() => scrollDrawerToCard(c.id))
+  startEditComment(c, popAnchor)
 }
 
-function scrollDrawerToCard(id: string): void {
-  const list = rootEl.value?.querySelector('.pfp-comment-drawer .pfp-sidebar-list') as HTMLElement | null
-  const card = list?.querySelector(`[data-card-id="${id}"]`) as HTMLElement | null
-  if (!list || !card) return
-  const listRect = list.getBoundingClientRect()
-  const cardRect = card.getBoundingClientRect()
-  list.scrollTop += cardRect.top - listRect.top - 8
-}
+const DRAFT_COMMENT_ID = '__draft__'
 
 const lineCommentMap = computed(() => {
   const map = new Map<number, string>()
+  const draft = commentDraft.value
+  if (draft?.lines) {
+    const end = draft.lines.end || draft.lines.start
+    for (let l = draft.lines.start; l <= end; l++) {
+      map.set(l, DRAFT_COMMENT_ID)
+    }
+  }
   for (const c of commentsForFile.value) {
     if (!c.lineStart) continue
     const end = c.lineEnd || c.lineStart
@@ -927,8 +876,15 @@ function applyHighlights(): void {
     for (const c of commentsForFile.value) {
       highlightInMarkdown(root, c.selection, c.id)
     }
+    const draft = commentDraft.value
+    if (draft?.selection) {
+      highlightInMarkdown(root, draft.selection, DRAFT_COMMENT_ID)
+    }
   }
 }
+
+const isProgrammaticScrolling = ref(false)
+let programmaticScrollTimer: ReturnType<typeof setTimeout> | null = null
 
 function scrollToHighlight(id: string): void {
   if (!bodyEl.value) return
@@ -938,7 +894,8 @@ function scrollToHighlight(id: string): void {
     if ((el as HTMLElement).dataset.commentId === id) matches.push(el as HTMLElement)
   }
   if (!matches.length) return
-  bodyEl.value.scrollTo({ top: matches[0].offsetTop - 20, behavior: 'smooth' })
+  isProgrammaticScrolling.value = true
+  bodyEl.value.scrollTo({ top: Math.max(matches[0].offsetTop - 20, 0), behavior: 'smooth' })
   // Pulse the matching highlights for ~1s so it's obvious which one we
   // scrolled to. We pulse every fragment of the same highlight at once,
   // so a multi-cell or multi-line selection still reads as one item.
@@ -949,9 +906,12 @@ function scrollToHighlight(id: string): void {
     void el.offsetWidth
     el.classList.add('comment-pulse')
   }
-  window.setTimeout(() => {
-    for (const el of matches) el.classList.remove('comment-pulse')
-  }, 1100)
+  if (programmaticScrollTimer) clearTimeout(programmaticScrollTimer)
+  programmaticScrollTimer = setTimeout(() => {
+    isProgrammaticScrolling.value = false
+    programmaticScrollTimer = null
+    showCommentPopover(id, matches[0], true)
+  }, 350)
 }
 
 function onMdClick(e: MouseEvent): void {
@@ -1123,6 +1083,7 @@ function updateSelectionAnchorFromRange(range: Range): void {
 }
 
 function onScrollReanchor(): void {
+  if (isProgrammaticScrolling.value) return
   // A read popover is pinned to a highlight's screen position, so scrolling
   // the document underneath it would leave it floating detached. Close it.
   if (commentPopover.value) closeCommentPopover()
@@ -1176,7 +1137,6 @@ function onSelectionChange(): void {
 }
 
 const commentDraftImages = ref<string[]>([])
-const editingCommentImages = ref<string[]>([])
 
 /** Convert a panel-relative anchor to viewport coords for the shared compose popover.
  *
@@ -1205,6 +1165,7 @@ function openCommentForSelection(): void {
   lastSelectionRange = null
   lastCsvCell = null
   window.getSelection()?.removeAllRanges()
+  nextTick(() => applyHighlights())
 }
 
 function anchorFromCellRect(rect: DOMRect): Anchor | null {
@@ -1271,6 +1232,7 @@ function openCommentForCsvCell(): void {
   commentDraftImages.value = []
   selectionAnchor.value = null
   lastSelectionRange = null
+  nextTick(() => applyHighlights())
 }
 
 function cancelComment(): void {
@@ -1281,6 +1243,7 @@ function cancelComment(): void {
   lastSelectionLines = null
   lastSelectionRange = null
   lastCsvCell = null
+  nextTick(() => applyHighlights())
 }
 
 function saveComment(): void {
@@ -1304,6 +1267,7 @@ function saveComment(): void {
   lastSelectionText = ''
   lastSelectionLines = null
   lastCsvCell = null
+  nextTick(() => applyHighlights())
 }
 
 async function handleDraftImageUpload(e: Event): Promise<void> {
@@ -1327,22 +1291,32 @@ function removeDraftImage(index: number): void {
 // ── Edit existing comment ────────────────────────────────────────────
 const editingCommentId = ref<string | null>(null)
 const editDraftText = ref('')
-const editCommentInputEl = ref<HTMLTextAreaElement>()
+const editingCommentImages = ref<string[]>([])
+const editAnchor = ref<Anchor | null>(null)
 
-function startEditComment(c: { id: string; comment: string; images?: string[] }): void {
+function startEditComment(c: { id: string; comment: string; images?: string[] }, anchor?: Anchor | null): void {
   editingCommentId.value = c.id
   editDraftText.value = c.comment
   editingCommentImages.value = c.images ? [...c.images] : []
-  nextTick(() => editCommentInputEl.value?.focus())
+
+  if (anchor) {
+    editAnchor.value = anchor
+  } else {
+    const el = bodyEl.value?.querySelector(`[data-comment-id="${c.id}"]`) as HTMLElement | null
+    const local = el ? anchorFromElement(el) : null
+    editAnchor.value = local ? toViewportAnchor(local) : null
+  }
 }
 
 function cancelEditComment(): void {
   editingCommentId.value = null
   editDraftText.value = ''
   editingCommentImages.value = []
+  editAnchor.value = null
 }
 
-function saveEditComment(id: string): void {
+function saveEditComment(id: string | null): void {
+  if (!id) return
   const note = editDraftText.value.trim()
   if (!note) return
   const path = cleanPath.value
@@ -1357,12 +1331,11 @@ function saveEditComment(id: string): void {
   for (const img of nextImages) {
     if (!existingImages.includes(img)) projectsStore.addFileCommentImage(path, id, img)
   }
-  editingCommentId.value = null
-  editDraftText.value = ''
-  editingCommentImages.value = []
+  cancelEditComment()
 }
 
-async function handleEditImageUpload(e: Event, id: string): Promise<void> {
+async function handleEditImageUpload(e: Event, id: string | null): Promise<void> {
+  if (!id) return
   const input = e.target as HTMLInputElement
   if (!input.files?.length) return
   const chatId = projectsStore.activeChatId
@@ -1399,16 +1372,33 @@ function onEditKeydown(e: KeyboardEvent): void {
   }
 }
 
+function onJumpPinnedCommentEvent(e: Event): void {
+  const customEv = e as CustomEvent<{ id?: string; line?: number | null }>
+  const { id, line } = customEv.detail || {}
+  if (id) {
+    scrollToHighlight(id)
+  } else if (line != null) {
+    const match = commentsForFile.value.find(c => c.lineStart === line)
+    if (match) scrollToHighlight(match.id)
+  }
+}
+
 if (typeof document !== 'undefined') {
   document.addEventListener('selectionchange', onSelectionChange)
 }
 onMounted(() => {
   bodyEl.value?.addEventListener('scroll', onScrollReanchor, { passive: true })
+  if (typeof window !== 'undefined') {
+    window.addEventListener('ciao:jump-pinned-comment', onJumpPinnedCommentEvent)
+  }
 })
 onBeforeUnmount(() => {
   clearHoverClose()
   if (typeof document !== 'undefined') {
     document.removeEventListener('selectionchange', onSelectionChange)
+  }
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('ciao:jump-pinned-comment', onJumpPinnedCommentEvent)
   }
   bodyEl.value?.removeEventListener('scroll', onScrollReanchor)
 })
@@ -1744,7 +1734,7 @@ watch(() => props.filePath, () => {
 }
 
 .pfp-md {
-  font-size: 14px;
+  font-size: var(--text-base);
   line-height: 1.6;
   max-width: 100%;
 }
@@ -1769,28 +1759,30 @@ watch(() => props.filePath, () => {
 .pfp-md :deep(:first-child) { margin-top: 0; }
 .pfp-md :deep(:last-child) { margin-bottom: 0; }
 .pfp-md :deep(pre) {
-  background: var(--bg2, rgba(255, 255, 255, 0.04));
-  padding: 10px 12px;
-  border-radius: 6px;
+  background: var(--bg);
+  padding: 8px 12px;
+  border-radius: var(--radius-sm, 6px);
   overflow-x: auto;
-  font-size: 12px;
+  font-size: var(--text-sm);
+  font-family: var(--font-mono);
 }
 .pfp-md :deep(code) {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
 }
 .pfp-md :deep(:not(pre) > code) {
-  background: var(--bg2, rgba(255, 255, 255, 0.06));
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
   padding: 1px 5px;
   border-radius: 4px;
-  font-size: 0.92em;
+  font-size: 0.9em;
 }
 .pfp-md :deep(:is(h1, h2, h3, h4)) {
   margin-top: 1.2em;
   margin-bottom: 0.4em;
-  line-height: 1.3;
+  line-height: 1.35;
+  font-weight: 700;
 }
-.pfp-md :deep(h1) { font-size: 1.6em; }
-.pfp-md :deep(h2) { font-size: 1.3em; }
+.pfp-md :deep(h1) { font-size: 1.5em; }
+.pfp-md :deep(h2) { font-size: 1.25em; }
 .pfp-md :deep(h3) { font-size: 1.1em; }
 .pfp-md :deep(a) {
   color: var(--accent);

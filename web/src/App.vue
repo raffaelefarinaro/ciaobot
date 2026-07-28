@@ -291,12 +291,14 @@ watch(showStartup, (show) => {
   --safe-right: env(safe-area-inset-right, 0px);
   --safe-bottom: 0px;
   --safe-left: env(safe-area-inset-left, 0px);
-  /* Type */
-  --font: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  /* Type: Hybrid typography model. Sans-serif for prose & UI, monospace for code & developer tokens. */
+  --font-mono: ui-monospace, 'SF Mono', 'Fira Code', 'Cascadia Code', 'Segoe UI Mono', 'Roboto Mono', Menlo, Consolas, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font: var(--font-sans);
   --text-xs: calc(11px * var(--font-scale));   /* labels, badges, pills, section titles */
   --text-sm: calc(12px * var(--font-scale));   /* hints, secondary text */
-  --text-base: calc(13px * var(--font-scale)); /* body */
-  --text-lg: calc(15px * var(--font-scale));   /* headers, titles */
+  --text-base: calc(14px * var(--font-scale)); /* body */
+  --text-lg: calc(16px * var(--font-scale));   /* headers, titles */
   /* Motion */
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
 }
@@ -403,7 +405,7 @@ body::before {
 
 /* ── Wordmark ────────────────────────────────────────────────── */
 .wordmark {
-  font-family: var(--font);
+  font-family: var(--font-mono);
   font-weight: 700;
   letter-spacing: -0.02em;
   color: var(--fg);
@@ -620,6 +622,7 @@ input:focus, textarea:focus, select:focus {
 }
 
 .section-title {
+  font-family: var(--font-mono);
   font-size: var(--text-xs);
   color: var(--fg2);
   letter-spacing: 0.5px;
@@ -627,6 +630,7 @@ input:focus, textarea:focus, select:focus {
   font-weight: 600;
 }
 .label-eyebrow {
+  font-family: var(--font-mono);
   font-size: var(--text-xs);
   color: var(--fg2);
   text-transform: uppercase;
@@ -693,6 +697,7 @@ input:focus, textarea:focus, select:focus {
 
 /* ── Badge / pill (status, context, day-of-week) ─────────────── */
 .badge {
+  font-family: var(--font-mono);
   display: inline-flex;
   align-items: center;
   padding: 2px 8px;

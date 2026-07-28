@@ -28,24 +28,26 @@ colors:
   light-text-muted: "#5f607d"
   light-border: "#d2d4e3"
 typography:
+  fontFamilySans: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'Segoe UI', Roboto, sans-serif"
+  fontFamilyMono: "SF Mono, Fira Code, Cascadia Code, monospace"
   title:
-    fontFamily: "SF Mono, Fira Code, Cascadia Code, monospace"
+    fontFamily: "{typography.fontFamilySans}"
     fontSize: 16px
     fontWeight: 700
     lineHeight: 1.3
     letterSpacing: -0.02em
   body:
-    fontFamily: "SF Mono, Fira Code, Cascadia Code, monospace"
-    fontSize: 13px
+    fontFamily: "{typography.fontFamilySans}"
+    fontSize: 14px
     fontWeight: 400
-    lineHeight: 1.5
+    lineHeight: 1.6
   body-mobile:
-    fontFamily: "SF Mono, Fira Code, Cascadia Code, monospace"
+    fontFamily: "{typography.fontFamilySans}"
     fontSize: 16px
     fontWeight: 400
-    lineHeight: 1.5
+    lineHeight: 1.6
   label:
-    fontFamily: "SF Mono, Fira Code, Cascadia Code, monospace"
+    fontFamily: "{typography.fontFamilyMono}"
     fontSize: 11px
     fontWeight: 600
     lineHeight: 1.3
@@ -131,12 +133,12 @@ Color is never the only state signal. Pair status colors with text, an icon, a s
 
 ## Typography
 
-The product uses the system monospace stack: **SF Mono**, **Fira Code**, **Cascadia Code**, then `monospace`. This is a functional choice: chat metadata, commands, schedules, identifiers, and system status align naturally and retain the product's console character.
+The product uses a **hybrid typography system**: a clean system proportional sans-serif stack (`-apple-system`, `SF Pro`, `Segoe UI`, `Roboto`) for conversational chat prose and general UI, paired with a monospaced stack (**SF Mono**, **Fira Code**, **Cascadia Code**, `monospace`) for code blocks, badges, commands, schedules, timestamps, and terminal identifiers.
 
 - **Titles:** 15–16px, bold, with slightly tight tracking. Titles should remain visible when actions compete for space.
-- **Body:** 13–14px on desktop with comfortable line height. Long-form assistant content may breathe more than controls and metadata.
+- **Body:** 14px on desktop with comfortable 1.6 line height for natural reading.
 - **Mobile form text:** At least 16px to prevent browser auto-zoom while keeping user zoom available.
-- **Labels:** 11px, semibold, often uppercase with 0.5px tracking. Use for short section titles and field labels, not paragraphs.
+- **Labels & Badges:** Monospaced 11px, semibold, often uppercase with 0.5px tracking for technical precision.
 - **Wordmark:** Bold monospace with a pink `›` prompt prefix. A blinking caret may appear only in startup or explicitly terminal-like moments.
 
 Respect the user-controlled font scale. Truncate compact navigation labels only when the full value remains available through context, title text, or an expanded view.
