@@ -224,7 +224,7 @@
         <!-- User message -->
         <div v-else-if="item.kind === 'user'" class="message-wrap user" :class="{ 'actions-tapped': tappedMessageKey === `user-${i}` }">
           <div class="message-row" @click="toggleMessageActions(`user-${i}`, $event)">
-            <div class="message user">
+            <div class="message user" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-user-${i}`" :data-msg-index="i" data-msg-role="user">
               <div class="message-content">
                 <div v-if="item.msg.images?.length" class="message-images">
                   <a
@@ -281,7 +281,7 @@
         <!-- Final assistant message -->
         <div v-else-if="item.kind === 'assistant'" class="message-wrap assistant" :class="{ 'actions-tapped': tappedMessageKey === `assistant-${i}` }">
           <div class="message-row" @click="toggleMessageActions(`assistant-${i}`, $event)">
-            <div class="message assistant" :class="{ error: item.msg.is_error }">
+            <div class="message assistant" :class="{ error: item.msg.is_error }" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-asst-${i}`" :data-msg-index="i" data-msg-role="assistant">
               <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
               <div v-if="item.outputs?.length" class="answer-outputs" role="group" aria-label="Outputs">
                 <span class="answer-outputs-label">Outputs</span>
@@ -362,7 +362,7 @@
           </div>
         </div>
         <!-- System message (errors, etc) -->
-        <div v-else-if="item.kind === 'system'" class="message system">
+        <div v-else-if="item.kind === 'system'" class="message system" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-sys-${i}`" :data-msg-index="i" data-msg-role="system">
           <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
           <div v-if="isErrorMsg(item.msg.content)" class="error-actions">
             <button
@@ -511,86 +511,16 @@
           Comment
         </button>
 
-        <!-- Floating compose popover: anchored to selection -->
-        <div
-          v-if="commentDraft && draftAnchor"
-          ref="chatCommentComposeEl"
-          class="chat-comment-pop chat-comment-compose"
-          :style="{ top: draftAnchor.top + 'px', left: draftAnchor.left + 'px' }"
-          @mousedown.stop
-        >
-          <div class="chat-pop-quote">"{{ truncate(commentDraft.selection, 120) }}"</div>
-          <textarea
-            ref="chatCommentInputEl"
-            v-model="commentDraft.text"
-            class="chat-sidebar-draft-input"
-            placeholder="Add a comment…"
-            rows="3"
-            @keydown="onChatCommentKeydown"
-          ></textarea>
-          <div v-if="commentDraftImages.length" class="chat-sidebar-draft-images">
-            <span v-for="(img, i) in commentDraftImages" :key="img" class="draft-image-preview">
-              <img :src="`/api/images/${img}`" :alt="img" class="draft-image-thumb" />
-              <button class="draft-image-remove" @click="removeDraftImage(i)" title="Remove">&times;</button>
-            </span>
-          </div>
-          <div class="chat-sidebar-draft-actions">
-            <label class="image-btn-sm" title="Upload images">
-              <input type="file" accept="image/*" multiple hidden @change="handleDraftImageUpload" />
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-            </label>
-            <button class="btn-sm" @click="cancelChatComment" type="button">Cancel</button>
-            <button
-              class="btn-sm primary"
-              :disabled="!commentDraft.text.trim()"
-              @click="saveChatComment"
-              type="button"
-            >Add comment</button>
-          </div>
-        </div>
-
-        <!-- Edit popover: anchored to the composer chip that opened it. The
-             chip is only a summary, so the full quote and the editable note
-             live here rather than in a full-height drawer. -->
-        <div v-if="chipEditAnchor" class="chat-comment-backdrop" @click="cancelEditChatComment"></div>
-        <div
-          v-if="chipEditAnchor && editingChatCommentId"
-          ref="chipEditPopEl"
-          class="chat-comment-pop chat-comment-compose"
-          :style="{ top: chipEditAnchor.top + 'px', left: chipEditAnchor.left + 'px' }"
-          @mousedown.stop
-        >
-          <div class="chat-pop-quote">"{{ truncate(editingChatCommentSelection, 160) }}"</div>
-          <textarea
-            ref="sidebarEditInputEl"
-            v-model="editingChatCommentText"
-            class="chat-sidebar-draft-input"
-            placeholder="Edit comment…"
-            rows="3"
-            @keydown="onEditChatCommentKeydown($event, editingChatCommentId)"
-          ></textarea>
-          <div v-if="editingChatCommentImages.length" class="chat-sidebar-draft-images">
-            <span v-for="(img, i) in editingChatCommentImages" :key="img" class="draft-image-preview">
-              <img :src="`/api/images/${img}`" :alt="img" class="draft-image-thumb" />
-              <button class="draft-image-remove" @click="removeEditImage(i)" title="Remove">&times;</button>
-            </span>
-          </div>
-          <div class="chat-sidebar-draft-actions">
-            <label class="image-btn-sm" title="Upload images">
-              <input type="file" accept="image/*" multiple hidden @change="handleEditImageUpload($event, editingChatCommentId)" />
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-            </label>
-            <button class="btn-sm" @click="cancelEditChatComment" type="button">Cancel</button>
-            <button
-              class="btn-sm primary"
-              :disabled="!editingChatCommentText.trim()"
-              @click="saveEditChatComment(editingChatCommentId)"
-              type="button"
-            >Save</button>
-          </div>
-        </div>
-
       </Teleport>
+      <CommentComposePopover
+        :anchor="commentDraft && draftAnchor ? draftAnchor : null"
+        v-model="composeText"
+        :images="commentDraftImages"
+        @cancel="cancelChatComment"
+        @save="saveChatComment"
+        @upload="handleDraftImageUpload"
+        @remove-image="removeDraftImage"
+      />
       <!-- Read popover for a comment highlight. Owns its own state so hovering
            a highlight doesn't re-render the transcript; see the component. -->
       <ChatCommentPopover
@@ -914,6 +844,7 @@ import { buildForkSnapshot } from '../lib/chatFork'
 import { formatCommentLocation } from '../lib/commentContext'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
 import ChatCommentPopover from './ChatCommentPopover.vue'
+import CommentComposePopover from './CommentComposePopover.vue'
 
 type RenderItem =
   | { kind: 'user'; msg: ChatMessage; turnIndex?: number }
@@ -1533,46 +1464,101 @@ const inputPlaceholder = computed(() => {
 })
 
 // ── Chat comment selection UX ─────────────────────────────────────────
-type ChatCommentDraft = { selection: string; text: string }
+type ChatCommentDraft = {
+  selection: string
+  text: string
+  messageId?: string
+  messageIndex?: number
+  messageRole?: string
+  occurrenceIndex?: number
+  paragraphIndex?: number
+}
 const selectionAnchor = ref<{ top: number; left: number } | null>(null)
 const draftAnchor = ref<{ top: number; left: number } | null>(null)
 
-// Rough heights of the two things anchored to a selection. Both are
-// `position: fixed`, so anything pushed past the viewport bottom cannot be
-// scrolled to — selecting text in the newest message would otherwise put the
-// composer's Save button off screen. The composer grows when images are
-// attached, so it re-clamps against its measured height once mounted.
 const COMMENT_PILL_H = 44
 const COMMENT_COMPOSE_H = 208
 const commentDraft = ref<ChatCommentDraft | null>(null)
-const chatCommentInputEl = ref<HTMLTextAreaElement>()
-const chatCommentComposeEl = ref<HTMLElement>()
 const sidebarEditInputEl = ref<HTMLTextAreaElement>()
 const chipEditPopEl = ref<HTMLElement>()
 const editingChatCommentId = ref<string | null>(null)
 const editingChatCommentText = ref('')
-// Quoted text of the comment being edited, shown in the popover because the
-// chip only has room for a truncated version.
 const editingChatCommentSelection = ref('')
-// Viewport position of the edit popover, anchored to the chip that opened it.
 const chipEditAnchor = ref<{ top: number; left: number } | null>(null)
 const commentDraftImages = ref<string[]>([])
 const editingChatCommentImages = ref<string[]>([])
+const composeText = computed({
+  get: () => commentDraft.value?.text ?? '',
+  set: (v: string) => {
+    if (commentDraft.value) commentDraft.value.text = v
+  },
+})
 let lastChatSelectionText = ''
 let lastChatSelectionRange: Range | null = null
-// Bubble element the current selection originated in. Captured at selection
-// time so applyHighlights() can re-wrap only the right bubble (otherwise a
-// short selection like "OK" could wrongly highlight in any other message).
 let lastChatSelectionBubble: HTMLElement | null = null
+let lastChatSelectionMsgId: string | undefined
+let lastChatSelectionMsgIndex: number | undefined
+let lastChatSelectionMsgRole: string | undefined
+let lastChatSelectionOccurrenceIndex: number | undefined
+let lastChatSelectionParagraphIndex: number | undefined
 let draftBubbleEl: HTMLElement | null = null
 const commentBubbleById = new Map<string, HTMLElement>()
-// Highlight id used for the in-progress draft selection so it shows in the
-// bubble while the user is still typing the comment (before it's saved).
 const DRAFT_COMMENT_ID = '__draft__'
 
 function truncate(s: string, n: number): string {
   if (!s) return ''
   return s.length > n ? s.slice(0, n - 1) + '…' : s
+}
+
+function getSelectionStartOffsetInElement(container: HTMLElement, range: Range): number {
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT)
+  let charPos = 0
+  let node: Node | null
+  while ((node = walker.nextNode())) {
+    if (node === range.startContainer) {
+      return charPos + range.startOffset
+    }
+    charPos += node.textContent?.length || 0
+  }
+  return -1
+}
+
+function computeOccurrenceIndex(contentEl: HTMLElement, range: Range, selection: string): number {
+  const fullText = contentEl.textContent || ''
+  const startOffset = getSelectionStartOffsetInElement(contentEl, range)
+  const needle = selection.trim()
+  if (startOffset === -1 || !needle) return 0
+
+  let occurrence = 0
+  let pos = 0
+  while (pos < fullText.length) {
+    const idx = fullText.indexOf(needle, pos)
+    if (idx === -1) break
+    if (idx === startOffset) {
+      return occurrence
+    }
+    if (idx > startOffset) {
+      break
+    }
+    occurrence++
+    pos = idx + 1
+  }
+  return Math.max(0, occurrence)
+}
+
+function computeParagraphIndex(contentEl: HTMLElement, range: Range): number {
+  const blocks = contentEl.querySelectorAll('p, li, pre, blockquote, h1, h2, h3, h4, h5, h6')
+  if (blocks.length > 0) {
+    const idx = Array.from(blocks).findIndex(b => b.contains(range.startContainer))
+    if (idx !== -1) return idx
+  }
+  const startOffset = getSelectionStartOffsetInElement(contentEl, range)
+  if (startOffset > 0) {
+    const textBefore = (contentEl.textContent || '').slice(0, startOffset)
+    const doubleNewlines = textBefore.match(/\n\s*\n/g)
+    return doubleNewlines ? doubleNewlines.length : 0
+  }
+  return 0
 }
 
 function updateChatSelectionAnchorFromRange(range: Range): void {
@@ -1659,6 +1645,14 @@ function onChatSelectionChange(): void {
   lastChatSelectionText = text
   lastChatSelectionBubble = bubble
   lastChatSelectionRange = range.cloneRange()
+
+  const contentEl = (bubble.querySelector('.message-content') || bubble) as HTMLElement
+  lastChatSelectionMsgId = bubble.dataset.msgId
+  lastChatSelectionMsgIndex = bubble.dataset.msgIndex ? parseInt(bubble.dataset.msgIndex, 10) : undefined
+  lastChatSelectionMsgRole = bubble.dataset.msgRole
+  lastChatSelectionOccurrenceIndex = computeOccurrenceIndex(contentEl, range, text)
+  lastChatSelectionParagraphIndex = computeParagraphIndex(contentEl, range)
+
   updateChatSelectionAnchorFromRange(range)
 }
 
@@ -1673,28 +1667,17 @@ function openCommentForSelection(): void {
   commentDraft.value = {
     selection: lastChatSelectionText,
     text: '',
+    messageId: lastChatSelectionMsgId,
+    messageIndex: lastChatSelectionMsgIndex,
+    messageRole: lastChatSelectionMsgRole,
+    occurrenceIndex: lastChatSelectionOccurrenceIndex,
+    paragraphIndex: lastChatSelectionParagraphIndex,
   }
   selectionAnchor.value = null
   lastChatSelectionRange = null
   window.getSelection()?.removeAllRanges()
-  nextTick(() => {
-    chatCommentInputEl.value?.focus()
-    reclampDraftAnchor()
-    applyHighlights()
-  })
+  nextTick(() => applyHighlights())
 }
-
-/** Re-clamp the composer against its real height once it has rendered. */
-function reclampDraftAnchor(): void {
-  const el = chatCommentComposeEl.value
-  if (!el || !draftAnchor.value) return
-  const height = el.offsetHeight || COMMENT_COMPOSE_H
-  const top = clampAnchorTop(draftAnchor.value.top, height)
-  if (top !== draftAnchor.value.top) draftAnchor.value = { ...draftAnchor.value, top }
-}
-
-// Attaching an image adds a preview row, so the composer outgrows the estimate.
-watch(commentDraftImages, () => nextTick(reclampDraftAnchor))
 
 function cancelChatComment(): void {
   commentDraft.value = null
@@ -1704,6 +1687,11 @@ function cancelChatComment(): void {
   lastChatSelectionText = ''
   lastChatSelectionBubble = null
   lastChatSelectionRange = null
+  lastChatSelectionMsgId = undefined
+  lastChatSelectionMsgIndex = undefined
+  lastChatSelectionMsgRole = undefined
+  lastChatSelectionOccurrenceIndex = undefined
+  lastChatSelectionParagraphIndex = undefined
   nextTick(() => applyHighlights())
 }
 
@@ -1712,7 +1700,16 @@ function saveChatComment(): void {
   if (!draft) return
   const note = draft.text.trim()
   if (!note) return
-  const id = store.addPendingChatComment({ selection: draft.selection, comment: note, images: commentDraftImages.value.length ? commentDraftImages.value : undefined })
+  const id = store.addPendingChatComment({
+    selection: draft.selection,
+    comment: note,
+    images: commentDraftImages.value.length ? commentDraftImages.value : undefined,
+    messageId: draft.messageId,
+    messageIndex: draft.messageIndex,
+    messageRole: draft.messageRole,
+    occurrenceIndex: draft.occurrenceIndex,
+    paragraphIndex: draft.paragraphIndex,
+  })
   if (draftBubbleEl) commentBubbleById.set(id, draftBubbleEl)
   draftBubbleEl = null
   commentDraft.value = null
@@ -1721,6 +1718,11 @@ function saveChatComment(): void {
   lastChatSelectionText = ''
   lastChatSelectionBubble = null
   lastChatSelectionRange = null
+  lastChatSelectionMsgId = undefined
+  lastChatSelectionMsgIndex = undefined
+  lastChatSelectionMsgRole = undefined
+  lastChatSelectionOccurrenceIndex = undefined
+  lastChatSelectionParagraphIndex = undefined
   nextTick(() => applyHighlights())
 }
 
@@ -1742,19 +1744,7 @@ function removeDraftImage(index: number): void {
   commentDraftImages.value.splice(index, 1)
 }
 
-function onChatCommentKeydown(e: KeyboardEvent): void {
-  if (e.key === 'Escape') {
-    e.preventDefault()
-    cancelChatComment()
-    return
-  }
-  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-    e.preventDefault()
-    saveChatComment()
-  }
-}
-
-// ── Edit / remove pending chat comments from the composer chips ──────
+// ── Edit / remove pending chat comments from the sidebar ─────────────
 function startEditChatComment(c: { id: string; selection: string; comment: string; images?: string[] }): void {
   editingChatCommentId.value = c.id
   editingChatCommentText.value = c.comment
@@ -1838,7 +1828,7 @@ function clearHighlights(root: HTMLElement): void {
   }
 }
 
-function highlightInElement(root: HTMLElement, selection: string, commentId: string): boolean {
+function highlightInElement(root: HTMLElement, selection: string, commentId: string, occurrenceIndex?: number): boolean {
   const text = selection.trim()
   if (!text) return false
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
@@ -1858,12 +1848,32 @@ function highlightInElement(root: HTMLElement, selection: string, commentId: str
   let matchStart = -1
   let matchEnd = -1
 
-  // Exact match first
-  const exactIdx = fullText.indexOf(text)
-  if (exactIdx !== -1) {
-    matchStart = exactIdx
-    matchEnd = exactIdx + text.length
-  } else {
+  // Match the specific occurrence index if specified
+  const targetOccurrence = occurrenceIndex ?? 0
+  let currentOccurrence = 0
+  let pos = 0
+  while (pos < fullText.length) {
+    const idx = fullText.indexOf(text, pos)
+    if (idx === -1) break
+    if (currentOccurrence === targetOccurrence) {
+      matchStart = idx
+      matchEnd = idx + text.length
+      break
+    }
+    currentOccurrence++
+    pos = idx + 1
+  }
+
+  // Fallback if target occurrence was not found (e.g. text changed): pick first exact match
+  if (matchStart === -1) {
+    const exactIdx = fullText.indexOf(text)
+    if (exactIdx !== -1) {
+      matchStart = exactIdx
+      matchEnd = exactIdx + text.length
+    }
+  }
+
+  if (matchStart === -1) {
     // Fallback: whitespace-normalized match for selections that span
     // <br>, block boundaries, or have extra whitespace from rendering.
     const normFull = fullText.replace(/\s+/g, '')
@@ -1934,7 +1944,7 @@ function highlightInElement(root: HTMLElement, selection: string, commentId: str
   return success
 }
 
-function findBubbleForComment(root: HTMLElement, c: ChatComment): HTMLElement | null {
+function findBubbleForComment(root: HTMLElement, c: { id: string; selection: string; messageId?: string; messageIndex?: number; messageRole?: string }): HTMLElement | null {
   const stored = commentBubbleById.get(c.id)
   if (stored && root.contains(stored)) {
     const content = stored.querySelector('.message-content')
@@ -1945,15 +1955,31 @@ function findBubbleForComment(root: HTMLElement, c: ChatComment): HTMLElement | 
       return stored
     }
   }
+
+  if (c.messageId) {
+    const escapedId = c.messageId.replace(/"/g, '\\"')
+    const byId = root.querySelector(`.message[data-msg-id="${escapedId}"]`) as HTMLElement | null
+    if (byId) return byId
+  }
+
+  if (c.messageIndex != null && c.messageIndex >= 0) {
+    const byIndex = root.querySelector(`.message[data-msg-index="${c.messageIndex}"]`) as HTMLElement | null
+    if (byIndex) return byIndex
+  }
+
   const bubbles = root.querySelectorAll('.message')
   for (const bubble of Array.from(bubbles)) {
-    const content = bubble.querySelector('.message-content')
+    const el = bubble as HTMLElement
+    if (c.messageRole && el.dataset.msgRole && el.dataset.msgRole !== c.messageRole) {
+      continue
+    }
+    const content = el.querySelector('.message-content')
     if (!content) continue
     const text = content.textContent || ''
     const normText = text.replace(/\s+/g, '')
     const normSelection = c.selection.replace(/\s+/g, '')
     if (text.includes(c.selection) || normText.includes(normSelection)) {
-      return bubble as HTMLElement
+      return el
     }
   }
   return null
@@ -1967,7 +1993,7 @@ function applyHighlights(): void {
   for (const c of store.pendingChatComments) {
     const bubble = findBubbleForComment(root, c)
     if (bubble) {
-      highlightInElement(bubble, c.selection, c.id)
+      highlightInElement(bubble, c.selection, c.id, c.occurrenceIndex)
     } else {
       console.warn('Bubble not found for comment', c.id, c.selection.slice(0, 80))
     }
@@ -1977,7 +2003,7 @@ function applyHighlights(): void {
   // they're commenting on while they type, not only after saving.
   const draft = commentDraft.value
   if (draft && draftBubbleEl && root.contains(draftBubbleEl)) {
-    highlightInElement(draftBubbleEl, draft.selection, DRAFT_COMMENT_ID)
+    highlightInElement(draftBubbleEl, draft.selection, DRAFT_COMMENT_ID, draft.occurrenceIndex)
   }
 }
 
@@ -5288,19 +5314,6 @@ details[open] > .activity-summary::before {
   inset: 0;
   z-index: 40;
   background: rgba(0, 0, 0, 0.32);
-}
-.chat-comment-pop {
-  position: fixed;
-  z-index: 41;
-  width: 280px;
-  max-width: calc(100vw - 16px);
-  background: var(--bg);
-  border: 1px solid var(--border-strong);
-  border-left: 3px solid var(--accent, #60a5fa);
-  border-radius: 8px;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
-  padding: 10px 12px;
-  box-sizing: border-box;
 }
 .btn-sm {
   display: inline-flex;
