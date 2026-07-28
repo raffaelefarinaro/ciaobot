@@ -26,6 +26,9 @@
 - **Auto-turn marks.** A user turn fired by a loop or schedule is marked `↻ auto` in the
   transcript, so a self-driven turn is no longer indistinguishable from something you typed
   (`556263c`, `6e627a4`).
+- **Per-workspace accent colour.** Each workspace picks one of five presets in Settings and
+  the PWA tints its chrome to match, so which workspace you are in is visible at a glance
+  instead of something you read off a label (`9ae33bb`).
 - **MCP settings you can actually edit.** Servers, secrets, and asset labels are editable
   from Settings, and the Providers page lists only the platform connectors and skills that
   are enabled (`9c42f5e`, `5afe526`).
