@@ -61,12 +61,14 @@ function neutralizeTags(value: string): string {
 
 function referenceBlock(source: string | null, selection: string, comment: string, images?: string[]): string {
   const lines: string[] = ['<user-comment-reference>']
-  if (source) lines.push(`<reference-source>${neutralizeTags(source)}</reference-source>`)
-  lines.push('<quoted-text>', neutralizeTags(selection), '</quoted-text>')
-  lines.push('<user-comment>', neutralizeTags(comment), '</user-comment>')
+  if (source) lines.push(`<reference-source>${neutralizeTags(source.trim())}</reference-source>`)
+  const cleanSelection = neutralizeTags(selection.trim())
+  lines.push(`<quoted-text>${cleanSelection}</quoted-text>`)
+  const cleanComment = neutralizeTags(comment.trim())
+  if (cleanComment) {
+    lines.push(`<user-comment>${cleanComment}</user-comment>`)
+  }
   if (images?.length) {
-    // Images are also sent as real attachments; this manifest just preserves
-    // the mapping of which image belongs to which comment.
     images.forEach((img, idx) => lines.push(`Attachment [Image ${idx + 1}]: ${img}`))
   }
   lines.push('</user-comment-reference>')

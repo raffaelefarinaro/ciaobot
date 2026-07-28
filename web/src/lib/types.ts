@@ -159,6 +159,10 @@ export interface ChatMessage {
   usage?: Record<string, string>
   quota?: Record<string, unknown>
   images?: string[]
+  // True when this user turn was fired by a loop or schedule rather than
+  // typed. Drives the ↻ marker on the bubble, so a self-driven turn is not
+  // mistaken for something the reader sent. Only present on user messages.
+  unattended?: boolean
   // Monotonic per-chat user-turn index. Server-assigned; used to dedup
   // user_echo events replayed on WS reconnect against already-rendered
   // history or an optimistic local push. Only present on user messages.
@@ -274,7 +278,11 @@ export type WsEvent =
   | { type: 'result'; text: string; is_error: boolean; effective_model: string; usage: Record<string, string>; quota?: Record<string, unknown>; session_id: string; sent_at?: string; completed_at?: string; duration_ms?: number }
   | { type: 'permission_request'; tool_name: string; tool_input?: string; message: string; request_id: string }
   | { type: 'chat_title'; chat_id: string; title: string }
-  | { type: 'user_echo'; text: string; images?: string[]; turn_index?: number; sent_at?: string }
+  | { type: 'user_echo'; text: string; images?: string[]; turn_index?: number; sent_at?: string; unattended?: boolean }
+  // A tool call was refused (user Deny, or the auto-deny on an unattended
+  // run). The call never executed, so any file card already painted for this
+  // tool_use_id has to be retracted.
+  | { type: 'tool_denied'; tool_use_id: string }
   | { type: 'queued'; id?: string; text: string; images?: string[] }
   | { type: 'queue_state'; queue: Array<{ id: string; text: string; images?: string[] }> }
   | { type: 'steered'; text: string; images?: string[] }
@@ -305,6 +313,10 @@ export type EventsWsMessage =
   | { type: 'project_updated'; project: ProjectInfo }
   | { type: 'project_deleted'; project_id: string }
   | { type: 'projects_reordered'; workspace: string; order: string[] }
+  // A loop was created, edited, started, stopped, or deleted. Carries no
+  // payload: the client refetches /api/loops, which is the only place the
+  // computed running/next_run fields are assembled.
+  | { type: 'loops_changed' }
   | { type: 'open_chat'; chat_id: string }
   | { type: 'server_restarting'; message?: string }
   | { type: 'provider_subchat_created'; subchat_id: string; parent_chat_id: string; record: ProviderSubchatRecord }

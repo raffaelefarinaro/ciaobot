@@ -93,16 +93,6 @@
           <span class="bg-agents-dot" aria-hidden="true"></span>
           {{ store.activeBackgroundAgents }} agent{{ store.activeBackgroundAgents === 1 ? '' : 's' }}
         </span>
-        <button
-          v-if="store.pendingChatComments.length"
-          class="chat-comments-toggle"
-          :class="{ active: showCommentList }"
-          @click="showCommentList = !showCommentList"
-          title="Toggle chat comments"
-        >
-          <span class="chat-comments-toggle-icon">💬</span>
-          <span class="chat-comments-toggle-count">{{ store.pendingChatComments.length }}</span>
-        </button>
         <div class="model-picker-wrap" ref="modelPickerRef" data-tour="model-picker">
           <button
             class="model-picker-btn touch-hit"
@@ -250,8 +240,15 @@
                 </div>
                 <div v-html="renderMarkdown(item.msg.content)"></div>
               </div>
-              <div v-if="item.msg.timestamp" class="message-meta">
-                {{ formatTime(item.msg.timestamp) }}
+              <div v-if="item.msg.timestamp || item.msg.unattended" class="message-meta">
+                <!-- Loop/schedule tick, not something the reader typed. Without
+                     this the two are indistinguishable in the transcript. -->
+                <span
+                  v-if="item.msg.unattended"
+                  class="unattended-mark"
+                  title="Sent automatically by a loop or schedule"
+                >&#10227; auto</span>
+                <span v-if="item.msg.timestamp">{{ formatTime(item.msg.timestamp) }}</span>
               </div>
             </div>
             <div v-if="item.msg.content?.trim()" class="message-actions">
@@ -517,6 +514,7 @@
         <!-- Floating compose popover: anchored to selection -->
         <div
           v-if="commentDraft && draftAnchor"
+          ref="chatCommentComposeEl"
           class="chat-comment-pop chat-comment-compose"
           :style="{ top: draftAnchor.top + 'px', left: draftAnchor.left + 'px' }"
           @mousedown.stop
@@ -551,6 +549,47 @@
           </div>
         </div>
 
+        <!-- Edit popover: anchored to the composer chip that opened it. The
+             chip is only a summary, so the full quote and the editable note
+             live here rather than in a full-height drawer. -->
+        <div v-if="chipEditAnchor" class="chat-comment-backdrop" @click="cancelEditChatComment"></div>
+        <div
+          v-if="chipEditAnchor && editingChatCommentId"
+          ref="chipEditPopEl"
+          class="chat-comment-pop chat-comment-compose"
+          :style="{ top: chipEditAnchor.top + 'px', left: chipEditAnchor.left + 'px' }"
+          @mousedown.stop
+        >
+          <div class="chat-pop-quote">"{{ truncate(editingChatCommentSelection, 160) }}"</div>
+          <textarea
+            ref="sidebarEditInputEl"
+            v-model="editingChatCommentText"
+            class="chat-sidebar-draft-input"
+            placeholder="Edit comment…"
+            rows="3"
+            @keydown="onEditChatCommentKeydown($event, editingChatCommentId)"
+          ></textarea>
+          <div v-if="editingChatCommentImages.length" class="chat-sidebar-draft-images">
+            <span v-for="(img, i) in editingChatCommentImages" :key="img" class="draft-image-preview">
+              <img :src="`/api/images/${img}`" :alt="img" class="draft-image-thumb" />
+              <button class="draft-image-remove" @click="removeEditImage(i)" title="Remove">&times;</button>
+            </span>
+          </div>
+          <div class="chat-sidebar-draft-actions">
+            <label class="image-btn-sm" title="Upload images">
+              <input type="file" accept="image/*" multiple hidden @change="handleEditImageUpload($event, editingChatCommentId)" />
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+            </label>
+            <button class="btn-sm" @click="cancelEditChatComment" type="button">Cancel</button>
+            <button
+              class="btn-sm primary"
+              :disabled="!editingChatCommentText.trim()"
+              @click="saveEditChatComment(editingChatCommentId)"
+              type="button"
+            >Save</button>
+          </div>
+        </div>
+
       </Teleport>
       <!-- Read popover for a comment highlight. Owns its own state so hovering
            a highlight doesn't re-render the transcript; see the component. -->
@@ -562,84 +601,6 @@
       </div>
     </div>
 
-    <!-- On-demand right-side comment drawer overlay (toggled from header pill) -->
-    <div v-if="showCommentList" class="chat-comment-backdrop" @click="showCommentList = false"></div>
-    <aside v-if="showCommentList" class="chat-comment-drawer" @mousedown.stop>
-      <div class="chat-sidebar-header">
-        <span class="chat-sidebar-title">Comments</span>
-        <span class="chat-sidebar-count">{{ store.pendingChatComments.length }}</span>
-        <button class="chat-drawer-close" @click="showCommentList = false" title="Close">&times;</button>
-      </div>
-      <div v-if="!store.pendingChatComments.length" class="chat-drawer-empty">No comments yet. Select text in a message to add one.</div>
-
-      <div class="chat-sidebar-list" ref="sidebarListEl">
-        <div
-          v-for="c in store.pendingChatComments"
-          :key="c.id"
-          class="chat-sidebar-card"
-          :class="{ 'is-editing': editingChatCommentId === c.id }"
-          :data-card-id="c.id"
-          @click="editingChatCommentId !== c.id && jumpToCommentHighlight(c.id)"
-        >
-          <div class="chat-sidebar-card-header">
-            <span class="chat-sidebar-card-file">Selection</span>
-            <div class="chat-sidebar-card-actions">
-              <button
-                v-if="editingChatCommentId !== c.id"
-                class="chat-sidebar-card-edit"
-                @click.stop="startEditChatComment(c)"
-                title="Edit"
-              >&#9998;</button>
-              <button
-                class="chat-sidebar-card-remove"
-                @click.stop="deleteChatComment(c.id)"
-                title="Delete"
-              >&times;</button>
-            </div>
-          </div>
-          <div class="chat-sidebar-card-quote">"{{ truncate(c.selection, 120) }}"</div>
-          <div v-if="editingChatCommentId !== c.id && c.images?.length" class="chat-sidebar-card-images">
-            <img
-              v-for="img in c.images"
-              :key="img"
-              :src="`/api/images/${img}`"
-              :alt="img"
-              class="card-image-thumb"
-              @click.stop
-            />
-          </div>
-          <div v-if="editingChatCommentId !== c.id" class="chat-sidebar-card-note">{{ c.comment }}</div>
-          <div v-if="editingChatCommentId === c.id" class="chat-sidebar-edit-body" @mousedown.stop @click.stop>
-            <textarea
-              ref="sidebarEditInputEl"
-              v-model="editingChatCommentText"
-              class="chat-sidebar-edit-input"
-              rows="3"
-              @keydown="onEditChatCommentKeydown($event, c.id)"
-            ></textarea>
-            <div v-if="editingChatCommentImages.length" class="chat-sidebar-edit-images">
-              <span v-for="(img, i) in editingChatCommentImages" :key="img" class="draft-image-preview">
-                <img :src="`/api/images/${img}`" :alt="img" class="draft-image-thumb" />
-                <button class="draft-image-remove" @click.stop="removeEditImage(i)" title="Remove">&times;</button>
-              </span>
-            </div>
-            <div class="chat-sidebar-edit-actions">
-              <label class="image-btn-sm" title="Upload images">
-                <input type="file" accept="image/*" multiple hidden @change="handleEditImageUpload($event, c.id)" />
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-              </label>
-              <button class="btn-sm" @click="cancelEditChatComment" type="button">Cancel</button>
-              <button
-                class="btn-sm primary"
-                :disabled="!editingChatCommentText.trim()"
-                @click="saveEditChatComment(c.id)"
-                type="button"
-              >Save</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </aside>
     </div>
 
     <!-- Scroll-to-bottom float button -->
@@ -717,7 +678,18 @@
           <span class="permission-tool">{{ p.tool_name }}</span>
           <span v-if="permissionReason(p)" class="permission-message">{{ permissionReason(p) }}</span>
         </div>
-        <pre v-if="p.tool_input" class="permission-input">{{ formatToolInput(p.tool_input) }}</pre>
+        <!-- Flat argument objects (the common case: MCP tools, Skill calls)
+             render as labelled rows, so a long `prompt` value reads as prose
+             instead of a JSON wall that gets clipped by the scroll box and
+             looks like the request failed to parse. Nested payloads and bare
+             strings fall back to the raw text. -->
+        <dl v-if="permissionArgs(p.tool_input)" class="permission-args">
+          <template v-for="f in permissionArgs(p.tool_input)" :key="f.key">
+            <dt>{{ f.key }}</dt>
+            <dd>{{ f.value }}</dd>
+          </template>
+        </dl>
+        <pre v-else-if="p.tool_input" class="permission-input">{{ formatToolInput(p.tool_input) }}</pre>
         <div class="permission-actions">
           <button
             class="btn-deny"
@@ -783,16 +755,52 @@
       </div>
     </div>
 
-    <!-- Pending image attachments. File and chat comments stay visible in
-         their own sidebars/viewers to avoid duplicate composer chips. -->
+    <!-- Staged attachments. Images, chat comments and file comments share one
+         lifecycle (staged here, sent with the next message, cleared on send),
+         so they share one row above the input. A chip is a summary; clicking a
+         chat-comment chip opens an edit popover anchored to it. -->
     <div
-      v-if="store.pendingImages.length"
+      v-if="store.pendingImages.length || store.pendingChatComments.length || store.pendingComments.length"
       class="pending-attachments"
     >
       <span v-for="(ref, i) in store.pendingImages" :key="`img-${ref}`" class="image-preview">
         <img :src="`/api/images/${ref}`" :alt="ref" class="image-preview-thumb" />
         <button class="image-ref-chip" @click="insertImageRef(i + 1)" title="Insert reference at cursor">[Image {{ i + 1 }}]</button>
         <button class="image-preview-remove" @click="removePendingImage(i)" title="Remove">&times;</button>
+      </span>
+      <span
+        v-for="c in store.pendingChatComments"
+        :key="`cc-${c.id}`"
+        class="comment-chip"
+        :class="{ 'is-editing': editingChatCommentId === c.id }"
+      >
+        <span class="comment-chip-icon" aria-hidden="true">&#128172;</span>
+        <button
+          type="button"
+          class="comment-chip-body"
+          @click="openChatCommentChip(c.id, $event)"
+          :title="`${c.selection}\n\n${c.comment}`"
+        >
+          <span class="comment-chip-quote">"{{ truncate(c.selection, 40) }}"</span>
+          <span class="comment-chip-note">{{ truncate(c.comment, 40) }}</span>
+        </button>
+        <button class="comment-chip-remove" @click="deleteChatComment(c.id)" title="Remove">&times;</button>
+      </span>
+      <span v-for="c in store.pendingComments" :key="`fc-${c.id}`" class="comment-chip">
+        <span class="comment-chip-icon" aria-hidden="true">&#128196;</span>
+        <button
+          type="button"
+          class="comment-chip-body"
+          @click="openFileCommentChip(c)"
+          :title="`${c.path}\n\n${c.selection}\n\n${c.comment}`"
+        >
+          <span class="comment-chip-file">
+            {{ fileCardBasename(c.path) }}
+            <span v-if="formatCommentLocation(c)" class="comment-chip-line">· {{ formatCommentLocation(c) }}</span>
+          </span>
+          <span class="comment-chip-note">{{ truncate(c.comment, 40) }}</span>
+        </button>
+        <button class="comment-chip-remove" @click="store.removePendingComment(c.id)" title="Remove">&times;</button>
       </span>
     </div>
 
@@ -904,6 +912,7 @@ import { formatTime, formatDuration } from '../lib/time'
 import { buildTurnParts, collectTraceOutputs, findFinalAnswerIndex, formatTokenUsage, traceSummaryMeta, traceSummaryMetaParts, type TraceOutput } from '../lib/chatActivity'
 import { buildForkSnapshot } from '../lib/chatFork'
 import { formatCommentLocation } from '../lib/commentContext'
+import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 
 type RenderItem =
@@ -1297,6 +1306,33 @@ function formatToolInput(raw: string) {
   }
 }
 
+// Split a tool input into `key: value` rows for the approval card. Returns
+// null when the payload isn't a plain object (bare command string, array,
+// truncated JSON) so the caller keeps the verbatim <pre> fallback. Nested
+// values are re-serialized compactly — the card is a "what am I approving"
+// glance, not a debugger.
+function permissionArgs(raw: string): { key: string; value: string }[] | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+  const rows = Object.entries(parsed as Record<string, unknown>).map(([key, value]) => ({
+    key,
+    value:
+      typeof value === 'string'
+        ? value
+        : value === null || value === undefined
+          ? String(value)
+          : typeof value === 'object'
+            ? JSON.stringify(value)
+            : String(value),
+  }))
+  return rows.length ? rows : null
+}
+
 // AskUserQuestion picker. The headless CLI can't render the SDK's built-in
 // picker, so the model's tool call lands with an empty result; the PWA owns
 // the actual UI here. `questionAnswers` holds the user's in-progress
@@ -1500,13 +1536,26 @@ const inputPlaceholder = computed(() => {
 type ChatCommentDraft = { selection: string; text: string }
 const selectionAnchor = ref<{ top: number; left: number } | null>(null)
 const draftAnchor = ref<{ top: number; left: number } | null>(null)
-const showCommentList = ref(false)
+
+// Rough heights of the two things anchored to a selection. Both are
+// `position: fixed`, so anything pushed past the viewport bottom cannot be
+// scrolled to — selecting text in the newest message would otherwise put the
+// composer's Save button off screen. The composer grows when images are
+// attached, so it re-clamps against its measured height once mounted.
+const COMMENT_PILL_H = 44
+const COMMENT_COMPOSE_H = 208
 const commentDraft = ref<ChatCommentDraft | null>(null)
 const chatCommentInputEl = ref<HTMLTextAreaElement>()
+const chatCommentComposeEl = ref<HTMLElement>()
 const sidebarEditInputEl = ref<HTMLTextAreaElement>()
-const sidebarListEl = ref<HTMLElement>()
+const chipEditPopEl = ref<HTMLElement>()
 const editingChatCommentId = ref<string | null>(null)
 const editingChatCommentText = ref('')
+// Quoted text of the comment being edited, shown in the popover because the
+// chip only has room for a truncated version.
+const editingChatCommentSelection = ref('')
+// Viewport position of the edit popover, anchored to the chip that opened it.
+const chipEditAnchor = ref<{ top: number; left: number } | null>(null)
 const commentDraftImages = ref<string[]>([])
 const editingChatCommentImages = ref<string[]>([])
 let lastChatSelectionText = ''
@@ -1520,10 +1569,6 @@ const commentBubbleById = new Map<string, HTMLElement>()
 // Highlight id used for the in-progress draft selection so it shows in the
 // bubble while the user is still typing the comment (before it's saved).
 const DRAFT_COMMENT_ID = '__draft__'
-
-const commentSidebarVisible = computed(
-  () => store.pendingChatComments.length > 0 || commentDraft.value !== null
-)
 
 function truncate(s: string, n: number): string {
   if (!s) return ''
@@ -1550,12 +1595,10 @@ function updateChatSelectionAnchorFromRange(range: Range): void {
   }
 
   const popoverW = Math.min(420, window.innerWidth * 0.9)
-  const top = endRect.bottom + 2
-  const left = Math.min(
-    Math.max(8, endRect.right + 6),
-    Math.max(8, window.innerWidth - popoverW - 8)
-  )
-  selectionAnchor.value = { top, left }
+  selectionAnchor.value = {
+    top: clampAnchorTop(endRect.bottom + 2, COMMENT_PILL_H),
+    left: clampAnchorLeft(endRect.right + 6, popoverW),
+  }
 }
 
 function onChatScrollReanchor(): void {
@@ -1622,7 +1665,10 @@ function onChatSelectionChange(): void {
 function openCommentForSelection(): void {
   if (!selectionAnchor.value || !lastChatSelectionText) return
   closeChatCommentPopover()
-  draftAnchor.value = selectionAnchor.value
+  draftAnchor.value = {
+    left: selectionAnchor.value.left,
+    top: clampAnchorTop(selectionAnchor.value.top, COMMENT_COMPOSE_H),
+  }
   draftBubbleEl = lastChatSelectionBubble
   commentDraft.value = {
     selection: lastChatSelectionText,
@@ -1633,9 +1679,22 @@ function openCommentForSelection(): void {
   window.getSelection()?.removeAllRanges()
   nextTick(() => {
     chatCommentInputEl.value?.focus()
+    reclampDraftAnchor()
     applyHighlights()
   })
 }
+
+/** Re-clamp the composer against its real height once it has rendered. */
+function reclampDraftAnchor(): void {
+  const el = chatCommentComposeEl.value
+  if (!el || !draftAnchor.value) return
+  const height = el.offsetHeight || COMMENT_COMPOSE_H
+  const top = clampAnchorTop(draftAnchor.value.top, height)
+  if (top !== draftAnchor.value.top) draftAnchor.value = { ...draftAnchor.value, top }
+}
+
+// Attaching an image adds a preview row, so the composer outgrows the estimate.
+watch(commentDraftImages, () => nextTick(reclampDraftAnchor))
 
 function cancelChatComment(): void {
   commentDraft.value = null
@@ -1695,17 +1754,19 @@ function onChatCommentKeydown(e: KeyboardEvent): void {
   }
 }
 
-// ── Edit / remove pending chat comments from the sidebar ─────────────
-function startEditChatComment(c: { id: string; comment: string; images?: string[] }): void {
+// ── Edit / remove pending chat comments from the composer chips ──────
+function startEditChatComment(c: { id: string; selection: string; comment: string; images?: string[] }): void {
   editingChatCommentId.value = c.id
   editingChatCommentText.value = c.comment
+  editingChatCommentSelection.value = c.selection
   editingChatCommentImages.value = c.images ? [...c.images] : []
-  nextTick(() => sidebarEditInputEl.value?.focus())
 }
 function cancelEditChatComment(): void {
   editingChatCommentId.value = null
   editingChatCommentText.value = ''
+  editingChatCommentSelection.value = ''
   editingChatCommentImages.value = []
+  chipEditAnchor.value = null
 }
 function saveEditChatComment(id: string): void {
   const text = editingChatCommentText.value.trim()
@@ -1942,7 +2003,6 @@ function handleHighlightClick(e: MouseEvent): void {
   const id = commentPopover.value?.pinFromEvent(e)
   if (!id) return
   e.stopPropagation()
-  scrollSidebarToCard(id)
 }
 
 // iOS Safari mishandles scrollIntoView on nested scrollable containers
@@ -1956,15 +2016,6 @@ function offsetTopWithin(el: HTMLElement, root: HTMLElement): number {
     node = node.offsetParent as HTMLElement | null
   }
   return top
-}
-
-function scrollSidebarToCard(id: string): void {
-  const root = sidebarListEl.value
-  if (!root) return
-  const card = root.querySelector(`.chat-sidebar-card[data-card-id="${id}"]`) as HTMLElement | null
-  if (!card) return
-  const top = offsetTopWithin(card, root) - (root.clientHeight - card.offsetHeight) / 2
-  root.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
 }
 
 function scrollToHighlight(id: string): void {
@@ -1989,6 +2040,68 @@ function jumpToCommentHighlight(id: string): void {
   void hl.offsetWidth
   hl.classList.add('comment-highlight--pulse')
   setTimeout(() => hl.classList.remove('comment-highlight--pulse'), 1200)
+}
+
+// A chip is a summary. Clicking it flashes the source text in the transcript
+// and opens an edit popover anchored to the chip, which holds the full quote
+// and the editable note. Anchored rather than a drawer so the thing you are
+// editing stays next to the thing you clicked.
+// Width matches .chat-comment-pop; the height is only a first estimate that
+// reclampChipEditAnchor() replaces with the measured value.
+const CHIP_EDIT_POP_W = 280
+const CHIP_EDIT_POP_H = 232
+
+function openChatCommentChip(id: string, e: MouseEvent): void {
+  if (editingChatCommentId.value === id) {
+    cancelEditChatComment()
+    return
+  }
+  const c = store.pendingChatComments.find(x => x.id === id)
+  if (!c) return
+  jumpToCommentHighlight(id)
+  startEditChatComment(c)
+  const chip = (e.currentTarget as HTMLElement).closest('.comment-chip') as HTMLElement | null
+  const rect = (chip ?? (e.currentTarget as HTMLElement)).getBoundingClientRect()
+  chipEditAnchor.value = {
+    // Open upward: the chip row sits directly above the composer, so there is
+    // never room below it.
+    top: clampAnchorTop(rect.top - CHIP_EDIT_POP_H - 6, CHIP_EDIT_POP_H),
+    left: clampAnchorLeft(rect.left, CHIP_EDIT_POP_W),
+  }
+  nextTick(() => {
+    reclampChipEditAnchor()
+    sidebarEditInputEl.value?.focus()
+  })
+}
+
+/** Re-clamp against the popover's real height once it has rendered. */
+function reclampChipEditAnchor(): void {
+  const el = chipEditPopEl.value
+  const anchor = chipEditAnchor.value
+  if (!el || !anchor) return
+  const height = el.offsetHeight || CHIP_EDIT_POP_H
+  const top = clampAnchorTop(anchor.top, height)
+  if (top !== anchor.top) chipEditAnchor.value = { ...anchor, top }
+}
+
+// Adding an image grows the popover past its estimate.
+watch(editingChatCommentImages, () => nextTick(reclampChipEditAnchor))
+
+// Sending the turn clears every pending comment, and switching chats swaps the
+// bucket. Either way the chip the popover is anchored to is gone, so close it
+// instead of leaving an editor floating over a comment that no longer exists.
+watch(
+  () => store.pendingChatComments.some(c => c.id === editingChatCommentId.value),
+  (stillThere) => {
+    if (editingChatCommentId.value && !stillThere) cancelEditChatComment()
+  }
+)
+
+// File comments have no highlight in the transcript, so the chip opens the
+// document at the commented line instead.
+function openFileCommentChip(c: { path: string; lineStart?: number | null }): void {
+  if (!c.path) return
+  fileViewer.open(c.path, c.lineStart ?? null, chat.value?.chat_id || '')
 }
 
 if (typeof document !== 'undefined') {
@@ -2423,13 +2536,6 @@ const renderData = computed<{
     // bookkeeping tools (TodoWrite, etc.) that produce no further user-facing
     // text. In that case the answer text is the real reply and must render as
     // a normal assistant bubble; the trailing tools just join the trace.
-    // While streaming, any in-progress turn buffer without a completed answer bubble
-    // is actively rendered by the live stream trace block below (`store.currentTimeline`).
-    // Clear the buffer so activity steps do not duplicate as a static reasoning trace.
-    if (store.isStreaming && !finalMsg) {
-      buffer = []
-      return
-    }
 
     const trailingHasThinking = trailing.some(m => m.tool_name === '_thinking')
     const turnSubchats = currentTurnIndex !== null ? subchatsByTurn.get(currentTurnIndex) || [] : []
@@ -2447,6 +2553,11 @@ const renderData = computed<{
       return
     }
 
+    // The in-flight turn is already drawn by the live stream trace block
+    // (`store.currentTimeline`), so drop its buffer rather than emitting a
+    // second, static copy. Only the trailing turn is in flight — earlier turns
+    // keep their trace even when they never produced an answer bubble (the
+    // user hit Stop, or the turn ended in tool calls only).
     if (isFinal && store.isStreaming) {
       buffer = []
       return
@@ -3399,23 +3510,32 @@ function insertImageRef(n: number) {
 .message {
   flex: 1;
   max-width: 100%;
-  padding: 8px 8px 8px 20px;
-  border-radius: var(--radius);
+  padding: 10px 14px;
   font-size: var(--text-base);
   line-height: 1.5;
   word-break: break-word;
   min-width: 0;
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
 
 .message.user {
-  background: var(--bg3);
+  background: color-mix(in srgb, var(--accent2) 12%, var(--bg3));
+  border: 1px solid var(--border-strong);
+  border-radius: 14px 14px 2px 14px;
   color: var(--fg);
   margin-left: 48px;
+}
+
+:root.theme-light .message.user {
+  background: color-mix(in srgb, var(--accent2) 8%, var(--bg3));
+  border-color: var(--border);
 }
 
 .message.assistant {
   background: var(--bg2);
   border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px 14px 14px 14px;
   line-height: 1.6;
   margin-right: 48px;
 }
@@ -4114,15 +4234,14 @@ details[open] > .activity-summary::before {
    reads; here they're just styled. */
 .message-content :deep(user-comment-reference) {
   display: block;
-  border-left: 3px solid var(--accent);
-  border-radius: 4px;
-  background: var(--bg);
-  padding: 6px 10px;
-  margin: 6px 0;
+  margin: 6px 0 10px;
 }
 .message-content :deep(reference-source) {
   display: block;
-  font-size: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
   color: var(--fg2);
   margin-bottom: 4px;
 }
@@ -4131,12 +4250,41 @@ details[open] > .activity-summary::before {
   white-space: pre-wrap;
   color: var(--fg2);
   font-style: italic;
-  border-left: 2px solid var(--border);
-  padding-left: 8px;
-  margin: 2px 0 6px;
+  background: var(--bg);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin: 4px 0;
 }
 .message-content :deep(user-comment) {
   display: block;
+  color: var(--fg);
+  font-style: normal;
+  font-weight: normal;
+  margin-top: 8px;
+}
+.message-content :deep(quoted-text p:first-child),
+.message-content :deep(user-comment p:first-child) {
+  margin-top: 0;
+}
+.message-content :deep(quoted-text p:last-child),
+.message-content :deep(user-comment p:last-child) {
+  margin-bottom: 0;
+}
+.message-content :deep(quoted-text > br:first-child),
+.message-content :deep(user-comment > br:first-child),
+.message-content :deep(quoted-text > br:last-child),
+.message-content :deep(user-comment > br:last-child) {
+  display: none;
+}
+.message-content :deep(blockquote) {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--bg);
+  border-radius: 6px;
+  color: var(--fg2);
+  font-style: italic;
 }
 
 /* File-path links produced by linkifyHtml/linkifyText. Subtle dotted
@@ -4187,6 +4335,15 @@ details[open] > .activity-summary::before {
 .message.user .message-meta {
   text-align: right;
 }
+
+/* Marks a turn fired by a loop or schedule. Accent-coloured so it reads as a
+   property of the message, not as part of the timestamp next to it. */
+.unattended-mark {
+  color: var(--accent);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin-right: 6px;
+}
 .tokens-group {
   white-space: nowrap;
   display: inline-block;
@@ -4208,8 +4365,8 @@ details[open] > .activity-summary::before {
   background: var(--bg);
 }
 
-/* Pending attachments row: images and file comments live above the input.
-   Chat comments live in the right sidebar. */
+/* Pending attachments row: images, chat comments and file comments all stage
+   here above the input. The drawers hold the full text. */
 .pending-attachments {
   display: flex;
   flex-wrap: wrap;
@@ -4219,6 +4376,10 @@ details[open] > .activity-summary::before {
   background: var(--bg2);
   border-top: 1px solid var(--border);
   flex-shrink: 0;
+  /* Comments wrap onto new rows, so cap the row before a long comment session
+     pushes the input off screen. */
+  max-height: 25vh;
+  overflow-y: auto;
 }
 
 .image-preview {
@@ -4274,7 +4435,7 @@ details[open] > .activity-summary::before {
   display: inline-flex;
   align-items: flex-start;
   gap: 6px;
-  max-width: min(360px, 100%);
+  max-width: min(280px, 100%);
   padding: 6px 8px 6px 8px;
   background: var(--bg);
   border: 1px solid var(--border);
@@ -4284,14 +4445,28 @@ details[open] > .activity-summary::before {
   line-height: 1.35;
   color: var(--fg);
 }
+/* The chip whose edit popover is open. */
+.comment-chip.is-editing {
+  border-color: var(--accent, #60a5fa);
+  background: var(--bg2);
+}
 .comment-chip-icon { line-height: 1; padding-top: 1px; }
 .comment-chip-body {
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
   gap: 2px;
   min-width: 0;
   flex: 1;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
+.comment-chip-body > * { max-width: 100%; }
 .comment-chip-file {
   font-weight: 600;
   font-size: 11px;
@@ -4830,10 +5005,42 @@ details[open] > .activity-summary::before {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 11px;
   color: var(--fg2);
-  max-height: 120px;
+  max-height: 220px;
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* Labelled argument rows. Key column is sized to content and clamped so a
+   long `prompt` value keeps most of the width; the whole block scrolls as one
+   unit rather than each value clipping on its own. */
+.permission-args {
+  display: grid;
+  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+  gap: 2px 10px;
+  margin: 0;
+  padding: 6px 8px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.permission-args dt {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--fg2);
+  opacity: 0.75;
+  white-space: nowrap;
+}
+
+.permission-args dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--fg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .permission-actions {
@@ -5118,7 +5325,7 @@ details[open] > .activity-summary::before {
   cursor: not-allowed;
 }
 
-/* Comment drawer: messages container takes full width; drawer overlays on demand. */
+/* Messages container takes the full pane; comment surfaces are popovers. */
 .chat-with-sidebar {
   flex: 1;
   position: relative;
@@ -5129,97 +5336,6 @@ details[open] > .activity-summary::before {
 .chat-with-sidebar > .messages {
   flex: 1;
   min-width: 0;
-}
-.chat-comment-drawer {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 31;
-  width: 300px;
-  max-width: 85%;
-  border-left: 1px solid var(--border);
-  background: var(--bg2, rgba(20, 20, 40, 0.98));
-  box-shadow: -6px 0 20px rgba(0, 0, 0, 0.28);
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-.chat-drawer-close {
-  background: transparent;
-  border: none;
-  color: var(--fg2);
-  cursor: pointer;
-  font-size: calc(16px * var(--font-scale));
-  line-height: 1;
-  padding: 0 4px;
-  margin-left: auto;
-}
-.chat-drawer-close:hover { color: var(--fg); }
-.chat-drawer-empty {
-  padding: 16px 14px;
-  color: var(--fg2);
-  font-size: var(--text-sm);
-}
-.chat-comments-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 28px;
-  padding: 0 8px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--fg2);
-  cursor: pointer;
-  font-size: var(--text-sm);
-  font-weight: 600;
-  transition: background 120ms var(--ease), color 120ms var(--ease), border-color 120ms var(--ease);
-}
-.chat-comments-toggle:hover { background: var(--bg3); color: var(--fg); }
-.chat-comments-toggle.active { border-color: var(--accent, #60a5fa); color: var(--fg); }
-.chat-comments-toggle-icon { font-size: var(--text-sm); line-height: 1; }
-.chat-comments-toggle-count { font-variant-numeric: tabular-nums; }
-.chat-sidebar-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-.chat-sidebar-title {
-  font-size: var(--text-base);
-  font-weight: 600;
-  color: var(--fg);
-  flex: 1;
-}
-.chat-sidebar-count {
-  font-size: var(--text-xs);
-  font-weight: 600;
-  color: var(--accent, #60a5fa);
-  background: var(--bg);
-  padding: 1px 6px;
-  border-radius: 999px;
-}
-.chat-sidebar-draft {
-  padding: 10px 12px 12px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg);
-}
-.chat-sidebar-draft-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
-}
-.chat-sidebar-draft-label {
-  font-weight: 600;
-  font-size: var(--text-xs);
-  color: var(--accent, #60a5fa);
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
-  flex: 1;
 }
 .chat-sidebar-draft-input {
   width: 100%;
@@ -5250,18 +5366,6 @@ details[open] > .activity-summary::before {
   gap: 6px;
   margin-bottom: 8px;
 }
-.chat-sidebar-card-images {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 4px;
-}
-.chat-sidebar-edit-images {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 8px;
-}
 .draft-image-preview {
   position: relative;
   display: inline-flex;
@@ -5269,14 +5373,6 @@ details[open] > .activity-summary::before {
 .draft-image-thumb {
   height: 40px;
   width: 40px;
-  object-fit: cover;
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  background: var(--bg);
-}
-.card-image-thumb {
-  height: 36px;
-  width: 36px;
   object-fit: cover;
   border-radius: 4px;
   border: 1px solid var(--border);
@@ -5311,110 +5407,6 @@ details[open] > .activity-summary::before {
   transition: background 120ms var(--ease), color 120ms var(--ease), border-color 120ms var(--ease);
 }
 .image-btn-sm:hover { background: var(--bg3); color: var(--fg); border-color: var(--fg2); }
-.chat-sidebar-list {
-  flex: 1;
-  overflow-y: auto;
-  padding: 10px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.chat-sidebar-card {
-  padding: 8px 10px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--accent2, #a78bfa);
-  border-radius: 6px;
-  font-size: var(--text-xs);
-  line-height: 1.4;
-  color: var(--fg);
-  cursor: pointer;
-  transition: transform 0.1s, box-shadow 0.1s;
-}
-.chat-sidebar-card:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
-}
-.chat-sidebar-card.is-editing { cursor: default; }
-.chat-sidebar-card-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 4px;
-}
-.chat-sidebar-card-file {
-  font-weight: 600;
-  font-size: var(--text-xs);
-  color: var(--fg2);
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
-  flex: 1;
-  min-width: 0;
-}
-.chat-sidebar-card-actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-.chat-sidebar-card:hover .chat-sidebar-card-actions,
-.chat-sidebar-card.is-editing .chat-sidebar-card-actions { opacity: 1; }
-.chat-sidebar-card-edit,
-.chat-sidebar-card-remove {
-  flex-shrink: 0;
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  border: none;
-  border-radius: 50%;
-  background: transparent;
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  line-height: 16px;
-  cursor: pointer;
-}
-.chat-sidebar-card-remove { font-size: calc(14px * var(--font-scale)); }
-.chat-sidebar-card-edit:hover,
-.chat-sidebar-card-remove:hover { background: var(--bg2); color: var(--fg); }
-.chat-sidebar-card-quote {
-  color: var(--fg2);
-  font-style: italic;
-  margin-bottom: 4px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-}
-.chat-sidebar-card-note {
-  color: var(--fg);
-  word-break: break-word;
-}
-.chat-sidebar-edit-body { margin-top: 4px; }
-.chat-sidebar-edit-input {
-  width: 100%;
-  resize: vertical;
-  min-height: 44px;
-  font-family: inherit;
-  font-size: var(--text-base);
-  line-height: 1.45;
-  color: var(--fg);
-  background: var(--bg2, rgba(255, 255, 255, 0.04));
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 8px;
-  outline: none;
-  box-sizing: border-box;
-  margin-bottom: 6px;
-}
-.chat-sidebar-edit-input:focus { border-color: var(--accent, #60a5fa); }
-.chat-sidebar-edit-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 6px;
-}
-
 /* Inline text highlights inside message bubbles. Use :deep() because
  * highlight spans are inserted via DOM manipulation in applyHighlights()
  * and don't carry Vue's scoped attribute. */
@@ -5441,24 +5433,6 @@ details[open] > .activity-summary::before {
   0%   { background: rgba(234, 179, 8, 0.25); box-shadow: 0 0 0 0 rgba(234, 179, 8, 0); }
   25%  { background: rgba(234, 179, 8, 0.7);  box-shadow: 0 0 0 6px rgba(234, 179, 8, 0.18); }
   100% { background: rgba(234, 179, 8, 0.25); box-shadow: 0 0 0 0 rgba(234, 179, 8, 0); }
-}
-
-/* On narrow viewports the sidebar would crush the messages. Collapse it to
- * a bottom drawer so both stay usable. Mirrors FileViewerModal's mobile
- * handling at the same breakpoint. */
-@media (max-width: 640px) {
-  .chat-comment-drawer {
-    left: 0;
-    top: auto;
-    width: auto;
-    max-width: none;
-    max-height: 50vh;
-    border-left: none;
-    border-top: 1px solid var(--border);
-    border-top-left-radius: 14px;
-    border-top-right-radius: 14px;
-    box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.32);
-  }
 }
 
 /* ── Loop banner ── */
