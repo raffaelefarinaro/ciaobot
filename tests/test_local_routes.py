@@ -70,6 +70,7 @@ def _client(*, pcm=None, tmp_path: Path | None = None):
     app.state.serializer = serializer
     app.state.config = SimpleNamespace(
         claude_default_model="opus",
+        primary_workspace=lambda: "personal",
         workspaces={
             "personal": SimpleNamespace(
                 name="personal",
