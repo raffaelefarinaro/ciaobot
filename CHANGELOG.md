@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.5.4 - 2026-07-28
+## v0.6.0 - 2026-07-28
 
 ### Added
 - **Host/client nodes.** A Ciaobot instance can now run as a *client* that tunnels to a
@@ -9,9 +9,23 @@
   the menu bar tray in sync with standby/leader status. Peer URLs are normalised
   (protocol prefix, default port 8443) so a bare hostname is enough
   (`257022b`, `66b04b5`, `0374c97`, `c8f31ba`, `8b58041`, `1a8ef5d`).
-- **Comments as overlays.** The legacy comment sidebars are gone. Comments now open as an
-  on-demand drawer with floating, hover-pinned popovers in both the transcript and the
-  pinned-file panel (`501a01a`, `25f31ea`, `82d60dd`).
+- **Comments as overlays.** The legacy comment sidebars are gone. Comments now open as
+  floating, hover-pinned popovers in the transcript, the file viewer, and the pinned-file
+  panel, all sharing one `CommentComposePopover`. The composer drops the redundant
+  selection quote — the highlight already shows what was picked — and editing an existing
+  comment happens in a popover anchored to its chip rather than a full-height drawer.
+  A comment now also carries the role and paragraph of the text it quotes, so the model
+  is not left guessing which reply a repeated phrase came from
+  (`501a01a`, `25f31ea`, `82d60dd`, `0da5348`, `6e627a4`, `76f1d4c`).
+- **Superseded harness skills are hidden.** The bundled CLI ships skills that either bypass
+  Ciaobot's own surfaces (cloud routines, harness cron loops, design sync) or duplicate one
+  the PWA owns (settings, permissions, diagnostics, per-project run stubs). These are now
+  removed from the model's context via `skillOverrides` *and* denied at execution, which
+  keeps the model from reaching for the wrong surface and saves the per-turn context cost
+  of their descriptions (`556263c`).
+- **Auto-turn marks.** A user turn fired by a loop or schedule is marked `↻ auto` in the
+  transcript, so a self-driven turn is no longer indistinguishable from something you typed
+  (`556263c`, `6e627a4`).
 - **MCP settings you can actually edit.** Servers, secrets, and asset labels are editable
   from Settings, and the Providers page lists only the platform connectors and skills that
   are enabled (`9c42f5e`, `5afe526`).
@@ -24,11 +38,45 @@
 - Host and client settings are simplified for host mode, with the card moved lower in
   Settings (`1aeb3e8`, `2baee33`).
 - Hovering a comment no longer re-renders the whole transcript (`ae41941`).
+- Claude's mid-turn progress narration folds into Activity instead of interrupting the
+  reply (`7e60815`).
+- Creating a loop over MCP starts its cadence immediately, and loop mutations broadcast
+  `loops_changed` so open tabs stop showing stale state until a reload. `autostart` only
+  ever governed server boot, so a fresh loop used to sit stopped while the model reported
+  it running (`556263c`).
 - Trimmed over-constraint from the system prompt for Claude 5-generation context
   engineering (`094b0cd`).
 - Dependency refresh across backend and frontend (`3843eaa`).
 
+### Security
+- **Local-only endpoints are gated on the peer address, not the `Host` header.**
+  `/api/node/handover` and `/api/menubar-chats` were reachable unauthenticated from the
+  network: the first could force-promote a node — demoting the real host, pushing its vault
+  — and forward the stored host session cookie to a URL of the caller's choosing; the
+  second leaked chat titles and workspace names. Both now require a loopback peer or a
+  session, and the handover target must be the host the node is actually connected to.
+  Turning password protection *on* also requires a local caller, since with protection off
+  there is no credential to prove authority with and any network peer could set a password
+  and lock the owner out. Setup-token redemption moved to the same check — its old gate
+  read the caller-supplied `Host` header (`4fad3a2`).
+- The pre-commit secret scan no longer exempts everything under any `tests` directory or
+  any file merely named `test_*`. A `tests/credentials.json` inside the vault, or a stray
+  `test_config.json`, was being committed and pushed unscanned (`4fad3a2`).
+
 ### Fixed
+- **Loops:** a loop whose target chat was deleted no longer recreates one every interval
+  forever — the replacement chat is persisted instead of being discarded by the status
+  write-back — and an orphaned loop is no longer re-homed into an arbitrary workspace
+  (`4fad3a2`).
+- **Transcript:** past turns keep their Activity trace while a later reply streams, and a
+  tool call that was denied no longer leaves an Outputs card for a file it never wrote
+  (`4fad3a2`, `556263c`).
+- **Comment composer:** the popover is clamped to the viewport, so commenting on the newest
+  message no longer puts Save below the fold where a fixed-position element cannot be
+  scrolled to (`4fad3a2`).
+- **API errors:** a plain-text 500 or a proxy 502/503 reports itself instead of being
+  reported as a stale route, which had been sending people to redeploy a healthy build
+  (`4fad3a2`).
 - **Node/auth:** stop client login loops and the host auth-check storm; restore
   host-password login; guard against self-proxying; restore the standby role check in
   `get_proxy_target_url` (`4db2291`, `2abf265`, `e7436e0`, `7859140`).
@@ -50,8 +98,8 @@
 - **Providers/GWS:** name the host and error category on connection failures; require
   confirmation before a GWS health "re-authenticate" push; debounce GWS health monitor
   false alarms (`31652ec`, `3cd67ca`, `5ba9a18`).
-- **Preflight secret scan:** use word boundaries for suspicious filenames and ignore
-  worktrees, env templates, and nested test files (`30e00b1`, `aeaa77b`).
+- **Preflight secret scan:** ignore worktrees and env templates, and stop `secretary.md`
+  style names from warning (`30e00b1`, `aeaa77b`; scope corrected in `4fad3a2`, above).
 - **Sessions:** recover from a non-fast-forward push rejection via auto-merge (`041b84a`).
 - Entity tagger no longer false-positives on README collisions and self-scans (`51616b3`).
 - Removed stale Pi references from engine comments, docstrings, and tests (`88e1fa0`).
@@ -61,7 +109,7 @@
 - Documented auth settings, menu bar chats, and node connect in the API docs (`4df84ca`).
 - Added #agentswelcome AI agent contribution guidelines (`e14cabc`).
 - Aligned docs and the capability skill with shipped Settings and MCP memory (`5524f29`).
-- Bumped the service-worker cache name to v0.5.4 so clients pick up the new build.
+- Bumped the service-worker cache name to v0.6.0 so clients pick up the new build.
 
 ## v0.5.3 - 2026-07-23
 
