@@ -1,6 +1,6 @@
 [package]
 name = "ciaobot-desktop"
-version = "0.6.0"
+version = "0.6.1"
 description = "Native macOS shell for Ciaobot"
 edition = "2024"
 rust-version = "1.90"

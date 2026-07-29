@@ -12,8 +12,13 @@ Ciaobot is a **second brain you own** — a local, provider-agnostic AI workspac
 `Ciaobot.app` plus the engine:
 
 ```bash
+brew install raffaelefarinaro/ciaobot/ciaobot
 brew install --cask raffaelefarinaro/ciaobot/ciaobot-desktop
 ```
+
+Installing the fully qualified formula first grants Homebrew trust only to the
+Ciaobot engine; installing the fully qualified cask grants trust only to the
+desktop app. The cask then places `Ciaobot.app` in `/Applications`.
 
 The app is ad-hoc signed and not notarized. If macOS blocks the first launch,
 Control-click `Ciaobot.app`, choose **Open**, and confirm once. Do not disable
@@ -24,6 +29,7 @@ without recreating your workspace:
 
 ```bash
 brew update
+brew trust --formula raffaelefarinaro/ciaobot/ciaobot
 brew upgrade ciaobot
 brew install --cask raffaelefarinaro/ciaobot/ciaobot-desktop
 open -a Ciaobot
