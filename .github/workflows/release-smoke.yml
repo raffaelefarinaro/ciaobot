@@ -52,7 +52,13 @@ jobs:
         run: |
           brew update
           brew install raffaelefarinaro/ciaobot/ciaobot
-          brew install --cask raffaelefarinaro/ciaobot/ciaobot-desktop
+          # --no-quarantine is required for an unattended launch, not a
+          # convenience. The app is ad-hoc signed and not notarized, so the
+          # quarantine flag makes the first launch wait on a Gatekeeper
+          # assessment no one is here to approve: a stack sample of the v0.6.4
+          # run showed the process pinned in `_dyld_start` with a 96K footprint
+          # 35s after launch, having never reached main().
+          brew install --cask --no-quarantine raffaelefarinaro/ciaobot/ciaobot-desktop
           test -x "$(brew --prefix)/bin/ciao"
           test -x "/Applications/Ciaobot.app/Contents/MacOS/ciaobot-desktop"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' /Applications/Ciaobot.app/Contents/Info.plist)" = "local.ciaobot.app"
@@ -94,6 +100,10 @@ jobs:
           echo "--- launchd state ---"
           launchctl list | grep -i ciao || echo "(no ciao services listed)"
           launchctl print "gui/$(id -u)/com.ciao.server" 2>&1 | head -40 || true
+          echo "--- gatekeeper / quarantine state ---"
+          xattr -l /Applications/Ciaobot.app 2>&1 | head -10 || echo "(no xattrs)"
+          spctl -a -vv /Applications/Ciaobot.app 2>&1 | head -10 || true
+          codesign -dv /Applications/Ciaobot.app 2>&1 | head -10 || true
           echo "--- server LaunchAgent plist ---"
           cat ~/Library/LaunchAgents/com.ciao.server.plist 2>/dev/null || echo "(absent)"
           # Sample the app BEFORE starting anything: this is the only thing that
