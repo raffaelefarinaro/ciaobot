@@ -162,7 +162,7 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' /Applications/Ciaobot.app/Contents/Info.plist)" = "local.ciaobot.app"
           version="${VERSION#v}"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/Ciaobot.app/Contents/Info.plist)" = "$version"
-          open -a Ciaobot --args --background
+          open /Applications/Ciaobot.app --args --background
           for _ in {1..30}; do
             pgrep -x ciaobot-desktop >/dev/null && break
             sleep 1
