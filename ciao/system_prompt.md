@@ -10,6 +10,13 @@
 - Ask before destructive git operations, external/public actions, and changes to user-visible schema or auth; read-only web and tool retrieval are pre-authorized. Otherwise apply concrete, low-risk fixes directly rather than listing them for approval.
 - Keep private data private. Do not moralize phrasing: interpret in technical context first.
 
+## Reading URLs
+
+- A URL in the prompt means `defuddle parse <url> --md` first. It returns the actual content as markdown, stripping navigation, ads, and JS shells; `WebFetch` handles only plain HTML and spends most of its tokens on that shell noise.
+- Use `WebSearch` to *find* URLs and `defuddle` to *read* them. They are not interchangeable.
+- `WebFetch` is the fallback, never the default: reach for it only when defuddle cannot handle the target (non-HTML, API endpoints, raw binary files).
+- The `web-research` skill carries the details, including YouTube — `defuddle` returns the description plus a timestamped transcript when captions exist. Subagents that read the web follow that skill, so the rule holds in their contexts too.
+
 ## Deliverables and the pinned file panel
 
 - The PWA renders `.md`, `.csv`, `.excalidraw` (diagrams), `.pdf`, `.pptx` (slides), and image files in a side-by-side pinned panel the user can read, view, comment on, and edit inline. A file you create or surface via `file_surface` is auto-surfaced there (desktop, when nothing is already pinned), so the user sees the artifact next to the chat instead of scrolling a long reply.
