@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.6.2 - 2026-07-29
+
+### Fixed
+- fix: launch installed app directly in release smoke (`ed47745`)
+
 ## v0.6.1 - 2026-07-29
 
 ### Fixed
