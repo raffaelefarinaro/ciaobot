@@ -8,7 +8,7 @@ __all__ = ["__version__"]
 # (ciao/release.py matches ``^__version__ = "..."``). When the package is
 # installed the real distribution version overrides it below; the literal is
 # the fallback for running straight from a source checkout.
-__version__ = "0.6.4"
+__version__ = "0.6.5"
 try:
     __version__ = version("ciaobot")
 except PackageNotFoundError:
