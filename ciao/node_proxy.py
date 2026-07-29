@@ -50,6 +50,8 @@ def is_local_path(path: str) -> bool:
     cleaned = path.rstrip("/")
     if cleaned in EXCLUDED_LOCAL_PATHS:
         return True
+    if cleaned.startswith("/api/desktop-drop"):
+        return True
     if cleaned.startswith("/api/auth"):
         return True
     if cleaned.startswith("/api/node"):
@@ -273,7 +275,7 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
         logger.warning("Client WebSocket proxy to host %s failed: %s", target_ws_url, exc)
         try:
             await websocket.send_json(
-                {"type": "error", "message": f"Host WS unreachable: {exc}"}
+                {"type": "host_unreachable"}
             )
             await websocket.close(code=4004)
         except Exception:

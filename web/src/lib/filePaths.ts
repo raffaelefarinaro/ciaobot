@@ -20,7 +20,7 @@ const EXTS = [
   'cfg', 'ini', 'log', 'csv',
   'env', 'example', 'excalidraw',
   // Binary / office types served by /api/workspace-binary (inline PDF preview).
-  'pdf', 'pptx',
+  'pdf', 'pptx', 'mht', 'mhtml',
   // Images served by /api/workspace-image.
   'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'avif', 'bmp', 'ico',
 ]

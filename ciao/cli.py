@@ -520,6 +520,20 @@ def _installed_app_dir() -> Path | None:
     return None
 
 
+def _desktop_app_installed(app_dir: Path | None = None) -> bool:
+    """Whether the authoritative Tauri ``Ciaobot.app`` is installed."""
+
+    roots = (
+        (Path(app_dir).expanduser(),)
+        if app_dir is not None
+        else (Path("/Applications"), Path.home() / "Applications")
+    )
+    return any(
+        (root / "Ciaobot.app" / "Contents" / "MacOS" / "ciaobot-desktop").is_file()
+        for root in roots
+    )
+
+
 def refresh_app_bundle_if_stale(
     workspace: Path, port: int, *, python_path: str | None = None
 ) -> Path | None:
@@ -1123,15 +1137,24 @@ def setup_workspace(
     launch_dir = Path(launch_agents_dir) if launch_agents_dir is not None else Path.home() / "Library" / "LaunchAgents"
     app_root_dir = Path(app_dir) if app_dir is not None else _default_app_dir()
     resolved_python = python_path or sys.executable
-    app_root = _write_app_shortcut(
-        workspace=root,
-        app_dir=app_root_dir,
-        port=port,
-        python_path=resolved_python,
-        launch_agents_dir=launch_dir,
-    )
-    menubar_executable = str(app_root / "Contents" / "MacOS" / "CiaobotMenuBar")
-    for plist_name in ("com.ciao.server.plist", "com.ciao.menubar.plist"):
+    desktop_installed = _desktop_app_installed(app_root_dir)
+    app_root: Path | None = None
+    menubar_executable = ""
+    plist_names = ["com.ciao.server.plist"]
+    if not desktop_installed:
+        app_root = _write_app_shortcut(
+            workspace=root,
+            app_dir=app_root_dir,
+            port=port,
+            python_path=resolved_python,
+            launch_agents_dir=launch_dir,
+        )
+        menubar_executable = str(app_root / "Contents" / "MacOS" / "CiaobotMenuBar")
+        plist_names.append("com.ciao.menubar.plist")
+    else:
+        # The Tauri app mints/redeems this URL itself on first launch.
+        _ensure_setup_token(root)
+    for plist_name in plist_names:
         written.append(_write_launchd_plist(
             workspace=root,
             launch_agents_dir=launch_dir,
@@ -1141,7 +1164,8 @@ def setup_workspace(
             plist_name=plist_name,
             menubar_executable=menubar_executable,
         ))
-    written.append(app_root)
+    if app_root is not None:
+        written.append(app_root)
 
     ensure_workspace_git(root)
     # A vault outside the workspace (existing notes folder) gets its own
@@ -1239,6 +1263,7 @@ def _setup_command(args: argparse.Namespace) -> int:
     plists = [
         Path(args.launch_agents_dir).expanduser() / name
         for name in ("com.ciao.server.plist", "com.ciao.menubar.plist")
+        if (Path(args.launch_agents_dir).expanduser() / name).is_file()
     ]
     if args.load_launchd:
         rc = 0
@@ -1961,6 +1986,37 @@ def _provider_chat_command(args: argparse.Namespace) -> int:
     return 1
 
 
+def _desktop_service_command(args: argparse.Namespace) -> int:
+    from ciao import macos_service
+
+    action = args.desktop_service_action
+    if action == "status":
+        result = macos_service.service_status()
+    elif action == "start":
+        result = macos_service.start_service()
+    elif action == "restart":
+        result = macos_service.restart_service(force=bool(args.force))
+    elif action == "stop":
+        result = macos_service.stop_service(force=bool(args.force))
+    elif action == "login":
+        result = macos_service.set_login_enabled(args.login_action == "enable")
+    elif action == "update-engine":
+        result = macos_service.update_engine(force=bool(args.force))
+    elif action == "migrate":
+        result = macos_service.migrate_legacy_companion(running_app=args.app_bundle)
+    elif action == "rollback":
+        result = macos_service.rollback_legacy_companion()
+    else:  # pragma: no cover - argparse constrains the action.
+        parser_error = macos_service.ServiceResult(
+            False,
+            str(action),
+            "Unknown desktop service action.",
+            {},
+        )
+        return macos_service.print_result(parser_error, as_json=bool(args.as_json))
+    return macos_service.print_result(result, as_json=bool(args.as_json))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ciao", description="Ciaobot local assistant CLI.")
     subparsers = parser.add_subparsers(dest="command")
@@ -1985,6 +2041,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="Localhost port the server listens on (defaults to $CIAO_PORT or 8443).",
     )
     menubar_parser.set_defaults(func=_menubar_command)
+
+    desktop_service_parser = subparsers.add_parser(
+        "desktop-service",
+        help="Control the launchd-managed engine for Ciaobot.app.",
+    )
+    desktop_service_sub = desktop_service_parser.add_subparsers(
+        dest="desktop_service_action",
+        required=True,
+    )
+    for action in ("status", "start", "restart", "stop", "update-engine", "migrate", "rollback"):
+        action_parser = desktop_service_sub.add_parser(action)
+        action_parser.add_argument("--json", action="store_true", dest="as_json")
+        if action in {"restart", "stop", "update-engine"}:
+            action_parser.add_argument(
+                "--force",
+                action="store_true",
+                help="Proceed even when chats are active (after UI confirmation).",
+            )
+        if action == "migrate":
+            action_parser.add_argument(
+                "--app-bundle",
+                type=Path,
+                required=True,
+                help="Installed Ciaobot.app bundle requesting migration.",
+            )
+        action_parser.set_defaults(func=_desktop_service_command)
+    login_parser = desktop_service_sub.add_parser("login")
+    login_parser.add_argument("login_action", choices=("enable", "disable"))
+    login_parser.add_argument("--json", action="store_true", dest="as_json")
+    login_parser.set_defaults(func=_desktop_service_command)
 
     setup_parser = subparsers.add_parser(
         "setup",

@@ -47,6 +47,11 @@ describe('linkifyText', () => {
     expect(html).toContain('data-file-path="assets/logo.png"')
   })
 
+  it('linkifies saved-page archive paths', () => {
+    const html = linkifyText('See captures/Label-Capture.mhtml')
+    expect(html).toContain('data-file-path="captures/Label-Capture.mhtml"')
+  })
+
   it('does not linkify paths inside URLs', () => {
     const html = linkifyText('Visit https://example.com/foo/bar.md for details')
     expect(html).not.toContain('class="file-link"')

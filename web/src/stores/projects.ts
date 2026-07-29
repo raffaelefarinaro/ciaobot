@@ -43,6 +43,11 @@ export function chatWsReconnectDelayMs(attempt: number): number {
   return Math.min(50 * 2 ** (attempt - 1), 2000)
 }
 
+/** Compatibility check for host proxies from before `host_unreachable` existed. */
+export function isHostConnectionUnavailableMessage(message: string): boolean {
+  return message.trim().toLowerCase().startsWith('host ws unreachable')
+}
+
 export const useProjectStore = defineStore('projects', () => {
   const projects = ref<ProjectInfo[]>([])
   const chats = ref<ChatInfo[]>([])
@@ -141,9 +146,11 @@ export const useProjectStore = defineStore('projects', () => {
       persistPendingChatComments()
     },
   })
-  // Pinned file paths per project_id. When a file is pinned it stays visible
-  // in a side panel while chatting in that project.
+  // Pinned file paths per chat/project. A separate dismissal flag remembers
+  // when the user closed the split panel so replayed file_surface events do
+  // not reopen it the next time that chat connects.
   const pinnedFilePaths = ref<Record<string, string>>({})
+  const dismissedAutoPins = ref<Record<string, true>>({})
   // 'filecard' carries a file-write tool call (Write/Edit/MultiEdit/NotebookEdit).
   // It breaks contiguous 'tool' groups so the PWA can render a standalone
   // clickable card with a preview link instead of folding it into _activity.
@@ -171,6 +178,10 @@ export const useProjectStore = defineStore('projects', () => {
   // signal on the per-chat socket when a send is rejected mid-drain).
   const serverRestarting = ref(false)
   const serverRestartMessage = ref('')
+  // Ephemeral client-mode connection state. Host proxy failures must never
+  // enter chat history: reconnect attempts can repeat indefinitely and would
+  // otherwise create one error bubble (and one "Fix this error" action) each.
+  const hostConnectionUnavailable = ref(false)
   type QueuedMessage = { id: string; text: string; images?: string[] }
   function makeQueuedId(): string {
     if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -632,6 +643,14 @@ export const useProjectStore = defineStore('projects', () => {
         return { ...message, content }
       })
       .filter((message) => {
+        // Remove cached bubbles written by older clients. The live proxy event
+        // now drives one ephemeral connection card outside chat history.
+        if (
+          message.role === 'system'
+          && isHostConnectionUnavailableMessage(
+            message.content.replace(/^Error:\s*/i, ''),
+          )
+        ) return false
         if (message.tool_name === '_activity') return Boolean(message.content)
         if (message.tool_name === '_filecard') {
           return Boolean(message.file_path) && isPlausibleFilePath(message.file_path || '')
@@ -783,6 +802,8 @@ export const useProjectStore = defineStore('projects', () => {
       if (fc) fileComments.value = JSON.parse(fc)
       const pf = localStorage.getItem('ciao-pinned-files')
       if (pf) pinnedFilePaths.value = JSON.parse(pf)
+      const pd = localStorage.getItem('ciao-dismissed-auto-pins')
+      if (pd) dismissedAutoPins.value = JSON.parse(pd)
       const pi = localStorage.getItem('ciao-pending-images')
       if (pi) pendingImagesByChat.value = normalizePendingBuckets<string>(JSON.parse(pi), activeChatId.value)
       const pc = localStorage.getItem('ciao-pending-comments')
@@ -809,6 +830,12 @@ export const useProjectStore = defineStore('projects', () => {
   function persistPinnedFiles() {
     try {
       localStorage.setItem('ciao-pinned-files', JSON.stringify(pinnedFilePaths.value))
+    } catch { /* ignore */ }
+  }
+
+  function persistDismissedAutoPins() {
+    try {
+      localStorage.setItem('ciao-dismissed-auto-pins', JSON.stringify(dismissedAutoPins.value))
     } catch { /* ignore */ }
   }
 
@@ -1002,9 +1029,29 @@ export const useProjectStore = defineStore('projects', () => {
         selectFirstChat()
       }
       if (activeChatId.value) {
-        void markRead(activeChatId.value)
-        await loadMessages(activeChatId.value)
-        connectWs(activeChatId.value)
+        // Only clear unread if the chat is actually on screen. This used to mark
+        // read unconditionally, so a fetchAll while the window was hidden (the
+        // desktop app launching at login, or a background tab) silently cleared
+        // a just-finished chat's unread — losing both the tray badge and the
+        // in-app marker. The chat_result_ready handler already gates on
+        // visibility for the same reason; match it.
+        if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+          void markRead(activeChatId.value)
+        }
+        // Detached on purpose: `bootstrapped` is set when fetchAll resolves and
+        // it gates the app shell, so awaiting the active chat's full history
+        // here made the whole home page wait on parsing one (possibly very
+        // long) transcript. `messages` is reactive, so the chat pane fills in
+        // on its own.
+        //
+        // The two calls stay ordered inside: connecting the socket before the
+        // fetch resolves would let an incoming message be clobbered by the
+        // fetch result overwriting messages[chatId].
+        const bootChatId = activeChatId.value
+        void (async () => {
+          await loadMessages(bootChatId)
+          connectWs(bootChatId)
+        })()
       }
       // Open the cross-chat awareness socket once per app session.
       connectEventsWs()
@@ -1750,7 +1797,9 @@ export const useProjectStore = defineStore('projects', () => {
 
   function _currentFocused(chatId: string): boolean {
     if (typeof document === 'undefined') return true
-    return activeChatId.value === chatId && document.visibilityState === 'visible'
+    return activeChatId.value === chatId
+      && document.visibilityState === 'visible'
+      && document.hasFocus()
   }
 
   function sendFocus(chatId: string) {
@@ -1782,7 +1831,16 @@ export const useProjectStore = defineStore('projects', () => {
       // from a fast first retry again.
       chatReconnectAttempts[chatId] = 0
       const event: WsEvent = JSON.parse(ev.data)
-      if (event.type === 'keepalive') return
+      if (event.type === 'keepalive') {
+        hostConnectionUnavailable.value = false
+        return
+      }
+      if (
+        event.type !== 'host_unreachable'
+        && !(event.type === 'error' && isHostConnectionUnavailableMessage(event.message))
+      ) {
+        hostConnectionUnavailable.value = false
+      }
       // First real frame after a drop/half-open recovery: drop the frozen
       // ephemeral timeline so broker replay rebuilds without duplicating it.
       if (pendingStreamResync.delete(chatId)) {
@@ -1933,6 +1991,17 @@ export const useProjectStore = defineStore('projects', () => {
 
     // Liveness watchdog: cheap timer, only acts on genuinely stale sockets.
     window.setInterval(checkWsLiveness, WS_LIVENESS_CHECK_MS)
+
+    // WKWebView can keep the document visible while the native window loses
+    // key focus (another app, hide, or minimize). Report those standard
+    // browser focus transitions so the engine does not suppress a native
+    // notification for a chat the user cannot currently see.
+    window.addEventListener('focus', () => {
+      if (activeChatId.value) sendFocus(activeChatId.value)
+    })
+    window.addEventListener('blur', () => {
+      if (activeChatId.value) sendFocus(activeChatId.value)
+    })
 
     document.addEventListener('visibilitychange', () => {
       documentVisible.value = document.visibilityState === 'visible'
@@ -2600,6 +2669,20 @@ export const useProjectStore = defineStore('projects', () => {
     if (!list.length) delete queuedMessages.value[chatId]
   }
 
+  function removeEchoedQueued(chatId: string, entryId: string | undefined, text: string) {
+    const list = queuedMessages.value[chatId]
+    if (!list?.length) return
+    // Newer servers identify the exact queue item that started. The text
+    // fallback keeps rolling upgrades working, while removing only one match
+    // preserves a later duplicate prompt in the queue.
+    const idx = entryId
+      ? list.findIndex(q => q.id === entryId)
+      : list.findIndex(q => q.text.trim() === text.trim())
+    if (idx === -1) return
+    list.splice(idx, 1)
+    if (!list.length) delete queuedMessages.value[chatId]
+  }
+
   function reorderQueued(chatId: string, fromIndex: number, toIndex: number) {
     const list = queuedMessages.value[chatId]
     if (!list || fromIndex < 0 || fromIndex >= list.length) return
@@ -2727,10 +2810,15 @@ export const useProjectStore = defineStore('projects', () => {
 
   async function uploadImages(chatId: string, files: File[]): Promise<string[]> {
     const refs = await uploadImageRefs(chatId, files)
+    addPendingImageRefs(chatId, refs)
+    return refs
+  }
+
+  function addPendingImageRefs(chatId: string, refs: string[]): void {
+    if (!refs.length) return
     const existing = getPendingBucket(pendingImagesByChat.value, chatId)
     setPendingBucket(pendingImagesByChat.value, chatId, [...existing, ...refs])
     persistPendingImages()
-    return refs
   }
 
   async function uploadImageRefs(chatId: string, files: File[]): Promise<string[]> {
@@ -2844,12 +2932,23 @@ export const useProjectStore = defineStore('projects', () => {
   // ── Pinned file viewer (per chat/project) ──────────────────────────
   function pinFile(id: string, path: string): void {
     pinnedFilePaths.value = { ...pinnedFilePaths.value, [id]: path }
+    if (dismissedAutoPins.value[id]) {
+      const nextDismissed = { ...dismissedAutoPins.value }
+      delete nextDismissed[id]
+      dismissedAutoPins.value = nextDismissed
+      persistDismissedAutoPins()
+    }
     persistPinnedFiles()
   }
   function unpinFile(id: string): void {
     const next = { ...pinnedFilePaths.value }
+    const hadPinnedFile = Boolean(next[id])
     delete next[id]
     pinnedFilePaths.value = next
+    if (hadPinnedFile) {
+      dismissedAutoPins.value = { ...dismissedAutoPins.value, [id]: true }
+      persistDismissedAutoPins()
+    }
     persistPinnedFiles()
   }
   function pinnedFileFor(id: string): string | undefined {
@@ -3047,6 +3146,7 @@ export const useProjectStore = defineStore('projects', () => {
     touches: Array<{ file_path?: string; action?: string }>,
   ): void {
     if (typeof window === 'undefined' || window.innerWidth <= 768) return
+    if (dismissedAutoPins.value[chatId]) return
     if (pinnedFileFor(chatId)) return
     // Freshest surfaced artifact wins (last touch in the batch).
     for (let i = touches.length - 1; i >= 0; i--) {
@@ -3063,6 +3163,22 @@ export const useProjectStore = defineStore('projects', () => {
     const entries = streamingTimeline.value[chatId] || []
     streamingTimeline.value[chatId] = []
     return entries
+  }
+
+  function beginHostReconnect(chatId: string, chatMessages: ChatMessage[]) {
+    hostConnectionUnavailable.value = true
+    _flushTimeline(chatId)
+    // Also clean repeated proxy errors already painted by an older frontend
+    // before this structured event arrived during a rolling deploy.
+    messages.value[chatId] = normalizeMessages([...chatMessages])
+    streaming.value[chatId] = false
+    streamingText.value[chatId] = ''
+    streamingThinking.value[chatId] = ''
+    delete streamingTextPhase.value[chatId]
+    delete liveUsage.value[chatId]
+    delete streamStartedAt.value[chatId]
+    persistStreamStartedAt()
+    delete pendingPermissions.value[chatId]
   }
 
   function handleEvent(chatId: string, event: WsEvent) {
@@ -3097,6 +3213,9 @@ export const useProjectStore = defineStore('projects', () => {
         // render the user turn without depending on /messages being ready.
         const trimmed = (event.text || '').trim()
         if (!trimmed) break
+        // Queued follow-ups are drained as individual turns. Remove only the
+        // entry that just started so later messages remain visible/editable.
+        removeEchoedQueued(chatId, event.entry_id, trimmed)
         const turnIndex = event.turn_index
         // Dedup by server-assigned turn_index when available. Covers the
         // mid-stream reload case: /messages hydrates user bubbles with their
@@ -3109,9 +3228,8 @@ export const useProjectStore = defineStore('projects', () => {
           if (existingWithTurn) {
             // Already rendered (either from loadMessages on reload or from a
             // previous receipt of the same echo). Don't push a duplicate, but
-            // do reflect the implied streaming state and clear queue chips.
+            // do reflect the implied streaming state.
             if (event.unattended) existingWithTurn.unattended = true
-            if (queuedMessages.value[chatId]?.length) clearQueued(chatId)
             if (!streaming.value[chatId]) streaming.value[chatId] = true
             break
           }
@@ -3150,7 +3268,6 @@ export const useProjectStore = defineStore('projects', () => {
             if (m.role === 'assistant') sawAssistant = true
           }
           if (upgraded) {
-            if (queuedMessages.value[chatId]?.length) clearQueued(chatId)
             if (!streaming.value[chatId]) streaming.value[chatId] = true
             break
           }
@@ -3171,11 +3288,6 @@ export const useProjectStore = defineStore('projects', () => {
           unattended: event.unattended || undefined,
         })
         messages.value[chatId] = normalizeMessages([...msgs])
-        // The server echoes the flushed queue as one combined user_echo. Clear
-        // the local queue chips once we see them as a real user bubble.
-        if (queuedMessages.value[chatId]?.length) {
-          clearQueued(chatId)
-        }
         // Flushed turn = we're streaming again. Make sure the flag reflects it.
         if (!streaming.value[chatId]) streaming.value[chatId] = true
         break
@@ -3554,6 +3666,12 @@ export const useProjectStore = defineStore('projects', () => {
           beginServerRestart(event.message)
           break
         }
+        // Rolling-upgrade compatibility: old client proxies emitted this as a
+        // generic error string. Treat it as the structured connection state.
+        if (isHostConnectionUnavailableMessage(event.message)) {
+          beginHostReconnect(chatId, msgs)
+          break
+        }
         _flushTimeline(chatId)
         msgs.push({
           role: 'system',
@@ -3570,6 +3688,11 @@ export const useProjectStore = defineStore('projects', () => {
         persistStreamStartedAt()
         delete pendingPermissions.value[chatId]
         persistMessages()
+        break
+      }
+
+      case 'host_unreachable': {
+        beginHostReconnect(chatId, msgs)
         break
       }
 
@@ -3646,7 +3769,7 @@ export const useProjectStore = defineStore('projects', () => {
     projects, chats, workspaces, workspaceProviderOptions, workspaceClaudeAiConnectors, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, subagents, providerSubchats, providerSubchatEvents, unread,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
     projectStreaming, backgroundAgents, toasts, pendingPermissions, activeQuestions, creatingChatProjectIds,
-    serverRestarting, serverRestartMessage,
+    serverRestarting, serverRestartMessage, hostConnectionUnavailable,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
     isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
@@ -3660,7 +3783,7 @@ export const useProjectStore = defineStore('projects', () => {
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest,
-    sendMessage, stopChat, respondPermission, respondQuestion, markResolvedQuestion, transcribeVoice, speakMessage, uploadImages, uploadImageRefs, removePendingImage, clearPendingImages,
+    sendMessage, stopChat, respondPermission, respondQuestion, markResolvedQuestion, transcribeVoice, speakMessage, uploadImages, uploadImageRefs, addPendingImageRefs, removePendingImage, clearPendingImages,
     addPendingComment, removePendingComment, clearPendingComments,
     addPendingChatComment, removePendingChatComment, clearPendingChatComments, updatePendingChatComment,
     addPendingChatCommentImage, removePendingChatCommentImage,

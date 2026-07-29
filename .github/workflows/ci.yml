@@ -23,7 +23,9 @@ jobs:
       with:
         node-version: '22'
         cache: 'npm'
-        cache-dependency-path: 'web/package-lock.json'
+        cache-dependency-path: |
+          web/package-lock.json
+          desktop/package-lock.json
 
     - name: Install dependencies
       run: |
@@ -66,6 +68,39 @@ jobs:
       run: |
         cd web
         npm run build
+
+    - name: Install desktop dependencies
+      working-directory: desktop
+      run: npm ci
+
+    - name: Build desktop UI
+      working-directory: desktop
+      run: npm run build
+
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@1.90.0
+      with:
+        targets: aarch64-apple-darwin,x86_64-apple-darwin
+        components: rustfmt,clippy
+
+    - name: Check desktop Rust formatting
+      working-directory: desktop/src-tauri
+      run: cargo fmt --check
+
+    - name: Lint desktop Rust
+      working-directory: desktop/src-tauri
+      run: cargo clippy --all-targets -- -D warnings
+
+    - name: Test desktop Rust
+      working-directory: desktop/src-tauri
+      run: cargo test
+
+    - name: Build macOS app bundle
+      working-directory: desktop
+      run: >-
+        npm run tauri build --
+        --bundles app
+        --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
     - name: Smoke-test wheel
       run: |

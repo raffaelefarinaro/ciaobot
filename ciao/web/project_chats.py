@@ -111,7 +111,7 @@ _PROJECT_IMAGE_EXTS = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif", ".bmp", ".ico",
 })
 _PROJECT_BINARY_EXTS = frozenset({
-    ".pdf", ".zip", ".docx", ".xlsx", ".pptx",
+    ".pdf", ".zip", ".docx", ".xlsx", ".pptx", ".mht", ".mhtml",
 })
 _PROJECT_UPLOAD_EXTS = _PROJECT_TEXT_EXTS | _PROJECT_IMAGE_EXTS | _PROJECT_BINARY_EXTS
 _PROJECT_UPLOAD_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
@@ -5400,6 +5400,7 @@ class ProjectChatManager:
                         "type": "user_echo",
                         "text": combined_text,
                         "images": merged_image_refs,
+                        "entry_id": next_pending.get("id"),
                     }
                     if turn_index2 is not None:
                         followup_echo["turn_index"] = turn_index2
@@ -6975,7 +6976,8 @@ class ProjectChatManager:
         checks extension against the union of viewer/image/binary allowlists,
         enforces a 50 MB size cap, and resolves name collisions by appending
         ``-2``, ``-3`` etc. Returns the same shape as ``list_project_files``
-        entries.
+        entries plus ``absolute_path``, which lets a remote client insert the
+        new host-side path into a chat prompt.
 
         Raises ``ValueError`` for any rejection (caller maps to 4xx). Raises
         ``LookupError`` if the project has no listable vault folder (the route
@@ -7018,6 +7020,7 @@ class ProjectChatManager:
         return {
             "path": rel.as_posix(),
             "vault_path": self._display_path(resolved),
+            "absolute_path": str(resolved),
             "kind": _classify_file(resolved),
             "size": stat.st_size,
             "mtime": datetime.fromtimestamp(stat.st_mtime, UTC)

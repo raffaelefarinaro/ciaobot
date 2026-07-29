@@ -41,16 +41,17 @@
     />
     <router-view />
     <InAppToast />
-    <CommandPaletteModal v-model="showCommandPalette" />
+    <ConfirmDialog />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import CommandPaletteModal from './components/CommandPaletteModal.vue'
+import ConfirmDialog from './components/ConfirmDialog.vue'
 import InAppToast from './components/InAppToast.vue'
 import RestartOverlay from './components/RestartOverlay.vue'
 import StartupView from './components/StartupView.vue'
+import { askConfirm } from './lib/confirm'
 import { normalizeWorkspaceColor } from './lib/workspaceColors'
 import { useProjectStore } from './stores/projects'
 
@@ -94,13 +95,14 @@ let nodePollTimer: ReturnType<typeof setInterval> | null = null
 
 async function switchBackToHost() {
   if (switchingToHost.value) return
-  if (
-    !confirm(
-      'Stop client mode and become host on this machine? Skips asking the remote to push.',
-    )
-  ) {
-    return
-  }
+  const confirmed = await askConfirm(
+    'Stop client mode and become host on this machine? Changes that exist only on the other host may not be synced.',
+    {
+      title: 'Become host on this device?',
+      confirmLabel: 'Disconnect and become host',
+    },
+  )
+  if (!confirmed) return
   switchingToHost.value = true
   try {
     const res = await fetch('/api/node/handover', {
@@ -173,15 +175,6 @@ function scheduleNextPoll() {
   }, 1500)
 }
 
-const showCommandPalette = ref(false)
-
-function handleKeyDown(e: KeyboardEvent) {
-  if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-    e.preventDefault()
-    showCommandPalette.value = !showCommandPalette.value
-  }
-}
-
 function stopPolling() {
   if (pollTimer) {
     clearTimeout(pollTimer)
@@ -193,7 +186,6 @@ onMounted(() => {
   pollStartup().then(scheduleNextPoll)
   void pollClientBanner()
   nodePollTimer = setInterval(() => { void pollClientBanner() }, 5000)
-  window.addEventListener('keydown', handleKeyDown)
 })
 
 onUnmounted(() => {
@@ -202,7 +194,6 @@ onUnmounted(() => {
     clearInterval(nodePollTimer)
     nodePollTimer = null
   }
-  window.removeEventListener('keydown', handleKeyDown)
 })
 
 watch(showStartup, (show) => {

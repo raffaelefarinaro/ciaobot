@@ -130,12 +130,28 @@ def test_failed_tool_calls_are_collected_from_their_results() -> None:
         _Msg("user", {"content": [
             {"type": "tool_result", "tool_use_id": "toolu-ok", "content": "ok"},
         ]}),
+        _Msg("user", {"content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": "toolu-surface-failed",
+                "content": json.dumps({
+                    "ok": False,
+                    "error": {"code": "file_not_found"},
+                }),
+            },
+        ]}),
     ]
 
-    assert _failed_tool_use_ids(msgs) == {"toolu-denied"}
+    assert _failed_tool_use_ids(msgs) == {
+        "toolu-denied",
+        "toolu-surface-failed",
+    }
     # Raw JSONL dicts flow through the subagent renderer, so both shapes work.
     dict_msgs = [{"type": m.type, "message": m.message} for m in msgs]
-    assert _failed_tool_use_ids(dict_msgs) == {"toolu-denied"}
+    assert _failed_tool_use_ids(dict_msgs) == {
+        "toolu-denied",
+        "toolu-surface-failed",
+    }
 
 
 def test_tool_use_blocks_keep_their_id_for_result_matching() -> None:
@@ -145,6 +161,42 @@ def test_tool_use_blocks_keep_their_id_for_result_matching() -> None:
     ]})
     assert blocks[0]["id"] == "toolu-1"
     assert blocks[0]["file_touch"]["file_path"] == "notes.md"
+
+
+def test_tool_use_blocks_canonicalize_and_reject_failed_surface_paths(
+    tmp_path: Path,
+) -> None:
+    readme = tmp_path / "memory-vault" / "work" / "project" / "README.md"
+    readme.parent.mkdir(parents=True)
+    readme.write_text("# Project", encoding="utf-8")
+
+    blocks = _extract_assistant_blocks(
+        {"content": [
+            {
+                "type": "tool_use",
+                "id": "toolu-write",
+                "name": "Write",
+                "input": {"file_path": str(readme), "content": "# Project"},
+            },
+            {
+                "type": "tool_use",
+                "id": "toolu-bad-surface",
+                "name": "mcp__ciaobot__file_surface",
+                "input": {"path": "work/project/README.md"},
+            },
+            {
+                "type": "tool_use",
+                "id": "toolu-good-surface",
+                "name": "mcp__ciaobot__file_surface",
+                "input": {"path": "memory-vault/work/project/README.md"},
+            },
+        ]},
+        workspace_root=tmp_path,
+    )
+
+    assert blocks[0]["file_touch"]["file_path"] == "memory-vault/work/project/README.md"
+    assert "file_touch" not in blocks[1]
+    assert blocks[2]["file_touch"]["file_path"] == "memory-vault/work/project/README.md"
 
 
 def test_in_place_container_mutations_reach_disk(tmp_path: Path) -> None:

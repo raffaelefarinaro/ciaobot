@@ -181,6 +181,11 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `PWA_AUTH_TOKEN` (required): pre-shared token for PWA auth.
 - `CIAO_PUSH_CONTACT` (optional): push notification contact string for the Web Push VAPID subject, for example `mailto:you@example.com`. Empty disables Web Push delivery until set (in `.env` or Settings), but the macOS menu-bar companion still posts local alerts from the runtime notification log.
 - `PWA_PORT` (default `8443`), `PWA_HOST` (default `0.0.0.0`).
+- `CIAO_RUNTIME_ROOT` (optional): runtime-state directory. `Ciaobot.app` reads
+  this from the configured workspace `.env` and resolves a relative value
+  against the workspace.
+- `CIAO_DESKTOP_SERVER_URL` (development only): overrides desktop runtime
+  discovery for a local Tauri development server target.
 - Session cookies are HttpOnly. Production/domain-scoped cookies are also Secure, and state-changing browser requests must come from the same host via `Origin` or `Referer`.
 - Ciaobot sends baseline security headers from the Starlette app, including CSP, `X-Content-Type-Options`, `Referrer-Policy`, and frame denial.
 
@@ -297,6 +302,9 @@ Ciaobot runs on macOS under launchd.
 - The macOS menu bar shows `Start at Login: On/Off` and toggles both `com.ciao.server` and `com.ciao.menubar` with `launchctl enable/disable`. Its status section also offers `Start Server` when the local server is unreachable and `Restart Server` when it is live. The unread badge counts every unread chat even though the quick-open list remains limited to the ten most recent chats.
 - Stop: `launchctl unload ~/Library/LaunchAgents/com.ciao.server.plist`.
 - Remote access is not configured by the public app. Use localhost by default, or put Tailscale or another user-owned network layer in front of the local server.
+- In client mode, non-image files dropped into chat are uploaded through the
+  authenticated host tunnel into the active project folder; the composer uses
+  the returned absolute host path, never the client's local filesystem path.
 
 ### Server startup behaviors
 

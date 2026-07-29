@@ -589,10 +589,6 @@ function onChatSelected() {
 }
 
 function closeChat() {
-  if (isMobile.value) {
-    // On mobile, show sidebar
-    sidebarCollapsed.value = false
-  }
   store.activeChatId = null
 }
 

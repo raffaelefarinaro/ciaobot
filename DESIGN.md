@@ -112,9 +112,19 @@ Ciaobot is a focused control surface for a personal AI assistant. Its visual ide
 
 The PWA is information-dense but not cramped. Monospaced typography, compact labels, restrained animation, and a deep indigo foundation establish the console character. A warm pink accent supplies personality and orientation. The interface must remain understandable without color, animation, hover, or prior knowledge of its icons.
 
-The macOS tray is a native companion, not a miniature copy of the PWA. Preserve platform menu conventions and use it for glanceable status, quick navigation, unread state, and server recovery.
-
-The installed PWA owns the `Ciaobot` name and orange mascot tile. The native recovery launcher is named `Ciaobot Server` and uses the same mascot on a deep-indigo tile with a terminal prompt, so the two roles remain recognizable but cannot be mistaken for one another in Finder or Launchpad.
+`Ciaobot.app` owns the macOS Dock window, native menu-bar item, and
+notifications. Desktop preferences live in the tray itself rather than a
+separate settings window, so the shell has no bundled interactive UI. The tray
+is not a miniature copy of the PWA: preserve platform menu conventions and use
+it for glanceable status, navigation, unread/input/working state, and server
+recovery. The one bundled page (`startup.html`) uses a warm, compact neutral
+surface; the remotely loaded PWA retains its own design system and receives no
+native capabilities. Finder file drops pass through the main webview to the
+PWA's standard composer drop target rather than becoming a separate native
+attachment surface. When the engine is
+unavailable, the main window uses the same warm native surface for a concise
+waiting/recovery state instead of showing a blank webview; it transitions to
+the PWA automatically when the engine becomes reachable.
 
 ## Colors
 
@@ -171,6 +181,7 @@ Borders are structural, not decorative. Active navigation is marked by a slim pi
 - **Caution and danger:** Restart and similar recoverable operations use orange caution styling. Delete and irreversible actions use red and require clear wording or confirmation.
 - **Navigation:** Use native buttons or links where possible. Every navigation row must support keyboard focus and Enter/Space activation, expose its selected/expanded state, and retain a visible text label.
 - **Cards and panels:** Group related information with a tonal surface, border, 10px radius, and 16px padding. Avoid nesting multiple bordered cards without a clear hierarchy.
+- **Data tables:** Compact tables should fit their content instead of stretching across a message. At narrow widths, preserve readable row labels and contain horizontal overflow in a visibly focused, keyboard-scrollable region.
 - **Inputs and composer:** Inputs use the deep background, visible border, pink focus ring, and plain-language labels. The chat composer remains the strongest persistent interaction affordance.
 - **Badges and status:** Badges are compact supporting signals, never the sole explanation. Running, unread, failed, and disabled states need accessible text equivalents.
 - **Menus and sheets:** Overflow menus contain secondary and destructive actions when horizontal space is constrained. Mobile modals become edge-to-edge sheets and honor safe areas.

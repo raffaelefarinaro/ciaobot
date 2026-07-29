@@ -1,8 +1,16 @@
 # Changelog
 
-## v0.6.0 - 2026-07-28
+## v0.6.0 - 2026-07-29
 
 ### Added
+- **Native macOS app.** The Homebrew cask now installs `Ciaobot.app` together
+  with the engine. The Tauri shell owns the window, menu bar, native
+  notifications, Finder drag-and-drop bridge, start-at-login preference, and
+  a single signed updater that advances the engine and app together. Existing
+  Homebrew installs migrate in place: the workspace and server LaunchAgent are
+  reused, the legacy menu-bar helper is disabled with a recoverable backup,
+  and the old `Ciaobot Server.app` moves to the Trash once the engine is
+  healthy.
 - **Host/client nodes.** A Ciaobot instance can now run as a *client* that tunnels to a
   *host* over a passworded connection. The client proxies API calls and WebSocket streams
   to the active leader, rewrites `Origin`/`Referer` on state-changing requests, and keeps

@@ -103,8 +103,8 @@ async def test_queued_messages_flush_one_at_a_time(tmp_path: Path) -> None:
     # Queue two messages while the first turn is still blocked. This must
     # succeed (broker.get() returns non-None) — otherwise the flush path
     # doesn't even get exercised.
-    assert pcm.queue_message(chat.chat_id, "msg A") is True
-    assert pcm.queue_message(chat.chat_id, "msg B") is True
+    assert pcm.queue_message(chat.chat_id, "msg A", entry_id="q-a") is True
+    assert pcm.queue_message(chat.chat_id, "msg B", entry_id="q-b") is True
 
     # Release the first turn; _drive will drain pending one by one.
     first_turn_ready.set()
@@ -129,8 +129,10 @@ async def test_queued_messages_flush_one_at_a_time(tmp_path: Path) -> None:
     # Each queued follow-up gets its own echo and its own turn_index.
     assert echoes[1]["text"] == "msg A"
     assert echoes[1].get("turn_index") == 1
+    assert echoes[1].get("entry_id") == "q-a"
     assert echoes[2]["text"] == "msg B"
     assert echoes[2].get("turn_index") == 2
+    assert echoes[2].get("entry_id") == "q-b"
 
 
 def test_question_notification_prefers_text_prompt_alias(tmp_path: Path) -> None:

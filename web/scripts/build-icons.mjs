@@ -5,8 +5,14 @@
 //         web/public/icons/icon-{192,512}-maskable.png (with safe-zone padding)
 //
 // Maskable icons need ~10% padding on each side so adaptive masks don't clip
-// the mark. We composite the source onto a solid background matching the PWA
-// theme color (#1a1a2e) at the inner safe zone (80%).
+// the mark. We composite the source onto a solid brand background (BG) at the
+// inner safe zone (80%).
+//
+// The larger "any" icons get that same background flattened in. They are what
+// macOS/iOS use for Web Push notifications, the home screen and the installed
+// app, and those surfaces composite a transparent mark onto plain white (or
+// black on iOS) — which reads as a different, older app than the orange one.
+// The 16/32 favicons stay transparent, which is conventional in a browser tab.
 //
 // IMPORTANT: This script is NOT wired into `npm run build` on purpose.
 // `sharp`'s PNG encoder is not byte-deterministic across platforms (the
@@ -30,6 +36,8 @@ const OUT = resolve(webRoot, 'public/icons')
 const BG = { r: 0xf9, g: 0x73, b: 0x16, alpha: 1 }
 
 const ANY_SIZES = [16, 32, 180, 192, 512]
+// "any" sizes that land on an opaque OS surface and therefore need BG baked in.
+const OPAQUE_ANY_SIZES = new Set([180, 192, 512])
 const MASKABLE_SIZES = [192, 512]
 // Safe zone for maskable icons: inner content fits within 80% of canvas.
 const SAFE_ZONE = 0.8
@@ -43,10 +51,11 @@ async function main() {
 
   for (const size of ANY_SIZES) {
     const out = resolve(OUT, `icon-${size}.png`)
-    await sharp(SRC)
-      .resize(size, size, { fit: 'cover' })
-      .png({ compressionLevel: 9 })
-      .toFile(out)
+    const pipeline = sharp(SRC).resize(size, size, { fit: 'cover' })
+    if (OPAQUE_ANY_SIZES.has(size)) {
+      pipeline.flatten({ background: BG })
+    }
+    await pipeline.png({ compressionLevel: 9 }).toFile(out)
     console.log(`[build-icons] wrote ${out}`)
   }
 

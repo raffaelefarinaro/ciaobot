@@ -154,8 +154,8 @@
           <code class="workspace-root-path">{{ routines.workspace_context.workspace_root }}</code>
         </div>
 
-        <!-- Package update -->
-        <div class="card">
+        <!-- Package update — the desktop app drives this from the tray. -->
+        <div v-if="!inDesktopApp" class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
               <p class="section-title">package update</p>
@@ -213,8 +213,8 @@
           <div v-if="packageResult" class="action-result">{{ packageResult }}</div>
         </div>
 
-        <!-- Notifications -->
-        <div class="card">
+        <!-- Notifications — the desktop app owns this in the tray. -->
+        <div v-if="!inDesktopApp" class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
               <p class="section-title">notifications</p>
@@ -384,6 +384,10 @@
               <span class="badge badge--warn">{{ nodeRoleLabel }}</span>
             </div>
           </div>
+          <!-- Where this engine can be reached from another device. The native
+               app no longer lists these in the tray, so this is the only place
+               they surface. Hosts share them; clients tunnel to a host instead. -->
+          <NodeAddresses v-if="!isNodeClient" />
           <div v-if="!nodeStatus" class="action-row"><span class="loading">Loading node status&hellip;</span></div>
           <template v-else>
             <!-- Client only: this device → host, with reachability on the link. -->
@@ -1599,9 +1603,6 @@
                   </div>
                 </div>
               </div>
-              <p class="hint hint--info gws-boundary-note">
-                Keep personal and work Google accounts in different profiles. A personal chat should not inherit work Drive, calendar, or connector access by accident.
-              </p>
             </template>
           </div>
         </template>
@@ -2327,6 +2328,8 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import { formatTime, formatDuration } from '../lib/time'
+import { isDesktopApp } from '../lib/desktop'
+import NodeAddresses from './NodeAddresses.vue'
 import type {
   AgentAssetsResponse,
   AutomationProcess,
@@ -2362,6 +2365,9 @@ import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import OnboardingCard from './OnboardingCard.vue'
 import { providerModelBadges, sectionsFromModelOptions, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
+
+// The tray owns package updates and native notifications in the desktop app.
+const inDesktopApp = isDesktopApp()
 import {
   DEFAULT_WORKSPACE_COLOR,
   WORKSPACE_COLOR_PRESETS,
@@ -6099,9 +6105,6 @@ async function doPackageUpdate() {
 }
 .gws-command {
   display: inline-block;
-}
-.gws-boundary-note {
-  margin-top: var(--space-3);
 }
 .status-text--ok {
   color: var(--success);

@@ -10,6 +10,9 @@ filenames, and oversized or disallowed extensions.
 
 from __future__ import annotations
 
+import json
+import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -23,6 +26,7 @@ from ciao.transcripts import TranscriptStore
 from ciao.web.project_chats import ProjectChatManager
 from ciao.web.routes_api import (
     _read_upload_limited,
+    desktop_drop_import,
     project_files_list,
     project_files_upload,
 )
@@ -76,11 +80,33 @@ def _make_client(pcm: ProjectChatManager, config: CiaoConfig) -> TestClient:
         routes=[
             Route("/api/projects/{project_id}/files", project_files_list, methods=["GET"]),
             Route("/api/projects/{project_id}/files", project_files_upload, methods=["POST"]),
+            Route("/api/desktop-drop", desktop_drop_import, methods=["POST"]),
         ]
     )
     app.state.project_chat_manager = pcm
     app.state.config = config
     return TestClient(app)
+
+
+def _write_desktop_drop_grant(
+    config: CiaoConfig,
+    paths: list[Path],
+    *,
+    created_at: float | None = None,
+) -> str:
+    grant_id = str(uuid.uuid4())
+    grant_dir = config.state_path.parent / "desktop-drop-grants"
+    grant_dir.mkdir(parents=True, exist_ok=True)
+    (grant_dir / f"{grant_id}.json").write_text(
+        json.dumps(
+            {
+                "created_at": created_at if created_at is not None else time.time(),
+                "paths": [str(path) for path in paths],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return grant_id
 
 
 # ── list ───────────────────────────────────────────────────────────────────
@@ -228,8 +254,25 @@ def test_upload_saves_file_to_vault_folder(tmp_path: Path) -> None:
     entry = pcm.save_project_file_upload(proj.project_id, b"hello world", "notes.md")
     assert entry["path"] == "notes.md"
     saved = folder / "notes.md"
+    assert entry["absolute_path"] == str(saved.resolve())
     assert saved.exists()
     assert saved.read_bytes() == b"hello world"
+
+
+def test_upload_accepts_mhtml_as_project_binary(tmp_path: Path) -> None:
+    folder = _make_work_project(tmp_path, "2026-q2-foo")
+    pcm = _make_manager(tmp_path)
+    proj = next(p for p in pcm.list_projects() if p.vault_folder == "2026-q2-foo")
+
+    entry = pcm.save_project_file_upload(
+        proj.project_id,
+        b"From: <Saved by Blink>\nContent-Type: multipart/related\n",
+        "Label Capture.mhtml",
+    )
+
+    assert entry["kind"] == "binary"
+    assert entry["absolute_path"] == str((folder / "Label Capture.mhtml").resolve())
+    assert (folder / "Label Capture.mhtml").exists()
 
 
 def test_upload_collision_appends_suffix(tmp_path: Path) -> None:
@@ -364,3 +407,69 @@ def test_upload_route_round_trip(tmp_path: Path) -> None:
     assert "a.md" in saved_paths
     assert any(e["filename"] == "b.exe" for e in body["errors"])
     assert (folder / "a.md").read_bytes() == b"alpha"
+
+
+def test_native_desktop_drop_returns_full_host_path_and_image_ref(
+    tmp_path: Path,
+) -> None:
+    _make_work_project(tmp_path, "2026-q2-foo")
+    pcm = _make_manager(tmp_path)
+    project = next(
+        project
+        for project in pcm.list_projects()
+        if project.vault_folder == "2026-q2-foo"
+    )
+    chat = pcm.create_chat(project.project_id, title="Drop test")
+    config = pcm._config
+    dropped_file = tmp_path / "outside project" / "report.mhtml"
+    dropped_file.parent.mkdir()
+    dropped_file.write_text("report", encoding="utf-8")
+    dropped_image = tmp_path / "outside project" / "shot.png"
+    dropped_image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    grant_id = _write_desktop_drop_grant(
+        config, [dropped_file.resolve(), dropped_image.resolve()]
+    )
+    client = _make_client(pcm, config)
+
+    response = client.post(
+        "/api/desktop-drop",
+        json={
+            "grant_id": grant_id,
+            "project_id": project.project_id,
+            "chat_id": chat.chat_id,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["paths"] == [str(dropped_file.resolve())]
+    assert len(body["image_refs"]) == 1
+    assert body["errors"] == []
+    assert client.post(
+        "/api/desktop-drop",
+        json={
+            "grant_id": grant_id,
+            "project_id": project.project_id,
+            "chat_id": chat.chat_id,
+        },
+    ).status_code == 404
+
+
+def test_native_desktop_drop_rejects_expired_grant(tmp_path: Path) -> None:
+    pcm = _make_manager(tmp_path)
+    config = pcm._config
+    dropped_file = tmp_path / "old.md"
+    dropped_file.write_text("old", encoding="utf-8")
+    grant_id = _write_desktop_drop_grant(
+        config,
+        [dropped_file],
+        created_at=time.time() - 301,
+    )
+
+    response = _make_client(pcm, config).post(
+        "/api/desktop-drop",
+        json={"grant_id": grant_id, "project_id": "", "chat_id": ""},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "desktop drop grant expired"

@@ -1,6 +1,6 @@
 <template>
   <div class="chat-panel" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handleFileLinkClick">
-    <div v-if="dragOver" class="drop-overlay">Drop images to attach, or files/folders to insert their path</div>
+    <div v-if="dragOver" class="drop-overlay">Drop images to attach, or files to add their accessible path</div>
 
     <!-- Header -->
     <PaneHeader :active-bg-agents="store.activeBackgroundAgents" @open-sidebar="$emit('open-sidebar')">
@@ -8,6 +8,13 @@
         <div class="header-left">
           <button class="close-btn desktop-only" @click="$emit('close')" title="Close chat">&times;</button>
           <div class="header-breadcrumb" ref="breadcrumbRef">
+            <span
+              v-if="project && project.name !== 'General'"
+              class="breadcrumb-project"
+              @click.stop="toggleContext"
+              :class="{ active: showContext }"
+            >{{ project.name }}</span>
+            <span v-if="project && project.name !== 'General'" class="breadcrumb-separator">/</span>
             <input
               v-if="editingTitle"
               class="title-input"
@@ -18,16 +25,7 @@
               @click.stop
               autofocus
             />
-            <template v-else>
-              <span
-                v-if="project && project.name !== 'General'"
-                class="breadcrumb-project"
-                @click.stop="toggleContext"
-                :class="{ active: showContext }"
-              >{{ project.name }}</span>
-              <span v-if="project && project.name !== 'General'" class="breadcrumb-separator">/</span>
-              <span class="pane-title chat-title" @dblclick.stop="startEditTitle" @click.stop>{{ chat.title }}</span>
-            </template>
+            <span v-else class="pane-title chat-title" @dblclick.stop="startEditTitle" @click.stop>{{ chat.title }}</span>
             <!-- Project context popup -->
             <div
               v-if="showContext"
@@ -378,6 +376,33 @@
           </div>
         </div>
       </template>
+
+      <div
+        v-if="store.hostConnectionUnavailable"
+        class="host-connection-card"
+        role="alert"
+      >
+        <div class="host-connection-main">
+          <span class="host-connection-spinner" aria-hidden="true"></span>
+          <div>
+            <div class="host-connection-title">Can’t reach the host</div>
+            <div class="host-connection-meta">
+              Ciaobot is trying to reconnect. You can keep waiting, or make this device the host.
+            </div>
+            <div v-if="hostHandoverError" class="host-connection-error">
+              {{ hostHandoverError }}
+            </div>
+          </div>
+        </div>
+        <button
+          type="button"
+          class="btn-small host-connection-action"
+          :disabled="becomingHost"
+          @click="disconnectAndBecomeHost"
+        >
+          {{ becomingHost ? 'Becoming host…' : 'Disconnect and become host' }}
+        </button>
+      </div>
 
       <div v-if="chat.retry?.status === 'pending' && !store.isStreaming" class="retry-card">
         <div class="retry-card-main">
@@ -846,6 +871,9 @@ import VoiceRecorder from './VoiceRecorder.vue'
 import SubagentPanel from './SubagentPanel.vue'
 import ProviderSubchatPanel from './ProviderSubchatPanel.vue'
 import { api } from '../lib/api'
+import { askConfirm } from '../lib/confirm'
+import { formatAttachedFilePath, nativeAbsoluteFilePath } from '../lib/chatAttachments'
+import { readChatDraft, writeChatDraft } from '../lib/chatDrafts'
 import type { Loop, ModelsResponse, ChatMessage, SubagentTranscript, ProviderSubchatRecord } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
@@ -878,9 +906,42 @@ const emit = defineEmits<{ close: [], 'open-sidebar': [] }>()
 
 const store = useProjectStore()
 const fileViewer = useFileViewerStore()
-const inputText = ref('')
+const draftChatId = store.activeChatId
+const inputText = ref(readChatDraft(draftChatId))
 const inputEl = ref<HTMLTextAreaElement>()
 const isContinuing = ref(false)
+const becomingHost = ref(false)
+const hostHandoverError = ref('')
+
+// ChatLayout keys this panel by chat id, so each instance owns one draft.
+// Persist synchronously to avoid losing the last keystroke when switching
+// chats immediately after typing.
+watch(inputText, (text) => {
+  writeChatDraft(draftChatId, text)
+}, { flush: 'sync' })
+
+async function disconnectAndBecomeHost() {
+  if (becomingHost.value) return
+  const confirmed = await askConfirm(
+    'Disconnect from the unreachable host and make this device the host? Changes that exist only on the other host may not be synced.',
+    {
+      title: 'Become host on this device?',
+      confirmLabel: 'Disconnect and become host',
+    },
+  )
+  if (!confirmed) return
+
+  becomingHost.value = true
+  hostHandoverError.value = ''
+  try {
+    const result = await api.post<{ ok: boolean }>('/api/node/handover', { force: true })
+    if (!result.ok) throw new Error('Could not make this device the host')
+    window.location.assign('/')
+  } catch (e: any) {
+    hostHandoverError.value = e?.payload?.error || e?.message || 'Could not make this device the host'
+    becomingHost.value = false
+  }
+}
 
 // Ticks once a second while streaming so the live elapsed-time label in the
 // "Working..." trace meta advances.
@@ -2172,6 +2233,9 @@ if (typeof document !== 'undefined') {
 }
 
 onMounted(async () => {
+  window.addEventListener('ciao:native-file-drag-enter', handleNativeFileDragEnter)
+  window.addEventListener('ciao:native-file-drag-leave', handleNativeFileDragLeave)
+  window.addEventListener('ciao:native-file-drop', handleNativeFileDrop)
   try {
     const r = await api.get<ModelsResponse>('/api/models')
     modelsResponse.value = r
@@ -2203,6 +2267,10 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  writeChatDraft(draftChatId, inputText.value)
+  window.removeEventListener('ciao:native-file-drag-enter', handleNativeFileDragEnter)
+  window.removeEventListener('ciao:native-file-drag-leave', handleNativeFileDragLeave)
+  window.removeEventListener('ciao:native-file-drop', handleNativeFileDrop)
   commentPopover.value?.clearPendingClose()
   if (typeof document !== 'undefined') {
     document.removeEventListener('selectionchange', onChatSelectionChange)
@@ -2899,6 +2967,7 @@ function send() {
   // the composed content from the comment blocks, so we pass an empty string
   // here. The user sees the actual content in their bubble, not a placeholder.
   store.sendMessage(chat.value.chat_id, sendText, 'queue')
+  writeChatDraft(chat.value.chat_id, '')
   inputText.value = ''
   // Sending implies following the reply: jump to the bottom even if the
   // user had scrolled up, so their bubble and the response are in view.
@@ -3189,10 +3258,12 @@ watch(showModelPicker, (open) => {
 })
 
 async function doArchive() {
-  if (!confirm('Archive this chat?')) return
+  if (!await askConfirm('Archive this chat? You can reopen it from the archive.', {
+    title: 'Archive chat',
+    confirmLabel: 'Archive',
+  })) return
   await store.archiveChat(chat.value.chat_id)
-  // Notify ChatLayout so it closes the chat pane and opens the sidebar
-  // on mobile (so the user can pick the next chat).
+  // Notify ChatLayout so it closes the chat pane.
   emit('close')
 }
 
@@ -3225,25 +3296,198 @@ async function handleVoice(blob: Blob) {
   }
 }
 async function handleFileSelect(e: Event) { const input = e.target as HTMLInputElement; if (!input.files?.length) return; await store.uploadImages(chat.value.chat_id, Array.from(input.files)); input.value = '' }
+
+type DroppedProjectFile = {
+  path: string
+  vault_path: string
+  absolute_path?: string
+}
+
+type ProjectUploadResult = {
+  saved?: DroppedProjectFile[]
+  errors?: { filename: string; error: string }[]
+  error?: string
+}
+
+type NativeFileDropDetail = {
+  grantId?: string
+  paths?: string[]
+  error?: string
+}
+
+type NativeFileDropResult = {
+  paths?: string[]
+  image_refs?: string[]
+  errors?: { filename: string; error: string }[]
+  error?: string
+}
+
+async function importNativeFileDrop(detail: NativeFileDropDetail): Promise<void> {
+  dragOver.value = false
+  if (detail.error || !detail.grantId) {
+    store.pushErrorToast(
+      'Could not attach file',
+      detail.error || 'The native file-drop grant was missing.',
+    )
+    return
+  }
+  try {
+    const response = await fetch('/api/desktop-drop', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        grant_id: detail.grantId,
+        project_id: project.value?.project_id || '',
+        chat_id: chat.value.chat_id,
+      }),
+    })
+    const result = await response.json().catch(() => ({})) as NativeFileDropResult
+    if (!response.ok) {
+      throw new Error(result.error || `Native file import failed (HTTP ${response.status})`)
+    }
+    for (const failure of result.errors || []) {
+      store.pushErrorToast(`Could not attach ${failure.filename}`, failure.error)
+    }
+    const paths = result.paths || []
+    if (paths.length) {
+      insertTextAtCursor(paths.map(formatAttachedFilePath).join(' '))
+    }
+    store.addPendingImageRefs(chat.value.chat_id, result.image_refs || [])
+  } catch (error) {
+    store.pushErrorToast(
+      'Could not attach file',
+      error instanceof Error ? error.message : String(error),
+    )
+  }
+}
+
+function handleNativeFileDragEnter(): void {
+  dragOver.value = true
+}
+
+function handleNativeFileDragLeave(): void {
+  dragOver.value = false
+}
+
+function handleNativeFileDrop(event: Event): void {
+  const detail = (event as CustomEvent<NativeFileDropDetail>).detail || {}
+  void importNativeFileDrop(detail)
+}
+
+async function localDropNeedsUpload(): Promise<boolean> {
+  try {
+    // This endpoint is deliberately handled by the local node instead of the
+    // client proxy, so it reveals whether the browser and agent are on
+    // different computers.
+    const response = await fetch('/api/startup-status', {
+      credentials: 'same-origin',
+    })
+    if (!response.ok) return true
+    const role = String((await response.json()).node_role || '')
+    return role === 'client' || role === 'standby'
+  } catch {
+    // Uploading is the safe fallback: a local-only path would be unusable if
+    // this browser turns out to be connected to a remote host.
+    return true
+  }
+}
+
+async function uploadDroppedProjectFiles(files: File[]): Promise<string[]> {
+  if (!project.value?.vault_folder) {
+    throw new Error('This project has no folder for uploaded files.')
+  }
+  const form = new FormData()
+  files.forEach((file, index) => form.append(`file${index}`, file, file.name))
+  const response = await fetch(`/api/projects/${project.value.project_id}/files`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    body: form,
+  })
+  const result = await response.json().catch(() => ({})) as ProjectUploadResult
+  if (!response.ok) {
+    throw new Error(result.error || `Upload failed (HTTP ${response.status})`)
+  }
+  for (const failure of result.errors || []) {
+    store.pushErrorToast(`Could not attach ${failure.filename}`, failure.error)
+  }
+  return (result.saved || []).flatMap((file) => {
+    const path = file.absolute_path || file.vault_path
+    return path ? [path] : []
+  })
+}
+
 async function handleDrop(e: DragEvent) {
   dragOver.value = false
   const dt = e.dataTransfer
   if (!dt) return
-  const imageFiles: File[] = []
-  const paths: string[] = []
-  for (const item of Array.from(dt.items || [])) {
-    if (item.kind !== 'file') continue
-    const entry = (item as any).webkitGetAsEntry?.()
-    if (entry && entry.isDirectory) {
-      paths.push(entry.name)
-      continue
+
+  // Capture DataTransfer contents synchronously; browsers may invalidate the
+  // drag store once this event handler yields to the startup-status request.
+  const files: File[] = []
+  const folders: { name: string; file: File | null }[] = []
+  const items = Array.from(dt.items || [])
+  if (items.length) {
+    for (const item of items) {
+      if (item.kind !== 'file') continue
+      const entry = (item as DataTransferItem & {
+        webkitGetAsEntry?: () => { isDirectory?: boolean; name?: string } | null
+      }).webkitGetAsEntry?.()
+      if (entry?.isDirectory) {
+        folders.push({ name: entry.name || 'folder', file: item.getAsFile() })
+        continue
+      }
+      const file = item.getAsFile()
+      if (file) files.push(file)
     }
-    const file = item.getAsFile()
-    if (!file) continue
-    if (file.type.startsWith('image/')) imageFiles.push(file)
-    else paths.push((file as any).webkitRelativePath || file.name)
+  } else {
+    files.push(...Array.from(dt.files || []))
   }
-  if (paths.length) insertTextAtCursor(paths.join(' '))
+
+  const imageFiles = files.filter(file => file.type.startsWith('image/'))
+  const regularFiles = files.filter(file => !file.type.startsWith('image/'))
+  const paths: string[] = []
+  const needsUpload = regularFiles.length || folders.length
+    ? await localDropNeedsUpload()
+    : false
+
+  const unavailableFolders: string[] = []
+  for (const folder of folders) {
+    const nativePath = needsUpload || !folder.file
+      ? null
+      : nativeAbsoluteFilePath(folder.file)
+    if (nativePath) paths.push(nativePath)
+    else unavailableFolders.push(folder.name)
+  }
+  if (unavailableFolders.length) {
+    store.pushErrorToast(
+      'Could not attach folder',
+      'Drop individual files instead; remote clients and sandboxed browsers cannot expose an absolute folder path.',
+    )
+  }
+
+  if (regularFiles.length) {
+    const uploadFiles: File[] = []
+    for (const file of regularFiles) {
+      const nativePath = needsUpload ? null : nativeAbsoluteFilePath(file)
+      if (nativePath) paths.push(nativePath)
+      else uploadFiles.push(file)
+    }
+    if (uploadFiles.length) {
+      try {
+        paths.push(...await uploadDroppedProjectFiles(uploadFiles))
+      } catch (error) {
+        store.pushErrorToast(
+          'Could not attach file',
+          error instanceof Error ? error.message : String(error),
+        )
+      }
+    }
+  }
+
+  if (paths.length) {
+    insertTextAtCursor(paths.map(formatAttachedFilePath).join(' '))
+  }
   if (imageFiles.length) await store.uploadImages(chat.value.chat_id, imageFiles)
 }
 async function handlePaste(e: ClipboardEvent) { const items = Array.from(e.clipboardData?.items || []).filter(i => i.type.startsWith('image/')); if (items.length) { e.preventDefault(); await store.uploadImages(chat.value.chat_id, items.map(i => i.getAsFile()).filter(Boolean) as File[]) } }
@@ -3515,7 +3759,10 @@ function insertImageRef(n: number) {
   color: var(--fg);
   padding: 2px 6px;
   font-family: var(--font);
-  width: 200px;
+  flex: 1;
+  min-width: 120px;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 /* Messages: outer scroll container; inner content uses min-height:100% +
@@ -3770,6 +4017,72 @@ function insertImageRef(n: number) {
 .fix-btn { color: var(--accent); border-color: var(--accent); }
 .fix-btn:hover { background: var(--accent); color: var(--bg); border-color: var(--accent); }
 
+.host-connection-card {
+  align-self: center;
+  width: min(680px, 90%);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: rgba(255, 152, 0, 0.08);
+  border: 1px solid rgba(255, 152, 0, 0.34);
+  border-radius: var(--radius);
+  color: var(--fg);
+}
+
+.host-connection-main {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.host-connection-spinner {
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
+  flex: 0 0 auto;
+  border: 2px solid rgba(255, 152, 0, 0.28);
+  border-top-color: var(--warning);
+  border-radius: 50%;
+  animation: host-connection-spin 0.9s linear infinite;
+}
+
+@keyframes host-connection-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .host-connection-spinner {
+    animation: none;
+    border-color: var(--warning);
+  }
+}
+
+.host-connection-title {
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+
+.host-connection-meta,
+.host-connection-error {
+  margin-top: 2px;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+}
+
+.host-connection-error {
+  color: var(--error);
+}
+
+.host-connection-action {
+  min-height: var(--touch);
+  flex: 0 0 auto;
+  color: var(--warning);
+  border-color: var(--warning);
+}
+
 .retry-card {
   align-self: center;
   width: min(680px, 90%);
@@ -3797,6 +4110,8 @@ function insertImageRef(n: number) {
 .retry-card-actions { display: flex; gap: var(--space-2); flex-shrink: 0; }
 
 @media (max-width: 640px) {
+  .host-connection-card { align-items: stretch; flex-direction: column; }
+  .host-connection-action { align-self: stretch; }
   .retry-card { align-items: stretch; flex-direction: column; }
   .retry-card-actions { justify-content: flex-end; }
 }
@@ -4389,24 +4704,55 @@ details[open] > .activity-summary::before {
   color: var(--accent);
   text-decoration: underline solid;
 }
-.message-content :deep(table) {
-  border-collapse: collapse;
-  margin: 6px 0;
-  font-size: 13px;
-  border: 1px solid var(--fg2);
+.message-content :deep(.markdown-table-scroll) {
+  width: fit-content;
   max-width: 100%;
-  display: block;
   overflow-x: auto;
+  margin: 8px 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  overscroll-behavior-inline: contain;
+  -webkit-overflow-scrolling: touch;
+}
+.message-content :deep(.markdown-table-scroll:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.message-content :deep(table) {
+  min-width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  margin: 0;
+  font-size: var(--text-sm);
 }
 .message-content :deep(th),
 .message-content :deep(td) {
-  border: 1px solid var(--fg2);
-  padding: 5px 9px;
+  padding: 7px 10px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+.message-content :deep(tr > :last-child) {
+  border-right: 0;
+}
+.message-content :deep(tbody tr:last-child > td) {
+  border-bottom: 0;
 }
 .message-content :deep(th) {
   background: var(--bg3);
   font-weight: 600;
   text-align: left;
+}
+.message-content :deep(tbody tr:nth-child(even) > td) {
+  background: color-mix(in srgb, var(--fg) 2.5%, transparent);
+}
+.message-content :deep(tr > :first-child) {
+  white-space: nowrap;
+}
+.message-content :deep(tbody tr > td:first-child) {
+  font-weight: 600;
 }
 
 .message-meta {

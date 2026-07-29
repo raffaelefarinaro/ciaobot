@@ -561,8 +561,15 @@ def update_package(
                 # success and no-ops when the tap formula hasn't caught up yet
                 # with the GitHub release the update banner is checking against,
                 # so the version never advances and the banner never clears.
+                # `ok` stays False so the update banner does not clear on a
+                # no-op, but callers that merely need to know "nothing to do
+                # here" (the desktop's combined engine+app update) should not
+                # treat this as a failure — hence the structured flag rather
+                # than matching on the message text.
                 return {
                     "ok": False,
+                    "already_current": True,
+                    "version": after_version,
                     "mode": mode,
                     "error": (
                         f"Still on {after_version} after running the upgrade — the "

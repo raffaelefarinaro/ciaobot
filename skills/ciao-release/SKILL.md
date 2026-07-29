@@ -76,7 +76,7 @@ env -u PYTHONPATH .venv/bin/python -m ciao.release "$(pwd)" \
 
 The `scripts/prepare-release` wrapper is equivalent (`CIAO_PYTHON=.venv/bin/python scripts/prepare-release --bump … --apply --create-pr --ready`) but does **not** unset `PYTHONPATH` — see the trap below. Use `--version X.Y.Z` for an explicit version. Defaults: `--source develop` (cuts `release/vX.Y.Z` from `origin/develop`), `--base main`.
 
-What `--apply` does, in order: bumps `pyproject.toml`, `ciao/__init__.py`, `web/package.json`, `web/package-lock.json`, and the service-worker cache names in **both** `web/public/sw.js` and `ciao/web/static/sw.js`; refreshes `CHANGELOG.md`; auto-bumps `auto` dependencies; regenerates the packaged `gws-*` skills if the installed `gws` CLI differs from the pin; runs the full check suite; commits `release: prepare vX.Y.Z`; pushes the branch; opens the PR.
+What `--apply` does, in order: bumps `pyproject.toml`, `ciao/__init__.py`, `web/package.json`, `web/package-lock.json`, the five desktop version files (`desktop/package.json`, `desktop/package-lock.json`, `desktop/src-tauri/Cargo.toml`, `desktop/src-tauri/Cargo.lock`, `desktop/src-tauri/tauri.conf.json`), and the service-worker cache names in **both** `web/public/sw.js` and `ciao/web/static/sw.js`; refreshes `CHANGELOG.md`; auto-bumps `auto` dependencies; regenerates the packaged `gws-*` skills if the installed `gws` CLI differs from the pin; runs the full check suite; commits `release: prepare vX.Y.Z`; pushes the branch; opens the PR.
 
 ## Rebuild the PWA last
 
@@ -88,10 +88,16 @@ Corollary: if a concurrent session is editing the tree, its unfinished work gets
 
 1. CI (`test`) on the PR must be green (`mergeStateStatus` CLEAN) before merging.
 2. Merge the PR into `main`. This runs `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag + GitHub release using `RELEASE_PAT` (a plain `GITHUB_TOKEN` release would **not** fire `release: published`).
-3. That fires `publish.yml`: builds PWA + wheel + sdist, publishes to PyPI (trusted publishing, env `pypi`), attaches artifacts to the release, and its `update-homebrew-tap` job bumps the `raffaelefarinaro/homebrew-ciaobot` formula.
+3. That fires `publish.yml`, which ships **both the engine and the desktop app from the same tag**:
+   - `build-and-publish` (ubuntu) — PWA + wheel + sdist, publishes to PyPI (trusted publishing, env `pypi`), attaches artifacts to the release.
+   - `build-desktop` (macos) — `npm run tauri build -- --target universal-apple-darwin`, then attaches `Ciaobot_<version>_universal.dmg`, `…app.tar.gz`, `…app.tar.gz.sig`, and a generated `latest.json` (the updater manifest the app polls). Needs the `TAURI_SIGNING_PRIVATE_KEY` / `…_PASSWORD` secrets; the app is ad-hoc signed and **not** notarized.
+   - `update-homebrew-tap` — bumps **both** `Formula/ciaobot.rb` (wheel sha256) and `Casks/ciaobot-desktop.rb` (DMG sha256) in `raffaelefarinaro/homebrew-ciaobot`.
+   - `release-smoke` (macos) — installs the released formula *and* cask from the tap, verifies the updater metadata, and checks cask uninstall.
 4. A follow-up job merges `main` back into `develop`.
 
-No manual tag / `gh release create` / tap push. `pip install ciaobot` and `brew install raffaelefarinaro/ciaobot/ciaobot` both ship every release.
+No manual tag / `gh release create` / tap push, and no separate desktop release — one merge ships the engine and the app together. `pip install ciaobot`, `brew install raffaelefarinaro/ciaobot/ciaobot`, and `brew install --cask raffaelefarinaro/ciaobot/ciaobot-desktop` all ship every release.
+
+There is deliberately **no** independent app version: `desktop/package.json` and `desktop/src-tauri/tauri.conf.json` are bumped by `--apply` alongside the Python version, so the engine and app always report the same `X.Y.Z`. Never ship one without the other — a desktop build expecting a newer engine surfaces as an opaque `Invalid desktop-service response`, because `service.rs` resolves the CLI from hardcoded Homebrew paths before `PATH`.
 
 **Merging the release PR:** the auto-mode classifier blocks `gh pr merge` on the agent-authored release PR unless the user explicitly authorized merging (e.g. "merge #NNN" / "finish then release"). Attempt once; on denial, ask the user to click merge or reply with explicit authorization.
 
@@ -101,6 +107,8 @@ No manual tag / `gh release create` / tap push. `pip install ciaobot` and `brew 
 - **Double-bump on failed check.** The tool bumps files *before* running checks. If a check fails, `git checkout -- CHANGELOG.md ciao/__init__.py pyproject.toml web/package.json web/package-lock.json` before re-running, or it double-bumps.
 - **`PYTHONPATH` / stray egg-info.** Never export `PYTHONPATH=.` before running the release/smoke tools — a leftover `ciao.egg-info/` or `ciaobot.egg-info/` at repo root leaks into the "isolated" smoke venv and the top-level wheel gets skipped, failing the probe with `ModuleNotFoundError: No module named 'ciao'` (tell: a bogus pip conflict naming an ancient pre-rename version). Use `env -u PYTHONPATH …`; `rm -rf ciao.egg-info` (gitignored, regenerates) if you see it.
 - **Never `pip install -U ciao`** — that's an unrelated PyPI package. The distribution is `ciaobot`; self-update uses GitHub release wheels.
+- **A stale `build/` resurrects deleted files into the wheel.** setuptools does not prune `build/lib/`, so a module you deleted from `ciao/` is still copied into the next wheel from the previous build's tree — the package ships a file that no longer exists in git, and `ciao/web/static/` accumulates every old hashed asset from every prior build (632 files packaged where the source tree had 392). It fails silently: the wheel installs and boots fine. `rm -rf build/` before building whenever the release deletes a module or renames assets, and sanity-check with `unzip -l dist/*.whl | grep -c 'ciao/web/static/'` against `find ciao/web/static -type f | wc -l`.
+- **`pip install --ignore-installed` leaves orphans.** Homebrew's install has no `RECORD` file, so pip refuses to uninstall it and `--ignore-installed` is the only way to overwrite in place — but it only *adds and replaces* files. Modules dropped in the new version stay on disk in `site-packages/ciao/`, dead but importable. After overwriting a Homebrew libexec by hand, diff the installed module list against the wheel and delete the leftovers.
 - **Post-merge watch timing.** Don't grab the latest `publish` run right after merging — it only spawns after `Release on main` finishes creating the tag, so you'd watch the *previous* release's run. Wait for a `Release on main` run on the merge commit, then take the `publish` run newer than it.
 - **Verification lag.** PyPI's `/pypi/<pkg>/json` `info.version` lags a few minutes — verify via the `/simple/ciaobot/` index. `raw.githubusercontent.com` caches the tap formula ~5 min — verify the bump via `gh api repos/raffaelefarinaro/homebrew-ciaobot/contents/Formula/ciaobot.rb`.
 - **vitest flake.** vitest can flake with fork-worker timeouts right after the pytest run; re-running `npm run test` cleanly passes.

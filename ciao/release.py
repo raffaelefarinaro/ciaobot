@@ -26,6 +26,11 @@ class RepoVersions:
     package: str
     pwa: str
     package_lock: str
+    desktop: str
+    desktop_lock: str
+    desktop_cargo: str
+    desktop_cargo_lock: str
+    desktop_tauri: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +45,11 @@ class ReleaseFiles:
     package_init: Path
     web_package: Path
     web_lock: Path
+    desktop_package: Path
+    desktop_lock: Path
+    desktop_cargo: Path
+    desktop_cargo_lock: Path
+    desktop_tauri: Path
     changelog: Path
     # Both copies of the service worker: the source under web/public/ and the
     # built copy under ciao/web/static/, which is tracked because the packaged
@@ -54,6 +64,11 @@ class ReleaseFiles:
             package_init=root / "ciao" / "__init__.py",
             web_package=root / "web" / "package.json",
             web_lock=root / "web" / "package-lock.json",
+            desktop_package=root / "desktop" / "package.json",
+            desktop_lock=root / "desktop" / "package-lock.json",
+            desktop_cargo=root / "desktop" / "src-tauri" / "Cargo.toml",
+            desktop_cargo_lock=root / "desktop" / "src-tauri" / "Cargo.lock",
+            desktop_tauri=root / "desktop" / "src-tauri" / "tauri.conf.json",
             changelog=root / "CHANGELOG.md",
             service_workers=(
                 root / "web" / "public" / "sw.js",
@@ -67,6 +82,11 @@ class ReleaseFiles:
             self.package_init,
             self.web_package,
             self.web_lock,
+            self.desktop_package,
+            self.desktop_lock,
+            self.desktop_cargo,
+            self.desktop_cargo_lock,
+            self.desktop_tauri,
             self.changelog,
             *(p for p in self.service_workers if p.exists()),
         ]
@@ -116,6 +136,11 @@ def read_versions(root: Path | str) -> RepoVersions:
     init_text = files.package_init.read_text(encoding="utf-8")
     web_package = _read_json(files.web_package)
     web_lock = _read_json(files.web_lock)
+    desktop_package = _read_json(files.desktop_package)
+    desktop_lock = _read_json(files.desktop_lock)
+    desktop_cargo_text = files.desktop_cargo.read_text(encoding="utf-8")
+    desktop_cargo_lock_text = files.desktop_cargo_lock.read_text(encoding="utf-8")
+    desktop_tauri = _read_json(files.desktop_tauri)
 
     return RepoVersions(
         pyproject=_extract_one(
@@ -132,6 +157,21 @@ def read_versions(root: Path | str) -> RepoVersions:
         ),
         pwa=str(web_package.get("version", "")),
         package_lock=str(web_lock.get("version", "")),
+        desktop=str(desktop_package.get("version", "")),
+        desktop_lock=str(desktop_lock.get("version", "")),
+        desktop_cargo=_extract_one(
+            r'^\[package\]\s*\nname\s*=\s*"[^"]+"\s*\nversion\s*=\s*"([^"]+)"',
+            desktop_cargo_text,
+            path=files.desktop_cargo,
+            label="desktop Cargo version",
+        ),
+        desktop_cargo_lock=_extract_one(
+            r'^\[\[package\]\]\s*\nname\s*=\s*"ciaobot-desktop"\s*\nversion\s*=\s*"([^"]+)"',
+            desktop_cargo_lock_text,
+            path=files.desktop_cargo_lock,
+            label="desktop Cargo.lock version",
+        ),
+        desktop_tauri=str(desktop_tauri.get("version", "")),
     )
 
 
@@ -243,6 +283,42 @@ def apply_release_files(
     if isinstance(packages, dict) and isinstance(packages.get(""), dict):
         packages[""]["version"] = version
     _dump_json(files.web_lock, web_lock)
+
+    desktop_package = _read_json(files.desktop_package)
+    desktop_package["version"] = version
+    _dump_json(files.desktop_package, desktop_package)
+
+    desktop_lock = _read_json(files.desktop_lock)
+    desktop_lock["version"] = version
+    desktop_packages = desktop_lock.get("packages")
+    if isinstance(desktop_packages, dict) and isinstance(desktop_packages.get(""), dict):
+        desktop_packages[""]["version"] = version
+    _dump_json(files.desktop_lock, desktop_lock)
+
+    desktop_cargo_text = files.desktop_cargo.read_text(encoding="utf-8")
+    files.desktop_cargo.write_text(
+        _replace_once(
+            r'(?m)(^\[package\]\s*\nname\s*=\s*"[^"]+"\s*\n)version\s*=\s*"[^"]+"',
+            desktop_cargo_text,
+            rf'\g<1>version = "{version}"',
+            path=files.desktop_cargo,
+        ),
+        encoding="utf-8",
+    )
+    desktop_cargo_lock_text = files.desktop_cargo_lock.read_text(encoding="utf-8")
+    files.desktop_cargo_lock.write_text(
+        _replace_once(
+            r'(?m)(^\[\[package\]\]\s*\nname\s*=\s*"ciaobot-desktop"\s*\n)version\s*=\s*"[^"]+"',
+            desktop_cargo_lock_text,
+            rf'\g<1>version = "{version}"',
+            path=files.desktop_cargo_lock,
+        ),
+        encoding="utf-8",
+    )
+
+    desktop_tauri = _read_json(files.desktop_tauri)
+    desktop_tauri["version"] = version
+    _dump_json(files.desktop_tauri, desktop_tauri)
 
     _bump_service_worker_caches(files, version)
 
@@ -388,6 +464,16 @@ def _run_checks(root: Path, *, skip_frontend: bool) -> list[str]:
             [
                 (["npm", "run", "test"], root / "web", "cd web && npm run test"),
                 (["npm", "run", "build"], root / "web", "cd web && npm run build"),
+                (
+                    ["npm", "run", "test"],
+                    root / "desktop",
+                    "cd desktop && npm run test",
+                ),
+                (
+                    ["npm", "run", "build"],
+                    root / "desktop",
+                    "cd desktop && npm run build",
+                ),
             ]
         )
     commands.append(
@@ -414,7 +500,7 @@ def _pr_body(version: str, changelog_section: str, checks: list[str]) -> str:
     testing = "\n".join(f"- {label}" for label in checks) or "- Not run"
     return f"""## Summary
 - Release Ciaobot v{version} to `main`
-- Update package, PWA, and package-lock versions
+- Update package, PWA, desktop, and lockfile versions
 - Add changelog notes for the release range
 
 ## Release notes
@@ -653,6 +739,18 @@ def main(argv: list[str] | None = None) -> int:
         raise ReleaseError(
             "pyproject.toml and ciao.__version__ are out of sync: "
             f"{current.pyproject} != {current.package}"
+        )
+    desktop_versions = {
+        current.desktop,
+        current.desktop_lock,
+        current.desktop_cargo,
+        current.desktop_cargo_lock,
+        current.desktop_tauri,
+    }
+    if desktop_versions != {current.pyproject}:
+        raise ReleaseError(
+            "desktop versions are out of sync with pyproject.toml: "
+            + ", ".join(sorted(desktop_versions | {current.pyproject}))
         )
     version = (
         _require_version(args.version, label="release version")

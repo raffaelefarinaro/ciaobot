@@ -294,6 +294,68 @@ def extract_file_touch(tool_name: str, tool_input: object) -> dict | None:
     return touches[0] if touches else None
 
 
+def normalize_file_touch_paths(
+    touches: list[dict],
+    workspace_root: Path | None = None,
+) -> list[dict]:
+    """Canonicalise file-card paths and discard invalid surface requests.
+
+    Providers can refer to the same workspace file using an absolute path or
+    a workspace-relative path. The PWA deduplicates file cards by path string,
+    so normalise both forms to one workspace-relative spelling before they
+    reach the client.
+
+    ``file_surface`` is different from Write/Edit: it promises that an
+    existing artifact was deliberately selected for preview. Its tool-use
+    event arrives before the structured MCP result, so reject a missing target
+    here instead of briefly painting a card for a request that will fail.
+    """
+    if not touches:
+        return touches
+    root = workspace_root.resolve() if workspace_root is not None else None
+    normalized: list[dict] = []
+    seen: set[str] = set()
+    for touch in touches:
+        item = dict(touch)
+        path_text = item.get("file_path")
+        if not isinstance(path_text, str) or not path_text.strip():
+            continue
+        raw_path = Path(path_text.strip())
+        target = raw_path
+        if not raw_path.is_absolute() and root is not None:
+            target = root / raw_path
+        try:
+            resolved = target.resolve()
+        except (OSError, RuntimeError):
+            resolved = target
+
+        if item.get("action") == "surfaced" and root is not None:
+            # Match CiaoControlPlane._safe_relative: file_surface accepts only
+            # existing files whose requested path is relative to, and resolves
+            # inside, the active workspace.
+            if raw_path.is_absolute():
+                continue
+            try:
+                if not resolved.is_relative_to(root) or not resolved.is_file():
+                    continue
+            except OSError:
+                continue
+
+        canonical = path_text.strip()
+        if root is not None:
+            try:
+                canonical = resolved.relative_to(root).as_posix()
+            except ValueError:
+                if raw_path.is_absolute():
+                    canonical = str(resolved)
+        item["file_path"] = canonical
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        normalized.append(item)
+    return normalized
+
+
 def refine_file_touch_actions(
     touches: list[dict],
     workspace_root: Path | None = None,
@@ -307,7 +369,7 @@ def refine_file_touch_actions(
         return touches
     root = workspace_root.resolve() if workspace_root is not None else None
     refined: list[dict] = []
-    for touch in touches:
+    for touch in normalize_file_touch_paths(touches, workspace_root):
         item = dict(touch)
         action = item.get("action")
         path_text = item.get("file_path")
@@ -658,6 +720,11 @@ class EventsHub:
 
     def __init__(self) -> None:
         self._subs: set[asyncio.Queue[dict]] = set()
+
+    @property
+    def subscriber_count(self) -> int:
+        """Number of live global-event consumers."""
+        return len(self._subs)
 
     def publish(self, payload: dict) -> None:
         """Fan-out to live subscribers. Drop events for full subscriber queues."""

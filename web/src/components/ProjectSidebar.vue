@@ -476,7 +476,7 @@
                 <button
                   class="chat-actions-btn"
                   aria-label="Chat actions"
-                  title="Rename, move, archive, delete"
+                  title="Copy ID, rename, move, archive, delete"
                   @click.stop="toggleChatMenu($event, chat.chat_id)"
                 >&middot;&middot;&middot;</button>
               </div>
@@ -493,6 +493,7 @@
                     :style="{ top: chatMenuPos.top + 'px', left: chatMenuPos.left + 'px' }"
                   >
                     <template v-if="!moveSubmenu">
+                      <button @click="copyChatId(chatMenu!)">Copy chat ID</button>
                       <button @click="startRenameChat(chatMenu!)">Rename</button>
                       <button v-if="moveTargets.length" @click="openMoveSubmenu()">Move to...</button>
                       <button v-if="chatMenuChat?.retry?.status === 'pending'" @click="stopRetry(chatMenu!)">Stop trying</button>
@@ -594,6 +595,7 @@ import { useFileViewerStore } from '../stores/fileViewer'
 import NotificationBell from './NotificationBell.vue'
 import { loopInWorkspace, scheduleInWorkspace } from '../lib/automationWorkspace'
 import { colorForWorkspace } from '../lib/workspaceColors'
+import { askConfirm } from '../lib/confirm'
 
 const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' }>()
 const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }>()
@@ -761,7 +763,7 @@ const moveTargets = computed<ProjectInfo[]>(() => {
     })
 })
 
-function menuPosition(rect: DOMRect, menuHeight = 160): { top: number; left: number } {
+function menuPosition(rect: DOMRect, menuHeight = 184): { top: number; left: number } {
   const top = rect.bottom + 4
   const left = Math.max(8, rect.right - 160)
   // If the menu would overflow the viewport bottom, flip it above the trigger
@@ -1009,8 +1011,28 @@ async function doRenameChat() {
   renamingChat.value = null
 }
 
+async function copyChatId(chatId: string) {
+  closeChatMenus()
+  try {
+    await navigator.clipboard.writeText(chatId)
+    store.pushToast({
+      chat_id: chatId,
+      title: 'Chat ID copied',
+      body: chatId,
+    })
+  } catch (e: any) {
+    store.pushErrorToast('Could not copy chat ID', `${e?.message || e}`)
+  }
+}
+
 async function doArchiveChat(chatId: string) {
   chatMenu.value = null
+  // This path never asked for confirmation, unlike the chat header's archive
+  // button, so archiving from the sidebar menu was a single misclick.
+  if (!await askConfirm('Archive this chat? You can reopen it from the archive.', {
+    title: 'Archive chat',
+    confirmLabel: 'Archive',
+  })) return
   await store.archiveChat(chatId)
 }
 

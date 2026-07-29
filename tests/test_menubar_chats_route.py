@@ -96,3 +96,47 @@ def test_menubar_chats_endpoint_filters_sorts_and_flags() -> None:
     }
     assert payload["chats"][1]["needs_input"] is True
     assert payload["chats"][1]["unread"] is False
+
+
+def test_a_chat_needing_attention_is_never_truncated_out_of_the_list() -> None:
+    # attention_count is counted over every non-archived chat while the list is
+    # capped at `limit`. If a stale chat needing attention fell outside the cap,
+    # the menu bar badge would show a count with no row explaining it.
+    work = SimpleNamespace(workspace="work")
+    chats = [
+        SimpleNamespace(
+            chat_id="stale-but-unread",
+            project_id="p-work",
+            title="Finished ages ago, never read",
+            archived=False,
+            last_activity_at="2026-01-01T00:00:00Z",
+            last_read_at="2025-12-31T00:00:00Z",
+            pending_question="",
+        )
+    ] + [
+        SimpleNamespace(
+            chat_id=f"recent-{index}",
+            project_id="p-work",
+            title=f"Recent {index}",
+            archived=False,
+            last_activity_at=f"2026-07-{index + 10:02d}T00:00:00Z",
+            last_read_at=f"2026-07-{index + 10:02d}T00:00:00Z",
+            pending_question="",
+        )
+        for index in range(12)
+    ]
+    pcm = SimpleNamespace(
+        list_chats=lambda: chats,
+        get_project=lambda project_id: work if project_id == "p-work" else None,
+    )
+
+    payload = _client(pcm=pcm).get("/api/menubar-chats?limit=5").json()
+
+    assert payload["attention_count"] == 1
+    ids = [row["chat_id"] for row in payload["chats"]]
+    assert len(ids) == 5
+    assert ids[0] == "stale-but-unread", ids
+    # Recency order still holds among the chats that need nothing.
+    assert ids[1:] == ["recent-11", "recent-10", "recent-9", "recent-8"], ids
+    flagged = [row for row in payload["chats"] if row["unread"] or row["needs_input"]]
+    assert len(flagged) == payload["attention_count"]

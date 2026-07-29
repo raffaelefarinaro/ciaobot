@@ -630,6 +630,30 @@ def test_setup_keeps_browser_pwa_named_ciaobot_app(tmp_path: Path) -> None:
     assert (apps / "Ciaobot Server.app").is_dir()
 
 
+def test_setup_skips_legacy_companion_when_tauri_app_is_installed(
+    tmp_path: Path,
+) -> None:
+    apps = tmp_path / "Applications"
+    executable = apps / "Ciaobot.app" / "Contents" / "MacOS" / "ciaobot-desktop"
+    executable.parent.mkdir(parents=True)
+    executable.write_text("", encoding="utf-8")
+    launch_agents = tmp_path / "LaunchAgents"
+
+    assert cli.main([
+        "setup",
+        "--workspace",
+        str(tmp_path / "workspace"),
+        "--launch-agents-dir",
+        str(launch_agents),
+        "--app-dir",
+        str(apps),
+    ]) == 0
+
+    assert (launch_agents / "com.ciao.server.plist").is_file()
+    assert not (launch_agents / "com.ciao.menubar.plist").exists()
+    assert not (apps / "Ciaobot Server.app").exists()
+
+
 def test_default_app_dir_prefers_system_applications(monkeypatch) -> None:
     monkeypatch.setattr(cli.os, "access", lambda path, mode: True)
     assert cli._default_app_dir() == Path("/Applications")

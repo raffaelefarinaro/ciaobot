@@ -16,8 +16,9 @@ import sys
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
-from typing import Any, Iterable, cast
+from typing import Any, Callable, Iterable, cast
 from urllib.parse import urlsplit
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from starlette.requests import Request
@@ -35,6 +36,7 @@ from ciao.loops import publish_loops_changed
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.model_tiers import codex_tier_models
 from ciao.package_version import package_changelog, package_status, update_package
+from ciao.network_addresses import is_loopback_url, server_addresses
 from ciao.tool_path import login_shell_path, resolve_tool
 from ciao.providers.claude import _summarize_tool_input
 from ciao.providers.codex import CodexProvider, codex_login_status, codex_tier_overrides
@@ -51,8 +53,10 @@ from ciao.cli import _auth_command_for_provider
 from ciao.rate_limits import is_rate_limit_telemetry
 from ciao.skills_inventory import build_skill_inventory
 from ciao.vault_lint import EXCLUDE_DIRS, _links_in
-from ciao.web.chat_broker import extract_file_touches
+from ciao.web.chat_broker import extract_file_touches, normalize_file_touch_paths
 from ciao.web.project_chats import (
+    RestartDrainingError,
+    _ALLOWED_IMAGE_EXTENSIONS,
     _PROJECT_UPLOAD_MAX_BYTES,
     _normalize_handover_messages,
 )
@@ -284,17 +288,23 @@ def _tool_icon(name: str) -> str:
     return _TOOL_ICONS.get(name, "\u2699\uFE0F")
 
 
-# Tools whose failure means nothing reached disk. A refused or errored `Write`
-# either wrote the file or did not run at all, so suppressing its file card on
-# error is safe. A `Bash` non-zero exit says no such thing — `printf x > f &&
-# exit 1` leaves the file behind — so its card stands, or history would hide a
-# file the agent really created.
-_ATOMIC_WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+# Tools whose failure invalidates their file card. A refused or errored `Write`
+# either wrote the file or did not run at all; a failed `file_surface` did not
+# select an artifact. A `Bash` non-zero exit says no such thing — `printf x > f
+# && exit 1` leaves the file behind — so its card stands, or history would hide
+# a file the agent really created.
+_FAILURE_DROPS_FILE_CARD_TOOLS = frozenset({
+    "Write",
+    "Edit",
+    "MultiEdit",
+    "NotebookEdit",
+    "mcp__ciaobot__file_surface",
+})
 
 
 def _touches_survive_failure(tool_name: str) -> bool:
     """Whether a failed call's file cards should still render."""
-    return tool_name not in _ATOMIC_WRITE_TOOLS
+    return tool_name not in _FAILURE_DROPS_FILE_CARD_TOOLS
 
 
 def _failed_tool_use_ids(msgs: list) -> set[str]:
@@ -325,12 +335,32 @@ def _failed_tool_use_ids(msgs: list) -> set[str]:
         for block in content:
             if not isinstance(block, dict) or block.get("type") != "tool_result":
                 continue
-            if block.get("is_error") and block.get("tool_use_id"):
+            failed_result = bool(block.get("is_error"))
+            content = block.get("content")
+            if not failed_result and isinstance(content, str):
+                try:
+                    content = json.loads(content)
+                except (TypeError, ValueError):
+                    content = None
+            if (
+                not failed_result
+                and isinstance(content, dict)
+                and content.get("ok") is False
+            ):
+                # MCP tools return structured envelopes. Claude records these
+                # as a successful transport-level tool_result even when the
+                # application operation failed, e.g. file_surface returning
+                # {"ok": false, "error": ...}.
+                failed_result = True
+            if failed_result and block.get("tool_use_id"):
                 failed.add(str(block["tool_use_id"]))
     return failed
 
 
-def _extract_assistant_blocks(raw: object) -> list[dict]:
+def _extract_assistant_blocks(
+    raw: object,
+    workspace_root: Path | None = None,
+) -> list[dict]:
     """Return ordered text/tool_use blocks for an assistant message.
 
     Items: {"kind": "text", "text": str},
@@ -382,7 +412,10 @@ def _extract_assistant_blocks(raw: object) -> list[dict]:
             if not isinstance(tinput, dict):
                 tinput = {}
             summary = _summarize_tool_input(name, tinput)
-            touches = extract_file_touches(name, tinput)
+            touches = normalize_file_touch_paths(
+                extract_file_touches(name, tinput),
+                workspace_root,
+            )
             entry = {"kind": "tool_use", "name": name, "summary": summary}
             # Kept so the history builder can match this call against its
             # tool_result and drop the file card when the call failed.
@@ -1810,6 +1843,229 @@ async def project_files_upload(request: Request) -> JSONResponse:
     return JSONResponse({"saved": saved, "errors": errors})
 
 
+_DESKTOP_DROP_GRANT_TTL_SECONDS = 5 * 60
+_DESKTOP_DROP_MAX_FILES = 100
+
+
+def _consume_desktop_drop_grant(request: Request, grant_id: str) -> list[Path]:
+    """Consume a native-app grant and return only its explicitly dropped paths."""
+    try:
+        canonical_id = str(UUID(grant_id))
+    except (ValueError, AttributeError) as exc:
+        raise ValueError("invalid desktop drop grant") from exc
+    if canonical_id != grant_id:
+        raise ValueError("invalid desktop drop grant")
+
+    config = request.app.state.config
+    grant_dir = config.state_path.parent / "desktop-drop-grants"
+    source = grant_dir / f"{grant_id}.json"
+    consuming = grant_dir / f".{grant_id}.consuming"
+    try:
+        source.replace(consuming)
+    except FileNotFoundError as exc:
+        raise LookupError("desktop drop grant not found or already used") from exc
+
+    try:
+        payload = json.loads(consuming.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid desktop drop grant") from exc
+    finally:
+        consuming.unlink(missing_ok=True)
+
+    if not isinstance(payload, dict):
+        raise ValueError("invalid desktop drop grant")
+    created_at = payload.get("created_at")
+    raw_paths = payload.get("paths")
+    if not isinstance(created_at, (int, float)):
+        raise ValueError("invalid desktop drop grant")
+    age = datetime.now(UTC).timestamp() - float(created_at)
+    if age < -30 or age > _DESKTOP_DROP_GRANT_TTL_SECONDS:
+        raise ValueError("desktop drop grant expired")
+    if (
+        not isinstance(raw_paths, list)
+        or not raw_paths
+        or len(raw_paths) > _DESKTOP_DROP_MAX_FILES
+        or not all(isinstance(path, str) for path in raw_paths)
+    ):
+        raise ValueError("invalid desktop drop grant")
+
+    paths = [Path(path) for path in raw_paths]
+    if any(not path.is_absolute() or not path.exists() for path in paths):
+        raise ValueError("a dropped file is no longer available")
+    return paths
+
+
+async def desktop_drop_import(request: Request) -> JSONResponse:
+    """Resolve a single-use native Finder drop for the active host or client."""
+    body = await request.json()
+    grant_id = str(body.get("grant_id") or "")
+    project_id = str(body.get("project_id") or "")
+    chat_id = str(body.get("chat_id") or "")
+    try:
+        paths = _consume_desktop_drop_grant(request, grant_id)
+    except LookupError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    node_mgr = getattr(request.app.state, "node_state_manager", None)
+    role = node_mgr.get_role() if node_mgr else "host"
+    is_client = role in {"client", "standby"}
+    image_paths = [
+        path
+        for path in paths
+        if path.is_file() and path.suffix.lower() in _ALLOWED_IMAGE_EXTENSIONS
+    ]
+    regular_paths = [path for path in paths if path not in image_paths]
+    errors: list[dict[str, str]] = []
+
+    if not is_client:
+        pcm = request.app.state.project_chat_manager
+        host_image_refs: list[str] = []
+        if image_paths and pcm.get_chat(chat_id) is None:
+            errors.extend(
+                {"filename": path.name, "error": "chat not found"}
+                for path in image_paths
+            )
+        else:
+            for path in image_paths:
+                try:
+                    if path.stat().st_size > request.app.state.config.max_image_size_bytes:
+                        raise ValueError("image too large")
+                    host_image_refs.append(
+                        pcm.save_image_upload(path.read_bytes(), path.name).path.name
+                    )
+                except (OSError, ValueError) as exc:
+                    errors.append({"filename": path.name, "error": str(exc)})
+        return JSONResponse(
+            {
+                "paths": [str(path) for path in regular_paths],
+                "image_refs": host_image_refs,
+                "errors": errors,
+            }
+        )
+
+    if node_mgr is None:
+        return JSONResponse({"error": "client node state unavailable"}, status_code=503)
+    host_url = node_mgr.get_active_peer_url()
+    if not host_url:
+        return JSONResponse({"error": "client has no reachable host"}, status_code=503)
+
+    import httpx
+
+    from ciao.web.auth import SESSION_COOKIE
+
+    headers = {"origin": host_url.rstrip("/")}
+    host_session = node_mgr.get_host_session()
+    if host_session:
+        headers["cookie"] = f"{SESSION_COOKIE}={host_session}"
+    timeout = httpx.Timeout(60.0, connect=5.0)
+    imported_paths: list[str] = []
+    image_refs: list[str] = []
+
+    try:
+        # These are fixed API endpoints, so a redirect is never expected.
+        # Refusing it also prevents a configured/compromised peer from
+        # forwarding the stored host-session cookie to another origin.
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            if image_paths:
+                image_files = []
+                for index, path in enumerate(image_paths):
+                    if path.stat().st_size > request.app.state.config.max_image_size_bytes:
+                        errors.append({"filename": path.name, "error": "image too large"})
+                        continue
+                    image_files.append(
+                        (
+                            f"file{index}",
+                            (
+                                path.name,
+                                path.read_bytes(),
+                                mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                            ),
+                        )
+                    )
+                if image_files:
+                    response = await client.post(
+                        f"{host_url.rstrip('/')}/api/chats/{chat_id}/images",
+                        headers=headers,
+                        files=image_files,
+                    )
+                    payload = response.json()
+                    if response.is_success and isinstance(payload, list):
+                        for entry in payload:
+                            if entry.get("ref"):
+                                image_refs.append(str(entry["ref"]))
+                            elif entry.get("error"):
+                                errors.append(
+                                    {
+                                        "filename": str(entry.get("filename") or ""),
+                                        "error": str(entry["error"]),
+                                    }
+                                )
+                    else:
+                        raise ValueError(
+                            payload.get("error", "host image upload failed")
+                            if isinstance(payload, dict)
+                            else "host image upload failed"
+                        )
+
+            uploadable_paths = []
+            for path in regular_paths:
+                if path.is_dir():
+                    errors.append(
+                        {
+                            "filename": path.name,
+                            "error": "folders cannot be transferred to the host",
+                        }
+                    )
+                elif path.stat().st_size > _PROJECT_UPLOAD_MAX_BYTES:
+                    errors.append({"filename": path.name, "error": "file too large"})
+                else:
+                    uploadable_paths.append(path)
+            if uploadable_paths:
+                files = [
+                    (
+                        f"file{index}",
+                        (
+                            path.name,
+                            path.read_bytes(),
+                            mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                        ),
+                    )
+                    for index, path in enumerate(uploadable_paths)
+                ]
+                response = await client.post(
+                    f"{host_url.rstrip('/')}/api/projects/{project_id}/files",
+                    headers=headers,
+                    files=files,
+                )
+                payload = response.json()
+                if not response.is_success or not isinstance(payload, dict):
+                    raise ValueError(
+                        payload.get("error", "host file upload failed")
+                        if isinstance(payload, dict)
+                        else "host file upload failed"
+                    )
+                imported_paths.extend(
+                    str(entry["absolute_path"])
+                    for entry in payload.get("saved", [])
+                    if entry.get("absolute_path")
+                )
+                errors.extend(
+                    {
+                        "filename": str(entry.get("filename") or ""),
+                        "error": str(entry.get("error") or "upload failed"),
+                    }
+                    for entry in payload.get("errors", [])
+                )
+    except (OSError, httpx.HTTPError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+    return JSONResponse(
+        {"paths": imported_paths, "image_refs": image_refs, "errors": errors}
+    )
+
+
 async def create_project_chat(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     project_id = request.path_params["project_id"]
@@ -2639,7 +2895,10 @@ async def chat_messages(request: Request) -> JSONResponse:
     failed_tool_ids = _failed_tool_use_ids(msgs)
     for m in msgs:
         if m.type == "assistant":
-            blocks = _extract_assistant_blocks(m.message)
+            blocks = _extract_assistant_blocks(
+                m.message,
+                workspace_root=config.workspace_root,
+            )
             # Drop the CLI's "No response requested." sentinel that marks
             # interrupted turns. If the message contained ONLY that sentinel
             # (no tools, no other text), skip the whole entry.
@@ -3385,10 +3644,10 @@ async def vault_backlinks(request: Request) -> JSONResponse:
 # contract as ``workspace_file``/``workspace_image``: any allowlisted-extension
 # file on disk is served, relative paths anchoring to the workspace. The browser
 # decides whether to render inline (PDF) or save (everything else) based on
-# the inferred MIME type; we set ``Content-Disposition: inline`` with the
-# original filename so downloads keep a sensible name either way.
+# the inferred MIME type. Saved-page archives are forced to download so their
+# packaged HTML cannot execute under the PWA origin.
 _WORKSPACE_BINARY_EXTS = frozenset({
-    ".pdf", ".zip", ".docx", ".xlsx", ".pptx",
+    ".pdf", ".zip", ".docx", ".xlsx", ".pptx", ".mht", ".mhtml",
 })
 _WORKSPACE_BINARY_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 
@@ -3432,7 +3691,7 @@ async def apfel_install_endpoint(request: Request) -> JSONResponse:
 
 
 async def workspace_binary(request: Request) -> Response:
-    """Serve a read-only binary file (PDF, ZIP, office doc) from the workspace."""
+    """Serve an allowlisted binary file from the workspace."""
     config = request.app.state.config
     raw = request.query_params.get("path", "").strip()
     roots = _allowed_roots(config)
@@ -3446,6 +3705,7 @@ async def workspace_binary(request: Request) -> Response:
     if resolved.stat().st_size > _WORKSPACE_BINARY_MAX_BYTES:
         return JSONResponse({"error": "file too large"}, status_code=413)
 
+    source_ext = resolved.suffix.lower()
     is_raw = request.query_params.get("raw") == "1"
     filename = resolved.name
     media_type: str | None = None
@@ -3520,12 +3780,12 @@ async def workspace_binary(request: Request) -> Response:
             }
             media_type = _FALLBACK_MIMES.get(resolved.suffix.lower(), "application/octet-stream")
 
-    # `inline` lets PDFs preview in a tab; non-renderable types still
-    # download but with a sensible filename. We set custom frame headers
-    # to allow embedding inside the PWA's same-origin file viewer iframe,
-    # bypassing the global middleware's default frame-blocking headers.
+    # `inline` lets PDFs preview in a tab; saved-page archives are explicit
+    # downloads. Custom frame headers let supported previews embed inside the
+    # PWA's same-origin file viewer iframe.
+    disposition = "attachment" if source_ext in {".mht", ".mhtml"} else "inline"
     headers = {
-        "Content-Disposition": f'inline; filename="{filename}"',
+        "Content-Disposition": f'{disposition}; filename="{filename}"',
         "X-Frame-Options": "SAMEORIGIN",
         "Content-Security-Policy": "; ".join(
             [
@@ -4546,15 +4806,55 @@ async def startup_status_endpoint(request: Request) -> JSONResponse:
 
     tracker = getattr(request.app.state, "startup_tracker", None)
     payload = tracker.to_dict() if tracker is not None else {"phases": [], "overall_ready": True}
+    latest_version, update_available = await _cached_update_hint(request)
     payload.update({
         "version": __version__,
+        "desktop_api_version": 1,
         "node_role": role,
         "active_peer_url": active_peer_url,
         "host_url": node_mgr.get_host_url() if node_mgr else None,
         "has_host_session": bool(node_mgr.get_host_session()) if node_mgr else False,
         "auth_required": bool(getattr(config, "pwa_auth_required", False)) if config else False,
+        "latest_version": latest_version,
+        "update_available": update_available,
     })
     return JSONResponse(payload)
+
+
+async def _refresh_update_hint(app: Any, fetcher: Callable[[], dict[str, object]]) -> None:
+    """Populate the cached update hint off the request path."""
+
+    try:
+        status = await asyncio.to_thread(fetcher)
+    except Exception:
+        # Deliberately broad: this runs detached, and a failed release lookup
+        # must never surface as an unhandled task exception.
+        return
+    app.state.update_hint = (
+        str(status.get("latest_version") or ""),
+        bool(status.get("update_available")),
+    )
+
+
+async def _cached_update_hint(request: Request) -> tuple[str, bool]:
+    """Return ``(latest_version, update_available)`` without ever blocking.
+
+    The menu bar polls this endpoint on a short client timeout to decide whether
+    the engine is alive, so the release lookup must stay off the request path
+    entirely. ``asyncio.to_thread`` cannot be cancelled, so even a ``wait_for``
+    around it would block until the thread finished — instead the lookup runs
+    detached and this only reads the last value it stored. The first poll after
+    a cold start reports no hint; the next one picks it up.
+    """
+
+    app = request.app
+    fetcher = getattr(app.state, "package_status_fetcher", None)
+    if not callable(fetcher):
+        return "", False
+    task = getattr(app.state, "update_hint_task", None)
+    if task is None or task.done():
+        app.state.update_hint_task = asyncio.create_task(_refresh_update_hint(app, fetcher))
+    return getattr(app.state, "update_hint", ("", False))
 
 
 async def active_chats_endpoint(request: Request) -> JSONResponse:
@@ -4633,6 +4933,12 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
             }
         )
     rows.sort(key=lambda row: str(row.get("last_activity_at") or ""), reverse=True)
+    # attention_count is counted over every non-archived chat but the list is
+    # truncated to `limit`, so a chat needing attention that is not among the
+    # most recent would be counted in the menu bar badge with no row to explain
+    # it. Float those chats to the front (stable, so recency order survives
+    # within each group) — the badge then always has something to point at.
+    rows.sort(key=lambda row: not (row["unread"] or row["needs_input"]))
     return JSONResponse({"chats": rows[:limit], "attention_count": attention_count})
 
 
@@ -4650,13 +4956,35 @@ async def open_chat_endpoint(request: Request) -> JSONResponse:
     pcm = getattr(request.app.state, "project_chat_manager", None)
     if pcm is None or pcm.get_chat(chat_id) is None:
         return JSONResponse({"ok": False, "error": "chat not found"}, status_code=404)
+    delivered = bool(getattr(pcm.events, "subscriber_count", 0))
     pcm.events.publish({"type": "open_chat", "chat_id": chat_id})
-    return JSONResponse({"ok": True, "chat_id": chat_id})
+    return JSONResponse({"ok": True, "chat_id": chat_id, "delivered": delivered})
 
 
 async def setup_status_endpoint(request: Request) -> JSONResponse:
     """Return first-run setup readiness for the onboarding wizard."""
     return JSONResponse(setup_status(request.app.state.config))
+
+
+async def node_addresses_endpoint(request: Request) -> JSONResponse:
+    """URLs this engine is reachable at, for sharing with another device.
+
+    Session-protected rather than loopback-public like the tray endpoints: it
+    enumerates LAN interface addresses, which is more than an unauthenticated
+    caller on this machine needs to know.
+    """
+
+    config = getattr(request.app.state, "config", None)
+    port = int(getattr(config, "pwa_port", 8443) or 8443)
+    urls = await asyncio.to_thread(server_addresses, port)
+    return JSONResponse(
+        {
+            "port": port,
+            "addresses": [
+                {"url": url, "loopback": is_loopback_url(url)} for url in urls
+            ],
+        }
+    )
 
 
 async def package_status_endpoint(request: Request) -> JSONResponse:
