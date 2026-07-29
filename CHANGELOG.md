@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.6.5 - 2026-07-30
+
+### Fixed
+- The loop indicator in a chat's loop banner is now legible. It inherited body
+  text size, so the heartbeat glyph was lost next to the loop title and the
+  Start/Stop buttons.
+- Pasted URLs are read with `defuddle` first instead of `WebFetch`. The rule
+  existed but lived only in a file that PWA chat turns never load, so it never
+  applied where most turns happen; `WebFetch` is now explicitly the fallback for
+  non-HTML targets.
+- The release verification job works again. It had been failing since v0.6.3
+  because a freshly installed app cannot launch unattended while the download
+  quarantine flag is set, which halted the app before it started its engine.
+  This never affected published releases — the engine, app, and Homebrew
+  packages shipped normally each time — only the automated check that installs
+  and launches them afterwards.
+
+### Maintenance
+- The desktop app records engine start-up failures to its log instead of
+  discarding them, so a backend that fails to come up says why.
+- Release verification can now be re-run on demand against an already published
+  version, and runs on any change to itself, rather than only once per release.
+- CI launches the app bundle it just built and waits for the engine, so a
+  start-up regression is caught on the pull request that introduces it.
+
 ## v0.6.4 - 2026-07-29
 
 ### Fixed

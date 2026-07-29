@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ciaobot"
-version = "0.6.4"
+version = "0.6.5"
 description = "Ciaobot personal assistant server."
 readme = "README.md"
 requires-python = ">=3.12"

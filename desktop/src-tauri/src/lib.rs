@@ -462,8 +462,20 @@ fn build_windows(
 ) -> tauri::Result<Arc<RwLock<url::Url>>> {
     let binary = service::resolve_ciao(env::var("PATH").ok().as_deref());
     let server_configured = runtime.server_plist.is_file();
-    if !server_configured && let Some(binary) = binary.as_deref() {
-        let _ = service::spawn_bootstrap(binary, runtime.workspace.as_deref());
+    // A discarded Result here is indistinguishable from never having tried, so
+    // a cold start that never brings up the engine leaves no evidence anywhere.
+    if !server_configured {
+        match binary.as_deref() {
+            Some(binary) => {
+                if let Err(error) = service::spawn_bootstrap(binary, runtime.workspace.as_deref()) {
+                    append_log(&runtime.runtime_root, &format!("bootstrap FAILED: {error}"));
+                }
+            }
+            None => append_log(
+                &runtime.runtime_root,
+                "bootstrap FAILED: the ciao executable was not found",
+            ),
+        }
     }
     let reachable = engine_reachable(runtime);
     let mut main_url = runtime.server_url.clone();
@@ -570,12 +582,11 @@ fn build_windows(
 // The tray rebuild runs on a background thread and its Result was being
 // discarded, so a failure to build or update the menu looked identical to
 // "nothing happened". Record those in the workspace runtime dir instead.
-fn tray_log(app: &AppHandle, message: &str) {
-    let model = app.state::<DesktopModel>();
-    let Ok(runtime) = model.runtime.read() else {
-        return;
-    };
-    let path = runtime.runtime_root.join("desktop-tray.log");
+// Takes the runtime root rather than the AppHandle so the startup path can use
+// it too: build_windows runs before DesktopModel is managed, and `tray_log`'s
+// `app.state::<DesktopModel>()` would panic there.
+fn append_log(runtime_root: &std::path::Path, message: &str) {
+    let path = runtime_root.join("desktop-tray.log");
     if let Ok(metadata) = std::fs::metadata(&path)
         && metadata.len() > 256 * 1024
     {
@@ -589,6 +600,14 @@ fn tray_log(app: &AppHandle, message: &str) {
         use std::io::Write;
         let _ = writeln!(file, "{message}");
     }
+}
+
+fn tray_log(app: &AppHandle, message: &str) {
+    let model = app.state::<DesktopModel>();
+    let Ok(runtime) = model.runtime.read() else {
+        return;
+    };
+    append_log(&runtime.runtime_root, message);
 }
 
 fn show_error(app: &AppHandle, title: &str, message: impl Into<String>) {
@@ -923,9 +942,19 @@ fn start_engine_if_needed(app: AppHandle, runtime: RuntimeConfig) {
     }
     thread::spawn(move || {
         let Some(binary) = service::resolve_ciao(env::var("PATH").ok().as_deref()) else {
+            tray_log(
+                &app,
+                "engine start FAILED: the ciao executable was not found",
+            );
             return;
         };
-        let _ = service::invoke(&binary, "start", &[]);
+        // Same reason as the bootstrap path: without this, an engine that fails
+        // to start looks exactly like an engine that was never asked to.
+        match service::invoke(&binary, "start", &[]) {
+            Ok(result) if result.ok => tray_log(&app, "engine start: ok"),
+            Ok(result) => tray_log(&app, &format!("engine start FAILED: {}", result.message)),
+            Err(error) => tray_log(&app, &format!("engine start FAILED: {error}")),
+        }
         let _ = refresh_tray(&app);
     });
 }
@@ -1153,8 +1182,9 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        browser_event_script, create_desktop_drop_grant, engine_already_current, is_external_link,
-        is_trusted_main_navigation, requires_confirmation, should_show_main_window,
+        append_log, browser_event_script, create_desktop_drop_grant, engine_already_current,
+        is_external_link, is_trusted_main_navigation, requires_confirmation,
+        should_show_main_window,
     };
     use crate::service::ServiceResult;
 
@@ -1165,6 +1195,29 @@ mod tests {
             message: "…".into(),
             details,
         }
+    }
+
+    // The startup paths log through append_log directly because DesktopModel is
+    // not managed yet, so it has to work from a runtime root alone.
+    #[test]
+    fn append_log_appends_to_the_runtime_root_and_drops_an_oversized_log() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("desktop-tray.log");
+
+        append_log(root.path(), "engine start: ok");
+        append_log(root.path(), "engine start FAILED: nope");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "engine start: ok\nengine start FAILED: nope\n"
+        );
+
+        std::fs::write(&path, vec![b'x'; 256 * 1024 + 1]).unwrap();
+        append_log(root.path(), "after the cap");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "after the cap\n",
+            "an oversized log should be dropped, not appended to forever"
+        );
     }
 
     #[test]

@@ -5813,7 +5813,10 @@ details[open] > .activity-summary::before {
   gap: 10px;
   min-width: 0;
 }
-.loop-banner-ico { color: var(--accent); font-weight: 700; flex-shrink: 0; }
+/* Explicit size: inheriting --text-sm left the glyph the same size as the
+   banner text, where the title and Start/Stop buttons overpowered it. Matches
+   the sidebar nav icons so the heartbeat reads at a glance. */
+.loop-banner-ico { color: var(--accent); font-weight: 700; font-size: 18px; line-height: 1; flex-shrink: 0; }
 .loop-banner-text {
   flex: 1;
   font-size: var(--text-sm);
