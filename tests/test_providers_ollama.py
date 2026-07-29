@@ -14,7 +14,6 @@ from pathlib import Path
 from ciao.config import (
     CiaoConfig,
     WorkspaceConfig,
-    _DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL,
     _DEFAULT_HARNESS_DISALLOWED_TOOLS,
 )
 from ciao.providers.ollama import (
@@ -478,11 +477,14 @@ def test_personal_workspace_allows_claude_ai_mcps_by_default(monkeypatch) -> Non
     config = CiaoConfig.from_env()
     personal = config.disallowed_tools_for_workspace("personal")
     assert "mcp__claude_ai_Airtable" not in personal
-    # Self-hosted n8n MCP (project-scoped in .mcp.json) is work-only, so it is blocked.
-    assert "mcp__n8n_mcp" in personal
-    # Every workspace denies the PWA-irrelevant harness tools by default;
-    # personal adds n8n on top. Work has no extra beyond the harness set.
-    assert config.disallowed_tools_for_workspace("work") == list(_DEFAULT_HARNESS_DISALLOWED_TOOLS)
+    # Ciaobot ships no opinion about n8n: it is project-scoped in .mcp.json, so
+    # it exists only where someone configured it, and which workspaces see it is
+    # a per-workspace preference. It used to be denied in a workspace named
+    # "personal" and nowhere else.
+    assert "mcp__n8n_mcp" not in personal
+    assert config.disallowed_tools_for_workspace("work") == list(
+        _DEFAULT_HARNESS_DISALLOWED_TOOLS
+    )
 
 
 def test_disallowed_tools_env_override_unions_with_toggle(monkeypatch) -> None:
@@ -508,10 +510,9 @@ def test_claude_ai_mcps_toggle_env_override(monkeypatch) -> None:
     # Flip personal on → connectors allowed, only the n8n extra stays.
     monkeypatch.setenv("CIAO_CLAUDE_AI_MCPS_PERSONAL", "true")
     config = CiaoConfig.from_env()
-    assert config.disallowed_tools_for_workspace("personal") == [
-        *_DEFAULT_HARNESS_DISALLOWED_TOOLS,
-        *_DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL,
-    ]
+    assert config.disallowed_tools_for_workspace("personal") == list(
+        _DEFAULT_HARNESS_DISALLOWED_TOOLS
+    )
     assert config.claude_ai_mcps_for_workspace("personal") is True
     # Flip work off → connectors blocked on top of any extras.
     monkeypatch.setenv("CIAO_CLAUDE_AI_MCPS_WORK", "false")
@@ -532,13 +533,13 @@ def test_disallowed_tools_personal_can_be_disabled(monkeypatch) -> None:
     # Empty string still applies the defaults (since unset == empty).
     # But since the toggle is on by default, connectors are not blocked.
     assert "mcp__claude_ai_Airtable" not in config.disallowed_tools_for_workspace("personal")
-    assert "mcp__n8n_mcp" in config.disallowed_tools_for_workspace("personal")
+    assert "EnterPlanMode" in config.disallowed_tools_for_workspace("personal")
 
     # "none" clears the extras.
     monkeypatch.setenv("CIAO_DISALLOWED_TOOLS_PERSONAL", "none")
     config = CiaoConfig.from_env()
     assert "mcp__claude_ai_Airtable" not in config.disallowed_tools_for_workspace("personal")
-    assert "mcp__n8n_mcp" not in config.disallowed_tools_for_workspace("personal")
+    assert "EnterPlanMode" not in config.disallowed_tools_for_workspace("personal")
 
     # Flip the toggle on too → fully empty denylist.
     monkeypatch.setenv("CIAO_CLAUDE_AI_MCPS_PERSONAL", "true")
@@ -609,9 +610,10 @@ def test_pcm_disallowed_tools_for_chat_routes_by_workspace(
     p_disallowed = pcm.disallowed_tools_for_chat(p_chat)
     w_disallowed = pcm.disallowed_tools_for_chat(w_chat)
     assert "mcp__claude_ai_Airtable" not in p_disallowed
-    assert "mcp__n8n_mcp" in p_disallowed
-    # Work denies the PWA-irrelevant harness tools; personal adds n8n on top.
-    assert w_disallowed == list(_DEFAULT_HARNESS_DISALLOWED_TOOLS)
+    # Same defaults either way — nothing keys on the workspace name.
+    assert "mcp__n8n_mcp" not in p_disallowed
+    assert "mcp__n8n_mcp" not in w_disallowed
+    assert set(_DEFAULT_HARNESS_DISALLOWED_TOOLS).issubset(set(w_disallowed))
     assert set(_DEFAULT_HARNESS_DISALLOWED_TOOLS).issubset(set(p_disallowed))
 
 

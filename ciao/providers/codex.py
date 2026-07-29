@@ -788,8 +788,20 @@ class CodexProvider(BaseSDKProvider):
         vault_root = Path(getattr(self.config, "vault_root", self.workspace_root / "memory-vault"))
         workspace = str((request.extra_env or {}).get("CIAO_ACTIVE_WORKSPACE") or "")
         try:
+            owner = str(
+                (request.extra_env or {}).get("CIAO_LEGACY_ENTITY_WORKSPACE")
+                or ""
+            )
+            if not owner:
+                legacy_owner = getattr(self.config, "legacy_entity_workspace", None)
+                owner = legacy_owner() if callable(legacy_owner) else ""
             entities = format_entities(
-                find_entities(request.prompt, vault_root, workspace=workspace)
+                find_entities(
+                    request.prompt,
+                    vault_root,
+                    workspace=workspace,
+                    legacy_workspace=owner,
+                )
             )
         except Exception:  # noqa: BLE001 - context enrichment is fail-open
             logger.debug("Codex entity context failed", exc_info=True)
@@ -938,6 +950,22 @@ class CodexProvider(BaseSDKProvider):
         except RpcError:
             logger.info("Codex active turn rejected steer", exc_info=True)
             return False
+
+    def tool_use_id_for_request(self, request_id: str) -> str:
+        """Map one of our ``codex-N`` request ids to the Codex item it gates.
+
+        The SDK providers use the tool_use_id itself as the request id, so a
+        caller holding a request id can address the tool call directly. Codex
+        mints its own counter-based ids while its tool events are keyed by
+        ``itemId``, so anything wanting to act on the *call* (retracting the
+        file card for a refused patch, say) has to come through here. Returns
+        "" when the id is stale or the request names no item.
+        """
+        pending = self._permission_requests.get(request_id)
+        if pending is None:
+            return ""
+        _rpc_id, _method, params = pending
+        return str(params.get("itemId") or "")
 
     def send_permission_response(self, request_id: str, approved: bool) -> bool:
         pending = self._permission_requests.pop(request_id, None)

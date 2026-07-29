@@ -10,7 +10,12 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ciao.node_proxy import StandbyProxyMiddleware, get_proxy_target_url, is_local_path
+from ciao.node_proxy import (
+    StandbyProxyMiddleware,
+    get_proxy_target_url,
+    is_local_path,
+    proxy_websocket,
+)
 from ciao.node_state import NodeStateManager
 
 
@@ -20,6 +25,7 @@ def test_is_local_path():
     assert is_local_path("/api/auth/login") is True
     assert is_local_path("/api/startup-status") is True
     assert is_local_path("/api/setup-status") is True
+    assert is_local_path("/api/desktop-drop") is True
     assert is_local_path("/api/chats") is False
     assert is_local_path("/api/projects") is False
 
@@ -84,3 +90,25 @@ def test_standby_proxy_middleware_routing(tmp_path: Path):
     assert res_chats.status_code == 503
     assert res_chats.json()["peer_unreachable"] is True
     assert res_chats.json().get("client") is True
+
+
+@pytest.mark.asyncio
+async def test_websocket_proxy_reports_host_connection_state() -> None:
+    class FailingConnection:
+        async def __aenter__(self):
+            raise OSError("host offline")
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    websocket = AsyncMock()
+    websocket.url.path = "/ws/chat/chat-1"
+    websocket.url.query = ""
+    websocket.app.state.node_state_manager = None
+
+    with patch("websockets.connect", return_value=FailingConnection()):
+        await proxy_websocket(websocket, "http://10.0.0.5:8443")
+
+    websocket.accept.assert_awaited_once()
+    websocket.send_json.assert_awaited_once_with({"type": "host_unreachable"})
+    websocket.close.assert_awaited_once_with(code=4004)

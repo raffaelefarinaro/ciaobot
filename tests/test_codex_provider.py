@@ -59,6 +59,48 @@ def test_codex_managed_process_receives_scoped_mcp_configuration(
     assert "secret-session-token" not in rendered
 
 
+def test_codex_entity_context_uses_the_registry_selected_legacy_owner(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "INDEX.md").write_text(
+        "- `People/Alba` (aliases: Alba)\n",
+        encoding="utf-8",
+    )
+    config = SimpleNamespace(
+        vault_root=tmp_path,
+        legacy_entity_workspace=lambda: "wrong-fallback",
+    )
+    provider = CodexProvider(tmp_path, config=config)
+
+    hidden = provider._runtime_context(
+        AgentRequest(
+            prompt="Ask Alba",
+            model="gpt-test",
+            mode="auto",
+            provider="codex",
+            extra_env={
+                "CIAO_ACTIVE_WORKSPACE": "personal",
+                "CIAO_LEGACY_ENTITY_WORKSPACE": "research",
+            },
+        )
+    )
+    visible = provider._runtime_context(
+        AgentRequest(
+            prompt="Ask Alba",
+            model="gpt-test",
+            mode="auto",
+            provider="codex",
+            extra_env={
+                "CIAO_ACTIVE_WORKSPACE": "research",
+                "CIAO_LEGACY_ENTITY_WORKSPACE": "research",
+            },
+        )
+    )
+
+    assert "[[People/Alba]]" not in hidden
+    assert "[[People/Alba]]" in visible
+
+
 FAKE_APP_SERVER = r'''#!/usr/bin/env python3
 import json
 import os

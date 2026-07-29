@@ -78,6 +78,7 @@ from ciao.web.routes_api import (
     create_project_chat,
     create_schedule,
     debug_issues,
+    desktop_drop_import,
     handover_merge,
     image_blob,
     local_handback,
@@ -121,6 +122,7 @@ from ciao.web.routes_api import (
     project_detail,
     reorder_projects,
     package_changelog_endpoint,
+    node_addresses_endpoint,
     package_status_endpoint,
     package_update_endpoint,
     tts_install_local_endpoint,
@@ -226,6 +228,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/projects/{project_id}/chats", create_project_chat, methods=["POST"]),
         Route("/api/projects/{project_id}/files", project_files_list, methods=["GET"]),
         Route("/api/projects/{project_id}/files", project_files_upload, methods=["POST"]),
+        Route("/api/desktop-drop", desktop_drop_import, methods=["POST"]),
         # Chats
         Route("/api/chats", list_all_chats, methods=["GET"]),
         # /read-all must precede /{chat_id} so the literal isn't swallowed.
@@ -324,6 +327,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/menubar-chats", menubar_chats_endpoint, methods=["GET"]),
         Route("/api/open-chat/{chat_id}", open_chat_endpoint, methods=["GET"]),
         Route("/api/setup-status", setup_status_endpoint, methods=["GET"]),
+        Route("/api/node/addresses", node_addresses_endpoint, methods=["GET"]),
         Route("/api/package/status", package_status_endpoint, methods=["GET"]),
         Route("/api/package/changelog", package_changelog_endpoint, methods=["GET"]),
         Route("/api/package/update", package_update_endpoint, methods=["POST"]),
@@ -408,5 +412,8 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     # Cache the GitHub release lookup so opening Settings repeatedly does not
     # exhaust the API rate limit (especially on shared/NAT egress IPs).
     app.state.package_status_fetcher = make_cached_package_status()
+    # Filled in off the request path by /api/startup-status so the menu bar can
+    # show an available release without that endpoint ever waiting on GitHub.
+    app.state.update_hint = ("", False)
 
     return app

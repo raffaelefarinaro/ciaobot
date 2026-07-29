@@ -154,8 +154,8 @@
           <code class="workspace-root-path">{{ routines.workspace_context.workspace_root }}</code>
         </div>
 
-        <!-- Package update -->
-        <div class="card">
+        <!-- Package update — the desktop app drives this from the tray. -->
+        <div v-if="!inDesktopApp" class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
               <p class="section-title">package update</p>
@@ -213,8 +213,8 @@
           <div v-if="packageResult" class="action-result">{{ packageResult }}</div>
         </div>
 
-        <!-- Notifications -->
-        <div class="card">
+        <!-- Notifications — the desktop app owns this in the tray. -->
+        <div v-if="!inDesktopApp" class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
               <p class="section-title">notifications</p>
@@ -384,6 +384,10 @@
               <span class="badge badge--warn">{{ nodeRoleLabel }}</span>
             </div>
           </div>
+          <!-- Where this engine can be reached from another device. The native
+               app no longer lists these in the tray, so this is the only place
+               they surface. Hosts share them; clients tunnel to a host instead. -->
+          <NodeAddresses v-if="!isNodeClient" />
           <div v-if="!nodeStatus" class="action-row"><span class="loading">Loading node status&hellip;</span></div>
           <template v-else>
             <!-- Client only: this device → host, with reachability on the link. -->
@@ -1159,6 +1163,29 @@
                 <label class="settings-field"><span class="ws-label">Vault name</span>
                   <input class="routine-input" v-model="newWorkspaceForm.vault_root" :disabled="workspacesSaving === 'new'" placeholder="(defaults to name)" />
                 </label>
+                <div class="settings-field settings-field--wide">
+                  <span class="ws-label" id="new-workspace-color-label">Accent color</span>
+                  <div
+                    class="workspace-color-swatches"
+                    role="radiogroup"
+                    aria-labelledby="new-workspace-color-label"
+                  >
+                    <button
+                      v-for="preset in WORKSPACE_COLOR_PRESETS"
+                      :key="`new-color-${preset.id}`"
+                      type="button"
+                      class="workspace-color-swatch"
+                      role="radio"
+                      :aria-checked="newWorkspaceForm.color === preset.id"
+                      :aria-label="preset.label"
+                      :title="preset.label"
+                      :disabled="workspacesSaving === 'new'"
+                      :class="{ active: newWorkspaceForm.color === preset.id }"
+                      :style="{ '--swatch': preset.swatch }"
+                      @click="newWorkspaceForm.color = preset.id"
+                    />
+                  </div>
+                </div>
                 <label class="settings-field"><span class="ws-label">Provider</span>
                   <select class="routine-input workspace-select" v-model="newWorkspaceForm.default_provider" :disabled="workspacesSaving === 'new'">
                     <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
@@ -1258,6 +1285,29 @@
                 </div>
 
                 <div class="settings-field-grid">
+                  <div class="settings-field settings-field--wide">
+                    <span class="ws-label" :id="`workspace-color-${form.name}`">Accent color</span>
+                    <div
+                      class="workspace-color-swatches"
+                      role="radiogroup"
+                      :aria-labelledby="`workspace-color-${form.name}`"
+                    >
+                      <button
+                        v-for="preset in WORKSPACE_COLOR_PRESETS"
+                        :key="`${form.name}-color-${preset.id}`"
+                        type="button"
+                        class="workspace-color-swatch"
+                        role="radio"
+                        :aria-checked="form.color === preset.id"
+                        :aria-label="preset.label"
+                        :title="preset.label"
+                        :disabled="workspacesSaving === form.name"
+                        :class="{ active: form.color === preset.id }"
+                        :style="{ '--swatch': preset.swatch }"
+                        @click="form.color = preset.id"
+                      />
+                    </div>
+                  </div>
                   <label class="settings-field"><span class="ws-label">Provider</span>
                     <select class="routine-input workspace-select" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
                       <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
@@ -1553,9 +1603,6 @@
                   </div>
                 </div>
               </div>
-              <p class="hint hint--info gws-boundary-note">
-                Keep personal and work Google accounts in different profiles. A personal chat should not inherit work Drive, calendar, or connector access by accident.
-              </p>
             </template>
           </div>
         </template>
@@ -2281,6 +2328,8 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import { formatTime, formatDuration } from '../lib/time'
+import { isDesktopApp } from '../lib/desktop'
+import NodeAddresses from './NodeAddresses.vue'
 import type {
   AgentAssetsResponse,
   AutomationProcess,
@@ -2316,6 +2365,15 @@ import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import OnboardingCard from './OnboardingCard.vue'
 import { providerModelBadges, sectionsFromModelOptions, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
+
+// The tray owns package updates and native notifications in the desktop app.
+const inDesktopApp = isDesktopApp()
+import {
+  DEFAULT_WORKSPACE_COLOR,
+  WORKSPACE_COLOR_PRESETS,
+  normalizeWorkspaceColor,
+  type WorkspaceColorId,
+} from '../lib/workspaceColors'
 
 const emit = defineEmits<{ 'open-sidebar': [] }>()
 
@@ -4317,6 +4375,7 @@ type WorkspaceForm = {
   model_bucket: string
   disallowed_tools: string
   claude_ai_mcps: 'on' | 'off'
+  color: WorkspaceColorId
 }
 
 function defaultWorkspaceProvider(): WorkspaceProvider {
@@ -4333,6 +4392,7 @@ function blankWorkspaceForm(): WorkspaceForm {
     model_bucket: '',
     disallowed_tools: '',
     claude_ai_mcps: 'on',
+    color: DEFAULT_WORKSPACE_COLOR,
   }
 }
 
@@ -4347,6 +4407,7 @@ function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
     model_bucket: ws.model_bucket || '',
     disallowed_tools: Array.isArray(ws.disallowed_tools) ? ws.disallowed_tools.join(', ') : '',
     claude_ai_mcps: mcps === false ? 'off' : 'on',
+    color: normalizeWorkspaceColor(ws.color),
   }
 }
 
@@ -4558,13 +4619,17 @@ async function saveWorkspace(name: string) {
   workspacesResult.value = ''
   try {
     await projectStore.updateWorkspace(name, {
-      vault_root: name,
+      // Send what the form holds. Overwriting it with the workspace name
+      // silently discarded any vault path the user had set, and reset an
+      // adopted workspace's `memory-vault/<name>` root to a bare name.
+      vault_root: form.vault_root.trim() || name,
       default_provider: form.default_provider,
       default_model: form.default_model,
       gws_profile: form.gws_profile,
       model_bucket: form.model_bucket,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
       claude_ai_mcps: claudeAiMcpsPayload(form.claude_ai_mcps),
+      color: form.color,
     })
     notifySaved(`Workspace "${name}" saved.`, 'Workspaces')
     await fetchWorkspacesList()
@@ -4586,13 +4651,15 @@ async function createNewWorkspace() {
   try {
     await projectStore.createWorkspace({
       name: form.name.trim(),
-      vault_root: form.name.trim(),
+      // The "Vault name" field is optional and defaults to the workspace name.
+      vault_root: form.vault_root.trim() || form.name.trim(),
       default_provider: form.default_provider,
       default_model: form.default_model,
       gws_profile: form.gws_profile,
       model_bucket: form.model_bucket,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
       claude_ai_mcps: claudeAiMcpsPayload(form.claude_ai_mcps),
+      color: form.color,
     })
     notifySaved(`Workspace "${form.name.trim()}" created.`, 'Workspaces')
     showNewWorkspace.value = false
@@ -6039,9 +6106,6 @@ async function doPackageUpdate() {
 .gws-command {
   display: inline-block;
 }
-.gws-boundary-note {
-  margin-top: var(--space-3);
-}
 .status-text--ok {
   color: var(--success);
 }
@@ -6448,6 +6512,43 @@ async function doPackageUpdate() {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-3);
 }
+.settings-field--wide {
+  grid-column: 1 / -1;
+}
+.workspace-color-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+.workspace-color-swatch {
+  width: var(--touch);
+  height: var(--touch);
+  padding: 0;
+  border: 2px solid var(--border);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at center, var(--swatch) 0 58%, transparent 60%),
+    var(--bg);
+  cursor: pointer;
+  transition: border-color 120ms var(--ease), transform 120ms var(--ease);
+}
+.workspace-color-swatch:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+}
+.workspace-color-swatch.active {
+  border-color: var(--swatch);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--swatch) 35%, transparent);
+}
+.workspace-color-swatch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.workspace-color-swatch:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 .settings-field {
   display: flex;
   flex-direction: column;
@@ -6522,9 +6623,6 @@ async function doPackageUpdate() {
 }
 .field-info-panel a {
   color: var(--accent);
-}
-.settings-field--wide {
-  grid-column: 1 / -1;
 }
 .settings-field .routine-input {
   max-width: none;

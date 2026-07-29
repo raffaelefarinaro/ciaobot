@@ -25,11 +25,11 @@ def test_open_chat_endpoint_publishes_event_for_known_chat() -> None:
     published: list[dict] = []
     pcm = SimpleNamespace(
         get_chat=lambda chat_id: {"chat_id": chat_id} if chat_id == "c1" else None,
-        events=SimpleNamespace(publish=published.append),
+        events=SimpleNamespace(publish=published.append, subscriber_count=1),
     )
 
     resp = _client(pcm=pcm).get("/api/open-chat/c1")
 
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "chat_id": "c1"}
+    assert resp.json() == {"ok": True, "chat_id": "c1", "delivered": True}
     assert published == [{"type": "open_chat", "chat_id": "c1"}]

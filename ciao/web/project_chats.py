@@ -111,7 +111,7 @@ _PROJECT_IMAGE_EXTS = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif", ".bmp", ".ico",
 })
 _PROJECT_BINARY_EXTS = frozenset({
-    ".pdf", ".zip", ".docx", ".xlsx", ".pptx",
+    ".pdf", ".zip", ".docx", ".xlsx", ".pptx", ".mht", ".mhtml",
 })
 _PROJECT_UPLOAD_EXTS = _PROJECT_TEXT_EXTS | _PROJECT_IMAGE_EXTS | _PROJECT_BINARY_EXTS
 _PROJECT_UPLOAD_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
@@ -1442,18 +1442,10 @@ class ProjectChatManager:
     def _workspace_vault_root(self, workspace: str) -> Path:
         """Return the vault root for one logical workspace.
 
-        Legacy ``personal``/``work`` workspace configs store ``vault_root`` as
-        the workspace name and are rooted under ``CIAO_VAULT_ROOT``. Custom
-        workspace roots are workspace-relative unless absolute.
+        Thin wrapper over ``CiaoConfig.workspace_vault_root``, which owns the
+        registry and the legacy-path handling.
         """
-        workspace_config = self._config.workspace(workspace)
-        raw_root = workspace_config.vault_root if workspace_config else workspace
-        root = Path(raw_root).expanduser()
-        if root.is_absolute():
-            return root.resolve()
-        if workspace in {"personal", "work"} and raw_root == workspace:
-            return (self._config.vault_root / workspace).resolve()
-        return (self._config.workspace_root / root).resolve()
+        return self._config.workspace_vault_root(workspace)
 
     def _ensure_defaults(self) -> None:
         """Ensure each workspace has its auto-managed `General` project.
@@ -1541,7 +1533,12 @@ class ProjectChatManager:
     def _create_onboarding_chat(self, project_id: str) -> None:
         import os
         vault_mode = os.environ.get("CIAO_VAULT_MODE", "scratch").strip().lower()
-        vault_root = str(self._config.vault_root)
+        project = self._projects.get(project_id)
+        vault_root = str(
+            self._workspace_vault_root(project.workspace)
+            if project is not None
+            else self._config.vault_root
+        )
 
         if vault_mode == "existing":
             title = "Connect Existing Vault 👋"
@@ -3380,6 +3377,11 @@ class ProjectChatManager:
                     trajectories_enabled=trajectories_enabled,
                     workspace_root=config.workspace_root,
                     vault_root=config.vault_root,
+                    proposal_vault_root=(
+                        self._workspace_vault_root(workspace)
+                        if workspace
+                        else None
+                    ),
                     provider=chat_meta.provider if chat_meta else "claude",
                     project_doc_path=project_doc_path,
                 )
@@ -3955,6 +3957,9 @@ class ProjectChatManager:
         workspace = project.workspace if project else ""
         env["GWS_PROFILE"] = self._workspace_gws_profile(workspace)
         env["CIAO_ACTIVE_WORKSPACE"] = workspace or self._config.gws_default_profile
+        env["CIAO_LEGACY_ENTITY_WORKSPACE"] = (
+            self._config.legacy_entity_workspace()
+        )
         if project:
             env["CIAO_ACTIVE_PROJECT"] = project.project_id
         env["CIAO_MODEL"] = chat.model
@@ -4008,6 +4013,11 @@ class ProjectChatManager:
         Legacy: ``CIAO_OLLAMA_AUTO_CLASSIFIER`` is no longer read; auto mode
         is always live for Ollama-routed chats. Remove it from your ``.env``.
         """
+        if unattended and chat.mode != "plan":
+            # `plan` is exempt: it cannot escalate (it only proposes), so
+            # forcing bypass would turn a read-only planning tick into a
+            # writing one.
+            return "bypass"
         return chat.mode
 
     @staticmethod
@@ -4174,7 +4184,7 @@ class ProjectChatManager:
             prompt=full_prompt,
             model=self._runtime_model_for_chat(chat),
             provider=chat.provider,
-            mode=self._effective_mode_for_chat(chat),
+            mode=self._effective_mode_for_chat(chat, unattended=unattended),
             display_prompt=final_display_prompt,
             resume_session=resume_session,
             images=images or [],
@@ -4290,7 +4300,9 @@ class ProjectChatManager:
                     prompt=request.prompt,
                     model=next_model,
                     provider=chat.provider,
-                    mode=self._effective_mode_for_chat(chat),
+                    # Reuse the original mode rather than recomputing: a
+                    # retry of an unattended turn is still unattended.
+                    mode=request.mode,
                     display_prompt=request.display_prompt,
                     resume_session=None,
                     # Always keep images: the fallback model may support
@@ -5014,6 +5026,10 @@ class ProjectChatManager:
             # when the ResultEvent arrives. Reassigned to the new turn_index
             # for each queued follow-up.
             current_turn_index = turn_index
+            # Only the turn this stream was started for is unattended. A queued
+            # follow-up was typed by a human who is sitting there watching, so
+            # it must keep its approval prompts (see the reset below).
+            turn_unattended = unattended
             last_assistant_text = ""
             had_error = False
             had_provider_progress = False
@@ -5031,7 +5047,7 @@ class ProjectChatManager:
                             chat_id,
                             current_prompt,
                             images=current_images,
-                            unattended=unattended,
+                            unattended=turn_unattended,
                         ):
                             payload = event_to_json(event)
                             if payload:
@@ -5349,6 +5365,10 @@ class ProjectChatManager:
                     if not combined_text:
                         continue
 
+                    # A queued message came from a person, whatever drove the
+                    # turn that was in flight when they sent it.
+                    turn_unattended = False
+
                     # Bump user-turn counter so image replay from history lines
                     # up. Capture turn_index2 first so we can attach it to the
                     # user_echo payload for client-side dedup.
@@ -5380,6 +5400,7 @@ class ProjectChatManager:
                         "type": "user_echo",
                         "text": combined_text,
                         "images": merged_image_refs,
+                        "entry_id": next_pending.get("id"),
                     }
                     if turn_index2 is not None:
                         followup_echo["turn_index"] = turn_index2
@@ -5963,6 +5984,9 @@ class ProjectChatManager:
         replies still indicate the user has dealt with the prompt, and
         the buffered event should not pop back up.
         """
+        provider_service = self._providers.get(chat_id)
+        provider = provider_service.provider if provider_service is not None else None
+
         # Strip from replay buffer first so even a stale-id reply (gate
         # already drained on turn teardown) cleans up the recorded event.
         stream = self._broker.get(chat_id)
@@ -5970,13 +5994,16 @@ class ProjectChatManager:
             stream.resolve_permission(request_id)
             if not approved:
                 # The refused call never ran, so retract any file card it
-                # already painted (request_id is the tool_use_id).
-                stream.deny_tool_use(request_id)
-        provider_service = self._providers.get(chat_id)
-        if provider_service is None:
-            return False
-        provider = provider_service.provider
-        if provider is None:
+                # already painted. On the SDK providers `request_id` *is* the
+                # tool_use_id; Codex mints its own `codex-N` request ids, so ask
+                # it which tool call the id belongs to or the retraction would
+                # silently match nothing. Done before the provider is told, so
+                # the mapping is still there to look up.
+                resolver = getattr(provider, "tool_use_id_for_request", None)
+                retract_id = resolver(request_id) if callable(resolver) else ""
+                stream.deny_tool_use(retract_id or request_id)
+
+        if provider_service is None or provider is None:
             return False
         # Provider adapters with custom permission handling (e.g. Codex)
         if hasattr(provider, "send_permission_response"):
@@ -6949,7 +6976,8 @@ class ProjectChatManager:
         checks extension against the union of viewer/image/binary allowlists,
         enforces a 50 MB size cap, and resolves name collisions by appending
         ``-2``, ``-3`` etc. Returns the same shape as ``list_project_files``
-        entries.
+        entries plus ``absolute_path``, which lets a remote client insert the
+        new host-side path into a chat prompt.
 
         Raises ``ValueError`` for any rejection (caller maps to 4xx). Raises
         ``LookupError`` if the project has no listable vault folder (the route
@@ -6992,6 +7020,7 @@ class ProjectChatManager:
         return {
             "path": rel.as_posix(),
             "vault_path": self._display_path(resolved),
+            "absolute_path": str(resolved),
             "kind": _classify_file(resolved),
             "size": stat.st_size,
             "mtime": datetime.fromtimestamp(stat.st_mtime, UTC)

@@ -34,15 +34,26 @@ export interface FileCommentInput {
   images?: string[]
 }
 
-export interface ChatCommentInput {
-  selection: string
-  comment: string
-  images?: string[]
+/**
+ * Where in the transcript a chat comment's quoted text came from.
+ *
+ * All optional: a comment made before this was plumbed through, or restored
+ * from an older persisted bucket, carries none of it. Declared once here
+ * because the store, the draft state, and this formatter all need the same
+ * shape — see `formatChatReferenceSource`.
+ */
+export interface ChatCommentAnchor {
   messageId?: string
   messageIndex?: number
   messageRole?: string
   occurrenceIndex?: number
   paragraphIndex?: number
+}
+
+export interface ChatCommentInput extends ChatCommentAnchor {
+  selection: string
+  comment: string
+  images?: string[]
 }
 
 // The custom elements we emit. Exported so the renderer allow-list and the CSS

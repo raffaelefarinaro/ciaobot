@@ -29,6 +29,7 @@ from ciao.memory_tool import (
     remove_entry,
     replace_entry,
 )
+from ciao.loops import publish_loops_changed
 from ciao.models import ControlSurface
 from ciao.schedules import ScheduleEntry, compute_next_run
 
@@ -1041,37 +1042,24 @@ class CiaoControlPlane:
             web_chat_id=chat.chat_id,
             interval_minutes=max(1, int(interval_minutes)),
             title=title,
-            autostart=autostart,
+            # `start` runs it now; `autostart` re-arms it on boot. Starting a
+            # loop without the latter gives you one that ticks until the next
+            # restart and is then silently dead, which is the "model says
+            # running, loop isn't" failure one level down — so starting implies
+            # both. A caller wanting a one-session loop can stop it.
+            autostart=autostart or start,
             web_project_id=chat.project_id,
             workspace=project.workspace,
         )
-        # Start the cadence now unless the caller explicitly asked for a
-        # stopped loop. ``autostart`` only governs server boot, so without
-        # this a freshly created loop sat at "stopped" while the model
-        # cheerfully reported it was running.
+        # ``autostart`` only governs server boot, so without this a freshly
+        # created loop sat at "stopped" while the model cheerfully reported it
+        # was running.
         if start:
             self.loops.start_loop(entry.loop_id)
         payload = asdict(entry)
         payload["running"] = self.loops.is_running(entry.loop_id)
-        self._publish_loops_changed()
+        publish_loops_changed(self.pcm)
         return _ok(payload)
-
-    def _publish_loops_changed(self) -> None:
-        """Tell every open PWA tab to refetch loops.
-
-        Loop state is fetched over REST when a chat mounts, so a loop created
-        or retimed mid-turn stayed invisible (no banner, no sidebar marker)
-        until a manual reload. Fire-and-forget: the events hub has no replay
-        buffer and a missed frame heals on the next mount.
-        """
-        pcm = self.pcm
-        events = getattr(pcm, "events", None)
-        if events is None:
-            return
-        try:
-            events.publish({"type": "loops_changed"})
-        except Exception:  # noqa: BLE001 — never fail an operation on fan-out
-            logger.exception("loops_changed publish failed")
 
     def _loop(self, principal: McpPrincipal, loop_id: str) -> Any:
         entry = self.loops.get(loop_id)
@@ -1097,19 +1085,19 @@ class CiaoControlPlane:
             normalized["interval_minutes"] = max(1, int(normalized["interval_minutes"]))
         updated = replace(entry, **normalized)
         self.loops.replace(updated)
-        self._publish_loops_changed()
+        publish_loops_changed(self.pcm)
         return _ok(asdict(updated))
 
     def loop_start(self, principal: McpPrincipal, loop_id: str) -> dict[str, Any]:
         self._loop(principal, loop_id)
         entry = self.loops.start_loop(loop_id)
-        self._publish_loops_changed()
+        publish_loops_changed(self.pcm)
         return _ok(asdict(entry))
 
     def loop_stop(self, principal: McpPrincipal, loop_id: str) -> dict[str, Any]:
         self._loop(principal, loop_id)
         self.loops.stop_loop(loop_id)
-        self._publish_loops_changed()
+        publish_loops_changed(self.pcm)
         return _ok({"loop_id": loop_id, "running": False})
 
     async def loop_run(self, principal: McpPrincipal, loop_id: str) -> dict[str, Any]:
@@ -1119,7 +1107,7 @@ class CiaoControlPlane:
     def loop_delete(self, principal: McpPrincipal, loop_id: str) -> dict[str, Any]:
         self._loop(principal, loop_id)
         deleted = self.loops.delete(loop_id)
-        self._publish_loops_changed()
+        publish_loops_changed(self.pcm)
         return _ok({"deleted": deleted, "loop_id": loop_id})
 
     # ---- workspace files/assets ---------------------------------------

@@ -437,14 +437,7 @@ def _memory_proposal_paths(config: Any, vault: Path, root: Path) -> list[tuple[P
         return paths
 
     for name in ws_names:
-        ws_config = config.workspace(name)
-        raw_root = ws_config.vault_root if ws_config else name
-        ws_vault_root = Path(raw_root).expanduser()
-        if not ws_vault_root.is_absolute():
-            if name in {"personal", "work"} and raw_root == name:
-                ws_vault_root = (vault / name).resolve()
-            else:
-                ws_vault_root = (root / ws_vault_root).resolve()
+        ws_vault_root = config.workspace_vault_root(name)
         title = f"Memory proposals ({name})" if len(ws_names) > 1 else "Memory proposals"
         paths.append((ws_vault_root / "Workspace" / "Memory-Proposals.md", title))
     return paths
@@ -500,14 +493,7 @@ def _workspace_memory_paths(config: Any, root: Path, vault: Path) -> list[tuple[
         memory_paths.append((vault / "MEMORY.md", "Workspace MEMORY.md"))
     else:
         for name in ws_names:
-            ws_config = config.workspace(name)
-            raw_root = ws_config.vault_root if ws_config else name
-            ws_vault_root = Path(raw_root).expanduser()
-            if not ws_vault_root.is_absolute():
-                if name in {"personal", "work"} and raw_root == name:
-                    ws_vault_root = (vault / name).resolve()
-                else:
-                    ws_vault_root = (root / ws_vault_root).resolve()
+            ws_vault_root = config.workspace_vault_root(name)
             title = f"Workspace MEMORY.md ({name})" if len(ws_names) > 1 else "Workspace MEMORY.md"
             memory_paths.append((ws_vault_root / "MEMORY.md", title))
     return memory_paths
@@ -747,15 +733,7 @@ def list_prompt_assets(config: Any) -> list[PromptAsset]:
         file_assets.append((Path(config.vault_root) / "MEMORY.md", "Workspace memory", "Durable memory file under the configured workspace vault root.", "vault", "shared", ""))
     else:
         for name in ws_names:
-            ws_config = config.workspace(name)
-            raw_root = ws_config.vault_root if ws_config else name
-            ws_vault_root = Path(raw_root).expanduser()
-            if not ws_vault_root.is_absolute():
-                if name in {"personal", "work"} and raw_root == name:
-                    ws_vault_root = (config.vault_root / name).resolve()
-                else:
-                    ws_vault_root = (root / ws_vault_root).resolve()
-
+            ws_vault_root = config.workspace_vault_root(name)
             title = f"Workspace memory ({name})" if len(ws_names) > 1 else "Workspace memory"
             file_assets.append((
                 ws_vault_root / "MEMORY.md",
@@ -1127,6 +1105,7 @@ async def os_audit_endpoint(request: Request) -> JSONResponse:
                     workspace_root,
                 )
             ],
+            config=config,
         )
         return JSONResponse(report)
     except Exception:  # noqa: BLE001

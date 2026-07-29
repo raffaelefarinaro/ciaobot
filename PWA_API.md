@@ -34,6 +34,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/projects/completed/restore` | Restore a completed project to active |
 | GET, POST | `/api/projects/{project_id}/chats` | List or create project chats |
 | GET, POST | `/api/projects/{project_id}/files` | List or upload project files |
+| POST | `/api/desktop-drop` | Consume a native app's single-use Finder-drop grant (local node only) |
 | GET | `/api/chats` | List all chats |
 | GET | `/api/menubar-chats` | Compact chat list for the macOS tray / menubar |
 | POST | `/api/chats/read-all` | Mark all chats read |
@@ -55,7 +56,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/read` | Mark chat read |
 | POST | `/api/chats/{chat_id}/retry` | Set, stop, or run deferred chat retry |
 | POST | `/api/chats/{chat_id}/prompt` | Send a prompt to start a background turn in the chat. Returns 409 `{error:"chat is archived", archived:true}` if the chat was archived; start a new chat (or `continue`) instead of retrying |
-| GET | `/api/open-chat/{chat_id}` | Focus an existing chat in the PWA and emit the local open-chat event |
+| GET | `/api/open-chat/{chat_id}` | Focus an existing chat in the PWA and report whether a live event subscriber received the navigation |
 | GET | `/api/chats/{chat_id}/messages` | Load persisted chat messages |
 | GET | `/api/chats/{chat_id}/subagents` | Load subagent transcripts |
 | POST | `/api/chats/{chat_id}/voice` | Upload voice for transcription |
@@ -140,6 +141,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/local/handback` | Commit pending work, pull from origin, push the current branch |
 | POST | `/api/local/resync` | Merge `origin/<branch>` back into the checkout |
 | POST | `/api/handover/merge` | Open an interactive chat that resolves sync conflicts on a branch |
+| GET | `/api/node/addresses` | URLs this engine is reachable at (localhost, Bonjour `.local`, each LAN/VPN IPv4), each flagged `loopback` so the PWA can mark the ones a phone cannot use. Session-protected, unlike the loopback-public tray endpoints, because it enumerates LAN interfaces |
 | GET | `/api/node/status` | Read multi-device node failover status and role |
 | POST | `/api/node/connect` | Connect this node as a client tunnel to a remote host |
 | POST | `/api/node/demote` | Demote active node to standby |
@@ -266,7 +268,11 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/proj
 
 Project file uploads are limited to 50 MB per file. File-list responses use
 workspace-relative viewer paths when the vault is nested under the workspace
-and absolute viewer paths when `CIAO_VAULT_ROOT` points elsewhere.
+and absolute viewer paths when `CIAO_VAULT_ROOT` points elsewhere. Successful
+upload entries also include `absolute_path`, which the chat composer uses after
+a client uploads a dropped file to the host's active project folder. Saved-page
+`.mht`/`.mhtml` files are accepted as binary project attachments and served as
+downloads rather than executable inline content.
 
 **Chats**
 
@@ -384,15 +390,20 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/provid
 # toggle controls (for UI labels).
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/workspaces"
 
-# Upsert — body keys: name, vault_root, default_provider, default_model,
-# gws_profile, model_bucket, disallowed_tools (extra non-connector tools,
+# Upsert — body keys: name, default_provider, default_model,
+# gws_profile, model_bucket, color (pink|cyan|amber|emerald|violet; default
+# pink — PWA accent only), disallowed_tools (extra non-connector tools,
 # CSV or list, null = defaults), claude_ai_mcps (true|false|null where null
 # = per-workspace default: personal off, else on). The effective denylist is
 # the union of the claude.ai connector set (when the toggle is off) and the
-# extras. POST creates, PATCH /api/workspaces/{name} updates in place.
+# extras. POST creates `<CIAO_VAULT_ROOT>/<name>` and PATCH
+# /api/workspaces/{name} updates metadata in place. `vault_root` in a request
+# body is ignored: locations are read-only here so a routine settings save
+# cannot relocate a workspace. Setup and migration may still persist an
+# external/legacy root in the registry.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/workspaces" \
   -H 'content-type: application/json' \
-  -d '{"name":"client-a","vault_root":"vaults/client-a","claude_ai_mcps":true,"disallowed_tools":"mcp__n8n_mcp"}'
+  -d '{"name":"client-a","claude_ai_mcps":true,"disallowed_tools":"mcp__n8n_mcp"}'
 
 # Flip just the toggle on an existing workspace.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/workspaces/personal" \
@@ -560,9 +571,9 @@ Global `/ws/events` payloads the PWA reacts to:
 - `loops_changed`: a loop was created, edited, started, stopped, or deleted (REST route, Schedules page, or the `loop_*` MCP tools mid-turn). No payload; the client refetches `GET /api/loops`, which is where the computed `running` / `next_run` fields are assembled. Without it a loop created by the model stayed invisible (no chat banner, no sidebar `↻` marker) until a manual reload.
 - `server_restarting`: restart drain began (`{message}`). The connect `snapshot` also carries `restarting: true` when drain is already in progress so late clients show the overlay without waiting for a turn rejection.
 
-Per-chat `/ws/chat/{chat_id}` events include text/thinking deltas, `tool_use` (with optional `file_touch` and provider-native `request_id`), `permission_request`, `tool_denied`, `result`, `user_echo`, `queued`, `queue_state`, `steered`, `status`, `error`, and `server_restarting` (sent instead of `error` when a new turn is rejected because restart drain is in progress). Client messages include normal `message`, `stop`, `permission_response`, and `question_response`; Codex structured questions use `question_response {request_id, answers: {question_id: string[]}}` so the answer resolves inside the still-running app-server turn.
+Per-chat `/ws/chat/{chat_id}` events include text/thinking deltas, `tool_use` (with optional `file_touch` and provider-native `request_id`), `permission_request`, `tool_denied`, `result`, `user_echo`, `queued`, `queue_state`, `steered`, `status`, `error`, `host_unreachable`, and `server_restarting`. The client-mode proxy emits `host_unreachable` when it cannot open the remote host socket; the PWA treats it as one ephemeral reconnecting state with a force-become-host action, never as a chat error. `server_restarting` is likewise sent instead of `error` when a new turn is rejected because restart drain is in progress. Client messages include normal `message`, `stop`, `permission_response`, and `question_response`; Codex structured questions use `question_response {request_id, answers: {question_id: string[]}}` so the answer resolves inside the still-running app-server turn.
 
-**Queue management**: while the assistant is streaming, the client can queue follow-up messages (mode `queue`). Each queued item gets an `id` and is flushed as its own user turn once the prior turn finishes. The client can also send `queue_reorder {entry_id, before_id}` (move `entry_id` before `before_id`, or to the end when `before_id` is null), `queue_edit {entry_id, text, images?}`, and `queue_remove {entry_id}`. The server confirms with `queue_state {queue: [{id, text, images?}]}` so connected clients stay in sync.
+**Queue management**: while the assistant is streaming, the client can queue follow-up messages (mode `queue`). Each queued item gets an `id` and is flushed as its own user turn once the prior turn finishes. When that turn starts, its `user_echo` includes `entry_id` so the client removes only the flushed item and keeps later queue entries visible. The client can also send `queue_reorder {entry_id, before_id}` (move `entry_id` before `before_id`, or to the end when `before_id` is null), `queue_edit {entry_id, text, images?}`, and `queue_remove {entry_id}`. The server confirms with `queue_state {queue: [{id, text, images?}]}` so connected clients stay in sync.
 
 **Auto tier-fallback status events**: when the primary model returns a capability error (image input, tool use, context length, etc.), the server emits a `status` event with a "retrying on &lt;model&gt;" message, then runs the retry and emits the normal `result` for the new model. The terminal `result.effective_model` is the retry target's id. Rate limits, auth errors, content filters, and 5xx do NOT trigger this path; only Claude, Ollama, and OpenRouter backends participate.
 

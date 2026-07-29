@@ -48,6 +48,18 @@ def test_resolve_source_falls_back_to_local_when_no_remote(tmp_path: Path, monke
 def _write_release_tree(root: Path) -> None:
     (root / "ciao").mkdir()
     (root / "web").mkdir()
+    (root / "desktop" / "src-tauri").mkdir(parents=True)
+    (root / "web" / "public").mkdir()
+    (root / "ciao" / "web" / "static").mkdir(parents=True)
+    for sw in (
+        root / "web" / "public" / "sw.js",
+        root / "ciao" / "web" / "static" / "sw.js",
+    ):
+        sw.write_text(
+            "const CACHE_NAME = 'ciaobot-v0.2.0'\n"
+            "const UNREAD_CACHE = 'ciaobot-unread-v0.2.0'\n",
+            encoding="utf-8",
+        )
     (root / "pyproject.toml").write_text(
         '[project]\nname = "ciao"\nversion = "0.2.0"\n',
         encoding="utf-8",
@@ -71,6 +83,38 @@ def _write_release_tree(root: Path) -> None:
         '    }\n'
         '  }\n'
         '}\n',
+        encoding="utf-8",
+    )
+    (root / "desktop" / "package.json").write_text(
+        '{\n  "name": "ciaobot-desktop",\n  "version": "0.1.0"\n}\n',
+        encoding="utf-8",
+    )
+    (root / "desktop" / "package-lock.json").write_text(
+        '{\n'
+        '  "name": "ciaobot-desktop",\n'
+        '  "version": "0.1.0",\n'
+        '  "packages": {\n'
+        '    "": {\n'
+        '      "name": "ciaobot-desktop",\n'
+        '      "version": "0.1.0"\n'
+        '    }\n'
+        '  }\n'
+        '}\n',
+        encoding="utf-8",
+    )
+    (root / "desktop" / "src-tauri" / "Cargo.toml").write_text(
+        '[package]\nname = "ciaobot-desktop"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    (root / "desktop" / "src-tauri" / "Cargo.lock").write_text(
+        'version = 4\n\n'
+        '[[package]]\n'
+        'name = "ciaobot-desktop"\n'
+        'version = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    (root / "desktop" / "src-tauri" / "tauri.conf.json").write_text(
+        '{\n  "productName": "Ciaobot",\n  "version": "0.1.0"\n}\n',
         encoding="utf-8",
     )
 
@@ -114,6 +158,11 @@ def test_apply_release_files_updates_versions_and_changelog(tmp_path: Path) -> N
     assert versions.package == "0.3.0"
     assert versions.pwa == "0.3.0"
     assert versions.package_lock == "0.3.0"
+    assert versions.desktop == "0.3.0"
+    assert versions.desktop_lock == "0.3.0"
+    assert versions.desktop_cargo == "0.3.0"
+    assert versions.desktop_cargo_lock == "0.3.0"
+    assert versions.desktop_tauri == "0.3.0"
     assert (tmp_path / "CHANGELOG.md").read_text(encoding="utf-8") == (
         "# Changelog\n\n"
         "## v0.3.0 - 2026-07-05\n\n"
@@ -121,6 +170,45 @@ def test_apply_release_files_updates_versions_and_changelog(tmp_path: Path) -> N
         "- feat: add release automation\n"
     )
     assert tmp_path / "web" / "package-lock.json" in touched
+    assert tmp_path / "desktop" / "src-tauri" / "Cargo.toml" in touched
+    assert tmp_path / "desktop" / "src-tauri" / "Cargo.lock" in touched
+
+
+def test_apply_release_files_bumps_service_worker_caches(tmp_path: Path) -> None:
+    """A stale cache name means clients keep serving the previous build.
+
+    Both copies have to move: web/public/sw.js is the source, and the tracked
+    ciao/web/static/sw.js is what the packaged wheel actually serves.
+    """
+    _write_release_tree(tmp_path)
+
+    touched = apply_release_files(
+        tmp_path, version="0.3.0", changelog_section="## v0.3.0 - 2026-07-05\n"
+    )
+
+    for sw in (
+        tmp_path / "web" / "public" / "sw.js",
+        tmp_path / "ciao" / "web" / "static" / "sw.js",
+    ):
+        text = sw.read_text(encoding="utf-8")
+        assert "'ciaobot-v0.3.0'" in text
+        # The prefixed cache has to move too, not just the bare one.
+        assert "'ciaobot-unread-v0.3.0'" in text
+        assert "0.2.0" not in text
+        assert sw in touched
+
+
+def test_apply_release_files_tolerates_a_missing_service_worker(tmp_path: Path) -> None:
+    """A checkout without built PWA output must not break the version bump."""
+    _write_release_tree(tmp_path)
+    (tmp_path / "ciao" / "web" / "static" / "sw.js").unlink()
+
+    touched = apply_release_files(
+        tmp_path, version="0.3.0", changelog_section="## v0.3.0 - 2026-07-05\n"
+    )
+
+    assert read_versions(tmp_path).pyproject == "0.3.0"
+    assert tmp_path / "ciao" / "web" / "static" / "sw.js" not in touched
 
 
 def test_apply_release_files_prepends_existing_changelog(tmp_path: Path) -> None:

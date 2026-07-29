@@ -8,6 +8,7 @@ import http.cookiejar
 import json
 import os
 import plistlib
+import re
 import secrets
 import shutil
 import sqlite3
@@ -21,6 +22,17 @@ import urllib.request
 
 from ciao import dev, package_smoke, public_release, release
 from ciao.setup_status import detect_nested_workspaces
+
+_WORKSPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+
+
+def _workspace_name_arg(value: str) -> str:
+    name = value.strip()
+    if not _WORKSPACE_NAME_RE.fullmatch(name):
+        raise argparse.ArgumentTypeError(
+            "workspace name must use letters, numbers, dashes, or underscores"
+        )
+    return name
 
 
 def _restart_exit_code() -> int:
@@ -508,6 +520,20 @@ def _installed_app_dir() -> Path | None:
     return None
 
 
+def _desktop_app_installed(app_dir: Path | None = None) -> bool:
+    """Whether the authoritative Tauri ``Ciaobot.app`` is installed."""
+
+    roots = (
+        (Path(app_dir).expanduser(),)
+        if app_dir is not None
+        else (Path("/Applications"), Path.home() / "Applications")
+    )
+    return any(
+        (root / "Ciaobot.app" / "Contents" / "MacOS" / "ciaobot-desktop").is_file()
+        for root in roots
+    )
+
+
 def refresh_app_bundle_if_stale(
     workspace: Path, port: int, *, python_path: str | None = None
 ) -> Path | None:
@@ -813,6 +839,66 @@ def detect_vault_mode(workspace: Path | str) -> str:
     return "existing" if entries else "scratch"
 
 
+def _setup_registry_vaults(
+    registry_path: Path,
+    *,
+    workspace_root: Path,
+    configured_vault_root: Path,
+) -> list[tuple[str, Path]] | None:
+    """Resolve an existing setup registry without rediscovering vaults.
+
+    A setup rerun must be idempotent even when the configured vault is a
+    container full of named workspaces. Rediscovering that container and then
+    scaffolding its root created a second MEMORY.md/INDEX.md/Logs layout.
+    Reuse the same resolver as the running app so legacy one-segment and
+    setup-selected roots keep the location already recorded for them.
+    """
+    if not registry_path.exists():
+        return None
+    try:
+        payload = json.loads(registry_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"existing workspace registry is unreadable: {exc}") from exc
+
+    if isinstance(payload, dict):
+        items = [
+            {"name": name, **value}
+            for name, value in payload.items()
+            if isinstance(value, dict)
+        ]
+    elif isinstance(payload, list):
+        items = [item for item in payload if isinstance(item, dict)]
+    else:
+        items = []
+
+    from ciao.config import CiaoConfig, WorkspaceConfig
+
+    workspaces: dict[str, WorkspaceConfig] = {}
+    for item in items:
+        name = str(item.get("name", "")).strip()
+        if not _WORKSPACE_NAME_RE.fullmatch(name):
+            continue
+        raw_root = str(item.get("vault_root", "")).strip()
+        if not raw_root:
+            continue
+        workspaces[name] = WorkspaceConfig(name=name, vault_root=raw_root)
+    if not workspaces:
+        raise ValueError("existing workspace registry has no valid workspaces")
+
+    config = CiaoConfig(
+        pwa_auth_token="setup-registry",
+        workspace_root=workspace_root,
+        vault_root=configured_vault_root,
+        state_path=workspace_root / ".runtime" / "state.json",
+        media_root=workspace_root / ".runtime" / "media",
+        workspaces=workspaces,
+    )
+    return [
+        (name, config.workspace_vault_root(name))
+        for name in config.workspace_names()
+    ]
+
+
 def setup_workspace(
     workspace: Path | str,
     *,
@@ -828,9 +914,17 @@ def setup_workspace(
     launch_agents_dir: Path | str | None = None,
     app_dir: Path | str | None = None,
 ) -> list[Path]:
+    requested_name = (workspace_name or "").strip()
+    if workspace_name is not None and not _WORKSPACE_NAME_RE.fullmatch(
+        requested_name
+    ):
+        raise ValueError(
+            "workspace name must use letters, numbers, dashes, or underscores"
+        )
     root = Path(workspace).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
+    setup_selected_vault = vault_root is not None
     vault_value = str(vault_root) if vault_root is not None else "memory-vault"
     if vault_root is None and vault_mode == "existing":
         # Single-folder setup: the chosen workspace IS the user's existing
@@ -857,6 +951,7 @@ def setup_workspace(
         existing_root = existing_env.get("CIAO_VAULT_ROOT", "").strip()
         if existing_root:
             vault_value = existing_root
+            setup_selected_vault = True
 
     vault_path = Path(vault_value).expanduser()
     if vault_path.is_absolute():
@@ -865,6 +960,13 @@ def setup_workspace(
         vault_value = str(vault_path)
     else:
         vault_path = root / vault_path
+    workspaces_registry = root / ".runtime" / "workspaces.json"
+    registered_vaults = _setup_registry_vaults(
+        workspaces_registry,
+        workspace_root=root,
+        configured_vault_root=vault_path,
+    )
+    name = requested_name or "personal"
 
     token = auth_token or secrets.token_urlsafe(32)
     # Empty contact = Web Push disabled until configured in Settings;
@@ -943,19 +1045,26 @@ def setup_workspace(
     # memory-vault/personal/, memory-vault/work/), adopt them as the logical
     # workspace registry instead of creating one synthetic workspace that points
     # at the whole vault.
-    nested = detect_nested_workspaces(vault_path)
-    name = (workspace_name or "").strip()
     provider = (default_provider or "claude").strip().lower()
     model_bucket = {
         "codex": "",
         "ollama": "personal",
         "openrouter": "openrouter",
     }.get(provider, "anthropic")
-    workspaces_registry = root / ".runtime" / "workspaces.json"
-    if nested:
+    scaffold_vaults: list[tuple[str, Path]]
+    if registered_vaults is not None:
+        # The registry, not today's CLI defaults or filesystem discovery, is
+        # authoritative on a rerun. Repair missing scaffold files only inside
+        # the vaults it already names.
+        scaffold_vaults = registered_vaults
+    else:
+        nested = detect_nested_workspaces(vault_path)
+        scaffold_vaults = []
+    if registered_vaults is None and nested:
         entries: list[dict[str, str]] = []
         for ws_name in nested:
             nested_vault = vault_path / ws_name
+            scaffold_vaults.append((ws_name, nested_vault))
             try:
                 stored_root = str(nested_vault.relative_to(root))
             except ValueError:
@@ -978,14 +1087,26 @@ def setup_workspace(
             json.dumps(entries, indent=2) + "\n",
         )
         written.append(workspaces_registry)
-    elif name:
+    elif registered_vaults is None:
+        # A fresh logical workspace always gets its own named folder beneath
+        # the configured vault container. Existing-folder onboarding is the
+        # compatibility exception: keep the selected notes in place so the
+        # onboarding chat can inspect them before proposing a migration.
+        scaffold_vault_path = vault_path
+        if vault_mode != "existing" and not setup_selected_vault:
+            scaffold_vault_path = vault_path / name
+        scaffold_vaults.append((name, scaffold_vault_path))
+        try:
+            stored_root = str(scaffold_vault_path.relative_to(root))
+        except ValueError:
+            stored_root = str(scaffold_vault_path)
         _write_if_missing(
             workspaces_registry,
             json.dumps(
                 [
                     {
                         "name": name,
-                        "vault_root": vault_value,
+                        "vault_root": stored_root,
                         "default_provider": provider,
                         "gws_profile": name,
                         "model_bucket": model_bucket,
@@ -997,34 +1118,43 @@ def setup_workspace(
         )
         written.append(workspaces_registry)
 
-    _write_if_missing(
-        vault_path / "MEMORY.md",
-        "# Memory\n\nDurable workspace memory lives here.\n",
-    )
-    _write_if_missing(
-        vault_path / "INDEX.md",
-        "# Vault Index\n\nGenerated by `ciao vault-index`.\n",
-    )
-    if not nested:
+    for _, scaffold_vault_path in scaffold_vaults:
         _write_if_missing(
-            vault_path / "projects" / "active" / "general" / "general.md",
+            scaffold_vault_path / "MEMORY.md",
+            "# Memory\n\nDurable workspace memory lives here.\n",
+        )
+        _write_if_missing(
+            scaffold_vault_path / "INDEX.md",
+            "# Vault Index\n\nGenerated by `ciao vault-index`.\n",
+        )
+        _write_if_missing(
+            scaffold_vault_path / "projects" / "active" / "general" / "general.md",
             "---\ntype: project\ntitle: General\ndescription: Default project.\nstatus: active\ntags: [project]\n---\n\n# General\n",
         )
-    (vault_path / "Logs" / "Chats").mkdir(parents=True, exist_ok=True)
-    written.append(vault_path)
+        (scaffold_vault_path / "Logs" / "Chats").mkdir(parents=True, exist_ok=True)
+        written.append(scaffold_vault_path)
 
     launch_dir = Path(launch_agents_dir) if launch_agents_dir is not None else Path.home() / "Library" / "LaunchAgents"
     app_root_dir = Path(app_dir) if app_dir is not None else _default_app_dir()
     resolved_python = python_path or sys.executable
-    app_root = _write_app_shortcut(
-        workspace=root,
-        app_dir=app_root_dir,
-        port=port,
-        python_path=resolved_python,
-        launch_agents_dir=launch_dir,
-    )
-    menubar_executable = str(app_root / "Contents" / "MacOS" / "CiaobotMenuBar")
-    for plist_name in ("com.ciao.server.plist", "com.ciao.menubar.plist"):
+    desktop_installed = _desktop_app_installed(app_root_dir)
+    app_root: Path | None = None
+    menubar_executable = ""
+    plist_names = ["com.ciao.server.plist"]
+    if not desktop_installed:
+        app_root = _write_app_shortcut(
+            workspace=root,
+            app_dir=app_root_dir,
+            port=port,
+            python_path=resolved_python,
+            launch_agents_dir=launch_dir,
+        )
+        menubar_executable = str(app_root / "Contents" / "MacOS" / "CiaobotMenuBar")
+        plist_names.append("com.ciao.menubar.plist")
+    else:
+        # The Tauri app mints/redeems this URL itself on first launch.
+        _ensure_setup_token(root)
+    for plist_name in plist_names:
         written.append(_write_launchd_plist(
             workspace=root,
             launch_agents_dir=launch_dir,
@@ -1034,7 +1164,8 @@ def setup_workspace(
             plist_name=plist_name,
             menubar_executable=menubar_executable,
         ))
-    written.append(app_root)
+    if app_root is not None:
+        written.append(app_root)
 
     ensure_workspace_git(root)
     # A vault outside the workspace (existing notes folder) gets its own
@@ -1121,6 +1252,7 @@ def _setup_command(args: argparse.Namespace) -> int:
         args.workspace,
         auth_token=args.auth_token,
         push_contact=args.push_contact,
+        workspace_name=args.workspace_name,
         python_path=args.python,
         port=args.port,
         launch_agents_dir=args.launch_agents_dir,
@@ -1131,6 +1263,7 @@ def _setup_command(args: argparse.Namespace) -> int:
     plists = [
         Path(args.launch_agents_dir).expanduser() / name
         for name in ("com.ciao.server.plist", "com.ciao.menubar.plist")
+        if (Path(args.launch_agents_dir).expanduser() / name).is_file()
     ]
     if args.load_launchd:
         rc = 0
@@ -1403,10 +1536,23 @@ def _os_audit_command(args: argparse.Namespace) -> int:
         "CIAO_RUNTIME_ROOT",
         ".runtime",
     )
+    from ciao.config import CiaoConfig
+
+    config_source = dict(os.environ)
+    config_source.update({
+        "CIAO_WORKSPACE": str(workspace),
+        "CIAO_VAULT_ROOT": str(vault),
+        "CIAO_RUNTIME_ROOT": str(runtime),
+        # Loading config for a read-only audit must not create a session
+        # secret merely because the CLI was invoked outside the server env.
+        "PWA_AUTH_TOKEN": config_source.get("PWA_AUTH_TOKEN", "") or "os-audit",
+    })
+    audit_config = CiaoConfig.from_env(config_source)
     report = run_os_audit(
         workspace_dir=workspace,
         vault_root=vault,
         runtime_dir=runtime,
+        config=audit_config,
     )
 
     if args.json:
@@ -1840,6 +1986,37 @@ def _provider_chat_command(args: argparse.Namespace) -> int:
     return 1
 
 
+def _desktop_service_command(args: argparse.Namespace) -> int:
+    from ciao import macos_service
+
+    action = args.desktop_service_action
+    if action == "status":
+        result = macos_service.service_status()
+    elif action == "start":
+        result = macos_service.start_service()
+    elif action == "restart":
+        result = macos_service.restart_service(force=bool(args.force))
+    elif action == "stop":
+        result = macos_service.stop_service(force=bool(args.force))
+    elif action == "login":
+        result = macos_service.set_login_enabled(args.login_action == "enable")
+    elif action == "update-engine":
+        result = macos_service.update_engine(force=bool(args.force))
+    elif action == "migrate":
+        result = macos_service.migrate_legacy_companion(running_app=args.app_bundle)
+    elif action == "rollback":
+        result = macos_service.rollback_legacy_companion()
+    else:  # pragma: no cover - argparse constrains the action.
+        parser_error = macos_service.ServiceResult(
+            False,
+            str(action),
+            "Unknown desktop service action.",
+            {},
+        )
+        return macos_service.print_result(parser_error, as_json=bool(args.as_json))
+    return macos_service.print_result(result, as_json=bool(args.as_json))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ciao", description="Ciaobot local assistant CLI.")
     subparsers = parser.add_subparsers(dest="command")
@@ -1865,6 +2042,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     menubar_parser.set_defaults(func=_menubar_command)
 
+    desktop_service_parser = subparsers.add_parser(
+        "desktop-service",
+        help="Control the launchd-managed engine for Ciaobot.app.",
+    )
+    desktop_service_sub = desktop_service_parser.add_subparsers(
+        dest="desktop_service_action",
+        required=True,
+    )
+    for action in ("status", "start", "restart", "stop", "update-engine", "migrate", "rollback"):
+        action_parser = desktop_service_sub.add_parser(action)
+        action_parser.add_argument("--json", action="store_true", dest="as_json")
+        if action in {"restart", "stop", "update-engine"}:
+            action_parser.add_argument(
+                "--force",
+                action="store_true",
+                help="Proceed even when chats are active (after UI confirmation).",
+            )
+        if action == "migrate":
+            action_parser.add_argument(
+                "--app-bundle",
+                type=Path,
+                required=True,
+                help="Installed Ciaobot.app bundle requesting migration.",
+            )
+        action_parser.set_defaults(func=_desktop_service_command)
+    login_parser = desktop_service_sub.add_parser("login")
+    login_parser.add_argument("login_action", choices=("enable", "disable"))
+    login_parser.add_argument("--json", action="store_true", dest="as_json")
+    login_parser.set_defaults(func=_desktop_service_command)
+
     setup_parser = subparsers.add_parser(
         "setup",
         help="Scaffold a local Ciaobot workspace from packaged stock assets.",
@@ -1874,6 +2081,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("."),
         help="Workspace directory to initialize.",
+    )
+    setup_parser.add_argument(
+        "--workspace-name",
+        type=_workspace_name_arg,
+        default=None,
+        help=(
+            "Name of the first logical workspace created under the vault "
+            "(default: personal)."
+        ),
     )
     setup_parser.add_argument("--auth-token", help="PWA auth token to write when .env is new.")
     setup_parser.add_argument("--push-contact", help="Web Push contact to write when .env is new.")

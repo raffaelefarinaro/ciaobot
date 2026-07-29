@@ -236,6 +236,11 @@ async def _async_main() -> int:
         port=config.pwa_port,
     )
     with lock:
+        if (
+            config._workspace_registry_changed
+            and not os.environ.get("CIAO_WORKSPACES", "").strip()
+        ):
+            config.persist_workspace_registry()
         return await _run_server_locked(config)
 
 

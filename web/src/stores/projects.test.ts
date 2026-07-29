@@ -2,7 +2,12 @@
 
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { shouldReconnectActiveChatOnStreamingStarted, chatWsReconnectDelayMs, useProjectStore } from './projects'
+import {
+  shouldReconnectActiveChatOnStreamingStarted,
+  chatWsReconnectDelayMs,
+  isHostConnectionUnavailableMessage,
+  useProjectStore,
+} from './projects'
 
 const apiGet = vi.hoisted(() => vi.fn())
 const apiPost = vi.hoisted(() => vi.fn())
@@ -93,7 +98,38 @@ beforeEach(() => {
   }
   vi.stubGlobal('localStorage', storage)
   Object.defineProperty(window, 'localStorage', { value: storage, configurable: true })
+  Object.defineProperty(document, 'hasFocus', {
+    value: vi.fn(() => true),
+    configurable: true,
+  })
   vi.stubGlobal('WebSocket', FakeWebSocket)
+})
+
+describe('native window focus reporting', () => {
+  test('requires both document visibility and key-window focus', () => {
+    let focused = true
+    Object.defineProperty(document, 'visibilityState', {
+      value: 'visible',
+      configurable: true,
+    })
+    Object.defineProperty(document, 'hasFocus', {
+      value: vi.fn(() => focused),
+      configurable: true,
+    })
+    const store = useProjectStore()
+    store.activeChatId = 'chat-focus'
+    store.connectWs('chat-focus')
+    const socket = fakeSockets[0]
+
+    focused = false
+    window.dispatchEvent(new Event('blur'))
+    focused = true
+    window.dispatchEvent(new Event('focus'))
+
+    const payloads = socket.send.mock.calls.map(([raw]) => JSON.parse(raw))
+    expect(payloads.at(-2)).toEqual({ type: 'focus', focused: false })
+    expect(payloads.at(-1)).toEqual({ type: 'focus', focused: true })
+  })
 })
 
 describe('streaming started reconnect guard', () => {
@@ -216,6 +252,61 @@ describe('per-chat WS auto-reconnect', () => {
   })
 })
 
+describe('client host connection failures', () => {
+  test('recognizes the legacy proxy error', () => {
+    expect(isHostConnectionUnavailableMessage(
+      "Host WS unreachable: [Errno 61] Connect call failed ('10.0.0.5', 8443)",
+    )).toBe(true)
+  })
+
+  test('shows one ephemeral reconnecting state without adding chat errors', () => {
+    const store = useProjectStore()
+    const chatId = 'c-client-offline'
+    store.activeChatId = chatId
+    store.messages[chatId] = [
+      { role: 'system', content: 'Error: Host WS unreachable: old attempt 1', timestamp: '' },
+      { role: 'system', content: 'Error: Host WS unreachable: old attempt 2', timestamp: '' },
+      { role: 'user', content: 'keep this', timestamp: '' },
+    ]
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'host_unreachable' }),
+    })
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'host_unreachable' }),
+    })
+
+    expect(store.hostConnectionUnavailable).toBe(true)
+    expect(store.messages[chatId]).toEqual([
+      { role: 'user', content: 'keep this', timestamp: '' },
+    ])
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'keepalive' }),
+    })
+    expect(store.hostConnectionUnavailable).toBe(false)
+  })
+
+  test('treats the legacy generic event as the same single connection state', () => {
+    const store = useProjectStore()
+    const chatId = 'c-client-legacy'
+    store.activeChatId = chatId
+    store.messages[chatId] = []
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'error',
+        message: 'Host WS unreachable: host offline',
+      }),
+    })
+
+    expect(store.hostConnectionUnavailable).toBe(true)
+    expect(store.messages[chatId]).toEqual([])
+  })
+})
+
 describe('ephemeral status events', () => {
   test('does not render Claude requesting status as a system message', () => {
     apiGet.mockResolvedValue([])
@@ -300,7 +391,130 @@ describe('ephemeral status events', () => {
   })
 })
 
+describe('pinned file dismissal', () => {
+  const surfacedEvent = {
+    type: 'tool_use',
+    tool_name: 'file_surface',
+    tool_use_id: 'surface-1',
+    file_touch: {
+      file_path: '/workspace/report.md',
+      action: 'surfaced',
+    },
+  }
+
+  test('keeps a user-closed pinned file closed when chat events replay', () => {
+    Object.defineProperty(window, 'innerWidth', {
+      value: 1200,
+      configurable: true,
+    })
+    const chatId = 'chat-pinned-dismissal'
+    const store = useProjectStore()
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({ data: JSON.stringify(surfacedEvent) })
+    expect(store.pinnedFileFor(chatId)).toBe('/workspace/report.md')
+
+    store.unpinFile(chatId)
+    expect(store.pinnedFileFor(chatId)).toBeUndefined()
+
+    fakeSockets[0].onmessage?.({ data: JSON.stringify(surfacedEvent) })
+    expect(store.pinnedFileFor(chatId)).toBeUndefined()
+  })
+
+  test('persists the dismissal across store recreation until the user pins a file', () => {
+    Object.defineProperty(window, 'innerWidth', {
+      value: 1200,
+      configurable: true,
+    })
+    const chatId = 'chat-pinned-reopen'
+    const firstStore = useProjectStore()
+    firstStore.activeChatId = chatId
+    firstStore.connectWs(chatId)
+    fakeSockets[0].onmessage?.({ data: JSON.stringify(surfacedEvent) })
+    firstStore.unpinFile(chatId)
+
+    setActivePinia(createPinia())
+    const reopenedStore = useProjectStore()
+    reopenedStore.activeChatId = chatId
+    reopenedStore.connectWs(chatId)
+    fakeSockets[1].onmessage?.({ data: JSON.stringify(surfacedEvent) })
+    expect(reopenedStore.pinnedFileFor(chatId)).toBeUndefined()
+
+    reopenedStore.pinFile(chatId, '/workspace/report.md')
+    expect(reopenedStore.pinnedFileFor(chatId)).toBe('/workspace/report.md')
+  })
+})
+
 describe('queued message replay handling', () => {
+  test('keeps later queued messages visible when the first follow-up starts', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-queue'
+    store.queuedMessages[chatId] = [
+      { id: 'q-1', text: 'msg A' },
+      { id: 'q-2', text: 'msg B' },
+    ]
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        entry_id: 'q-1',
+        text: 'msg A',
+        turn_index: 1,
+      }),
+    })
+
+    expect(store.queuedMessages[chatId]).toEqual([
+      { id: 'q-2', text: 'msg B' },
+    ])
+  })
+
+  test('legacy echoes remove only one matching queue entry', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-queue'
+    store.queuedMessages[chatId] = [
+      { id: 'q-1', text: 'same prompt' },
+      { id: 'q-2', text: 'same prompt' },
+    ]
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: 'same prompt',
+        turn_index: 1,
+      }),
+    })
+
+    expect(store.queuedMessages[chatId]).toEqual([
+      { id: 'q-2', text: 'same prompt' },
+    ])
+  })
+
+  test('an echo for the current turn does not clear unrelated queued messages', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-queue'
+    store.queuedMessages[chatId] = [
+      { id: 'q-1', text: 'follow-up A' },
+      { id: 'q-2', text: 'follow-up B' },
+    ]
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({
+        type: 'user_echo',
+        text: 'original turn',
+        turn_index: 0,
+      }),
+    })
+
+    expect(store.queuedMessages[chatId]).toEqual([
+      { id: 'q-1', text: 'follow-up A' },
+      { id: 'q-2', text: 'follow-up B' },
+    ])
+  })
+
   test('clears local queued chips when server history contains the flushed user turn', async () => {
     const store = useProjectStore()
     const chatId = 'chat-queue'
@@ -1215,6 +1429,82 @@ describe('workspace and chat transitions', () => {
     expect(store.activeWorkspace).toBe('client')
     expect(store.activeChatId).toBe('c-client')
     expect(store.bootstrapped).toBe(true)
+  })
+
+  // The app shell renders once fetchAll resolves, so it must not wait on the
+  // active chat's message history — a long transcript would otherwise delay the
+  // whole home page behind parsing one chat.
+  test('fetchAll resolves without waiting for the active chat history', async () => {
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    const store = useProjectStore()
+    let releaseMessages: (value: unknown) => void = () => {}
+    const messagesRequested = new Promise<void>(seen => {
+      apiGet.mockImplementation((path: string) => {
+        if (path === '/api/workspaces') {
+          return Promise.resolve({ workspaces: [], active: 'home', provider_options: [] })
+        }
+        if (path === '/api/projects') {
+          return Promise.resolve([
+            { project_id: 'p1', name: 'General', workspace: 'home', context: '', created_at: '', order: 0, vault_folder: 'general' },
+          ])
+        }
+        if (path === '/api/chats') {
+          return Promise.resolve([
+            { chat_id: 'c1', project_id: 'p1', title: 'Long chat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+          ])
+        }
+        if (path === '/api/chats/c1/messages') {
+          seen()
+          // Never resolves until we say so: stands in for a slow transcript.
+          return new Promise(resolve => { releaseMessages = resolve })
+        }
+        return Promise.resolve([])
+      })
+    })
+
+    await store.fetchAll()
+
+    // Shell is ready even though the history is still in flight.
+    expect(store.bootstrapped).toBe(true)
+    expect(store.activeChatId).toBe('c1')
+    await messagesRequested
+    expect(store.messages['c1'] ?? []).toEqual([])
+
+    releaseMessages([])
+  })
+
+  // A fetchAll while nothing is on screen (the desktop app launching at login,
+  // or a background tab) used to mark the active chat read unconditionally,
+  // wiping a just-finished chat's unread — and with it the tray badge and the
+  // in-app marker.
+  test.each([
+    ['visible', true],
+    ['hidden', false],
+  ])('fetchAll marks the active chat read only when %s', async (visibility, shouldMark) => {
+    Object.defineProperty(document, 'visibilityState', { value: visibility, configurable: true })
+    const store = useProjectStore()
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/workspaces') {
+        return Promise.resolve({ workspaces: [], active: 'home', provider_options: [] })
+      }
+      if (path === '/api/projects') {
+        return Promise.resolve([
+          { project_id: 'p1', name: 'General', workspace: 'home', context: '', created_at: '', order: 0, vault_folder: 'general' },
+        ])
+      }
+      if (path === '/api/chats') {
+        return Promise.resolve([
+          { chat_id: 'c1', project_id: 'p1', title: 'Done', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+        ])
+      }
+      return Promise.resolve([])
+    })
+
+    await store.fetchAll()
+
+    expect(store.activeChatId).toBe('c1')
+    const markedRead = apiPost.mock.calls.some(([path]) => path === '/api/chats/c1/read')
+    expect(markedRead).toBe(shouldMark)
   })
 
   test('restoreState runs at store init so active chat is known before fetchAll', () => {

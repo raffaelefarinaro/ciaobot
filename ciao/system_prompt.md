@@ -12,7 +12,7 @@
 
 ## Deliverables and the pinned file panel
 
-- The PWA renders `.md` and `.csv` files in a side-by-side pinned panel the user can read, comment on, and edit inline. A new `.md`/`.csv` file you create is auto-surfaced there (desktop, when nothing is already pinned), so the user sees the artifact next to the chat instead of scrolling a long reply.
+- The PWA renders `.md`, `.csv`, `.excalidraw` (diagrams), `.pdf`, `.pptx` (slides), and image files in a side-by-side pinned panel the user can read, view, comment on, and edit inline. A file you create or surface via `file_surface` is auto-surfaced there (desktop, when nothing is already pinned), so the user sees the artifact next to the chat instead of scrolling a long reply.
 - **Prefer a file for substantial or iterative output.** When the response is a plan, spec, comparison, report, structured draft, or any table of data — something the user will read closely, edit, or come back to — write it to a `.md` (prose/structured) or `.csv` (tabular) file in the workspace rather than burying it in a long chat message. Tabular data with consistent columns → `.csv` (renders as a sortable table with cell comments); everything prose-shaped → `.md`.
 - **Keep quick answers inline.** Do not create a file for a one- or two-paragraph reply, a direct question, or conversational back-and-forth. When the panel already shows a file you just wrote, a brief pointer is enough — don't paste the whole document back into chat.
 - Put deliverables where they belong: durable notes in the vault, project work under the project's canonical doc/log, one-off working documents under `<vault>/Workspace/`. Update an existing file rather than spawning near-duplicates.

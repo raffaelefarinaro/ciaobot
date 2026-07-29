@@ -18,6 +18,8 @@ export interface WorkspaceInfo {
   claude_ai_mcps?: boolean | null
   gws_profile: string
   model_bucket: string
+  // PWA accent preset: pink | cyan | amber | emerald | violet. Missing → pink.
+  color?: string
 }
 
 export interface WorkspacesResponse {
@@ -278,7 +280,7 @@ export type WsEvent =
   | { type: 'result'; text: string; is_error: boolean; effective_model: string; usage: Record<string, string>; quota?: Record<string, unknown>; session_id: string; sent_at?: string; completed_at?: string; duration_ms?: number }
   | { type: 'permission_request'; tool_name: string; tool_input?: string; message: string; request_id: string }
   | { type: 'chat_title'; chat_id: string; title: string }
-  | { type: 'user_echo'; text: string; images?: string[]; turn_index?: number; sent_at?: string; unattended?: boolean }
+  | { type: 'user_echo'; text: string; images?: string[]; turn_index?: number; sent_at?: string; unattended?: boolean; entry_id?: string }
   // A tool call was refused (user Deny, or the auto-deny on an unattended
   // run). The call never executed, so any file card already painted for this
   // tool_use_id has to be retracted.
@@ -287,6 +289,10 @@ export type WsEvent =
   | { type: 'queue_state'; queue: Array<{ id: string; text: string; images?: string[] }> }
   | { type: 'steered'; text: string; images?: string[] }
   | { type: 'error'; message: string }
+  // The local client proxy could not open the remote host socket. This is a
+  // connection state, not a chat/model failure, so the PWA renders one
+  // reconnecting card instead of appending an error to conversation history.
+  | { type: 'host_unreachable' }
   // Server is draining for restart; client should show RestartOverlay, not
   // treat this as a chat failure.
   | { type: 'server_restarting'; message: string }

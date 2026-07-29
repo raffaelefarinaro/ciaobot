@@ -49,10 +49,11 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       try { err = JSON.parse(raw) } catch { err = {} }
     }
     // A server running older code answers an unknown route with the SPA shell
-    // (HTML) or a 404. Only those warrant the redeploy hint — a plain-text 500
-    // from Starlette, or a 502/503 from a proxy, is a real failure and has to
-    // surface as itself, or the user redeploys a healthy build chasing it.
-    if (looksLikeHtml || res.status === 404) {
+    // (HTML), or a 404 with no JSON error to explain itself. Only those warrant
+    // the redeploy hint: a real `404 {"error": "not found"}` has a reason worth
+    // showing, and a plain-text 500 or a proxy 502/503 is a live failure — hide
+    // either behind "redeploy" and the user goes and redeploys a healthy build.
+    if (looksLikeHtml || (res.status === 404 && !err?.error)) {
       throw new ApiError(
         `API route ${path} is not available on the running server yet. Use Settings → Deploy, then restart Ciaobot.`,
         { status: res.status, payload: err },

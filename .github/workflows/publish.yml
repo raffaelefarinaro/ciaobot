@@ -37,9 +37,71 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ github.event.release.tag_name }}" dist/* --clobber
 
+  build-desktop:
+    runs-on: macos-latest
+    if: github.event_name == 'release'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@1.90.0
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm ci
+      - name: Build signed universal desktop artifacts
+        working-directory: desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri build -- --target universal-apple-darwin
+      - name: Prepare updater manifest
+        env:
+          VERSION: ${{ github.event.release.tag_name }}
+        run: |
+          version="${VERSION#v}"
+          bundle="desktop/src-tauri/target/universal-apple-darwin/release/bundle"
+          updater="$(find "$bundle" -name '*.app.tar.gz' -type f -print -quit)"
+          signature="${updater}.sig"
+          dmg="$(find "$bundle" -name '*.dmg' -type f -print -quit)"
+          test -n "$updater" -a -f "$signature" -a -n "$dmg"
+          updater_name="Ciaobot_${version}_universal.app.tar.gz"
+          dmg_name="Ciaobot_${version}_universal.dmg"
+          cp "$updater" "$updater_name"
+          cp "$signature" "${updater_name}.sig"
+          cp "$dmg" "$dmg_name"
+          signature_value="$(cat "${updater_name}.sig")"
+          download="https://github.com/raffaelefarinaro/ciaobot/releases/download/v${version}/${updater_name}"
+          jq -n \
+            --arg version "$version" \
+            --arg notes "Ciaobot v${version}" \
+            --arg pub_date "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            --arg url "$download" \
+            --arg signature "$signature_value" \
+            '{
+              version: $version,
+              notes: $notes,
+              pub_date: $pub_date,
+              platforms: {
+                "darwin-aarch64": {signature: $signature, url: $url},
+                "darwin-x86_64": {signature: $signature, url: $url}
+              }
+            }' > latest.json
+      - name: Attach desktop artifacts to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" Ciaobot_*_universal.dmg Ciaobot_*_universal.app.tar.gz Ciaobot_*_universal.app.tar.gz.sig latest.json --clobber
+
   update-homebrew-tap:
     runs-on: ubuntu-latest
-    needs: build-and-publish
+    needs: [build-and-publish, build-desktop]
     if: github.event_name == 'release'
     steps:
       - uses: actions/checkout@v4
@@ -51,8 +113,11 @@ jobs:
           version="${VERSION#v}"
           wheel_url="https://github.com/raffaelefarinaro/ciaobot/releases/download/v${version}/ciaobot-${version}-py3-none-any.whl"
           sha256="$(curl -fsSL "$wheel_url" | sha256sum | awk '{print $1}')"
+          dmg_url="https://github.com/raffaelefarinaro/ciaobot/releases/download/v${version}/Ciaobot_${version}_universal.dmg"
+          dmg_sha256="$(curl -fsSL "$dmg_url" | sha256sum | awk '{print $1}')"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "sha256=${sha256}" >> "$GITHUB_OUTPUT"
+          echo "dmg_sha256=${dmg_sha256}" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         with:
           repository: raffaelefarinaro/homebrew-ciaobot
@@ -63,6 +128,7 @@ jobs:
           ./scripts/update-homebrew-tap.sh \
             "${{ steps.wheel.outputs.version }}" \
             "${{ steps.wheel.outputs.sha256 }}" \
+            "${{ steps.wheel.outputs.dmg_sha256 }}" \
             homebrew-ciaobot
       - name: Commit and push tap update
         working-directory: homebrew-ciaobot
@@ -75,6 +141,48 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/ciaobot.rb
+          git add Formula/ciaobot.rb Casks/ciaobot-desktop.rb
           git commit -m "ciaobot ${RELEASE_VERSION}"
           git push
+
+  release-smoke:
+    runs-on: macos-latest
+    needs: update-homebrew-tap
+    if: github.event_name == 'release'
+    steps:
+      - name: Install the released formula and cask from the tap
+        env:
+          VERSION: ${{ github.event.release.tag_name }}
+        run: |
+          brew tap raffaelefarinaro/ciaobot
+          brew update
+          brew install --cask raffaelefarinaro/ciaobot/ciaobot-desktop
+          test -x "$(brew --prefix)/bin/ciao"
+          test -x "/Applications/Ciaobot.app/Contents/MacOS/ciaobot-desktop"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' /Applications/Ciaobot.app/Contents/Info.plist)" = "local.ciaobot.app"
+          version="${VERSION#v}"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' /Applications/Ciaobot.app/Contents/Info.plist)" = "$version"
+          open -a Ciaobot --args --background
+          for _ in {1..30}; do
+            pgrep -x ciaobot-desktop >/dev/null && break
+            sleep 1
+          done
+          pgrep -x ciaobot-desktop >/dev/null
+          for _ in {1..30}; do
+            curl -fsS http://localhost:8443/api/startup-status >/dev/null && break
+            sleep 1
+          done
+          curl -fsS http://localhost:8443/api/startup-status | jq -e '.desktop_api_version == 1'
+      - name: Verify updater metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release download "$TAG" --repo raffaelefarinaro/ciaobot --pattern latest.json
+          jq -e '.platforms["darwin-aarch64"].url and .platforms["darwin-aarch64"].signature' latest.json
+          jq -e '.platforms["darwin-x86_64"].url and .platforms["darwin-x86_64"].signature' latest.json
+      - name: Verify cask uninstall
+        run: |
+          pkill -x ciaobot-desktop || true
+          brew uninstall --cask ciaobot-desktop
+          test ! -e "/Applications/Ciaobot.app"

@@ -697,6 +697,73 @@ def _vault_audit(vault_root: Path) -> dict[str, Any]:
     return result
 
 
+def audit_upgrade_notices(config: Any | None) -> dict[str, Any]:
+    """Actions an upgrade left for the operator, detected from the install.
+
+    A release note only works if someone reads it and then remembers to act.
+    These are the same conditions stated as facts about *this* machine, so the
+    PWA can show them and the operator can act without consulting a changelog.
+
+    Each notice carries an interactive Ciaobot-chat remedy. Detected, never
+    applied: moving an existing vault can involve conflicts or user-owned
+    layout decisions, so a normal chat inspects it and asks before acting.
+    """
+    notices: list[dict[str, str]] = []
+    errors: list[dict[str, str]] = []
+    if config is None:
+        return {"notices": notices, "notices_found": 0, "errors": errors}
+
+    # Advisory section: a config that does not expose a workspace registry has
+    # nothing to report, and must not turn the whole audit red.
+    vault_raw = getattr(config, "vault_root", None)
+    workspace_raw = getattr(config, "workspace_root", None)
+    lister = getattr(config, "workspace_names", None)
+    if vault_raw is None or workspace_raw is None or not callable(lister):
+        return {"notices": notices, "notices_found": 0, "errors": errors}
+    names = list(lister())
+
+    resolver = getattr(config, "workspace_vault_root", None)
+    if not callable(resolver):
+        return {"notices": notices, "notices_found": 0, "errors": errors}
+    standardizer = getattr(config, "canonical_workspace_vault_root", None)
+    if not callable(standardizer):
+        return {"notices": notices, "notices_found": 0, "errors": errors}
+
+    for name in names:
+        # Compare the registry-resolved path with the standard folder supplied
+        # by config. Setup-created whole-vault roots, adopted external folders,
+        # and pre-nesting siblings all remain usable until the user approves an
+        # interactive migration, but all should receive the same guided path
+        # into the standard named folder.
+        try:
+            actual = Path(resolver(name)).resolve()
+            standard = Path(standardizer(name)).resolve()
+        except Exception:  # noqa: BLE001 — advisory section
+            continue
+        if actual != standard and actual.is_dir():
+            notices.append({
+                "type": "vault_outside_vault_root",
+                "workspace": name,
+                "detail": (
+                    f"Workspace '{name}' keeps its vault at the nonstandard "
+                    f"location {actual}; its standard location is {standard}."
+                ),
+                "remedy": (
+                    f"Open a Ciaobot chat in workspace '{name}' and ask it to "
+                    f"migrate the vault from {actual} to {standard}. It should "
+                    "inspect both locations, ask before resolving conflicts, "
+                    "identify which files are vault content when the source also "
+                    "contains Ciaobot runtime files, and make a backup before "
+                    "moving anything. After confirmation it should move the "
+                    "approved content, atomically update the active workspace "
+                    "registry to the standard path, and restart Ciaobot as its "
+                    "final step. Verify the workspace before removing the backup."
+                ),
+            })
+
+    return {"notices": notices, "notices_found": len(notices), "errors": errors}
+
+
 def run_os_audit(
     workspace_dir: Path | None = None,
     vault_root: Path | None = None,
@@ -705,8 +772,13 @@ def run_os_audit(
     *,
     proposal_paths: list[Path] | None = None,
     today: datetime.date | None = None,
+    config: Any | None = None,
 ) -> dict[str, Any]:
-    """Execute a complete AI OS audit pass."""
+    """Execute a complete AI OS audit pass.
+
+    ``config`` is optional for programmatic callers. The CLI and PWA both pass
+    the live registry so upgrade notices are consistent across surfaces.
+    """
     workspace = (workspace_dir or Path.cwd()).expanduser().resolve()
     vault = (vault_root or (workspace / "memory-vault")).expanduser().resolve()
     runtime = (runtime_dir or (workspace / ".runtime")).expanduser().resolve()
@@ -722,6 +794,7 @@ def run_os_audit(
         today=today,
     )
     job_result = audit_job_runs(workspace, runtime_dir=runtime)
+    upgrade_result = audit_upgrade_notices(config)
 
     collected_errors = [
         *setup_result["errors"],
@@ -730,6 +803,7 @@ def run_os_audit(
         *rule_result["errors"],
         *memory_result["errors"],
         *job_result["errors"],
+        *upgrade_result["errors"],
     ]
     scan_errors: list[dict[str, str]] = []
     seen_errors: set[tuple[str, ...]] = set()
@@ -764,6 +838,7 @@ def run_os_audit(
         + memory_result["invalid_expiration_entries"]
         + memory_result["pending_memory_proposals"]
         + job_result["failed_runs"]
+        + upgrade_result["notices_found"]
     )
     total_errors = len(scan_errors)
     total_issues = actionable_count + total_errors
@@ -785,6 +860,7 @@ def run_os_audit(
         "rule_audit": rule_result,
         "memory_hygiene": memory_result,
         "job_runs_audit": job_result,
+        "upgrade_notices": upgrade_result,
         "scan_errors": scan_errors,
     }
 
@@ -869,6 +945,13 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
             f"  - 🔴 [{failure.get('job')} at {failure.get('ts')}]: "
             f"{failure.get('error')}"
         )
+
+    notices = report.get("upgrade_notices", {}).get("notices", [])
+    if notices:
+        lines.extend(["", "## Upgrade Actions"])
+        for notice in notices:
+            lines.append(f"- ⚠️ **{notice['workspace']}**: {notice['detail']}")
+            lines.append(f"  - Fix: `{notice['remedy']}`")
 
     if report["scan_errors"]:
         lines.extend(["", "## Scan Errors"])

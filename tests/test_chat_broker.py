@@ -175,6 +175,58 @@ def test_refine_file_touch_actions_marks_new_writes_created(tmp_path) -> None:
     ]
 
 
+def test_file_touch_payloads_use_one_workspace_relative_path(tmp_path) -> None:
+    """Absolute writes and relative surfaces for one file must produce the
+    same path string, while a failed surface request produces no card."""
+    from ciao.web.chat_broker import apply_file_touches_to_payload
+
+    readme = tmp_path / "memory-vault" / "work" / "project" / "README.md"
+    readme.parent.mkdir(parents=True)
+    readme.write_text("# Project", encoding="utf-8")
+
+    write_payload = {
+        "type": "tool_use",
+        "tool_name": "Write",
+        "file_touch": {"file_path": str(readme), "action": "written"},
+    }
+    apply_file_touches_to_payload(write_payload, workspace_root=tmp_path)
+    assert write_payload["file_touch"] == {
+        "file_path": "memory-vault/work/project/README.md",
+        "action": "written",
+    }
+
+    surface_payload = {
+        "type": "tool_use",
+        "tool_name": "mcp__ciaobot__file_surface",
+        "file_touch": {
+            "file_path": "memory-vault/work/project/README.md",
+            "action": "surfaced",
+        },
+    }
+    apply_file_touches_to_payload(surface_payload, workspace_root=tmp_path)
+    assert surface_payload["file_touch"]["file_path"] == write_payload["file_touch"]["file_path"]
+
+    failed_surface_payload = {
+        "type": "tool_use",
+        "tool_name": "mcp__ciaobot__file_surface",
+        "file_touch": {
+            "file_path": "work/project/README.md",
+            "action": "surfaced",
+        },
+    }
+    apply_file_touches_to_payload(failed_surface_payload, workspace_root=tmp_path)
+    assert "file_touch" not in failed_surface_payload
+    assert "file_touches" not in failed_surface_payload
+
+    absolute_surface_payload = {
+        "type": "tool_use",
+        "tool_name": "mcp__ciaobot__file_surface",
+        "file_touch": {"file_path": str(readme), "action": "surfaced"},
+    }
+    apply_file_touches_to_payload(absolute_surface_payload, workspace_root=tmp_path)
+    assert "file_touch" not in absolute_surface_payload
+
+
 def test_event_to_json_permission_request_includes_request_id() -> None:
     """Client needs ``request_id`` to reply with the matching
     ``permission_response`` — otherwise it can't correlate approvals to

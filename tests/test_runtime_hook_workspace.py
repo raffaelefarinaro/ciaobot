@@ -93,6 +93,27 @@ async def test_user_prompt_hook_filters_entities_to_active_workspace(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_user_prompt_hook_does_not_leak_unprefixed_legacy_entities(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "INDEX.md").write_text(
+        "- `People/Alba` (aliases: Alba)\n",
+        encoding="utf-8",
+    )
+    hook = build_user_prompt_submit_hook(
+        tmp_path,
+        {
+            "CIAO_ACTIVE_WORKSPACE": "work",
+            "CIAO_LEGACY_ENTITY_WORKSPACE": "personal",
+        },
+    )
+
+    out = await hook({"prompt": "Ask Alba", "cwd": "/repo"}, None, None)
+
+    assert "[[People/Alba]]" not in out["hookSpecificOutput"]["additionalContext"]
+
+
+@pytest.mark.asyncio
 async def test_user_prompt_hook_ignores_injected_context_wrapper(tmp_path: Path) -> None:
     # The CIAO_CONTEXT wrapper is prepended before the hook runs. Entity
     # detection must scan the user's words, not the injected canonical-doc

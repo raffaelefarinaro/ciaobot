@@ -96,7 +96,13 @@ class _Index:
             len(self._entities), len(self._match_terms),
         )
 
-    def find(self, prompt: str, *, workspace: str | None = None) -> list[VaultEntity]:
+    def find(
+        self,
+        prompt: str,
+        *,
+        workspace: str | None = None,
+        legacy_workspace: str = "",
+    ) -> list[VaultEntity]:
         """Return entities whose name/alias appears as a whole word in ``prompt``."""
         self._refresh_if_stale()
         if not self._match_terms or not prompt:
@@ -107,7 +113,9 @@ class _Index:
         for pattern, entity in self._match_terms:
             if entity.path in seen:
                 continue
-            if not _entity_visible_in_workspace(entity, workspace):
+            if not _entity_visible_in_workspace(
+                entity, workspace, legacy_workspace=legacy_workspace
+            ):
                 continue
             if pattern.search(snippet):
                 hits.append(entity)
@@ -184,14 +192,22 @@ def _compile_terms(entities: list[VaultEntity]) -> list[tuple[re.Pattern[str], V
     return terms
 
 
-def _entity_visible_in_workspace(entity: VaultEntity, workspace: str | None) -> bool:
+def _entity_visible_in_workspace(
+    entity: VaultEntity,
+    workspace: str | None,
+    *,
+    legacy_workspace: str = "",
+) -> bool:
     """Return whether an indexed entity is visible to ``workspace``.
 
     Workspace-scoped vaults index paths as ``<workspace>/...``. Shared roots
     use ``shared/...`` and are visible everywhere. Older single-workspace
-    indexes used unprefixed paths like ``People/Alba``; keep those visible
-    only when no workspace filter is requested or for the legacy personal
-    workspace.
+    indexes used unprefixed paths like ``People/Alba``; those belong to
+    ``legacy_workspace``, which the caller reads off the workspace registry.
+
+    An unknown ``legacy_workspace`` fails closed. Showing an unprefixed entity
+    in every workspace is a cross-workspace disclosure; the provider request
+    carries the registry-selected owner explicitly for normal PWA chats.
     """
     workspace = (workspace or "").strip()
     if not workspace:
@@ -203,7 +219,7 @@ def _entity_visible_in_workspace(entity: VaultEntity, workspace: str | None) -> 
     if "/" in entity.path:
         first = entity.path.split("/", 1)[0]
         if first in {"People", "Projects", "Places", "Ideas", "Resources"}:
-            return workspace == "personal"
+            return bool(legacy_workspace) and workspace == legacy_workspace
     return False
 
 
@@ -224,9 +240,16 @@ def find_entities(
     vault_root: Path,
     *,
     workspace: str | None = None,
+    legacy_workspace: str = "",
 ) -> list[VaultEntity]:
-    """Scan ``prompt`` and return whole-word matches against INDEX.md."""
-    return get_index(vault_root).find(prompt, workspace=workspace)
+    """Scan ``prompt`` and return whole-word matches against INDEX.md.
+
+    ``legacy_workspace`` is the workspace that owns unprefixed pre-migration
+    vault entries — pass ``config.primary_workspace()``.
+    """
+    return get_index(vault_root).find(
+        prompt, workspace=workspace, legacy_workspace=legacy_workspace
+    )
 
 
 def format_entities(entities: list[VaultEntity]) -> str:

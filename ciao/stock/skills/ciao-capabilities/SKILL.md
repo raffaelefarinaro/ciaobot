@@ -1,6 +1,6 @@
 ---
 name: ciao-capabilities
-description: Authoritative catalog of what Ciaobot can do, for capability questions and feature tours. Use whenever the user asks what Ciaobot is, what it can do, what features are available, whether it can do something specific, or how one of its features works (memory, vault, archiving, schedules, loops, routines, workspaces, projects, forks, agent handoffs, skills, voice, models, providers, notifications, menu bar, files, chat comments, pinned files, document previews, CSV tables and cell comments, backlinks, command palette) — and when onboarding or giving a tour or walkthrough to a new user. Trigger on phrasings like "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "can you remind me / remember / schedule", "can you fork this chat", "can you ask Codex / another provider", even when the word "Ciaobot" is not mentioned.
+description: Authoritative catalog of what Ciaobot can do, for capability questions and feature tours. Use whenever the user asks what Ciaobot is, what it can do, what features are available, whether it can do something specific, or how one of its features works (memory, vault, archiving, schedules, loops, routines, workspaces, projects, forks, agent handoffs, skills, voice, models, providers, notifications, desktop app, Homebrew cask, updates, menu bar, files, chat comments, pinned files, document previews, CSV tables and cell comments, backlinks) — and when onboarding or giving a tour or walkthrough to a new user. Trigger on phrasings like "what can you do", "what can ciaobot do", "help me get started", "give me a tour", "can you remind me / remember / schedule", "can you fork this chat", "can you ask Codex / another provider", even when the word "Ciaobot" is not mentioned.
 ---
 
 # Ciaobot Capabilities
@@ -48,7 +48,8 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 
 - Create, preview, edit, and **restore** workspace and vault files from the PWA, with history — no terminal needed.
 - **In chat**: agent file touches surface as inline cards; open the viewer, pin beside the chat, and add line comments on selections. Freshly written `.md`/`.csv` files auto-surface in the pinned panel so you see them without hunting.
-- **Drag to attach**: drag a file or folder into the composer to insert its name into the message (browsers only expose the name for OS drags, not a full path); images dropped this way upload as attachments.
+- **Drag to attach**: drag a file into the composer to insert an agent-accessible absolute path. On the host, Ciaobot uses the desktop path when the webview exposes it; from a client (or a sandboxed browser), it uploads the file into the active project folder on the host first. Images dropped this way upload as visual attachments.
+- **Per-chat drafts**: unsent composer text is cached locally per chat and restored after switching chats or reloading. Sending clears only the active chat's draft.
 - **Chat annotations**: select text in any message and attach a comment that rides on your next send.
 - **Rich previews**: images inline; PDFs in the viewer; `.pptx` slides rendered as PDF (LibreOffice on the server).
 - **CSV tables**: `.csv` files render as an editable table in the viewer, and you can attach comments to individual cells (anchored by row and column) the same way you annotate document lines.
@@ -76,9 +77,8 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 
 ### App and system surface
 
-- **Command palette**: press ⌘K (Ctrl+K on Windows/Linux) anywhere to open a quick palette — search and jump to any chat, hop to Schedules or Settings, or toggle the theme.
 - **Settings page**: Home (deploy, notifications, appearance, **host & client** multi-device role, workspace health), Providers, Workspaces (including Google Workspace), Models, Context (injected prompt layers), Assets (skill/agent/command inventory plus editable **project MCP servers** and secrets), and Automations.
-- **macOS extras**: a menu bar companion (`ciao menubar`) with server status, a Start at Login status/toggle, and open/restart/logs actions (the Ciaobot face turns scared when the server is down), a distinct `Ciaobot Server.app` recovery launcher, and LaunchAgents so everything starts on login.
+- **macOS extras**: `Ciaobot.app` provides the main window plus a menu bar with engine status, notification and Start at Login toggles, and a single **Update…** action that updates the engine and the app together and restarts. The Python engine remains a separate LaunchAgent.
 - **Local HTTP API**: the app exposes an API an in-chat agent can drive (create chats, subagents, commands) — recipes are in `PWA_API.md` in the Ciaobot GitHub repo (`raffaelefarinaro/ciaobot`); fetch it when you need the raw API surface. For the common cases, the `chat_create` and `schedule_*`/`loop_*` MCP tools already carry the working recipes in their own docstrings.
 
 ### Privacy and trust posture

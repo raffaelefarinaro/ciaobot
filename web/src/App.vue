@@ -1,5 +1,5 @@
 <template>
-  <div id="ciao-app">
+  <div id="ciao-app" :data-workspace-color="workspaceColor">
     <div
       v-if="clientMode"
       class="client-mode-banner"
@@ -41,16 +41,18 @@
     />
     <router-view />
     <InAppToast />
-    <CommandPaletteModal v-model="showCommandPalette" />
+    <ConfirmDialog />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import CommandPaletteModal from './components/CommandPaletteModal.vue'
+import ConfirmDialog from './components/ConfirmDialog.vue'
 import InAppToast from './components/InAppToast.vue'
 import RestartOverlay from './components/RestartOverlay.vue'
 import StartupView from './components/StartupView.vue'
+import { askConfirm } from './lib/confirm'
+import { normalizeWorkspaceColor } from './lib/workspaceColors'
 import { useProjectStore } from './stores/projects'
 
 interface Phase {
@@ -73,6 +75,11 @@ const clientHasSession = ref(false)
 const switchingToHost = ref(false)
 
 const showStartup = computed(() => !startupDone.value && !skipped.value)
+const workspaceColor = computed(() => {
+  const active = projectStore.activeWorkspace
+  const ws = projectStore.workspaces.find((item) => item.name === active)
+  return normalizeWorkspaceColor(ws?.color)
+})
 const clientHostLabel = computed(() => {
   const raw = clientHostUrl.value
   if (!raw) return 'remote host'
@@ -88,13 +95,14 @@ let nodePollTimer: ReturnType<typeof setInterval> | null = null
 
 async function switchBackToHost() {
   if (switchingToHost.value) return
-  if (
-    !confirm(
-      'Stop client mode and become host on this machine? Skips asking the remote to push.',
-    )
-  ) {
-    return
-  }
+  const confirmed = await askConfirm(
+    'Stop client mode and become host on this machine? Changes that exist only on the other host may not be synced.',
+    {
+      title: 'Become host on this device?',
+      confirmLabel: 'Disconnect and become host',
+    },
+  )
+  if (!confirmed) return
   switchingToHost.value = true
   try {
     const res = await fetch('/api/node/handover', {
@@ -167,15 +175,6 @@ function scheduleNextPoll() {
   }, 1500)
 }
 
-const showCommandPalette = ref(false)
-
-function handleKeyDown(e: KeyboardEvent) {
-  if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-    e.preventDefault()
-    showCommandPalette.value = !showCommandPalette.value
-  }
-}
-
 function stopPolling() {
   if (pollTimer) {
     clearTimeout(pollTimer)
@@ -187,7 +186,6 @@ onMounted(() => {
   pollStartup().then(scheduleNextPoll)
   void pollClientBanner()
   nodePollTimer = setInterval(() => { void pollClientBanner() }, 5000)
-  window.addEventListener('keydown', handleKeyDown)
 })
 
 onUnmounted(() => {
@@ -196,7 +194,6 @@ onUnmounted(() => {
     clearInterval(nodePollTimer)
     nodePollTimer = null
   }
-  window.removeEventListener('keydown', handleKeyDown)
 })
 
 watch(showStartup, (show) => {
@@ -291,12 +288,14 @@ watch(showStartup, (show) => {
   --safe-right: env(safe-area-inset-right, 0px);
   --safe-bottom: 0px;
   --safe-left: env(safe-area-inset-left, 0px);
-  /* Type */
-  --font: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  /* Type: Hybrid typography model. Sans-serif for prose & UI, monospace for code & developer tokens. */
+  --font-mono: ui-monospace, 'SF Mono', 'Fira Code', 'Cascadia Code', 'Segoe UI Mono', 'Roboto Mono', Menlo, Consolas, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font: var(--font-sans);
   --text-xs: calc(11px * var(--font-scale));   /* labels, badges, pills, section titles */
   --text-sm: calc(12px * var(--font-scale));   /* hints, secondary text */
-  --text-base: calc(13px * var(--font-scale)); /* body */
-  --text-lg: calc(15px * var(--font-scale));   /* headers, titles */
+  --text-base: calc(14px * var(--font-scale)); /* body */
+  --text-lg: calc(16px * var(--font-scale));   /* headers, titles */
   /* Motion */
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
 }
@@ -322,6 +321,52 @@ watch(showStartup, (show) => {
   --success: #2e7d32;
   --warning: #ef6c00;
   --error: #c62828;
+}
+
+/* Per-workspace accent overrides (Option A: accents only).
+   Applied on #ciao-app for the active workspace, and on individual
+   controls (home new-chat buttons, workspace pills, chat badges) that
+   belong to another workspace. Pink is explicit so a pink-target control
+   inside a non-pink active workspace does not inherit the parent accent. */
+[data-workspace-color="pink"] {
+  --accent: #ff4d6d;
+  --accent-strong: #ff2e54;
+}
+[data-workspace-color="cyan"] {
+  --accent: #38bdf8;
+  --accent-strong: #0284c7;
+}
+[data-workspace-color="amber"] {
+  --accent: #fb923c;
+  --accent-strong: #ea580c;
+}
+[data-workspace-color="emerald"] {
+  --accent: #34d399;
+  --accent-strong: #059669;
+}
+[data-workspace-color="violet"] {
+  --accent: #a78bfa;
+  --accent-strong: #7c3aed;
+}
+:root.theme-light [data-workspace-color="pink"] {
+  --accent: #d81b60;
+  --accent-strong: #b00d46;
+}
+:root.theme-light [data-workspace-color="cyan"] {
+  --accent: #0284c7;
+  --accent-strong: #0369a1;
+}
+:root.theme-light [data-workspace-color="amber"] {
+  --accent: #ea580c;
+  --accent-strong: #c2410c;
+}
+:root.theme-light [data-workspace-color="emerald"] {
+  --accent: #059669;
+  --accent-strong: #047857;
+}
+:root.theme-light [data-workspace-color="violet"] {
+  --accent: #7c3aed;
+  --accent-strong: #6d28d9;
 }
 
 /* In standalone/fullscreen PWA the home indicator is live, so restore the
@@ -403,7 +448,7 @@ body::before {
 
 /* ── Wordmark ────────────────────────────────────────────────── */
 .wordmark {
-  font-family: var(--font);
+  font-family: var(--font-mono);
   font-weight: 700;
   letter-spacing: -0.02em;
   color: var(--fg);
@@ -620,6 +665,7 @@ input:focus, textarea:focus, select:focus {
 }
 
 .section-title {
+  font-family: var(--font-mono);
   font-size: var(--text-xs);
   color: var(--fg2);
   letter-spacing: 0.5px;
@@ -627,6 +673,7 @@ input:focus, textarea:focus, select:focus {
   font-weight: 600;
 }
 .label-eyebrow {
+  font-family: var(--font-mono);
   font-size: var(--text-xs);
   color: var(--fg2);
   text-transform: uppercase;
@@ -693,6 +740,7 @@ input:focus, textarea:focus, select:focus {
 
 /* ── Badge / pill (status, context, day-of-week) ─────────────── */
 .badge {
+  font-family: var(--font-mono);
   display: inline-flex;
   align-items: center;
   padding: 2px 8px;

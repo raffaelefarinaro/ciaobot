@@ -2,8 +2,9 @@
   <Teleport to="body">
     <div
       v-if="anchor"
+      ref="rootEl"
       class="compose"
-      :style="{ top: anchor.top + 'px', left: anchor.left + 'px' }"
+      :style="{ top: placed.top + 'px', left: placed.left + 'px' }"
       @mousedown.stop
     >
       <textarea
@@ -48,9 +49,23 @@
 // Used by ChatPanel, FileViewerModal, and PinnedFilePanel so the UI stays
 // identical. Anchor is viewport-fixed (Teleport to body). The selection quote
 // is intentionally omitted — the highlight already shows what was selected.
+//
+// Callers pass the raw point they want the popover near; keeping it on screen is
+// this component's job, because only it knows how tall the box actually is (the
+// textarea and an image row make that vary). Callers used to each guess a
+// reserve height and they disagreed, so a popover opened near the bottom edge
+// could put its Save button past the fold, where `position: fixed` means no
+// amount of scrolling reaches it.
 import { computed, nextTick, ref, watch } from 'vue'
 
+import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
+
 export type ComposeAnchor = { top: number; left: number }
+
+// Pre-measurement fallback: the width is fixed in this component's CSS, and the
+// height covers a 3-row textarea plus the action row.
+const COMPOSE_W = 280
+const COMPOSE_H = 208
 
 const props = withDefaults(defineProps<{
   anchor: ComposeAnchor | null
@@ -70,6 +85,30 @@ const emit = defineEmits<{
 
 const images = computed(() => props.images ?? [])
 const inputEl = ref<HTMLTextAreaElement>()
+const rootEl = ref<HTMLElement>()
+// Measured height, once rendered. Null until then, so the first paint uses the
+// COMPOSE_H estimate rather than jumping.
+const measuredH = ref<number | null>(null)
+
+const placed = computed<ComposeAnchor>(() => {
+  const a = props.anchor ?? { top: 0, left: 0 }
+  return {
+    top: clampAnchorTop(a.top, measuredH.value ?? COMPOSE_H),
+    left: clampAnchorLeft(a.left, COMPOSE_W),
+  }
+})
+
+function measure(): void {
+  nextTick(() => {
+    const h = rootEl.value?.offsetHeight
+    if (h) measuredH.value = h
+  })
+}
+
+// Re-measure whenever the box can change size or move: a new anchor means a new
+// open, and an image row grows it past the estimate.
+watch(() => props.anchor, (a) => { if (a) measure() })
+watch(images, () => { if (props.anchor) measure() })
 
 function onInput(e: Event): void {
   emit('update:modelValue', (e.target as HTMLTextAreaElement).value)

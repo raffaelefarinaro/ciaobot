@@ -12,6 +12,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
 from starlette.websockets import WebSocket
 
+
 logger = logging.getLogger(__name__)
 
 SESSION_COOKIE = "ciao_session"

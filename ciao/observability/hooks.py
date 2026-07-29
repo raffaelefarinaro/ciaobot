@@ -111,8 +111,14 @@ def build_user_prompt_submit_hook(
                 or _legacy_workspace_context(env.get("CIAO_WORKSPACE"))
                 or env.get("GWS_PROFILE")
             )
+            legacy_workspace = env.get("CIAO_LEGACY_ENTITY_WORKSPACE", "")
             scan_text = _CIAO_CONTEXT_RE.sub("", prompt)
-            entities = find_entities(scan_text, vault_root, workspace=workspace)
+            entities = find_entities(
+                scan_text,
+                vault_root,
+                workspace=workspace,
+                legacy_workspace=legacy_workspace,
+            )
             sections: list[str] = ["[SITUATIONAL CONTEXT: Runtime & Vault Entities]"]
             sections.append("<ciao-runtime>\n" + "\n".join(runtime) + "\n</ciao-runtime>")
             tagged = format_entities(entities)

@@ -72,8 +72,12 @@ def test_auth_settings_change_requires_current_password(tmp_path: Path) -> None:
     assert ok.json()["auth_required"] is True
 
 
-def test_auth_settings_enable_rejected_from_remote_peer(tmp_path: Path) -> None:
-    """With protection off there is no credential, so only this machine may turn it on."""
+def test_auth_settings_enable_allowed_from_remote_peer(tmp_path: Path) -> None:
+    """A headless host is only reachable remotely, so it must be protectable that way.
+
+    Requiring a local caller here would leave a Mac mini reached over a tailnet
+    from a phone permanently unprotectable; the call is logged instead.
+    """
     app = _app(tmp_path, auth_required=False, token="")
     client = TestClient(app, client=("10.0.0.9", 5555))
 
@@ -81,9 +85,9 @@ def test_auth_settings_enable_rejected_from_remote_peer(tmp_path: Path) -> None:
         "/api/auth/settings",
         json={"auth_required": True, "password": "hunter2"},
     )
-    assert res.status_code == 403
-    assert app.state.config.pwa_auth_required is False
-    assert not (tmp_path / ".env").exists()
+    assert res.status_code == 200
+    assert app.state.config.pwa_auth_required is True
+    assert app.state.config.pwa_auth_token == "hunter2"
 
 
 def test_auth_settings_change_from_remote_peer_still_works(tmp_path: Path) -> None:

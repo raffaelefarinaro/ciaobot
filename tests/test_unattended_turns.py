@@ -52,6 +52,40 @@ def test_unattended_prefix_tells_the_model_nobody_is_watching(tmp_path: Path) ->
     assert tick.index("[Unattended run:") < tick.index("[CIAO_CONTEXT_END]")
 
 
+def test_unattended_turn_runs_in_bypass(tmp_path: Path) -> None:
+    """Nobody can answer an approval prompt on a loop tick.
+
+    Every escalating mode resolves to an unanswerable card that `_drive`
+    auto-denies, so the automation fails while reporting success.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("loops", workspace="personal")
+    chat = pcm.create_chat(project.project_id, model="opus", provider="claude")
+
+    chat.mode = "auto"
+    assert pcm._effective_mode_for_chat(chat) == "auto"
+    assert pcm._effective_mode_for_chat(chat, unattended=True) == "bypass"
+
+    # `plan` cannot escalate — it only proposes — so forcing bypass would turn
+    # a read-only tick into a writing one.
+    chat.mode = "plan"
+    assert pcm._effective_mode_for_chat(chat, unattended=True) == "plan"
+
+
+def test_build_agent_request_forwards_unattended_to_the_mode(tmp_path: Path) -> None:
+    """The flag has to survive the trip, or the bypass above is dead code."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("loops", workspace="personal")
+    chat = pcm.create_chat(project.project_id, model="opus", provider="claude")
+    chat.mode = "auto"
+
+    interactive = pcm.build_agent_request(chat, prompt="hi")
+    assert interactive.mode == "auto"
+
+    tick = pcm.build_agent_request(chat, prompt="hi", unattended=True)
+    assert tick.mode == "bypass"
+
+
 def test_unattended_turn_flag_is_persisted_and_reloaded(tmp_path: Path) -> None:
     """The ↻ marker has to survive a reload: /messages reads the flag back
     because the SDK session file records no sender for a turn."""
@@ -96,12 +130,28 @@ def test_failed_tool_calls_are_collected_from_their_results() -> None:
         _Msg("user", {"content": [
             {"type": "tool_result", "tool_use_id": "toolu-ok", "content": "ok"},
         ]}),
+        _Msg("user", {"content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": "toolu-surface-failed",
+                "content": json.dumps({
+                    "ok": False,
+                    "error": {"code": "file_not_found"},
+                }),
+            },
+        ]}),
     ]
 
-    assert _failed_tool_use_ids(msgs) == {"toolu-denied"}
+    assert _failed_tool_use_ids(msgs) == {
+        "toolu-denied",
+        "toolu-surface-failed",
+    }
     # Raw JSONL dicts flow through the subagent renderer, so both shapes work.
     dict_msgs = [{"type": m.type, "message": m.message} for m in msgs]
-    assert _failed_tool_use_ids(dict_msgs) == {"toolu-denied"}
+    assert _failed_tool_use_ids(dict_msgs) == {
+        "toolu-denied",
+        "toolu-surface-failed",
+    }
 
 
 def test_tool_use_blocks_keep_their_id_for_result_matching() -> None:
@@ -111,6 +161,42 @@ def test_tool_use_blocks_keep_their_id_for_result_matching() -> None:
     ]})
     assert blocks[0]["id"] == "toolu-1"
     assert blocks[0]["file_touch"]["file_path"] == "notes.md"
+
+
+def test_tool_use_blocks_canonicalize_and_reject_failed_surface_paths(
+    tmp_path: Path,
+) -> None:
+    readme = tmp_path / "memory-vault" / "work" / "project" / "README.md"
+    readme.parent.mkdir(parents=True)
+    readme.write_text("# Project", encoding="utf-8")
+
+    blocks = _extract_assistant_blocks(
+        {"content": [
+            {
+                "type": "tool_use",
+                "id": "toolu-write",
+                "name": "Write",
+                "input": {"file_path": str(readme), "content": "# Project"},
+            },
+            {
+                "type": "tool_use",
+                "id": "toolu-bad-surface",
+                "name": "mcp__ciaobot__file_surface",
+                "input": {"path": "work/project/README.md"},
+            },
+            {
+                "type": "tool_use",
+                "id": "toolu-good-surface",
+                "name": "mcp__ciaobot__file_surface",
+                "input": {"path": "memory-vault/work/project/README.md"},
+            },
+        ]},
+        workspace_root=tmp_path,
+    )
+
+    assert blocks[0]["file_touch"]["file_path"] == "memory-vault/work/project/README.md"
+    assert "file_touch" not in blocks[1]
+    assert blocks[2]["file_touch"]["file_path"] == "memory-vault/work/project/README.md"
 
 
 def test_in_place_container_mutations_reach_disk(tmp_path: Path) -> None:

@@ -71,16 +71,6 @@
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4z"/></svg>
           </button>
-          <button
-            v-if="activeFileComments.length"
-            class="fv-comments-toggle"
-            :class="{ active: showSidebar }"
-            @click="showSidebar = !showSidebar"
-            title="Toggle comments"
-          >
-            <span class="fv-comments-toggle-icon">💬</span>
-            <span class="fv-comments-toggle-count">{{ activeFileComments.length }}</span>
-          </button>
           <button class="btn-icon" @click="store.close()" title="Close (Esc)" aria-label="Close">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
@@ -337,65 +327,18 @@
 
         </div>
 
-        <!-- On-demand comment drawer overlay -->
-        <div v-if="showSidebar" class="fv-comment-backdrop" @click="showSidebar = false"></div>
-        <div v-if="showSidebar" class="fv-comment-drawer" @mousedown.stop>
-          <div class="fv-sidebar-header">
-            <span class="fv-sidebar-title">Comments</span>
-            <span class="fv-sidebar-count">{{ activeFileComments.length }}</span>
-            <button class="fv-drawer-close" @click="showSidebar = false" title="Close">×</button>
-          </div>
-          <div v-if="!activeFileComments.length" class="fv-drawer-empty">No comments yet. Select text in the document to add one.</div>
+        <!-- Inline comment edit popover -->
+        <CommentComposePopover
+          :anchor="editingCommentId && editAnchor ? editAnchor : null"
+          v-model="editDraftText"
+          :images="editingCommentImages"
+          @cancel="cancelEditComment"
+          @save="saveEditComment(editingCommentId)"
+          @upload="handleEditImageUpload($event, editingCommentId)"
+          @remove-image="removeEditImage"
+        />
 
-          <div class="fv-sidebar-list" ref="sidebarListEl">
-            <div
-              v-for="c in activeFileComments"
-              :key="c.id"
-              class="fv-sidebar-card"
-              :class="{ 'is-pending': isPending(c.id), 'is-editing': editingCommentId === c.id }"
-              :data-card-id="c.id"
-              @click="editingCommentId !== c.id && scrollToHighlight(c.id)"
-            >
-              <div class="fv-sidebar-card-header">
-                <span class="fv-sidebar-card-file">{{ commentBasename(c.path) }}<span v-if="commentLineLabel(c)" class="fv-sidebar-card-line">:{{ commentLineLabel(c) }}</span></span>
-                <div class="fv-sidebar-card-actions">
-                  <button class="fv-sidebar-card-edit" @click.stop="startEditComment(c)" title="Edit">✎</button>
-                  <button class="fv-sidebar-card-remove" @click.stop="deleteFileComment(c.path, c.id)" title="Delete">×</button>
-                </div>
-              </div>
-              <div class="fv-sidebar-card-quote">"{{ truncate(c.selection, 120) }}"</div>
-              <div v-if="editingCommentId !== c.id" class="fv-sidebar-card-note">{{ c.comment }}</div>
-              <div v-if="editingCommentId !== c.id && c.images?.length" class="fv-sidebar-card-images">
-                <img v-for="img in c.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="card-image-thumb" @click.stop />
-              </div>
-              <div v-if="editingCommentId === c.id" class="fv-sidebar-edit-body" @mousedown.stop>
-                <textarea
-                  ref="editCommentInputEl"
-                  v-model="editDraftText"
-                  class="fv-sidebar-edit-input"
-                  placeholder="Edit comment…"
-                  rows="2"
-                  @keydown="onEditKeydown"
-                ></textarea>
-                <div v-if="editingCommentImages.length" class="fv-sidebar-edit-images">
-                  <span v-for="(img, i) in editingCommentImages" :key="img" class="draft-image-preview">
-                    <img :src="`/api/images/${img}`" :alt="img" class="draft-image-thumb" />
-                    <button class="draft-image-remove" @click="removeEditImage(i)" title="Remove">×</button>
-                  </span>
-                </div>
-                <div class="fv-sidebar-edit-actions">
-                  <label class="image-btn-sm" title="Upload images">
-                    <input type="file" accept="image/*" multiple hidden @change="handleEditImageUpload($event, c.id)" />
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-                  </label>
-                  <button class="fv-btn-sm" @click="cancelEditComment" type="button">Cancel</button>
-                  <button class="fv-btn-sm primary" @click="saveEditComment(c.id)" type="button">Save</button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
+        <!-- Inline comment draft popover -->
         <CommentComposePopover
           :anchor="commentDraft && draftAnchor ? draftAnchor : null"
           v-model="composeText"
@@ -424,7 +367,7 @@
         <div
           v-if="activePopupComment"
           class="fv-comment-backdrop"
-          @click="closePopupComment"
+          @click="handleBackdropClick"
         ></div>
         <div
           v-if="activePopupComment"
@@ -435,10 +378,13 @@
           <div class="fv-pop-header">
             <span class="fv-sidebar-card-line" v-if="commentLineLabel(activePopupComment)">{{ commentLineLabel(activePopupComment) }}</span>
             <div class="fv-sidebar-card-actions fv-pop-actions">
+              <button class="fv-sidebar-card-edit" @click.stop="editFromPopup(activePopupComment)" title="Edit">✎</button>
               <button class="fv-sidebar-card-remove" @click.stop="deletePopupComment" title="Delete">×</button>
             </div>
           </div>
-          <div class="fv-sidebar-card-quote">"{{ truncate(activePopupComment.selection, 120) }}"</div>
+          <div v-if="activePopupComment.images?.length" class="fv-sidebar-card-images">
+            <img v-for="img in activePopupComment.images" :key="img" :src="`/api/images/${img}`" :alt="img" class="card-image-thumb" @click.stop />
+          </div>
           <div class="fv-sidebar-card-note">{{ activePopupComment.comment }}</div>
         </div>
       </div>
@@ -694,7 +640,7 @@ void fmTitle
 const activeFileComments = computed(() =>
   projectsStore.fileCommentsFor(cleanPath(store.path))
 )
-const showSidebar = computed(() => activeFileComments.value.length > 0 || commentDraft.value !== null)
+const showSidebar = ref(false)
 
 function isPending(id: string): boolean {
   return projectsStore.pendingComments.some(c => c.id === id)
@@ -714,13 +660,21 @@ const contentLines = computed(() => {
   return text.split('\n')
 })
 
+const DRAFT_COMMENT_ID = '__draft__'
+
 const lineCommentMap = computed(() => {
   const map = new Map<number, string>()
+  const draft = commentDraft.value
+  if (draft?.lines) {
+    const end = draft.lines.end || draft.lines.start
+    for (let l = draft.lines.start; l <= end; l++) {
+      map.set(l, DRAFT_COMMENT_ID)
+    }
+  }
   for (const c of activeFileComments.value) {
     if (!c.lineStart) continue
     const end = c.lineEnd || c.lineStart
     for (let l = c.lineStart; l <= end; l++) {
-      // First comment wins for overlap
       if (!map.has(l)) map.set(l, c.id)
     }
   }
@@ -838,15 +792,73 @@ const sidebarCards = computed(() => {
   return cards
 })
 
+let popupOpenTimestamp = 0
+
+function openPopupCommentForElement(el: HTMLElement, id: string): void {
+  const rect = el.getBoundingClientRect()
+  const modal = modalEl.value
+  if (!modal) return
+  const modalRect = modal.getBoundingClientRect()
+  popupAnchor.value = {
+    top: rect.bottom - modalRect.top + 6,
+    left: Math.max(8, rect.left - modalRect.left),
+  }
+  activePopupId.value = id
+  popupOpenTimestamp = Date.now()
+}
+
 function scrollToHighlight(id: string): void {
   if (!bodyEl.value) return
   const highlights = bodyEl.value.querySelectorAll('[data-comment-id]')
   for (const el of Array.from(highlights)) {
     if ((el as HTMLElement).dataset.commentId === id) {
-      bodyEl.value.scrollTo({ top: (el as HTMLElement).offsetTop - 20, behavior: 'smooth' })
+      const targetEl = el as HTMLElement
+      const top = targetEl.offsetTop - 60
+      bodyEl.value.scrollTo({ top: Math.max(top, 0), behavior: 'smooth' })
+      targetEl.classList.remove('comment-pulse')
+      void targetEl.offsetWidth
+      targetEl.classList.add('comment-pulse')
+      window.setTimeout(() => targetEl.classList.remove('comment-pulse'), 1200)
+
+      window.setTimeout(() => {
+        if (targetEl) {
+          openPopupCommentForElement(targetEl, id)
+        }
+      }, 350)
       break
     }
   }
+}
+
+function scrollToTarget(): void {
+  const line = store.line
+  if (!bodyEl.value || line == null) return
+
+  // 1. Try finding a comment matching this line
+  const comment = activeFileComments.value.find(
+    c => (c.lineStart ?? 0) <= line && (c.lineEnd ?? c.lineStart ?? 0) >= line
+  )
+  if (comment) {
+    scrollToHighlight(comment.id)
+    return
+  }
+
+  // 2. Try finding exact line element in code view (.pre-line[data-line="X"])
+  const lineEl = bodyEl.value.querySelector(`.pre-line[data-line="${line}"]`) as HTMLElement | null
+  if (lineEl) {
+    bodyEl.value.scrollTo({ top: Math.max(lineEl.offsetTop - 60, 0), behavior: 'smooth' })
+    lineEl.classList.remove('comment-pulse')
+    void lineEl.offsetWidth
+    lineEl.classList.add('comment-pulse')
+    window.setTimeout(() => lineEl.classList.remove('comment-pulse'), 1200)
+    return
+  }
+
+  // 3. Fallback: scroll proportionally
+  const total = (store.content.match(/\n/g)?.length || 1) + 1
+  const ratio = Math.min(Math.max((line - 1) / total, 0), 1)
+  const target = bodyEl.value.scrollHeight * ratio - bodyEl.value.clientHeight / 3
+  bodyEl.value.scrollTo({ top: Math.max(target, 0), behavior: 'smooth' })
 }
 
 // Scroll sync: keep sidebar vertically aligned with the document body.
@@ -936,7 +948,6 @@ const activePopupComment = computed(() => {
 })
 
 function openPopupComment(e: MouseEvent, id: string): void {
-  if (window.innerWidth > 640) return
   const rect = (e.target as HTMLElement).getBoundingClientRect()
   const modal = modalEl.value
   if (!modal) return
@@ -952,12 +963,23 @@ function closePopupComment(): void {
   activePopupId.value = null
 }
 
+function handleBackdropClick(): void {
+  if (Date.now() - popupOpenTimestamp < 150) return
+  closePopupComment()
+}
+
 function deletePopupComment(): void {
   const id = activePopupId.value
   if (!id) return
   activePopupId.value = null
   const c = activeFileComments.value.find(x => x.id === id)
   if (c) deleteFileComment(c.path, id)
+}
+
+function editFromPopup(c: { id: string; comment: string; images?: string[] }): void {
+  const local = popupAnchor.value
+  closePopupComment()
+  startEditComment(c, toViewportAnchor(local))
 }
 
 function onMdClick(e: MouseEvent): void {
@@ -1074,6 +1096,10 @@ function applyHighlights(): void {
     for (const c of activeFileComments.value) {
       highlightInMarkdown(root, c.selection, c.id)
     }
+    const draft = commentDraft.value
+    if (draft?.selection) {
+      highlightInMarkdown(root, draft.selection, DRAFT_COMMENT_ID)
+    }
   } else {
     // Pre highlighting is handled by the line-based v-for + CSS
     // but we still need to ensure click handlers are wired.
@@ -1136,6 +1162,21 @@ function togglePin(): void {
     store.close()
   }
 }
+
+// Automatically pin opened documents to the side panel if desktop split view is available
+// and no file is currently pinned in the active chat/project, bypassing the modal overlay.
+watch(
+  [() => store.isOpen, () => store.path],
+  ([isOpen, currentPath]) => {
+    if (!isOpen || !currentPath) return
+    const key = activePinKey.value
+    if (canPin.value && key && !projectsStore.pinnedFileFor(key)) {
+      projectsStore.pinFile(key, cleanPath(currentPath))
+      store.close()
+    }
+  },
+  { immediate: true },
+)
 
 // Selection-driven comment UX. Two states:
 //   1. selectionAnchor != null  → floating "Comment" trigger sits near the
@@ -1242,31 +1283,19 @@ watch(
   () => {
     nextTick(() => {
       backdropEl.value?.focus()
-      if (!store.line || store.loading || store.error) return
-      // Plain-text view: line numbers map to <pre> children, so scroll a
-      // proportional offset. We don't render explicit line markers yet, so
-      // approximate by line-height * line.
-      if (!isMarkdown.value && bodyEl.value) {
-        const pre = bodyEl.value.querySelector('pre.fv-pre') as HTMLElement | null
-        if (pre) {
-          const total = (store.content.match(/\n/g)?.length || 1) + 1
-          const ratio = Math.min(Math.max((store.line - 1) / total, 0), 1)
-          const target = pre.scrollHeight * ratio - bodyEl.value.clientHeight / 3
-          bodyEl.value.scrollTop = Math.max(target, 0)
-        }
-      }
+      if (store.loading || store.error) return
+      scrollToTarget()
     })
   },
 )
 
 // Re-apply markdown highlights and sidebar positions whenever the content
-// or comment list changes. The third nextTick lets Vue re-render the cards
-// at their desired tops before we measure heights and push them down to
-// resolve overlaps.
+// or comment list changes.
 watch(
   () => `${store.loadToken}|${store.path}|${activeFileComments.value.map(c => c.id).join(',')}|${renderedMarkdown.value.length}|${store.content.length}`,
   () => nextTick(() => {
     applyHighlights()
+    scrollToTarget()
     nextTick(() => {
       updateCommentPositions()
       attachScrollSync()
@@ -1462,17 +1491,16 @@ function onSelectionChange(): void {
 const commentDraftImages = ref<string[]>([])
 const editingCommentImages = ref<string[]>([])
 
-/** Convert a modal-relative anchor to viewport coords for the shared compose popover. */
+/** Convert a modal-relative anchor to viewport coords for the shared compose popover.
+ *
+ * Only translates; CommentComposePopover clamps itself to the viewport, since
+ * it is the only thing that knows its rendered height.
+ */
 function toViewportAnchor(local: Anchor): Anchor {
   const modal = modalEl.value
   if (!modal) return local
   const r = modal.getBoundingClientRect()
-  const popWidth = 280
-  const pad = 8
-  return {
-    top: Math.min(Math.max(r.top + local.top, pad), Math.max(pad, window.innerHeight - 120)),
-    left: Math.min(Math.max(r.left + local.left, pad), Math.max(pad, window.innerWidth - popWidth - pad)),
-  }
+  return { top: r.top + local.top, left: r.left + local.left }
 }
 
 function openCommentForSelection(): void {
@@ -1490,6 +1518,7 @@ function openCommentForSelection(): void {
   lastSelectionRange = null
   lastCsvCell = null
   window.getSelection()?.removeAllRanges()
+  nextTick(() => applyHighlights())
 }
 
 function anchorFromCellRect(rect: DOMRect): Anchor | null {
@@ -1541,6 +1570,7 @@ function openCommentForCsvCell(): void {
   commentDraftImages.value = []
   selectionAnchor.value = null
   lastSelectionRange = null
+  nextTick(() => applyHighlights())
 }
 
 function cancelComment(): void {
@@ -1551,6 +1581,7 @@ function cancelComment(): void {
   lastSelectionLines = null
   lastSelectionRange = null
   lastCsvCell = null
+  nextTick(() => applyHighlights())
 }
 
 function saveComment(): void {
@@ -1575,6 +1606,7 @@ function saveComment(): void {
   lastSelectionLines = null
   lastSelectionRange = null
   lastCsvCell = null
+  nextTick(() => applyHighlights())
 }
 
 async function handleDraftImageUpload(e: Event): Promise<void> {
@@ -1598,22 +1630,44 @@ function removeDraftImage(index: number): void {
 // ── Edit existing comment ────────────────────────────────────────────
 const editingCommentId = ref<string | null>(null)
 const editDraftText = ref('')
-const editCommentInputEl = ref<HTMLTextAreaElement>()
+const editAnchor = ref<Anchor | null>(null)
 
-function startEditComment(c: { id: string; comment: string; images?: string[] }): void {
+function anchorFromElement(el: HTMLElement): Anchor | null {
+  const modal = modalEl.value
+  const body = bodyEl.value
+  if (!modal || !body) return null
+  const rect = el.getBoundingClientRect()
+  const modalRect = modal.getBoundingClientRect()
+  const popWidth = 280
+  const pad = 8
+  const top = Math.min(Math.max(rect.bottom - modalRect.top + 6, pad), Math.max(pad, modal.clientHeight - 60))
+  const left = Math.min(Math.max(rect.left - modalRect.left, pad), Math.max(pad, modal.clientWidth - popWidth - pad))
+  return { top, left }
+}
+
+function startEditComment(c: { id: string; comment: string; images?: string[] }, anchor?: Anchor | null): void {
   editingCommentId.value = c.id
   editDraftText.value = c.comment
   editingCommentImages.value = c.images ? [...c.images] : []
-  nextTick(() => editCommentInputEl.value?.focus())
+
+  if (anchor) {
+    editAnchor.value = anchor
+  } else {
+    const el = bodyEl.value?.querySelector(`[data-comment-id="${c.id}"]`) as HTMLElement | null
+    const local = el ? anchorFromElement(el) : null
+    editAnchor.value = local ? toViewportAnchor(local) : null
+  }
 }
 
 function cancelEditComment(): void {
   editingCommentId.value = null
   editDraftText.value = ''
   editingCommentImages.value = []
+  editAnchor.value = null
 }
 
-function saveEditComment(id: string): void {
+function saveEditComment(id: string | null): void {
+  if (!id) return
   const note = editDraftText.value.trim()
   if (!note) return
   const path = cleanPath(store.path)
@@ -1628,12 +1682,12 @@ function saveEditComment(id: string): void {
   for (const img of nextImages) {
     if (!existingImages.includes(img)) projectsStore.addFileCommentImage(path, id, img)
   }
-  editingCommentId.value = null
-  editDraftText.value = ''
-  editingCommentImages.value = []
+  cancelEditComment()
+  nextTick(() => applyHighlights())
 }
 
-async function handleEditImageUpload(e: Event, id: string): Promise<void> {
+async function handleEditImageUpload(e: Event, id: string | null): Promise<void> {
+  if (!id) return
   const input = e.target as HTMLInputElement
   if (!input.files?.length) return
   const chatId = projectsStore.activeChatId
@@ -2067,7 +2121,7 @@ if (typeof window !== 'undefined') {
 }
 
 .fv-md {
-  font-size: 14px;
+  font-size: var(--text-base);
   line-height: 1.6;
   max-width: 88ch;
 }
@@ -2075,28 +2129,30 @@ if (typeof window !== 'undefined') {
 .fv-md :deep(:first-child) { margin-top: 0; }
 .fv-md :deep(:last-child) { margin-bottom: 0; }
 .fv-md :deep(pre) {
-  background: var(--bg2, rgba(255, 255, 255, 0.04));
-  padding: 10px 12px;
-  border-radius: 6px;
+  background: var(--bg);
+  padding: 8px 12px;
+  border-radius: var(--radius-sm, 6px);
   overflow-x: auto;
-  font-size: 12px;
+  font-size: var(--text-sm);
+  font-family: var(--font-mono);
 }
 .fv-md :deep(code) {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
 }
 .fv-md :deep(:not(pre) > code) {
-  background: var(--bg2, rgba(255, 255, 255, 0.06));
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
   padding: 1px 5px;
   border-radius: 4px;
-  font-size: 0.92em;
+  font-size: 0.9em;
 }
 .fv-md :deep(:is(h1, h2, h3, h4)) {
   margin-top: 1.2em;
   margin-bottom: 0.4em;
-  line-height: 1.3;
+  line-height: 1.35;
+  font-weight: 700;
 }
-.fv-md :deep(h1) { font-size: 1.6em; }
-.fv-md :deep(h2) { font-size: 1.3em; }
+.fv-md :deep(h1) { font-size: 1.5em; }
+.fv-md :deep(h2) { font-size: 1.25em; }
 .fv-md :deep(h3) { font-size: 1.1em; }
 .fv-md :deep(a) {
   color: var(--accent);
@@ -2807,6 +2863,22 @@ if (typeof window !== 'undefined') {
 }
 :deep(.comment-highlight:hover) {
   background: rgba(234, 179, 8, 0.4);
+}
+:deep(.comment-highlight[data-comment-id="__draft__"]),
+.pre-line.comment-highlight[data-comment-id="__draft__"] {
+  background: rgba(234, 179, 8, 0.45);
+  border-bottom-color: rgba(234, 179, 8, 0.9);
+}
+
+:deep(.comment-highlight.comment-pulse),
+.pre-line.comment-highlight.comment-pulse,
+.pre-line.comment-pulse {
+  animation: fv-comment-pulse 1.1s var(--ease, ease) 1;
+}
+@keyframes fv-comment-pulse {
+  0%   { background: rgba(234, 179, 8, 0.25); box-shadow: 0 0 0 0 rgba(234, 179, 8, 0); }
+  25%  { background: rgba(234, 179, 8, 0.75); box-shadow: 0 0 0 6px rgba(234, 179, 8, 0.25); }
+  100% { background: rgba(234, 179, 8, 0.25); box-shadow: 0 0 0 0 rgba(234, 179, 8, 0); }
 }
 
 /* Pre line wrappers */

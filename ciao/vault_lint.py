@@ -31,6 +31,22 @@ EXCLUDE_DIRS = {
 }
 
 
+def _workspace_dirs(vault_root: Path) -> list[Path]:
+    """Vault subdirectories that look like a workspace (they hold a MEMORY.md).
+
+    Discovered from the layout rather than read from config: the linter runs as
+    a standalone script with no server config to consult.
+    """
+    try:
+        return [
+            entry
+            for entry in vault_root.iterdir()
+            if entry.is_dir() and (entry / "MEMORY.md").is_file()
+        ]
+    except OSError:
+        return []
+
+
 def _links_in(text: str):
     """Yield wikilink targets in ``text``, skipping code spans/fences,
     backslash-escaped brackets, and ``<placeholder>`` template syntax — none
@@ -116,11 +132,16 @@ def run_validation(vault_root: Path) -> dict:
                     "target": target
                 })
 
-    # Check for memory files links (roots)
-    memory_md = vault_root / "personal" / "MEMORY.md"
-    memory_work_md = vault_root / "work" / "MEMORY.md"
+    # Check for memory files links (roots). Every workspace subdirectory that
+    # has a MEMORY.md counts — hardcoding personal/work meant a differently
+    # named workspace's root links were never checked, so everything they
+    # referenced looked like an orphan.
+    memory_roots = sorted(
+        entry / "MEMORY.md"
+        for entry in _workspace_dirs(vault_root)
+    )
     memory_links = set()
-    for mem_file in (memory_md, memory_work_md):
+    for mem_file in memory_roots:
         if mem_file.exists():
             try:
                 mem_content = mem_file.read_text(encoding="utf-8")

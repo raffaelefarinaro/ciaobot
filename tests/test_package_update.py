@@ -110,6 +110,28 @@ def test_update_package_homebrew_noop_reports_failure(monkeypatch) -> None:
     res = update_package()
     assert res["ok"] is False
     assert "0.4.6" in res["error"]
+    # ok=False keeps the banner honest, but the desktop's combined engine+app
+    # update needs to tell "nothing to do" apart from a real failure without
+    # matching on the message text.
+    assert res["already_current"] is True
+    assert res["version"] == "0.4.6"
+
+
+def test_update_package_homebrew_failure_is_not_flagged_already_current(monkeypatch) -> None:
+    monkeypatch.setattr("ciao.package_version.detect_install_mode", lambda: "homebrew")
+    monkeypatch.setattr("ciao.package_version._resolve_brew", lambda: "/opt/homebrew/bin/brew")
+
+    def fake_run(cmd, **kwargs):
+        result = MagicMock()
+        result.returncode = 1
+        result.stdout = ""
+        result.stderr = "Error: something broke"
+        return result
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    res = update_package()
+    assert res["ok"] is False
+    assert res.get("already_current") is not True
 
 
 def test_update_package_homebrew_refreshes_tap_before_upgrade(monkeypatch) -> None:

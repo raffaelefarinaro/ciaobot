@@ -15,8 +15,8 @@ Runs weekly (Sunday night) via ``.runtime/schedules.json``. The pass:
    helper is in :mod:`ciao.dag`; per-node timing lands in
    ``.runtime/job_runs.jsonl`` with ``provider='dag'`` so the Automation
    page can drill in.
-4. Writes one Markdown proposal per skill to
-   ``memory-vault/personal/Workspace/Skill-Proposals/YYYY-MM-DD-<skill>.md``.
+4. Writes one Markdown proposal per skill to the active workspace's
+   ``Workspace/Skill-Proposals/YYYY-MM-DD-<skill>.md`` queue.
 
 Guardrails:
 
@@ -98,20 +98,26 @@ _DEFAULT_SKILLS_ROOTS: tuple[Path, ...] = _resolve_skills_roots()
 
 
 def _resolve_proposals_dir() -> Path:
-    """Resolve the proposals output dir.
+    """Resolve the active workspace's registry-owned proposal queue."""
+    from ciao.config import CiaoConfig
 
-    Same convention as the skills roots: prefer the ciao workspace when
-    ``CIAO_WORKSPACE`` is set (so proposals accumulate in the user's vault,
-    not the ciaobot engine repo); fall back to ciaobot's in-tree memory-vault
-    for tests and installs without a workspace.
-    """
-    workspace = os.environ.get("CIAO_WORKSPACE", "").strip()
-    if workspace:
-        return Path(workspace).expanduser() / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
-    return _REPO_ROOT / "memory-vault" / "personal" / "Workspace" / "Skill-Proposals"
+    config = CiaoConfig.from_env()
+    workspace = os.environ.get("CIAO_ACTIVE_WORKSPACE", "").strip()
+    if config.workspace(workspace) is None:
+        workspace = config.primary_workspace()
+    return (
+        config.workspace_vault_root(workspace)
+        / "Workspace"
+        / "Skill-Proposals"
+    )
 
 
-_DEFAULT_PROPOSALS_DIR: Path = _resolve_proposals_dir()
+# Resolved per call, not at import: an import-time constant that depended on
+# vault layout relocated the queue whenever the layout changed, orphaning
+# proposals already written to the old location. The path itself is now
+# layout-independent, and this keeps it that way if that ever changes.
+def _default_proposals_dir() -> Path:
+    return _resolve_proposals_dir()
 _DEFAULT_TESTS_ROOT = _REPO_ROOT / "tests"
 
 MAX_SKILL_BYTES = 15 * 1024
@@ -804,7 +810,7 @@ async def run_evolution_pass(
     timing lands in ``.runtime/job_runs.jsonl`` with label
     ``skillevo:<skill>:<node>``.
     """
-    output_dir = output_dir or _DEFAULT_PROPOSALS_DIR
+    output_dir = output_dir or _default_proposals_dir()
     if env is None:
         env = routine_env_for_model(model, ollama_settings) if ollama_settings is not None else {}
     now = now or datetime.now(UTC)

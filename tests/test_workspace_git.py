@@ -190,7 +190,24 @@ def test_setup_workspace_creates_git_repo_without_committing_env(
     # Default layout: the vault lives inside the workspace repo and is
     # tracked there — no second repo is created.
     assert not (ws / "memory-vault" / ".git").exists()
-    assert "memory-vault/MEMORY.md" in tracked
+    assert "memory-vault/personal/MEMORY.md" in tracked
+
+
+def test_setup_workspace_rejects_a_traversal_workspace_name_before_writes(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+
+    with pytest.raises(ValueError, match="workspace name"):
+        setup_workspace(
+            workspace,
+            workspace_name="../outside",
+            launch_agents_dir=tmp_path / "LaunchAgents",
+            app_dir=tmp_path / "Applications",
+        )
+
+    assert not workspace.exists()
+    assert not (tmp_path / "outside").exists()
 
 
 def test_setup_workspace_git_inits_external_vault(tmp_path: Path) -> None:
@@ -254,6 +271,85 @@ def test_setup_workspace_rerun_honors_existing_env_vault_root(
     # .env is left untouched and still points at the original vault.
     assert (ws / ".env").read_text(encoding="utf-8") == env_before
     assert "CIAO_VAULT_ROOT=brain-a" in env_before
+
+
+def test_setup_workspace_rerun_without_arguments_uses_registered_external_root(
+    tmp_path: Path,
+) -> None:
+    ws = tmp_path / "workspace"
+    setup_workspace(
+        ws,
+        vault_root="brain-a",
+        workspace_name="research",
+        launch_agents_dir=tmp_path / "LaunchAgents",
+        app_dir=tmp_path / "Applications",
+    )
+    registry = ws / ".runtime" / "workspaces.json"
+    registry_before = registry.read_text(encoding="utf-8")
+
+    setup_workspace(
+        ws,
+        launch_agents_dir=tmp_path / "LaunchAgents",
+        app_dir=tmp_path / "Applications",
+    )
+
+    assert registry.read_text(encoding="utf-8") == registry_before
+    assert (ws / "brain-a" / "MEMORY.md").is_file()
+    assert not (ws / "brain-a" / "personal").exists()
+    assert not (ws / "brain-a" / "research").exists()
+
+
+def test_setup_workspace_rerun_does_not_scaffold_the_vault_container(
+    tmp_path: Path,
+) -> None:
+    ws = tmp_path / "workspace"
+    setup_workspace(
+        ws,
+        workspace_name="research",
+        launch_agents_dir=tmp_path / "LaunchAgents",
+        app_dir=tmp_path / "Applications",
+    )
+    registry = ws / ".runtime" / "workspaces.json"
+    registry_before = registry.read_text(encoding="utf-8")
+
+    setup_workspace(
+        ws,
+        launch_agents_dir=tmp_path / "LaunchAgents",
+        app_dir=tmp_path / "Applications",
+    )
+
+    assert registry.read_text(encoding="utf-8") == registry_before
+    assert (ws / "memory-vault" / "research" / "MEMORY.md").is_file()
+    assert not (ws / "memory-vault" / "MEMORY.md").exists()
+    assert not (ws / "memory-vault" / "INDEX.md").exists()
+    assert not (ws / "memory-vault" / "Logs").exists()
+    assert not (ws / "memory-vault" / "personal").exists()
+
+
+def test_setup_workspace_rerun_supports_a_configured_vault_alias(
+    tmp_path: Path,
+) -> None:
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    external = tmp_path / "external-notes"
+    external.mkdir()
+    (ws / "memory-vault").symlink_to(external, target_is_directory=True)
+
+    setup_workspace(
+        ws,
+        workspace_name="research",
+        launch_agents_dir=tmp_path / "LaunchAgents",
+        app_dir=tmp_path / "Applications",
+    )
+    setup_workspace(
+        ws,
+        launch_agents_dir=tmp_path / "LaunchAgents",
+        app_dir=tmp_path / "Applications",
+    )
+
+    assert (external / "research" / "MEMORY.md").is_file()
+    assert not (external / "personal").exists()
+    assert not (external / "MEMORY.md").exists()
 
 
 def test_setup_workspace_rerun_does_not_clobber_custom_agent_through_symlink(

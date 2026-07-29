@@ -75,10 +75,11 @@
                   v-for="action in generalWorkspaceActions"
                   :key="action.workspace"
                   class="btn-primary"
+                  :data-workspace-color="action.color"
                   :disabled="action.isCreating"
                   @click="createWorkspaceChat(action)"
                 >
-                  {{ action.isCreating ? 'Creating...' : `+ ${action.label} Chat` }}
+                  {{ action.isCreating ? 'Creating...' : `+ ${action.label} chat` }}
                 </button>
               </div>
             </div>
@@ -154,12 +155,13 @@
                 v-for="action in generalWorkspaceActions"
                 :key="action.workspace"
                 class="btn-primary"
+                :data-workspace-color="action.color"
                 :disabled="action.isCreating"
                 @click="createWorkspaceChat(action)"
               >
-                {{ action.isCreating ? 'Creating...' : `+ ${action.label} Chat` }}
+                {{ action.isCreating ? 'Creating...' : `+ ${action.label} chat` }}
               </button>
-            </div>
+              </div>
             <OnboardingCard variant="home" @open-sidebar="sidebarCollapsed = false" />
           </div>
         </div>
@@ -188,6 +190,7 @@ import ProductTour from './ProductTour.vue'
 import OnboardingCard from './OnboardingCard.vue'
 import HomeRecentChats from './HomeRecentChats.vue'
 import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
+import { normalizeWorkspaceColor } from '../lib/workspaceColors'
 
 const store = useProjectStore()
 const tourStore = useProductTourStore()
@@ -405,6 +408,7 @@ const generalWorkspaceActions = computed(() => {
         workspace: workspace.name,
         label: workspaceLabel(workspace.name),
         projectId,
+        color: normalizeWorkspaceColor(workspace.color),
         isCreating: Boolean(projectId && store.creatingChatProjectIds[projectId]),
       }
     })
@@ -585,10 +589,6 @@ function onChatSelected() {
 }
 
 function closeChat() {
-  if (isMobile.value) {
-    // On mobile, show sidebar
-    sidebarCollapsed.value = false
-  }
   store.activeChatId = null
 }
 
@@ -733,6 +733,13 @@ onBeforeUnmount(() => {
   image-rendering: pixelated;
   -webkit-user-drag: none;
   pointer-events: none;
+  /* Soft accent halo — follows the active workspace without a hard stroke. */
+  filter:
+    drop-shadow(0 0 1.5px color-mix(in srgb, var(--accent) 55%, transparent))
+    drop-shadow(1px 0 0 color-mix(in srgb, var(--accent) 40%, transparent))
+    drop-shadow(-1px 0 0 color-mix(in srgb, var(--accent) 40%, transparent))
+    drop-shadow(0 1px 0 color-mix(in srgb, var(--accent) 40%, transparent))
+    drop-shadow(0 -1px 0 color-mix(in srgb, var(--accent) 40%, transparent));
 }
 .face-speech-bubble {
   position: absolute;

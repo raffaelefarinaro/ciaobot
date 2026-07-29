@@ -889,55 +889,12 @@ def needs_input_chat_ids(workspace: Path) -> set[str]:
     }
 
 
-_INET_RE = re.compile(r"^\s*inet (\d+\.\d+\.\d+\.\d+)", re.MULTILINE)
-
-
-def parse_inet_addresses(ifconfig_text: str) -> list[str]:
-    """IPv4 addresses from `ifconfig` output, loopback excluded, order kept."""
-
-    seen: list[str] = []
-    for address in _INET_RE.findall(ifconfig_text):
-        if address.startswith("127.") or address in seen:
-            continue
-        seen.append(address)
-    return seen
-
-
-def server_addresses(
-    port: int,
-    *,
-    ifconfig_text: str | None = None,
-    local_hostname: str | None = None,
-) -> list[str]:
-    """URLs the PWA is reachable at: localhost, Bonjour name, LAN IPv4s.
-
-    The server binds 0.0.0.0 (see CiaoConfig.pwa_host), so every interface
-    address genuinely serves the app.
-    """
-
-    if ifconfig_text is None:
-        try:
-            ifconfig_text = subprocess.run(
-                ["ifconfig", "-a"], capture_output=True, text=True, check=False
-            ).stdout
-        except OSError:
-            ifconfig_text = ""
-    if local_hostname is None:
-        try:
-            local_hostname = subprocess.run(
-                ["scutil", "--get", "LocalHostName"],
-                capture_output=True,
-                text=True,
-                check=False,
-            ).stdout.strip()
-        except OSError:
-            local_hostname = ""
-
-    urls = [f"http://localhost:{port}/"]
-    if local_hostname:
-        urls.append(f"http://{local_hostname}.local:{port}/")
-    urls.extend(f"http://{address}:{port}/" for address in parse_inet_addresses(ifconfig_text))
-    return urls
+# Address discovery lives in ciao.network_addresses so the PWA can list the
+# same URLs; re-exported here because callers and tests reference menubar.*.
+from ciao.network_addresses import (  # noqa: E402
+    parse_inet_addresses as parse_inet_addresses,
+    server_addresses as server_addresses,
+)
 
 
 def copy_to_clipboard(text: str) -> None:

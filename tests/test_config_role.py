@@ -59,7 +59,7 @@ def test_legacy_workspaces_are_exposed_as_workspace_configs(tmp_path: Path) -> N
     )
 
     assert list(config.workspaces) == ["personal", "work"]
-    assert config.workspace("personal").vault_root == "personal"
+    assert config.workspace("personal").vault_root == "memory-vault/personal"
     assert config.workspace("personal").model_bucket == "personal"
     assert config.workspace("work").gws_profile == "work"
     assert config.default_model_for_workspace("personal") == "deepseek-v4-flash:cloud"
@@ -98,8 +98,11 @@ def test_ciao_workspaces_json_defines_named_workspaces(tmp_path: Path) -> None:
     assert config.default_model_for_workspace("home") == "haiku"
     assert config.disallowed_tools_for_workspace("home") == ["Bash", "mcp__example"]
     assert config.default_model_for_workspace("client") == "opus"
-    # Non-personal workspaces still deny the PWA-irrelevant harness tools.
-    assert config.disallowed_tools_for_workspace("client") == list(_DEFAULT_HARNESS_DISALLOWED_TOOLS)
+    # A workspace with no explicit denylist gets the same defaults whatever it
+    # is named — no branch on "personal"/"work" anywhere.
+    assert config.disallowed_tools_for_workspace("client") == list(
+        _DEFAULT_HARNESS_DISALLOWED_TOOLS
+    )
 
 
 def test_runtime_workspaces_json_is_used_when_env_is_absent(tmp_path: Path) -> None:
@@ -125,7 +128,10 @@ def test_runtime_workspaces_json_is_used_when_env_is_absent(tmp_path: Path) -> N
     )
 
     assert config.workspace_names() == ["default"]
-    assert config.workspace("default").vault_root == "memory-vault"
+    assert config.workspace("default").vault_root == str(
+        tmp_path / "memory-vault"
+    )
+    assert config.workspace_vault_root("default") == tmp_path / "memory-vault"
     assert config.default_model_for_workspace("default") == "haiku"
 
 
@@ -134,7 +140,11 @@ def test_unknown_workspace_uses_global_defaults(tmp_path: Path) -> None:
 
     assert config.workspace("missing") is None
     assert config.default_model_for_workspace("missing") == "sonnet"
-    assert config.disallowed_tools_for_workspace("missing") == []
+    # A stale or renamed workspace name still gets the harness denies. Returning
+    # [] made it the one input that reached the model with nothing denied.
+    assert config.disallowed_tools_for_workspace("missing") == list(
+        _DEFAULT_HARNESS_DISALLOWED_TOOLS
+    )
 
 
 def test_missing_auth_token_enters_bootstrap_mode_with_persisted_token(tmp_path: Path) -> None:

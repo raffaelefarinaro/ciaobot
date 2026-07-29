@@ -14,6 +14,7 @@ BROWSER_OR_INTERNAL_ROUTES: dict[str, str] = {
     "/api/setup/finish": "browser first-run setup handoff; writes local config and requests restart",
     "/api/setup/mkdir": "browser first-run setup folder picker; creates a local folder (bootstrap + localhost only)",
     "/api/projects/{project_id}/files": "browser multipart upload; agents edit vault files directly",
+    "/api/desktop-drop": "native app bridge; consumes a short-lived Finder-drop grant created outside HTTP",
     "/api/chats/{chat_id}/voice": "browser voice upload",
     "/api/chats/{chat_id}/speak": "browser read-aloud playback; returns audio bytes",
     "/api/chats/{chat_id}/images": "browser image upload",

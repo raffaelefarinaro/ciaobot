@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Update Formula/ciaobot.rb in a checked-out homebrew-ciaobot tap.
+# Update Formula/ciaobot.rb and Casks/ciaobot-desktop.rb in a checked-out tap.
 #
 # Usage:
-#   ./scripts/update-homebrew-tap.sh <version> <wheel-sha256> [tap-root]
+#   ./scripts/update-homebrew-tap.sh <version> <wheel-sha256> <dmg-sha256> [tap-root]
 #
 # Example:
-#   ./scripts/update-homebrew-tap.sh 0.4.5 33efb3... /tmp/homebrew-ciaobot
+#   ./scripts/update-homebrew-tap.sh 0.6.1 33efb3... 8c61aa... /tmp/homebrew-ciaobot
 #
 # When tap-root is omitted, updates deploy/homebrew/ciaobot.rb in the repo root
 # (useful for review before pushing to the tap repository).
@@ -14,16 +14,20 @@ set -euo pipefail
 
 VERSION="${1:?version required, e.g. 0.4.5}"
 SHA256="${2:?wheel sha256 required}"
-TAP_ROOT="${3:-}"
+DMG_SHA256="${3:?desktop DMG sha256 required}"
+TAP_ROOT="${4:-}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ -z "$TAP_ROOT" ]]; then
   TAP_ROOT="$REPO_ROOT/deploy/homebrew"
   mkdir -p "$TAP_ROOT"
   FORMULA_PATH="$TAP_ROOT/ciaobot.rb"
+  CASK_PATH="$TAP_ROOT/ciaobot-desktop.rb"
 else
   mkdir -p "$TAP_ROOT/Formula"
+  mkdir -p "$TAP_ROOT/Casks"
   FORMULA_PATH="$TAP_ROOT/Formula/ciaobot.rb"
+  CASK_PATH="$TAP_ROOT/Casks/ciaobot-desktop.rb"
 fi
 
 WHEEL_URL="https://github.com/raffaelefarinaro/ciaobot/releases/download/v${VERSION}/ciaobot-${VERSION}-py3-none-any.whl"
@@ -83,8 +87,11 @@ class Ciaobot < Formula
     <<~CAVEATS
       Finish setup with \`ciao run\`, then open http://localhost:8443 and
       follow the wizard: it asks for a workspace folder and a model
-      provider, then installs the menu bar app and background server.
-      Afterwards, open Ciaobot from the menu bar icon or Ciaobot Server.app.
+      provider, then installs the background engine.
+
+      For the native window, menu bar, and notifications:
+
+        brew install --cask raffaelefarinaro/ciaobot/ciaobot-desktop
 
       Scripted or headless setups can skip the wizard:
 
@@ -99,3 +106,31 @@ end
 EOF
 
 echo "Updated ${FORMULA_PATH}"
+
+cat >"$CASK_PATH" <<EOF
+cask "ciaobot-desktop" do
+  version "${VERSION}"
+  sha256 "${DMG_SHA256}"
+
+  url "https://github.com/raffaelefarinaro/ciaobot/releases/download/v#{version}/Ciaobot_#{version}_universal.dmg"
+  name "Ciaobot"
+  desc "Native macOS shell for the local-first Ciaobot assistant"
+  homepage "https://github.com/raffaelefarinaro/ciaobot"
+
+  depends_on formula: "ciaobot"
+  depends_on macos: ">= :ventura"
+  auto_updates true
+
+  app "Ciaobot.app"
+
+  uninstall quit: "local.ciaobot.app"
+
+  caveats <<~EOS
+    Ciaobot is ad-hoc signed and is not notarized. On first launch, macOS may
+    require you to Control-click Ciaobot.app, choose Open, and confirm once.
+    Do not disable Gatekeeper.
+  EOS
+end
+EOF
+
+echo "Updated ${CASK_PATH}"

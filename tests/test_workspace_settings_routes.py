@@ -132,13 +132,14 @@ def test_post_workspace_persists_runtime_registry_and_updates_live_config(tmp_pa
     client_workspace = next(item for item in stored if item["name"] == "client-a")
     assert client_workspace == {
         "name": "client-a",
-        "vault_root": "client-a",
+        "vault_root": "memory-vault/client-a",
         "default_provider": "claude",
         "default_model": "kimi-k2.7-code:cloud",
         "disallowed_tools": ["mcp__claude_ai_Slack", "Bash"],
         "claude_ai_mcps": None,
         "gws_profile": "work",
         "model_bucket": "anthropic",
+        "color": "pink",
     }
 
 
@@ -163,26 +164,92 @@ def test_patch_and_delete_workspace_update_runtime_registry(tmp_path):
     assert json.loads((tmp_path / ".runtime" / "workspaces.json").read_text()) == [
         {
             "name": "personal",
-            "vault_root": "personal",
+            "vault_root": "memory-vault/personal",
             "default_provider": "claude",
             "default_model": "",
             "disallowed_tools": None,
             "claude_ai_mcps": None,
             "gws_profile": "personal",
             "model_bucket": "personal",
+            "color": "pink",
         },
         {
             "name": "work",
-            "vault_root": "work",
+            "vault_root": "memory-vault/work",
             "default_provider": "claude",
             "default_model": "",
             "disallowed_tools": None,
             "claude_ai_mcps": None,
             "gws_profile": "work",
             "model_bucket": "work",
+            "color": "pink",
         },
     ]
     assert pcm.refresh_count == 3
+
+
+def test_workspace_save_never_accepts_a_request_body_vault_path(tmp_path):
+    client, config, _pcm = _client(tmp_path)
+
+    created = client.post(
+        "/api/workspaces",
+        json={"name": "research", "vault_root": "/"},
+    )
+    assert created.status_code == 201
+    assert (
+        config.workspace_vault_root("research")
+        == tmp_path / "memory-vault" / "research"
+    )
+
+    existing = config.workspace("research")
+    assert existing is not None
+    existing.vault_root = str(tmp_path / "external-vault")
+    patched = client.patch(
+        "/api/workspaces/research",
+        json={"vault_root": "../outside", "default_model": "sonnet"},
+    )
+    assert patched.status_code == 200
+    assert config.workspace("research").vault_root == str(
+        tmp_path / "external-vault"
+    )
+
+
+def test_workspace_creation_rejects_a_symlinked_vault_folder(tmp_path):
+    target = tmp_path / "outside"
+    target.mkdir()
+    vault = tmp_path / "memory-vault"
+    vault.mkdir()
+    (vault / "research").symlink_to(target, target_is_directory=True)
+    client, config, pcm = _client(tmp_path)
+
+    response = client.post("/api/workspaces", json={"name": "research"})
+
+    assert response.status_code == 400
+    assert "symlink" in response.json()["error"]
+    assert config.workspace("research") is None
+    assert pcm.refresh_count == 0
+
+
+def test_workspace_creation_rejects_case_and_vault_owner_collisions(tmp_path):
+    client, config, _pcm = _client(tmp_path)
+    assert client.post("/api/workspaces", json={"name": "Research"}).status_code == 201
+
+    case_collision = client.post(
+        "/api/workspaces",
+        json={"name": "research"},
+    )
+    assert case_collision.status_code == 400
+    assert "conflicts" in case_collision.json()["error"]
+
+    existing = config.workspace("work")
+    assert existing is not None
+    existing.vault_root = str(tmp_path / "memory-vault" / "client")
+    root_collision = client.post(
+        "/api/workspaces",
+        json={"name": "client"},
+    )
+    assert root_collision.status_code == 400
+    assert "already owned" in root_collision.json()["error"]
 
 
 def test_workspace_validation_rejects_bad_name_and_provider(tmp_path):
@@ -230,10 +297,10 @@ def test_claude_ai_mcps_toggle_persists_and_resolves(tmp_path):
     connector portion of the effective denylist (union with extras)."""
     client, config, _pcm = _client(tmp_path)
 
-    # Personal default: toggle on -> connectors allowed, n8n extra blocked.
+    # Personal default: toggle on -> connectors allowed, harness tools blocked.
     personal = config.disallowed_tools_for_workspace("personal")
     assert "mcp__claude_ai_Airtable" not in personal
-    assert "mcp__n8n_mcp" in personal
+    assert "EnterPlanMode" in personal
 
     # Flip the personal toggle off via PATCH; keep n8n as an explicit extra.
     resp = client.patch(
@@ -266,6 +333,48 @@ def test_claude_ai_mcps_toggle_persists_and_resolves(tmp_path):
     # The payload advertises the connector set for the PWA label.
     payload = client.get("/api/workspaces").json()
     assert "mcp__claude_ai_Airtable" in payload["claude_ai_connectors"]
+
+
+def test_workspace_color_defaults_persists_and_validates(tmp_path):
+    """Accent color defaults to pink, persists on write, and rejects unknowns."""
+    client, config, _pcm = _client(tmp_path)
+
+    listed = client.get("/api/workspaces").json()
+    personal = next(w for w in listed["workspaces"] if w["name"] == "personal")
+    assert personal["color"] == "pink"
+
+    create = client.post(
+        "/api/workspaces",
+        json={"name": "client-a", "color": "cyan"},
+    )
+    assert create.status_code == 201
+    created = next(w for w in create.json()["workspaces"] if w["name"] == "client-a")
+    assert created["color"] == "cyan"
+    assert config.workspace("client-a").color == "cyan"
+
+    patch = client.patch(
+        "/api/workspaces/client-a",
+        json={"color": "emerald"},
+    )
+    assert patch.status_code == 200
+    updated = next(w for w in patch.json()["workspaces"] if w["name"] == "client-a")
+    assert updated["color"] == "emerald"
+    assert config.workspace("client-a").color == "emerald"
+
+    stored = json.loads((tmp_path / ".runtime" / "workspaces.json").read_text())
+    assert next(w for w in stored if w["name"] == "client-a")["color"] == "emerald"
+
+    # Other fields can update without resetting color.
+    keep = client.patch(
+        "/api/workspaces/client-a",
+        json={"default_model": "sonnet"},
+    )
+    assert keep.status_code == 200
+    assert config.workspace("client-a").color == "emerald"
+
+    bad = client.patch("/api/workspaces/client-a", json={"color": "neon"})
+    assert bad.status_code == 400
+    assert "color" in bad.json()["error"]
 
 
 def test_provider_config_status_and_write_only_patch(tmp_path):

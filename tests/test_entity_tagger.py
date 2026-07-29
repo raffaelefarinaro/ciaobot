@@ -49,6 +49,26 @@ def test_filters_matches_to_active_workspace_and_shared_roots(tmp_path: Path) ->
     assert "personal/People/Defne" not in paths
 
 
+def test_unprefixed_legacy_entities_require_an_explicit_owner(
+    tmp_path: Path,
+) -> None:
+    _write_index(tmp_path, "- `People/Alba` (aliases: Alba)\n")
+
+    assert find_entities("Alba", tmp_path, workspace="work") == []
+    assert find_entities(
+        "Alba",
+        tmp_path,
+        workspace="personal",
+        legacy_workspace="personal",
+    )
+    assert find_entities(
+        "Alba",
+        tmp_path,
+        workspace="work",
+        legacy_workspace="personal",
+    ) == []
+
+
 def test_prefixed_entities_match_note_name_without_aliases(tmp_path: Path) -> None:
     _write_index(tmp_path, """# Vault Index
 

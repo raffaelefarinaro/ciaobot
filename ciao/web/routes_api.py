@@ -16,18 +16,27 @@ import sys
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
-from typing import Any, Iterable, cast
+from typing import Any, Callable, Iterable, cast
 from urllib.parse import urlsplit
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
 from ciao import subagent_tracking
-from ciao.config import WorkspaceConfig, CLAUDE_AI_CONNECTORS, coerce_claude_ai_mcps
+from ciao.config import (
+    WorkspaceConfig,
+    CLAUDE_AI_CONNECTORS,
+    DEFAULT_WORKSPACE_COLOR,
+    coerce_claude_ai_mcps,
+    coerce_workspace_color,
+)
+from ciao.loops import publish_loops_changed
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.model_tiers import codex_tier_models
 from ciao.package_version import package_changelog, package_status, update_package
+from ciao.network_addresses import is_loopback_url, server_addresses
 from ciao.tool_path import login_shell_path, resolve_tool
 from ciao.providers.claude import _summarize_tool_input
 from ciao.providers.codex import CodexProvider, codex_login_status, codex_tier_overrides
@@ -44,8 +53,10 @@ from ciao.cli import _auth_command_for_provider
 from ciao.rate_limits import is_rate_limit_telemetry
 from ciao.skills_inventory import build_skill_inventory
 from ciao.vault_lint import EXCLUDE_DIRS, _links_in
-from ciao.web.chat_broker import extract_file_touches
+from ciao.web.chat_broker import extract_file_touches, normalize_file_touch_paths
 from ciao.web.project_chats import (
+    RestartDrainingError,
+    _ALLOWED_IMAGE_EXTENSIONS,
     _PROJECT_UPLOAD_MAX_BYTES,
     _normalize_handover_messages,
 )
@@ -277,6 +288,25 @@ def _tool_icon(name: str) -> str:
     return _TOOL_ICONS.get(name, "\u2699\uFE0F")
 
 
+# Tools whose failure invalidates their file card. A refused or errored `Write`
+# either wrote the file or did not run at all; a failed `file_surface` did not
+# select an artifact. A `Bash` non-zero exit says no such thing — `printf x > f
+# && exit 1` leaves the file behind — so its card stands, or history would hide
+# a file the agent really created.
+_FAILURE_DROPS_FILE_CARD_TOOLS = frozenset({
+    "Write",
+    "Edit",
+    "MultiEdit",
+    "NotebookEdit",
+    "mcp__ciaobot__file_surface",
+})
+
+
+def _touches_survive_failure(tool_name: str) -> bool:
+    """Whether a failed call's file cards should still render."""
+    return tool_name not in _FAILURE_DROPS_FILE_CARD_TOOLS
+
+
 def _failed_tool_use_ids(msgs: list) -> set[str]:
     """Tool-call ids whose ``tool_result`` came back as an error.
 
@@ -285,6 +315,9 @@ def _failed_tool_use_ids(msgs: list) -> set[str]:
     for a file that was never created (this is what made a permission-denied
     `skills-monitor.md` look written). Results live on the following user
     message, so they can only be matched in a pre-pass over the whole session.
+
+    Which ids actually suppress a card is decided per tool — see
+    ``_touches_survive_failure``.
     """
     failed: set[str] = set()
     for m in msgs:
@@ -302,12 +335,32 @@ def _failed_tool_use_ids(msgs: list) -> set[str]:
         for block in content:
             if not isinstance(block, dict) or block.get("type") != "tool_result":
                 continue
-            if block.get("is_error") and block.get("tool_use_id"):
+            failed_result = bool(block.get("is_error"))
+            content = block.get("content")
+            if not failed_result and isinstance(content, str):
+                try:
+                    content = json.loads(content)
+                except (TypeError, ValueError):
+                    content = None
+            if (
+                not failed_result
+                and isinstance(content, dict)
+                and content.get("ok") is False
+            ):
+                # MCP tools return structured envelopes. Claude records these
+                # as a successful transport-level tool_result even when the
+                # application operation failed, e.g. file_surface returning
+                # {"ok": false, "error": ...}.
+                failed_result = True
+            if failed_result and block.get("tool_use_id"):
                 failed.add(str(block["tool_use_id"]))
     return failed
 
 
-def _extract_assistant_blocks(raw: object) -> list[dict]:
+def _extract_assistant_blocks(
+    raw: object,
+    workspace_root: Path | None = None,
+) -> list[dict]:
     """Return ordered text/tool_use blocks for an assistant message.
 
     Items: {"kind": "text", "text": str},
@@ -359,7 +412,10 @@ def _extract_assistant_blocks(raw: object) -> list[dict]:
             if not isinstance(tinput, dict):
                 tinput = {}
             summary = _summarize_tool_input(name, tinput)
-            touches = extract_file_touches(name, tinput)
+            touches = normalize_file_touch_paths(
+                extract_file_touches(name, tinput),
+                workspace_root,
+            )
             entry = {"kind": "tool_use", "name": name, "summary": summary}
             # Kept so the history builder can match this call against its
             # tool_result and drop the file card when the call failed.
@@ -593,10 +649,14 @@ def _render_subagent_messages(msgs: Iterable[object]) -> list[dict]:
                     if not isinstance(touches, list) or not touches:
                         touch = blk.get("file_touch")
                         touches = [touch] if touch else []
-                    if touches and blk.get("id") in failed_tool_ids:
-                        # Denied or errored: nothing reached disk, so render a
-                        # plain activity row instead of a file card that implies
-                        # the write happened.
+                    if (
+                        touches
+                        and blk.get("id") in failed_tool_ids
+                        and not _touches_survive_failure(name)
+                    ):
+                        # Denied or errored write: nothing reached disk, so
+                        # render a plain activity row instead of a file card
+                        # that implies the write happened.
                         touches = []
                     if touches:
                         flush_tools()
@@ -765,6 +825,10 @@ async def list_workspaces(request: Request) -> JSONResponse:
 
 
 def _workspace_to_dict(workspace: WorkspaceConfig) -> dict:
+    try:
+        color = coerce_workspace_color(getattr(workspace, "color", DEFAULT_WORKSPACE_COLOR))
+    except ValueError:
+        color = DEFAULT_WORKSPACE_COLOR
     return {
         "name": getattr(workspace, "name", ""),
         "vault_root": getattr(workspace, "vault_root", ""),
@@ -781,6 +845,7 @@ def _workspace_to_dict(workspace: WorkspaceConfig) -> dict:
         "claude_ai_mcps": getattr(workspace, "claude_ai_mcps", None),
         "gws_profile": getattr(workspace, "gws_profile", ""),
         "model_bucket": getattr(workspace, "model_bucket", ""),
+        "color": color,
     }
 
 
@@ -820,6 +885,24 @@ def _workspace_from_request(
     name = str(data.get("name", existing.name if existing else "")).strip()
     if not _WORKSPACE_NAME_RE.match(name):
         raise ValueError("workspace name must use letters, numbers, dashes, or underscores")
+    if existing is None:
+        for configured_name in config.workspace_names():
+            if configured_name.casefold() == name.casefold():
+                raise ValueError(
+                    f"workspace name conflicts with existing workspace "
+                    f"'{configured_name}'"
+                )
+        target_root = config.canonical_workspace_vault_root(name)
+        for configured_name in config.workspace_names():
+            try:
+                configured_root = config.workspace_vault_root(configured_name)
+            except ValueError:
+                continue
+            if configured_root == target_root:
+                raise ValueError(
+                    f"workspace vault folder is already owned by "
+                    f"'{configured_name}'"
+                )
     provider = str(
         data.get(
             "default_provider",
@@ -842,9 +925,28 @@ def _workspace_from_request(
         claude_ai_mcps = existing.claude_ai_mcps
     else:
         claude_ai_mcps = None
+    if "color" in data:
+        color = coerce_workspace_color(data.get("color"))
+    elif existing is not None:
+        try:
+            color = coerce_workspace_color(existing.color)
+        except ValueError:
+            color = DEFAULT_WORKSPACE_COLOR
+    else:
+        color = DEFAULT_WORKSPACE_COLOR
     return WorkspaceConfig(
         name=name,
-        vault_root=name,
+        # Vault locations are not an editable Settings field. Updating a
+        # workspace must preserve setup-created/external roots exactly; a new
+        # user-named workspace always receives its standard folder beneath the
+        # configured vault. Accepting request-body paths here allowed `/` and
+        # `..` to turn one authenticated save into filesystem-wide writes and
+        # scans.
+        vault_root=(
+            existing.vault_root
+            if existing is not None
+            else config.stored_workspace_vault_root(name)
+        ),
         default_provider=provider,
         default_model=str(
             data.get("default_model", existing.default_model if existing else "")
@@ -855,6 +957,7 @@ def _workspace_from_request(
         model_bucket=str(
             data.get("model_bucket", existing.model_bucket if existing else "")
         ).strip(),
+        color=color,
     )
 
 
@@ -863,6 +966,10 @@ def _workspaces_path(config) -> Path:
 
 
 def _persist_workspaces(config) -> None:
+    persist = getattr(config, "persist_workspace_registry", None)
+    if callable(persist):
+        persist()
+        return
     path = _workspaces_path(config)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = [_workspace_to_dict(workspace) for workspace in config.workspaces.values()]
@@ -1598,10 +1705,14 @@ async def list_projects(request: Request) -> JSONResponse:
 
 async def create_project(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
+    config = request.app.state.config
     body = await request.json()
     project = pcm.create_project(
         name=body["name"],
-        workspace=body.get("workspace", "personal"),
+        # An omitted workspace has to resolve to one that exists: create_project
+        # does not validate the name, so an unknown one yields a project that is
+        # filtered out of every workspace's sidebar.
+        workspace=body.get("workspace") or config.primary_workspace(),
         context=body.get("context", ""),
     )
     return JSONResponse(project.to_dict(), status_code=201)
@@ -1730,6 +1841,229 @@ async def project_files_upload(request: Request) -> JSONResponse:
         except ValueError as exc:
             errors.append({"filename": filename, "error": str(exc)})
     return JSONResponse({"saved": saved, "errors": errors})
+
+
+_DESKTOP_DROP_GRANT_TTL_SECONDS = 5 * 60
+_DESKTOP_DROP_MAX_FILES = 100
+
+
+def _consume_desktop_drop_grant(request: Request, grant_id: str) -> list[Path]:
+    """Consume a native-app grant and return only its explicitly dropped paths."""
+    try:
+        canonical_id = str(UUID(grant_id))
+    except (ValueError, AttributeError) as exc:
+        raise ValueError("invalid desktop drop grant") from exc
+    if canonical_id != grant_id:
+        raise ValueError("invalid desktop drop grant")
+
+    config = request.app.state.config
+    grant_dir = config.state_path.parent / "desktop-drop-grants"
+    source = grant_dir / f"{grant_id}.json"
+    consuming = grant_dir / f".{grant_id}.consuming"
+    try:
+        source.replace(consuming)
+    except FileNotFoundError as exc:
+        raise LookupError("desktop drop grant not found or already used") from exc
+
+    try:
+        payload = json.loads(consuming.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid desktop drop grant") from exc
+    finally:
+        consuming.unlink(missing_ok=True)
+
+    if not isinstance(payload, dict):
+        raise ValueError("invalid desktop drop grant")
+    created_at = payload.get("created_at")
+    raw_paths = payload.get("paths")
+    if not isinstance(created_at, (int, float)):
+        raise ValueError("invalid desktop drop grant")
+    age = datetime.now(UTC).timestamp() - float(created_at)
+    if age < -30 or age > _DESKTOP_DROP_GRANT_TTL_SECONDS:
+        raise ValueError("desktop drop grant expired")
+    if (
+        not isinstance(raw_paths, list)
+        or not raw_paths
+        or len(raw_paths) > _DESKTOP_DROP_MAX_FILES
+        or not all(isinstance(path, str) for path in raw_paths)
+    ):
+        raise ValueError("invalid desktop drop grant")
+
+    paths = [Path(path) for path in raw_paths]
+    if any(not path.is_absolute() or not path.exists() for path in paths):
+        raise ValueError("a dropped file is no longer available")
+    return paths
+
+
+async def desktop_drop_import(request: Request) -> JSONResponse:
+    """Resolve a single-use native Finder drop for the active host or client."""
+    body = await request.json()
+    grant_id = str(body.get("grant_id") or "")
+    project_id = str(body.get("project_id") or "")
+    chat_id = str(body.get("chat_id") or "")
+    try:
+        paths = _consume_desktop_drop_grant(request, grant_id)
+    except LookupError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    node_mgr = getattr(request.app.state, "node_state_manager", None)
+    role = node_mgr.get_role() if node_mgr else "host"
+    is_client = role in {"client", "standby"}
+    image_paths = [
+        path
+        for path in paths
+        if path.is_file() and path.suffix.lower() in _ALLOWED_IMAGE_EXTENSIONS
+    ]
+    regular_paths = [path for path in paths if path not in image_paths]
+    errors: list[dict[str, str]] = []
+
+    if not is_client:
+        pcm = request.app.state.project_chat_manager
+        host_image_refs: list[str] = []
+        if image_paths and pcm.get_chat(chat_id) is None:
+            errors.extend(
+                {"filename": path.name, "error": "chat not found"}
+                for path in image_paths
+            )
+        else:
+            for path in image_paths:
+                try:
+                    if path.stat().st_size > request.app.state.config.max_image_size_bytes:
+                        raise ValueError("image too large")
+                    host_image_refs.append(
+                        pcm.save_image_upload(path.read_bytes(), path.name).path.name
+                    )
+                except (OSError, ValueError) as exc:
+                    errors.append({"filename": path.name, "error": str(exc)})
+        return JSONResponse(
+            {
+                "paths": [str(path) for path in regular_paths],
+                "image_refs": host_image_refs,
+                "errors": errors,
+            }
+        )
+
+    if node_mgr is None:
+        return JSONResponse({"error": "client node state unavailable"}, status_code=503)
+    host_url = node_mgr.get_active_peer_url()
+    if not host_url:
+        return JSONResponse({"error": "client has no reachable host"}, status_code=503)
+
+    import httpx
+
+    from ciao.web.auth import SESSION_COOKIE
+
+    headers = {"origin": host_url.rstrip("/")}
+    host_session = node_mgr.get_host_session()
+    if host_session:
+        headers["cookie"] = f"{SESSION_COOKIE}={host_session}"
+    timeout = httpx.Timeout(60.0, connect=5.0)
+    imported_paths: list[str] = []
+    image_refs: list[str] = []
+
+    try:
+        # These are fixed API endpoints, so a redirect is never expected.
+        # Refusing it also prevents a configured/compromised peer from
+        # forwarding the stored host-session cookie to another origin.
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            if image_paths:
+                image_files = []
+                for index, path in enumerate(image_paths):
+                    if path.stat().st_size > request.app.state.config.max_image_size_bytes:
+                        errors.append({"filename": path.name, "error": "image too large"})
+                        continue
+                    image_files.append(
+                        (
+                            f"file{index}",
+                            (
+                                path.name,
+                                path.read_bytes(),
+                                mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                            ),
+                        )
+                    )
+                if image_files:
+                    response = await client.post(
+                        f"{host_url.rstrip('/')}/api/chats/{chat_id}/images",
+                        headers=headers,
+                        files=image_files,
+                    )
+                    payload = response.json()
+                    if response.is_success and isinstance(payload, list):
+                        for entry in payload:
+                            if entry.get("ref"):
+                                image_refs.append(str(entry["ref"]))
+                            elif entry.get("error"):
+                                errors.append(
+                                    {
+                                        "filename": str(entry.get("filename") or ""),
+                                        "error": str(entry["error"]),
+                                    }
+                                )
+                    else:
+                        raise ValueError(
+                            payload.get("error", "host image upload failed")
+                            if isinstance(payload, dict)
+                            else "host image upload failed"
+                        )
+
+            uploadable_paths = []
+            for path in regular_paths:
+                if path.is_dir():
+                    errors.append(
+                        {
+                            "filename": path.name,
+                            "error": "folders cannot be transferred to the host",
+                        }
+                    )
+                elif path.stat().st_size > _PROJECT_UPLOAD_MAX_BYTES:
+                    errors.append({"filename": path.name, "error": "file too large"})
+                else:
+                    uploadable_paths.append(path)
+            if uploadable_paths:
+                files = [
+                    (
+                        f"file{index}",
+                        (
+                            path.name,
+                            path.read_bytes(),
+                            mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                        ),
+                    )
+                    for index, path in enumerate(uploadable_paths)
+                ]
+                response = await client.post(
+                    f"{host_url.rstrip('/')}/api/projects/{project_id}/files",
+                    headers=headers,
+                    files=files,
+                )
+                payload = response.json()
+                if not response.is_success or not isinstance(payload, dict):
+                    raise ValueError(
+                        payload.get("error", "host file upload failed")
+                        if isinstance(payload, dict)
+                        else "host file upload failed"
+                    )
+                imported_paths.extend(
+                    str(entry["absolute_path"])
+                    for entry in payload.get("saved", [])
+                    if entry.get("absolute_path")
+                )
+                errors.extend(
+                    {
+                        "filename": str(entry.get("filename") or ""),
+                        "error": str(entry.get("error") or "upload failed"),
+                    }
+                    for entry in payload.get("errors", [])
+                )
+    except (OSError, httpx.HTTPError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+    return JSONResponse(
+        {"paths": imported_paths, "image_refs": image_refs, "errors": errors}
+    )
 
 
 async def create_project_chat(request: Request) -> JSONResponse:
@@ -2561,7 +2895,10 @@ async def chat_messages(request: Request) -> JSONResponse:
     failed_tool_ids = _failed_tool_use_ids(msgs)
     for m in msgs:
         if m.type == "assistant":
-            blocks = _extract_assistant_blocks(m.message)
+            blocks = _extract_assistant_blocks(
+                m.message,
+                workspace_root=config.workspace_root,
+            )
             # Drop the CLI's "No response requested." sentinel that marks
             # interrupted turns. If the message contained ONLY that sentinel
             # (no tools, no other text), skip the whole entry.
@@ -2606,10 +2943,14 @@ async def chat_messages(request: Request) -> JSONResponse:
                     if not isinstance(touches, list) or not touches:
                         touch = blk.get("file_touch")
                         touches = [touch] if touch else []
-                    if touches and blk.get("id") in failed_tool_ids:
-                        # Denied or errored: nothing reached disk, so render a
-                        # plain activity row instead of a file card that implies
-                        # the write happened.
+                    if (
+                        touches
+                        and blk.get("id") in failed_tool_ids
+                        and not _touches_survive_failure(name)
+                    ):
+                        # Denied or errored write: nothing reached disk, so
+                        # render a plain activity row instead of a file card
+                        # that implies the write happened.
                         touches = []
                     if touches:
                         flush_tools()
@@ -3303,10 +3644,10 @@ async def vault_backlinks(request: Request) -> JSONResponse:
 # contract as ``workspace_file``/``workspace_image``: any allowlisted-extension
 # file on disk is served, relative paths anchoring to the workspace. The browser
 # decides whether to render inline (PDF) or save (everything else) based on
-# the inferred MIME type; we set ``Content-Disposition: inline`` with the
-# original filename so downloads keep a sensible name either way.
+# the inferred MIME type. Saved-page archives are forced to download so their
+# packaged HTML cannot execute under the PWA origin.
 _WORKSPACE_BINARY_EXTS = frozenset({
-    ".pdf", ".zip", ".docx", ".xlsx", ".pptx",
+    ".pdf", ".zip", ".docx", ".xlsx", ".pptx", ".mht", ".mhtml",
 })
 _WORKSPACE_BINARY_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 
@@ -3350,7 +3691,7 @@ async def apfel_install_endpoint(request: Request) -> JSONResponse:
 
 
 async def workspace_binary(request: Request) -> Response:
-    """Serve a read-only binary file (PDF, ZIP, office doc) from the workspace."""
+    """Serve an allowlisted binary file from the workspace."""
     config = request.app.state.config
     raw = request.query_params.get("path", "").strip()
     roots = _allowed_roots(config)
@@ -3364,6 +3705,7 @@ async def workspace_binary(request: Request) -> Response:
     if resolved.stat().st_size > _WORKSPACE_BINARY_MAX_BYTES:
         return JSONResponse({"error": "file too large"}, status_code=413)
 
+    source_ext = resolved.suffix.lower()
     is_raw = request.query_params.get("raw") == "1"
     filename = resolved.name
     media_type: str | None = None
@@ -3438,12 +3780,12 @@ async def workspace_binary(request: Request) -> Response:
             }
             media_type = _FALLBACK_MIMES.get(resolved.suffix.lower(), "application/octet-stream")
 
-    # `inline` lets PDFs preview in a tab; non-renderable types still
-    # download but with a sensible filename. We set custom frame headers
-    # to allow embedding inside the PWA's same-origin file viewer iframe,
-    # bypassing the global middleware's default frame-blocking headers.
+    # `inline` lets PDFs preview in a tab; saved-page archives are explicit
+    # downloads. Custom frame headers let supported previews embed inside the
+    # PWA's same-origin file viewer iframe.
+    disposition = "attachment" if source_ext in {".mht", ".mhtml"} else "inline"
     headers = {
-        "Content-Disposition": f'inline; filename="{filename}"',
+        "Content-Disposition": f'{disposition}; filename="{filename}"',
         "X-Frame-Options": "SAMEORIGIN",
         "Content-Security-Policy": "; ".join(
             [
@@ -4037,22 +4379,6 @@ def _enrich_loop(entry, manager, pcm=None) -> dict:
     return entry_dict
 
 
-def _publish_loops_changed(pcm) -> None:
-    """Nudge every open tab to refetch loops (see EventsHub, no replay buffer).
-
-    Loops are read over REST when a chat or the Schedules page mounts, so
-    without this a loop created in another tab (or by the model mid-turn)
-    stays invisible until a reload.
-    """
-    events = getattr(pcm, "events", None)
-    if events is None:
-        return
-    try:
-        events.publish({"type": "loops_changed"})
-    except Exception:  # noqa: BLE001 — fan-out must not fail the request
-        logger.exception("loops_changed publish failed")
-
-
 async def list_loops(request: Request) -> JSONResponse:
     lm = request.app.state.loop_manager
     pcm = request.app.state.project_chat_manager
@@ -4088,13 +4414,15 @@ async def create_loop(request: Request) -> JSONResponse:
         web_chat_id=web_chat_id,
         interval_minutes=interval_minutes,
         title=(body.get("title") or "").strip(),
-        autostart=bool(body.get("autostart")),
+        # Starting implies autostart, so a running loop survives a restart
+        # instead of going quietly dead (see CiaoControlPlane.loop_create).
+        autostart=bool(body.get("autostart")) or bool(body.get("start")),
         web_project_id=loop_project_id,
         workspace=getattr(loop_project, "workspace", "") or "",
     )
     if body.get("start"):
         lm.start_loop(entry.loop_id)
-    _publish_loops_changed(pcm)
+    publish_loops_changed(pcm)
     return JSONResponse(_enrich_loop(entry, lm, pcm), status_code=201)
 
 
@@ -4105,7 +4433,7 @@ async def loop_detail(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
     if request.method == "DELETE":
         deleted = lm.delete(loop_id)
-        _publish_loops_changed(pcm)
+        publish_loops_changed(pcm)
         return JSONResponse({"ok": deleted})
     # PATCH
     entry = lm.get(loop_id)
@@ -4174,7 +4502,7 @@ async def loop_detail(request: Request) -> JSONResponse:
             lm.start_loop(loop_id)
         else:
             lm.stop_loop(loop_id)
-    _publish_loops_changed(pcm)
+    publish_loops_changed(pcm)
     return JSONResponse(_enrich_loop(entry, lm, pcm))
 
 
@@ -4322,14 +4650,16 @@ def _routines_payload(config, app_settings) -> dict:
         # Automatic resolves to the workspace haiku tier — apfel is opt-in
         # (choose "Apple" explicitly), not the auto default just because the
         # binary is on PATH (it fails when Apple Intelligence is disabled).
-        title_effective = config.haiku_model_for_workspace("personal")
+        title_effective = config.haiku_model_for_workspace(config.primary_workspace())
     from ciao.critique import critique_models_effective
 
     critique_effective = critique_models_effective(config)
     if config.insights_model_override:
         insights_effective = config.insights_model_override
     else:
-        insights_effective = config.sonnet_model_for_workspace("personal")
+        insights_effective = config.sonnet_model_for_workspace(
+            config.primary_workspace()
+        )
 
     return {
         # Overrides as stored ("" = automatic default).
@@ -4476,15 +4806,55 @@ async def startup_status_endpoint(request: Request) -> JSONResponse:
 
     tracker = getattr(request.app.state, "startup_tracker", None)
     payload = tracker.to_dict() if tracker is not None else {"phases": [], "overall_ready": True}
+    latest_version, update_available = await _cached_update_hint(request)
     payload.update({
         "version": __version__,
+        "desktop_api_version": 1,
         "node_role": role,
         "active_peer_url": active_peer_url,
         "host_url": node_mgr.get_host_url() if node_mgr else None,
         "has_host_session": bool(node_mgr.get_host_session()) if node_mgr else False,
         "auth_required": bool(getattr(config, "pwa_auth_required", False)) if config else False,
+        "latest_version": latest_version,
+        "update_available": update_available,
     })
     return JSONResponse(payload)
+
+
+async def _refresh_update_hint(app: Any, fetcher: Callable[[], dict[str, object]]) -> None:
+    """Populate the cached update hint off the request path."""
+
+    try:
+        status = await asyncio.to_thread(fetcher)
+    except Exception:
+        # Deliberately broad: this runs detached, and a failed release lookup
+        # must never surface as an unhandled task exception.
+        return
+    app.state.update_hint = (
+        str(status.get("latest_version") or ""),
+        bool(status.get("update_available")),
+    )
+
+
+async def _cached_update_hint(request: Request) -> tuple[str, bool]:
+    """Return ``(latest_version, update_available)`` without ever blocking.
+
+    The menu bar polls this endpoint on a short client timeout to decide whether
+    the engine is alive, so the release lookup must stay off the request path
+    entirely. ``asyncio.to_thread`` cannot be cancelled, so even a ``wait_for``
+    around it would block until the thread finished — instead the lookup runs
+    detached and this only reads the last value it stored. The first poll after
+    a cold start reports no hint; the next one picks it up.
+    """
+
+    app = request.app
+    fetcher = getattr(app.state, "package_status_fetcher", None)
+    if not callable(fetcher):
+        return "", False
+    task = getattr(app.state, "update_hint_task", None)
+    if task is None or task.done():
+        app.state.update_hint_task = asyncio.create_task(_refresh_update_hint(app, fetcher))
+    return getattr(app.state, "update_hint", ("", False))
 
 
 async def active_chats_endpoint(request: Request) -> JSONResponse:
@@ -4563,6 +4933,12 @@ async def menubar_chats_endpoint(request: Request) -> JSONResponse:
             }
         )
     rows.sort(key=lambda row: str(row.get("last_activity_at") or ""), reverse=True)
+    # attention_count is counted over every non-archived chat but the list is
+    # truncated to `limit`, so a chat needing attention that is not among the
+    # most recent would be counted in the menu bar badge with no row to explain
+    # it. Float those chats to the front (stable, so recency order survives
+    # within each group) — the badge then always has something to point at.
+    rows.sort(key=lambda row: not (row["unread"] or row["needs_input"]))
     return JSONResponse({"chats": rows[:limit], "attention_count": attention_count})
 
 
@@ -4580,13 +4956,35 @@ async def open_chat_endpoint(request: Request) -> JSONResponse:
     pcm = getattr(request.app.state, "project_chat_manager", None)
     if pcm is None or pcm.get_chat(chat_id) is None:
         return JSONResponse({"ok": False, "error": "chat not found"}, status_code=404)
+    delivered = bool(getattr(pcm.events, "subscriber_count", 0))
     pcm.events.publish({"type": "open_chat", "chat_id": chat_id})
-    return JSONResponse({"ok": True, "chat_id": chat_id})
+    return JSONResponse({"ok": True, "chat_id": chat_id, "delivered": delivered})
 
 
 async def setup_status_endpoint(request: Request) -> JSONResponse:
     """Return first-run setup readiness for the onboarding wizard."""
     return JSONResponse(setup_status(request.app.state.config))
+
+
+async def node_addresses_endpoint(request: Request) -> JSONResponse:
+    """URLs this engine is reachable at, for sharing with another device.
+
+    Session-protected rather than loopback-public like the tray endpoints: it
+    enumerates LAN interface addresses, which is more than an unauthenticated
+    caller on this machine needs to know.
+    """
+
+    config = getattr(request.app.state, "config", None)
+    port = int(getattr(config, "pwa_port", 8443) or 8443)
+    urls = await asyncio.to_thread(server_addresses, port)
+    return JSONResponse(
+        {
+            "port": port,
+            "addresses": [
+                {"url": url, "loopback": is_loopback_url(url)} for url in urls
+            ],
+        }
+    )
 
 
 async def package_status_endpoint(request: Request) -> JSONResponse:
@@ -4842,6 +5240,17 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     # with visible content is an existing notes folder the onboarding agent
     # adapts in place.
     vault_mode = str(body.get("vault_mode", "")).strip().lower() or detect_vault_mode(workspace)
+    workspace_name = str(body.get("workspace_name", "")).strip() or "personal"
+    if not _WORKSPACE_NAME_RE.fullmatch(workspace_name):
+        return JSONResponse(
+            {
+                "error": (
+                    "workspace name must use letters, numbers, dashes, "
+                    "or underscores"
+                )
+            },
+            status_code=400,
+        )
 
     written = setup_workspace(
         workspace,
@@ -4850,7 +5259,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         push_contact=push_contact,
         vault_root=str(body.get("vault_root", "")).strip() or None,
         vault_mode=vault_mode,
-        workspace_name=str(body.get("workspace_name", "")).strip() or "personal",
+        workspace_name=workspace_name,
         default_provider=default_provider,
         python_path=str(body.get("python", "")).strip() or None,
         port=port,
@@ -5374,10 +5783,23 @@ def _open_merge_chat(request: Request, branch: str) -> dict:
     with the user. Returns {ok, chat_id, project_id} or {error}."""
     config = request.app.state.config
     pcm = request.app.state.project_chat_manager
-    projects = pcm.list_projects("personal")
-    project = next((p for p in projects if p.name == "General"), None)
+    # Any workspace can host this; prefer the primary one, then settle for the
+    # first workspace that has a General project. Keying on a workspace named
+    # "personal" meant the whole sync-conflict flow failed on installs whose
+    # workspaces are named anything else.
+    workspace = config.primary_workspace()
+    project = next(
+        (p for p in pcm.list_projects(workspace) if p.name == "General"), None
+    )
     if project is None:
-        return {"error": "no personal project to host the merge chat"}
+        for candidate in config.workspace_names():
+            project = next(
+                (p for p in pcm.list_projects(candidate) if p.name == "General"), None
+            )
+            if project is not None:
+                break
+    if project is None:
+        return {"error": "no General project in any workspace to host the merge chat"}
 
     from datetime import UTC, datetime
     from ciao.local_session import MERGE_PROMPT
@@ -5814,4 +6236,3 @@ async def node_peers_endpoint(request: Request) -> JSONResponse:
         status = node_mgr.add_peer(url, peer_id=node_id)
 
     return JSONResponse({"ok": True, "status": status})
-
