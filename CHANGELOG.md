@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.6.4 - 2026-07-29
+
+### Fixed
+- fix: configure smoke workspace before app launch (`8623999`)
+
 ## v0.6.3 - 2026-07-29
 
 ### Fixed
