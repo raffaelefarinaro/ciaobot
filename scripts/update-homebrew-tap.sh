@@ -118,7 +118,7 @@ cask "ciaobot-desktop" do
   homepage "https://github.com/raffaelefarinaro/ciaobot"
 
   depends_on formula: "ciaobot"
-  depends_on macos: ">= :ventura"
+  depends_on macos: :ventura
   auto_updates true
 
   app "Ciaobot.app"

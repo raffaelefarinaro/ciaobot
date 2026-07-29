@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.6.1 - 2026-07-29
+
+### Fixed
+- Workspace switches now land on the home screen instead of opening and
+  loading an arbitrary chat. Creating a chat in another workspace no longer
+  waits for the previous first chat's transcript.
+- Homebrew installs now trust and install the engine formula before the cask;
+  the release smoke test follows the same flow, and generated casks use the
+  current macOS dependency syntax.
+
 ## v0.6.0 - 2026-07-29
 
 ### Added

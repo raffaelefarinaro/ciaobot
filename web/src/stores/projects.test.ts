@@ -1514,7 +1514,7 @@ describe('workspace and chat transitions', () => {
     expect(store.bootstrapped).toBe(false)
   })
 
-  test('switchWorkspace transitions to first chat of new workspace and marks it read', async () => {
+  test('switchWorkspace lands on home without loading an arbitrary chat', async () => {
     const store = useProjectStore()
     store.projects = [
       { project_id: 'p-personal', name: 'Proj Personal', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
@@ -1527,14 +1527,63 @@ describe('workspace and chat transitions', () => {
     store.activeWorkspace = 'work'
     store.activeChatId = 'c-work'
 
-    apiGet.mockResolvedValue([]) // loadMessages mock response
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/chats/c-personal/messages') {
+        return new Promise(() => {}) // a transcript that would block forever
+      }
+      return Promise.resolve([])
+    })
 
     await store.switchWorkspace('personal')
 
     expect(store.activeWorkspace).toBe('personal')
-    expect(store.activeChatId).toBe('c-personal')
-    expect(routerPush).toHaveBeenCalledWith('/chat/c-personal')
-    expect(apiPost).toHaveBeenCalledWith('/api/chats/c-personal/read', {})
+    expect(store.activeChatId).toBeNull()
+    expect(routerPush).toHaveBeenCalledWith('/')
+    expect(apiGet).not.toHaveBeenCalledWith('/api/chats/c-personal/messages')
+    expect(apiPost).not.toHaveBeenCalledWith('/api/chats/c-personal/read', {})
+  })
+
+  test('cross-workspace new chat does not wait for the target workspace history', async () => {
+    const store = useProjectStore()
+    store.projects = [
+      { project_id: 'p-personal', name: 'General', workspace: 'personal', context: '', created_at: '', order: 0, vault_folder: '' },
+      { project_id: 'p-work', name: 'General', workspace: 'work', context: '', created_at: '', order: 0, vault_folder: '' },
+    ]
+    store.chats = [
+      { chat_id: 'c-personal-old', project_id: 'p-personal', title: 'Long chat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+      { chat_id: 'c-work', project_id: 'p-work', title: 'Work chat', model: '', provider: 'claude', mode: '', session_id: '', created_at: '', archived: false },
+    ]
+    store.activeWorkspace = 'work'
+    store.activeChatId = 'c-work'
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/chats/c-personal-old/messages') {
+        return new Promise(() => {})
+      }
+      return Promise.resolve([])
+    })
+    apiPost.mockImplementation((path: string) => {
+      if (path === '/api/projects/p-personal/chats') {
+        return Promise.resolve({
+          chat_id: 'c-personal-new',
+          project_id: 'p-personal',
+          title: 'New Chat',
+          model: '',
+          provider: 'claude',
+          mode: '',
+          session_id: '',
+          created_at: '',
+          archived: false,
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    await store.switchWorkspace('personal')
+    await store.createChat('p-personal')
+    await vi.waitFor(() => expect(store.activeChatId).toBe('c-personal-new'))
+
+    expect(apiPost).toHaveBeenCalledWith('/api/projects/p-personal/chats', { title: 'New Chat' })
+    expect(apiGet).not.toHaveBeenCalledWith('/api/chats/c-personal-old/messages')
   })
 
   test('switchWorkspace with transition false updates workspace and chat ID but does not redirect', async () => {
