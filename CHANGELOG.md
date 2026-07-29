@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.6.5 - 2026-07-29
+
+### Added
+- feat: opt-in Developer ID signing and notarization for the desktop app (`13c3c58`)
+
+### Changed
+- Merge pull request #209 from raffaelefarinaro/chore/sync-develop-v0.6.4 (`c4eadd5`)
+- Revert "feat: opt-in Developer ID signing and notarization for the desktop app" (`7a42cd7`)
+- Merge pull request #210 from raffaelefarinaro/fix/release-smoke-engine-start (`7fe7dff`)
+- Merge pull request #211 from raffaelefarinaro/fix/issues-207-206 (`8f1099a`)
+
+### Fixed
+- fix: surface engine start failures and make release smoke runnable (`bac8dd7`)
+- fix: install the cask unquarantined in release-smoke (`b5f3b5d`)
+- fix: clear the quarantine attribute instead of using --no-quarantine (`ebd8214`)
+- fix: enlarge the loop banner icon and enforce defuddle-first URL reading (`61f8968`)
+
+### Maintenance
+- chore: sample the stuck app in release-smoke diagnostics (`753d54a`)
+- test: cold-start the built app bundle in CI (`35a5a88`)
+
 ## v0.6.4 - 2026-07-29
 
 ### Fixed
