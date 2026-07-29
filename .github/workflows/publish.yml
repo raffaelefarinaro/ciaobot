@@ -55,70 +55,12 @@ jobs:
       - name: Install desktop dependencies
         working-directory: desktop
         run: npm ci
-      # Developer ID signing and notarization are opt-in on the secrets being
-      # present. Without them the build stays ad-hoc signed exactly as before,
-      # and users must approve the app in System Settings on first launch —
-      # `brew install --cask` sets com.apple.quarantine, and a quarantined
-      # non-notarized app cannot launch unattended at all. Notarization requires
-      # signing with a Developer ID certificate at build time; an ad-hoc bundle
-      # is rejected by notarytool, so this cannot be bolted on afterwards.
-      #
-      # To enable, set all of:
-      #   APPLE_CERTIFICATE           base64 of the Developer ID Application .p12
-      #   APPLE_CERTIFICATE_PASSWORD  password for that .p12
-      #   APPLE_SIGNING_IDENTITY      e.g. "Developer ID Application: Name (TEAMID)"
-      #   APPLE_ID                    Apple ID email
-      #   APPLE_PASSWORD              app-specific password for that Apple ID
-      #   APPLE_TEAM_ID               10-character team id
-      - name: Detect Developer ID credentials
-        id: signing
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-        run: |
-          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_ID" ]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::No Developer ID credentials; building ad-hoc signed and un-notarized. First launch will require manual approval in System Settings."
-          fi
-
-      - name: Build signed and notarized universal desktop artifacts
-        if: steps.signing.outputs.enabled == 'true'
-        working-directory: desktop
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: npm run tauri build -- --target universal-apple-darwin
-
-      - name: Build ad-hoc signed universal desktop artifacts
-        if: steps.signing.outputs.enabled != 'true'
+      - name: Build signed universal desktop artifacts
         working-directory: desktop
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri build -- --target universal-apple-darwin
-
-      # Records what actually shipped, so "is this build notarized?" is answered
-      # by the release log instead of by downloading the DMG and checking.
-      - name: Report signing and notarization state
-        run: |
-          bundle="desktop/src-tauri/target/universal-apple-darwin/release/bundle"
-          app="$(find "$bundle" -maxdepth 3 -name '*.app' -type d -print -quit)"
-          test -n "$app"
-          codesign -dv --verbose=2 "$app" 2>&1 | head -20 || true
-          if spctl -a -vv -t exec "$app" 2>&1 | grep -q "source=Notarized"; then
-            echo "notarized: yes"
-          else
-            echo "notarized: no"
-            spctl -a -vv -t exec "$app" 2>&1 | head -10 || true
-          fi
       - name: Prepare updater manifest
         env:
           VERSION: ${{ github.event.release.tag_name }}
