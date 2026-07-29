@@ -154,8 +154,8 @@ jobs:
         env:
           VERSION: ${{ github.event.release.tag_name }}
         run: |
-          brew tap raffaelefarinaro/ciaobot
           brew update
+          brew install raffaelefarinaro/ciaobot/ciaobot
           brew install --cask raffaelefarinaro/ciaobot/ciaobot-desktop
           test -x "$(brew --prefix)/bin/ciao"
           test -x "/Applications/Ciaobot.app/Contents/MacOS/ciaobot-desktop"
