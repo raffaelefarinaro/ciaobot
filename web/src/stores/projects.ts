@@ -1785,8 +1785,14 @@ export const useProjectStore = defineStore('projects', () => {
     if (activeChatId.value) disconnectWs(activeChatId.value)
     activeWorkspace.value = ws
     if (transition) {
+      // A workspace pill expresses scope, not a request to open an arbitrary
+      // conversation. Selecting the first chat here also made the switch (and
+      // cross-workspace "new chat") wait for that chat's complete transcript
+      // before the home screen could render.
+      activeChatId.value = null
       persistState()
-      await transitionToFirstChat()
+      const { router } = await import('../router')
+      await router.push('/')
     } else {
       selectFirstChat()
       persistState()
