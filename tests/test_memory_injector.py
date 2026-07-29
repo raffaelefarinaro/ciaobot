@@ -71,6 +71,19 @@ def test_system_prompt_includes_gws_operational_notes() -> None:
     assert "supportsAllDrives" in append
 
 
+def test_system_prompt_includes_url_reading_notes() -> None:
+    """PWA turns get their instructions from system_prompt.md, not the repo's
+    CLAUDE.md, so the defuddle-first rule has to live here or it never fires."""
+    payload = mi.system_prompt_payload("")
+    assert payload is not None
+    append = payload["append"]
+    assert "Reading URLs" in append
+    assert "defuddle parse <url> --md" in append
+    # WebFetch must stay described as the fallback, not an equal option.
+    assert "WebFetch" in append
+    assert "web-research" in append
+
+
 def test_system_prompt_includes_ciaobot_diagnostics_notes() -> None:
     """Installed agents should know which local logs to inspect for support."""
     payload = mi.system_prompt_payload("")
