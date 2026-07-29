@@ -96,6 +96,24 @@ jobs:
           launchctl print "gui/$(id -u)/com.ciao.server" 2>&1 | head -40 || true
           echo "--- server LaunchAgent plist ---"
           cat ~/Library/LaunchAgents/com.ciao.server.plist 2>/dev/null || echo "(absent)"
+          # Sample the app BEFORE starting anything: this is the only thing that
+          # tells apart "setup() is blocked before it starts the engine" from
+          # "it asked launchd and launchd refused".
+          echo "--- app stack sample (still in the failed state) ---"
+          app_pid="$(pgrep -x ciaobot-desktop || true)"
+          if [ -n "$app_pid" ]; then
+            sample "$app_pid" 2 -file "${RUNNER_TEMP}/ciaobot-sample.txt" >/dev/null 2>&1 || true
+            sed -n '1,120p' "${RUNNER_TEMP}/ciaobot-sample.txt" 2>/dev/null || echo "(sample unavailable)"
+          else
+            echo "(app not running)"
+          fi
+          echo "--- any desktop-tray.log on the box ---"
+          find "$HOME" -name desktop-tray.log -maxdepth 6 2>/dev/null || true
+          ls -la "$HOME/.ciaobot/runtime" 2>/dev/null || echo "(no ~/.ciaobot/runtime)"
+          echo "--- app log stream ---"
+          log show --last 3m --predicate 'process == "ciaobot-desktop"' 2>/dev/null | tail -40 || echo "(log show unavailable)"
+          echo "--- desktop-service status ---"
+          ciao desktop-service status --json 2>&1 | head -20 || true
           echo "--- explicit desktop-service start ---"
           ciao desktop-service start --json 2>&1 | head -40 || true
           sleep 5
