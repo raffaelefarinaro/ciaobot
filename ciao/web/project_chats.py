@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import mimetypes
+import copy
 import os
 import re
 import shutil
@@ -63,6 +64,7 @@ from ciao.model_tiers import (
     CODEX_FABLE_THINKING_LEVEL,
     canonical_tier,
     is_capability_error,
+    model_supports_vision,
     next_tier_for_failure,
 )
 from ciao.providers.ollama import (
@@ -109,7 +111,7 @@ _PROJECT_IMAGE_EXTS = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".avif", ".bmp", ".ico",
 })
 _PROJECT_BINARY_EXTS = frozenset({
-    ".pdf", ".zip", ".docx", ".xlsx", ".pptx",
+    ".pdf", ".zip", ".docx", ".xlsx", ".pptx", ".mht", ".mhtml",
 })
 _PROJECT_UPLOAD_EXTS = _PROJECT_TEXT_EXTS | _PROJECT_IMAGE_EXTS | _PROJECT_BINARY_EXTS
 _PROJECT_UPLOAD_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
@@ -376,7 +378,9 @@ _TITLE_SYSTEM_PROMPT = (
     "it. Reply with ONLY a title for the conversation: 3 to 6 words, no "
     "quotes, no trailing punctuation, no emoji, in the same language as the "
     "excerpt. Capture the topic, not the meta (don't say 'chat about', 'help "
-    "with', etc). Never write in the first person."
+    "with', etc). When the excerpt includes an assistant reply, title what "
+    "the conversation is actually about from the reply, not a literal "
+    "restatement of an opening question. Never write in the first person."
 )
 
 # A title that opens like an assistant reply means the model answered the
@@ -410,6 +414,33 @@ def _is_contentless_prompt(text: str) -> bool:
     """True for bare openers ("continue", "ok", "go on") with no topic."""
     normalized = re.sub(r"[\s.!?,:;]+", " ", (text or "").strip().lower()).strip()
     return normalized in _CONTENTLESS_PROMPTS
+
+
+# Question-shaped openers ("why is X broken?", "what does Y mean?") are often
+# meta-inquiries whose real topic only emerges in the assistant's reply: the
+# user asks "why no recent sessions?" to diagnose something, the assistant
+# pivots to the actual cause, and a title built from the question alone ("No
+# Recent Sessions") misnames the chat. Defer those to the post-reply path so
+# the titler sees both sides and can prefer the assistant's framing (#176).
+_QUESTION_OPENER_RE = re.compile(
+    r"^(why|what|how|when|where|who|whom|whose|which|"
+    r"is|are|am|was|were|"
+    r"do|does|did|can|could|will|would|shall|should|may|might|must|"
+    r"has|have|had)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_question_shaped_prompt(text: str) -> bool:
+    """True for meta-inquiry openers. We defer titling these until the first
+    assistant reply so the title reflects the conclusion, not the question.
+    """
+    snippet = (text or "").strip()
+    if not snippet:
+        return False
+    if snippet.endswith("?"):
+        return True
+    return bool(_QUESTION_OPENER_RE.match(snippet))
 
 
 def _fallback_title(user_text: str) -> str | None:
@@ -540,9 +571,10 @@ async def _generate_chat_title_with_engine(
         user_prompt = (
             "First user message:\n"
             f"{user_snippet}\n\n"
-            "Assistant reply (for context):\n"
+            "Assistant reply:\n"
             f"{assistant_snippet}\n\n"
-            "Title:"
+            "Title the conversation the reply is about, not the opening "
+            "question if they differ:\n"
         )
     else:
         user_prompt = f"User message:\n{user_snippet}\n\nTitle:"
@@ -741,6 +773,13 @@ class ChatInfo:
     # Drives the per-message footer in the PWA (time of send, agent latency).
     # Recorded at the orchestration layer so it stays provider-agnostic.
     user_turn_timings: dict = field(default_factory=dict)
+    # Map of user-turn index (as str) → True for turns fired by a loop or
+    # schedule rather than typed by the user. Without it a loop tick renders as
+    # an ordinary user bubble, so neither the reader nor the model can tell the
+    # difference (the model narrated "even though you're actively messaging me"
+    # while replying to its own loop prompt). Absent key = interactive turn, so
+    # pre-feature chats degrade to today's behaviour.
+    user_turn_unattended: dict = field(default_factory=dict)
     # Relative workspace path to the archived markdown transcript.
     # Set when archive_chat() succeeds; cleared on new_session().
     archive_path: str = ""
@@ -1072,6 +1111,7 @@ class ProjectChatManager:
                 user_turn_count=cd.get("user_turn_count", 0),
                 user_turn_images=dict(cd.get("user_turn_images", {})),
                 user_turn_timings=dict(cd.get("user_turn_timings", {})),
+                user_turn_unattended=dict(cd.get("user_turn_unattended", {})),
                 archive_path=cd.get("archive_path", ""),
                 retry_status=cd.get("retry_status", "") if cd.get("retry_status", "") in _RETRY_STATUSES else "",
                 retry_prompt=cd.get("retry_prompt", ""),
@@ -1097,7 +1137,7 @@ class ProjectChatManager:
             len(self._projects),
             len(self._chats),
         )
-        self._last_local_payload = self._state_payload()
+        self._last_local_payload = copy.deepcopy(self._state_payload())
 
     def _migrate_remove_claude_code_cli_project(self) -> None:
         """Remove the retired CLI-import project from persisted PWA state."""
@@ -1157,6 +1197,7 @@ class ProjectChatManager:
                     "user_turn_count": c.user_turn_count,
                     "user_turn_images": c.user_turn_images,
                     "user_turn_timings": c.user_turn_timings,
+                    "user_turn_unattended": c.user_turn_unattended,
                     "archive_path": c.archive_path,
                     "retry_status": c.retry_status,
                     "retry_prompt": c.retry_prompt,
@@ -1379,7 +1420,14 @@ class ProjectChatManager:
                 )
             finally:
                 tmp.unlink(missing_ok=True)
-        self._last_local_payload = current
+        # Deep copy, not the payload itself: ``_state_payload`` embeds the live
+        # container objects (``user_turn_timings``, ``user_turn_images``,
+        # ``handover_messages``, ...), so keeping a reference makes the baseline
+        # alias current state. The field-level diff in ``_merge_local_map`` then
+        # sees ``before == value`` for every in-place mutation and drops it, and
+        # the value never reaches disk. That silently lost per-turn send times
+        # and image refs whenever they were the only change in a save.
+        self._last_local_payload = copy.deepcopy(current)
 
     # ── Defaults and auto-discovery ──────────────────────────────────────
 
@@ -1394,18 +1442,10 @@ class ProjectChatManager:
     def _workspace_vault_root(self, workspace: str) -> Path:
         """Return the vault root for one logical workspace.
 
-        Legacy ``personal``/``work`` workspace configs store ``vault_root`` as
-        the workspace name and are rooted under ``CIAO_VAULT_ROOT``. Custom
-        workspace roots are workspace-relative unless absolute.
+        Thin wrapper over ``CiaoConfig.workspace_vault_root``, which owns the
+        registry and the legacy-path handling.
         """
-        workspace_config = self._config.workspace(workspace)
-        raw_root = workspace_config.vault_root if workspace_config else workspace
-        root = Path(raw_root).expanduser()
-        if root.is_absolute():
-            return root.resolve()
-        if workspace in {"personal", "work"} and raw_root == workspace:
-            return (self._config.vault_root / workspace).resolve()
-        return (self._config.workspace_root / root).resolve()
+        return self._config.workspace_vault_root(workspace)
 
     def _ensure_defaults(self) -> None:
         """Ensure each workspace has its auto-managed `General` project.
@@ -1493,7 +1533,12 @@ class ProjectChatManager:
     def _create_onboarding_chat(self, project_id: str) -> None:
         import os
         vault_mode = os.environ.get("CIAO_VAULT_MODE", "scratch").strip().lower()
-        vault_root = str(self._config.vault_root)
+        project = self._projects.get(project_id)
+        vault_root = str(
+            self._workspace_vault_root(project.workspace)
+            if project is not None
+            else self._config.vault_root
+        )
 
         if vault_mode == "existing":
             title = "Connect Existing Vault 👋"
@@ -3221,6 +3266,12 @@ class ProjectChatManager:
                 chat.archive_path = str(result)
             self._append_subchats_to_transcript(result, chat_id)
         self._save()
+        self._events.publish({
+            "type": "chat_archived",
+            "chat_id": chat_id,
+            "project_id": chat.project_id,
+            "archive_path": chat.archive_path,
+        })
         if result is None:
             return None
         return ArchiveOutcome(
@@ -3326,6 +3377,11 @@ class ProjectChatManager:
                     trajectories_enabled=trajectories_enabled,
                     workspace_root=config.workspace_root,
                     vault_root=config.vault_root,
+                    proposal_vault_root=(
+                        self._workspace_vault_root(workspace)
+                        if workspace
+                        else None
+                    ),
                     provider=chat_meta.provider if chat_meta else "claude",
                     project_doc_path=project_doc_path,
                 )
@@ -3438,13 +3494,14 @@ class ProjectChatManager:
         if callable(revoke):
             revoke(chat_id)
 
-    def _build_prompt_prefix(self, chat: ChatInfo) -> str:
+    def _build_prompt_prefix(self, chat: ChatInfo, *, unattended: bool = False) -> str:
         """Build context prefix for a web chat message.
 
         Carries the workspace, project name, context, and canonical-doc path
-        so the agent knows which project it's operating in.
+        so the agent knows which project it's operating in. ``unattended`` adds
+        a line telling the model this turn came from a loop or schedule.
         """
-        parts: list[str] = []
+        parts: list[str] = [f'[Chat ID: "{chat.chat_id}"]']
         project = self._projects.get(chat.project_id)
         if project:
             if project.workspace != "personal":
@@ -3481,6 +3538,20 @@ class ProjectChatManager:
                     )
                 reminder_lines.append("Use handoff_send or handoff_close to send answers or close them.]")
                 parts.append("\n".join(reminder_lines))
+
+        if unattended:
+            # Without this the model reads a loop tick as a message the user
+            # just typed, and answers accordingly ("even though you're actively
+            # messaging me" while replying to its own loop prompt). Lives inside
+            # the injected-context block so the existing history strip keeps it
+            # out of the rendered transcript.
+            parts.append(
+                "[Unattended run: this turn was fired automatically by a "
+                "Ciaobot loop or schedule, not typed by the user. Nobody is "
+                "watching it. Do not ask questions or wait for an approval, "
+                "and do not address the user as if they just spoke. If "
+                "something blocks you, state it plainly and stop.]"
+            )
 
         if not parts:
             return ""
@@ -3886,6 +3957,9 @@ class ProjectChatManager:
         workspace = project.workspace if project else ""
         env["GWS_PROFILE"] = self._workspace_gws_profile(workspace)
         env["CIAO_ACTIVE_WORKSPACE"] = workspace or self._config.gws_default_profile
+        env["CIAO_LEGACY_ENTITY_WORKSPACE"] = (
+            self._config.legacy_entity_workspace()
+        )
         if project:
             env["CIAO_ACTIVE_PROJECT"] = project.project_id
         env["CIAO_MODEL"] = chat.model
@@ -3902,8 +3976,23 @@ class ProjectChatManager:
         env["CLAUDE_CODE_DISABLE_ARTIFACT"] = "1"
         return env
 
-    def _effective_mode_for_chat(self, chat: ChatInfo) -> BridgeMode:
+    def _effective_mode_for_chat(
+        self, chat: ChatInfo, *, unattended: bool = False
+    ) -> BridgeMode:
         """Pick the runtime permission mode for ``chat``.
+
+        ``unattended`` (a schedule or loop tick) forces ``bypass``. Nobody is
+        watching such a turn, so every mode that can escalate resolves to an
+        unanswerable prompt: ``_drive`` auto-denies it with "Scheduled runs
+        cannot wait for interactive approval", and the automation fails while
+        reporting success. A loop that fetches a page and writes a snapshot
+        died on its first tool call under the previous default (chats inherit
+        `auto`; ``ScheduleEntry.mode`` also defaults to `auto`). The
+        authorization for these turns happened when the user created the
+        schedule or loop, which is the same trade every cron runner makes.
+        Deny rules still apply — they are evaluated before the callback — so
+        the per-workspace denylist (claude.ai connectors, `Skill(schedule)`,
+        harness tools) is not weakened by this.
 
         Auto mode relies on Anthropic's server-side classifier to decide
         which tool calls run silently and which escalate. Ollama-routed
@@ -3924,6 +4013,11 @@ class ProjectChatManager:
         Legacy: ``CIAO_OLLAMA_AUTO_CLASSIFIER`` is no longer read; auto mode
         is always live for Ollama-routed chats. Remove it from your ``.env``.
         """
+        if unattended and chat.mode != "plan":
+            # `plan` is exempt: it cannot escalate (it only proposes), so
+            # forcing bypass would turn a read-only planning tick into a
+            # writing one.
+            return "bypass"
         return chat.mode
 
     @staticmethod
@@ -4025,9 +4119,14 @@ class ProjectChatManager:
         display_prompt: str = "",
         images: list[ImageAttachment] | None = None,
         resume_session: str | None = None,
+        unattended: bool = False,
     ) -> AgentRequest:
-        """Resolve all routing parameters and construct an AgentRequest."""
-        prefix = self._build_prompt_prefix(chat)
+        """Resolve all routing parameters and construct an AgentRequest.
+
+        ``unattended`` marks a schedule- or loop-driven turn, which changes
+        the permission mode (see ``_effective_mode_for_chat``).
+        """
+        prefix = self._build_prompt_prefix(chat, unattended=unattended)
         if chat.provider == "codex":
             provider_prompt = (
                 expand_slash_command(prompt, self._config.workspace_root) or prompt
@@ -4085,7 +4184,7 @@ class ProjectChatManager:
             prompt=full_prompt,
             model=self._runtime_model_for_chat(chat),
             provider=chat.provider,
-            mode=self._effective_mode_for_chat(chat),
+            mode=self._effective_mode_for_chat(chat, unattended=unattended),
             display_prompt=final_display_prompt,
             resume_session=resume_session,
             images=images or [],
@@ -4105,6 +4204,8 @@ class ProjectChatManager:
         chat_id: str,
         prompt: str,
         images: list[ImageAttachment] | None = None,
+        *,
+        unattended: bool = False,
     ) -> AsyncGenerator[StreamEvent, None]:
         chat = self._chats.get(chat_id)
         if chat is None:
@@ -4123,6 +4224,7 @@ class ProjectChatManager:
             display_prompt=prompt,
             images=images,
             resume_session=chat.session_id or None,
+            unattended=unattended,
         )
 
         response_text = ""
@@ -4178,7 +4280,11 @@ class ProjectChatManager:
             and intended_backend(request.model) in ("anthropic", "ollama", "openrouter")
         ):
             next_model = next_tier_for_failure(request.model, self._config)
-            if next_model and next_model != request.model:
+            if (
+                next_model
+                and next_model != request.model
+                and (not images or model_supports_vision(next_model))
+            ):
                 will_fallback = True
                 logger.warning(
                     "Auto tier-fallback: %s failed (%s); retrying on %s",
@@ -4194,7 +4300,9 @@ class ProjectChatManager:
                     prompt=request.prompt,
                     model=next_model,
                     provider=chat.provider,
-                    mode=self._effective_mode_for_chat(chat),
+                    # Reuse the original mode rather than recomputing: a
+                    # retry of an unattended turn is still unattended.
+                    mode=request.mode,
                     display_prompt=request.display_prompt,
                     resume_session=None,
                     # Always keep images: the fallback model may support
@@ -4237,6 +4345,11 @@ class ProjectChatManager:
                         type="model_changed",
                         model=next_model,
                     )
+            elif next_model and next_model != request.model and images and not model_supports_vision(next_model):
+                logger.info(
+                    "Auto tier-fallback skipped: next model %s does not support vision for image input",
+                    next_model,
+                )
             else:
                 logger.info(
                     "Auto tier-fallback skipped: no neighbor tier configured for %s",
@@ -4830,6 +4943,11 @@ class ProjectChatManager:
             chat_meta.last_activity_at = sent_at_iso
             chat_meta.last_read_at = sent_at_iso  # user sending = implicitly read
             chat_meta.user_turn_timings[str(turn_index)] = {"sent_at": sent_at_iso}
+            if unattended:
+                # Persisted so the ↻ marker survives a reload; /messages reads
+                # this back because the SDK session file has no notion of who
+                # sent a turn.
+                chat_meta.user_turn_unattended[str(turn_index)] = True
             self._turn_perf_started[(chat_id, turn_index)] = time.perf_counter()
 
         # First buffered event: echo the user prompt so any client subscribing
@@ -4841,6 +4959,8 @@ class ProjectChatManager:
             "text": prompt,
             "images": image_refs,
         }
+        if unattended:
+            echo_payload["unattended"] = True
         if turn_index is not None:
             echo_payload["turn_index"] = turn_index
         if sent_at_iso:
@@ -4857,6 +4977,13 @@ class ProjectChatManager:
         # question") yields a vaguer title than the full-exchange path
         # would have, but the cheap Ollama free-tier title model
         # absorbs that cost easily and we can always rename manually.
+        #
+        # Exception: question-shaped meta-inquiries ("why no recent sessions?")
+        # get deferred until the first assistant reply. Their real topic only
+        # emerges in the reply, so a title from the prompt alone would name
+        # the question, not the conclusion (#176). `defer_title` is closed
+        # over by _drive below, which fires the title once the turn lands.
+        defer_title = False
         if chat_meta and chat_meta.title == "New Chat" and prompt.strip():
             chat_meta.title_status = "pending"
             self._events.publish({
@@ -4865,9 +4992,14 @@ class ProjectChatManager:
                 "title": chat_meta.title,
                 "status": "pending",
             })
-            asyncio.create_task(
-                self._auto_title_and_publish(chat_id, prompt, "")
-            )
+            if _is_question_shaped_prompt(prompt):
+                # Wait for the first assistant reply so the titler can prefer
+                # its framing; _drive fires the title after the turn ends.
+                defer_title = True
+            else:
+                asyncio.create_task(
+                    self._auto_title_and_publish(chat_id, prompt, "")
+                )
 
         # Announce stream start to the global awareness hub so non-active
         # clients (different chat selected, sidebar only) can render the
@@ -4894,6 +5026,10 @@ class ProjectChatManager:
             # when the ResultEvent arrives. Reassigned to the new turn_index
             # for each queued follow-up.
             current_turn_index = turn_index
+            # Only the turn this stream was started for is unattended. A queued
+            # follow-up was typed by a human who is sitting there watching, so
+            # it must keep its approval prompts (see the reset below).
+            turn_unattended = unattended
             last_assistant_text = ""
             had_error = False
             had_provider_progress = False
@@ -4908,7 +5044,10 @@ class ProjectChatManager:
                     question_paused = False
                     try:
                         async for event in self.stream_chat(
-                            chat_id, current_prompt, images=current_images
+                            chat_id,
+                            current_prompt,
+                            images=current_images,
+                            unattended=turn_unattended,
                         ):
                             payload = event_to_json(event)
                             if payload:
@@ -5110,6 +5249,25 @@ class ProjectChatManager:
                         # queued follow-ups should still be sent.
                         if stream.user_stopped:
                             logger.info("Stream stopped by user for chat %s", chat_id)
+                        elif (
+                            isinstance(exc, ValueError)
+                            and "archived chat" in str(exc)
+                        ):
+                            # Lost a race with archive_chat() between the
+                            # entry-point archived guard and stream_chat. The
+                            # turn is legitimately over; log without a
+                            # traceback and surface a clean error.
+                            logger.info(
+                                "Send to archived chat %s rejected mid-stream",
+                                chat_id,
+                            )
+                            stream.publish({
+                                "type": "error",
+                                "message": "This chat has been archived.",
+                                "archived": True,
+                            })
+                            had_error = True
+                            break
                         else:
                             logger.exception("Stream error for chat %s", chat_id)
                             error_msg = str(exc)
@@ -5207,6 +5365,10 @@ class ProjectChatManager:
                     if not combined_text:
                         continue
 
+                    # A queued message came from a person, whatever drove the
+                    # turn that was in flight when they sent it.
+                    turn_unattended = False
+
                     # Bump user-turn counter so image replay from history lines
                     # up. Capture turn_index2 first so we can attach it to the
                     # user_echo payload for client-side dedup.
@@ -5238,6 +5400,7 @@ class ProjectChatManager:
                         "type": "user_echo",
                         "text": combined_text,
                         "images": merged_image_refs,
+                        "entry_id": next_pending.get("id"),
                     }
                     if turn_index2 is not None:
                         followup_echo["turn_index"] = turn_index2
@@ -5249,6 +5412,17 @@ class ProjectChatManager:
                     current_images = merged_images or None
                     current_turn_index = turn_index2
             finally:
+                # Question-shaped openers deferred title generation until the
+                # first reply landed (#176). Fire it now with both sides of
+                # the exchange so the title reflects the conclusion, not the
+                # question. Fire-and-forget like the early path; an empty
+                # reply (error / abort) falls back to the user-only prompt.
+                if defer_title:
+                    asyncio.create_task(
+                        self._auto_title_and_publish(
+                            chat_id, prompt, last_assistant_text
+                        )
+                    )
                 # Drop any perf-clock entry that didn't get consumed by a
                 # ResultEvent (errored / aborted turn) so the dict stays bounded.
                 if current_turn_index is not None:
@@ -5810,18 +5984,28 @@ class ProjectChatManager:
         replies still indicate the user has dealt with the prompt, and
         the buffered event should not pop back up.
         """
+        provider_service = self._providers.get(chat_id)
+        provider = provider_service.provider if provider_service is not None else None
+
         # Strip from replay buffer first so even a stale-id reply (gate
         # already drained on turn teardown) cleans up the recorded event.
         stream = self._broker.get(chat_id)
         if stream is not None:
             stream.resolve_permission(request_id)
-        provider_service = self._providers.get(chat_id)
-        if provider_service is None:
+            if not approved:
+                # The refused call never ran, so retract any file card it
+                # already painted. On the SDK providers `request_id` *is* the
+                # tool_use_id; Codex mints its own `codex-N` request ids, so ask
+                # it which tool call the id belongs to or the retraction would
+                # silently match nothing. Done before the provider is told, so
+                # the mapping is still there to look up.
+                resolver = getattr(provider, "tool_use_id_for_request", None)
+                retract_id = resolver(request_id) if callable(resolver) else ""
+                stream.deny_tool_use(retract_id or request_id)
+
+        if provider_service is None or provider is None:
             return False
-        provider = provider_service.provider
-        if provider is None:
-            return False
-        # Pi provider uses extension_ui_response instead of SDK permission gates
+        # Provider adapters with custom permission handling (e.g. Codex)
         if hasattr(provider, "send_permission_response"):
             return cast(bool, provider.send_permission_response(request_id, approved))
         # permission_gate is defined on the concrete SDK providers, not on
@@ -6304,13 +6488,42 @@ class ProjectChatManager:
 
         Unlike schedules, loops never override the chat's model or mode:
         each iteration runs with whatever the user configured on the chat.
+        If the target chat is missing or archived, auto-fork or create a fresh
+        chat in the loop's project and re-point entry.web_chat_id.
         Returns a status dict: "ok", "error", "busy" (active turn already
         in flight), or "missing-chat".
         """
         chat_id = entry.web_chat_id
-        if self._chats.get(chat_id) is None:
-            logger.warning("Loop target chat %s not found, skipping", chat_id)
-            return {"status": "missing-chat"}
+        chat = self._chats.get(chat_id)
+        if chat is None or chat.archived:
+            if chat is not None and chat.archived:
+                try:
+                    new_chat = self.continue_archived_chat(chat_id)
+                    entry.web_chat_id = new_chat.chat_id
+                    chat_id = new_chat.chat_id
+                except Exception:
+                    project = self._resolve_loop_project(entry)
+                    if project is None:
+                        logger.warning("Loop target chat %s archived and project unresolvable, skipping", chat_id)
+                        return {"status": "missing-chat"}
+                    new_chat = self.create_chat(
+                        project.project_id,
+                        title=getattr(entry, "title", "") or f"Loop: {prompt[:30]}",
+                    )
+                    entry.web_chat_id = new_chat.chat_id
+                    chat_id = new_chat.chat_id
+            else:
+                project = self._resolve_loop_project(entry)
+                if project is None:
+                    logger.warning("Loop target chat %s not found, skipping", chat_id)
+                    return {"status": "missing-chat"}
+                new_chat = self.create_chat(
+                    project.project_id,
+                    title=getattr(entry, "title", "") or f"Loop: {prompt[:30]}",
+                )
+                entry.web_chat_id = new_chat.chat_id
+                chat_id = new_chat.chat_id
+
         if self.chat_stream_active(chat_id):
             return {"status": "busy", "chat_id": chat_id}
         is_error = False
@@ -6556,6 +6769,27 @@ class ProjectChatManager:
                 return p
         return None
 
+    def _resolve_loop_project(self, entry: object) -> ProjectInfo | None:
+        """Resolve the target project for a loop entry.
+
+        Returns None when the loop names no project or workspace we still know
+        about. Callers treat that as "stop this loop" — re-homing it into an
+        arbitrary project would run the user's prompt against the wrong
+        workspace, on a schedule, unattended.
+        """
+        web_project_id = getattr(entry, "web_project_id", "") or ""
+        if web_project_id and web_project_id in self._projects:
+            return self._projects[web_project_id]
+        workspace = getattr(entry, "workspace", "") or ""
+        if workspace:
+            for p in self._projects.values():
+                if p.workspace == workspace and p.name == "General":
+                    return p
+            for p in self._projects.values():
+                if p.workspace == workspace:
+                    return p
+        return None
+
     # ── Voice ────────────────────────────────────────────────────────────
 
     async def transcribe_voice(self, audio_path: Path) -> tuple[str, float]:
@@ -6742,7 +6976,8 @@ class ProjectChatManager:
         checks extension against the union of viewer/image/binary allowlists,
         enforces a 50 MB size cap, and resolves name collisions by appending
         ``-2``, ``-3`` etc. Returns the same shape as ``list_project_files``
-        entries.
+        entries plus ``absolute_path``, which lets a remote client insert the
+        new host-side path into a chat prompt.
 
         Raises ``ValueError`` for any rejection (caller maps to 4xx). Raises
         ``LookupError`` if the project has no listable vault folder (the route
@@ -6785,6 +7020,7 @@ class ProjectChatManager:
         return {
             "path": rel.as_posix(),
             "vault_path": self._display_path(resolved),
+            "absolute_path": str(resolved),
             "kind": _classify_file(resolved),
             "size": stat.st_size,
             "mtime": datetime.fromtimestamp(stat.st_mtime, UTC)

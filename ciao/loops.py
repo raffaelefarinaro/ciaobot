@@ -34,6 +34,24 @@ MIN_INTERVAL_MINUTES = 1
 TICK_SECONDS = 20
 
 
+def publish_loops_changed(pcm) -> None:
+    """Nudge every open tab to refetch loops.
+
+    Loops are read over REST when a chat or the Schedules page mounts, so
+    without this a loop created in another tab (or by the model mid-turn) stays
+    invisible until a reload. Fire-and-forget: the events hub has no replay
+    buffer and a missed frame heals on the next mount, and a fan-out failure
+    must never fail the operation that triggered it.
+    """
+    events = getattr(pcm, "events", None)
+    if events is None:
+        return
+    try:
+        events.publish({"type": "loops_changed"})
+    except Exception:  # noqa: BLE001 — never fail an operation on fan-out
+        logger.exception("loops_changed publish failed")
+
+
 def _now_utc() -> datetime:
     return datetime.now(UTC)
 
@@ -74,6 +92,8 @@ class LoopEntry:
     # "user" for loops the user creates; "system" is reserved for packaged
     # loops (mirrors ScheduleEntry.scope so the UI can group them apart).
     scope: str = "user"
+    web_project_id: str = ""
+    workspace: str = ""
 
     def interval(self) -> timedelta:
         return timedelta(minutes=max(MIN_INTERVAL_MINUTES, self.interval_minutes))
@@ -110,6 +130,8 @@ class LoopStore:
         interval_minutes: int = 10,
         title: str = "",
         autostart: bool = False,
+        web_project_id: str = "",
+        workspace: str = "",
     ) -> LoopEntry:
         entry = LoopEntry(
             loop_id=f"loop-{uuid.uuid4().hex[:8]}",
@@ -119,6 +141,8 @@ class LoopStore:
             interval_minutes=max(MIN_INTERVAL_MINUTES, int(interval_minutes)),
             title=title,
             autostart=autostart,
+            web_project_id=web_project_id,
+            workspace=workspace,
         )
         with self._lock:
             data = self._load()
@@ -184,12 +208,14 @@ class LoopManager:
         *,
         dispatch: Callable[[LoopEntry], Awaitable[dict | None]] | None = None,
         chat_busy: Callable[[str], bool] | None = None,
-        chat_exists: Callable[[str], bool] | None = None,
+        chat_exists: Callable[[LoopEntry], bool] | None = None,
+        is_node_active: Callable[[], bool] | None = None,
     ) -> None:
         self._store = store
         self._dispatch = dispatch
         self._chat_busy = chat_busy
         self._chat_exists = chat_exists
+        self._is_node_active = is_node_active
         self._running: set[str] = set()
         self._inflight: set[str] = set()
         self._tick_task: asyncio.Task[None] | None = None
@@ -241,6 +267,11 @@ class LoopManager:
     def stop_loop(self, loop_id: str) -> None:
         self._running.discard(loop_id)
 
+    def _chat_is_dispatchable(self, entry: LoopEntry) -> bool:
+        if self._chat_exists is None:
+            return True
+        return self._chat_exists(entry)
+
     async def run_now(self, loop_id: str) -> dict:
         """Fire one iteration immediately, even if the loop is stopped.
 
@@ -250,7 +281,7 @@ class LoopManager:
         entry = self._store.get(loop_id)
         if entry is None:
             raise ValueError(f"Loop '{loop_id}' not found.")
-        if self._chat_exists is not None and not self._chat_exists(entry.web_chat_id):
+        if not self._chat_is_dispatchable(entry):
             return {"loop_id": loop_id, "status": "missing-chat"}
         if loop_id in self._inflight or (
             self._chat_busy is not None and self._chat_busy(entry.web_chat_id)
@@ -268,6 +299,8 @@ class LoopManager:
         return (now - last) >= entry.interval()
 
     async def tick(self, now: datetime | None = None) -> None:
+        if self._is_node_active is not None and not self._is_node_active():
+            return
         current = now or _now_utc()
         entries = {entry.loop_id: entry for entry in self._store.list()}
         # Drop runtime state for loops deleted behind our back (direct file
@@ -279,7 +312,7 @@ class LoopManager:
                 continue
             if not self._due(entry, current):
                 continue
-            if self._chat_exists is not None and not self._chat_exists(entry.web_chat_id):
+            if not self._chat_is_dispatchable(entry):
                 # Target chat is gone; stop the loop instead of logging every
                 # tick forever.
                 logger.warning(
@@ -309,6 +342,7 @@ class LoopManager:
 
     async def _run_dispatch(self, entry: LoopEntry) -> None:
         status = "ok"
+        dispatched_chat_id = entry.web_chat_id
         try:
             result = await self._dispatch(entry) if self._dispatch is not None else None
             if isinstance(result, dict) and result.get("status"):
@@ -325,6 +359,12 @@ class LoopManager:
         latest = self._store.get(entry.loop_id)
         if latest is not None:
             latest.last_status = status
+            # `dispatch` re-points the entry when the target chat was gone or
+            # archived. Carry only that change onto the re-read copy — without
+            # it the loop forgets its replacement chat and builds a new one
+            # every interval. Anything else on `latest` is the user's edit.
+            if entry.web_chat_id != dispatched_chat_id:
+                latest.web_chat_id = entry.web_chat_id
             self._store.replace(latest)
 
     async def _loop(self) -> None:

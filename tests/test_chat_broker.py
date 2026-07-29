@@ -86,8 +86,7 @@ def test_event_to_json_tool_use_tags_file_writes() -> None:
 
 def test_extract_file_touch_dict_input() -> None:
     """Reload-side: ``_extract_assistant_blocks`` passes the raw SDK input dict.
-    Picks ``file_path`` for Claude, ``path`` for Pi, and ``notebook_path``
-    for NotebookEdit."""
+    Picks ``file_path`` or ``path``, and ``notebook_path`` for NotebookEdit."""
     assert extract_file_touch("Write", {"file_path": "a.md", "content": "..."}) == {
         "file_path": "a.md",
         "action": "written",
@@ -174,6 +173,58 @@ def test_refine_file_touch_actions_marks_new_writes_created(tmp_path) -> None:
         {"file_path": "new.md", "action": "created"},
         {"file_path": "edited.md", "action": "edited"},
     ]
+
+
+def test_file_touch_payloads_use_one_workspace_relative_path(tmp_path) -> None:
+    """Absolute writes and relative surfaces for one file must produce the
+    same path string, while a failed surface request produces no card."""
+    from ciao.web.chat_broker import apply_file_touches_to_payload
+
+    readme = tmp_path / "memory-vault" / "work" / "project" / "README.md"
+    readme.parent.mkdir(parents=True)
+    readme.write_text("# Project", encoding="utf-8")
+
+    write_payload = {
+        "type": "tool_use",
+        "tool_name": "Write",
+        "file_touch": {"file_path": str(readme), "action": "written"},
+    }
+    apply_file_touches_to_payload(write_payload, workspace_root=tmp_path)
+    assert write_payload["file_touch"] == {
+        "file_path": "memory-vault/work/project/README.md",
+        "action": "written",
+    }
+
+    surface_payload = {
+        "type": "tool_use",
+        "tool_name": "mcp__ciaobot__file_surface",
+        "file_touch": {
+            "file_path": "memory-vault/work/project/README.md",
+            "action": "surfaced",
+        },
+    }
+    apply_file_touches_to_payload(surface_payload, workspace_root=tmp_path)
+    assert surface_payload["file_touch"]["file_path"] == write_payload["file_touch"]["file_path"]
+
+    failed_surface_payload = {
+        "type": "tool_use",
+        "tool_name": "mcp__ciaobot__file_surface",
+        "file_touch": {
+            "file_path": "work/project/README.md",
+            "action": "surfaced",
+        },
+    }
+    apply_file_touches_to_payload(failed_surface_payload, workspace_root=tmp_path)
+    assert "file_touch" not in failed_surface_payload
+    assert "file_touches" not in failed_surface_payload
+
+    absolute_surface_payload = {
+        "type": "tool_use",
+        "tool_name": "mcp__ciaobot__file_surface",
+        "file_touch": {"file_path": str(readme), "action": "surfaced"},
+    }
+    apply_file_touches_to_payload(absolute_surface_payload, workspace_root=tmp_path)
+    assert "file_touch" not in absolute_surface_payload
 
 
 def test_event_to_json_permission_request_includes_request_id() -> None:
@@ -445,3 +496,41 @@ def test_events_hub_subscribe_emits_keepalive(monkeypatch) -> None:
         await agen.aclose()
 
     asyncio.run(_run())
+
+
+def test_deny_tool_use_retracts_the_file_card() -> None:
+    """A refused Write never reached disk, so the file card it painted on
+    *request* must not survive: it made a permission-denied snapshot file look
+    created. The activity line stays; only the touch is stripped."""
+    stream = ChatStream("hi")
+    stream.publish({
+        "type": "tool_use",
+        "tool_name": "Write",
+        "tool_use_id": "toolu-1",
+        "file_touch": {"file_path": "notes.md", "action": "written"},
+    })
+    stream.publish({
+        "type": "tool_use",
+        "tool_name": "Write",
+        "tool_use_id": "toolu-2",
+        "file_touch": {"file_path": "kept.md", "action": "written"},
+    })
+
+    stream.deny_tool_use("toolu-1")
+
+    buffered = stream.buffered_events()
+    denied = next(ev for ev in buffered if ev.get("tool_use_id") == "toolu-1")
+    survivor = next(ev for ev in buffered if ev.get("tool_use_id") == "toolu-2")
+    assert "file_touch" not in denied
+    assert "file_touches" not in denied
+    assert denied["tool_name"] == "Write"  # the attempt is still in the trace
+    assert survivor["file_touch"]["file_path"] == "kept.md"
+    # Live clients already rendered the chip, so they need an explicit retraction.
+    assert {"type": "tool_denied", "tool_use_id": "toolu-1"} in buffered
+
+
+def test_deny_tool_use_ignores_empty_id() -> None:
+    stream = ChatStream("hi")
+    stream.publish({"type": "text_delta", "text": "x"})
+    stream.deny_tool_use("")
+    assert all(ev.get("type") != "tool_denied" for ev in stream.buffered_events())

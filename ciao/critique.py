@@ -1,7 +1,7 @@
 """Multi-model adversarial review via the Claude Agent SDK.
 
-Replaces the former Pi-subprocess panel. Each model in the panel is called
-through :func:`ciao.providers.oneshot.run_oneshot` with per-model routing
+Each model in the panel is called through
+:func:`ciao.providers.oneshot.run_oneshot` with per-model routing
 env (OpenRouter / Ollama / Anthropic), so ``owner/model`` ids reach
 OpenRouter, ``:tag`` ids reach Ollama, and bare aliases stay on Anthropic.
 The artifact is inlined in the prompt (the one-shot call runs with no

@@ -66,7 +66,7 @@ async def test_queued_messages_flush_one_at_a_time(tmp_path: Path) -> None:
     first_turn_ready = asyncio.Event()
     turn_calls: list[str] = []
 
-    async def fake_stream_chat(chat_id, prompt, images=None):
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         """Fake provider: block the first turn until the test releases it."""
         turn_calls.append(prompt)
         if len(turn_calls) == 1:
@@ -103,8 +103,8 @@ async def test_queued_messages_flush_one_at_a_time(tmp_path: Path) -> None:
     # Queue two messages while the first turn is still blocked. This must
     # succeed (broker.get() returns non-None) — otherwise the flush path
     # doesn't even get exercised.
-    assert pcm.queue_message(chat.chat_id, "msg A") is True
-    assert pcm.queue_message(chat.chat_id, "msg B") is True
+    assert pcm.queue_message(chat.chat_id, "msg A", entry_id="q-a") is True
+    assert pcm.queue_message(chat.chat_id, "msg B", entry_id="q-b") is True
 
     # Release the first turn; _drive will drain pending one by one.
     first_turn_ready.set()
@@ -129,8 +129,10 @@ async def test_queued_messages_flush_one_at_a_time(tmp_path: Path) -> None:
     # Each queued follow-up gets its own echo and its own turn_index.
     assert echoes[1]["text"] == "msg A"
     assert echoes[1].get("turn_index") == 1
+    assert echoes[1].get("entry_id") == "q-a"
     assert echoes[2]["text"] == "msg B"
     assert echoes[2].get("turn_index") == 2
+    assert echoes[2].get("entry_id") == "q-b"
 
 
 def test_question_notification_prefers_text_prompt_alias(tmp_path: Path) -> None:
@@ -175,7 +177,7 @@ async def test_ask_user_question_pauses_turn_without_draining_as_queued(tmp_path
     project = pcm.create_project("2026-q2-question", workspace="work")
     chat = pcm.create_chat(project.project_id, title="question-test")
 
-    async def fake_stream_chat(chat_id, prompt, images=None):
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         yield ToolUseEvent(
             type="assistant",
             tool_name="AskUserQuestion",
@@ -240,7 +242,7 @@ async def test_queued_messages_survive_question_pause_and_flush_after_answer(
     queued_ready = asyncio.Event()
     turn_calls: list[str] = []
 
-    async def fake_stream_chat(chat_id, prompt, images=None):
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         turn_calls.append(prompt)
         if prompt == "initial":
             # Hold the first turn open until the test has queued follow-ups,
@@ -392,7 +394,7 @@ async def test_ask_user_question_interrupts_live_provider(tmp_path: Path) -> Non
     # Register a fake provider so _drive's interrupt branch fires.
     pcm._providers[chat.chat_id] = _FakeProvider()  # type: ignore[assignment]
 
-    async def fake_stream_chat(chat_id, prompt, images=None):
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         yield ToolUseEvent(
             type="assistant",
             tool_name="AskUserQuestion",
@@ -427,7 +429,7 @@ async def test_user_send_clears_pending_question(tmp_path: Path) -> None:
     chat = pcm.create_chat(project.project_id, title="clear-test")
     pcm._chats[chat.chat_id].pending_question = '{"questions":[{"question":"x?"}]}'
 
-    async def fake_stream_chat(chat_id, prompt, images=None):
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         yield ResultEvent(
             type="result",
             result="answered",
@@ -462,7 +464,7 @@ async def test_queue_flush_bumps_user_turn_count_per_message(tmp_path: Path) -> 
     first_turn_ready = asyncio.Event()
     turn_calls: list[str] = []
 
-    async def fake_stream_chat(chat_id, prompt, images=None):
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         turn_calls.append(prompt)
         if len(turn_calls) == 1:
             await first_turn_ready.wait()
@@ -517,7 +519,7 @@ async def test_queued_message_survives_non_retryable_error(tmp_path: Path) -> No
     first_turn_ready = asyncio.Event()
     turn_calls: list[str] = []
 
-    async def fake_stream_chat(chat_id, prompt, images=None):
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         turn_calls.append(prompt)
         if prompt == "initial":
             await first_turn_ready.wait()
@@ -628,7 +630,7 @@ async def test_queue_reorder_changes_flush_order(tmp_path: Path) -> None:
     first_turn_ready = asyncio.Event()
     turn_calls: list[str] = []
 
-    async def fake_stream_chat(chat_id, prompt, images=None):
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         turn_calls.append(prompt)
         if len(turn_calls) == 1:
             await first_turn_ready.wait()
@@ -680,7 +682,7 @@ async def test_queue_edit_updates_flushed_text(tmp_path: Path) -> None:
     first_turn_ready = asyncio.Event()
     turn_calls: list[str] = []
 
-    async def fake_stream_chat(chat_id, prompt, images=None):
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
         turn_calls.append(prompt)
         if len(turn_calls) == 1:
             await first_turn_ready.wait()

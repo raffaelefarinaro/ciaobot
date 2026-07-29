@@ -27,6 +27,37 @@ logger = logging.getLogger(__name__)
 
 BACKUP_PUSH_INTERVAL = 30  # seconds between background backup pushes
 
+# Workspace roots holding user data rather than app source.
+_VAULT_ROOT = "memory-vault"
+_SECRETS_ROOT = "secrets"
+_USER_DATA_ROOTS = (_VAULT_ROOT, _SECRETS_ROOT)
+
+# Suffixes a test-*named* file may carry to earn the fixture exemption. A
+# `test_config.json` is far more likely to be a real config someone named badly
+# than a fixture, so it stays in scope for the scanner.
+_TEST_SOURCE_SUFFIXES = {".py", ".ts", ".tsx", ".js", ".jsx", ".vue"}
+
+
+def _is_test_fixture(rel_path: str) -> bool:
+    """Whether a workspace-relative path is exempt from the secret scan.
+
+    Test fixtures may legitimately carry mock keys and certs. Two carve-outs
+    keep that from becoming a hole: the exemption never applies under a
+    user-data root (a `tests/` folder in someone's vault is their notes, not
+    pytest), and a merely test-*named* file has to be source to qualify —
+    `memory-vault/.../tests/credentials.json` and a stray `test_config.json`
+    are real credentials.
+    """
+    parts = Path(rel_path).parts
+    if not parts or parts[0] in _USER_DATA_ROOTS:
+        return False
+    if "tests" in parts or "__tests__" in parts:
+        return True
+    name = parts[-1]
+    return (name.startswith("test_") or name.endswith("_test.py")) and (
+        Path(name).suffix in _TEST_SOURCE_SUFFIXES
+    )
+
 
 # The prompt dispatched into a chat when an automatic pull/merge conflicts.
 # Filled with the branch via str.replace.
@@ -38,7 +69,7 @@ Steps:
 1. Identify the conflicting files via `git status`.
 2. Inspect the conflict markers and resolve them with judgment:
    - `memory-vault/**`: keep BOTH sides' content (union the notes; never drop entries).
-   - `.runtime/schedules.json`: union the schedule entries.
+   - `.runtime/schedules.json` and `.runtime/loops.json`: union the schedule and loop entries.
    - If a conflict is ambiguous or risky (you might drop real work), STOP and ask me with
      AskUserQuestion before deciding.
 3. Stage the resolved files: `git add <file>`.
@@ -143,8 +174,39 @@ async def push_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
     """Push the working branch for backup (sets upstream)."""
     rc, out, err = await _git(workspace, "push", "-u", "origin", branch, timeout=10.0)
     if rc != 0:
-        return False, err or out
+        detail = err or out
+        nff_markers = (
+            "non-fast-forward",
+            "behind its remote counterpart",
+            "fetch first",
+            "updates were rejected",
+            "[rejected]",
+        )
+        if any(marker in detail.lower() for marker in nff_markers):
+            logger.info(
+                "Push rejected (non-fast-forward) for branch '%s'; attempting auto-merge with origin/%s",
+                branch,
+                branch,
+            )
+            await _git(workspace, "fetch", "origin", timeout=10.0)
+            rc_m, out_m, err_m = await _git(
+                workspace, "merge", "--no-edit", f"origin/{branch}"
+            )
+            if rc_m != 0:
+                await _git(workspace, "merge", "--abort")
+                return (
+                    False,
+                    f"Push rejected (non-fast-forward) and auto-merge hit conflict on origin/{branch}: {err_m or out_m}",
+                )
+            rc2, out2, err2 = await _git(
+                workspace, "push", "-u", "origin", branch, timeout=10.0
+            )
+            if rc2 != 0:
+                return False, err2 or out2
+            return True, out2 or "pushed after merging origin"
+        return False, detail
     return True, out or "pushed"
+
 
 
 async def commit_pending(workspace: Path, *, branch: str) -> bool:
@@ -332,17 +394,16 @@ class LocalSessionManager:
             # Categorize
             if rel_path.startswith("ciao/") or (rel_path.startswith("web/") and not rel_path.startswith(("web/package", "web/tsconfig", "web/vite.config"))):
                 categories["code"].append(rel_path)
-            elif rel_path.startswith("memory-vault/"):
+            elif rel_path.startswith(f"{_VAULT_ROOT}/"):
                 categories["vault"].append(rel_path)
             elif rel_path.startswith("scripts/"):
                 categories["scripts"].append(rel_path)
-            elif rel_path in (".env", "pyproject.toml", "package.json", "package-lock.json", "skills/skills-lock.json", ".gitignore") or rel_path.startswith(("secrets/", "web/package", "web/tsconfig", "web/vite.config")):
+            elif rel_path in (".env", "pyproject.toml", "package.json", "package-lock.json", "skills/skills-lock.json", ".gitignore") or rel_path.startswith((f"{_SECRETS_ROOT}/", "web/package", "web/tsconfig", "web/vite.config")):
                 categories["config"].append(rel_path)
             else:
                 categories["other"].append(rel_path)
 
-            # Scan for secrets (skip test files to prevent mock test keys/certs from blocking commits)
-            if not rel_path.startswith("tests/"):
+            if not _is_test_fixture(rel_path):
                 file_blockers, file_warnings = self._scan_file_for_secrets(p)
                 blockers.extend(file_blockers)
                 warnings.extend(file_warnings)
@@ -361,8 +422,8 @@ class LocalSessionManager:
         warnings: list[str] = []
         name = p.name.lower()
 
-        # Block env-style files
-        if name.startswith(".env") or name.endswith(".env"):
+        # Block env-style files (except template/example files)
+        if (name.startswith(".env") or name.endswith(".env")) and not name.startswith((".env.example", ".env.sample", ".env.template", ".env.schema")):
             blockers.append(f"Blocked file '{p.name}': .env configuration files containing credentials must not be tracked.")
             return blockers, warnings
 
@@ -412,8 +473,10 @@ class LocalSessionManager:
         if slack_tokens:
             blockers.append(f"Blocked file '{p.name}': High-confidence Slack API token detected.")
 
-        # Suspicious file names (warnings)
-        if name in ("config.json", "credentials.json", "settings.yaml") or "password" in name or "secret" in name:
+        # Suspicious file names (warnings). The trailing boundary is what keeps
+        # `secretary.md` quiet; there is deliberately no leading boundary, so
+        # `mysecrets.txt` and `dbpassword.json` still warn.
+        if name in ("config.json", "credentials.json", "settings.yaml") or re.search(r"(secrets?|passwords?)(?:[\W_]|$)", name):
             warnings.append(f"Suspicious file name '{p.name}' could contain configuration or credentials.")
 
         return blockers, warnings

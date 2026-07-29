@@ -2,7 +2,7 @@
 
 The CLI is a thin passthrough to `ciao.memory_tool`, which already has its
 own deep tests. We only cover the wiring (env-var resolution, JSON output,
-exit codes, action plumbing) so a Pi subagent invoking the script can rely
+exit codes, action plumbing) so a subagent invoking the script can rely
 on its contract.
 """
 

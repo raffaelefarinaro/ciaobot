@@ -49,6 +49,26 @@ def test_filters_matches_to_active_workspace_and_shared_roots(tmp_path: Path) ->
     assert "personal/People/Defne" not in paths
 
 
+def test_unprefixed_legacy_entities_require_an_explicit_owner(
+    tmp_path: Path,
+) -> None:
+    _write_index(tmp_path, "- `People/Alba` (aliases: Alba)\n")
+
+    assert find_entities("Alba", tmp_path, workspace="work") == []
+    assert find_entities(
+        "Alba",
+        tmp_path,
+        workspace="personal",
+        legacy_workspace="personal",
+    )
+    assert find_entities(
+        "Alba",
+        tmp_path,
+        workspace="work",
+        legacy_workspace="personal",
+    ) == []
+
+
 def test_prefixed_entities_match_note_name_without_aliases(tmp_path: Path) -> None:
     _write_index(tmp_path, """# Vault Index
 
@@ -74,6 +94,33 @@ def test_respects_whole_word_and_skips_short_aliases(tmp_path: Path) -> None:
     # "Alba" is long enough; "Albania" should NOT match because of word boundary.
     hits = find_entities("Albania is a country", tmp_path)
     assert not hits
+
+
+def test_readme_folds_to_folder_not_shared_filename(tmp_path: Path) -> None:
+    # Every project folder has a README; matching on the bare "README" token
+    # must not light up every project at once. Each README folds to its folder.
+    _write_index(tmp_path, """# Vault Index
+
+- `personal/projects/active/consulting/README` (tags: project)
+- `personal/projects/active/thailand-2027/README` (tags: project)
+""")
+    # A stray "README" mention (e.g. from an injected file path) matches nothing.
+    assert find_entities("please open the README file", tmp_path, workspace="personal") == []
+    # A genuine folder-name mention still resolves, once, to that project.
+    hits = find_entities("update the consulting project", tmp_path, workspace="personal")
+    assert [e.path for e in hits] == ["personal/projects/active/consulting/README"]
+    assert hits[0].name == "consulting"
+
+
+def test_structural_log_and_index_files_are_not_matchable(tmp_path: Path) -> None:
+    # "log"/"index" are structural filenames whose bare names are common words;
+    # they should never be surfaced as entities.
+    _write_index(tmp_path, """# Vault Index
+
+- `personal/projects/active/consulting/log` (tags: project, log)
+- `personal/projects/active/consulting/index` (tags: project)
+""")
+    assert find_entities("check the log and the index", tmp_path, workspace="personal") == []
 
 
 def test_handles_missing_index(tmp_path: Path) -> None:

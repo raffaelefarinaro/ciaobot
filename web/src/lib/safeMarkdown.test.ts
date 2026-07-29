@@ -69,6 +69,21 @@ describe('safe markdown rendering', () => {
     expect(html).toContain('<quoted-text>')
   })
 
+  it('wraps tables in a keyboard-scrollable region', () => {
+    const html = renderMarkdown([
+      '| Question | Resolution |',
+      '| --- | --- |',
+      '| PORT | Use the configured port |',
+    ].join('\n'))
+
+    expect(html).toContain(
+      '<div class="markdown-table-scroll" role="region" aria-label="Scrollable table" tabindex="0">',
+    )
+    expect(html).toContain('<table>')
+    expect(html.indexOf('markdown-table-scroll')).toBeLessThan(html.indexOf('<table>'))
+    expect(html.indexOf('</table>')).toBeLessThan(html.indexOf('</div>'))
+  })
+
   it('resolves Obsidian wikilinks into file-link anchors', () => {
     const html = renderFileMarkdown('See [[README|Rossmann MVP]] for context.', {
       resolveImageSrc: (href) => href,

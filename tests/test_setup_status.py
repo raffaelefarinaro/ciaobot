@@ -300,7 +300,7 @@ def _finish_client(tmp_path) -> TestClient:
 
 def test_setup_finish_autodetects_scratch_for_empty_folder(tmp_path) -> None:
     """Without an explicit vault_mode, an empty workspace folder starts from
-    scratch: fresh vault at memory-vault/."""
+    scratch in the chosen logical workspace's named vault folder."""
     ws = tmp_path / "fresh"
     ws.mkdir()
     resp = _finish_client(tmp_path).post(
@@ -315,15 +315,34 @@ def test_setup_finish_autodetects_scratch_for_empty_folder(tmp_path) -> None:
     assert resp.status_code == 200
     env_text = (ws / ".env").read_text(encoding="utf-8")
     assert "CIAO_VAULT_MODE=scratch" in env_text
-    assert (ws / "memory-vault" / "MEMORY.md").is_file()
+    assert (ws / "memory-vault" / "life" / "MEMORY.md").is_file()
     # The wizard's first workspace replaces the legacy personal+work
     # fallback: a one-entry registry with the chosen name.
     import json as _json
 
     registry = _json.loads((ws / ".runtime" / "workspaces.json").read_text(encoding="utf-8"))
     assert [w["name"] for w in registry] == ["life"]
-    assert registry[0]["vault_root"] == "memory-vault"
+    assert registry[0]["vault_root"] == "memory-vault/life"
     assert registry[0]["gws_profile"] == "life"
+
+
+def test_setup_finish_rejects_a_traversal_workspace_name(tmp_path) -> None:
+    workspace = tmp_path / "fresh"
+
+    response = _finish_client(tmp_path).post(
+        "/api/setup/finish",
+        json={
+            "workspace": str(workspace),
+            "workspace_name": "../outside",
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+        },
+    )
+
+    assert response.status_code == 400
+    assert "workspace name" in response.json()["error"]
+    assert not workspace.exists()
+    assert not (tmp_path / "outside").exists()
 
 
 def test_setup_finish_persists_codex_as_first_workspace_provider(tmp_path) -> None:
@@ -371,6 +390,21 @@ def test_setup_finish_autodetects_existing_notes_folder(tmp_path) -> None:
     assert "CIAO_VAULT_ROOT=." in env_text
     assert (ws / "MEMORY.md").is_file()
     assert not (ws / "memory-vault").exists()
+    registry = json.loads(
+        (ws / ".runtime" / "workspaces.json").read_text(encoding="utf-8")
+    )
+    assert registry[0]["vault_root"] == "."
+
+    loaded = CiaoConfig.from_env(
+        {
+            "PWA_AUTH_TOKEN": "test-token",
+            "CIAO_WORKSPACE": str(ws),
+            "CIAO_VAULT_ROOT": ".",
+            "CIAO_RUNTIME_ROOT": str(ws / ".runtime"),
+            "CIAO_OLLAMA_LOCAL_DISCOVERY": "0",
+        }
+    )
+    assert loaded.workspace_vault_root("personal") == ws
 
 
 def test_auth_check_reports_unauthenticated_in_bootstrap(tmp_path) -> None:
@@ -397,6 +431,32 @@ def test_auth_check_reports_unauthenticated_in_bootstrap(tmp_path) -> None:
         {"PWA_AUTH_TOKEN": "tok", "CIAO_WORKSPACE": str(tmp_path / "ws")}
     )
     assert client.get("/api/auth/check").status_code == 200
+
+
+def test_auth_check_requires_session_when_password_enabled(tmp_path) -> None:
+    """Host auth_check must mirror AuthMiddleware when PWA_AUTH_REQUIRED is on."""
+    from ciao.web.auth import SESSION_COOKIE
+    from ciao.web.routes_api import auth_check
+
+    serializer = URLSafeTimedSerializer("test-secret")
+    app = Starlette(
+        routes=[Route("/api/auth/check", auth_check, methods=["GET"])],
+        middleware=[Middleware(AuthMiddleware, serializer=serializer)],
+    )
+    app.state.serializer = serializer
+    app.state.config = CiaoConfig.from_env(
+        {
+            "PWA_AUTH_REQUIRED": "true",
+            "PWA_AUTH_TOKEN": "secret",
+            "CIAO_WORKSPACE": str(tmp_path / "ws"),
+        }
+    )
+    client = TestClient(app, base_url="http://localhost:8443")
+
+    assert client.get("/api/auth/check").status_code == 401
+
+    cookie = {SESSION_COOKIE: serializer.dumps({"user": "owner"})}
+    assert client.get("/api/auth/check", cookies=cookie).status_code == 200
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="launchd handoff is macOS-only")
@@ -547,7 +607,7 @@ def test_setup_finish_defaults_vault_inside_workspace(tmp_path) -> None:
     assert resp.json()["workspace"] == str(workspace.resolve())
     env_text = (workspace / ".env").read_text(encoding="utf-8")
     assert "CIAO_VAULT_ROOT=memory-vault" in env_text
-    assert (workspace / "memory-vault" / "MEMORY.md").is_file()
+    assert (workspace / "memory-vault" / "personal" / "MEMORY.md").is_file()
     # One repo at the workspace root; the nested vault is never double-inited.
     assert (workspace / ".git").is_dir()
     assert not (workspace / "memory-vault" / ".git").exists()
@@ -744,3 +804,88 @@ def test_tcc_protected_location_flags_desktop(monkeypatch, tmp_path) -> None:
     # Non-macOS never flags (launchd/TCC is macOS-only).
     monkeypatch.setattr(setup_status.sys, "platform", "linux")
     assert setup_status.tcc_protected_location(home / "Desktop" / "Cowork") is None
+
+
+def test_discover_claude_mcps_filters_connected_and_caches(monkeypatch, tmp_path) -> None:
+    from ciao import setup_status
+
+    setup_status.clear_claude_discovery_cache()
+    calls = {"n": 0}
+    config = tmp_path / ".claude.json"
+    config.write_text(
+        json.dumps(
+            {
+                "projects": {
+                    str(tmp_path.resolve()): {
+                        "disabledMcpServers": [
+                            "claude.ai Excalidraw",
+                            "claude.ai Gmail",
+                            "claude.ai Google Calendar",
+                            "claude.ai Google Drive",
+                        ]
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeResult:
+        stdout = (
+            "claude.ai Airtable: https://example - ✔ Connected\n"
+            "claude.ai Slack: https://example - ! Needs authentication\n"
+            "claude.ai Gmail: https://example - ✔ Connected\n"
+            "claude.ai Excalidraw: https://example - ✔ Connected\n"
+            "claude.ai Figma: https://example - ✔ Connected\n"
+            "n8n_mcp: ✔ Connected\n"
+            "notion: ✔ Connected\n"
+        )
+        stderr = ""
+
+    def fake_run(*_args, **_kwargs):
+        calls["n"] += 1
+        return FakeResult()
+
+    monkeypatch.setattr(setup_status.shutil, "which", lambda _name: "/bin/claude")
+    monkeypatch.setattr(setup_status.subprocess, "run", fake_run)
+
+    assert setup_status.discover_claude_mcps(
+        tmp_path, config_path=config
+    ) == ["Airtable", "Figma"]
+    assert setup_status.discover_claude_mcps(
+        tmp_path, config_path=config
+    ) == ["Airtable", "Figma"]
+    assert calls["n"] == 1
+
+    setup_status.clear_claude_discovery_cache()
+    assert setup_status.discover_claude_mcps(
+        tmp_path, config_path=config
+    ) == ["Airtable", "Figma"]
+    assert calls["n"] == 2
+
+
+def test_discover_claude_system_skills_filters_enabled_and_caches(monkeypatch) -> None:
+    from ciao import setup_status
+
+    setup_status.clear_claude_discovery_cache()
+    calls = {"n": 0}
+
+    class FakeResult:
+        stdout = (
+            "❯ skill-creator@claude-plugins-official\n"
+            "  Status: ✔ enabled\n"
+            "❯ other-plugin@source\n"
+            "  Status: ✘ disabled\n"
+        )
+        stderr = ""
+
+    def fake_run(*_args, **_kwargs):
+        calls["n"] += 1
+        return FakeResult()
+
+    monkeypatch.setattr(setup_status.shutil, "which", lambda _name: "/bin/claude")
+    monkeypatch.setattr(setup_status.subprocess, "run", fake_run)
+
+    assert setup_status.discover_claude_system_skills() == ["skill-creator"]
+    assert setup_status.discover_claude_system_skills() == ["skill-creator"]
+    assert calls["n"] == 1

@@ -1,5 +1,31 @@
 <template>
-  <div id="ciao-app">
+  <div id="ciao-app" :data-workspace-color="workspaceColor">
+    <div
+      v-if="clientMode"
+      class="client-mode-banner"
+      role="status"
+    >
+      <span>
+        Client mode — viewing
+        <code>{{ clientHostLabel }}</code>
+        <template v-if="!clientHasSession"> · host password needed</template>
+      </span>
+      <div class="client-mode-banner-actions">
+        <button
+          type="button"
+          class="client-mode-banner-link"
+          :disabled="switchingToHost"
+          @click="switchBackToHost"
+        >
+          {{ switchingToHost ? 'Switching…' : 'Switch to host' }}
+        </button>
+        <router-link
+          v-if="clientHasSession"
+          class="client-mode-banner-link"
+          to="/settings"
+        >Manage</router-link>
+      </div>
+    </div>
     <Transition name="fade">
       <StartupView
         v-if="showStartup"
@@ -15,16 +41,18 @@
     />
     <router-view />
     <InAppToast />
-    <CommandPaletteModal v-model="showCommandPalette" />
+    <ConfirmDialog />
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import CommandPaletteModal from './components/CommandPaletteModal.vue'
+import ConfirmDialog from './components/ConfirmDialog.vue'
 import InAppToast from './components/InAppToast.vue'
 import RestartOverlay from './components/RestartOverlay.vue'
 import StartupView from './components/StartupView.vue'
+import { askConfirm } from './lib/confirm'
+import { normalizeWorkspaceColor } from './lib/workspaceColors'
 import { useProjectStore } from './stores/projects'
 
 interface Phase {
@@ -41,10 +69,61 @@ const overallReady = ref(false)
 const serverVersion = ref('')
 const skipped = ref(false)
 const startupDone = ref(false)
+const clientMode = ref(false)
+const clientHostUrl = ref('')
+const clientHasSession = ref(false)
+const switchingToHost = ref(false)
 
 const showStartup = computed(() => !startupDone.value && !skipped.value)
+const workspaceColor = computed(() => {
+  const active = projectStore.activeWorkspace
+  const ws = projectStore.workspaces.find((item) => item.name === active)
+  return normalizeWorkspaceColor(ws?.color)
+})
+const clientHostLabel = computed(() => {
+  const raw = clientHostUrl.value
+  if (!raw) return 'remote host'
+  try {
+    return new URL(raw).host || raw
+  } catch {
+    return raw
+  }
+})
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null
+let nodePollTimer: ReturnType<typeof setInterval> | null = null
+
+async function switchBackToHost() {
+  if (switchingToHost.value) return
+  const confirmed = await askConfirm(
+    'Stop client mode and become host on this machine? Changes that exist only on the other host may not be synced.',
+    {
+      title: 'Become host on this device?',
+      confirmLabel: 'Disconnect and become host',
+    },
+  )
+  if (!confirmed) return
+  switchingToHost.value = true
+  try {
+    const res = await fetch('/api/node/handover', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({
+        target_node_url: clientHostUrl.value,
+        force: true,
+      }),
+    })
+    if (!res.ok) {
+      const payload = await res.json().catch(() => ({}))
+      throw new Error((payload as { error?: string }).error || `HTTP ${res.status}`)
+    }
+    window.location.assign('/')
+  } catch (e: any) {
+    switchingToHost.value = false
+    window.alert(e?.message || 'Failed to switch back to host')
+  }
+}
 
 async function pollStartup() {
   try {
@@ -65,8 +144,26 @@ async function pollStartup() {
     if (overallReady.value) {
       startupDone.value = true
     }
+    refreshClientBanner(data)
   } catch {
     // ignore fetch errors during startup
+  }
+}
+
+function refreshClientBanner(data: Record<string, unknown>) {
+  const role = String(data.node_role || '')
+  clientMode.value = role === 'client' || role === 'standby'
+  clientHostUrl.value = String(data.host_url || data.active_peer_url || '')
+  clientHasSession.value = Boolean(data.has_host_session)
+}
+
+async function pollClientBanner() {
+  try {
+    const res = await fetch('/api/startup-status')
+    if (!res.ok) return
+    refreshClientBanner(await res.json())
+  } catch {
+    /* ignore */
   }
 }
 
@@ -78,15 +175,6 @@ function scheduleNextPoll() {
   }, 1500)
 }
 
-const showCommandPalette = ref(false)
-
-function handleKeyDown(e: KeyboardEvent) {
-  if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-    e.preventDefault()
-    showCommandPalette.value = !showCommandPalette.value
-  }
-}
-
 function stopPolling() {
   if (pollTimer) {
     clearTimeout(pollTimer)
@@ -96,12 +184,16 @@ function stopPolling() {
 
 onMounted(() => {
   pollStartup().then(scheduleNextPoll)
-  window.addEventListener('keydown', handleKeyDown)
+  void pollClientBanner()
+  nodePollTimer = setInterval(() => { void pollClientBanner() }, 5000)
 })
 
 onUnmounted(() => {
   stopPolling()
-  window.removeEventListener('keydown', handleKeyDown)
+  if (nodePollTimer) {
+    clearInterval(nodePollTimer)
+    nodePollTimer = null
+  }
 })
 
 watch(showStartup, (show) => {
@@ -110,6 +202,48 @@ watch(showStartup, (show) => {
 </script>
 
 <style>
+.client-mode-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  background: color-mix(in srgb, var(--warn, #ff9800) 18%, var(--bg2));
+  border-bottom: 1px solid var(--border);
+  color: var(--fg);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.client-mode-banner code {
+  color: var(--accent, #ff4d6d);
+  font-size: inherit;
+}
+.client-mode-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+.client-mode-banner-link {
+  color: var(--accent, #ff4d6d);
+  text-decoration: none;
+  font-weight: 600;
+  white-space: nowrap;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+.client-mode-banner-link:hover:not(:disabled) {
+  text-decoration: underline;
+}
+.client-mode-banner-link:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
 :root {
   /* Font scale multiplier */
   --font-scale: 1.0;
@@ -154,12 +288,14 @@ watch(showStartup, (show) => {
   --safe-right: env(safe-area-inset-right, 0px);
   --safe-bottom: 0px;
   --safe-left: env(safe-area-inset-left, 0px);
-  /* Type */
-  --font: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  /* Type: Hybrid typography model. Sans-serif for prose & UI, monospace for code & developer tokens. */
+  --font-mono: ui-monospace, 'SF Mono', 'Fira Code', 'Cascadia Code', 'Segoe UI Mono', 'Roboto Mono', Menlo, Consolas, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font: var(--font-sans);
   --text-xs: calc(11px * var(--font-scale));   /* labels, badges, pills, section titles */
   --text-sm: calc(12px * var(--font-scale));   /* hints, secondary text */
-  --text-base: calc(13px * var(--font-scale)); /* body */
-  --text-lg: calc(15px * var(--font-scale));   /* headers, titles */
+  --text-base: calc(14px * var(--font-scale)); /* body */
+  --text-lg: calc(16px * var(--font-scale));   /* headers, titles */
   /* Motion */
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
 }
@@ -185,6 +321,52 @@ watch(showStartup, (show) => {
   --success: #2e7d32;
   --warning: #ef6c00;
   --error: #c62828;
+}
+
+/* Per-workspace accent overrides (Option A: accents only).
+   Applied on #ciao-app for the active workspace, and on individual
+   controls (home new-chat buttons, workspace pills, chat badges) that
+   belong to another workspace. Pink is explicit so a pink-target control
+   inside a non-pink active workspace does not inherit the parent accent. */
+[data-workspace-color="pink"] {
+  --accent: #ff4d6d;
+  --accent-strong: #ff2e54;
+}
+[data-workspace-color="cyan"] {
+  --accent: #38bdf8;
+  --accent-strong: #0284c7;
+}
+[data-workspace-color="amber"] {
+  --accent: #fb923c;
+  --accent-strong: #ea580c;
+}
+[data-workspace-color="emerald"] {
+  --accent: #34d399;
+  --accent-strong: #059669;
+}
+[data-workspace-color="violet"] {
+  --accent: #a78bfa;
+  --accent-strong: #7c3aed;
+}
+:root.theme-light [data-workspace-color="pink"] {
+  --accent: #d81b60;
+  --accent-strong: #b00d46;
+}
+:root.theme-light [data-workspace-color="cyan"] {
+  --accent: #0284c7;
+  --accent-strong: #0369a1;
+}
+:root.theme-light [data-workspace-color="amber"] {
+  --accent: #ea580c;
+  --accent-strong: #c2410c;
+}
+:root.theme-light [data-workspace-color="emerald"] {
+  --accent: #059669;
+  --accent-strong: #047857;
+}
+:root.theme-light [data-workspace-color="violet"] {
+  --accent: #7c3aed;
+  --accent-strong: #6d28d9;
 }
 
 /* In standalone/fullscreen PWA the home indicator is live, so restore the
@@ -266,7 +448,7 @@ body::before {
 
 /* ── Wordmark ────────────────────────────────────────────────── */
 .wordmark {
-  font-family: var(--font);
+  font-family: var(--font-mono);
   font-weight: 700;
   letter-spacing: -0.02em;
   color: var(--fg);
@@ -425,9 +607,24 @@ input:focus, textarea:focus, select:focus {
   box-shadow: 0 0 0 2px rgba(255, 77, 109, 0.2);
 }
 
-@media (min-width: 769px) {
-  /* Tighten typography on desktop where iOS zoom isn't a concern */
+/* Tighten typography only when the user has a fine pointer (mouse / trackpad).
+   Gating on viewport width alone used to override inputs back to <16px on
+   wide touch devices (iPad portrait/landscape, iPhone landscape, Android
+   tablets), which makes iOS Safari auto-zoom the page on focus. Pointer
+   type is the actual signal: iOS only auto-zooms on touch input, so a
+   coarse pointer always wants the 16px default regardless of width. */
+@media (pointer: fine) {
   input, textarea, select { font-size: calc(14px * var(--font-scale)); padding: 8px 12px; }
+}
+
+/* Touch devices: keep inputs at >= 16px so iOS Safari does not auto-zoom the
+   viewport on focus. Some components (markdown editor, comment compose)
+   override the global input rule with smaller text tokens; this carve-out
+   pins every input/textarea/select to 16px when the pointer is coarse, no
+   matter what scoped styles say. Pairs with the (pointer: fine) tightening
+   above: trackpad/desktop stays tight, touch stays zoom-stable. */
+@media (pointer: coarse) {
+  input, textarea, select { font-size: 16px !important; }
 }
 
 /* ── Shared page layout (schedules, settings, login) ─────────── */
@@ -468,6 +665,7 @@ input:focus, textarea:focus, select:focus {
 }
 
 .section-title {
+  font-family: var(--font-mono);
   font-size: var(--text-xs);
   color: var(--fg2);
   letter-spacing: 0.5px;
@@ -475,6 +673,7 @@ input:focus, textarea:focus, select:focus {
   font-weight: 600;
 }
 .label-eyebrow {
+  font-family: var(--font-mono);
   font-size: var(--text-xs);
   color: var(--fg2);
   text-transform: uppercase;
@@ -541,6 +740,7 @@ input:focus, textarea:focus, select:focus {
 
 /* ── Badge / pill (status, context, day-of-week) ─────────────── */
 .badge {
+  font-family: var(--font-mono);
   display: inline-flex;
   align-items: center;
   padding: 2px 8px;
@@ -557,6 +757,16 @@ input:focus, textarea:focus, select:focus {
   background: var(--bg3);
   color: var(--fg2);
   border: 1px solid var(--border);
+}
+.badge--builtin {
+  background: color-mix(in srgb, var(--accent2) 14%, var(--bg3));
+  color: var(--fg2);
+  border: 1px solid color-mix(in srgb, var(--accent2) 40%, var(--border));
+}
+.theme-light .badge--builtin {
+  background: color-mix(in srgb, var(--light-secondary, #512da8) 10%, var(--light-surface-interactive, #e6e8f4));
+  color: var(--light-text-muted, #5f607d);
+  border-color: color-mix(in srgb, var(--light-secondary, #512da8) 28%, var(--light-border, #d2d4e3));
 }
 .badge--success { background: rgba(76, 175, 80, 0.15); color: var(--success); }
 .badge--warn { background: rgba(255, 152, 0, 0.15); color: var(--warning); }

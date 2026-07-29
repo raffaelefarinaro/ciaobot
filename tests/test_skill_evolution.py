@@ -14,6 +14,32 @@ from ciao import skill_evolution as se
 from ciao import trajectory_builder as tb
 
 
+def test_default_proposals_dir_uses_the_active_workspace_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir()
+    (runtime / "workspaces.json").write_text(
+        json.dumps([
+            {
+                "name": "client",
+                "vault_root": "memory-vault/client",
+            }
+        ]),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
+    monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("CIAO_RUNTIME_ROOT", str(runtime))
+    monkeypatch.setenv("CIAO_ACTIVE_WORKSPACE", "client")
+    monkeypatch.setenv("CIAO_OLLAMA_LOCAL_DISCOVERY", "0")
+
+    assert se._resolve_proposals_dir() == (
+        tmp_path / "memory-vault" / "client" / "Workspace" / "Skill-Proposals"
+    )
+
+
 # ── trajectory mining ───────────────────────────────────────────────────
 
 

@@ -29,7 +29,8 @@ web/
     router.ts             routes: /login, /, /chat/:id, /project/:id, /schedules, /settings, /settings/:tab
     components/           one Vue SFC per feature pane (including CommandPaletteModal.vue and FileViewerModal.vue)
     stores/               Pinia stores (auth, projects, tasks, fileViewer)
-    lib/                  pure helpers (api, time, safeMarkdown, etc.)
+    composables/          reactive logic shared between components (useHoverPinPopover)
+    lib/                  pure helpers (api, time, safeMarkdown, etc.) — no Vue imports
 ```
 
 ## iOS PWA gotchas
@@ -52,6 +53,16 @@ WebKit gesture-event blockers. Individual controls may use
 `touch-action: manipulation` to avoid delayed/double activation without
 disabling page zoom. The in-app font scale under Settings > Appearance is an
 additional convenience, not a replacement for browser zoom.
+
+iOS Safari auto-zooms the viewport when an input/textarea/select gets focus
+if its computed `font-size` is below 16px. The global input rule in
+`App.vue` already pins mobile inputs at `16px * var(--font-scale)`, and a
+`@media (pointer: coarse)` carve-out re-pins them to a flat `16px` so
+component-level overrides (markdown editor, comment compose) cannot drop
+back below the zoom threshold. The desktop tightening override is gated on
+`(pointer: fine)` rather than `(min-width: 769px)` so wide touch devices
+(iPad portrait/landscape) never get the smaller typography. Do not weaken
+either rule.
 
 ### WebSocket suspension
 
@@ -83,6 +94,7 @@ Prefer the utility classes over re-inventing the same button/badge/card per comp
 
 - One Vue SFC per pane. Keep `<script setup lang="ts">`, template, scoped `<style>`.
 - Markdown rendering goes through `lib/safeMarkdown.ts` (DOMPurify + marked + highlight.js). Never `v-html` raw user content.
+- Chat Markdown tables use the renderer's `.markdown-table-scroll` region so compact tables shrink-wrap and wide tables scroll independently at narrow widths. Keep the region keyboard focusable and preserve readable key columns.
 - DOM manipulation that needs to bypass Vue's scoped attribute (e.g. inline highlight spans inserted into rendered markdown) uses `:deep(...)` in the scoped stylesheet.
 - Completed chat traces stay collapsed as one compact `Activity` row. Touched-file chips sit below the final answer under `Outputs` (including files created via `Write` or common Bash redirects/`touch`/`cp`); interrupted turns keep their file chips inside `Activity` so unfinished work remains visible. Newly created files are labelled `new` on the chip.
 - Conversation forks are initiated from the final assistant reply action group (Copy/Read aloud/Fork). The PWA sends the selected message slice up to that reply and redirects to the newly created chat, focusing the composer.

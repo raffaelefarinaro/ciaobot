@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from starlette.applications import Starlette
 from starlette.routing import Mount
 from starlette.testclient import TestClient
 
+from ciao import mcp_server
 from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
+from ciao.execution_modes import AUTO_APPROVED_MCP_TOOLS, auto_approved_mcp_tool_names
 from ciao.mcp_server import CiaoMcpService, McpSessionRegistry
 
 
@@ -111,6 +115,29 @@ def test_registry_issues_scoped_reusable_and_revocable_tokens() -> None:
     assert registry.status()["active_sessions"] == 1
     assert registry.revoke_chat("chat-1") == 1
     assert registry.status()["active_sessions"] == 0
+
+
+def test_registry_reissues_when_workspace_or_project_changes() -> None:
+    registry = McpSessionRegistry(ttl_seconds=60)
+    token, principal = registry.issue(
+        chat_id="chat-1",
+        project_id="project-1",
+        workspace="personal",
+        provider="claude",
+    )
+
+    moved_token, moved = registry.issue(
+        chat_id="chat-1",
+        project_id="project-work",
+        workspace="work",
+        provider="claude",
+    )
+
+    assert moved_token != token
+    assert moved.workspace == "work"
+    assert moved.project_id == "project-work"
+    assert principal.workspace == "personal"
+    assert registry.status()["active_sessions"] == 1
 
 
 def test_streamable_http_auth_and_structured_tool_result(tmp_path: Path) -> None:
@@ -378,14 +405,41 @@ class _ChatCreatePcm:
         self.started.append((chat_id, text))
 
 
-def _chat_create_control_plane(pcm: _ChatCreatePcm) -> CiaoControlPlane:
-    config = SimpleNamespace(workspace=lambda name: object() if name == "personal" else None)
+def _chat_create_control_plane(
+    pcm: _ChatCreatePcm,
+    *,
+    schedule_manager: Any = None,
+    workspaces: tuple[str, ...] = ("personal",),
+) -> CiaoControlPlane:
+    config = SimpleNamespace(workspace=lambda name: object() if name in workspaces else None)
     return CiaoControlPlane(
         config,
         project_chat_manager=pcm,
-        schedule_manager=SimpleNamespace(),
+        schedule_manager=SimpleNamespace() if schedule_manager is None else schedule_manager,
         loop_manager=SimpleNamespace(),
     )
+
+
+def _work_project_pcm() -> _ChatCreatePcm:
+    """A pcm holding a project in a non-Personal workspace, to prove inheritance."""
+    pcm = _ChatCreatePcm()
+    pcm.projects["project-work"] = SimpleNamespace(
+        project_id="project-work",
+        name="AI-NATIVE-SDK",
+        workspace="work",
+    )
+    return pcm
+
+
+def _schedule_control_plane(tmp_path: Path, pcm: _ChatCreatePcm) -> tuple[CiaoControlPlane, Any]:
+    """Control plane wired to a real ScheduleManager over a temp store."""
+    from ciao.schedules import ScheduleManager, ScheduleStore
+
+    schedules = ScheduleManager(store=ScheduleStore(tmp_path), dispatch_to_web=lambda *a, **k: None)
+    plane = _chat_create_control_plane(
+        pcm, schedule_manager=schedules, workspaces=("personal", "work")
+    )
+    return plane, schedules
 
 
 def _chat_create_principal(**overrides) -> McpPrincipal:
@@ -471,6 +525,120 @@ def test_schedule_create_resolves_project_by_name(tmp_path: Path) -> None:
     )
 
     assert result["data"]["web_project_id"] == "project-2"
+    assert result["data"]["workspace"] == "personal"
+    assert result["data"]["project_name"] == "Research"
+
+
+def test_schedule_create_defaults_to_callers_project_and_workspace(tmp_path: Path) -> None:
+    control_plane, schedules = _schedule_control_plane(tmp_path, _work_project_pcm())
+    principal = _chat_create_principal(
+        project_id="project-work",
+        workspace="work",
+    )
+
+    result = control_plane.schedule_create(
+        principal,
+        prompt="Seed the weekly skills CSV.",
+        daily_time="08:00",
+        timezone="Europe/Zurich",
+        frequency="weekly",
+        days_of_week=["mon"],
+    )
+
+    assert result["data"]["web_project_id"] == "project-work"
+    assert result["data"]["workspace"] == "work"
+    assert result["data"]["project_name"] == "AI-NATIVE-SDK"
+    stored = schedules.list_entries()[0]
+    assert stored.web_project_id == "project-work"
+    assert stored.workspace == "work"
+
+
+def test_schedule_create_with_chat_id_skips_project_default(tmp_path: Path) -> None:
+    pcm = _work_project_pcm()
+    chat = SimpleNamespace(chat_id="chat-fixed", project_id="project-work")
+    pcm.get_chat = lambda cid: chat if cid == "chat-fixed" else None  # type: ignore[method-assign]
+    control_plane, _schedules = _schedule_control_plane(tmp_path, pcm)
+    principal = _chat_create_principal(
+        project_id="project-work",
+        workspace="work",
+    )
+
+    result = control_plane.schedule_create(
+        principal,
+        prompt="Continue this thread weekly.",
+        daily_time="08:00",
+        timezone="UTC",
+        frequency="weekly",
+        chat_id="chat-fixed",
+    )
+
+    assert result["data"]["web_chat_id"] == "chat-fixed"
+    assert result["data"]["web_project_id"] is None
+    assert result["data"]["workspace"] == "work"
+
+
+def test_chat_update_resolves_omitted_chat_id() -> None:
+    pcm = SimpleNamespace(
+        update_chat=lambda cid, **kwargs: SimpleNamespace(
+            chat_id=cid,
+            control_surface="",
+            to_dict=lambda local=True: {"chat_id": cid, **kwargs},
+        ),
+        is_session_local=lambda c: True,
+        get_chat=lambda cid: SimpleNamespace(chat_id=cid, project_id="project-1"),
+        get_project=lambda pid: SimpleNamespace(project_id=pid, workspace="personal"),
+    )
+    config = SimpleNamespace(workspace=lambda name: object() if name == "personal" else None)
+    control_plane = CiaoControlPlane(
+        config,
+        project_chat_manager=pcm,
+        schedule_manager=SimpleNamespace(),
+        loop_manager=SimpleNamespace(),
+    )
+    principal = _chat_create_principal()
+
+    result = control_plane.chat_update(principal, "", title="Renamed")
+
+    assert result["data"]["chat_id"] == "chat-1"
+    assert result["data"]["title"] == "Renamed"
+
+
+def test_loop_create_defaults_to_caller_and_stamps_workspace(tmp_path: Path) -> None:
+    from ciao.loops import LoopManager, LoopStore
+
+    pcm = _ChatCreatePcm()
+    pcm.projects["project-work"] = SimpleNamespace(
+        project_id="project-work",
+        name="AI-NATIVE-SDK",
+        workspace="work",
+    )
+    pcm.get_chat = lambda cid: (  # type: ignore[method-assign]
+        SimpleNamespace(chat_id="chat-work", project_id="project-work")
+        if cid == "chat-work"
+        else None
+    )
+    manager = LoopManager(store=LoopStore(tmp_path))
+    config = SimpleNamespace(
+        workspace=lambda name: object() if name in {"personal", "work"} else None
+    )
+    control_plane = CiaoControlPlane(
+        config,
+        project_chat_manager=pcm,
+        schedule_manager=SimpleNamespace(),
+        loop_manager=manager,
+    )
+    principal = _chat_create_principal(
+        chat_id="chat-work",
+        project_id="project-work",
+        workspace="work",
+    )
+
+    result = control_plane.loop_create(principal, "", "Check PRs", interval_minutes=15)
+
+    assert result["data"]["web_chat_id"] == "chat-work"
+    assert result["data"]["web_project_id"] == "project-work"
+    assert result["data"]["workspace"] == "work"
+    assert result["data"]["interval_minutes"] == 15
 
 
 def test_adversarial_review_synthesizes_panel_results(monkeypatch) -> None:
@@ -514,3 +682,229 @@ def test_adversarial_review_rejects_empty_artifact() -> None:
     with pytest.raises(ControlPlaneError) as excinfo:
         asyncio.run(control_plane.adversarial_review(principal, "   "))
     assert excinfo.value.code == "empty_artifact"
+
+
+@pytest.mark.asyncio
+async def test_chat_archive_defaults_to_caller_chat() -> None:
+    from ciao.config import CiaoConfig
+
+    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
+    archived_calls = []
+
+    fake_pcm = SimpleNamespace(
+        archive_chat=lambda cid: archived_calls.append(cid) or SimpleNamespace(path=Path("/tmp/chat.md")),
+        run_archive_postprocess=lambda cid, outcome, chat, project: None,
+        active_chat_ids=lambda: set(),
+    )
+    control_plane = CiaoControlPlane(
+        config,
+        project_chat_manager=fake_pcm,
+        schedule_manager=SimpleNamespace(),
+        loop_manager=SimpleNamespace(),
+    )
+    control_plane._chat = lambda p, cid: SimpleNamespace(project_id="p1")
+    control_plane._project = lambda p, pid: SimpleNamespace(name="Project")
+    principal = McpPrincipal(
+        token_id="t1",
+        chat_id="chat-active-123",
+        project_id="p1",
+        workspace="personal",
+        provider="claude",
+    )
+
+    # Calling chat_archive with empty or "this chat" targets principal.chat_id
+    res1 = control_plane.chat_archive(principal, "")
+    assert res1["ok"] is True
+    assert res1["data"]["deferred"] is True
+    assert res1["data"]["chat_id"] == "chat-active-123"
+
+    res2 = control_plane.chat_archive(principal, "this chat")
+    assert res2["ok"] is True
+    assert res2["data"]["deferred"] is True
+    assert res2["data"]["chat_id"] == "chat-active-123"
+
+    # Calling with specific another chat archives that chat directly
+    res3 = control_plane.chat_archive(principal, "chat_other_999")
+    assert res3["ok"] is True
+    assert res3["data"]["chat_id"] == "chat_other_999"
+    assert "chat_other_999" in archived_calls
+
+
+def test_project_and_chat_resolution_defaults() -> None:
+    from ciao.config import CiaoConfig
+
+    config = CiaoConfig.from_env({"PWA_AUTH_TOKEN": "t"})
+    fake_pcm = SimpleNamespace(
+        get_chat=lambda cid: SimpleNamespace(chat_id=cid, project_id="proj-active-123", to_dict=lambda **k: {"chat_id": cid}),
+        get_project=lambda pid: SimpleNamespace(project_id=pid, name="Active Project", workspace="personal", to_dict=lambda: {"project_id": pid}),
+        list_projects=lambda ws: [SimpleNamespace(project_id="proj-active-123", name="Active Project", workspace="personal")],
+        list_project_files=lambda pid: ["file1.md"],
+        is_session_local=lambda c: True,
+    )
+    control_plane = CiaoControlPlane(
+        config,
+        project_chat_manager=fake_pcm,
+        schedule_manager=SimpleNamespace(),
+        loop_manager=SimpleNamespace(),
+    )
+    principal = McpPrincipal(
+        token_id="t1",
+        chat_id="chat-active-123",
+        project_id="proj-active-123",
+        workspace="personal",
+        provider="claude",
+    )
+
+    # project_get defaults to active project when empty or 'this project'
+    p_res1 = control_plane.project_get(principal, "")
+    assert p_res1["ok"] is True
+    assert p_res1["data"]["project_id"] == "proj-active-123"
+
+    p_res2 = control_plane.project_get(principal, "this project")
+    assert p_res2["ok"] is True
+    assert p_res2["data"]["project_id"] == "proj-active-123"
+
+    # chat_get defaults to active chat when empty or 'this chat'
+    c_res1 = control_plane.chat_get(principal, "")
+    assert c_res1["ok"] is True
+    assert c_res1["data"]["chat_id"] == "chat-active-123"
+
+    c_res2 = control_plane.chat_get(principal, "self")
+    assert c_res2["ok"] is True
+    assert c_res2["data"]["chat_id"] == "chat-active-123"
+
+    # project_files_list defaults to active project
+    pf_res = control_plane.project_files_list(principal, "")
+    assert pf_res["ok"] is True
+    assert pf_res["data"] == ["file1.md"]
+
+
+
+
+def test_collect_env_refs_from_headers_and_env_block() -> None:
+    from ciao.mcp_server import _collect_env_refs
+
+    refs = _collect_env_refs(
+        {
+            "url": "https://example.test/mcp",
+            "headers": {"Authorization": "Bearer ${N8N_MCP_TOKEN}"},
+            "env": {"NOTION_TOKEN": "${NOTION_TOKEN}"},
+        }
+    )
+    by_key = dict(refs)
+    assert by_key["N8N_MCP_TOKEN"] == "headers"
+    assert by_key["NOTION_TOKEN"] == "env"
+
+
+def test_discover_project_servers_reports_env_and_observed_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runtime = workspace / ".runtime"
+    runtime.mkdir()
+    (workspace / ".env").write_text("N8N_MCP_TOKEN=secret-token\n", encoding="utf-8")
+    (workspace / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "n8n_mcp": {
+                        "type": "http",
+                        "url": "https://example.test/mcp-server/http",
+                        "headers": {"Authorization": "Bearer ${N8N_MCP_TOKEN}"},
+                    },
+                    "notion": {
+                        "command": "npx",
+                        "args": ["-y", "@notionhq/notion-mcp-server"],
+                        "env": {"NOTION_TOKEN": "${NOTION_TOKEN}"},
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (runtime / "agent_tool_calls.jsonl").write_text(
+        json.dumps({"tool": "mcp__notion__API-retrieve-a-page"}) + "\n"
+        + json.dumps({"tool": "Bash"}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("N8N_MCP_TOKEN", raising=False)
+    monkeypatch.delenv("NOTION_TOKEN", raising=False)
+
+    config = SimpleNamespace(
+        state_path=runtime / "state.json",
+        pwa_port=18443,
+        mcp_enabled=True,
+        workspace_root=workspace,
+    )
+    service = CiaoMcpService(config)
+    payload = service.status_for_api()
+    by_name = {row["name"]: row for row in payload["project_servers"]}
+
+    assert payload["env_path"] == str(workspace / ".env")
+    assert "_meta" not in by_name["n8n_mcp"]
+    assert by_name["n8n_mcp"]["ready"] is True
+    assert by_name["n8n_mcp"]["env_keys"][0]["key"] == "N8N_MCP_TOKEN"
+    assert by_name["n8n_mcp"]["env_keys"][0]["configured"] is True
+    assert by_name["notion"]["ready"] is False
+    assert by_name["notion"]["command"] == "npx"
+    assert by_name["notion"]["args"] == ["-y", "@notionhq/notion-mcp-server"]
+    assert by_name["notion"]["tools"] == ["mcp__notion__API-retrieve-a-page"]
+    assert by_name["notion"]["tools_source"] == "observed"
+    assert service.project_server_env_keys() == {"N8N_MCP_TOKEN", "NOTION_TOKEN"}
+
+
+def test_probe_stdio_server_returns_observed_tools_only(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runtime = workspace / ".runtime"
+    runtime.mkdir()
+    (workspace / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "notion": {
+                        "command": "npx",
+                        "args": ["-y", "@notionhq/notion-mcp-server"],
+                        "env": {"NOTION_TOKEN": "${NOTION_TOKEN}"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (runtime / "agent_tool_calls.jsonl").write_text(
+        json.dumps({"tool": "mcp__notion__search"}) + "\n",
+        encoding="utf-8",
+    )
+    config = SimpleNamespace(
+        state_path=runtime / "state.json",
+        pwa_port=18443,
+        mcp_enabled=True,
+        workspace_root=workspace,
+    )
+    service = CiaoMcpService(config)
+    result = service.probe_project_server_tools("notion")
+    assert result["ok"] is True
+    assert result["tools"] == ["mcp__notion__search"]
+    assert "Stdio" in result["tools_note"]
+
+
+def test_auto_approved_policy_matches_tool_annotations() -> None:
+    """The allowed_tools policy must track the annotations on the tools.
+
+    ``AUTO_APPROVED_MCP_TOOLS`` bypasses the PermissionGate, so a new tool
+    silently inheriting either policy is the failure mode worth catching. The
+    contract: every ``_READ``/``_WRITE`` tool is auto-approved, every
+    ``_DESTRUCTIVE`` one still raises an approval card.
+    """
+    source = Path(mcp_server.__file__).read_text(encoding="utf-8")
+    declared = re.findall(r'@tool\(name="([a-z_]+)", annotations=(_[A-Z]+)', source)
+    assert declared, "no annotated @tool declarations found in ciao/mcp_server.py"
+
+    expected = [name for name, ann in declared if ann in {"_READ", "_WRITE"}]
+    destructive = {name for name, ann in declared if ann == "_DESTRUCTIVE"}
+
+    assert list(AUTO_APPROVED_MCP_TOOLS) == expected
+    assert destructive.isdisjoint(AUTO_APPROVED_MCP_TOOLS)
+    assert auto_approved_mcp_tool_names()[0] == f"mcp__ciaobot__{expected[0]}"

@@ -11,8 +11,16 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.responses import FileResponse, Response
 
+from ciao.node_proxy import StandbyProxyMiddleware
 from ciao.package_version import make_cached_package_status
-from ciao.mcp_server import mcp_status_endpoint, mcp_usage_endpoint
+from ciao.mcp_server import (
+    mcp_env_keys_endpoint,
+    mcp_server_item_endpoint,
+    mcp_server_tools_endpoint,
+    mcp_servers_collection_endpoint,
+    mcp_status_endpoint,
+    mcp_usage_endpoint,
+)
 from ciao.web.auth import AuthMiddleware, make_serializer
 from ciao.web.agent_assets import (
     agent_assets_endpoint,
@@ -20,6 +28,7 @@ from ciao.web.agent_assets import (
     create_subagent_endpoint,
     delete_command_endpoint,
     delete_subagent_endpoint,
+    os_audit_endpoint,
     update_command_endpoint,
     update_subagent_endpoint,
     workspace_health_endpoint,
@@ -35,6 +44,8 @@ from ciao.web.routes_api import (
     auth_check,
     auth_login,
     auth_logout,
+    auth_settings_get,
+    auth_settings_update,
     chat_archive,
     chat_continue,
     chat_detail,
@@ -67,12 +78,18 @@ from ciao.web.routes_api import (
     create_project_chat,
     create_schedule,
     debug_issues,
+    desktop_drop_import,
     handover_merge,
     image_blob,
     local_handback,
     local_preflight,
     local_resync,
     local_status,
+    node_demote_endpoint,
+    node_handover_endpoint,
+    node_connect_endpoint,
+    node_peers_endpoint,
+    node_status_endpoint,
     list_all_chats,
     list_models,
     delete_workspace_setting,
@@ -89,6 +106,7 @@ from ciao.web.routes_api import (
     provider_config_settings,
     settings_routines,
     setup_finish_endpoint,
+    setup_inspect_folder_endpoint,
     setup_list_dirs_endpoint,
     setup_mkdir_endpoint,
     setup_status_endpoint,
@@ -104,6 +122,7 @@ from ciao.web.routes_api import (
     project_detail,
     reorder_projects,
     package_changelog_endpoint,
+    node_addresses_endpoint,
     package_status_endpoint,
     package_update_endpoint,
     tts_install_local_endpoint,
@@ -121,6 +140,7 @@ from ciao.web.routes_api import (
     run_loop_now,
     startup_status_endpoint,
     active_chats_endpoint,
+    menubar_chats_endpoint,
     open_chat_endpoint,
     status_endpoint,
     upsert_workspace_setting,
@@ -188,6 +208,8 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/auth", auth_login, methods=["POST"]),
         Route("/api/auth/logout", auth_logout, methods=["POST"]),
         Route("/api/auth/check", auth_check, methods=["GET"]),
+        Route("/api/auth/settings", auth_settings_get, methods=["GET"]),
+        Route("/api/auth/settings", auth_settings_update, methods=["POST"]),
         # Projects
         Route("/api/workspaces", list_workspaces, methods=["GET"]),
         Route("/api/workspaces", upsert_workspace_setting, methods=["POST"]),
@@ -206,6 +228,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/projects/{project_id}/chats", create_project_chat, methods=["POST"]),
         Route("/api/projects/{project_id}/files", project_files_list, methods=["GET"]),
         Route("/api/projects/{project_id}/files", project_files_upload, methods=["POST"]),
+        Route("/api/desktop-drop", desktop_drop_import, methods=["POST"]),
         # Chats
         Route("/api/chats", list_all_chats, methods=["GET"]),
         # /read-all must precede /{chat_id} so the literal isn't swallowed.
@@ -269,6 +292,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/commands", list_commands_endpoint, methods=["GET"]),
         # Agent-facing instruction, subagent, and command assets.
         Route("/api/agent-assets", agent_assets_endpoint, methods=["GET"]),
+        Route("/api/agent-assets/audit", os_audit_endpoint, methods=["GET"]),
         Route("/api/workspace-health", workspace_health_endpoint, methods=["GET"]),
         Route("/api/workspace-health/fix", workspace_health_fix_endpoint, methods=["POST"]),
         Route("/api/agent-assets/subagents", create_subagent_endpoint, methods=["POST"]),
@@ -300,19 +324,32 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/status", status_endpoint, methods=["GET", "PATCH"]),
         Route("/api/startup-status", startup_status_endpoint, methods=["GET"]),
         Route("/api/active-chats", active_chats_endpoint, methods=["GET"]),
+        Route("/api/menubar-chats", menubar_chats_endpoint, methods=["GET"]),
         Route("/api/open-chat/{chat_id}", open_chat_endpoint, methods=["GET"]),
         Route("/api/setup-status", setup_status_endpoint, methods=["GET"]),
+        Route("/api/node/addresses", node_addresses_endpoint, methods=["GET"]),
         Route("/api/package/status", package_status_endpoint, methods=["GET"]),
         Route("/api/package/changelog", package_changelog_endpoint, methods=["GET"]),
         Route("/api/package/update", package_update_endpoint, methods=["POST"]),
         Route("/api/voice/install-local", voice_install_local_endpoint, methods=["POST"]),
         Route("/api/tts/install-local", tts_install_local_endpoint, methods=["POST"]),
+        # Node & Handover (Multi-device Active-Standby)
+        Route("/api/node/status", node_status_endpoint, methods=["GET"]),
+        Route("/api/node/connect", node_connect_endpoint, methods=["POST"]),
+        Route("/api/node/handover", node_handover_endpoint, methods=["POST"]),
+        Route("/api/node/demote", node_demote_endpoint, methods=["POST"]),
+        Route("/api/node/peers", node_peers_endpoint, methods=["POST"]),
         Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"]),
         Route("/api/setup/list-dirs", setup_list_dirs_endpoint, methods=["GET"]),
+        Route("/api/setup/inspect-folder", setup_inspect_folder_endpoint, methods=["GET"]),
         Route("/api/setup/mkdir", setup_mkdir_endpoint, methods=["POST"]),
         Route("/api/stats", cli_stats, methods=["GET"]),
         Route("/api/mcp/status", mcp_status_endpoint, methods=["GET"]),
         Route("/api/mcp/usage", mcp_usage_endpoint, methods=["GET"]),
+        Route("/api/mcp/env-keys", mcp_env_keys_endpoint, methods=["POST"]),
+        Route("/api/mcp/servers", mcp_servers_collection_endpoint, methods=["POST"]),
+        Route("/api/mcp/servers/{name}", mcp_server_item_endpoint, methods=["PATCH", "DELETE"]),
+        Route("/api/mcp/servers/{name}/tools", mcp_server_tools_endpoint, methods=["GET"]),
         # Push notifications
         Route("/api/push/public-key", push_public_key, methods=["GET"]),
         Route("/api/push/subscribe", push_subscribe, methods=["POST"]),
@@ -353,6 +390,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     middleware = [
         Middleware(SecurityHeadersMiddleware),
         Middleware(AuthMiddleware, serializer=serializer, auth_required=config.pwa_auth_required),
+        Middleware(StandbyProxyMiddleware),
     ]
 
     lifespan = None
@@ -374,5 +412,8 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
     # Cache the GitHub release lookup so opening Settings repeatedly does not
     # exhaust the API rate limit (especially on shared/NAT egress IPs).
     app.state.package_status_fetcher = make_cached_package_status()
+    # Filled in off the request path by /api/startup-status so the menu bar can
+    # show an available release without that endpoint ever waiting on GitHub.
+    app.state.update_hint = ("", False)
 
     return app

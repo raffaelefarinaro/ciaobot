@@ -1,5 +1,21 @@
 const BASE = ''
 
+export class ApiError extends Error {
+  status?: number
+  payload?: unknown
+
+  constructor(message: string, opts?: { status?: number; payload?: unknown }) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = opts?.status
+    this.payload = opts?.payload
+  }
+}
+
+function onLoginPage(): boolean {
+  return window.location.pathname === '/login' || window.location.pathname.startsWith('/login/')
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const opts: RequestInit = {
     method,
@@ -11,22 +27,57 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   }
   const res = await fetch(`${BASE}${path}`, opts)
   if (res.status === 401) {
-    window.location.href = '/login'
-    throw new Error('unauthorized')
+    // Never hard-reload while already on /login — that caused a refresh loop
+    // when client mode's /api/auth/check returns 401 (host password needed).
+    const isAuthProbe = path === '/api/auth/check' || path === '/api/auth'
+    if (!onLoginPage() && !isAuthProbe) {
+      window.location.href = '/login'
+    }
+    const payload = await res.json().catch(() => ({}))
+    throw new ApiError(
+      (payload as { error?: string })?.error || 'unauthorized',
+      { status: 401, payload },
+    )
   }
+  const contentType = (res.headers.get('content-type') || '').toLowerCase()
+  const raw = await res.text()
+  const looksLikeHtml = raw.trimStart().startsWith('<!') || raw.trimStart().startsWith('<html')
+  const looksLikeJson = contentType.includes('application/json') || raw.trimStart().startsWith('{') || raw.trimStart().startsWith('[')
   if (!res.ok) {
-    const err: any = await res.json().catch(() => ({}))
+    let err: any = {}
+    if (looksLikeJson) {
+      try { err = JSON.parse(raw) } catch { err = {} }
+    }
+    // A server running older code answers an unknown route with the SPA shell
+    // (HTML), or a 404 with no JSON error to explain itself. Only those warrant
+    // the redeploy hint: a real `404 {"error": "not found"}` has a reason worth
+    // showing, and a plain-text 500 or a proxy 502/503 is a live failure — hide
+    // either behind "redeploy" and the user goes and redeploys a healthy build.
+    if (looksLikeHtml || (res.status === 404 && !err?.error)) {
+      throw new ApiError(
+        `API route ${path} is not available on the running server yet. Use Settings → Deploy, then restart Ciaobot.`,
+        { status: res.status, payload: err },
+      )
+    }
     const stepDetail = Array.isArray(err?.steps)
       ? err.steps.filter((s: any) => s && !s.ok).map((s: any) =>
           s.output ? `${s.step}: ${s.output}` : s.step).join('; ')
       : ''
-    const msg = err?.error || stepDetail || res.statusText || `HTTP ${res.status}`
-    const e = new Error(msg) as Error & { payload?: unknown; status?: number }
-    e.payload = err
-    e.status = res.status
-    throw e
+    const bodyDetail = !looksLikeJson ? raw.trim().slice(0, 200) : ''
+    const msg = err?.error || stepDetail || bodyDetail || res.statusText || `HTTP ${res.status}`
+    throw new ApiError(msg, { status: res.status, payload: err })
   }
-  return res.json()
+  if (looksLikeHtml || !looksLikeJson) {
+    throw new ApiError(
+      `API route ${path} is not available on the running server yet. Use Settings → Deploy, then restart Ciaobot.`,
+      { status: res.status },
+    )
+  }
+  try {
+    return JSON.parse(raw) as T
+  } catch {
+    throw new ApiError(`Invalid JSON from ${path}`, { status: res.status })
+  }
 }
 
 export const api = {

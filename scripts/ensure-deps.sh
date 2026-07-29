@@ -94,9 +94,18 @@ ciao_ensure_deps() {
   fi
 
   # Ensure venv exists and is healthy
-  if [[ -d .venv && ! -x .venv/bin/python ]]; then
-    log_warn "Removing broken virtualenv at .venv..."
-    rm -rf .venv
+  if [[ -d .venv ]]; then
+    if [[ ! -x .venv/bin/python ]]; then
+      log_warn "Removing broken virtualenv at .venv (missing python binary)..."
+      rm -rf .venv
+    elif ! .venv/bin/python -c "import pip" >/dev/null 2>&1; then
+      log_warn "pip missing in .venv, attempting to recover with ensurepip..."
+      .venv/bin/python -m ensurepip --default-pip >/dev/null 2>&1 || true
+      if ! .venv/bin/python -c "import pip" >/dev/null 2>&1; then
+        log_warn "Failed to recover pip via ensurepip. Recreating virtual environment..."
+        rm -rf .venv
+      fi
+    fi
   fi
 
   if [[ ! -d .venv ]]; then

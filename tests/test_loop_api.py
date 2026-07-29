@@ -49,6 +49,17 @@ class _ProjectChats:
         self.chats[new_id] = _Chat("Continued chat")
         return _NewChat(new_id)
 
+    def _resolve_loop_project(self, entry: object):
+        class _Proj:
+            project_id = "proj-1"
+        return _Proj()
+
+    def create_chat(self, project_id: str, title: str = ""):
+        self._continued += 1
+        new_id = f"chat-created-{self._continued}"
+        self.chats[new_id] = _Chat(title)
+        return _NewChat(new_id)
+
 
 def _make_client(tmp_path: Path) -> tuple[TestClient, LoopManager]:
     runtime = tmp_path / ".runtime"
@@ -62,7 +73,7 @@ def _make_client(tmp_path: Path) -> tuple[TestClient, LoopManager]:
         store=LoopStore(runtime),
         dispatch=dispatch,
         chat_busy=pcm.chat_stream_active,
-        chat_exists=lambda chat_id: pcm.get_chat(chat_id) is not None,
+        chat_exists=lambda entry: pcm.get_chat(entry.web_chat_id) is not None,
     )
     app = Starlette(
         routes=[
@@ -210,3 +221,18 @@ def test_delete_stops_and_removes(tmp_path: Path) -> None:
     assert not manager.is_running(loop_id)
     assert client.get("/api/loops").json() == []
     assert client.delete(f"/api/loops/{loop_id}").json() == {"ok": False}
+
+
+def test_start_on_missing_chat_creates_new_chat(tmp_path: Path) -> None:
+    client, manager = _make_client(tmp_path)
+    entry = manager.create(prompt="p", web_chat_id="chat-missing")
+    loop_id = entry.loop_id
+
+    resp = client.patch(f"/api/loops/{loop_id}", json={"running": True})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["running"] is True
+    assert body["web_chat_id"] == "chat-created-1"
+    assert manager.is_running(loop_id)
+    assert manager.get(loop_id).web_chat_id == "chat-created-1"
+

@@ -15,8 +15,8 @@ describe('comment context formatting', () => {
 
     expect(out).toContain('<user-comment-reference>')
     expect(out).toContain('<reference-source>ciao/chat.py (lines 42-47)</reference-source>')
-    expect(out).toContain('<quoted-text>\ndef send():\n</quoted-text>')
-    expect(out).toContain('<user-comment>\nwhy sync?\n</user-comment>')
+    expect(out).toContain('<quoted-text>def send():</quoted-text>')
+    expect(out).toContain('<user-comment>why sync?</user-comment>')
     expect(out).toContain('</user-comment-reference>')
   })
 
@@ -37,8 +37,24 @@ describe('comment context formatting', () => {
 
     expect(out).toContain('<user-comment-reference>')
     expect(out).not.toContain('<reference-source>')
-    expect(out).toContain('<quoted-text>\nthe answer is 4\n</quoted-text>')
-    expect(out).toContain('<user-comment>\nis that right?\n</user-comment>')
+    expect(out).toContain('<quoted-text>the answer is 4</quoted-text>')
+    expect(out).toContain('<user-comment>is that right?</user-comment>')
+  })
+
+  it('formats a grounded chat comment with role and paragraph source anchor', () => {
+    const out = formatChatComments([
+      {
+        selection: 'OpenAI',
+        comment: 'check this term',
+        messageRole: 'assistant',
+        paragraphIndex: 2,
+      },
+    ])
+
+    expect(out).toContain('<user-comment-reference>')
+    expect(out).toContain('<reference-source>assistant message, paragraph 3</reference-source>')
+    expect(out).toContain('<quoted-text>OpenAI</quoted-text>')
+    expect(out).toContain('<user-comment>check this term</user-comment>')
   })
 
   it('neutralizes our own tags embedded in untrusted selection text', () => {
@@ -56,7 +72,7 @@ describe('comment context formatting', () => {
     // quoted-text tag (the neutralized ones no longer match).
     expect((out.match(/<quoted-text>/g) || []).length).toBe(1)
     expect((out.match(/<\/quoted-text>/g) || []).length).toBe(1)
-    expect(out).toContain('</quoted-text>\n<user-comment>\nnote\n</user-comment>')
+    expect(out).toContain('</quoted-text>\n<user-comment>note</user-comment>')
   })
 
   it('lists attached images as a manifest inside the reference', () => {
@@ -79,7 +95,7 @@ describe('comment context formatting', () => {
     expect(out).toContain(
       '<reference-source>guests.csv (row 12, column card_status [F])</reference-source>',
     )
-    expect(out).toContain('<quoted-text>\nTo do\n</quoted-text>')
+    expect(out).toContain('<quoted-text>To do</quoted-text>')
   })
 
   it('joins multiple comments into separate reference blocks', () => {

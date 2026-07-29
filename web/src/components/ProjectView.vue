@@ -244,6 +244,12 @@ const router = useRouter()
 
 const project = computed(() => store.projects.find(p => p.project_id === props.projectId) || null)
 
+watch(project, (p) => {
+  if (p && p.workspace && p.workspace !== store.activeWorkspace) {
+    store.activeWorkspace = p.workspace
+  }
+}, { immediate: true })
+
 const allChats = computed(() => store.chats.filter(c => c.project_id === props.projectId))
 const activeChats = computed(() =>
   allChats.value

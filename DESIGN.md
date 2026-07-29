@@ -28,24 +28,26 @@ colors:
   light-text-muted: "#5f607d"
   light-border: "#d2d4e3"
 typography:
+  fontFamilySans: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'Segoe UI', Roboto, sans-serif"
+  fontFamilyMono: "SF Mono, Fira Code, Cascadia Code, monospace"
   title:
-    fontFamily: "SF Mono, Fira Code, Cascadia Code, monospace"
+    fontFamily: "{typography.fontFamilySans}"
     fontSize: 16px
     fontWeight: 700
     lineHeight: 1.3
     letterSpacing: -0.02em
   body:
-    fontFamily: "SF Mono, Fira Code, Cascadia Code, monospace"
-    fontSize: 13px
+    fontFamily: "{typography.fontFamilySans}"
+    fontSize: 14px
     fontWeight: 400
-    lineHeight: 1.5
+    lineHeight: 1.6
   body-mobile:
-    fontFamily: "SF Mono, Fira Code, Cascadia Code, monospace"
+    fontFamily: "{typography.fontFamilySans}"
     fontSize: 16px
     fontWeight: 400
-    lineHeight: 1.5
+    lineHeight: 1.6
   label:
-    fontFamily: "SF Mono, Fira Code, Cascadia Code, monospace"
+    fontFamily: "{typography.fontFamilyMono}"
     fontSize: 11px
     fontWeight: 600
     lineHeight: 1.3
@@ -110,15 +112,25 @@ Ciaobot is a focused control surface for a personal AI assistant. Its visual ide
 
 The PWA is information-dense but not cramped. Monospaced typography, compact labels, restrained animation, and a deep indigo foundation establish the console character. A warm pink accent supplies personality and orientation. The interface must remain understandable without color, animation, hover, or prior knowledge of its icons.
 
-The macOS tray is a native companion, not a miniature copy of the PWA. Preserve platform menu conventions and use it for glanceable status, quick navigation, unread state, and server recovery.
-
-The installed PWA owns the `Ciaobot` name and orange mascot tile. The native recovery launcher is named `Ciaobot Server` and uses the same mascot on a deep-indigo tile with a terminal prompt, so the two roles remain recognizable but cannot be mistaken for one another in Finder or Launchpad.
+`Ciaobot.app` owns the macOS Dock window, native menu-bar item, and
+notifications. Desktop preferences live in the tray itself rather than a
+separate settings window, so the shell has no bundled interactive UI. The tray
+is not a miniature copy of the PWA: preserve platform menu conventions and use
+it for glanceable status, navigation, unread/input/working state, and server
+recovery. The one bundled page (`startup.html`) uses a warm, compact neutral
+surface; the remotely loaded PWA retains its own design system and receives no
+native capabilities. Finder file drops pass through the main webview to the
+PWA's standard composer drop target rather than becoming a separate native
+attachment surface. When the engine is
+unavailable, the main window uses the same warm native surface for a concise
+waiting/recovery state instead of showing a blank webview; it transitions to
+the PWA automatically when the engine becomes reachable.
 
 ## Colors
 
 Dark mode is the primary visual expression. It uses layered indigo surfaces instead of neutral black, keeping long sessions comfortable while preserving clear hierarchy.
 
-- **Primary pink (`#ff4d6d`):** The brand accent and primary-action color. Use it for the current location, focus, progress, and the single most important action in a region.
+- **Primary pink (`#ff4d6d`):** The brand accent and primary-action color. Use it for the current location, focus, progress, and the single most important action in a region. Workspaces may override this with a saved accent preset (`pink`, `cyan`, `amber`, `emerald`, `violet`); canvas and surface tokens stay fixed.
 - **Violet (`#6a47b8`):** A secondary accent for selected filters, contextual information, and supporting distinctions. It must not compete with the primary action.
 - **Background (`#1a1a2e`):** The deepest application canvas.
 - **Surfaces (`#1f2240`, `#23264a`, `#2a2e54`):** Cards, elevated controls, hover, and pressed states. Prefer tonal separation and borders over large shadows.
@@ -131,12 +143,12 @@ Color is never the only state signal. Pair status colors with text, an icon, a s
 
 ## Typography
 
-The product uses the system monospace stack: **SF Mono**, **Fira Code**, **Cascadia Code**, then `monospace`. This is a functional choice: chat metadata, commands, schedules, identifiers, and system status align naturally and retain the product's console character.
+The product uses a **hybrid typography system**: a clean system proportional sans-serif stack (`-apple-system`, `SF Pro`, `Segoe UI`, `Roboto`) for conversational chat prose and general UI, paired with a monospaced stack (**SF Mono**, **Fira Code**, **Cascadia Code**, `monospace`) for code blocks, badges, commands, schedules, timestamps, and terminal identifiers.
 
 - **Titles:** 15–16px, bold, with slightly tight tracking. Titles should remain visible when actions compete for space.
-- **Body:** 13–14px on desktop with comfortable line height. Long-form assistant content may breathe more than controls and metadata.
+- **Body:** 14px on desktop with comfortable 1.6 line height for natural reading.
 - **Mobile form text:** At least 16px to prevent browser auto-zoom while keeping user zoom available.
-- **Labels:** 11px, semibold, often uppercase with 0.5px tracking. Use for short section titles and field labels, not paragraphs.
+- **Labels & Badges:** Monospaced 11px, semibold, often uppercase with 0.5px tracking for technical precision.
 - **Wordmark:** Bold monospace with a pink `›` prompt prefix. A blinking caret may appear only in startup or explicitly terminal-like moments.
 
 Respect the user-controlled font scale. Truncate compact navigation labels only when the full value remains available through context, title text, or an expanded view.
@@ -169,6 +181,7 @@ Borders are structural, not decorative. Active navigation is marked by a slim pi
 - **Caution and danger:** Restart and similar recoverable operations use orange caution styling. Delete and irreversible actions use red and require clear wording or confirmation.
 - **Navigation:** Use native buttons or links where possible. Every navigation row must support keyboard focus and Enter/Space activation, expose its selected/expanded state, and retain a visible text label.
 - **Cards and panels:** Group related information with a tonal surface, border, 10px radius, and 16px padding. Avoid nesting multiple bordered cards without a clear hierarchy.
+- **Data tables:** Compact tables should fit their content instead of stretching across a message. At narrow widths, preserve readable row labels and contain horizontal overflow in a visibly focused, keyboard-scrollable region.
 - **Inputs and composer:** Inputs use the deep background, visible border, pink focus ring, and plain-language labels. The chat composer remains the strongest persistent interaction affordance.
 - **Badges and status:** Badges are compact supporting signals, never the sole explanation. Running, unread, failed, and disabled states need accessible text equivalents.
 - **Menus and sheets:** Overflow menus contain secondary and destructive actions when horizontal space is constrained. Mobile modals become edge-to-edge sheets and honor safe areas.

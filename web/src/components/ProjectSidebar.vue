@@ -97,6 +97,7 @@
           :key="workspace.name"
           :class="{ active: store.activeWorkspace === workspace.name }"
           :aria-pressed="store.activeWorkspace === workspace.name"
+          :data-workspace-color="colorForWorkspace(workspace)"
           @click="selectAutomationWorkspace(workspace.name)"
         >
           {{ workspaceLabel(workspace.name) }}
@@ -274,21 +275,14 @@
           class="settings-nav-item"
           :class="{ active: route.path === '/settings/context' }"
         >
-          agent context
+          context
         </router-link>
         <router-link
           to="/settings/skills"
           class="settings-nav-item"
           :class="{ active: route.path === '/settings/skills' }"
         >
-          agent assets
-        </router-link>
-        <router-link
-          to="/settings/usage"
-          class="settings-nav-item"
-          :class="{ active: route.path === '/settings/usage' }"
-        >
-          tool usage
+          assets
         </router-link>
         <router-link
           to="/settings/automations"
@@ -308,6 +302,7 @@
           :key="workspace.name"
           :class="{ active: store.activeWorkspace === workspace.name }"
           :aria-pressed="store.activeWorkspace === workspace.name"
+          :data-workspace-color="colorForWorkspace(workspace)"
           @click="store.switchWorkspace(workspace.name)"
         >
           {{ workspaceLabel(workspace.name) }}
@@ -465,6 +460,13 @@
                   title="Generating title..."
                 />
                 <span v-else class="chat-title">{{ chat.title }}</span>
+                <span
+                  v-if="chatLoopBadge(chat.chat_id)"
+                  class="loop-mark"
+                  :class="{ stopped: !chatLoopBadge(chat.chat_id)!.running }"
+                  :title="chatLoopBadge(chat.chat_id)!.title"
+                  :aria-label="chatLoopBadge(chat.chat_id)!.title"
+                >&#10227;</span>
                 <span v-if="store.isChatStreaming(chat.chat_id)" class="spinner-dot" title="Working" />
                 <span v-else-if="store.chatHasBackgroundAgents(chat.chat_id)" class="spinner-dot bg-agents" title="Background agents running" />
                 <span v-else-if="store.chatNeedsInput(chat.chat_id)" class="needs-input-badge" title="Needs your answer" aria-label="Needs your answer">?</span>
@@ -474,7 +476,7 @@
                 <button
                   class="chat-actions-btn"
                   aria-label="Chat actions"
-                  title="Rename, move, archive, delete"
+                  title="Copy ID, rename, move, archive, delete"
                   @click.stop="toggleChatMenu($event, chat.chat_id)"
                 >&middot;&middot;&middot;</button>
               </div>
@@ -491,6 +493,7 @@
                     :style="{ top: chatMenuPos.top + 'px', left: chatMenuPos.left + 'px' }"
                   >
                     <template v-if="!moveSubmenu">
+                      <button @click="copyChatId(chatMenu!)">Copy chat ID</button>
                       <button @click="startRenameChat(chatMenu!)">Rename</button>
                       <button v-if="moveTargets.length" @click="openMoveSubmenu()">Move to...</button>
                       <button v-if="chatMenuChat?.retry?.status === 'pending'" @click="stopRetry(chatMenu!)">Stop trying</button>
@@ -591,6 +594,8 @@ import { useTaskStore } from '../stores/tasks'
 import { useFileViewerStore } from '../stores/fileViewer'
 import NotificationBell from './NotificationBell.vue'
 import { loopInWorkspace, scheduleInWorkspace } from '../lib/automationWorkspace'
+import { colorForWorkspace } from '../lib/workspaceColors'
+import { askConfirm } from '../lib/confirm'
 
 const props = defineProps<{ collapsed: boolean; mode?: 'chat' | 'project' | 'schedules' | 'settings' }>()
 const emit = defineEmits<{ toggle: []; 'chat-selected': []; 'new-schedule': [] }>()
@@ -618,6 +623,32 @@ const workspaceLoops = computed(() =>
     store.projects,
   )),
 )
+
+// Loop-driven chats get a ↻ marker in the list so it's obvious the chat has
+// a heartbeat of its own and new turns will appear without anyone typing.
+// Keyed lookup (not a filter per row) so a long chat list stays O(n).
+const loopsByChat = computed(() => {
+  const byChat = new Map<string, { count: number; running: boolean }>()
+  for (const l of taskStore.loops) {
+    const prev = byChat.get(l.web_chat_id)
+    byChat.set(l.web_chat_id, {
+      count: (prev?.count || 0) + 1,
+      running: (prev?.running || false) || !!l.running,
+    })
+  }
+  return byChat
+})
+function chatLoopBadge(chatId: string): { running: boolean; title: string } | null {
+  const info = loopsByChat.value.get(chatId)
+  if (!info) return null
+  const plural = info.count > 1 ? `${info.count} loops` : 'A loop'
+  return {
+    running: info.running,
+    title: info.running
+      ? `${plural} running in this chat`
+      : `${plural} attached to this chat (stopped)`,
+  }
+}
 
 const oneOffSchedules = computed(() => {
   return workspaceSchedules.value
@@ -732,7 +763,7 @@ const moveTargets = computed<ProjectInfo[]>(() => {
     })
 })
 
-function menuPosition(rect: DOMRect, menuHeight = 160): { top: number; left: number } {
+function menuPosition(rect: DOMRect, menuHeight = 184): { top: number; left: number } {
   const top = rect.bottom + 4
   const left = Math.max(8, rect.right - 160)
   // If the menu would overflow the viewport bottom, flip it above the trigger
@@ -818,6 +849,14 @@ async function onBrandClick() {
 watch(() => store.workspaceProjects, (projects) => {
   for (const p of projects) {
     expandedProjects.add(p.project_id)
+  }
+}, { immediate: true })
+
+watch(() => store.activeChatId, (chatId) => {
+  if (!chatId) return
+  const project = store.projectFor(chatId)
+  if (project) {
+    expandedProjects.add(project.project_id)
   }
 }, { immediate: true })
 
@@ -972,8 +1011,28 @@ async function doRenameChat() {
   renamingChat.value = null
 }
 
+async function copyChatId(chatId: string) {
+  closeChatMenus()
+  try {
+    await navigator.clipboard.writeText(chatId)
+    store.pushToast({
+      chat_id: chatId,
+      title: 'Chat ID copied',
+      body: chatId,
+    })
+  } catch (e: any) {
+    store.pushErrorToast('Could not copy chat ID', `${e?.message || e}`)
+  }
+}
+
 async function doArchiveChat(chatId: string) {
   chatMenu.value = null
+  // This path never asked for confirmation, unlike the chat header's archive
+  // button, so archiving from the sidebar menu was a single misclick.
+  if (!await askConfirm('Archive this chat? You can reopen it from the archive.', {
+    title: 'Archive chat',
+    confirmLabel: 'Archive',
+  })) return
   await store.archiveChat(chatId)
 }
 
@@ -1423,6 +1482,7 @@ async function confirmDeleteChat(chatId: string) {
 
 .workspace-toggle button.active {
   border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg3));
 }
 
 .project-list {
@@ -1591,6 +1651,21 @@ async function confirmDeleteChat(chatId: string) {
   border-bottom: none;
 }
 
+/* Loop marker on a chat row. Accent while the cadence is live, muted when the
+   loop exists but is stopped, so "this chat re-runs itself" reads at a glance
+   without competing with the streaming dot next to it. */
+.loop-mark {
+  flex: 0 0 auto;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--accent);
+}
+
+.loop-mark.stopped {
+  color: var(--fg3, var(--fg2));
+  opacity: 0.7;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
@@ -1699,11 +1774,15 @@ async function confirmDeleteChat(chatId: string) {
 
 
 .sidebar-footer {
+  /* Match the sidebar/pane headers: 44px controls + 8px pad + 1px border. */
+  height: 61px;
   padding: 8px;
   border-top: 1px solid var(--border);
   display: flex;
   gap: 6px;
   align-items: center;
+  flex-shrink: 0;
+  box-sizing: border-box;
 }
 
 .add-project-btn {

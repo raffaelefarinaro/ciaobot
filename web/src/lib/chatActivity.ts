@@ -50,6 +50,19 @@ export type TurnPart =
   | { kind: 'trace'; steps: ChatMessage[] }
   | { kind: 'assistant'; msg: ChatMessage }
 
+/** Assistant prose step (not an Activity marker). Ignores `phase` so Claude
+ *  mid-turn narration can still be found before we classify it. */
+export function isAssistantTextStep(
+  m: Pick<ChatMessage, 'role' | 'tool_name'>,
+): boolean {
+  return (
+    m.role === 'assistant'
+    && m.tool_name !== '_activity'
+    && m.tool_name !== '_thinking'
+    && m.tool_name !== '_filecard'
+  )
+}
+
 /** True when a buffered step is substantive assistant answer text that should
  *  render as its own bubble — not an Activity marker (`_activity`/`_thinking`/
  *  `_filecard`, all emitted with role `system`) and not Codex `commentary`
@@ -57,26 +70,80 @@ export type TurnPart =
 export function isAnswerBubble(
   m: Pick<ChatMessage, 'role' | 'tool_name' | 'phase'>,
 ): boolean {
-  return (
-    m.role === 'assistant'
-    && m.tool_name !== '_activity'
-    && m.tool_name !== '_thinking'
-    && m.tool_name !== '_filecard'
-    && m.phase !== 'commentary'
-  )
+  return isAssistantTextStep(m) && m.phase !== 'commentary'
+}
+
+/**
+ * Heuristic for Claude mid-turn progress narration (Codex already stamps
+ * `phase: commentary`). Validated against real Ciao multi-text turns:
+ * fold "Now let me…", "Let me…", trailing-colon status lines; keep long
+ * updates, blockers/decisions, and answer-shaped openings.
+ *
+ * Never apply this alone to the last text in a turn — callers must always
+ * keep the final block visible (it can be a short clarifying question).
+ */
+const PROGRESS_OPENER_RE = /^(now\b|let me\b|i['']ll\b|i will\b|looking\b|checking\b|searching\b|reading\b|next\b|okay[,.]?\s*let|ok[,.]?\s*let|alright\b|updating\b|fixing\b|adding\b|writing\b|running\b|making\b|i['']m going\b|i am going\b|digging\b|inspecting\b|opening\b|creating\b|wiring\b|clean[,.]?\b|good[,.]?\b|got it\b)/i
+const ANSWER_OPENER_RE = /^(Done|Fixed|Shipped|Merged|Implemented|Here['']s|Here is|Summary|Both moves|Half right)\b/i
+const DECISION_RE = /\b(blocked|blocking|need your|your call|before i)\b/i
+const MARKDOWN_ANSWER_RE = /^(#{1,3}\s|[-*]\s|\*\*[A-Z])/m
+
+export function isProgressCommentary(content: string): boolean {
+  const t = (content || '').trim()
+  if (!t) return true
+
+  // Keep substantive mid-turn updates.
+  if (t.length >= 200) return false
+  // Keep user-facing blockers / decisions at any length (can be short).
+  if (DECISION_RE.test(t)) return false
+  if (ANSWER_OPENER_RE.test(t)) return false
+  if (MARKDOWN_ANSWER_RE.test(t)) return false
+
+  const first = t.split('\n', 1)[0].trim()
+  if (/:\s*$/.test(first) && t.length < 200) return true
+  if (PROGRESS_OPENER_RE.test(first) && t.length < 250) return true
+  return false
+}
+
+/** Index of the turn's user-facing final reply. Prefers the last non-progress
+ *  assistant text (so a trailing "Now the docs:" after a real answer does not
+ *  steal the final bubble); falls back to the last assistant text so a
+ *  short clarifying question still surfaces. Returns -1 when none. */
+export function findFinalAnswerIndex(
+  buffer: Array<Pick<ChatMessage, 'role' | 'tool_name' | 'phase' | 'content'>>,
+): number {
+  let fallback = -1
+  for (let k = buffer.length - 1; k >= 0; k--) {
+    const m = buffer[k]
+    if (!isAssistantTextStep(m)) continue
+    if (m.phase === 'commentary') continue
+    if (fallback < 0) fallback = k
+    if (m.phase === 'final_answer') return k
+    if (!isProgressCommentary(m.content || '')) return k
+  }
+  return fallback
+}
+
+/** True when this assistant text should render as its own bubble (given it is
+ *  not the turn-final index, which the caller always keeps). */
+export function shouldRenderAnswerBubble(
+  m: Pick<ChatMessage, 'role' | 'tool_name' | 'phase' | 'content'>,
+): boolean {
+  if (!isAssistantTextStep(m)) return false
+  if (m.phase === 'commentary') return false
+  if (m.phase === 'final_answer') return true
+  return !isProgressCommentary(m.content || '')
 }
 
 /** Split one turn's buffered steps into ordered parts, EXCLUDING the final
  *  answer bubble at `finalIdx` (the caller appends that itself, with the
  *  turn's outputs/subchats attached).
  *
- *  Every assistant text block renders as its own message bubble, in order, and
- *  the tool/thinking steps that ran between two consecutive text blocks group
- *  into one Activity trace bubble sitting between them — so an agentic turn
- *  reads as "message → what happened next → message" rather than one giant
- *  collapsed trace with the real messages buried inside. Bookkeeping tool calls
- *  the model ran AFTER its final answer (`buffer` indices past `finalIdx`) fold
- *  into the trace that precedes the reply, never a dangling block below it.
+ *  Substantive assistant text renders as its own message bubble. Claude
+ *  progress narration (`Now let me…`, short status lines) and Codex
+ *  `phase: commentary` fold into the Activity trace with the tool/thinking
+ *  steps between them. Bookkeeping tool calls after the final answer
+ *  (`buffer` indices past `finalIdx`) fold into the trace that precedes the
+ *  reply, never a dangling block below it.
  *
  *  Pass `finalIdx < 0` when the turn produced no answer bubble (in progress /
  *  interrupted / tools only): every step then groups into traces. */
@@ -92,7 +159,7 @@ export function buildTurnParts(buffer: ChatMessage[], finalIdx: number): TurnPar
   for (let k = 0; k < buffer.length; k++) {
     if (k === finalIdx) continue
     const m = buffer[k]
-    if (isAnswerBubble(m)) {
+    if (shouldRenderAnswerBubble(m)) {
       flush()
       parts.push({ kind: 'assistant', msg: m })
     } else {

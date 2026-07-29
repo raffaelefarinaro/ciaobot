@@ -1,6 +1,6 @@
 <template>
   <div class="chat-panel" @dragover.prevent="dragOver = true" @dragleave="dragOver = false" @drop.prevent="handleDrop" @click="handleFileLinkClick">
-    <div v-if="dragOver" class="drop-overlay">Drop images to attach, or files/folders to insert their path</div>
+    <div v-if="dragOver" class="drop-overlay">Drop images to attach, or files to add their accessible path</div>
 
     <!-- Header -->
     <PaneHeader :active-bg-agents="store.activeBackgroundAgents" @open-sidebar="$emit('open-sidebar')">
@@ -8,6 +8,13 @@
         <div class="header-left">
           <button class="close-btn desktop-only" @click="$emit('close')" title="Close chat">&times;</button>
           <div class="header-breadcrumb" ref="breadcrumbRef">
+            <span
+              v-if="project && project.name !== 'General'"
+              class="breadcrumb-project"
+              @click.stop="toggleContext"
+              :class="{ active: showContext }"
+            >{{ project.name }}</span>
+            <span v-if="project && project.name !== 'General'" class="breadcrumb-separator">/</span>
             <input
               v-if="editingTitle"
               class="title-input"
@@ -18,16 +25,7 @@
               @click.stop
               autofocus
             />
-            <template v-else>
-              <span
-                v-if="project && project.name !== 'General'"
-                class="breadcrumb-project"
-                @click.stop="toggleContext"
-                :class="{ active: showContext }"
-              >{{ project.name }}</span>
-              <span v-if="project && project.name !== 'General'" class="breadcrumb-separator">/</span>
-              <span class="pane-title chat-title" @dblclick.stop="startEditTitle" @click.stop>{{ chat.title }}</span>
-            </template>
+            <span v-else class="pane-title chat-title" @dblclick.stop="startEditTitle" @click.stop>{{ chat.title }}</span>
             <!-- Project context popup -->
             <div
               v-if="showContext"
@@ -133,6 +131,7 @@
           <strong>{{ l.title || 'Loop' }}</strong>
           · every {{ l.interval_minutes }}m
           · {{ l.running ? 'running' : 'stopped' }}<template v-if="l.last_status === 'busy'"> (waiting, chat busy)</template>
+          <template v-if="l.running && loopCountdown(l)"> · next {{ loopCountdown(l) }}</template>
         </span>
         <button class="btn-small" @click="toggleLoop(l)">{{ l.running ? 'Stop loop' : 'Start loop' }}</button>
         <router-link :to="`/schedules/${l.loop_id}`" class="btn-small loop-banner-manage">Manage</router-link>
@@ -141,7 +140,7 @@
 
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
-    <div class="messages" ref="messagesEl" data-tour="chat-messages" @click="handleHighlightClick">
+    <div class="messages" ref="messagesEl" data-tour="chat-messages" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
       <div class="messages-content">
       <template v-for="(item, i) in renderItems" :key="i">
         <!-- Reasoning trace: intermediate assistant text + tool calls grouped -->
@@ -224,7 +223,7 @@
         <!-- User message -->
         <div v-else-if="item.kind === 'user'" class="message-wrap user" :class="{ 'actions-tapped': tappedMessageKey === `user-${i}` }">
           <div class="message-row" @click="toggleMessageActions(`user-${i}`, $event)">
-            <div class="message user">
+            <div class="message user" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-user-${i}`" :data-msg-index="i" data-msg-role="user">
               <div class="message-content">
                 <div v-if="item.msg.images?.length" class="message-images">
                   <a
@@ -240,8 +239,15 @@
                 </div>
                 <div v-html="renderMarkdown(item.msg.content)"></div>
               </div>
-              <div v-if="item.msg.timestamp" class="message-meta">
-                {{ formatTime(item.msg.timestamp) }}
+              <div v-if="item.msg.timestamp || item.msg.unattended" class="message-meta">
+                <!-- Loop/schedule tick, not something the reader typed. Without
+                     this the two are indistinguishable in the transcript. -->
+                <span
+                  v-if="item.msg.unattended"
+                  class="unattended-mark"
+                  title="Sent automatically by a loop or schedule"
+                >&#10227; auto</span>
+                <span v-if="item.msg.timestamp">{{ formatTime(item.msg.timestamp) }}</span>
               </div>
             </div>
             <div v-if="item.msg.content?.trim()" class="message-actions">
@@ -274,7 +280,7 @@
         <!-- Final assistant message -->
         <div v-else-if="item.kind === 'assistant'" class="message-wrap assistant" :class="{ 'actions-tapped': tappedMessageKey === `assistant-${i}` }">
           <div class="message-row" @click="toggleMessageActions(`assistant-${i}`, $event)">
-            <div class="message assistant" :class="{ error: item.msg.is_error }">
+            <div class="message assistant" :class="{ error: item.msg.is_error }" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-asst-${i}`" :data-msg-index="i" data-msg-role="assistant">
               <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
               <div v-if="item.outputs?.length" class="answer-outputs" role="group" aria-label="Outputs">
                 <span class="answer-outputs-label">Outputs</span>
@@ -355,7 +361,7 @@
           </div>
         </div>
         <!-- System message (errors, etc) -->
-        <div v-else-if="item.kind === 'system'" class="message system">
+        <div v-else-if="item.kind === 'system'" class="message system" :data-msg-id="item.msg.timestamp ? `msg-${item.msg.timestamp}` : `msg-sys-${i}`" :data-msg-index="i" data-msg-role="system">
           <div class="message-content" v-html="renderMarkdown(item.msg.content)"></div>
           <div v-if="isErrorMsg(item.msg.content)" class="error-actions">
             <button
@@ -370,6 +376,33 @@
           </div>
         </div>
       </template>
+
+      <div
+        v-if="store.hostConnectionUnavailable"
+        class="host-connection-card"
+        role="alert"
+      >
+        <div class="host-connection-main">
+          <span class="host-connection-spinner" aria-hidden="true"></span>
+          <div>
+            <div class="host-connection-title">Can’t reach the host</div>
+            <div class="host-connection-meta">
+              Ciaobot is trying to reconnect. You can keep waiting, or make this device the host.
+            </div>
+            <div v-if="hostHandoverError" class="host-connection-error">
+              {{ hostHandoverError }}
+            </div>
+          </div>
+        </div>
+        <button
+          type="button"
+          class="btn-small host-connection-action"
+          :disabled="becomingHost"
+          @click="disconnectAndBecomeHost"
+        >
+          {{ becomingHost ? 'Becoming host…' : 'Disconnect and become host' }}
+        </button>
+      </div>
 
       <div v-if="chat.retry?.status === 'pending' && !store.isStreaming" class="retry-card">
         <div class="retry-card-main">
@@ -489,8 +522,7 @@
       <div ref="scrollAnchor"></div>
 
       <!-- Floating "Comment" pill is teleported to body so it isn't clipped by
-           .messages (position: relative + overflow-y: auto). The composer
-           itself lives in the right-side comment sidebar, not as a popover. -->
+           .messages (position: relative + overflow-y: auto). -->
       <Teleport to="body">
         <button
           v-if="selectionAnchor"
@@ -504,122 +536,41 @@
           <span class="chat-comment-trigger-icon">💬</span>
           Comment
         </button>
+
       </Teleport>
+      <CommentComposePopover
+        :anchor="commentDraft && draftAnchor ? draftAnchor : null"
+        v-model="composeText"
+        :images="commentDraftImages"
+        @cancel="cancelChatComment"
+        @save="saveChatComment"
+        @upload="handleDraftImageUpload"
+        @remove-image="removeDraftImage"
+      />
+      <!-- Same popover, editing an existing comment. Anchored to the chip that
+           opened it rather than to a selection, since the text it annotates may
+           be scrolled out of view. -->
+      <CommentComposePopover
+        :anchor="editingChatCommentId ? chipEditAnchor : null"
+        v-model="editingChatCommentText"
+        :images="editingChatCommentImages"
+        @cancel="cancelEditChatComment"
+        @save="editingChatCommentId && saveEditChatComment(editingChatCommentId)"
+        @upload="editingChatCommentId && handleEditImageUpload($event, editingChatCommentId)"
+        @remove-image="removeEditImage"
+      />
+      <!-- Read popover for a comment highlight. Owns its own state so hovering
+           a highlight doesn't re-render the transcript; see the component. -->
+      <ChatCommentPopover
+        ref="commentPopover"
+        :comments="store.pendingChatComments"
+        :draft-id="DRAFT_COMMENT_ID"
+        @edit="openEditFromChatPopover"
+        @delete="deleteChatComment"
+      />
       </div>
     </div>
 
-    <!-- Right-side comment sidebar: shows pending chat comments (and the
-         in-flight draft) while you're composing the next message. Cleared
-         on send, same lifecycle as the existing pending-chip strip. -->
-    <aside v-if="commentSidebarVisible" class="chat-comment-sidebar">
-      <div class="chat-sidebar-header">
-        <span class="chat-sidebar-title">Comments</span>
-        <span class="chat-sidebar-count">{{ store.pendingChatComments.length + (commentDraft ? 1 : 0) }}</span>
-      </div>
-
-      <div v-if="commentDraft" class="chat-sidebar-draft" @mousedown.stop>
-        <div class="chat-sidebar-draft-header">
-          <span class="chat-sidebar-draft-label">New comment</span>
-          <button class="chat-sidebar-card-remove" @click="cancelChatComment" title="Cancel">&times;</button>
-        </div>
-        <div class="chat-sidebar-card-quote">"{{ truncate(commentDraft.selection, 120) }}"</div>
-        <textarea
-          ref="chatCommentInputEl"
-          v-model="commentDraft.text"
-          class="chat-sidebar-draft-input"
-          placeholder="Add a comment…"
-          rows="3"
-          @keydown="onChatCommentKeydown"
-        ></textarea>
-        <div v-if="commentDraftImages.length" class="chat-sidebar-draft-images">
-          <span v-for="(img, i) in commentDraftImages" :key="img" class="draft-image-preview">
-            <img :src="`/api/images/${img}`" :alt="img" class="draft-image-thumb" />
-            <button class="draft-image-remove" @click="removeDraftImage(i)" title="Remove">&times;</button>
-          </span>
-        </div>
-        <div class="chat-sidebar-draft-actions">
-          <label class="image-btn-sm" title="Upload images">
-            <input type="file" accept="image/*" multiple hidden @change="handleDraftImageUpload" />
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-          </label>
-          <button class="btn-sm" @click="cancelChatComment" type="button">Cancel</button>
-          <button
-            class="btn-sm primary"
-            :disabled="!commentDraft.text.trim()"
-            @click="saveChatComment"
-            type="button"
-          >Add comment</button>
-        </div>
-      </div>
-
-      <div class="chat-sidebar-list" ref="sidebarListEl">
-        <div
-          v-for="c in store.pendingChatComments"
-          :key="c.id"
-          class="chat-sidebar-card"
-          :class="{ 'is-editing': editingChatCommentId === c.id }"
-          :data-card-id="c.id"
-          @click="editingChatCommentId !== c.id && jumpToCommentHighlight(c.id)"
-        >
-          <div class="chat-sidebar-card-header">
-            <span class="chat-sidebar-card-file">Selection</span>
-            <div class="chat-sidebar-card-actions">
-              <button
-                v-if="editingChatCommentId !== c.id"
-                class="chat-sidebar-card-edit"
-                @click.stop="startEditChatComment(c)"
-                title="Edit"
-              >&#9998;</button>
-              <button
-                class="chat-sidebar-card-remove"
-                @click.stop="deleteChatComment(c.id)"
-                title="Delete"
-              >&times;</button>
-            </div>
-          </div>
-          <div class="chat-sidebar-card-quote">"{{ truncate(c.selection, 120) }}"</div>
-          <div v-if="editingChatCommentId !== c.id && c.images?.length" class="chat-sidebar-card-images">
-            <img
-              v-for="img in c.images"
-              :key="img"
-              :src="`/api/images/${img}`"
-              :alt="img"
-              class="card-image-thumb"
-              @click.stop
-            />
-          </div>
-          <div v-if="editingChatCommentId !== c.id" class="chat-sidebar-card-note">{{ c.comment }}</div>
-          <div v-if="editingChatCommentId === c.id" class="chat-sidebar-edit-body" @mousedown.stop @click.stop>
-            <textarea
-              ref="sidebarEditInputEl"
-              v-model="editingChatCommentText"
-              class="chat-sidebar-edit-input"
-              rows="3"
-              @keydown="onEditChatCommentKeydown($event, c.id)"
-            ></textarea>
-            <div v-if="editingChatCommentImages.length" class="chat-sidebar-edit-images">
-              <span v-for="(img, i) in editingChatCommentImages" :key="img" class="draft-image-preview">
-                <img :src="`/api/images/${img}`" :alt="img" class="draft-image-thumb" />
-                <button class="draft-image-remove" @click.stop="removeEditImage(i)" title="Remove">&times;</button>
-              </span>
-            </div>
-            <div class="chat-sidebar-edit-actions">
-              <label class="image-btn-sm" title="Upload images">
-                <input type="file" accept="image/*" multiple hidden @change="handleEditImageUpload($event, c.id)" />
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-              </label>
-              <button class="btn-sm" @click="cancelEditChatComment" type="button">Cancel</button>
-              <button
-                class="btn-sm primary"
-                :disabled="!editingChatCommentText.trim()"
-                @click="saveEditChatComment(c.id)"
-                type="button"
-              >Save</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </aside>
     </div>
 
     <!-- Scroll-to-bottom float button -->
@@ -697,7 +648,18 @@
           <span class="permission-tool">{{ p.tool_name }}</span>
           <span v-if="permissionReason(p)" class="permission-message">{{ permissionReason(p) }}</span>
         </div>
-        <pre v-if="p.tool_input" class="permission-input">{{ formatToolInput(p.tool_input) }}</pre>
+        <!-- Flat argument objects (the common case: MCP tools, Skill calls)
+             render as labelled rows, so a long `prompt` value reads as prose
+             instead of a JSON wall that gets clipped by the scroll box and
+             looks like the request failed to parse. Nested payloads and bare
+             strings fall back to the raw text. -->
+        <dl v-if="permissionArgs(p.tool_input)" class="permission-args">
+          <template v-for="f in permissionArgs(p.tool_input)" :key="f.key">
+            <dt>{{ f.key }}</dt>
+            <dd>{{ f.value }}</dd>
+          </template>
+        </dl>
+        <pre v-else-if="p.tool_input" class="permission-input">{{ formatToolInput(p.tool_input) }}</pre>
         <div class="permission-actions">
           <button
             class="btn-deny"
@@ -763,16 +725,52 @@
       </div>
     </div>
 
-    <!-- Pending image attachments. File and chat comments stay visible in
-         their own sidebars/viewers to avoid duplicate composer chips. -->
+    <!-- Staged attachments. Images, chat comments and file comments share one
+         lifecycle (staged here, sent with the next message, cleared on send),
+         so they share one row above the input. A chip is a summary; clicking a
+         chat-comment chip opens an edit popover anchored to it. -->
     <div
-      v-if="store.pendingImages.length"
+      v-if="store.pendingImages.length || store.pendingChatComments.length || store.pendingComments.length"
       class="pending-attachments"
     >
       <span v-for="(ref, i) in store.pendingImages" :key="`img-${ref}`" class="image-preview">
         <img :src="`/api/images/${ref}`" :alt="ref" class="image-preview-thumb" />
         <button class="image-ref-chip" @click="insertImageRef(i + 1)" title="Insert reference at cursor">[Image {{ i + 1 }}]</button>
         <button class="image-preview-remove" @click="removePendingImage(i)" title="Remove">&times;</button>
+      </span>
+      <span
+        v-for="c in store.pendingChatComments"
+        :key="`cc-${c.id}`"
+        class="comment-chip"
+        :class="{ 'is-editing': editingChatCommentId === c.id }"
+      >
+        <span class="comment-chip-icon" aria-hidden="true">&#128172;</span>
+        <button
+          type="button"
+          class="comment-chip-body"
+          @click.stop.prevent="openChatCommentChip(c.id, $event)"
+          :title="`${c.selection}\n\n${c.comment}`"
+        >
+          <span class="comment-chip-quote">"{{ truncate(c.selection, 40) }}"</span>
+          <span class="comment-chip-note">{{ truncate(c.comment, 40) }}</span>
+        </button>
+        <button class="comment-chip-remove" @click.stop.prevent="deleteChatComment(c.id)" title="Remove">&times;</button>
+      </span>
+      <span v-for="c in store.pendingComments" :key="`fc-${c.id}`" class="comment-chip">
+        <span class="comment-chip-icon" aria-hidden="true">&#128196;</span>
+        <button
+          type="button"
+          class="comment-chip-body"
+          @click.stop.prevent="openFileCommentChip(c)"
+          :title="`${c.path}\n\n${c.selection}\n\n${c.comment}`"
+        >
+          <span class="comment-chip-file">
+            {{ fileCardBasename(c.path) }}
+            <span v-if="formatCommentLocation(c)" class="comment-chip-line">· {{ formatCommentLocation(c) }}</span>
+          </span>
+          <span class="comment-chip-note">{{ truncate(c.comment, 40) }}</span>
+        </button>
+        <button class="comment-chip-remove" @click="store.removePendingComment(c.id)" title="Remove">&times;</button>
       </span>
     </div>
 
@@ -873,6 +871,9 @@ import VoiceRecorder from './VoiceRecorder.vue'
 import SubagentPanel from './SubagentPanel.vue'
 import ProviderSubchatPanel from './ProviderSubchatPanel.vue'
 import { api } from '../lib/api'
+import { askConfirm } from '../lib/confirm'
+import { formatAttachedFilePath, nativeAbsoluteFilePath } from '../lib/chatAttachments'
+import { readChatDraft, writeChatDraft } from '../lib/chatDrafts'
 import type { Loop, ModelsResponse, ChatMessage, SubagentTranscript, ProviderSubchatRecord } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
@@ -881,15 +882,18 @@ import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
 import { formatTime, formatDuration } from '../lib/time'
-import { buildTurnParts, collectTraceOutputs, formatTokenUsage, isAnswerBubble, traceSummaryMeta, traceSummaryMetaParts, type TraceOutput } from '../lib/chatActivity'
+import { buildTurnParts, collectTraceOutputs, findFinalAnswerIndex, formatTokenUsage, traceSummaryMeta, traceSummaryMetaParts, type TraceOutput } from '../lib/chatActivity'
 import { buildForkSnapshot } from '../lib/chatFork'
-import { formatCommentLocation } from '../lib/commentContext'
+import { formatCommentLocation, type ChatCommentAnchor } from '../lib/commentContext'
+import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
+import ChatCommentPopover from './ChatCommentPopover.vue'
+import CommentComposePopover from './CommentComposePopover.vue'
 
 type RenderItem =
-  | { kind: 'user'; msg: ChatMessage }
-  | { kind: 'assistant'; msg: ChatMessage; outputs?: TraceOutput[]; subchats?: ProviderSubchatRecord[] }
+  | { kind: 'user'; msg: ChatMessage; turnIndex?: number }
+  | { kind: 'assistant'; msg: ChatMessage; outputs?: TraceOutput[]; subchats?: ProviderSubchatRecord[]; turnIndex?: number }
   | { kind: 'system'; msg: ChatMessage }
-  | { kind: 'trace'; steps: ChatMessage[]; subs?: SubagentTranscript[]; outputs?: TraceOutput[]; subchats?: ProviderSubchatRecord[] }
+  | { kind: 'trace'; steps: ChatMessage[]; subs?: SubagentTranscript[]; outputs?: TraceOutput[]; subchats?: ProviderSubchatRecord[]; turnIndex?: number }
 
 type ChatComment = {
   id: string
@@ -902,9 +906,42 @@ const emit = defineEmits<{ close: [], 'open-sidebar': [] }>()
 
 const store = useProjectStore()
 const fileViewer = useFileViewerStore()
-const inputText = ref('')
+const draftChatId = store.activeChatId
+const inputText = ref(readChatDraft(draftChatId))
 const inputEl = ref<HTMLTextAreaElement>()
 const isContinuing = ref(false)
+const becomingHost = ref(false)
+const hostHandoverError = ref('')
+
+// ChatLayout keys this panel by chat id, so each instance owns one draft.
+// Persist synchronously to avoid losing the last keystroke when switching
+// chats immediately after typing.
+watch(inputText, (text) => {
+  writeChatDraft(draftChatId, text)
+}, { flush: 'sync' })
+
+async function disconnectAndBecomeHost() {
+  if (becomingHost.value) return
+  const confirmed = await askConfirm(
+    'Disconnect from the unreachable host and make this device the host? Changes that exist only on the other host may not be synced.',
+    {
+      title: 'Become host on this device?',
+      confirmLabel: 'Disconnect and become host',
+    },
+  )
+  if (!confirmed) return
+
+  becomingHost.value = true
+  hostHandoverError.value = ''
+  try {
+    const result = await api.post<{ ok: boolean }>('/api/node/handover', { force: true })
+    if (!result.ok) throw new Error('Could not make this device the host')
+    window.location.assign('/')
+  } catch (e: any) {
+    hostHandoverError.value = e?.payload?.error || e?.message || 'Could not make this device the host'
+    becomingHost.value = false
+  }
+}
 
 // Ticks once a second while streaming so the live elapsed-time label in the
 // "Working..." trace meta advances.
@@ -1028,6 +1065,34 @@ onMounted(() => {
 })
 async function toggleLoop(l: Loop) {
   await taskStore.updateLoop(l.loop_id, { running: !l.running })
+}
+
+// Lightweight 30-second tick powering the "next in Xm" countdown in the loop
+// banner.  Only runs while there are running loops bound to this chat.
+const loopNow = ref(Date.now())
+let loopTick: ReturnType<typeof setInterval> | null = null
+watch(chatLoops, (loops) => {
+  const hasRunning = loops.some(l => l.running)
+  if (hasRunning && !loopTick) {
+    loopNow.value = Date.now()
+    loopTick = setInterval(() => { loopNow.value = Date.now() }, 30_000)
+  } else if (!hasRunning && loopTick) {
+    clearInterval(loopTick)
+    loopTick = null
+  }
+}, { immediate: true })
+onBeforeUnmount(() => { if (loopTick) clearInterval(loopTick) })
+
+function loopCountdown(l: Loop): string {
+  if (!l.next_run) return ''
+  // Touch loopNow so Vue re-evaluates when the tick fires.
+  const diffMs = new Date(l.next_run).getTime() - loopNow.value
+  if (diffMs <= 0) return 'soon'
+  const mins = Math.ceil(diffMs / 60_000)
+  if (mins < 60) return `in ${mins}m`
+  const hrs = Math.floor(mins / 60)
+  const rm = mins % 60
+  return rm ? `in ${hrs}h ${rm}m` : `in ${hrs}h`
 }
 const project = computed(() => store.activeProject)
 const models = ref<string[]>(['haiku', 'sonnet', 'opus', 'fable'])
@@ -1276,6 +1341,33 @@ function formatToolInput(raw: string) {
   }
 }
 
+// Split a tool input into `key: value` rows for the approval card. Returns
+// null when the payload isn't a plain object (bare command string, array,
+// truncated JSON) so the caller keeps the verbatim <pre> fallback. Nested
+// values are re-serialized compactly — the card is a "what am I approving"
+// glance, not a debugger.
+function permissionArgs(raw: string): { key: string; value: string }[] | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+  const rows = Object.entries(parsed as Record<string, unknown>).map(([key, value]) => ({
+    key,
+    value:
+      typeof value === 'string'
+        ? value
+        : value === null || value === undefined
+          ? String(value)
+          : typeof value === 'object'
+            ? JSON.stringify(value)
+            : String(value),
+  }))
+  return rows.length ? rows : null
+}
+
 // AskUserQuestion picker. The headless CLI can't render the SDK's built-in
 // picker, so the model's tool call lands with an empty result; the PWA owns
 // the actual UI here. `questionAnswers` holds the user's in-progress
@@ -1472,39 +1564,96 @@ const filteredThinkingLevels = computed(() => {
 
 const inputPlaceholder = computed(() => {
   if (store.isStreaming) return 'Follow-up...'
-  return 'Message'
+  return 'message'
 })
 
 // ── Chat comment selection UX ─────────────────────────────────────────
-type ChatCommentDraft = { selection: string; text: string }
+type ChatCommentDraft = ChatCommentAnchor & {
+  selection: string
+  text: string
+}
 const selectionAnchor = ref<{ top: number; left: number } | null>(null)
+const draftAnchor = ref<{ top: number; left: number } | null>(null)
+
+const COMMENT_PILL_H = 44
 const commentDraft = ref<ChatCommentDraft | null>(null)
-const chatCommentInputEl = ref<HTMLTextAreaElement>()
-const sidebarEditInputEl = ref<HTMLTextAreaElement>()
-const sidebarListEl = ref<HTMLElement>()
 const editingChatCommentId = ref<string | null>(null)
 const editingChatCommentText = ref('')
+const chipEditAnchor = ref<{ top: number; left: number } | null>(null)
 const commentDraftImages = ref<string[]>([])
 const editingChatCommentImages = ref<string[]>([])
+const composeText = computed({
+  get: () => commentDraft.value?.text ?? '',
+  set: (v: string) => {
+    if (commentDraft.value) commentDraft.value.text = v
+  },
+})
 let lastChatSelectionText = ''
 let lastChatSelectionRange: Range | null = null
-// Bubble element the current selection originated in. Captured at selection
-// time so applyHighlights() can re-wrap only the right bubble (otherwise a
-// short selection like "OK" could wrongly highlight in any other message).
 let lastChatSelectionBubble: HTMLElement | null = null
+let lastChatSelectionMsgId: string | undefined
+let lastChatSelectionMsgIndex: number | undefined
+let lastChatSelectionMsgRole: string | undefined
+let lastChatSelectionOccurrenceIndex: number | undefined
+let lastChatSelectionParagraphIndex: number | undefined
 let draftBubbleEl: HTMLElement | null = null
 const commentBubbleById = new Map<string, HTMLElement>()
-// Highlight id used for the in-progress draft selection so it shows in the
-// bubble while the user is still typing the comment (before it's saved).
 const DRAFT_COMMENT_ID = '__draft__'
-
-const commentSidebarVisible = computed(
-  () => store.pendingChatComments.length > 0 || commentDraft.value !== null
-)
 
 function truncate(s: string, n: number): string {
   if (!s) return ''
   return s.length > n ? s.slice(0, n - 1) + '…' : s
+}
+
+function getSelectionStartOffsetInElement(container: HTMLElement, range: Range): number {
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT)
+  let charPos = 0
+  let node: Node | null
+  while ((node = walker.nextNode())) {
+    if (node === range.startContainer) {
+      return charPos + range.startOffset
+    }
+    charPos += node.textContent?.length || 0
+  }
+  return -1
+}
+
+function computeOccurrenceIndex(contentEl: HTMLElement, range: Range, selection: string): number {
+  const fullText = contentEl.textContent || ''
+  const startOffset = getSelectionStartOffsetInElement(contentEl, range)
+  const needle = selection.trim()
+  if (startOffset === -1 || !needle) return 0
+
+  let occurrence = 0
+  let pos = 0
+  while (pos < fullText.length) {
+    const idx = fullText.indexOf(needle, pos)
+    if (idx === -1) break
+    if (idx === startOffset) {
+      return occurrence
+    }
+    if (idx > startOffset) {
+      break
+    }
+    occurrence++
+    pos = idx + 1
+  }
+  return Math.max(0, occurrence)
+}
+
+function computeParagraphIndex(contentEl: HTMLElement, range: Range): number {
+  const blocks = contentEl.querySelectorAll('p, li, pre, blockquote, h1, h2, h3, h4, h5, h6')
+  if (blocks.length > 0) {
+    const idx = Array.from(blocks).findIndex(b => b.contains(range.startContainer))
+    if (idx !== -1) return idx
+  }
+  const startOffset = getSelectionStartOffsetInElement(contentEl, range)
+  if (startOffset > 0) {
+    const textBefore = (contentEl.textContent || '').slice(0, startOffset)
+    const doubleNewlines = textBefore.match(/\n\s*\n/g)
+    return doubleNewlines ? doubleNewlines.length : 0
+  }
+  return 0
 }
 
 function updateChatSelectionAnchorFromRange(range: Range): void {
@@ -1527,15 +1676,18 @@ function updateChatSelectionAnchorFromRange(range: Range): void {
   }
 
   const popoverW = Math.min(420, window.innerWidth * 0.9)
-  const top = endRect.bottom + 2
-  const left = Math.min(
-    Math.max(8, endRect.right + 6),
-    Math.max(8, window.innerWidth - popoverW - 8)
-  )
-  selectionAnchor.value = { top, left }
+  selectionAnchor.value = {
+    top: clampAnchorTop(endRect.bottom + 2, COMMENT_PILL_H),
+    left: clampAnchorLeft(endRect.right + 6, popoverW),
+  }
 }
 
+const isProgrammaticScrolling = ref(false)
+let programmaticScrollTimer: ReturnType<typeof setTimeout> | null = null
+
 function onChatScrollReanchor(): void {
+  if (isProgrammaticScrolling.value) return
+  closeChatCommentPopover()
   if (commentDraft.value || !lastChatSelectionRange) return
   try {
     if (!lastChatSelectionRange.startContainer.isConnected) {
@@ -1592,32 +1744,50 @@ function onChatSelectionChange(): void {
   lastChatSelectionText = text
   lastChatSelectionBubble = bubble
   lastChatSelectionRange = range.cloneRange()
+
+  const contentEl = (bubble.querySelector('.message-content') || bubble) as HTMLElement
+  lastChatSelectionMsgId = bubble.dataset.msgId
+  lastChatSelectionMsgIndex = bubble.dataset.msgIndex ? parseInt(bubble.dataset.msgIndex, 10) : undefined
+  lastChatSelectionMsgRole = bubble.dataset.msgRole
+  lastChatSelectionOccurrenceIndex = computeOccurrenceIndex(contentEl, range, text)
+  lastChatSelectionParagraphIndex = computeParagraphIndex(contentEl, range)
+
   updateChatSelectionAnchorFromRange(range)
 }
 
 function openCommentForSelection(): void {
   if (!selectionAnchor.value || !lastChatSelectionText) return
+  closeChatCommentPopover()
+  draftAnchor.value = { ...selectionAnchor.value }
   draftBubbleEl = lastChatSelectionBubble
   commentDraft.value = {
     selection: lastChatSelectionText,
     text: '',
+    messageId: lastChatSelectionMsgId,
+    messageIndex: lastChatSelectionMsgIndex,
+    messageRole: lastChatSelectionMsgRole,
+    occurrenceIndex: lastChatSelectionOccurrenceIndex,
+    paragraphIndex: lastChatSelectionParagraphIndex,
   }
   selectionAnchor.value = null
   lastChatSelectionRange = null
   window.getSelection()?.removeAllRanges()
-  nextTick(() => {
-    chatCommentInputEl.value?.focus()
-    applyHighlights()
-  })
+  nextTick(() => applyHighlights())
 }
 
 function cancelChatComment(): void {
   commentDraft.value = null
+  draftAnchor.value = null
   commentDraftImages.value = []
   draftBubbleEl = null
   lastChatSelectionText = ''
   lastChatSelectionBubble = null
   lastChatSelectionRange = null
+  lastChatSelectionMsgId = undefined
+  lastChatSelectionMsgIndex = undefined
+  lastChatSelectionMsgRole = undefined
+  lastChatSelectionOccurrenceIndex = undefined
+  lastChatSelectionParagraphIndex = undefined
   nextTick(() => applyHighlights())
 }
 
@@ -1626,14 +1796,29 @@ function saveChatComment(): void {
   if (!draft) return
   const note = draft.text.trim()
   if (!note) return
-  const id = store.addPendingChatComment({ selection: draft.selection, comment: note, images: commentDraftImages.value.length ? commentDraftImages.value : undefined })
+  const id = store.addPendingChatComment({
+    selection: draft.selection,
+    comment: note,
+    images: commentDraftImages.value.length ? commentDraftImages.value : undefined,
+    messageId: draft.messageId,
+    messageIndex: draft.messageIndex,
+    messageRole: draft.messageRole,
+    occurrenceIndex: draft.occurrenceIndex,
+    paragraphIndex: draft.paragraphIndex,
+  })
   if (draftBubbleEl) commentBubbleById.set(id, draftBubbleEl)
   draftBubbleEl = null
   commentDraft.value = null
+  draftAnchor.value = null
   commentDraftImages.value = []
   lastChatSelectionText = ''
   lastChatSelectionBubble = null
   lastChatSelectionRange = null
+  lastChatSelectionMsgId = undefined
+  lastChatSelectionMsgIndex = undefined
+  lastChatSelectionMsgRole = undefined
+  lastChatSelectionOccurrenceIndex = undefined
+  lastChatSelectionParagraphIndex = undefined
   nextTick(() => applyHighlights())
 }
 
@@ -1655,29 +1840,17 @@ function removeDraftImage(index: number): void {
   commentDraftImages.value.splice(index, 1)
 }
 
-function onChatCommentKeydown(e: KeyboardEvent): void {
-  if (e.key === 'Escape') {
-    e.preventDefault()
-    cancelChatComment()
-    return
-  }
-  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-    e.preventDefault()
-    saveChatComment()
-  }
-}
-
 // ── Edit / remove pending chat comments from the sidebar ─────────────
-function startEditChatComment(c: { id: string; comment: string; images?: string[] }): void {
+function startEditChatComment(c: { id: string; selection: string; comment: string; images?: string[] }): void {
   editingChatCommentId.value = c.id
   editingChatCommentText.value = c.comment
   editingChatCommentImages.value = c.images ? [...c.images] : []
-  nextTick(() => sidebarEditInputEl.value?.focus())
 }
 function cancelEditChatComment(): void {
   editingChatCommentId.value = null
   editingChatCommentText.value = ''
   editingChatCommentImages.value = []
+  chipEditAnchor.value = null
 }
 function saveEditChatComment(id: string): void {
   const text = editingChatCommentText.value.trim()
@@ -1731,6 +1904,7 @@ function onEditChatCommentKeydown(e: KeyboardEvent, id: string): void {
   }
 }
 function deleteChatComment(id: string): void {
+  if (commentPopover.value?.openId === id) closeChatCommentPopover()
   store.removePendingChatComment(id)
   commentBubbleById.delete(id)
   if (editingChatCommentId.value === id) cancelEditChatComment()
@@ -1748,7 +1922,7 @@ function clearHighlights(root: HTMLElement): void {
   }
 }
 
-function highlightInElement(root: HTMLElement, selection: string, commentId: string): boolean {
+function highlightInElement(root: HTMLElement, selection: string, commentId: string, occurrenceIndex?: number): boolean {
   const text = selection.trim()
   if (!text) return false
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
@@ -1768,12 +1942,32 @@ function highlightInElement(root: HTMLElement, selection: string, commentId: str
   let matchStart = -1
   let matchEnd = -1
 
-  // Exact match first
-  const exactIdx = fullText.indexOf(text)
-  if (exactIdx !== -1) {
-    matchStart = exactIdx
-    matchEnd = exactIdx + text.length
-  } else {
+  // Match the specific occurrence index if specified
+  const targetOccurrence = occurrenceIndex ?? 0
+  let currentOccurrence = 0
+  let pos = 0
+  while (pos < fullText.length) {
+    const idx = fullText.indexOf(text, pos)
+    if (idx === -1) break
+    if (currentOccurrence === targetOccurrence) {
+      matchStart = idx
+      matchEnd = idx + text.length
+      break
+    }
+    currentOccurrence++
+    pos = idx + 1
+  }
+
+  // Fallback if target occurrence was not found (e.g. text changed): pick first exact match
+  if (matchStart === -1) {
+    const exactIdx = fullText.indexOf(text)
+    if (exactIdx !== -1) {
+      matchStart = exactIdx
+      matchEnd = exactIdx + text.length
+    }
+  }
+
+  if (matchStart === -1) {
     // Fallback: whitespace-normalized match for selections that span
     // <br>, block boundaries, or have extra whitespace from rendering.
     const normFull = fullText.replace(/\s+/g, '')
@@ -1844,7 +2038,7 @@ function highlightInElement(root: HTMLElement, selection: string, commentId: str
   return success
 }
 
-function findBubbleForComment(root: HTMLElement, c: ChatComment): HTMLElement | null {
+function findBubbleForComment(root: HTMLElement, c: { id: string; selection: string; messageId?: string; messageIndex?: number; messageRole?: string }): HTMLElement | null {
   const stored = commentBubbleById.get(c.id)
   if (stored && root.contains(stored)) {
     const content = stored.querySelector('.message-content')
@@ -1855,15 +2049,31 @@ function findBubbleForComment(root: HTMLElement, c: ChatComment): HTMLElement | 
       return stored
     }
   }
+
+  if (c.messageId) {
+    const escapedId = c.messageId.replace(/"/g, '\\"')
+    const byId = root.querySelector(`.message[data-msg-id="${escapedId}"]`) as HTMLElement | null
+    if (byId) return byId
+  }
+
+  if (c.messageIndex != null && c.messageIndex >= 0) {
+    const byIndex = root.querySelector(`.message[data-msg-index="${c.messageIndex}"]`) as HTMLElement | null
+    if (byIndex) return byIndex
+  }
+
   const bubbles = root.querySelectorAll('.message')
   for (const bubble of Array.from(bubbles)) {
-    const content = bubble.querySelector('.message-content')
+    const el = bubble as HTMLElement
+    if (c.messageRole && el.dataset.msgRole && el.dataset.msgRole !== c.messageRole) {
+      continue
+    }
+    const content = el.querySelector('.message-content')
     if (!content) continue
     const text = content.textContent || ''
     const normText = text.replace(/\s+/g, '')
     const normSelection = c.selection.replace(/\s+/g, '')
     if (text.includes(c.selection) || normText.includes(normSelection)) {
-      return bubble as HTMLElement
+      return el
     }
   }
   return null
@@ -1877,7 +2087,7 @@ function applyHighlights(): void {
   for (const c of store.pendingChatComments) {
     const bubble = findBubbleForComment(root, c)
     if (bubble) {
-      highlightInElement(bubble, c.selection, c.id)
+      highlightInElement(bubble, c.selection, c.id, c.occurrenceIndex)
     } else {
       console.warn('Bubble not found for comment', c.id, c.selection.slice(0, 80))
     }
@@ -1887,20 +2097,32 @@ function applyHighlights(): void {
   // they're commenting on while they type, not only after saving.
   const draft = commentDraft.value
   if (draft && draftBubbleEl && root.contains(draftBubbleEl)) {
-    highlightInElement(draftBubbleEl, draft.selection, DRAFT_COMMENT_ID)
+    highlightInElement(draftBubbleEl, draft.selection, DRAFT_COMMENT_ID, draft.occurrenceIndex)
   }
 }
 
-// ── Click sync between highlights and sidebar cards ──────────────────
+// ── Click / hover sync between highlights, read popover, and sidebar ──
+// The popover state lives in the child so hover never touches this component's
+// render (the transcript is rendered inline here and is not virtualized). The
+// handlers are read off the ref at event time, not at render time.
+const commentPopover = ref<InstanceType<typeof ChatCommentPopover> | null>(null)
+
+function onChatHighlightHover(e: MouseEvent): void {
+  commentPopover.value?.onTargetOver(e)
+}
+
+function onChatHighlightHoverOut(e: MouseEvent): void {
+  commentPopover.value?.onTargetOut(e)
+}
+
+function closeChatCommentPopover(): void {
+  commentPopover.value?.close()
+}
+
 function handleHighlightClick(e: MouseEvent): void {
-  const target = e.target as HTMLElement | null
-  if (!target) return
-  const highlight = target.closest('.comment-highlight') as HTMLElement | null
-  if (!highlight) return
-  const id = highlight.dataset.commentId
+  const id = commentPopover.value?.pinFromEvent(e)
   if (!id) return
   e.stopPropagation()
-  scrollSidebarToCard(id)
 }
 
 // iOS Safari mishandles scrollIntoView on nested scrollable containers
@@ -1916,15 +2138,6 @@ function offsetTopWithin(el: HTMLElement, root: HTMLElement): number {
   return top
 }
 
-function scrollSidebarToCard(id: string): void {
-  const root = sidebarListEl.value
-  if (!root) return
-  const card = root.querySelector(`.chat-sidebar-card[data-card-id="${id}"]`) as HTMLElement | null
-  if (!card) return
-  const top = offsetTopWithin(card, root) - (root.clientHeight - card.offsetHeight) / 2
-  root.scrollTo({ top: Math.max(0, top), behavior: 'smooth' })
-}
-
 function scrollToHighlight(id: string): void {
   const root = messagesEl.value
   if (!root) return
@@ -1936,7 +2149,8 @@ function scrollToHighlight(id: string): void {
 
 // Click from a pending chat-comment chip: scroll the conversation to the
 // highlighted text AND flash it briefly so the eye lands on the right span.
-function jumpToCommentHighlight(id: string): void {
+function jumpToCommentHighlight(id: string, onComplete?: () => void): void {
+  isProgrammaticScrolling.value = true
   scrollToHighlight(id)
   const root = messagesEl.value
   if (!root) return
@@ -1947,6 +2161,71 @@ function jumpToCommentHighlight(id: string): void {
   void hl.offsetWidth
   hl.classList.add('comment-highlight--pulse')
   setTimeout(() => hl.classList.remove('comment-highlight--pulse'), 1200)
+
+  if (programmaticScrollTimer) clearTimeout(programmaticScrollTimer)
+  programmaticScrollTimer = setTimeout(() => {
+    isProgrammaticScrolling.value = false
+    programmaticScrollTimer = null
+    if (onComplete) onComplete()
+  }, 350)
+}
+
+function anchorFromElement(el: HTMLElement): { top: number; left: number } {
+  const rect = el.getBoundingClientRect()
+  return {
+    top: clampAnchorTop(rect.bottom + 6, 80),
+    left: clampAnchorLeft(rect.left, 280),
+  }
+}
+
+function openEditFromChatPopover(c: { id: string; comment: string; images?: string[] }): void {
+  const hl = messagesEl.value?.querySelector(`.comment-highlight[data-comment-id="${c.id}"]`) as HTMLElement | null
+  const anchor = hl ? anchorFromElement(hl) : null
+  chipEditAnchor.value = anchor
+  const target = store.pendingChatComments.find(x => x.id === c.id)
+  if (target) startEditChatComment(target)
+}
+
+// Clicking a pending comment chip scrolls to the commented text in the transcript,
+// pulses the highlight, and pins the read popover over the highlight.
+function openChatCommentChip(id: string, _e: MouseEvent): void {
+  const c = store.pendingChatComments.find(x => x.id === id)
+  if (!c) return
+  cancelEditChatComment()
+
+  jumpToCommentHighlight(id, () => {
+    const rootEl = messagesEl.value
+    if (!rootEl) return
+    const hl = rootEl.querySelector(`.comment-highlight[data-comment-id="${id}"]`) as HTMLElement | null
+    if (hl) {
+      commentPopover.value?.show(id, hl, true)
+    }
+  })
+}
+
+// Sending the turn clears every pending comment, and switching chats swaps the
+// bucket. Either way the chip the popover is anchored to is gone, so close it
+// instead of leaving an editor floating over a comment that no longer exists.
+watch(
+  () => store.pendingChatComments.some(c => c.id === editingChatCommentId.value),
+  (stillThere) => {
+    if (editingChatCommentId.value && !stillThere) cancelEditChatComment()
+  }
+)
+
+// File comments have no highlight in the transcript, so the chip opens the
+// document at the commented line instead.
+function openFileCommentChip(c: { id?: string; path: string; lineStart?: number | null }): void {
+  if (!c.path) return
+  const activePinKey = chat.value?.chat_id || store.activeChatId
+  const pinnedPath = activePinKey ? store.pinnedFileFor(activePinKey) : ''
+  if (pinnedPath && pinnedPath === c.path) {
+    window.dispatchEvent(new CustomEvent('ciao:jump-pinned-comment', {
+      detail: { id: c.id, line: c.lineStart }
+    }))
+  } else {
+    fileViewer.open(c.path, c.lineStart ?? null, chat.value?.chat_id || '')
+  }
 }
 
 if (typeof document !== 'undefined') {
@@ -1954,6 +2233,9 @@ if (typeof document !== 'undefined') {
 }
 
 onMounted(async () => {
+  window.addEventListener('ciao:native-file-drag-enter', handleNativeFileDragEnter)
+  window.addEventListener('ciao:native-file-drag-leave', handleNativeFileDragLeave)
+  window.addEventListener('ciao:native-file-drop', handleNativeFileDrop)
   try {
     const r = await api.get<ModelsResponse>('/api/models')
     modelsResponse.value = r
@@ -1985,6 +2267,11 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  writeChatDraft(draftChatId, inputText.value)
+  window.removeEventListener('ciao:native-file-drag-enter', handleNativeFileDragEnter)
+  window.removeEventListener('ciao:native-file-drag-leave', handleNativeFileDragLeave)
+  window.removeEventListener('ciao:native-file-drop', handleNativeFileDrop)
+  commentPopover.value?.clearPendingClose()
   if (typeof document !== 'undefined') {
     document.removeEventListener('selectionchange', onChatSelectionChange)
   }
@@ -2241,11 +2528,13 @@ const liveTraceMetaParts = computed(() => {
 // almost certainly the reply, not background reasoning. The length gate keeps
 // short model introspection from flashing the affordance on well-behaved
 // models.
-const LIKELY_ANSWER_THINKING_CHARS = 200
+const LIKELY_ANSWER_THINKING_CHARS = 1000
 const thinkingIsLikelyAnswer = computed(() => {
   const thinking = store.currentStreamingThinking
   if (!thinking || thinking.length < LIKELY_ANSWER_THINKING_CHARS) return false
   if (store.currentStreamingText) return false
+  if (store.activeBackgroundAgents > 0) return false
+  if (store.currentTimeline.some(entry => entry.kind === 'tool')) return false
   return true
 })
 
@@ -2362,18 +2651,10 @@ const renderData = computed<{
   const flushTurn = (isFinal = false) => {
     if (!buffer.length) return
     const turnOutputs = collectTraceOutputs(buffer)
-    // Find index of the LAST assistant text message (the final answer).
-    // _activity (tool calls) and _thinking (model reasoning) are part of
-    // the trace, never the final user-facing reply. `isAnswerBubble` is the
-    // same predicate `buildTurnParts` uses, so the two never disagree on
-    // which steps are bubbles vs trace material.
-    let finalIdx = -1
-    for (let k = buffer.length - 1; k >= 0; k--) {
-      if (isAnswerBubble(buffer[k])) {
-        finalIdx = k
-        break
-      }
-    }
+    // Prefer the last non-progress assistant text as the final reply so Claude
+    // "Now let me…" narration folds into Activity; fall back to the last text
+    // so a short clarifying question still surfaces. Matches buildTurnParts.
+    const finalIdx = findFinalAnswerIndex(buffer)
     const finalMsg = finalIdx >= 0 ? buffer[finalIdx] : null
     const trailing = finalIdx >= 0 ? buffer.slice(finalIdx + 1) : []
 
@@ -2386,6 +2667,7 @@ const renderData = computed<{
     // bookkeeping tools (TodoWrite, etc.) that produce no further user-facing
     // text. In that case the answer text is the real reply and must render as
     // a normal assistant bubble; the trailing tools just join the trace.
+
     const trailingHasThinking = trailing.some(m => m.tool_name === '_thinking')
     const turnSubchats = currentTurnIndex !== null ? subchatsByTurn.get(currentTurnIndex) || [] : []
     if (trailingHasThinking && finalMsg) {
@@ -2393,6 +2675,7 @@ const renderData = computed<{
       items.push({
         kind: 'trace',
         steps: buffer.slice(),
+        turnIndex: currentTurnIndex ?? undefined,
         ...(traceSubs.length ? { subs: traceSubs } : {}),
         ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
         ...(turnSubchats.length ? { subchats: turnSubchats } : {}),
@@ -2401,10 +2684,11 @@ const renderData = computed<{
       return
     }
 
-    // While streaming, the final buffer in activeMessages is an incomplete turn
-    // that was already persisted to the server session file. The active turn's
-    // activity and text are already fully rendered in the live "Working..." block
-    // below. Clear the buffer so we don't duplicate it as a collapsed reasoning trace.
+    // The in-flight turn is already drawn by the live stream trace block
+    // (`store.currentTimeline`), so drop its buffer rather than emitting a
+    // second, static copy. Only the trailing turn is in flight — earlier turns
+    // keep their trace even when they never produced an answer bubble (the
+    // user hit Stop, or the turn ended in tool calls only).
     if (isFinal && store.isStreaming) {
       buffer = []
       return
@@ -2423,8 +2707,8 @@ const renderData = computed<{
     // with the turn's outputs/subchats attached.
     const turnItems: RenderItem[] = buildTurnParts(buffer, finalIdx).map((part) =>
       part.kind === 'assistant'
-        ? { kind: 'assistant', msg: part.msg }
-        : { kind: 'trace', steps: part.steps },
+        ? { kind: 'assistant', msg: part.msg, turnIndex: currentTurnIndex ?? undefined }
+        : { kind: 'trace', steps: part.steps, turnIndex: currentTurnIndex ?? undefined },
     )
     // Foreground subagents / (when there's no answer bubble) file outputs and
     // handoffs belong to the one Activity trace that sits right before the
@@ -2437,7 +2721,7 @@ const renderData = computed<{
     const last = turnItems[turnItems.length - 1]
     let host = last && last.kind === 'trace' ? last : null
     if (!host && needsHost) {
-      host = { kind: 'trace', steps: [] }
+      host = { kind: 'trace', steps: [], turnIndex: currentTurnIndex ?? undefined }
       turnItems.push(host)
     }
     if (host) {
@@ -2450,6 +2734,7 @@ const renderData = computed<{
       items.push({
         kind: 'assistant',
         msg: finalMsg,
+        turnIndex: currentTurnIndex ?? undefined,
         ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
         ...(turnSubchats.length ? { subchats: turnSubchats } : {}),
       })
@@ -2463,7 +2748,7 @@ const renderData = computed<{
       currentTurnIndex = typeof msg.turn_index === 'number'
         ? msg.turn_index
         : currentTurnIndex === null ? 0 : currentTurnIndex + 1
-      items.push({ kind: 'user', msg })
+      items.push({ kind: 'user', msg, turnIndex: currentTurnIndex })
     } else if (
       msg.role === 'system'
       && msg.tool_name !== '_activity'
@@ -2485,20 +2770,66 @@ const renderData = computed<{
     return { items, liveSubs: all, liveStandaloneSubs: [] }
   }
   // Anything still unplaced (turn not in history yet, or no turn info):
-  // attach to the last turn's trace block so a background subagent reads as
-  // part of that turn's activity — the same single "Activity" group the live
-  // "Working…" view shows — instead of a dangling standalone block. Fall back
-  // to a fresh trace block only when there's no prior trace to attach to.
+  // attach anchored subagents to their actual user-turn's trace block so a
+  // late-finishing agent doesn't drift to the most recent trace. Unanchored
+  // leftovers still fall back to the last trace block, or a fresh block if
+  // there is none.
   const leftovers = [...subsByTurn.values()].flat().concat(unanchoredSubs)
   if (leftovers.length) {
-    let lastTrace: RenderItem | undefined
-    for (let i = items.length - 1; i >= 0; i--) {
-      if (items[i].kind === 'trace') { lastTrace = items[i]; break }
+    const anchored = new Map<number, SubagentTranscript[]>()
+    const unanchored: SubagentTranscript[] = []
+    for (const sub of leftovers) {
+      if (typeof sub.turn_index === 'number') {
+        const list = anchored.get(sub.turn_index) || []
+        list.push(sub)
+        anchored.set(sub.turn_index, list)
+      } else {
+        unanchored.push(sub)
+      }
     }
-    if (lastTrace && lastTrace.kind === 'trace') {
-      lastTrace.subs = [...(lastTrace.subs || []), ...leftovers]
-    } else {
-      items.push({ kind: 'trace', steps: [], subs: leftovers })
+
+    // Attach each anchored group to the matching turn's trace block. If the
+    // turn has no trace block (e.g. the model replied with plain text), mint
+    // one right before the first assistant/system item of that turn.
+    for (const [turnIdx, subs] of anchored) {
+      let turnStart = -1
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i]
+        if (it.kind === 'user' && it.turnIndex === turnIdx) {
+          turnStart = i
+        }
+      }
+      if (turnStart === -1) {
+        // Matching user turn isn't rendered yet; keep with unanchored fallback.
+        unanchored.push(...subs)
+        continue
+      }
+      let traceIdx = -1
+      for (let i = turnStart + 1; i < items.length && items[i].kind !== 'user'; i++) {
+        if (items[i].kind === 'trace') traceIdx = i
+      }
+      if (traceIdx >= 0) {
+        const host = items[traceIdx]
+        if (host.kind === 'trace') {
+          host.subs = [...(host.subs || []), ...subs]
+        }
+      } else {
+        let insertAt = turnStart + 1
+        while (insertAt < items.length && items[insertAt].kind === 'user') insertAt++
+        items.splice(insertAt, 0, { kind: 'trace', steps: [], subs, turnIndex: turnIdx })
+      }
+    }
+
+    if (unanchored.length) {
+      let lastTrace: RenderItem | undefined
+      for (let i = items.length - 1; i >= 0; i--) {
+        if (items[i].kind === 'trace') { lastTrace = items[i]; break }
+      }
+      if (lastTrace && lastTrace.kind === 'trace') {
+        lastTrace.subs = [...(lastTrace.subs || []), ...unanchored]
+      } else {
+        items.push({ kind: 'trace', steps: [], subs: unanchored })
+      }
     }
   }
   return { items, liveSubs: [], liveStandaloneSubs: [] }
@@ -2550,7 +2881,10 @@ function autoResize() {
   const el = inputEl.value
   if (!el) return
   el.style.height = 'auto'
-  el.style.height = Math.min(el.scrollHeight, 200) + 'px'
+  // Floor at the shared touch target so an empty composer stays aligned
+  // with the sidebar "+ New Project" row (both 44px inside 61px footers).
+  const next = Math.min(Math.max(el.scrollHeight, 44), 200)
+  el.style.height = next + 'px'
   const bar = el.closest('.input-bar')
   if (!bar) return
   const isTall = bar.classList.contains('tall')
@@ -2633,6 +2967,7 @@ function send() {
   // the composed content from the comment blocks, so we pass an empty string
   // here. The user sees the actual content in their bubble, not a placeholder.
   store.sendMessage(chat.value.chat_id, sendText, 'queue')
+  writeChatDraft(chat.value.chat_id, '')
   inputText.value = ''
   // Sending implies following the reply: jump to the bottom even if the
   // user had scrolled up, so their bubble and the response are in view.
@@ -2923,10 +3258,12 @@ watch(showModelPicker, (open) => {
 })
 
 async function doArchive() {
-  if (!confirm('Archive this chat?')) return
+  if (!await askConfirm('Archive this chat? You can reopen it from the archive.', {
+    title: 'Archive chat',
+    confirmLabel: 'Archive',
+  })) return
   await store.archiveChat(chat.value.chat_id)
-  // Notify ChatLayout so it closes the chat pane and opens the sidebar
-  // on mobile (so the user can pick the next chat).
+  // Notify ChatLayout so it closes the chat pane.
   emit('close')
 }
 
@@ -2959,25 +3296,198 @@ async function handleVoice(blob: Blob) {
   }
 }
 async function handleFileSelect(e: Event) { const input = e.target as HTMLInputElement; if (!input.files?.length) return; await store.uploadImages(chat.value.chat_id, Array.from(input.files)); input.value = '' }
+
+type DroppedProjectFile = {
+  path: string
+  vault_path: string
+  absolute_path?: string
+}
+
+type ProjectUploadResult = {
+  saved?: DroppedProjectFile[]
+  errors?: { filename: string; error: string }[]
+  error?: string
+}
+
+type NativeFileDropDetail = {
+  grantId?: string
+  paths?: string[]
+  error?: string
+}
+
+type NativeFileDropResult = {
+  paths?: string[]
+  image_refs?: string[]
+  errors?: { filename: string; error: string }[]
+  error?: string
+}
+
+async function importNativeFileDrop(detail: NativeFileDropDetail): Promise<void> {
+  dragOver.value = false
+  if (detail.error || !detail.grantId) {
+    store.pushErrorToast(
+      'Could not attach file',
+      detail.error || 'The native file-drop grant was missing.',
+    )
+    return
+  }
+  try {
+    const response = await fetch('/api/desktop-drop', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        grant_id: detail.grantId,
+        project_id: project.value?.project_id || '',
+        chat_id: chat.value.chat_id,
+      }),
+    })
+    const result = await response.json().catch(() => ({})) as NativeFileDropResult
+    if (!response.ok) {
+      throw new Error(result.error || `Native file import failed (HTTP ${response.status})`)
+    }
+    for (const failure of result.errors || []) {
+      store.pushErrorToast(`Could not attach ${failure.filename}`, failure.error)
+    }
+    const paths = result.paths || []
+    if (paths.length) {
+      insertTextAtCursor(paths.map(formatAttachedFilePath).join(' '))
+    }
+    store.addPendingImageRefs(chat.value.chat_id, result.image_refs || [])
+  } catch (error) {
+    store.pushErrorToast(
+      'Could not attach file',
+      error instanceof Error ? error.message : String(error),
+    )
+  }
+}
+
+function handleNativeFileDragEnter(): void {
+  dragOver.value = true
+}
+
+function handleNativeFileDragLeave(): void {
+  dragOver.value = false
+}
+
+function handleNativeFileDrop(event: Event): void {
+  const detail = (event as CustomEvent<NativeFileDropDetail>).detail || {}
+  void importNativeFileDrop(detail)
+}
+
+async function localDropNeedsUpload(): Promise<boolean> {
+  try {
+    // This endpoint is deliberately handled by the local node instead of the
+    // client proxy, so it reveals whether the browser and agent are on
+    // different computers.
+    const response = await fetch('/api/startup-status', {
+      credentials: 'same-origin',
+    })
+    if (!response.ok) return true
+    const role = String((await response.json()).node_role || '')
+    return role === 'client' || role === 'standby'
+  } catch {
+    // Uploading is the safe fallback: a local-only path would be unusable if
+    // this browser turns out to be connected to a remote host.
+    return true
+  }
+}
+
+async function uploadDroppedProjectFiles(files: File[]): Promise<string[]> {
+  if (!project.value?.vault_folder) {
+    throw new Error('This project has no folder for uploaded files.')
+  }
+  const form = new FormData()
+  files.forEach((file, index) => form.append(`file${index}`, file, file.name))
+  const response = await fetch(`/api/projects/${project.value.project_id}/files`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    body: form,
+  })
+  const result = await response.json().catch(() => ({})) as ProjectUploadResult
+  if (!response.ok) {
+    throw new Error(result.error || `Upload failed (HTTP ${response.status})`)
+  }
+  for (const failure of result.errors || []) {
+    store.pushErrorToast(`Could not attach ${failure.filename}`, failure.error)
+  }
+  return (result.saved || []).flatMap((file) => {
+    const path = file.absolute_path || file.vault_path
+    return path ? [path] : []
+  })
+}
+
 async function handleDrop(e: DragEvent) {
   dragOver.value = false
   const dt = e.dataTransfer
   if (!dt) return
-  const imageFiles: File[] = []
-  const paths: string[] = []
-  for (const item of Array.from(dt.items || [])) {
-    if (item.kind !== 'file') continue
-    const entry = (item as any).webkitGetAsEntry?.()
-    if (entry && entry.isDirectory) {
-      paths.push(entry.name)
-      continue
+
+  // Capture DataTransfer contents synchronously; browsers may invalidate the
+  // drag store once this event handler yields to the startup-status request.
+  const files: File[] = []
+  const folders: { name: string; file: File | null }[] = []
+  const items = Array.from(dt.items || [])
+  if (items.length) {
+    for (const item of items) {
+      if (item.kind !== 'file') continue
+      const entry = (item as DataTransferItem & {
+        webkitGetAsEntry?: () => { isDirectory?: boolean; name?: string } | null
+      }).webkitGetAsEntry?.()
+      if (entry?.isDirectory) {
+        folders.push({ name: entry.name || 'folder', file: item.getAsFile() })
+        continue
+      }
+      const file = item.getAsFile()
+      if (file) files.push(file)
     }
-    const file = item.getAsFile()
-    if (!file) continue
-    if (file.type.startsWith('image/')) imageFiles.push(file)
-    else paths.push((file as any).webkitRelativePath || file.name)
+  } else {
+    files.push(...Array.from(dt.files || []))
   }
-  if (paths.length) insertTextAtCursor(paths.join(' '))
+
+  const imageFiles = files.filter(file => file.type.startsWith('image/'))
+  const regularFiles = files.filter(file => !file.type.startsWith('image/'))
+  const paths: string[] = []
+  const needsUpload = regularFiles.length || folders.length
+    ? await localDropNeedsUpload()
+    : false
+
+  const unavailableFolders: string[] = []
+  for (const folder of folders) {
+    const nativePath = needsUpload || !folder.file
+      ? null
+      : nativeAbsoluteFilePath(folder.file)
+    if (nativePath) paths.push(nativePath)
+    else unavailableFolders.push(folder.name)
+  }
+  if (unavailableFolders.length) {
+    store.pushErrorToast(
+      'Could not attach folder',
+      'Drop individual files instead; remote clients and sandboxed browsers cannot expose an absolute folder path.',
+    )
+  }
+
+  if (regularFiles.length) {
+    const uploadFiles: File[] = []
+    for (const file of regularFiles) {
+      const nativePath = needsUpload ? null : nativeAbsoluteFilePath(file)
+      if (nativePath) paths.push(nativePath)
+      else uploadFiles.push(file)
+    }
+    if (uploadFiles.length) {
+      try {
+        paths.push(...await uploadDroppedProjectFiles(uploadFiles))
+      } catch (error) {
+        store.pushErrorToast(
+          'Could not attach file',
+          error instanceof Error ? error.message : String(error),
+        )
+      }
+    }
+  }
+
+  if (paths.length) {
+    insertTextAtCursor(paths.map(formatAttachedFilePath).join(' '))
+  }
   if (imageFiles.length) await store.uploadImages(chat.value.chat_id, imageFiles)
 }
 async function handlePaste(e: ClipboardEvent) { const items = Array.from(e.clipboardData?.items || []).filter(i => i.type.startsWith('image/')); if (items.length) { e.preventDefault(); await store.uploadImages(chat.value.chat_id, items.map(i => i.getAsFile()).filter(Boolean) as File[]) } }
@@ -3249,7 +3759,10 @@ function insertImageRef(n: number) {
   color: var(--fg);
   padding: 2px 6px;
   font-family: var(--font);
-  width: 200px;
+  flex: 1;
+  min-width: 120px;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 /* Messages: outer scroll container; inner content uses min-height:100% +
@@ -3310,23 +3823,32 @@ function insertImageRef(n: number) {
 .message {
   flex: 1;
   max-width: 100%;
-  padding: 8px 8px 8px 20px;
-  border-radius: var(--radius);
+  padding: 10px 14px;
   font-size: var(--text-base);
   line-height: 1.5;
   word-break: break-word;
   min-width: 0;
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
 
 .message.user {
-  background: var(--bg3);
+  background: color-mix(in srgb, var(--accent2) 12%, var(--bg3));
+  border: 1px solid var(--border-strong);
+  border-radius: 14px 14px 2px 14px;
   color: var(--fg);
   margin-left: 48px;
+}
+
+:root.theme-light .message.user {
+  background: color-mix(in srgb, var(--accent2) 8%, var(--bg3));
+  border-color: var(--border);
 }
 
 .message.assistant {
   background: var(--bg2);
   border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px 14px 14px 14px;
   line-height: 1.6;
   margin-right: 48px;
 }
@@ -3495,6 +4017,72 @@ function insertImageRef(n: number) {
 .fix-btn { color: var(--accent); border-color: var(--accent); }
 .fix-btn:hover { background: var(--accent); color: var(--bg); border-color: var(--accent); }
 
+.host-connection-card {
+  align-self: center;
+  width: min(680px, 90%);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: rgba(255, 152, 0, 0.08);
+  border: 1px solid rgba(255, 152, 0, 0.34);
+  border-radius: var(--radius);
+  color: var(--fg);
+}
+
+.host-connection-main {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.host-connection-spinner {
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
+  flex: 0 0 auto;
+  border: 2px solid rgba(255, 152, 0, 0.28);
+  border-top-color: var(--warning);
+  border-radius: 50%;
+  animation: host-connection-spin 0.9s linear infinite;
+}
+
+@keyframes host-connection-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .host-connection-spinner {
+    animation: none;
+    border-color: var(--warning);
+  }
+}
+
+.host-connection-title {
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+
+.host-connection-meta,
+.host-connection-error {
+  margin-top: 2px;
+  color: var(--fg2);
+  font-size: var(--text-xs);
+}
+
+.host-connection-error {
+  color: var(--error);
+}
+
+.host-connection-action {
+  min-height: var(--touch);
+  flex: 0 0 auto;
+  color: var(--warning);
+  border-color: var(--warning);
+}
+
 .retry-card {
   align-self: center;
   width: min(680px, 90%);
@@ -3522,6 +4110,8 @@ function insertImageRef(n: number) {
 .retry-card-actions { display: flex; gap: var(--space-2); flex-shrink: 0; }
 
 @media (max-width: 640px) {
+  .host-connection-card { align-items: stretch; flex-direction: column; }
+  .host-connection-action { align-self: stretch; }
   .retry-card { align-items: stretch; flex-direction: column; }
   .retry-card-actions { justify-content: flex-end; }
 }
@@ -3982,18 +4572,38 @@ details[open] > .activity-summary::before {
 }
 .message-content :deep(pre) {
   background: var(--bg);
-  padding: 8px;
-  border-radius: 4px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm, 6px);
   overflow-x: auto;
-  margin: 4px 0;
+  margin: 6px 0;
   white-space: pre-wrap;
   max-width: 100%;
+  font-family: var(--font-mono);
 }
 
 .message-content :deep(code) {
-  font-family: var(--font);
-  font-size: var(--text-base);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
 }
+
+.message-content :deep(pre code) {
+  padding: 0;
+  background: transparent;
+  font-size: var(--text-sm);
+}
+
+.message-content :deep(:is(h1, h2, h3, h4)) {
+  margin-top: 1.2em;
+  margin-bottom: 0.4em;
+  line-height: 1.35;
+  font-weight: 700;
+}
+.message-content :deep(h1) { font-size: 1.5em; }
+.message-content :deep(h2) { font-size: 1.25em; }
+.message-content :deep(h3) { font-size: 1.1em; }
 
 .message-content :deep(p) { margin: 4px 0; }
 .message-content :deep(ul),
@@ -4025,15 +4635,14 @@ details[open] > .activity-summary::before {
    reads; here they're just styled. */
 .message-content :deep(user-comment-reference) {
   display: block;
-  border-left: 3px solid var(--accent);
-  border-radius: 4px;
-  background: var(--bg);
-  padding: 6px 10px;
-  margin: 6px 0;
+  margin: 6px 0 10px;
 }
 .message-content :deep(reference-source) {
   display: block;
-  font-size: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
   color: var(--fg2);
   margin-bottom: 4px;
 }
@@ -4042,12 +4651,41 @@ details[open] > .activity-summary::before {
   white-space: pre-wrap;
   color: var(--fg2);
   font-style: italic;
-  border-left: 2px solid var(--border);
-  padding-left: 8px;
-  margin: 2px 0 6px;
+  background: var(--bg);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin: 4px 0;
 }
 .message-content :deep(user-comment) {
   display: block;
+  color: var(--fg);
+  font-style: normal;
+  font-weight: normal;
+  margin-top: 8px;
+}
+.message-content :deep(quoted-text p:first-child),
+.message-content :deep(user-comment p:first-child) {
+  margin-top: 0;
+}
+.message-content :deep(quoted-text p:last-child),
+.message-content :deep(user-comment p:last-child) {
+  margin-bottom: 0;
+}
+.message-content :deep(quoted-text > br:first-child),
+.message-content :deep(user-comment > br:first-child),
+.message-content :deep(quoted-text > br:last-child),
+.message-content :deep(user-comment > br:last-child) {
+  display: none;
+}
+.message-content :deep(blockquote) {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--bg);
+  border-radius: 6px;
+  color: var(--fg2);
+  font-style: italic;
 }
 
 /* File-path links produced by linkifyHtml/linkifyText. Subtle dotted
@@ -4066,24 +4704,55 @@ details[open] > .activity-summary::before {
   color: var(--accent);
   text-decoration: underline solid;
 }
-.message-content :deep(table) {
-  border-collapse: collapse;
-  margin: 6px 0;
-  font-size: 13px;
-  border: 1px solid var(--fg2);
+.message-content :deep(.markdown-table-scroll) {
+  width: fit-content;
   max-width: 100%;
-  display: block;
   overflow-x: auto;
+  margin: 8px 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  overscroll-behavior-inline: contain;
+  -webkit-overflow-scrolling: touch;
+}
+.message-content :deep(.markdown-table-scroll:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.message-content :deep(table) {
+  min-width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  margin: 0;
+  font-size: var(--text-sm);
 }
 .message-content :deep(th),
 .message-content :deep(td) {
-  border: 1px solid var(--fg2);
-  padding: 5px 9px;
+  padding: 7px 10px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+.message-content :deep(tr > :last-child) {
+  border-right: 0;
+}
+.message-content :deep(tbody tr:last-child > td) {
+  border-bottom: 0;
 }
 .message-content :deep(th) {
   background: var(--bg3);
   font-weight: 600;
   text-align: left;
+}
+.message-content :deep(tbody tr:nth-child(even) > td) {
+  background: color-mix(in srgb, var(--fg) 2.5%, transparent);
+}
+.message-content :deep(tr > :first-child) {
+  white-space: nowrap;
+}
+.message-content :deep(tbody tr > td:first-child) {
+  font-weight: 600;
 }
 
 .message-meta {
@@ -4097,6 +4766,15 @@ details[open] > .activity-summary::before {
 
 .message.user .message-meta {
   text-align: right;
+}
+
+/* Marks a turn fired by a loop or schedule. Accent-coloured so it reads as a
+   property of the message, not as part of the timestamp next to it. */
+.unattended-mark {
+  color: var(--accent);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin-right: 6px;
 }
 .tokens-group {
   white-space: nowrap;
@@ -4119,8 +4797,8 @@ details[open] > .activity-summary::before {
   background: var(--bg);
 }
 
-/* Pending attachments row: images and file comments live above the input.
-   Chat comments live in the right sidebar. */
+/* Pending attachments row: images, chat comments and file comments all stage
+   here above the input. The drawers hold the full text. */
 .pending-attachments {
   display: flex;
   flex-wrap: wrap;
@@ -4130,6 +4808,10 @@ details[open] > .activity-summary::before {
   background: var(--bg2);
   border-top: 1px solid var(--border);
   flex-shrink: 0;
+  /* Comments wrap onto new rows, so cap the row before a long comment session
+     pushes the input off screen. */
+  max-height: 25vh;
+  overflow-y: auto;
 }
 
 .image-preview {
@@ -4185,8 +4867,10 @@ details[open] > .activity-summary::before {
   display: inline-flex;
   align-items: flex-start;
   gap: 6px;
-  max-width: min(360px, 100%);
-  padding: 6px 8px 6px 8px;
+  width: 220px;
+  max-width: min(220px, 100%);
+  height: 48px;
+  padding: 6px 8px;
   background: var(--bg);
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
@@ -4194,15 +4878,30 @@ details[open] > .activity-summary::before {
   font-size: 11px;
   line-height: 1.35;
   color: var(--fg);
+  box-sizing: border-box;
+}
+/* The chip whose edit popover is open. */
+.comment-chip.is-editing {
+  border-color: var(--accent, #60a5fa);
+  background: var(--bg2);
 }
 .comment-chip-icon { line-height: 1; padding-top: 1px; }
 .comment-chip-body {
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
   gap: 2px;
   min-width: 0;
   flex: 1;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
+.comment-chip-body > * { max-width: 100%; }
 .comment-chip-file {
   font-weight: 600;
   font-size: 11px;
@@ -4347,8 +5046,11 @@ details[open] > .activity-summary::before {
 /* Input bar */
 .input-bar {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   gap: 8px;
+  /* Match sidebar-footer / pane headers: 44px controls + 8px pad + 1px border.
+     Grows past 61px when the textarea becomes multi-line (.tall). */
+  min-height: 61px;
   padding: 8px 12px;
   /* Do not add the bottom safe-area inset: in PWA standalone mode this
      would reserve ~34px below the input for the home indicator, which
@@ -4359,6 +5061,11 @@ details[open] > .activity-summary::before {
   border-top: 1px solid var(--border);
   background: var(--bg);
   flex-shrink: 0;
+  box-sizing: border-box;
+}
+
+.input-bar.tall {
+  align-items: flex-end;
 }
 
 /* Buttons sit in a row at the bottom by default; once the textarea grows
@@ -4384,7 +5091,8 @@ details[open] > .activity-summary::before {
 .chat-input {
   flex: 1;
   resize: none;
-  min-height: 44px;
+  height: var(--touch);
+  min-height: var(--touch);
   max-height: 200px;
   /* Textareas top-align text; symmetric padding optically centers one
      line inside the 44px touch target (14px × 1.25 line-height). */
@@ -4741,10 +5449,42 @@ details[open] > .activity-summary::before {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 11px;
   color: var(--fg2);
-  max-height: 120px;
+  max-height: 220px;
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* Labelled argument rows. Key column is sized to content and clamped so a
+   long `prompt` value keeps most of the width; the whole block scrolls as one
+   unit rather than each value clipping on its own. */
+.permission-args {
+  display: grid;
+  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+  gap: 2px 10px;
+  margin: 0;
+  padding: 6px 8px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 11px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.permission-args dt {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--fg2);
+  opacity: 0.75;
+  white-space: nowrap;
+}
+
+.permission-args dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--fg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .permission-actions {
@@ -4782,6 +5522,7 @@ details[open] > .activity-summary::before {
   position: relative;
   display: inline-flex;
   align-items: center;
+  height: 30px;
 }
 
 .model-picker-btn {
@@ -4948,9 +5689,11 @@ details[open] > .activity-summary::before {
      slightly truncated placeholder. */
   .chat-input { font-size: 16px; padding: 12px 12px; line-height: 1.25; }
   .chat-input::placeholder { font-size: 16px; }
-  /* Keep every composer action at the shared touch-target minimum. */
-  .input-bar { padding-top: 5px; padding-bottom: 5px; }
-  .chat-input { min-height: var(--touch); }
+  /* Keep every composer action at the shared touch-target minimum.
+     Preserve the 61px footer lock (44 + 8 + 8 + 1) used on desktop so the
+     sidebar "+ New Project" row still lines up on coarse pointers. */
+  .input-bar { min-height: 61px; padding-top: 8px; padding-bottom: 8px; }
+  .chat-input { height: var(--touch); min-height: var(--touch); }
   .input-actions .send-btn {
     min-width: var(--touch);
     min-height: var(--touch);
@@ -4986,6 +5729,12 @@ details[open] > .activity-summary::before {
 .chat-comment-trigger:hover { filter: brightness(1.08); }
 .chat-comment-trigger-icon { font-size: var(--text-sm); line-height: 1; }
 
+.chat-comment-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(0, 0, 0, 0.32);
+}
 .btn-sm {
   display: inline-flex;
   align-items: center;
@@ -5009,262 +5758,18 @@ details[open] > .activity-summary::before {
   cursor: not-allowed;
 }
 
-/* Comment sidebar: messages on the left, comments on the right. Sibling of
- * .messages inside .chat-with-sidebar so the input bar (which sits below
- * this wrapper) keeps its full chat-panel width. */
+/* Messages container takes the full pane; comment surfaces are popovers. */
 .chat-with-sidebar {
   flex: 1;
+  position: relative;
   display: flex;
   min-height: 0;
   overflow: hidden;
 }
 .chat-with-sidebar > .messages {
-  min-width: 0;
-}
-.chat-comment-sidebar {
-  width: 280px;
-  flex-shrink: 0;
-  border-left: 1px solid var(--border);
-  background: var(--bg2, rgba(255, 255, 255, 0.04));
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-.chat-sidebar-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-.chat-sidebar-title {
-  font-size: var(--text-base);
-  font-weight: 600;
-  color: var(--fg);
-  flex: 1;
-}
-.chat-sidebar-count {
-  font-size: var(--text-xs);
-  font-weight: 600;
-  color: var(--accent, #60a5fa);
-  background: var(--bg);
-  padding: 1px 6px;
-  border-radius: 999px;
-}
-.chat-sidebar-draft {
-  padding: 10px 12px 12px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg);
-}
-.chat-sidebar-draft-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
-}
-.chat-sidebar-draft-label {
-  font-weight: 600;
-  font-size: var(--text-xs);
-  color: var(--accent, #60a5fa);
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
-  flex: 1;
-}
-.chat-sidebar-draft-input {
-  width: 100%;
-  resize: vertical;
-  min-height: 60px;
-  font-family: inherit;
-  font-size: var(--text-base);
-  line-height: 1.45;
-  color: var(--fg);
-  background: var(--bg2, rgba(255, 255, 255, 0.04));
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 8px;
-  outline: none;
-  box-sizing: border-box;
-  margin-bottom: 8px;
-}
-.chat-sidebar-draft-input:focus { border-color: var(--accent, #60a5fa); }
-.chat-sidebar-draft-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 6px;
-  align-items: center;
-}
-.chat-sidebar-draft-images {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 8px;
-}
-.chat-sidebar-card-images {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 4px;
-}
-.chat-sidebar-edit-images {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 8px;
-}
-.draft-image-preview {
-  position: relative;
-  display: inline-flex;
-}
-.draft-image-thumb {
-  height: 40px;
-  width: 40px;
-  object-fit: cover;
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  background: var(--bg);
-}
-.card-image-thumb {
-  height: 36px;
-  width: 36px;
-  object-fit: cover;
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  background: var(--bg);
-}
-.draft-image-remove {
-  position: absolute;
-  top: -4px;
-  right: -4px;
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  border: none;
-  border-radius: 50%;
-  background: var(--bg3);
-  color: var(--fg);
-  font-size: 12px;
-  line-height: 14px;
-  cursor: pointer;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
-}
-.image-btn-sm {
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--fg2);
-  transition: background 120ms var(--ease), color 120ms var(--ease), border-color 120ms var(--ease);
-}
-.image-btn-sm:hover { background: var(--bg3); color: var(--fg); border-color: var(--fg2); }
-.chat-sidebar-list {
-  flex: 1;
-  overflow-y: auto;
-  padding: 10px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.chat-sidebar-card {
-  padding: 8px 10px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--accent2, #a78bfa);
-  border-radius: 6px;
-  font-size: var(--text-xs);
-  line-height: 1.4;
-  color: var(--fg);
-  cursor: pointer;
-  transition: transform 0.1s, box-shadow 0.1s;
-}
-.chat-sidebar-card:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
-}
-.chat-sidebar-card.is-editing { cursor: default; }
-.chat-sidebar-card-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 4px;
-}
-.chat-sidebar-card-file {
-  font-weight: 600;
-  font-size: var(--text-xs);
-  color: var(--fg2);
-  text-transform: uppercase;
-  letter-spacing: 0.02em;
   flex: 1;
   min-width: 0;
 }
-.chat-sidebar-card-actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  opacity: 0;
-  transition: opacity 0.15s;
-}
-.chat-sidebar-card:hover .chat-sidebar-card-actions,
-.chat-sidebar-card.is-editing .chat-sidebar-card-actions { opacity: 1; }
-.chat-sidebar-card-edit,
-.chat-sidebar-card-remove {
-  flex-shrink: 0;
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  border: none;
-  border-radius: 50%;
-  background: transparent;
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  line-height: 16px;
-  cursor: pointer;
-}
-.chat-sidebar-card-remove { font-size: calc(14px * var(--font-scale)); }
-.chat-sidebar-card-edit:hover,
-.chat-sidebar-card-remove:hover { background: var(--bg2); color: var(--fg); }
-.chat-sidebar-card-quote {
-  color: var(--fg2);
-  font-style: italic;
-  margin-bottom: 4px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-}
-.chat-sidebar-card-note {
-  color: var(--fg);
-  word-break: break-word;
-}
-.chat-sidebar-edit-body { margin-top: 4px; }
-.chat-sidebar-edit-input {
-  width: 100%;
-  resize: vertical;
-  min-height: 44px;
-  font-family: inherit;
-  font-size: var(--text-base);
-  line-height: 1.45;
-  color: var(--fg);
-  background: var(--bg2, rgba(255, 255, 255, 0.04));
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 6px 8px;
-  outline: none;
-  box-sizing: border-box;
-  margin-bottom: 6px;
-}
-.chat-sidebar-edit-input:focus { border-color: var(--accent, #60a5fa); }
-.chat-sidebar-edit-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 6px;
-}
-
 /* Inline text highlights inside message bubbles. Use :deep() because
  * highlight spans are inserted via DOM manipulation in applyHighlights()
  * and don't carry Vue's scoped attribute. */
@@ -5291,19 +5796,6 @@ details[open] > .activity-summary::before {
   0%   { background: rgba(234, 179, 8, 0.25); box-shadow: 0 0 0 0 rgba(234, 179, 8, 0); }
   25%  { background: rgba(234, 179, 8, 0.7);  box-shadow: 0 0 0 6px rgba(234, 179, 8, 0.18); }
   100% { background: rgba(234, 179, 8, 0.25); box-shadow: 0 0 0 0 rgba(234, 179, 8, 0); }
-}
-
-/* On narrow viewports the sidebar would crush the messages. Collapse it to
- * a bottom drawer so both stay usable. Mirrors FileViewerModal's mobile
- * handling at the same breakpoint. */
-@media (max-width: 640px) {
-  .chat-with-sidebar { flex-direction: column; }
-  .chat-comment-sidebar {
-    width: auto;
-    border-left: none;
-    border-top: 1px solid var(--border);
-    max-height: 45vh;
-  }
 }
 
 /* ── Loop banner ── */

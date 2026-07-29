@@ -15,20 +15,22 @@ _ORIGIN = "https://ciao.example"
 
 
 class _FakeChat:
-    def __init__(self, chat_id):
+    def __init__(self, chat_id, archived=False):
         self.chat_id = chat_id
         self.title = "Test Chat"
+        self.archived = archived
 
 
 class _FakePCM:
-    def __init__(self, chat_exists=True):
+    def __init__(self, chat_exists=True, archived=False):
         self.chat_exists = chat_exists
+        self.archived = archived
         self.stream_started = None
         self.resolved_images = []
 
     def get_chat(self, chat_id):
         if self.chat_exists:
-            return _FakeChat(chat_id)
+            return _FakeChat(chat_id, archived=self.archived)
         return None
 
     def resolve_image_ref(self, ref):
@@ -111,3 +113,20 @@ def test_chat_prompt_chat_not_found() -> None:
     )
     assert resp.status_code == 404
     assert "not found" in resp.json()["error"]
+
+
+def test_chat_prompt_archived_rejected_before_stream() -> None:
+    """An archived chat returns 409 without starting a stream, so
+    stream_chat never raises "Cannot send messages to an archived chat"
+    from the background task."""
+    pcm = _FakePCM(chat_exists=True, archived=True)
+    client, cookies = _client(pcm=pcm)
+    resp = client.post(
+        "/api/chats/chat-123/prompt",
+        json={"prompt": "Hello world!"},
+        cookies=cookies,
+        headers={"Origin": _ORIGIN},
+    )
+    assert resp.status_code == 409
+    assert resp.json()["archived"] is True
+    assert pcm.stream_started is None

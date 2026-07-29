@@ -79,7 +79,7 @@ def test_discover_archived_chats_happy_path(tmp_path: Path) -> None:
     chat2_md = chat2_provider_dir / "2026-06-10T14-00-00Z-sess2.md"
     chat2_content = (
         "---\n"
-        "provider: pi\n"
+        "provider: claude\n"
         "context: Personal Chat Title\n"
         "selected_model: qwen3\n"
         "session_id: sess2\n"
@@ -143,7 +143,7 @@ def test_discover_archived_chats_happy_path(tmp_path: Path) -> None:
     assert c2.title == "Personal Chat Title"
     assert c2.project_id == personal_proj.project_id
     assert c2.model == "qwen3"
-    assert c2.provider == "pi"
+    assert c2.provider == "claude"
     assert c2.archived is True
     assert c2.created_at == "2026-06-10T14:00:00Z"
     assert c2.last_activity_at == "2026-06-10T15:00:00Z"

@@ -6,9 +6,13 @@ import asyncio
 import inspect
 import json
 import logging
+import os
+import re
 import secrets
 import threading
 import time
+import urllib.error
+import urllib.request
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -28,6 +32,176 @@ from ciao.control_plane import CiaoControlPlane, ControlPlaneError, McpPrincipal
 
 
 logger = logging.getLogger(__name__)
+
+_ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_MCP_HTTP_PROBE_TIMEOUT_S = 3.0
+
+
+def _workspace_env_path(workspace_root: Path) -> Path:
+    return workspace_root.resolve() / ".env"
+
+
+def _read_dotenv_value(env_path: Path, key: str) -> str:
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            continue
+        env_key, value = line.split("=", 1)
+        if env_key.strip() == key:
+            return value.strip().strip("'\"")
+    return ""
+
+
+def _env_key_configured(key: str, workspace_root: Path) -> bool:
+    if os.environ.get(key, "").strip():
+        return True
+    return bool(_read_dotenv_value(_workspace_env_path(workspace_root), key))
+
+
+def _collect_env_refs(value: Any, *, default_source: str = "config") -> list[tuple[str, str]]:
+    """Collect ``${VAR}`` references and explicit ``env`` map keys from MCP config."""
+    found: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(key: str, source: str) -> None:
+        key = str(key).strip()
+        if not key or key in seen:
+            return
+        seen.add(key)
+        found.append((key, source))
+
+    def walk(node: Any, source: str) -> None:
+        if isinstance(node, str):
+            for match in _ENV_REF_RE.finditer(node):
+                add(match.group(1), source)
+            return
+        if isinstance(node, dict):
+            for key, child in node.items():
+                if source == "env":
+                    # Keys under mcpServers.<name>.env are themselves env vars.
+                    add(str(key), "env")
+                    walk(child, "env")
+                    continue
+                child_source = source
+                if source == "config" and key in {"headers", "env", "args", "url", "command"}:
+                    child_source = str(key)
+                walk(child, child_source)
+            return
+        if isinstance(node, (list, tuple)):
+            for child in node:
+                walk(child, source)
+
+    walk(value, default_source)
+    return found
+
+
+def _resolve_env_template(value: str, workspace_root: Path) -> str:
+    def repl(match: re.Match[str]) -> str:
+        key = match.group(1)
+        return os.environ.get(key, "").strip() or _read_dotenv_value(
+            _workspace_env_path(workspace_root), key
+        )
+
+    return _ENV_REF_RE.sub(repl, value)
+
+
+def _observed_project_mcp_tools(runtime_root: Path, server_name: str) -> list[str]:
+    """Return tool names seen in agent telemetry for a project MCP server."""
+    path = runtime_root / "agent_tool_calls.jsonl"
+    if not path.is_file():
+        return []
+    prefix = f"mcp__{server_name}__"
+    bare = f"mcp__{server_name}"
+    found: set[str] = set()
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                tool = str(record.get("tool") or "")
+                if tool.startswith(prefix) or tool == bare:
+                    found.add(tool)
+    except OSError:
+        return []
+    return sorted(found)
+
+
+def _probe_http_mcp_tools(
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+    timeout_s: float = _MCP_HTTP_PROBE_TIMEOUT_S,
+) -> tuple[list[str], str]:
+    """Best-effort ``tools/list`` against an HTTP/SSE MCP endpoint.
+
+    Returns ``(tool_names, error)``. Empty tools with an empty error means the
+    server responded but advertised no tools.
+    """
+    endpoint = url.strip()
+    if not endpoint:
+        return [], "missing url"
+    payload = json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+    ).encode("utf-8")
+    req_headers = {
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+        **(headers or {}),
+    }
+    request = urllib.request.Request(
+        endpoint,
+        data=payload,
+        headers=req_headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_s) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            content_type = (response.headers.get("content-type") or "").lower()
+    except urllib.error.HTTPError as exc:
+        return [], f"HTTP {exc.code}"
+    except Exception as exc:  # noqa: BLE001 — probe is best-effort
+        return [], str(exc) or exc.__class__.__name__
+
+    body = raw
+    if "text/event-stream" in content_type or raw.lstrip().startswith("event:"):
+        data_lines: list[str] = []
+        for line in raw.splitlines():
+            if line.startswith("data:"):
+                data_lines.append(line[5:].strip())
+        body = "\n".join(data_lines)
+    try:
+        message = json.loads(body)
+    except (TypeError, ValueError):
+        return [], "non-JSON tools/list response"
+    if not isinstance(message, dict):
+        return [], "unexpected tools/list payload"
+    if message.get("error"):
+        err = message["error"]
+        if isinstance(err, dict):
+            return [], str(err.get("message") or err.get("code") or err)
+        return [], str(err)
+    result = message.get("result") or {}
+    tools = result.get("tools") if isinstance(result, dict) else None
+    if not isinstance(tools, list):
+        return [], "tools/list missing tools array"
+    names = sorted(
+        {
+            str(tool.get("name") or "").strip()
+            for tool in tools
+            if isinstance(tool, dict) and str(tool.get("name") or "").strip()
+        }
+    )
+    return names, ""
 
 
 _READ = ToolAnnotations(
@@ -82,7 +256,18 @@ class McpSessionRegistry:
             existing_token = self._by_key.get(key)
             existing = self._by_token.get(existing_token or "")
             if existing is not None and existing.expires_at > now:
-                return existing.token, existing.principal
+                prior = existing.principal
+                # Reuse only when scope still matches. A moved project or
+                # corrected workspace must not keep minting stale-scoped tools.
+                if (
+                    prior.project_id == project_id
+                    and prior.workspace == workspace
+                    and prior.handoff_depth == handoff_depth
+                ):
+                    return existing.token, existing.principal
+                # revoke() owns the _by_token/_by_key pairing; the lock is an
+                # RLock so re-entering it here is safe.
+                self.revoke(existing.token)
             token = secrets.token_urlsafe(36)
             principal = McpPrincipal(
                 token_id=secrets.token_hex(8),
@@ -206,6 +391,7 @@ class CiaoMcpService:
             yield
 
     def status(self) -> dict[str, Any]:
+        workspace_root = Path(getattr(self.config, "workspace_root", Path.cwd())).resolve()
         return {
             "enabled": bool(getattr(self.config, "mcp_enabled", True)),
             "url": self.url,
@@ -213,8 +399,395 @@ class CiaoMcpService:
             "tool_count": len(self._tool_names),
             "tools": sorted(self._tool_names),
             "last_error": self._last_error,
+            "env_path": str(_workspace_env_path(workspace_root)),
+            "project_servers": self._discover_project_mcp_servers(),
             **self.registry.status(),
         }
+
+    def project_server_env_keys(self) -> set[str]:
+        """Env var names referenced by discovered project MCP server configs."""
+        keys: set[str] = set()
+        for server in self._discover_project_mcp_servers():
+            for entry in server.get("env_keys") or []:
+                if isinstance(entry, dict) and entry.get("key"):
+                    keys.add(str(entry["key"]))
+        return keys
+
+    def probe_project_server_tools(self, name: str) -> dict[str, Any]:
+        """Lazy tools discovery for one project MCP server.
+
+        HTTP/SSE servers are probed with ``tools/list``. Stdio servers return
+        observed telemetry tools only (spawning the command from Settings is
+        intentionally avoided).
+        """
+        servers = {str(s.get("name")): s for s in self._discover_project_mcp_servers()}
+        server = servers.get(name)
+        if server is None:
+            return {"ok": False, "error": f"unknown MCP server '{name}'", "tools": []}
+        observed = list(server.get("tools") or [])
+        if server.get("transport") != "http":
+            return {
+                "ok": True,
+                "name": name,
+                "tools": observed,
+                "tools_source": server.get("tools_source") or ("observed" if observed else "none"),
+                "tools_note": (
+                    "Stdio MCP tools are discovered when a chat loads the server. "
+                    f"They surface as {server.get('tool_prefix')}*."
+                ),
+                "tool_prefix": server.get("tool_prefix"),
+            }
+        if not server.get("ready", True):
+            return {
+                "ok": False,
+                "name": name,
+                "error": "Configure the required .env keys before probing tools.",
+                "tools": observed,
+                "tools_source": server.get("tools_source") or ("observed" if observed else "none"),
+                "tool_prefix": server.get("tool_prefix"),
+            }
+        workspace_root = Path(getattr(self.config, "workspace_root", Path.cwd())).resolve()
+        raw_meta = server.get("_meta")
+        meta: dict[str, Any] = raw_meta if isinstance(raw_meta, dict) else {}
+        raw_headers = meta.get("headers")
+        headers_raw: dict[str, Any] = raw_headers if isinstance(raw_headers, dict) else {}
+        headers = {
+            str(k): _resolve_env_template(str(v), workspace_root)
+            for k, v in headers_raw.items()
+        }
+        tools, error = _probe_http_mcp_tools(str(server.get("url") or ""), headers=headers)
+        prefixed = [f"mcp__{name}__{tool}" for tool in tools]
+        merged = sorted(set(observed) | set(prefixed) | set(tools))
+        if error and not merged:
+            return {
+                "ok": False,
+                "name": name,
+                "error": error,
+                "tools": observed,
+                "tools_source": "observed" if observed else "none",
+                "tool_prefix": server.get("tool_prefix"),
+            }
+        return {
+            "ok": True,
+            "name": name,
+            "tools": merged,
+            "tools_source": "probed" if tools else ("observed" if observed else "none"),
+            "tools_note": "" if tools else (error or ""),
+            "tool_prefix": server.get("tool_prefix"),
+        }
+
+    def _discover_project_mcp_servers(self) -> list[dict[str, Any]]:
+        servers: list[dict[str, Any]] = []
+        workspace_root = Path(getattr(self.config, "workspace_root", Path.cwd())).resolve()
+        env_path = _workspace_env_path(workspace_root)
+        runtime_root = Path(getattr(self.config, "state_path", workspace_root / ".runtime" / "state.json")).parent
+        candidates: list[tuple[str, Path]] = [
+            ("project", workspace_root / ".mcp.json"),
+            ("project", workspace_root.parent / ".mcp.json"),
+            ("project", workspace_root.parent / "ciao" / ".mcp.json"),
+        ]
+
+        seen: set[str] = set()
+        for source, path in candidates:
+            if not path.is_file():
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                continue
+            mcp_dict = data.get("mcpServers") or data.get("mcp_servers") or {}
+            if not isinstance(mcp_dict, dict):
+                continue
+            for name, meta in mcp_dict.items():
+                server_name = str(name)
+                if server_name in seen:
+                    continue
+                seen.add(server_name)
+                meta_dict = meta if isinstance(meta, dict) else {}
+                url = str(meta_dict.get("url", "") or "")
+                command = str(meta_dict.get("command", "") or "")
+                args_raw = meta_dict.get("args") or []
+                args = [str(item) for item in args_raw] if isinstance(args_raw, list) else []
+                transport = "http" if url else "stdio"
+                env_refs = _collect_env_refs(meta_dict)
+                env_keys = [
+                    {
+                        "key": key,
+                        "configured": _env_key_configured(key, workspace_root),
+                        "source": ref_source,
+                    }
+                    for key, ref_source in env_refs
+                ]
+                ready = all(entry["configured"] for entry in env_keys)
+                observed = _observed_project_mcp_tools(runtime_root, server_name)
+                tool_prefix = f"mcp__{server_name}__"
+                payload: dict[str, Any] = {
+                    "name": server_name,
+                    "url": url,
+                    "command": command,
+                    "args": args,
+                    "transport": transport,
+                    "source": f"{source} ({path.parent.name})",
+                    "config_path": str(path.resolve()),
+                    "env_path": str(env_path),
+                    "env_keys": env_keys,
+                    "ready": ready,
+                    "tool_prefix": tool_prefix,
+                    "tools": observed,
+                    "tools_source": "observed" if observed else "none",
+                    "tools_note": (
+                        ""
+                        if observed
+                        else (
+                            f"Tools load when a chat starts this server "
+                            f"(prefix {tool_prefix}*)."
+                            if ready
+                            else "Add the required .env keys below, then start a chat that uses this server."
+                        )
+                    ),
+                    # Internal probe helper; stripped from status responses.
+                    "_meta": meta_dict,
+                }
+                servers.append(payload)
+        return servers
+
+    def status_for_api(self) -> dict[str, Any]:
+        """Public status payload without internal probe helpers."""
+        payload = self.status()
+        servers = []
+        for server in payload.get("project_servers") or []:
+            if not isinstance(server, dict):
+                continue
+            public = {k: v for k, v in server.items() if not str(k).startswith("_")}
+            # Source is always project-scoped for this list; keep it out of the UI payload.
+            public.pop("source", None)
+            servers.append(public)
+        payload["project_servers"] = servers
+        return payload
+
+    def _workspace_root(self) -> Path:
+        return Path(getattr(self.config, "workspace_root", Path.cwd())).resolve()
+
+    def _project_mcp_json_candidates(self) -> list[Path]:
+        workspace_root = self._workspace_root()
+        return [
+            workspace_root / ".mcp.json",
+            workspace_root.parent / ".mcp.json",
+            # Sibling checkout used by some local monorepo layouts.
+            workspace_root.parent / "ciao" / ".mcp.json",
+        ]
+
+    def _preferred_mcp_json_path(self, *, create: bool = False) -> Path | None:
+        """Prefer an existing project ``.mcp.json`` that already has servers."""
+        for path in self._project_mcp_json_candidates():
+            if not path.is_file():
+                continue
+            try:
+                data = self._read_mcp_json(path)
+                servers = data.get("mcpServers") or data.get("mcp_servers") or {}
+            except ValueError:
+                continue
+            if isinstance(servers, dict) and servers:
+                return path
+        for path in self._project_mcp_json_candidates():
+            if path.is_file():
+                return path
+        if create:
+            return self._workspace_root() / ".mcp.json"
+        return None
+
+    def _read_mcp_json(self, path: Path) -> dict[str, Any]:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            data = {}
+        except (OSError, ValueError, TypeError) as exc:
+            raise ValueError(f"invalid .mcp.json at {path}: {exc}") from exc
+        if not isinstance(data, dict):
+            raise ValueError(f"invalid .mcp.json at {path}: expected object")
+        return data
+
+    def _write_mcp_json(self, path: Path, data: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    def _mcp_servers_dict(self, data: dict[str, Any]) -> dict[str, Any]:
+        raw = data.get("mcpServers")
+        if raw is None:
+            raw = data.get("mcp_servers")
+        if raw is None:
+            servers: dict[str, Any] = {}
+            data["mcpServers"] = servers
+            return servers
+        if not isinstance(raw, dict):
+            raise ValueError(".mcp.json mcpServers must be an object")
+        if "mcpServers" not in data and "mcp_servers" in data:
+            # Normalize legacy key on write.
+            data["mcpServers"] = raw
+            data.pop("mcp_servers", None)
+        return raw
+
+    def _find_server_file(self, name: str) -> tuple[Path, dict[str, Any], dict[str, Any]] | None:
+        for path in self._project_mcp_json_candidates():
+            if not path.is_file():
+                continue
+            try:
+                data = self._read_mcp_json(path)
+                servers = self._mcp_servers_dict(data)
+            except ValueError:
+                continue
+            if name in servers:
+                return path, data, servers
+        return None
+
+    def upsert_project_server(
+        self,
+        name: str,
+        *,
+        url: str = "",
+        command: str = "",
+        args: list[str] | None = None,
+        env_keys: dict[str, str] | None = None,
+        bind_env_keys: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Create or update a project MCP server in ``.mcp.json``."""
+        server_name = str(name or "").strip()
+        if not server_name or "/" in server_name or "\\" in server_name:
+            raise ValueError("invalid MCP server name")
+        url = str(url or "").strip()
+        command = str(command or "").strip()
+        args_list = [str(item).strip() for item in (args or []) if str(item).strip()]
+        if url and command:
+            raise ValueError("provide either url or command, not both")
+        if not url and not command:
+            raise ValueError("url or command is required")
+
+        found = self._find_server_file(server_name)
+        if found:
+            path, data, servers = found
+            meta = servers.get(server_name)
+            meta = dict(meta) if isinstance(meta, dict) else {}
+        else:
+            preferred = self._preferred_mcp_json_path(create=True)
+            if preferred is None:
+                raise ValueError("no writable .mcp.json location is available")
+            path = preferred
+            data = self._read_mcp_json(path) if path.is_file() else {}
+            servers = self._mcp_servers_dict(data)
+            if server_name in servers:
+                meta = dict(servers[server_name]) if isinstance(servers[server_name], dict) else {}
+            else:
+                meta = {}
+
+        if url:
+            meta["type"] = "http"
+            meta["url"] = url
+            meta.pop("command", None)
+            meta.pop("args", None)
+        else:
+            meta.pop("type", None)
+            meta.pop("url", None)
+            meta["command"] = command
+            if args_list:
+                meta["args"] = args_list
+            else:
+                meta.pop("args", None)
+
+        keys_to_bind = [str(k).strip() for k in (bind_env_keys or []) if str(k).strip()]
+        if env_keys:
+            keys_to_bind.extend(str(k).strip() for k in env_keys if str(k).strip())
+        if keys_to_bind:
+            raw_env = meta.get("env")
+            env_map: dict[str, Any] = dict(raw_env) if isinstance(raw_env, dict) else {}
+            for key in keys_to_bind:
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                    raise ValueError(f"invalid env key '{key}'")
+                # Keep existing header/env templates; only add missing env bindings.
+                existing_refs = {ref for ref, _src in _collect_env_refs(meta)}
+                if key not in existing_refs:
+                    env_map[key] = f"${{{key}}}"
+            if env_map:
+                meta["env"] = env_map
+
+        servers[server_name] = meta
+        data["mcpServers"] = servers
+        self._write_mcp_json(path, data)
+
+        if env_keys:
+            updates = {
+                str(k).strip(): str(v)
+                for k, v in env_keys.items()
+                if str(k).strip() and str(v).strip()
+            }
+            if updates:
+                env_path = _workspace_env_path(self._workspace_root())
+                _write_mcp_env_values(env_path, updates)
+                for key, value in updates.items():
+                    os.environ[key] = value.strip()
+
+        return self.status_for_api()
+
+    def delete_project_server(self, name: str) -> dict[str, Any]:
+        found = self._find_server_file(name)
+        if found is None:
+            raise ValueError(f"unknown MCP server '{name}'")
+        path, data, servers = found
+        servers.pop(name, None)
+        data["mcpServers"] = servers
+        self._write_mcp_json(path, data)
+        return self.status_for_api()
+
+    def save_project_server_env_keys(
+        self,
+        updates: dict[str, str],
+        *,
+        server: str | None = None,
+        bind_missing: bool = True,
+    ) -> dict[str, Any]:
+        """Write MCP secrets to ``.env`` and optionally bind new keys into ``.mcp.json``."""
+        cleaned = {
+            str(k).strip(): str(v)
+            for k, v in updates.items()
+            if str(k).strip()
+        }
+        if not cleaned:
+            raise ValueError("no keys to save")
+        for key in cleaned:
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                raise ValueError(f"invalid env key '{key}'")
+
+        allowed = self.project_server_env_keys()
+        unknown = sorted(set(cleaned) - allowed)
+        if unknown:
+            if not server:
+                raise ValueError(
+                    f"unsupported MCP env key(s): {', '.join(unknown)}. "
+                    "Pass server=<name> to bind new keys into that MCP config."
+                )
+            if not bind_missing:
+                raise ValueError(f"unsupported MCP env key(s): {', '.join(unknown)}")
+            found = self._find_server_file(server)
+            if found is None:
+                raise ValueError(f"unknown MCP server '{server}'")
+            path, data, servers = found
+            meta = dict(servers.get(server) or {})
+            env_map = dict(meta.get("env") or {}) if isinstance(meta.get("env"), dict) else {}
+            for key in unknown:
+                env_map[key] = f"${{{key}}}"
+            meta["env"] = env_map
+            servers[server] = meta
+            data["mcpServers"] = servers
+            self._write_mcp_json(path, data)
+
+        env_path = _workspace_env_path(self._workspace_root())
+        _write_mcp_env_values(env_path, cleaned)
+        for key, value in cleaned.items():
+            value = value.strip()
+            if value:
+                os.environ[key] = value
+            else:
+                os.environ.pop(key, None)
+        return self.status_for_api()
 
     def usage(self, *, limit: int | None = None) -> dict[str, Any]:
         """Aggregate per-tool call counts from the telemetry log.
@@ -453,8 +1026,8 @@ class CiaoMcpService:
             return await self._invoke("projects_list", lambda cp, p: cp.projects_list(p, include_completed))
 
         @tool(name="project_get", annotations=_READ, structured_output=True)
-        async def project_get(project_id: str) -> dict[str, Any]:
-            """Get one project by ID within the active workspace."""
+        async def project_get(project_id: str = "") -> dict[str, Any]:
+            """Get one project by ID or name within the active workspace. Omit to get the active project."""
             return await self._invoke("project_get", lambda cp, p: cp.project_get(p, project_id))
 
         @tool(name="project_create", annotations=_WRITE, structured_output=True)
@@ -464,12 +1037,12 @@ class CiaoMcpService:
 
         @tool(name="project_update", annotations=_WRITE, structured_output=True)
         async def project_update(
-            project_id: str,
+            project_id: str = "",
             name: str | None = None,
             context: str | None = None,
             vault_folder: str | None = None,
         ) -> dict[str, Any]:
-            """Update project metadata or its safe vault-folder binding."""
+            """Update project metadata or its safe vault-folder binding. Omit project_id for active project."""
             return await self._invoke(
                 "project_update",
                 lambda cp, p: cp.project_update(
@@ -479,7 +1052,7 @@ class CiaoMcpService:
             )
 
         @tool(name="project_complete", annotations=_DESTRUCTIVE, structured_output=True)
-        async def project_complete(project_id: str) -> dict[str, Any]:
+        async def project_complete(project_id: str = "") -> dict[str, Any]:
             """Move a vault-backed project to completed and archive its active project record."""
             return await self._invoke("project_complete", lambda cp, p: cp.project_complete(p, project_id), mutating=True)
 
@@ -489,13 +1062,13 @@ class CiaoMcpService:
             return await self._invoke("project_restore", lambda cp, p: cp.project_restore(p, stem), mutating=True)
 
         @tool(name="project_delete", annotations=_DESTRUCTIVE, structured_output=True)
-        async def project_delete(project_id: str) -> dict[str, Any]:
+        async def project_delete(project_id: str = "") -> dict[str, Any]:
             """Delete a non-vault-backed project and its chats."""
             return await self._invoke("project_delete", lambda cp, p: cp.project_delete(p, project_id), mutating=True)
 
         @tool(name="project_files_list", annotations=_READ, structured_output=True)
-        async def project_files_list(project_id: str) -> dict[str, Any]:
-            """List files inside a project's vault folder."""
+        async def project_files_list(project_id: str = "") -> dict[str, Any]:
+            """List files inside a project's vault folder. Omit project_id for active project."""
             return await self._invoke("project_files_list", lambda cp, p: cp.project_files_list(p, project_id))
 
         @tool(name="chats_list", annotations=_READ, structured_output=True)
@@ -504,8 +1077,8 @@ class CiaoMcpService:
             return await self._invoke("chats_list", lambda cp, p: cp.chats_list(p, project_id))
 
         @tool(name="chat_get", annotations=_READ, structured_output=True)
-        async def chat_get(chat_id: str) -> dict[str, Any]:
-            """Get one chat by ID within the active workspace."""
+        async def chat_get(chat_id: str = "") -> dict[str, Any]:
+            """Get one chat by ID within the active workspace. Omit to get the calling chat."""
             return await self._invoke("chat_get", lambda cp, p: cp.chat_get(p, chat_id))
 
         @tool(name="chat_create", annotations=_WRITE, structured_output=True)
@@ -549,7 +1122,7 @@ class CiaoMcpService:
 
         @tool(name="chat_update", annotations=_WRITE, structured_output=True)
         async def chat_update(
-            chat_id: str,
+            chat_id: str = "",
             title: str | None = None,
             provider: str | None = None,
             model: str | None = None,
@@ -559,7 +1132,7 @@ class CiaoMcpService:
             model_bucket: str | None = None,
             control_surface: str | None = None,
         ) -> dict[str, Any]:
-            """Update chat metadata and same-backend model settings."""
+            """Update chat metadata and same-backend model settings. Omit chat_id for calling chat."""
             return await self._invoke(
                 "chat_update",
                 lambda cp, p: cp.chat_update(
@@ -589,7 +1162,7 @@ class CiaoMcpService:
 
         @tool(name="chat_retry", annotations=_WRITE, structured_output=True)
         async def chat_retry(
-            chat_id: str,
+            chat_id: str = "",
             action: str = "try_now",
             prompt: str = "",
         ) -> dict[str, Any]:
@@ -605,7 +1178,7 @@ class CiaoMcpService:
 
         @tool(name="chat_handover", annotations=_WRITE, structured_output=True)
         async def chat_handover(
-            chat_id: str,
+            chat_id: str = "",
             provider: str = "",
             model: str = "",
             messages: list[dict[str, Any]] | None = None,
@@ -631,28 +1204,33 @@ class CiaoMcpService:
 
         @tool(name="chat_fork", annotations=_WRITE, structured_output=True)
         async def chat_fork(
-            chat_id: str,
-            messages: list[dict[str, Any]],
-            turn_index: int,
+            chat_id: str = "",
+            messages: list[dict[str, Any]] | None = None,
+            turn_index: int = 0,
         ) -> dict[str, Any]:
             """Create an independent chat from visible history through one turn."""
             return await self._invoke(
                 "chat_fork",
                 lambda cp, p: cp.chat_fork(
-                    p, chat_id, messages=messages, turn_index=turn_index
+                    p, chat_id, messages=messages or [], turn_index=turn_index
                 ),
                 mutating=True,
             )
 
         @tool(name="chat_archive", annotations=_WRITE, structured_output=True)
-        async def chat_archive(chat_id: str) -> dict[str, Any]:
-            """Archive a chat to the vault and trigger normal post-archive processing."""
+        async def chat_archive(chat_id: str = "") -> dict[str, Any]:
+            """Archive a chat to the vault and trigger normal post-archive processing.
+
+            Args:
+                chat_id: The ID of the chat to archive. Omit or pass empty to
+                    archive the calling chat.
+            """
             return await self._invoke(
                 "chat_archive", lambda cp, p: cp.chat_archive(p, chat_id), mutating=True
             )
 
         @tool(name="chat_delete", annotations=_DESTRUCTIVE, structured_output=True)
-        async def chat_delete(chat_id: str) -> dict[str, Any]:
+        async def chat_delete(chat_id: str = "") -> dict[str, Any]:
             """Delete a chat; deleting the current caller is deferred until the turn finishes."""
             return await self._invoke(
                 "chat_delete", lambda cp, p: cp.chat_delete(p, chat_id), mutating=True
@@ -785,10 +1363,10 @@ class CiaoMcpService:
             """Validate a schedule and compute its next run without saving it.
 
             Call this before schedule_create for a new recurring schedule and
-            show the user the resulting next_run as part of the draft. A
-            missing or invalid next_run means the fields don't validate as
-            given — don't create it yet. See schedule_create's docstring for
-            field semantics (they're identical here)."""
+            show the user the resulting next_run, workspace, and project as
+            part of the draft. A missing or invalid next_run means the fields
+            don't validate as given — don't create it yet. See schedule_create's
+            docstring for field semantics (they're identical here)."""
             values = {key: value for key, value in locals().items() if key != "self"}
             return await self._invoke("schedule_preview", lambda cp, p: cp.schedule_preview(p, **values))
 
@@ -813,7 +1391,11 @@ class CiaoMcpService:
 
             Show the user a concise draft and get confirmation before creating
             it, unless they already explicitly asked you to apply it — call
-            schedule_preview first and include its next_run in the draft.
+            schedule_preview first. The draft must include next_run, the
+            target workspace, and the target project (or chat). Ask if they
+            want a different workspace/project when that isn't obvious from
+            the request. Schedules always belong to one logical workspace
+            (Personal, Work, …) and show under Automations for that workspace.
 
             Args:
                 prompt: The prompt dispatched each run. Start with the goal in
@@ -836,12 +1418,15 @@ class CiaoMcpService:
                 day_of_month: 1-31, monthly only.
                 run_at_date: "YYYY-MM-DD", once only, must be in the future.
                 project_id: Project id or case-insensitive name — creates a
-                    fresh chat in that project per run. Preferred for
+                    fresh chat in that project per run. When omitted (and
+                    chat_id is also omitted), defaults to this chat's project
+                    and stamps that project's workspace. Preferred for
                     vault-aware automation.
                 chat_id: Posts into one existing chat instead. Use only when
                     conversation continuity across runs matters; resolve it
                     via chats_list first (chat titles aren't unique, unlike
                     project names, so there's no name lookup for this one).
+                    When set, project_id is not auto-inherited.
                 model: Empty inherits the target workspace's default model at
                     dispatch time; override only when necessary.
                 provider: Empty inherits the target workspace's default
@@ -920,11 +1505,12 @@ class CiaoMcpService:
 
         @tool(name="loop_create", annotations=_WRITE, structured_output=True)
         async def loop_create(
-            chat_id: str,
             prompt: str,
+            chat_id: str = "",
             interval_minutes: int = 10,
             title: str = "",
             autostart: bool = False,
+            start: bool = True,
         ) -> dict[str, Any]:
             """Create an interval loop: re-sends one prompt into a fixed chat
             every N minutes, retaining that chat's context. Use a loop rather
@@ -933,16 +1519,22 @@ class CiaoMcpService:
             should get a fresh project chat.
 
             Args:
-                chat_id: An existing chat id. Resolve it via chats_list first
-                    — chat titles aren't unique, so there's no name lookup
-                    here (unlike schedule_create's project_id).
+                chat_id: An existing chat id, or omit / pass empty / "this" for
+                    the calling chat. If you must target another chat, resolve
+                    its id via chats_list first — chat titles aren't unique.
                 prompt: Give a short, fixed no-change response for a no-op
                     tick, so repeated iterations stay cheap and scannable.
                 interval_minutes: There is no model field — each iteration
                     uses the target chat's current model and mode.
-                autostart: Only controls whether the loop starts on server
-                    boot; live running/stopped state is set separately via
-                    loop_start/loop_stop.
+                autostart: Only controls whether the loop starts again on
+                    server boot. It does NOT start the loop now — `start`
+                    does that.
+                start: True (default) begins the cadence immediately, so the
+                    first tick fires within a minute. Pass False only when the
+                    user asked for a loop they will start by hand later; say
+                    which you did instead of claiming a stopped loop is
+                    running. The returned payload carries the real `running`
+                    flag — report that, not your intent.
 
             If the target chat is busy when a tick fires, that iteration is
             skipped and retried on the next tick (not queued). If the target
@@ -952,7 +1544,9 @@ class CiaoMcpService:
             """
             return await self._invoke(
                 "loop_create",
-                lambda cp, p: cp.loop_create(p, chat_id, prompt, interval_minutes, title, autostart),
+                lambda cp, p: cp.loop_create(
+                    p, chat_id, prompt, interval_minutes, title, autostart, start
+                ),
                 mutating=True,
             )
 
@@ -1058,8 +1652,8 @@ class CiaoMcpService:
 async def mcp_status_endpoint(request: Request) -> JSONResponse:
     service = getattr(request.app.state, "mcp_service", None)
     if service is None:
-        return JSONResponse({"enabled": False, "bound": False, "tool_count": 0})
-    return JSONResponse(service.status())
+        return JSONResponse({"enabled": False, "bound": False, "tool_count": 0, "project_servers": []})
+    return JSONResponse(service.status_for_api())
 
 
 async def mcp_usage_endpoint(request: Request) -> JSONResponse:
@@ -1067,3 +1661,154 @@ async def mcp_usage_endpoint(request: Request) -> JSONResponse:
     if service is None:
         return JSONResponse({"total_calls": 0, "total_errors": 0, "tool_count": 0, "tools": []})
     return JSONResponse(service.usage())
+
+
+def _write_mcp_env_values(path: Path, updates: dict[str, str]) -> None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        lines = []
+    remaining = dict(updates)
+    out: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            out.append(line)
+            continue
+        key = line.split("=", 1)[0].strip()
+        if key not in remaining:
+            out.append(line)
+            continue
+        value = remaining.pop(key).strip()
+        if value:
+            out.append(f"{key}={value}")
+    for key, value in remaining.items():
+        value = value.strip()
+        if value:
+            out.append(f"{key}={value}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+
+
+async def mcp_env_keys_endpoint(request: Request) -> JSONResponse:
+    """Save MCP-related secrets into the workspace ``.env``.
+
+    Known keys from discovered servers are accepted. Unknown keys require
+    ``server`` so they can be bound into that server's ``.mcp.json`` env map.
+    Values are never returned.
+    """
+    service = getattr(request.app.state, "mcp_service", None)
+    if service is None:
+        return JSONResponse({"error": "MCP service unavailable"}, status_code=503)
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "expected object"}, status_code=400)
+    raw_keys = body.get("keys")
+    if not isinstance(raw_keys, dict):
+        return JSONResponse({"error": "keys must be an object"}, status_code=400)
+    updates = {str(k): str(v) for k, v in raw_keys.items()}
+    server = str(body.get("server") or "").strip() or None
+    try:
+        payload = await asyncio.to_thread(
+            service.save_project_server_env_keys,
+            updates,
+            server=server,
+            bind_missing=True,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(payload)
+
+
+async def mcp_servers_collection_endpoint(request: Request) -> JSONResponse:
+    """Create a project MCP server in ``.mcp.json``."""
+    service = getattr(request.app.state, "mcp_service", None)
+    if service is None:
+        return JSONResponse({"error": "MCP service unavailable"}, status_code=503)
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "expected object"}, status_code=400)
+    args = body.get("args")
+    args_list = [str(item) for item in args] if isinstance(args, list) else None
+    env_keys = body.get("env_keys") if isinstance(body.get("env_keys"), dict) else None
+    try:
+        payload = await asyncio.to_thread(
+            service.upsert_project_server,
+            str(body.get("name") or ""),
+            url=str(body.get("url") or ""),
+            command=str(body.get("command") or ""),
+            args=args_list,
+            env_keys={str(k): str(v) for k, v in env_keys.items()} if env_keys else None,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(payload, status_code=201)
+
+
+async def mcp_server_item_endpoint(request: Request) -> JSONResponse:
+    """Update or delete one project MCP server."""
+    service = getattr(request.app.state, "mcp_service", None)
+    if service is None:
+        return JSONResponse({"error": "MCP service unavailable"}, status_code=503)
+    name = str(request.path_params.get("name") or "").strip()
+    if not name:
+        return JSONResponse({"error": "missing server name"}, status_code=400)
+    if request.method == "DELETE":
+        try:
+            payload = await asyncio.to_thread(service.delete_project_server, name)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        return JSONResponse(payload)
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse({"error": "invalid JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "expected object"}, status_code=400)
+    args = body.get("args")
+    args_list = [str(item) for item in args] if isinstance(args, list) else None
+    env_keys = body.get("env_keys") if isinstance(body.get("env_keys"), dict) else None
+    # Preserve existing transport fields when omitted.
+    current = None
+    for server in service.status_for_api().get("project_servers") or []:
+        if isinstance(server, dict) and server.get("name") == name:
+            current = server
+            break
+    if current is None:
+        return JSONResponse({"error": f"unknown MCP server '{name}'"}, status_code=404)
+    url = body["url"] if "url" in body else (current.get("url") or "")
+    command = body["command"] if "command" in body else (current.get("command") or "")
+    if args_list is None and "args" not in body:
+        args_list = list(current.get("args") or [])
+    try:
+        payload = await asyncio.to_thread(
+            service.upsert_project_server,
+            name,
+            url=str(url or ""),
+            command=str(command or ""),
+            args=args_list,
+            env_keys={str(k): str(v) for k, v in env_keys.items()} if env_keys else None,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(payload)
+
+
+async def mcp_server_tools_endpoint(request: Request) -> JSONResponse:
+    """Lazy tool discovery for one project MCP server (HTTP probe or observed)."""
+    service = getattr(request.app.state, "mcp_service", None)
+    if service is None:
+        return JSONResponse({"ok": False, "error": "MCP service unavailable", "tools": []}, status_code=503)
+    name = str(request.path_params.get("name") or "").strip()
+    if not name:
+        return JSONResponse({"ok": False, "error": "missing server name", "tools": []}, status_code=400)
+    result = await asyncio.to_thread(service.probe_project_server_tools, name)
+    if result.get("error") == f"unknown MCP server '{name}'":
+        return JSONResponse(result, status_code=404)
+    return JSONResponse(result)

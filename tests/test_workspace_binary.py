@@ -50,6 +50,9 @@ def workspace(tmp_path: Path) -> Path:
     (ws / "docs" / "readme.md").write_text("# hello\n", encoding="utf-8")
     (ws / "docs" / "pic.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     (ws / "docs" / "presentation.pptx").write_bytes(b"PPTX_BYTES")
+    (ws / "docs" / "capture.mhtml").write_bytes(
+        b"From: <Saved by Blink>\nContent-Type: multipart/related\n"
+    )
     return ws
 
 
@@ -70,6 +73,16 @@ def test_zip_returns_zip_mime(workspace: Path) -> None:
     resp = client.get("/api/workspace-binary", params={"path": "docs/bundle.zip"})
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("application/zip")
+
+
+def test_mhtml_returns_saved_page_bytes(workspace: Path) -> None:
+    client = _make_client(workspace)
+    resp = client.get(
+        "/api/workspace-binary", params={"path": "docs/capture.mhtml"}
+    )
+    assert resp.status_code == 200
+    assert resp.content.startswith(b"From: <Saved by Blink>")
+    assert "attachment" in resp.headers["content-disposition"]
 
 
 def test_markdown_is_rejected(workspace: Path) -> None:
@@ -186,5 +199,3 @@ def test_pptx_conversion_success(workspace: Path, monkeypatch: pytest.MonkeyPatc
     assert resp.content == b"%PDF-1.4\n%%EOF\n"
     assert resp.headers["content-type"] == "application/pdf"
     assert "presentation.pdf" in resp.headers["content-disposition"]
-
-

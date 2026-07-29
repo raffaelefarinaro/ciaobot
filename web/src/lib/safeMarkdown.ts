@@ -1,5 +1,5 @@
 import DOMPurify from 'dompurify'
-import { Marked, marked } from 'marked'
+import { Marked, Renderer, type Tokens } from 'marked'
 
 import { COMMENT_TAGS } from './commentContext'
 import { linkifyHtml } from './filePaths'
@@ -12,6 +12,20 @@ type FileMarkdownOptions = {
 }
 
 const MARKDOWN_OPTIONS = { breaks: true }
+
+const chatMarkdownRenderer = new Renderer()
+chatMarkdownRenderer.table = function table(token: Tokens.Table): string {
+  return [
+    '<div class="markdown-table-scroll" role="region" aria-label="Scrollable table" tabindex="0">',
+    Renderer.prototype.table.call(this, token),
+    '</div>',
+  ].join('')
+}
+
+const chatMarkdownParser = new Marked({
+  ...MARKDOWN_OPTIONS,
+  renderer: chatMarkdownRenderer,
+})
 
 function sanitizeHtml(html: string): string {
   return DOMPurify.sanitize(html, {
@@ -42,7 +56,7 @@ function escapeAttr(value: string): string {
 
 export function renderMarkdown(text: string, knownPaths: string[] = []): string {
   try {
-    const html = marked.parse(text, MARKDOWN_OPTIONS) as string
+    const html = chatMarkdownParser.parse(text) as string
     return linkifyHtml(sanitizeHtml(withExternalLinkAttrs(html)), knownPaths)
   } catch {
     return sanitizeHtml(text)

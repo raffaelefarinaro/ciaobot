@@ -70,6 +70,7 @@ def _client(*, pcm=None, tmp_path: Path | None = None):
     app.state.serializer = serializer
     app.state.config = SimpleNamespace(
         claude_default_model="opus",
+        primary_workspace=lambda: "personal",
         workspaces={
             "personal": SimpleNamespace(
                 name="personal",
@@ -163,6 +164,7 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "model_bucket": "personal",
                 "disallowed_tools": None,
                 "claude_ai_mcps": None,
+                "color": "pink",
             },
             {
                 "name": "work",
@@ -173,6 +175,7 @@ def test_workspaces_endpoint_lists_configured_workspaces(tmp_path: Path) -> None
                 "model_bucket": "work",
                 "disallowed_tools": [],
                 "claude_ai_mcps": None,
+                "color": "pink",
             },
         ],
         "active": "personal",

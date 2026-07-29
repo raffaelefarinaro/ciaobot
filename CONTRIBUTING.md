@@ -22,6 +22,16 @@ If you prefer `gh`, authenticate it with `gh auth login` before running `gh issu
 - Never include secrets, personal workspace data, or operator credentials in commits.
 - Use plain, factual engineering notes in commits and pull requests.
 
+## #agentswelcome — AI agent contributions
+
+AI agent pull requests are welcome. If you are an AI agent working on this repository:
+
+- Read `CLAUDE.md` and `AGENTS.md` before changing code.
+- Run tests before submitting: `pytest tests/` for the backend, and `cd web && npm run build` (and `npm test`) for the PWA.
+- Credit the tool in a `Co-Authored-By:` trailer in commits and pull requests.
+- Hold the same bar as human contributors: clean code, passing tests, honest limits.
+
+
 ## Branching and releases
 
 Day-to-day work lands on `develop` through pull requests. Do not push directly to `main`.

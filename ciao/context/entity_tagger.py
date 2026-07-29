@@ -26,6 +26,13 @@ _MAX_PROMPT_CHARS = 4000
 _MAX_MATCHES = 8
 # Aliases shorter than this produce too many false matches ("mo", "al").
 _MIN_ALIAS_LEN = 3
+# README/index represent their whole folder, so we name the entity after the
+# parent folder instead of the bare filename (otherwise one "README" token
+# lights up every project at once). log/index are structural files whose bare
+# names are also common words ("log"), so we drop them from the index entirely;
+# the folder's README already stands in for the folder.
+_FOLDER_FILENAMES = {"readme"}
+_SKIP_FILENAMES = {"log", "index"}
 
 # Bullet lines look like:
 #   - `People/Alba` (tags: person, friend; aliases: Alba)
@@ -89,7 +96,13 @@ class _Index:
             len(self._entities), len(self._match_terms),
         )
 
-    def find(self, prompt: str, *, workspace: str | None = None) -> list[VaultEntity]:
+    def find(
+        self,
+        prompt: str,
+        *,
+        workspace: str | None = None,
+        legacy_workspace: str = "",
+    ) -> list[VaultEntity]:
         """Return entities whose name/alias appears as a whole word in ``prompt``."""
         self._refresh_if_stale()
         if not self._match_terms or not prompt:
@@ -100,7 +113,9 @@ class _Index:
         for pattern, entity in self._match_terms:
             if entity.path in seen:
                 continue
-            if not _entity_visible_in_workspace(entity, workspace):
+            if not _entity_visible_in_workspace(
+                entity, workspace, legacy_workspace=legacy_workspace
+            ):
                 continue
             if pattern.search(snippet):
                 hits.append(entity)
@@ -127,6 +142,13 @@ def _parse_index(path: Path) -> list[VaultEntity]:
             continue
         category = _category_for_path(parts)
         name = parts[-1]
+        lname = name.lower()
+        if lname in _SKIP_FILENAMES:
+            continue
+        # Fold a folder's README onto its folder so the match term is the
+        # project name, not a word ("README") shared by every folder.
+        if lname in _FOLDER_FILENAMES and len(parts) >= 3:
+            name = parts[-2]
         aliases: list[str] = []
         alias_match = _ALIASES_RE.search(rest)
         if alias_match:
@@ -170,14 +192,22 @@ def _compile_terms(entities: list[VaultEntity]) -> list[tuple[re.Pattern[str], V
     return terms
 
 
-def _entity_visible_in_workspace(entity: VaultEntity, workspace: str | None) -> bool:
+def _entity_visible_in_workspace(
+    entity: VaultEntity,
+    workspace: str | None,
+    *,
+    legacy_workspace: str = "",
+) -> bool:
     """Return whether an indexed entity is visible to ``workspace``.
 
     Workspace-scoped vaults index paths as ``<workspace>/...``. Shared roots
     use ``shared/...`` and are visible everywhere. Older single-workspace
-    indexes used unprefixed paths like ``People/Alba``; keep those visible
-    only when no workspace filter is requested or for the legacy personal
-    workspace.
+    indexes used unprefixed paths like ``People/Alba``; those belong to
+    ``legacy_workspace``, which the caller reads off the workspace registry.
+
+    An unknown ``legacy_workspace`` fails closed. Showing an unprefixed entity
+    in every workspace is a cross-workspace disclosure; the provider request
+    carries the registry-selected owner explicitly for normal PWA chats.
     """
     workspace = (workspace or "").strip()
     if not workspace:
@@ -189,7 +219,7 @@ def _entity_visible_in_workspace(entity: VaultEntity, workspace: str | None) -> 
     if "/" in entity.path:
         first = entity.path.split("/", 1)[0]
         if first in {"People", "Projects", "Places", "Ideas", "Resources"}:
-            return workspace == "personal"
+            return bool(legacy_workspace) and workspace == legacy_workspace
     return False
 
 
@@ -210,9 +240,16 @@ def find_entities(
     vault_root: Path,
     *,
     workspace: str | None = None,
+    legacy_workspace: str = "",
 ) -> list[VaultEntity]:
-    """Scan ``prompt`` and return whole-word matches against INDEX.md."""
-    return get_index(vault_root).find(prompt, workspace=workspace)
+    """Scan ``prompt`` and return whole-word matches against INDEX.md.
+
+    ``legacy_workspace`` is the workspace that owns unprefixed pre-migration
+    vault entries — pass ``config.primary_workspace()``.
+    """
+    return get_index(vault_root).find(
+        prompt, workspace=workspace, legacy_workspace=legacy_workspace
+    )
 
 
 def format_entities(entities: list[VaultEntity]) -> str:

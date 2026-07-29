@@ -12,16 +12,23 @@ ciao setup --workspace /tmp/ciao-workspace
 ciao run
 ```
 
-`ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies the editable `CLAUDE.md` workspace guide, links `AGENTS.md` to that same guide for Codex, copies `CIAO_CUSTOMIZATION.md`, renders the server and menu bar plists under `~/Library/LaunchAgents/`, and creates `~/Applications/Ciaobot Server.app`, which starts the local service when needed and opens the `Ciaobot` PWA. Existing custom `AGENTS.md` files are preserved. By default setup does not load launchd; add `--load-launchd` when you want it to run `launchctl`.
+`ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies the editable `CLAUDE.md` workspace guide, links `AGENTS.md` to that same guide for Codex, copies `CIAO_CUSTOMIZATION.md`, and renders the server plist under `~/Library/LaunchAgents/`. When the real Tauri `Ciaobot.app` is installed, setup does not generate or load the legacy rumps agent or `Ciaobot Server.app`; package-only installs retain those assets for the migration/rollback window. Existing custom `AGENTS.md` files are preserved. By default setup does not load launchd; add `--load-launchd` when you want it to run `launchctl`.
+
+A fresh first logical workspace and workspaces added later in Settings live at
+`<CIAO_VAULT_ROOT>/<workspace-name>/`. Their registry path is read-only in the
+PWA. Existing-folder setup preserves the selected notes in place so the
+onboarding agent can inspect them; `ciao os-audit` then offers a model-guided,
+backed-up migration into the standard named folder.
 
 Common package CLI entry points:
 
 ```bash
-ciao setup --workspace ~/ciao --load-launchd
+ciao setup --workspace ~/ciao --workspace-name personal --load-launchd
 ciao memory read --target memory
 ciao vault-index --workspace default --format json
 ciao vault-search "project keyword" --limit 5
 ciao vault-lint --vault-root memory-vault
+ciao os-audit --json
 ciao create-chat --prompt "Start here" --workspace default
 ciao cleanup-sdk-blobs --workspace .       # dry-run by default
 ciao dev                                   # backend :8543 + Vite :5173
@@ -54,7 +61,7 @@ brew install raffaelefarinaro/ciaobot/ciaobot
 The formula template lives in `deploy/homebrew/ciaobot.rb`. Regenerate it with:
 
 ```bash
-./scripts/update-homebrew-tap.sh <version> <wheel-sha256>
+./scripts/update-homebrew-tap.sh <version> <wheel-sha256> <desktop-dmg-sha256>
 ```
 
 On each GitHub release, `publish.yml` updates the tap automatically. Add a repo-scoped `HOMEBREW_TAP_GITHUB_TOKEN` secret to this repository so the workflow can push to `homebrew-ciaobot` (the default `GITHUB_TOKEN` cannot write across repos).
@@ -70,7 +77,10 @@ On each GitHub release, `publish.yml` updates the tap automatically. Add a repo-
 scripts/prepare-release --apply --create-pr --ready
 ```
 
-  That cuts `release/vX.Y.Z` from `develop`, bumps `pyproject.toml`, `ciao/__init__.py`, `web/package.json`, and `web/package-lock.json`, refreshes `CHANGELOG.md`, runs release checks, and opens a PR into `main`. Use `--bump minor` or `--version X.Y.Z` when needed.
+  That cuts `release/vX.Y.Z` from `develop`, aligns the Python, PWA, desktop
+  npm/Cargo/Tauri versions and lockfiles, refreshes `CHANGELOG.md`, runs release
+  checks, and opens a PR into `main`. Use `--bump minor` or `--version X.Y.Z`
+  when needed.
 
 - **Publish:** merging the release PR into `main` triggers `.github/workflows/release-on-main.yml`, which creates the `vX.Y.Z` tag and GitHub release. `publish.yml` then builds the wheel, publishes to PyPI, and updates the Homebrew tap. A follow-up job merges `main` back into `develop`.
 
@@ -90,6 +100,38 @@ cd web
 npm install
 npm run build        # typecheck + Vite build, outputs to ciao/web/static/
 ```
+
+## macOS desktop development
+
+The Tauri 2 shell requires macOS 13+, Node 22.x, and Rust 1.90.0 with
+`aarch64-apple-darwin` and `x86_64-apple-darwin` targets:
+
+```bash
+cd desktop
+npm ci
+npm run build
+cd src-tauri
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cd ..
+npm run tauri build -- --target universal-apple-darwin
+```
+
+The main webview loads the live localhost PWA and must never be added to a
+Tauri capability. While the engine is unreachable it loads the bundled
+`startup.html` recovery page and automatically navigates to the PWA after
+recovery; test both states when changing desktop startup or service lifecycle
+code. The shell exposes **no** Tauri commands and declares no capabilities:
+every desktop preference and action is driven from the tray in Rust, so remote
+page content has no IPC surface to reach. Keep it that way — adding a command
+means re-introducing a bundled window to own it. Release builds require `TAURI_SIGNING_PRIVATE_KEY` and
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; Apple signing remains ad-hoc.
+The main window keeps Tauri's native drag/drop handler enabled so Finder paths
+are preserved. Rust creates a short-lived, single-use grant under the runtime
+root; the local `/api/desktop-drop` route consumes it and either returns host
+paths or transfers client files to the host project. Verify both a host
+Finder-to-chat drop and a client-to-host transfer after changing this bridge.
 
 After PWA changes, rebuild and either restart the service or use the **Deploy** button in PWA Settings. **Never restart the ciao service from inside a PWA chat** (you'd sever your own session); ask the operator to deploy.
 
@@ -119,12 +161,16 @@ ciao package-smoke --skip-frontend # Wheel install smoke test
 ciao vault-index --workspace default --format json  # Query the vault index
 ciao vault-search "keyword" --limit 5 # FTS search over the configured vault
 ciao vault-lint --vault-root memory-vault # Vault hygiene lint
+ciao os-audit --json # Strict AI OS setup and context-hygiene audit
 ciao benchmark-control-surfaces --provider claude --provider codex --repeats 5 # 240-turn release evaluation
 cd web && npm test             # Frontend unit tests
 cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 ```
 
-For chat rendering changes, verify the compact `Activity` disclosure, `Outputs` placement, readable token labels, keyboard operation, and 44px touch targets at both desktop and narrow-phone widths.
+For chat rendering changes, verify the compact `Activity` disclosure, `Outputs` placement, readable token labels, keyboard operation, and 44px touch targets at both desktop and narrow-phone widths. Markdown tables should shrink-wrap on desktop and keep readable first-column labels inside a horizontally scrollable table viewport on narrow screens.
+For composer drag-and-drop changes, test both local host and remote client roles:
+host paths must be absolute, while client files must upload into the active
+project on the host before the returned host path is inserted.
 
 ## Quality gates
 
@@ -139,6 +185,20 @@ scripts/dev-commands.sh all         # everything above
 ```
 
 `mypy ciao` is a blocking CI step — keep it green (config in `pyproject.toml` under `[tool.mypy]`). The frontend lint and both dependency audits are advisory (`|| true`) so a fresh upstream advisory can't block a release; review their output rather than ignoring it. Install `pip install -e '.[test]'` (Python) and `cd web && npm ci` (frontend) to get the tools. A `.pre-commit-config.yaml` wires trailing-whitespace/ruff/mypy/eslint hooks for `pre-commit install`.
+
+### AI OS audit
+
+`ciao os-audit` checks required workspace roots, vault links and duplicates, skill budgets, instruction clashes, bounded-memory hygiene, pending memory proposals, and failed background jobs. Human-readable Markdown is the default; use `--json` for automation.
+
+The status and process exit code are a stable contract:
+
+| Status | Exit | Meaning |
+|---|---:|---|
+| `healthy` | 0 | The scan completed reliably and found no actionable items. |
+| `needs_attention` | 1 | The scan completed reliably and found actionable items. |
+| `error` | 2 | Required evidence could not be inspected reliably. Findings may still be present, but the report is not a clean bill of health. |
+
+The weekly `system-workspace-hygiene` schedule runs `ciao vault-index --write` before `ciao os-audit --json`. A failed index rebuild blocks link and index repairs and prevents a healthy/no-op claim. The prompt treats audit exit 1 as findings and continues, but treats exit 2 as an unreliable scan and reports the errors without claiming success.
 
 ## Skills, subagents, and slash commands
 

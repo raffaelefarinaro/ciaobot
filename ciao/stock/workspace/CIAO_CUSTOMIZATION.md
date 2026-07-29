@@ -35,6 +35,7 @@ Example `.runtime/workspaces.json`:
     "default_model": "opus",
     "gws_profile": "personal",
     "model_bucket": "anthropic",
+    "color": "pink",
     "disallowed_tools": []
   },
   {
@@ -43,12 +44,15 @@ Example `.runtime/workspaces.json`:
     "default_model": "sonnet",
     "gws_profile": "work",
     "model_bucket": "anthropic",
+    "color": "cyan",
     "disallowed_tools": ["mcp__claude_ai_Slack", "mcp__claude_ai_Salesforce"]
   }
 ]
 ```
 
 `vault_root` is relative to `CIAO_WORKSPACE` unless it is absolute.
+
+`color` is an optional PWA accent preset (`pink`, `cyan`, `amber`, `emerald`, `violet`). Missing values default to Ciao pink. Only accent tokens change; canvas colors stay fixed.
 
 ## Providers and Models
 

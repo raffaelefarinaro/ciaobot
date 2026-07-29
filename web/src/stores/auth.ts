@@ -8,21 +8,26 @@ export const useAuthStore = defineStore('auth', () => {
   async function login(token: string) {
     await api.post('/api/auth', { token })
     authenticated.value = true
-    const { router } = await import('../router')
-    router.push('/')
+    // Full reload so client-mode tunnel + stores pick up the host session.
+    window.location.assign('/')
   }
 
   async function logout() {
-    await api.post('/api/auth/logout')
+    try {
+      await api.post('/api/auth/logout')
+    } catch {
+      /* still clear local auth state */
+    }
     authenticated.value = false
-    const { router } = await import('../router')
-    router.push('/login')
+    window.location.assign('/login')
   }
 
   async function check() {
     try {
-      await api.get('/api/auth/check')
-      authenticated.value = true
+      // Use raw fetch so a 401 here never triggers api.ts's /login redirect
+      // (that reload looped while waiting for the host password).
+      const res = await fetch('/api/auth/check', { credentials: 'same-origin' })
+      authenticated.value = res.ok
     } catch {
       authenticated.value = false
     }

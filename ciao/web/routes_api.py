@@ -16,18 +16,27 @@ import sys
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, UTC
 from pathlib import Path
-from typing import Any, Iterable, cast
+from typing import Any, Callable, Iterable, cast
 from urllib.parse import urlsplit
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
 from ciao import subagent_tracking
-from ciao.config import WorkspaceConfig, CLAUDE_AI_CONNECTORS, coerce_claude_ai_mcps
+from ciao.config import (
+    WorkspaceConfig,
+    CLAUDE_AI_CONNECTORS,
+    DEFAULT_WORKSPACE_COLOR,
+    coerce_claude_ai_mcps,
+    coerce_workspace_color,
+)
+from ciao.loops import publish_loops_changed
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.model_tiers import codex_tier_models
 from ciao.package_version import package_changelog, package_status, update_package
+from ciao.network_addresses import is_loopback_url, server_addresses
 from ciao.tool_path import login_shell_path, resolve_tool
 from ciao.providers.claude import _summarize_tool_input
 from ciao.providers.codex import CodexProvider, codex_login_status, codex_tier_overrides
@@ -44,8 +53,10 @@ from ciao.cli import _auth_command_for_provider
 from ciao.rate_limits import is_rate_limit_telemetry
 from ciao.skills_inventory import build_skill_inventory
 from ciao.vault_lint import EXCLUDE_DIRS, _links_in
-from ciao.web.chat_broker import extract_file_touches
+from ciao.web.chat_broker import extract_file_touches, normalize_file_touch_paths
 from ciao.web.project_chats import (
+    RestartDrainingError,
+    _ALLOWED_IMAGE_EXTENSIONS,
     _PROJECT_UPLOAD_MAX_BYTES,
     _normalize_handover_messages,
 )
@@ -277,7 +288,79 @@ def _tool_icon(name: str) -> str:
     return _TOOL_ICONS.get(name, "\u2699\uFE0F")
 
 
-def _extract_assistant_blocks(raw: object) -> list[dict]:
+# Tools whose failure invalidates their file card. A refused or errored `Write`
+# either wrote the file or did not run at all; a failed `file_surface` did not
+# select an artifact. A `Bash` non-zero exit says no such thing — `printf x > f
+# && exit 1` leaves the file behind — so its card stands, or history would hide
+# a file the agent really created.
+_FAILURE_DROPS_FILE_CARD_TOOLS = frozenset({
+    "Write",
+    "Edit",
+    "MultiEdit",
+    "NotebookEdit",
+    "mcp__ciaobot__file_surface",
+})
+
+
+def _touches_survive_failure(tool_name: str) -> bool:
+    """Whether a failed call's file cards should still render."""
+    return tool_name not in _FAILURE_DROPS_FILE_CARD_TOOLS
+
+
+def _failed_tool_use_ids(msgs: list) -> set[str]:
+    """Tool-call ids whose ``tool_result`` came back as an error.
+
+    A denied or failed ``Write``/``Edit`` never touched the file, but the file
+    card is emitted from the *request*, so history would show an Outputs chip
+    for a file that was never created (this is what made a permission-denied
+    `skills-monitor.md` look written). Results live on the following user
+    message, so they can only be matched in a pre-pass over the whole session.
+
+    Which ids actually suppress a card is decided per tool — see
+    ``_touches_survive_failure``.
+    """
+    failed: set[str] = set()
+    for m in msgs:
+        # Both SDK objects and raw JSONL dicts flow through here (the subagent
+        # renderer accepts either).
+        mtype = m.get("type") if isinstance(m, dict) else getattr(m, "type", None)
+        if mtype != "user":
+            continue
+        message = m.get("message") if isinstance(m, dict) else getattr(m, "message", None)
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            failed_result = bool(block.get("is_error"))
+            content = block.get("content")
+            if not failed_result and isinstance(content, str):
+                try:
+                    content = json.loads(content)
+                except (TypeError, ValueError):
+                    content = None
+            if (
+                not failed_result
+                and isinstance(content, dict)
+                and content.get("ok") is False
+            ):
+                # MCP tools return structured envelopes. Claude records these
+                # as a successful transport-level tool_result even when the
+                # application operation failed, e.g. file_surface returning
+                # {"ok": false, "error": ...}.
+                failed_result = True
+            if failed_result and block.get("tool_use_id"):
+                failed.add(str(block["tool_use_id"]))
+    return failed
+
+
+def _extract_assistant_blocks(
+    raw: object,
+    workspace_root: Path | None = None,
+) -> list[dict]:
     """Return ordered text/tool_use blocks for an assistant message.
 
     Items: {"kind": "text", "text": str},
@@ -329,8 +412,15 @@ def _extract_assistant_blocks(raw: object) -> list[dict]:
             if not isinstance(tinput, dict):
                 tinput = {}
             summary = _summarize_tool_input(name, tinput)
-            touches = extract_file_touches(name, tinput)
+            touches = normalize_file_touch_paths(
+                extract_file_touches(name, tinput),
+                workspace_root,
+            )
             entry = {"kind": "tool_use", "name": name, "summary": summary}
+            # Kept so the history builder can match this call against its
+            # tool_result and drop the file card when the call failed.
+            if block.get("id"):
+                entry["id"] = str(block["id"])
             if touches:
                 entry["file_touch"] = touches[0]
                 if len(touches) > 1:
@@ -522,6 +612,10 @@ def _summarize_task_notification(content: str) -> str | None:
 def _render_subagent_messages(msgs: Iterable[object]) -> list[dict]:
     """Render SDK or JSONL message objects for the subagent transcript UI."""
     rendered: list[dict] = []
+    # Materialised because the failed-tool pre-pass has to see the results,
+    # which arrive after the calls they belong to.
+    msgs = list(msgs)
+    failed_tool_ids = _failed_tool_use_ids(msgs)
     for m in msgs:
         mtype = getattr(m, "type", None)
         message = getattr(m, "message", None)
@@ -555,6 +649,15 @@ def _render_subagent_messages(msgs: Iterable[object]) -> list[dict]:
                     if not isinstance(touches, list) or not touches:
                         touch = blk.get("file_touch")
                         touches = [touch] if touch else []
+                    if (
+                        touches
+                        and blk.get("id") in failed_tool_ids
+                        and not _touches_survive_failure(name)
+                    ):
+                        # Denied or errored write: nothing reached disk, so
+                        # render a plain activity row instead of a file card
+                        # that implies the write happened.
+                        touches = []
                     if touches:
                         flush_tools()
                         for touch in touches:
@@ -703,7 +806,13 @@ def _local_subagent_transcripts(session_id: str, workspace_root: Path) -> list[d
 
 # ── Auth ────────────────────────────────────────────────────────────────
 
-from ciao.web.routes_auth import auth_check, auth_login, auth_logout
+from ciao.web.routes_auth import (
+    auth_check,
+    auth_login,
+    auth_logout,
+    auth_settings_get,
+    auth_settings_update,
+)
 
 
 # ── Projects ─────────────────────────────────────────────────────────────
@@ -716,6 +825,10 @@ async def list_workspaces(request: Request) -> JSONResponse:
 
 
 def _workspace_to_dict(workspace: WorkspaceConfig) -> dict:
+    try:
+        color = coerce_workspace_color(getattr(workspace, "color", DEFAULT_WORKSPACE_COLOR))
+    except ValueError:
+        color = DEFAULT_WORKSPACE_COLOR
     return {
         "name": getattr(workspace, "name", ""),
         "vault_root": getattr(workspace, "vault_root", ""),
@@ -732,6 +845,7 @@ def _workspace_to_dict(workspace: WorkspaceConfig) -> dict:
         "claude_ai_mcps": getattr(workspace, "claude_ai_mcps", None),
         "gws_profile": getattr(workspace, "gws_profile", ""),
         "model_bucket": getattr(workspace, "model_bucket", ""),
+        "color": color,
     }
 
 
@@ -771,6 +885,24 @@ def _workspace_from_request(
     name = str(data.get("name", existing.name if existing else "")).strip()
     if not _WORKSPACE_NAME_RE.match(name):
         raise ValueError("workspace name must use letters, numbers, dashes, or underscores")
+    if existing is None:
+        for configured_name in config.workspace_names():
+            if configured_name.casefold() == name.casefold():
+                raise ValueError(
+                    f"workspace name conflicts with existing workspace "
+                    f"'{configured_name}'"
+                )
+        target_root = config.canonical_workspace_vault_root(name)
+        for configured_name in config.workspace_names():
+            try:
+                configured_root = config.workspace_vault_root(configured_name)
+            except ValueError:
+                continue
+            if configured_root == target_root:
+                raise ValueError(
+                    f"workspace vault folder is already owned by "
+                    f"'{configured_name}'"
+                )
     provider = str(
         data.get(
             "default_provider",
@@ -793,9 +925,28 @@ def _workspace_from_request(
         claude_ai_mcps = existing.claude_ai_mcps
     else:
         claude_ai_mcps = None
+    if "color" in data:
+        color = coerce_workspace_color(data.get("color"))
+    elif existing is not None:
+        try:
+            color = coerce_workspace_color(existing.color)
+        except ValueError:
+            color = DEFAULT_WORKSPACE_COLOR
+    else:
+        color = DEFAULT_WORKSPACE_COLOR
     return WorkspaceConfig(
         name=name,
-        vault_root=name,
+        # Vault locations are not an editable Settings field. Updating a
+        # workspace must preserve setup-created/external roots exactly; a new
+        # user-named workspace always receives its standard folder beneath the
+        # configured vault. Accepting request-body paths here allowed `/` and
+        # `..` to turn one authenticated save into filesystem-wide writes and
+        # scans.
+        vault_root=(
+            existing.vault_root
+            if existing is not None
+            else config.stored_workspace_vault_root(name)
+        ),
         default_provider=provider,
         default_model=str(
             data.get("default_model", existing.default_model if existing else "")
@@ -806,6 +957,7 @@ def _workspace_from_request(
         model_bucket=str(
             data.get("model_bucket", existing.model_bucket if existing else "")
         ).strip(),
+        color=color,
     )
 
 
@@ -814,6 +966,10 @@ def _workspaces_path(config) -> Path:
 
 
 def _persist_workspaces(config) -> None:
+    persist = getattr(config, "persist_workspace_registry", None)
+    if callable(persist):
+        persist()
+        return
     path = _workspaces_path(config)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = [_workspace_to_dict(workspace) for workspace in config.workspaces.values()]
@@ -1549,10 +1705,14 @@ async def list_projects(request: Request) -> JSONResponse:
 
 async def create_project(request: Request) -> JSONResponse:
     pcm = request.app.state.project_chat_manager
+    config = request.app.state.config
     body = await request.json()
     project = pcm.create_project(
         name=body["name"],
-        workspace=body.get("workspace", "personal"),
+        # An omitted workspace has to resolve to one that exists: create_project
+        # does not validate the name, so an unknown one yields a project that is
+        # filtered out of every workspace's sidebar.
+        workspace=body.get("workspace") or config.primary_workspace(),
         context=body.get("context", ""),
     )
     return JSONResponse(project.to_dict(), status_code=201)
@@ -1681,6 +1841,229 @@ async def project_files_upload(request: Request) -> JSONResponse:
         except ValueError as exc:
             errors.append({"filename": filename, "error": str(exc)})
     return JSONResponse({"saved": saved, "errors": errors})
+
+
+_DESKTOP_DROP_GRANT_TTL_SECONDS = 5 * 60
+_DESKTOP_DROP_MAX_FILES = 100
+
+
+def _consume_desktop_drop_grant(request: Request, grant_id: str) -> list[Path]:
+    """Consume a native-app grant and return only its explicitly dropped paths."""
+    try:
+        canonical_id = str(UUID(grant_id))
+    except (ValueError, AttributeError) as exc:
+        raise ValueError("invalid desktop drop grant") from exc
+    if canonical_id != grant_id:
+        raise ValueError("invalid desktop drop grant")
+
+    config = request.app.state.config
+    grant_dir = config.state_path.parent / "desktop-drop-grants"
+    source = grant_dir / f"{grant_id}.json"
+    consuming = grant_dir / f".{grant_id}.consuming"
+    try:
+        source.replace(consuming)
+    except FileNotFoundError as exc:
+        raise LookupError("desktop drop grant not found or already used") from exc
+
+    try:
+        payload = json.loads(consuming.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid desktop drop grant") from exc
+    finally:
+        consuming.unlink(missing_ok=True)
+
+    if not isinstance(payload, dict):
+        raise ValueError("invalid desktop drop grant")
+    created_at = payload.get("created_at")
+    raw_paths = payload.get("paths")
+    if not isinstance(created_at, (int, float)):
+        raise ValueError("invalid desktop drop grant")
+    age = datetime.now(UTC).timestamp() - float(created_at)
+    if age < -30 or age > _DESKTOP_DROP_GRANT_TTL_SECONDS:
+        raise ValueError("desktop drop grant expired")
+    if (
+        not isinstance(raw_paths, list)
+        or not raw_paths
+        or len(raw_paths) > _DESKTOP_DROP_MAX_FILES
+        or not all(isinstance(path, str) for path in raw_paths)
+    ):
+        raise ValueError("invalid desktop drop grant")
+
+    paths = [Path(path) for path in raw_paths]
+    if any(not path.is_absolute() or not path.exists() for path in paths):
+        raise ValueError("a dropped file is no longer available")
+    return paths
+
+
+async def desktop_drop_import(request: Request) -> JSONResponse:
+    """Resolve a single-use native Finder drop for the active host or client."""
+    body = await request.json()
+    grant_id = str(body.get("grant_id") or "")
+    project_id = str(body.get("project_id") or "")
+    chat_id = str(body.get("chat_id") or "")
+    try:
+        paths = _consume_desktop_drop_grant(request, grant_id)
+    except LookupError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    node_mgr = getattr(request.app.state, "node_state_manager", None)
+    role = node_mgr.get_role() if node_mgr else "host"
+    is_client = role in {"client", "standby"}
+    image_paths = [
+        path
+        for path in paths
+        if path.is_file() and path.suffix.lower() in _ALLOWED_IMAGE_EXTENSIONS
+    ]
+    regular_paths = [path for path in paths if path not in image_paths]
+    errors: list[dict[str, str]] = []
+
+    if not is_client:
+        pcm = request.app.state.project_chat_manager
+        host_image_refs: list[str] = []
+        if image_paths and pcm.get_chat(chat_id) is None:
+            errors.extend(
+                {"filename": path.name, "error": "chat not found"}
+                for path in image_paths
+            )
+        else:
+            for path in image_paths:
+                try:
+                    if path.stat().st_size > request.app.state.config.max_image_size_bytes:
+                        raise ValueError("image too large")
+                    host_image_refs.append(
+                        pcm.save_image_upload(path.read_bytes(), path.name).path.name
+                    )
+                except (OSError, ValueError) as exc:
+                    errors.append({"filename": path.name, "error": str(exc)})
+        return JSONResponse(
+            {
+                "paths": [str(path) for path in regular_paths],
+                "image_refs": host_image_refs,
+                "errors": errors,
+            }
+        )
+
+    if node_mgr is None:
+        return JSONResponse({"error": "client node state unavailable"}, status_code=503)
+    host_url = node_mgr.get_active_peer_url()
+    if not host_url:
+        return JSONResponse({"error": "client has no reachable host"}, status_code=503)
+
+    import httpx
+
+    from ciao.web.auth import SESSION_COOKIE
+
+    headers = {"origin": host_url.rstrip("/")}
+    host_session = node_mgr.get_host_session()
+    if host_session:
+        headers["cookie"] = f"{SESSION_COOKIE}={host_session}"
+    timeout = httpx.Timeout(60.0, connect=5.0)
+    imported_paths: list[str] = []
+    image_refs: list[str] = []
+
+    try:
+        # These are fixed API endpoints, so a redirect is never expected.
+        # Refusing it also prevents a configured/compromised peer from
+        # forwarding the stored host-session cookie to another origin.
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            if image_paths:
+                image_files = []
+                for index, path in enumerate(image_paths):
+                    if path.stat().st_size > request.app.state.config.max_image_size_bytes:
+                        errors.append({"filename": path.name, "error": "image too large"})
+                        continue
+                    image_files.append(
+                        (
+                            f"file{index}",
+                            (
+                                path.name,
+                                path.read_bytes(),
+                                mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                            ),
+                        )
+                    )
+                if image_files:
+                    response = await client.post(
+                        f"{host_url.rstrip('/')}/api/chats/{chat_id}/images",
+                        headers=headers,
+                        files=image_files,
+                    )
+                    payload = response.json()
+                    if response.is_success and isinstance(payload, list):
+                        for entry in payload:
+                            if entry.get("ref"):
+                                image_refs.append(str(entry["ref"]))
+                            elif entry.get("error"):
+                                errors.append(
+                                    {
+                                        "filename": str(entry.get("filename") or ""),
+                                        "error": str(entry["error"]),
+                                    }
+                                )
+                    else:
+                        raise ValueError(
+                            payload.get("error", "host image upload failed")
+                            if isinstance(payload, dict)
+                            else "host image upload failed"
+                        )
+
+            uploadable_paths = []
+            for path in regular_paths:
+                if path.is_dir():
+                    errors.append(
+                        {
+                            "filename": path.name,
+                            "error": "folders cannot be transferred to the host",
+                        }
+                    )
+                elif path.stat().st_size > _PROJECT_UPLOAD_MAX_BYTES:
+                    errors.append({"filename": path.name, "error": "file too large"})
+                else:
+                    uploadable_paths.append(path)
+            if uploadable_paths:
+                files = [
+                    (
+                        f"file{index}",
+                        (
+                            path.name,
+                            path.read_bytes(),
+                            mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                        ),
+                    )
+                    for index, path in enumerate(uploadable_paths)
+                ]
+                response = await client.post(
+                    f"{host_url.rstrip('/')}/api/projects/{project_id}/files",
+                    headers=headers,
+                    files=files,
+                )
+                payload = response.json()
+                if not response.is_success or not isinstance(payload, dict):
+                    raise ValueError(
+                        payload.get("error", "host file upload failed")
+                        if isinstance(payload, dict)
+                        else "host file upload failed"
+                    )
+                imported_paths.extend(
+                    str(entry["absolute_path"])
+                    for entry in payload.get("saved", [])
+                    if entry.get("absolute_path")
+                )
+                errors.extend(
+                    {
+                        "filename": str(entry.get("filename") or ""),
+                        "error": str(entry.get("error") or "upload failed"),
+                    }
+                    for entry in payload.get("errors", [])
+                )
+    except (OSError, httpx.HTTPError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+    return JSONResponse(
+        {"paths": imported_paths, "image_refs": image_refs, "errors": errors}
+    )
 
 
 async def create_project_chat(request: Request) -> JSONResponse:
@@ -1944,6 +2327,14 @@ async def chat_prompt(request: Request) -> JSONResponse:
     chat = pcm.get_chat(chat_id)
     if chat is None:
         return JSONResponse({"error": "not found"}, status_code=404)
+    if chat.archived:
+        # Reject before starting a doomed stream: stream_chat would raise
+        # "Cannot send messages to an archived chat" from the background
+        # task, producing a server traceback + a raw error bubble. Same
+        # guard the loop dispatcher uses (issue #126).
+        return JSONResponse(
+            {"error": "chat is archived", "archived": True}, status_code=409
+        )
 
     images: list[ImageAttachment] = []
     for ref in body.get("images", []):
@@ -2296,6 +2687,8 @@ def _render_codex_thread(thread: dict, chat) -> list[dict]:
                 timing = chat.user_turn_timings.get(str(user_idx)) or {}
                 if timing.get("sent_at"):
                     entry["sent_at"] = timing["sent_at"]
+                if chat.user_turn_unattended.get(str(user_idx)):
+                    entry["unattended"] = True
                 result.append(entry)
                 user_idx += 1
                 continue
@@ -2499,9 +2892,13 @@ async def chat_messages(request: Request) -> JSONResponse:
         return JSONResponse(handover_messages)
 
     user_idx = 0
+    failed_tool_ids = _failed_tool_use_ids(msgs)
     for m in msgs:
         if m.type == "assistant":
-            blocks = _extract_assistant_blocks(m.message)
+            blocks = _extract_assistant_blocks(
+                m.message,
+                workspace_root=config.workspace_root,
+            )
             # Drop the CLI's "No response requested." sentinel that marks
             # interrupted turns. If the message contained ONLY that sentinel
             # (no tools, no other text), skip the whole entry.
@@ -2546,6 +2943,15 @@ async def chat_messages(request: Request) -> JSONResponse:
                     if not isinstance(touches, list) or not touches:
                         touch = blk.get("file_touch")
                         touches = [touch] if touch else []
+                    if (
+                        touches
+                        and blk.get("id") in failed_tool_ids
+                        and not _touches_survive_failure(name)
+                    ):
+                        # Denied or errored write: nothing reached disk, so
+                        # render a plain activity row instead of a file card
+                        # that implies the write happened.
+                        touches = []
                     if touches:
                         flush_tools()
                         for touch in touches:
@@ -2654,6 +3060,10 @@ async def chat_messages(request: Request) -> JSONResponse:
             timing = chat.user_turn_timings.get(str(user_idx)) or chat.user_turn_timings.get(user_idx)
             if timing and timing.get("sent_at"):
                 entry["sent_at"] = timing["sent_at"]
+            # Loop/schedule ticks are user turns in the session file too, so the
+            # flag has to come from our own per-turn record.
+            if chat.user_turn_unattended.get(str(user_idx)) or chat.user_turn_unattended.get(user_idx):
+                entry["unattended"] = True
             user_idx += 1
         result.append(entry)
     _overlay_assistant_timings(result, chat.user_turn_timings)
@@ -3234,10 +3644,10 @@ async def vault_backlinks(request: Request) -> JSONResponse:
 # contract as ``workspace_file``/``workspace_image``: any allowlisted-extension
 # file on disk is served, relative paths anchoring to the workspace. The browser
 # decides whether to render inline (PDF) or save (everything else) based on
-# the inferred MIME type; we set ``Content-Disposition: inline`` with the
-# original filename so downloads keep a sensible name either way.
+# the inferred MIME type. Saved-page archives are forced to download so their
+# packaged HTML cannot execute under the PWA origin.
 _WORKSPACE_BINARY_EXTS = frozenset({
-    ".pdf", ".zip", ".docx", ".xlsx", ".pptx",
+    ".pdf", ".zip", ".docx", ".xlsx", ".pptx", ".mht", ".mhtml",
 })
 _WORKSPACE_BINARY_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 
@@ -3281,7 +3691,7 @@ async def apfel_install_endpoint(request: Request) -> JSONResponse:
 
 
 async def workspace_binary(request: Request) -> Response:
-    """Serve a read-only binary file (PDF, ZIP, office doc) from the workspace."""
+    """Serve an allowlisted binary file from the workspace."""
     config = request.app.state.config
     raw = request.query_params.get("path", "").strip()
     roots = _allowed_roots(config)
@@ -3295,6 +3705,7 @@ async def workspace_binary(request: Request) -> Response:
     if resolved.stat().st_size > _WORKSPACE_BINARY_MAX_BYTES:
         return JSONResponse({"error": "file too large"}, status_code=413)
 
+    source_ext = resolved.suffix.lower()
     is_raw = request.query_params.get("raw") == "1"
     filename = resolved.name
     media_type: str | None = None
@@ -3369,12 +3780,12 @@ async def workspace_binary(request: Request) -> Response:
             }
             media_type = _FALLBACK_MIMES.get(resolved.suffix.lower(), "application/octet-stream")
 
-    # `inline` lets PDFs preview in a tab; non-renderable types still
-    # download but with a sensible filename. We set custom frame headers
-    # to allow embedding inside the PWA's same-origin file viewer iframe,
-    # bypassing the global middleware's default frame-blocking headers.
+    # `inline` lets PDFs preview in a tab; saved-page archives are explicit
+    # downloads. Custom frame headers let supported previews embed inside the
+    # PWA's same-origin file viewer iframe.
+    disposition = "attachment" if source_ext in {".mht", ".mhtml"} else "inline"
     headers = {
-        "Content-Disposition": f'inline; filename="{filename}"',
+        "Content-Disposition": f'{disposition}; filename="{filename}"',
         "X-Frame-Options": "SAMEORIGIN",
         "Content-Security-Policy": "; ".join(
             [
@@ -3983,7 +4394,10 @@ async def create_loop(request: Request) -> JSONResponse:
     if not prompt:
         return JSONResponse({"error": "prompt is required"}, status_code=400)
     web_chat_id = (body.get("web_chat_id") or "").strip()
-    if not web_chat_id or pcm.get_chat(web_chat_id) is None:
+    if not web_chat_id:
+        return JSONResponse({"error": "web_chat_id must point to an existing chat"}, status_code=400)
+    chat = pcm.get_chat(web_chat_id)
+    if chat is None:
         return JSONResponse({"error": "web_chat_id must point to an existing chat"}, status_code=400)
     try:
         interval_minutes = int(body.get("interval_minutes", 10))
@@ -3992,15 +4406,23 @@ async def create_loop(request: Request) -> JSONResponse:
     if interval_minutes < 1:
         return JSONResponse({"error": "interval_minutes must be >= 1"}, status_code=400)
 
+    # A loop inherits the workspace of its chat's project, same as a schedule.
+    loop_project_id = getattr(chat, "project_id", "") or ""
+    loop_project = pcm.get_project(loop_project_id) if loop_project_id else None
     entry = lm.create(
         prompt=prompt,
         web_chat_id=web_chat_id,
         interval_minutes=interval_minutes,
         title=(body.get("title") or "").strip(),
-        autostart=bool(body.get("autostart")),
+        # Starting implies autostart, so a running loop survives a restart
+        # instead of going quietly dead (see CiaoControlPlane.loop_create).
+        autostart=bool(body.get("autostart")) or bool(body.get("start")),
+        web_project_id=loop_project_id,
+        workspace=getattr(loop_project, "workspace", "") or "",
     )
     if body.get("start"):
         lm.start_loop(entry.loop_id)
+    publish_loops_changed(pcm)
     return JSONResponse(_enrich_loop(entry, lm, pcm), status_code=201)
 
 
@@ -4010,7 +4432,9 @@ async def loop_detail(request: Request) -> JSONResponse:
     lm = request.app.state.loop_manager
     pcm = request.app.state.project_chat_manager
     if request.method == "DELETE":
-        return JSONResponse({"ok": lm.delete(loop_id)})
+        deleted = lm.delete(loop_id)
+        publish_loops_changed(pcm)
+        return JSONResponse({"ok": deleted})
     # PATCH
     entry = lm.get(loop_id)
     if entry is None:
@@ -4042,7 +4466,28 @@ async def loop_detail(request: Request) -> JSONResponse:
     if "running" in body:
         if body["running"]:
             chat = pcm.get_chat(entry.web_chat_id)
-            if chat is not None and chat.archived:
+            if chat is None:
+                project = pcm._resolve_loop_project(entry)
+                if project is None:
+                    # Nothing left to dispatch into: the target chat is gone and
+                    # the loop's project/workspace no longer resolves. Starting
+                    # it would mark it running while every tick no-ops.
+                    return JSONResponse(
+                        {
+                            "error": (
+                                "This loop's chat and project are both gone. "
+                                "Point it at an existing chat before starting it."
+                            )
+                        },
+                        status_code=409,
+                    )
+                new_chat = pcm.create_chat(
+                    project.project_id,
+                    title=entry.title or f"Loop: {entry.prompt[:30]}",
+                )
+                entry.web_chat_id = new_chat.chat_id
+                lm.replace(entry)
+            elif chat.archived:
                 # The target chat was archived (e.g. by an auto-archive
                 # policy) while the loop was stopped. Resuming into a dead
                 # chat would just auto-stop again on the next tick, so fork
@@ -4057,6 +4502,7 @@ async def loop_detail(request: Request) -> JSONResponse:
             lm.start_loop(loop_id)
         else:
             lm.stop_loop(loop_id)
+    publish_loops_changed(pcm)
     return JSONResponse(_enrich_loop(entry, lm, pcm))
 
 
@@ -4204,14 +4650,16 @@ def _routines_payload(config, app_settings) -> dict:
         # Automatic resolves to the workspace haiku tier — apfel is opt-in
         # (choose "Apple" explicitly), not the auto default just because the
         # binary is on PATH (it fails when Apple Intelligence is disabled).
-        title_effective = config.haiku_model_for_workspace("personal")
+        title_effective = config.haiku_model_for_workspace(config.primary_workspace())
     from ciao.critique import critique_models_effective
 
     critique_effective = critique_models_effective(config)
     if config.insights_model_override:
         insights_effective = config.insights_model_override
     else:
-        insights_effective = config.sonnet_model_for_workspace("personal")
+        insights_effective = config.sonnet_model_for_workspace(
+            config.primary_workspace()
+        )
 
     return {
         # Overrides as stored ("" = automatic default).
@@ -4348,13 +4796,65 @@ async def status_endpoint(request: Request) -> JSONResponse:
 
 
 async def startup_status_endpoint(request: Request) -> JSONResponse:
-    """Return startup phase progress."""
+    """Return startup phase progress and node role state."""
     from ciao import __version__
 
+    node_mgr = getattr(request.app.state, "node_state_manager", None)
+    role = node_mgr.get_role() if node_mgr else "host"
+    active_peer_url = node_mgr.get_active_peer_url() if node_mgr else None
+    config = getattr(request.app.state, "config", None)
+
     tracker = getattr(request.app.state, "startup_tracker", None)
-    if tracker is None:
-        return JSONResponse({"phases": [], "overall_ready": True, "version": __version__})
-    return JSONResponse({**tracker.to_dict(), "version": __version__})
+    payload = tracker.to_dict() if tracker is not None else {"phases": [], "overall_ready": True}
+    latest_version, update_available = await _cached_update_hint(request)
+    payload.update({
+        "version": __version__,
+        "desktop_api_version": 1,
+        "node_role": role,
+        "active_peer_url": active_peer_url,
+        "host_url": node_mgr.get_host_url() if node_mgr else None,
+        "has_host_session": bool(node_mgr.get_host_session()) if node_mgr else False,
+        "auth_required": bool(getattr(config, "pwa_auth_required", False)) if config else False,
+        "latest_version": latest_version,
+        "update_available": update_available,
+    })
+    return JSONResponse(payload)
+
+
+async def _refresh_update_hint(app: Any, fetcher: Callable[[], dict[str, object]]) -> None:
+    """Populate the cached update hint off the request path."""
+
+    try:
+        status = await asyncio.to_thread(fetcher)
+    except Exception:
+        # Deliberately broad: this runs detached, and a failed release lookup
+        # must never surface as an unhandled task exception.
+        return
+    app.state.update_hint = (
+        str(status.get("latest_version") or ""),
+        bool(status.get("update_available")),
+    )
+
+
+async def _cached_update_hint(request: Request) -> tuple[str, bool]:
+    """Return ``(latest_version, update_available)`` without ever blocking.
+
+    The menu bar polls this endpoint on a short client timeout to decide whether
+    the engine is alive, so the release lookup must stay off the request path
+    entirely. ``asyncio.to_thread`` cannot be cancelled, so even a ``wait_for``
+    around it would block until the thread finished — instead the lookup runs
+    detached and this only reads the last value it stored. The first poll after
+    a cold start reports no hint; the next one picks it up.
+    """
+
+    app = request.app
+    fetcher = getattr(app.state, "package_status_fetcher", None)
+    if not callable(fetcher):
+        return "", False
+    task = getattr(app.state, "update_hint_task", None)
+    if task is None or task.done():
+        app.state.update_hint_task = asyncio.create_task(_refresh_update_hint(app, fetcher))
+    return getattr(app.state, "update_hint", ("", False))
 
 
 async def active_chats_endpoint(request: Request) -> JSONResponse:
@@ -4371,6 +4871,77 @@ async def active_chats_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({"active_chat_ids": pcm.active_chat_ids()})
 
 
+def _menubar_chat_needs_input(pending_question: str) -> bool:
+    """True when AskUserQuestion JSON is waiting for an answer."""
+    raw = (pending_question or "").strip()
+    if not raw:
+        return False
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    questions = parsed.get("questions")
+    return isinstance(questions, list) and len(questions) > 0
+
+
+async def menubar_chats_endpoint(request: Request) -> JSONResponse:
+    """Open-chat summaries for the macOS menu bar.
+
+    Usable without a session, but only from a loopback peer (the tray holds no
+    session cookie) — see ``_LOOPBACK_ONLY_API`` in ``ciao.web.auth``. Unlike
+    ``/api/active-chats`` this returns titles and workspace names, so it must
+    not be reachable from the network.
+
+    In client mode the proxy forwards this to the active peer so the tray list
+    matches the chats that ``/api/active-chats`` reports as working — local
+    ``web_projects.json`` can lag the leader after handover.
+    """
+    limit_raw = request.query_params.get("limit", "10")
+    try:
+        limit = max(1, min(50, int(limit_raw)))
+    except ValueError:
+        limit = 10
+
+    pcm = getattr(request.app.state, "project_chat_manager", None)
+    if pcm is None:
+        return JSONResponse({"chats": [], "attention_count": 0})
+
+    rows: list[dict[str, object]] = []
+    attention_count = 0
+    for chat in pcm.list_chats():
+        if chat.archived:
+            continue
+        project = pcm.get_project(chat.project_id)
+        if project is None:
+            continue
+        activity = chat.last_activity_at or ""
+        read = chat.last_read_at or ""
+        unread = bool(activity) and activity > read
+        needs_input = _menubar_chat_needs_input(chat.pending_question)
+        if unread or needs_input:
+            attention_count += 1
+        rows.append(
+            {
+                "chat_id": chat.chat_id,
+                "title": chat.title or "Untitled chat",
+                "workspace": project.workspace,
+                "last_activity_at": activity,
+                "unread": unread,
+                "needs_input": needs_input,
+            }
+        )
+    rows.sort(key=lambda row: str(row.get("last_activity_at") or ""), reverse=True)
+    # attention_count is counted over every non-archived chat but the list is
+    # truncated to `limit`, so a chat needing attention that is not among the
+    # most recent would be counted in the menu bar badge with no row to explain
+    # it. Float those chats to the front (stable, so recency order survives
+    # within each group) — the badge then always has something to point at.
+    rows.sort(key=lambda row: not (row["unread"] or row["needs_input"]))
+    return JSONResponse({"chats": rows[:limit], "attention_count": attention_count})
+
+
 async def open_chat_endpoint(request: Request) -> JSONResponse:
     """Ask an already-open PWA to navigate to a chat.
 
@@ -4385,13 +4956,35 @@ async def open_chat_endpoint(request: Request) -> JSONResponse:
     pcm = getattr(request.app.state, "project_chat_manager", None)
     if pcm is None or pcm.get_chat(chat_id) is None:
         return JSONResponse({"ok": False, "error": "chat not found"}, status_code=404)
+    delivered = bool(getattr(pcm.events, "subscriber_count", 0))
     pcm.events.publish({"type": "open_chat", "chat_id": chat_id})
-    return JSONResponse({"ok": True, "chat_id": chat_id})
+    return JSONResponse({"ok": True, "chat_id": chat_id, "delivered": delivered})
 
 
 async def setup_status_endpoint(request: Request) -> JSONResponse:
     """Return first-run setup readiness for the onboarding wizard."""
     return JSONResponse(setup_status(request.app.state.config))
+
+
+async def node_addresses_endpoint(request: Request) -> JSONResponse:
+    """URLs this engine is reachable at, for sharing with another device.
+
+    Session-protected rather than loopback-public like the tray endpoints: it
+    enumerates LAN interface addresses, which is more than an unauthenticated
+    caller on this machine needs to know.
+    """
+
+    config = getattr(request.app.state, "config", None)
+    port = int(getattr(config, "pwa_port", 8443) or 8443)
+    urls = await asyncio.to_thread(server_addresses, port)
+    return JSONResponse(
+        {
+            "port": port,
+            "addresses": [
+                {"url": url, "loopback": is_loopback_url(url)} for url in urls
+            ],
+        }
+    )
 
 
 async def package_status_endpoint(request: Request) -> JSONResponse:
@@ -4647,6 +5240,17 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     # with visible content is an existing notes folder the onboarding agent
     # adapts in place.
     vault_mode = str(body.get("vault_mode", "")).strip().lower() or detect_vault_mode(workspace)
+    workspace_name = str(body.get("workspace_name", "")).strip() or "personal"
+    if not _WORKSPACE_NAME_RE.fullmatch(workspace_name):
+        return JSONResponse(
+            {
+                "error": (
+                    "workspace name must use letters, numbers, dashes, "
+                    "or underscores"
+                )
+            },
+            status_code=400,
+        )
 
     written = setup_workspace(
         workspace,
@@ -4655,7 +5259,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
         push_contact=push_contact,
         vault_root=str(body.get("vault_root", "")).strip() or None,
         vault_mode=vault_mode,
-        workspace_name=str(body.get("workspace_name", "")).strip() or "personal",
+        workspace_name=workspace_name,
         default_provider=default_provider,
         python_path=str(body.get("python", "")).strip() or None,
         port=port,
@@ -4789,6 +5393,47 @@ async def setup_list_dirs_endpoint(request: Request) -> JSONResponse:
         return JSONResponse({"error": f"permission denied: {target}"}, status_code=400)
     except OSError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def setup_inspect_folder_endpoint(request: Request) -> JSONResponse:
+    """Probe a candidate workspace folder for the first-run setup wizard.
+
+    Returns the inferred vault mode ("scratch" vs "existing"), the resolved
+    vault root, and any nested workspace directories the folder already
+    contains (e.g. ``memory-vault/personal/``, ``memory-vault/work/``). The
+    wizard uses this to decide whether to ask for a "first workspace" name
+    (scratch) or show the existing ones as read-only chips (existing).
+    """
+    from ciao.cli import detect_vault_mode
+    from ciao.setup_status import detect_nested_workspaces
+
+    guard = _setup_fs_guard(request)
+    if guard is not None:
+        return guard
+    raw = str(request.query_params.get("path") or "").strip()
+    if not raw:
+        return JSONResponse({"error": "path is required"}, status_code=400)
+    target = _resolve_setup_dir(raw)
+    if target is None:
+        return JSONResponse({"error": f"not a directory: {raw}"}, status_code=400)
+    # Reuse the same "scratch vs existing" rule the setup/finish endpoint
+    # applies, so the wizard and the server agree before the user clicks
+    # Finish. The vault root mirrors setup_workspace's logic: an existing
+    # notes folder (no prior scaffold) is the vault itself; otherwise the
+    # vault lives under memory-vault/.
+    mode = detect_vault_mode(target)
+    existing_env_path = target / ".env"
+    vault_root = target / "memory-vault"
+    if mode == "existing" and not vault_root.is_dir():
+        vault_root = target
+    nested = detect_nested_workspaces(vault_root) if mode == "existing" else []
+    return JSONResponse({
+        "path": str(target),
+        "mode": mode,
+        "vault_root": str(vault_root),
+        "existing_workspaces": nested,
+        "has_env": existing_env_path.is_file(),
+    })
 
 
 async def setup_mkdir_endpoint(request: Request) -> JSONResponse:
@@ -5138,10 +5783,23 @@ def _open_merge_chat(request: Request, branch: str) -> dict:
     with the user. Returns {ok, chat_id, project_id} or {error}."""
     config = request.app.state.config
     pcm = request.app.state.project_chat_manager
-    projects = pcm.list_projects("personal")
-    project = next((p for p in projects if p.name == "General"), None)
+    # Any workspace can host this; prefer the primary one, then settle for the
+    # first workspace that has a General project. Keying on a workspace named
+    # "personal" meant the whole sync-conflict flow failed on installs whose
+    # workspaces are named anything else.
+    workspace = config.primary_workspace()
+    project = next(
+        (p for p in pcm.list_projects(workspace) if p.name == "General"), None
+    )
     if project is None:
-        return {"error": "no personal project to host the merge chat"}
+        for candidate in config.workspace_names():
+            project = next(
+                (p for p in pcm.list_projects(candidate) if p.name == "General"), None
+            )
+            if project is not None:
+                break
+    if project is None:
+        return {"error": "no General project in any workspace to host the merge chat"}
 
     from datetime import UTC, datetime
     from ciao.local_session import MERGE_PROMPT
@@ -5288,3 +5946,293 @@ async def cli_stats(request: Request) -> JSONResponse:
     except (json.JSONDecodeError, OSError):
         return JSONResponse({"error": "failed to read stats"}, status_code=500)
     return JSONResponse(data)
+
+
+async def node_status_endpoint(request: Request) -> JSONResponse:
+    """Return node status (node_id, role, host connection, peers)."""
+    node_mgr = getattr(request.app.state, "node_state_manager", None)
+    if node_mgr is None:
+        return JSONResponse({"error": "node_state_manager not initialized"}, status_code=500)
+    local_session = getattr(request.app.state, "local_session_manager", None)
+    git_status = local_session.status() if local_session is not None else {}
+    status = node_mgr.get_status()
+    status["git"] = git_status
+
+    if status.get("role") == "client" and status.get("host_url"):
+        host_url = status["host_url"]
+        try:
+            import httpx
+            headers = {}
+            session = node_mgr.get_host_session()
+            if session:
+                from ciao.web.auth import SESSION_COOKIE
+                headers["cookie"] = f"{SESSION_COOKIE}={session}"
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                res = await client.get(f"{host_url}/api/startup-status", headers=headers)
+                status["host_reachable"] = res.status_code == 200
+                status["active_peer_reachable"] = status["host_reachable"]
+        except Exception:
+            status["host_reachable"] = False
+            status["active_peer_reachable"] = False
+    else:
+        status["host_reachable"] = None
+        status["active_peer_reachable"] = None
+
+    return JSONResponse(status)
+
+
+def _parse_set_cookie_session(set_cookie_headers: list[str]) -> str | None:
+    from ciao.web.auth import SESSION_COOKIE
+
+    for raw in set_cookie_headers:
+        # httpx may join multiple Set-Cookie; handle one header value.
+        parts = raw.split(";")
+        if not parts:
+            continue
+        name_val = parts[0].strip()
+        if "=" not in name_val:
+            continue
+        name, value = name_val.split("=", 1)
+        if name.strip() == SESSION_COOKIE and value.strip():
+            return value.strip()
+    return None
+
+
+async def node_connect_endpoint(request: Request) -> JSONResponse:
+    """Connect this node as a client tunnel to a remote host.
+
+    Body: ``{ "host_url": "...", "password": "..." }``.
+    The host must have PWA auth enabled; password is its auth token.
+    """
+    node_mgr = getattr(request.app.state, "node_state_manager", None)
+    if node_mgr is None:
+        return JSONResponse({"error": "node_state_manager not initialized"}, status_code=500)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    host_url = str(body.get("host_url") or body.get("url") or "").strip()
+    password = str(body.get("password") or body.get("token") or "")
+    if not host_url:
+        return JSONResponse({"error": "host_url is required"}, status_code=400)
+    if not password.strip():
+        return JSONResponse(
+            {
+                "error": "Password is required to connect as a client",
+                "auth_required": True,
+            },
+            status_code=400,
+        )
+
+    from ciao.node_state import _normalize_peer_url
+
+    host_url = _normalize_peer_url(host_url)
+    if not host_url:
+        return JSONResponse({"error": "invalid host_url"}, status_code=400)
+
+    import httpx
+
+    host_session: str | None = None
+    try:
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
+            status_res = await client.get(f"{host_url}/api/startup-status")
+            if status_res.status_code != 200:
+                return JSONResponse(
+                    {
+                        "error": f"Host unreachable (HTTP {status_res.status_code})",
+                        "peer_unreachable": True,
+                    },
+                    status_code=400,
+                )
+            host_status = (
+                status_res.json()
+                if status_res.headers.get("content-type", "").startswith("application/json")
+                else {}
+            )
+            auth_required = (
+                bool(host_status.get("auth_required"))
+                if isinstance(host_status, dict)
+                else False
+            )
+            if not auth_required:
+                return JSONResponse(
+                    {
+                        "error": (
+                            "Host has no password set. On that machine open "
+                            "Settings → PWA password, enable protection, then connect again."
+                        ),
+                        "auth_required": False,
+                        "password_required_on_host": True,
+                    },
+                    status_code=400,
+                )
+
+            login_res = await client.post(
+                f"{host_url}/api/auth",
+                json={"token": password},
+            )
+            if login_res.status_code != 200:
+                detail = ""
+                try:
+                    payload = login_res.json()
+                    if isinstance(payload, dict) and payload.get("error"):
+                        detail = str(payload["error"])
+                except Exception:
+                    detail = (login_res.text or "").strip()[:120]
+                if login_res.status_code in {401, 403}:
+                    return JSONResponse(
+                        {"error": "Invalid password for host", "auth_required": True},
+                        status_code=401,
+                    )
+                return JSONResponse(
+                    {
+                        "error": (
+                            f"Host login failed (HTTP {login_res.status_code}"
+                            + (f": {detail}" if detail else "")
+                            + ")"
+                        ),
+                        "peer_unreachable": login_res.status_code >= 500,
+                    },
+                    status_code=400,
+                )
+            cookies = []
+            try:
+                cookies = login_res.headers.get_list("set-cookie")
+            except Exception:
+                raw = login_res.headers.get("set-cookie")
+                if raw:
+                    cookies = [raw]
+            host_session = _parse_set_cookie_session(cookies)
+            if not host_session:
+                from ciao.web.auth import SESSION_COOKIE
+
+                host_session = login_res.cookies.get(SESSION_COOKIE)
+            if not host_session:
+                return JSONResponse(
+                    {"error": "Host login succeeded but no session cookie was returned"},
+                    status_code=502,
+                )
+    except Exception as exc:
+        return JSONResponse(
+            {"error": f"Failed to reach host at {host_url}: {exc}", "peer_unreachable": True},
+            status_code=400,
+        )
+
+    status = node_mgr.connect_as_client(host_url, host_session=host_session)
+    return JSONResponse({"ok": True, "status": status})
+
+
+async def node_handover_endpoint(request: Request) -> JSONResponse:
+    """Become host: ask the connected host to push, pull locally, then promote.
+
+    Body: ``{ "force": bool }``. When not force, the remote host is demoted
+    (commit + push) first. Session matching is not required — git sync only.
+
+    ``target_node_url`` may only name the host this node is already connected
+    to. The demote call carries the stored host session cookie, so accepting an
+    arbitrary URL here would hand that session to whoever supplied it.
+    """
+    node_mgr = getattr(request.app.state, "node_state_manager", None)
+    if node_mgr is None:
+        return JSONResponse({"error": "node_state_manager not initialized"}, status_code=500)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    from ciao.node_state import _normalize_peer_url
+
+    force = bool(body.get("force", False))
+    host_url = node_mgr.get_host_url() or ""
+    requested_url = str(body.get("target_node_url") or "").strip()
+    if requested_url and _normalize_peer_url(requested_url) != _normalize_peer_url(host_url):
+        return JSONResponse(
+            {"error": "target_node_url does not match the connected host"},
+            status_code=400,
+        )
+    target_url = host_url.rstrip("/")
+    local_session = getattr(request.app.state, "local_session_manager", None)
+
+    if target_url and not force:
+        try:
+            import httpx
+            from ciao.web.auth import SESSION_COOKIE
+
+            headers = {}
+            session = node_mgr.get_host_session()
+            if session:
+                headers["cookie"] = f"{SESSION_COOKIE}={session}"
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                res = await client.post(f"{target_url}/api/node/demote", headers=headers)
+                if res.status_code != 200:
+                    return JSONResponse(
+                        {
+                            "error": (
+                                f"Failed to ask host at {target_url} to push "
+                                f"(HTTP {res.status_code})"
+                            ),
+                            "peer_unreachable": True,
+                        },
+                        status_code=400,
+                    )
+        except Exception as exc:
+            return JSONResponse(
+                {
+                    "error": f"Failed to reach host at {target_url}: {exc}",
+                    "peer_unreachable": True,
+                },
+                status_code=400,
+            )
+
+    resync_result = None
+    if local_session is not None:
+        resync_result = await local_session.resync()
+
+    status = node_mgr.promote()
+    if resync_result:
+        status["resync"] = resync_result
+
+    return JSONResponse({"ok": True, "status": status})
+
+
+async def node_demote_endpoint(request: Request) -> JSONResponse:
+    """Push local changes and leave host mode (become client without a tunnel)."""
+    node_mgr = getattr(request.app.state, "node_state_manager", None)
+    if node_mgr is None:
+        return JSONResponse({"error": "node_state_manager not initialized"}, status_code=500)
+
+    local_session = getattr(request.app.state, "local_session_manager", None)
+    if local_session is not None:
+        await local_session.commit_and_sync()
+
+    status = node_mgr.demote()
+    return JSONResponse({"ok": True, "demoted": True, "status": status})
+
+
+async def node_peers_endpoint(request: Request) -> JSONResponse:
+    """Manage registered peer nodes (add/remove). Prefer ``/api/node/connect``."""
+    node_mgr = getattr(request.app.state, "node_state_manager", None)
+    if node_mgr is None:
+        return JSONResponse({"error": "node_state_manager not initialized"}, status_code=500)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    action = str(body.get("action", "add")).strip().lower()
+    url = str(body.get("url", "")).strip()
+    node_id = str(body.get("node_id", "")).strip()
+
+    if not url:
+        return JSONResponse({"error": "url is required"}, status_code=400)
+
+    if action == "remove":
+        status = node_mgr.remove_peer(url)
+    else:
+        status = node_mgr.add_peer(url, peer_id=node_id)
+
+    return JSONResponse({"ok": True, "status": status})

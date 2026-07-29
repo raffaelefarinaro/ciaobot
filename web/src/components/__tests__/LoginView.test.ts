@@ -138,11 +138,17 @@ describe('LoginView setup wizard tests', () => {
   })
 
   it('asks only for the workspace folder and explains the auto-adjust behavior', async () => {
-    mockApiGet.mockResolvedValue({
-      configured: false,
-      bootstrap: true,
-      mode: 'bootstrap',
-      providers: {}
+    mockApiGet.mockImplementation((path: string) => {
+      if (path.startsWith('/api/setup/inspect-folder')) {
+        // Empty folder: no nested workspaces, fall through to the text field.
+        return Promise.resolve({ mode: 'scratch', existing_workspaces: [] })
+      }
+      return Promise.resolve({
+        configured: false,
+        bootstrap: true,
+        mode: 'bootstrap',
+        providers: {}
+      })
     })
 
     const wrapper = await mountLoginView()
@@ -156,6 +162,60 @@ describe('LoginView setup wizard tests', () => {
     const nameInput = wrapper.find('#setup-workspace-name')
     expect(nameInput.exists()).toBe(true)
     expect((nameInput.element as HTMLInputElement).value).toBe('personal')
+  })
+
+  it('hides the "First Workspace" field and shows chips when the folder already has nested workspaces', async () => {
+    mockApiGet.mockImplementation((path: string) => {
+      if (path.startsWith('/api/setup/inspect-folder')) {
+        return Promise.resolve({
+          mode: 'existing',
+          existing_workspaces: ['personal', 'work'],
+        })
+      }
+      return Promise.resolve({
+        configured: false,
+        bootstrap: true,
+        mode: 'bootstrap',
+        providers: {}
+      })
+    })
+
+    const wrapper = await mountLoginView()
+    // The text field is gone; the detected names show as chips instead.
+    expect(wrapper.find('#setup-workspace-name').exists()).toBe(false)
+    const chips = wrapper.findAll('.workspace-chip')
+    expect(chips.map(c => c.text())).toEqual(['personal', 'work'])
+    expect(wrapper.text()).toContain('Found 2 workspaces')
+  })
+
+  it('omits workspace_name from the finish payload when the folder already has nested workspaces', async () => {
+    mockApiGet.mockImplementation((path: string) => {
+      if (path.startsWith('/api/setup/inspect-folder')) {
+        return Promise.resolve({
+          mode: 'existing',
+          existing_workspaces: ['personal', 'work'],
+        })
+      }
+      return Promise.resolve({
+        configured: false,
+        bootstrap: true,
+        mode: 'bootstrap',
+        providers: {
+          claude: { name: 'claude', ok: true, auth: 'oauth', command: 'ciao auth claude', detail: 'Ready' }
+        }
+      })
+    })
+
+    const wrapper = await mountLoginView()
+    mockApiPost.mockResolvedValue({ ok: true })
+    await wrapper.find('form').trigger('submit.prevent')
+    await flushPromises()
+
+    const body = mockApiPost.mock.calls[0][1]
+    expect(body.workspace).toBe('~/ciaobot')
+    // Server adopts the discovered workspaces via detect_nested_workspaces;
+    // we don't send a synthetic name that would otherwise be ignored.
+    expect(body).not.toHaveProperty('workspace_name')
   })
 
   it('opens the folder picker, lists directories, and writes the selection into the workspace field', async () => {
@@ -239,5 +299,52 @@ describe('LoginView setup wizard tests', () => {
     const payload = mockApiPost.mock.calls[0][1]
     expect(payload).not.toHaveProperty('push_contact')
     expect(wrapper.text()).toContain('restarting')
+  })
+
+  it('shows switch-back-to-host bailout in client login mode', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/startup-status')) {
+        return {
+          ok: true,
+          json: async () => ({
+            node_role: 'client',
+            host_url: 'http://100.101.252.27:8443',
+            has_host_session: false,
+          }),
+        } as Response
+      }
+      return { ok: false, json: async () => ({}) } as Response
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    mockApiGet.mockResolvedValue({
+      configured: true,
+      bootstrap: false,
+      mode: 'configured',
+      providers: {},
+    })
+
+    const wrapper = await mountLoginView()
+    expect(wrapper.text()).toContain('host password required')
+    expect(wrapper.text()).toContain('Switch back to host')
+
+    mockApiPost.mockResolvedValue({ ok: true, status: { role: 'host' } })
+    const assign = vi.fn()
+    vi.stubGlobal('confirm', () => true)
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { ...window.location, assign, pathname: '/login', href: 'http://localhost/login' },
+    })
+
+    await wrapper.find('.client-bailout-btn').trigger('click')
+    await flushPromises()
+
+    expect(mockApiPost).toHaveBeenCalledWith('/api/node/handover', {
+      target_node_url: 'http://100.101.252.27:8443',
+      force: true,
+    })
+    expect(assign).toHaveBeenCalledWith('/')
+    vi.unstubAllGlobals()
   })
 })

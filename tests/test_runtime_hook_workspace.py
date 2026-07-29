@@ -90,3 +90,52 @@ async def test_user_prompt_hook_filters_entities_to_active_workspace(tmp_path: P
     assert "[[shared/People/Alba]]" in ctx
     assert "[[personal/Projects/Apollo]]" not in ctx
     assert "[[personal/People/Defne]]" not in ctx
+
+
+@pytest.mark.asyncio
+async def test_user_prompt_hook_does_not_leak_unprefixed_legacy_entities(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "INDEX.md").write_text(
+        "- `People/Alba` (aliases: Alba)\n",
+        encoding="utf-8",
+    )
+    hook = build_user_prompt_submit_hook(
+        tmp_path,
+        {
+            "CIAO_ACTIVE_WORKSPACE": "work",
+            "CIAO_LEGACY_ENTITY_WORKSPACE": "personal",
+        },
+    )
+
+    out = await hook({"prompt": "Ask Alba", "cwd": "/repo"}, None, None)
+
+    assert "[[People/Alba]]" not in out["hookSpecificOutput"]["additionalContext"]
+
+
+@pytest.mark.asyncio
+async def test_user_prompt_hook_ignores_injected_context_wrapper(tmp_path: Path) -> None:
+    # The CIAO_CONTEXT wrapper is prepended before the hook runs. Entity
+    # detection must scan the user's words, not the injected canonical-doc
+    # path, so a bare "fix it" prompt yields no <ciao-entities> block.
+    (tmp_path / "INDEX.md").write_text(
+        "- `personal/projects/active/consulting/README` (tags: project)\n",
+        encoding="utf-8",
+    )
+    hook = build_user_prompt_submit_hook(
+        tmp_path,
+        {"CIAO_ACTIVE_WORKSPACE": "personal", "GWS_PROFILE": "personal"},
+    )
+    wrapped = (
+        "[CIAO_CONTEXT_BEGIN]\n"
+        '[Project: "CONSULTING"]\n'
+        "[Canonical doc: personal/projects/active/consulting/README.md]\n"
+        "[CIAO_CONTEXT_END]\n\n"
+        "fix it"
+    )
+
+    out = await hook({"prompt": wrapped, "cwd": "/repo"}, None, None)
+
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    assert "<ciao-entities>" not in ctx
+    assert "consulting" not in ctx

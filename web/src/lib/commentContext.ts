@@ -34,7 +34,23 @@ export interface FileCommentInput {
   images?: string[]
 }
 
-export interface ChatCommentInput {
+/**
+ * Where in the transcript a chat comment's quoted text came from.
+ *
+ * All optional: a comment made before this was plumbed through, or restored
+ * from an older persisted bucket, carries none of it. Declared once here
+ * because the store, the draft state, and this formatter all need the same
+ * shape — see `formatChatReferenceSource`.
+ */
+export interface ChatCommentAnchor {
+  messageId?: string
+  messageIndex?: number
+  messageRole?: string
+  occurrenceIndex?: number
+  paragraphIndex?: number
+}
+
+export interface ChatCommentInput extends ChatCommentAnchor {
   selection: string
   comment: string
   images?: string[]
@@ -61,12 +77,14 @@ function neutralizeTags(value: string): string {
 
 function referenceBlock(source: string | null, selection: string, comment: string, images?: string[]): string {
   const lines: string[] = ['<user-comment-reference>']
-  if (source) lines.push(`<reference-source>${neutralizeTags(source)}</reference-source>`)
-  lines.push('<quoted-text>', neutralizeTags(selection), '</quoted-text>')
-  lines.push('<user-comment>', neutralizeTags(comment), '</user-comment>')
+  if (source) lines.push(`<reference-source>${neutralizeTags(source.trim())}</reference-source>`)
+  const cleanSelection = neutralizeTags(selection.trim())
+  lines.push(`<quoted-text>${cleanSelection}</quoted-text>`)
+  const cleanComment = neutralizeTags(comment.trim())
+  if (cleanComment) {
+    lines.push(`<user-comment>${cleanComment}</user-comment>`)
+  }
   if (images?.length) {
-    // Images are also sent as real attachments; this manifest just preserves
-    // the mapping of which image belongs to which comment.
     images.forEach((img, idx) => lines.push(`Attachment [Image ${idx + 1}]: ${img}`))
   }
   lines.push('</user-comment-reference>')
@@ -117,9 +135,20 @@ export function formatFileComments(comments: FileCommentInput[]): string {
     .join('\n')
 }
 
+function formatChatReferenceSource(c: ChatCommentInput): string | null {
+  const parts: string[] = []
+  if (c.messageRole) {
+    parts.push(c.messageRole === 'user' ? 'user message' : 'assistant message')
+  }
+  if (c.paragraphIndex != null && c.paragraphIndex >= 0) {
+    parts.push(`paragraph ${c.paragraphIndex + 1}`)
+  }
+  return parts.length ? parts.join(', ') : null
+}
+
 export function formatChatComments(comments: ChatCommentInput[]): string {
   if (!comments.length) return ''
-  // No source anchor: the quoted text is from a reply already in the visible
-  // conversation history the model can see, so a locator adds little.
-  return comments.map((c) => referenceBlock(null, c.selection, c.comment, c.images)).join('\n')
+  return comments
+    .map((c) => referenceBlock(formatChatReferenceSource(c), c.selection, c.comment, c.images))
+    .join('\n')
 }

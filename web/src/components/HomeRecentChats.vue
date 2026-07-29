@@ -22,13 +22,24 @@
             aria-label="Generating title"
           />
           <span v-else class="home-recent-title">{{ chat.title }}</span>
+          <span
+            v-if="loopBadge(chat.chat_id)"
+            class="loop-mark"
+            :class="{ stopped: !loopBadge(chat.chat_id)!.running }"
+            :title="loopBadge(chat.chat_id)!.title"
+            :aria-label="loopBadge(chat.chat_id)!.title"
+          >&#10227;</span>
           <span v-if="store.isChatStreaming(chat.chat_id)" class="spinner-dot" title="Working" />
           <span v-else-if="store.chatHasBackgroundAgents(chat.chat_id)" class="spinner-dot bg-agents" title="Background agents running" />
           <span v-else-if="store.chatNeedsInput(chat.chat_id)" class="needs-input-badge" title="Needs your answer">?</span>
           <span v-else-if="store.chatUnread(chat.chat_id) > 0" class="unread-dot" title="Unread" />
         </span>
         <span class="home-recent-meta">
-          <span class="home-recent-ws" v-if="workspaceOf(chat)">{{ workspaceOf(chat) }}</span>
+          <span
+            class="home-recent-ws"
+            v-if="workspaceOf(chat)"
+            :data-workspace-color="colorOf(chat)"
+          >{{ workspaceOf(chat) }}</span>
           <span class="home-recent-project" v-if="store.projectFor(chat.chat_id)?.name">
             {{ store.projectFor(chat.chat_id)?.name }}
           </span>
@@ -40,20 +51,59 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useProjectStore } from '../stores/projects'
+import { useTaskStore } from '../stores/tasks'
 import type { ChatInfo } from '../lib/types'
+import { colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors'
 
 const store = useProjectStore()
+const taskStore = useTaskStore()
+
+// Loop marker, same semantics as the sidebar: a loop-driven chat produces new
+// turns on its own, which is worth knowing before you open it. ChatLayout
+// fetches loops on mount and the `loops_changed` event keeps them fresh.
+const loopsByChat = computed(() => {
+  const byChat = new Map<string, { count: number; running: boolean }>()
+  for (const l of taskStore.loops) {
+    const prev = byChat.get(l.web_chat_id)
+    byChat.set(l.web_chat_id, {
+      count: (prev?.count || 0) + 1,
+      running: (prev?.running || false) || !!l.running,
+    })
+  }
+  return byChat
+})
+function loopBadge(chatId: string): { running: boolean; title: string } | null {
+  const info = loopsByChat.value.get(chatId)
+  if (!info) return null
+  const plural = info.count > 1 ? `${info.count} loops` : 'A loop'
+  return {
+    running: info.running,
+    title: info.running
+      ? `${plural} running in this chat`
+      : `${plural} attached to this chat (stopped)`,
+  }
+}
+
+function workspaceNameOf(chat: ChatInfo): string {
+  return store.projectFor(chat.chat_id)?.workspace || ''
+}
 
 // Workspace label for a chat's project, normalized like the sidebar
 // workspace pills ("personal"/"work"). Empty when the project is unknown.
 function workspaceOf(chat: ChatInfo): string {
-  const ws = store.projectFor(chat.chat_id)?.workspace || ''
-  return ws
+  return workspaceNameOf(chat)
     .split(/[-_\s]+/)
     .filter(Boolean)
     .join(' ')
     .toLowerCase()
+}
+
+function colorOf(chat: ChatInfo): WorkspaceColorId {
+  const name = workspaceNameOf(chat)
+  const ws = store.workspaceOptions.find((item) => item.name === name)
+  return colorForWorkspace(ws)
 }
 </script>
 
@@ -73,7 +123,9 @@ function workspaceOf(chat: ChatInfo): string {
 }
 .home-recent-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  /* auto-fit (not auto-fill): empty tracks collapse so a lone card — or the
+     last card on an odd-count row — stretches to the full column width. */
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 8px;
 }
 .home-recent-card {
@@ -144,6 +196,16 @@ function workspaceOf(chat: ChatInfo): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.loop-mark {
+  flex: 0 0 auto;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--accent);
+}
+.loop-mark.stopped {
+  color: var(--fg2);
+  opacity: 0.7;
 }
 .unread-dot {
   width: 8px;

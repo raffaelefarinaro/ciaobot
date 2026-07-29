@@ -96,8 +96,8 @@ STREAM_KEEPALIVE_SECONDS = 5.0
 # Tool names that mutate a file on disk and carry the target path in their input.
 # `Write` and `Edit` both use `file_path`; `MultiEdit` does too. `NotebookEdit`
 # stores the path under `notebook_path`. Lowercase variants seen in some
-# providers (`write`, `edit`) are mirrored for safety. Pi tool calls use
-# `path` instead of Claude's `file_path`, so path extraction accepts aliases.
+# providers (`write`, `edit`) are mirrored for safety. Some tool calls use
+# `path` instead of `file_path`, so path extraction accepts aliases.
 _FILE_TOUCH_TOOLS: dict[str, tuple[str, ...]] = {
     "Write": ("file_path", "path"),
     "write": ("file_path", "path"),
@@ -253,8 +253,8 @@ def extract_file_touches(tool_name: str, tool_input: object) -> list[dict]:
     Accepts both shapes of ``tool_input``:
 
     - ``dict``: the raw SDK input as persisted in the session JSONL. We pick
-      the path out of ``file_path`` (Claude), ``path`` (Pi), or
-      ``notebook_path`` (NotebookEdit). For shell tools we parse ``command``.
+      the path out of ``file_path``, ``path``, or ``notebook_path``
+      (NotebookEdit). For shell tools we parse ``command``.
     - ``str``: the live stream summary produced by
       ``_summarize_tool_input`` in ``ciao/providers/claude.py``. For the
       dedicated file-touch tools it already collapses the dict into the path
@@ -294,6 +294,68 @@ def extract_file_touch(tool_name: str, tool_input: object) -> dict | None:
     return touches[0] if touches else None
 
 
+def normalize_file_touch_paths(
+    touches: list[dict],
+    workspace_root: Path | None = None,
+) -> list[dict]:
+    """Canonicalise file-card paths and discard invalid surface requests.
+
+    Providers can refer to the same workspace file using an absolute path or
+    a workspace-relative path. The PWA deduplicates file cards by path string,
+    so normalise both forms to one workspace-relative spelling before they
+    reach the client.
+
+    ``file_surface`` is different from Write/Edit: it promises that an
+    existing artifact was deliberately selected for preview. Its tool-use
+    event arrives before the structured MCP result, so reject a missing target
+    here instead of briefly painting a card for a request that will fail.
+    """
+    if not touches:
+        return touches
+    root = workspace_root.resolve() if workspace_root is not None else None
+    normalized: list[dict] = []
+    seen: set[str] = set()
+    for touch in touches:
+        item = dict(touch)
+        path_text = item.get("file_path")
+        if not isinstance(path_text, str) or not path_text.strip():
+            continue
+        raw_path = Path(path_text.strip())
+        target = raw_path
+        if not raw_path.is_absolute() and root is not None:
+            target = root / raw_path
+        try:
+            resolved = target.resolve()
+        except (OSError, RuntimeError):
+            resolved = target
+
+        if item.get("action") == "surfaced" and root is not None:
+            # Match CiaoControlPlane._safe_relative: file_surface accepts only
+            # existing files whose requested path is relative to, and resolves
+            # inside, the active workspace.
+            if raw_path.is_absolute():
+                continue
+            try:
+                if not resolved.is_relative_to(root) or not resolved.is_file():
+                    continue
+            except OSError:
+                continue
+
+        canonical = path_text.strip()
+        if root is not None:
+            try:
+                canonical = resolved.relative_to(root).as_posix()
+            except ValueError:
+                if raw_path.is_absolute():
+                    canonical = str(resolved)
+        item["file_path"] = canonical
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        normalized.append(item)
+    return normalized
+
+
 def refine_file_touch_actions(
     touches: list[dict],
     workspace_root: Path | None = None,
@@ -307,7 +369,7 @@ def refine_file_touch_actions(
         return touches
     root = workspace_root.resolve() if workspace_root is not None else None
     refined: list[dict] = []
-    for touch in touches:
+    for touch in normalize_file_touch_paths(touches, workspace_root):
         item = dict(touch)
         action = item.get("action")
         path_text = item.get("file_path")
@@ -537,6 +599,24 @@ class ChatStream:
             except asyncio.QueueFull:
                 logger.warning("Chat stream subscriber queue full, dropping event")
 
+    def deny_tool_use(self, tool_use_id: str) -> None:
+        """Retract the file card for a tool call that was refused.
+
+        ``file_touch`` is attached when a call is *requested*, so a refused
+        Write still painted an Outputs chip for a file that was never created.
+        The permission gate keys requests by ``tool_use_id`` — the same id the
+        ``tool_use`` event carries — so the two can be matched here: strip the
+        touch from the replay buffer (reload, second tab) and tell live clients
+        to drop the chip they already rendered.
+        """
+        if not tool_use_id:
+            return
+        for ev in self._events:
+            if ev.get("type") == "tool_use" and ev.get("tool_use_id") == tool_use_id:
+                ev.pop("file_touch", None)
+                ev.pop("file_touches", None)
+        self.publish({"type": "tool_denied", "tool_use_id": tool_use_id})
+
     def resolve_permission(self, request_id: str) -> bool:
         """Drop a previously-published ``permission_request`` from replay.
 
@@ -640,6 +720,11 @@ class EventsHub:
 
     def __init__(self) -> None:
         self._subs: set[asyncio.Queue[dict]] = set()
+
+    @property
+    def subscriber_count(self) -> int:
+        """Number of live global-event consumers."""
+        return len(self._subs)
 
     def publish(self, payload: dict) -> None:
         """Fan-out to live subscribers. Drop events for full subscriber queues."""

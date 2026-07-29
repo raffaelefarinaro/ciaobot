@@ -55,6 +55,8 @@ WORKING_POLL_SECONDS = 2.0
 class ServerStatus:
     reachable: bool
     ready: bool
+    node_role: str = "active"
+    active_peer_url: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +83,12 @@ def fetch_server_status(port: int, *, timeout: float = 2.0) -> ServerStatus:
         return ServerStatus(reachable=False, ready=False)
     if not isinstance(payload, dict):
         return ServerStatus(reachable=True, ready=False)
-    return ServerStatus(reachable=True, ready=bool(payload.get("overall_ready", True)))
+    return ServerStatus(
+        reachable=True,
+        ready=bool(payload.get("overall_ready", True)),
+        node_role=str(payload.get("node_role", "active")),
+        active_peer_url=str(payload.get("active_peer_url") or ""),
+    )
 
 
 def fetch_active_chat_ids(port: int, *, timeout: float = 2.0) -> set[str]:
@@ -118,7 +125,20 @@ def status_label(status: ServerStatus) -> str:
         return "Server: not running"
     if not status.ready:
         return "Server: starting…"
-    return "Server: running"
+    role = (status.node_role or "").strip().lower()
+    if role in {"client", "standby"} and status.active_peer_url:
+        # Show a short peer identifier: hostname or last IP octet
+        peer = status.active_peer_url
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(peer)
+            peer = parsed.hostname or peer
+        except Exception:
+            pass
+        return f"Client — connected to {peer}"
+    if role in {"client", "standby"}:
+        return "Server: client (no host)"
+    return "Server: host"
 
 
 def server_recovery_label(status: ServerStatus) -> str:
@@ -615,6 +635,71 @@ class OpenChat:
     workspace: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class MenubarChatsSnapshot:
+    """Live open-chat list from the server (peer-proxied when on standby)."""
+
+    chats: list[OpenChat]
+    unread_ids: set[str]
+    needs_input_ids: set[str]
+    attention_count: int
+
+
+def fetch_menubar_chats(
+    port: int, *, limit: int = 10, timeout: float = 2.0
+) -> MenubarChatsSnapshot | None:
+    """Open chats from the live server, or ``None`` when unreachable.
+
+    Prefer this over reading ``web_projects.json`` so a standby tray matches
+    the active peer's chat list (and can mark the chats that are working).
+    """
+
+    url = f"http://localhost:{port}/api/menubar-chats?limit={limit}"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    rows = payload.get("chats")
+    if not isinstance(rows, list):
+        return None
+
+    chats: list[OpenChat] = []
+    unread_ids: set[str] = set()
+    needs_input_ids: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        chat_id = str(row.get("chat_id") or "").strip()
+        if not chat_id:
+            continue
+        chats.append(
+            OpenChat(
+                chat_id=chat_id,
+                title=str(row.get("title") or "Untitled chat"),
+                last_activity_at=str(row.get("last_activity_at") or ""),
+                workspace=str(row.get("workspace") or ""),
+            )
+        )
+        if row.get("unread"):
+            unread_ids.add(chat_id)
+        if row.get("needs_input"):
+            needs_input_ids.add(chat_id)
+    attention_raw = payload.get("attention_count")
+    if isinstance(attention_raw, int) and attention_raw >= 0:
+        attention_count = attention_raw
+    else:
+        attention_count = len(unread_ids | needs_input_ids)
+    return MenubarChatsSnapshot(
+        chats=chats,
+        unread_ids=unread_ids,
+        needs_input_ids=needs_input_ids,
+        attention_count=attention_count,
+    )
+
+
 def _notification_entry_id(entry: dict[str, object]) -> str:
     """Stable identity for one append-only local notification-log entry."""
 
@@ -804,55 +889,12 @@ def needs_input_chat_ids(workspace: Path) -> set[str]:
     }
 
 
-_INET_RE = re.compile(r"^\s*inet (\d+\.\d+\.\d+\.\d+)", re.MULTILINE)
-
-
-def parse_inet_addresses(ifconfig_text: str) -> list[str]:
-    """IPv4 addresses from `ifconfig` output, loopback excluded, order kept."""
-
-    seen: list[str] = []
-    for address in _INET_RE.findall(ifconfig_text):
-        if address.startswith("127.") or address in seen:
-            continue
-        seen.append(address)
-    return seen
-
-
-def server_addresses(
-    port: int,
-    *,
-    ifconfig_text: str | None = None,
-    local_hostname: str | None = None,
-) -> list[str]:
-    """URLs the PWA is reachable at: localhost, Bonjour name, LAN IPv4s.
-
-    The server binds 0.0.0.0 (see CiaoConfig.pwa_host), so every interface
-    address genuinely serves the app.
-    """
-
-    if ifconfig_text is None:
-        try:
-            ifconfig_text = subprocess.run(
-                ["ifconfig", "-a"], capture_output=True, text=True, check=False
-            ).stdout
-        except OSError:
-            ifconfig_text = ""
-    if local_hostname is None:
-        try:
-            local_hostname = subprocess.run(
-                ["scutil", "--get", "LocalHostName"],
-                capture_output=True,
-                text=True,
-                check=False,
-            ).stdout.strip()
-        except OSError:
-            local_hostname = ""
-
-    urls = [f"http://localhost:{port}/"]
-    if local_hostname:
-        urls.append(f"http://{local_hostname}.local:{port}/")
-    urls.extend(f"http://{address}:{port}/" for address in parse_inet_addresses(ifconfig_text))
-    return urls
+# Address discovery lives in ciao.network_addresses so the PWA can list the
+# same URLs; re-exported here because callers and tests reference menubar.*.
+from ciao.network_addresses import (  # noqa: E402
+    parse_inet_addresses as parse_inet_addresses,
+    server_addresses as server_addresses,
+)
 
 
 def copy_to_clipboard(text: str) -> None:
@@ -1334,11 +1376,18 @@ def run_menubar(workspace: Path, port: int) -> int:
         status = fetch_server_status(port)
         state["reachable"] = status.reachable
 
-        chats = read_open_chats(workspace)
-        unread_chats = read_unread_chats(workspace)
-        unread_ids = {chat.chat_id for chat in unread_chats}
-        needs_input_ids = needs_input_chat_ids(workspace)
-        attention_count = count_attention_chats(workspace)
+        live = fetch_menubar_chats(port) if status.reachable else None
+        if live is not None:
+            chats = live.chats
+            unread_ids = live.unread_ids
+            needs_input_ids = live.needs_input_ids
+            attention_count = live.attention_count
+        else:
+            chats = read_open_chats(workspace)
+            unread_chats = read_unread_chats(workspace)
+            unread_ids = {chat.chat_id for chat in unread_chats}
+            needs_input_ids = needs_input_chat_ids(workspace)
+            attention_count = count_attention_chats(workspace)
         working_ids = set(state["working_ids"])
         addresses = server_addresses(port)
         pkg = status_fetcher()

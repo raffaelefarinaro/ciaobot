@@ -30,6 +30,7 @@ import asyncio
 import json
 import os
 import uuid
+import warnings
 from dataclasses import dataclass
 import logging
 from collections.abc import AsyncGenerator, Callable
@@ -39,6 +40,7 @@ from typing import Any, cast
 
 from claude_agent_sdk import (
     AssistantMessage,
+    CanUseToolShadowedWarning,
     CLIConnectionError,
     ClaudeAgentOptions,
     ClaudeSDKClient,
@@ -66,6 +68,7 @@ from ciao.models import (
     TokenUsageEvent,
     ToolUseEvent,
 )
+from ciao.execution_modes import auto_approved_mcp_tool_names, harness_skill_overrides
 from ciao.memory_injector import build_memory_block, system_prompt_payload
 from ciao.observability.hooks import (
     build_user_prompt_submit_hook,
@@ -83,6 +86,14 @@ from ciao.providers.base import (
 from ciao.rate_limits import RateLimitStore, default_store_path, is_rate_limit_telemetry
 
 logger = logging.getLogger(__name__)
+
+# We set ``allowed_tools`` and ``can_use_tool`` together on purpose: the
+# allowlist covers Ciaobot's own non-destructive control plane (see
+# AUTO_APPROVED_MCP_TOOLS) and the gate handles everything else. The SDK warns
+# on every connect that the callback is shadowed for those names, which is
+# exactly the intent, so silence that one category instead of printing a
+# 35-tool paragraph into the server log per process.
+warnings.filterwarnings("ignore", category=CanUseToolShadowedWarning)
 
 _CLAUDE_OP_ERRORS = (ClaudeSDKError, CLIConnectionError, ProcessError)
 
@@ -501,8 +512,8 @@ class ClaudeProvider(BaseSDKProvider):
 
         # Bounded agent-managed memory: frozen snapshot of ~/.ciao/memory.md
         # and ~/.ciao/user.md appended to Claude Code's default system prompt.
-        # Edits go through `ciao memory` (same path Pi uses, via the script
-        # wrapper) instead of an MCP tool, so the write path stays in sync.
+        # Edits go through `ciao memory` (via the script wrapper or control
+        # plane) instead of an MCP tool, so the write path stays in sync.
         # Edits persist immediately but only appear in this block on the next
         # session, which keeps the prefix cache stable.
         memory_cfg = self._memory_config()
@@ -537,6 +548,13 @@ class ClaudeProvider(BaseSDKProvider):
             # Agents are discovered from .claude/agents/ via setting_sources
             # below. No manual frontmatter parsing needed.
             setting_sources=["user", "project", "local"],
+            # Inline settings layer (highest precedence, additive — it does
+            # NOT replace the sources above; verified against the bundled CLI:
+            # all 68 workspace skills and 8 agents still resolve with this
+            # set). Used to drop the bundled `schedule` / `loop` skills out of
+            # the model's context entirely, since Ciaobot's own schedules and
+            # loops supersede them. See HARNESS_DISABLED_SKILLS.
+            settings=json.dumps({"skillOverrides": harness_skill_overrides()}),
             # Per-turn runtime context + vault entity tags. Fires before
             # each user prompt reaches the model. See ciao/observability/hooks.py.
             hooks={
@@ -604,6 +622,17 @@ class ClaudeProvider(BaseSDKProvider):
             # unavailable at spawn time already degrades to the legacy surface
             # in ProjectChatManager. ``request.mcp_required`` is still honored
             # on the Codex path, which has a non-exclusive per-server flag.
+
+            # Pre-approve the non-destructive half of our own control plane.
+            # Auto mode's classifier escalates every MCP tool that isn't
+            # readOnlyHint, so "create the loop you just asked me for" raised
+            # an Approve/Deny card. These names bypass the PermissionGate;
+            # destructive tools (delete/stop/lifecycle) are absent from the
+            # policy and still prompt. See AUTO_APPROVED_MCP_TOOLS in
+            # ciao/execution_modes.py. Plan mode is excluded: its contract is
+            # "propose, don't act", and an allow rule would punch a hole in it.
+            if request.mode != "plan":
+                options.allowed_tools = auto_approved_mcp_tool_names()
         if system_cli:
             options.cli_path = system_cli
         if resume_session:

@@ -54,8 +54,15 @@ flowchart LR
 
 ## Managed Claude Code configuration
 
-Users do not maintain a static `.mcp.json` for Ciaobot. For an MCP chat,
-`ClaudeProvider` constructs the equivalent of:
+Users do not maintain a static `.mcp.json` for the **embedded Ciaobot** HTTP
+adapter — that server is injected at chat spawn with a scoped bearer token.
+Separately, Settings → Assets → MCP servers can create, update, and delete
+**project** MCP server entries in the workspace `.mcp.json` (stdio/HTTP), write
+matching env-key secrets into `.env`, and probe tools (`POST/PATCH/DELETE
+/api/mcp/servers`, `GET /api/mcp/servers/{name}/tools`). Those third-party
+servers are distinct from the managed `ciaobot` control-plane adapter.
+
+For an MCP chat, `ClaudeProvider` constructs the equivalent of:
 
 ```python
 ClaudeAgentOptions(
@@ -148,6 +155,22 @@ an in-place new session, `schedule_action`, `loop_action`).
 | Schedules | `schedules_list`, `schedule_preview`, `schedule_create`, `schedule_update`, `schedule_action` |
 | Loops | `loops_list`, `loop_create`, `loop_update`, `loop_action` |
 | Workspace files | `file_surface` |
+
+`loop_create` starts the cadence immediately (`start=true` by default) and
+returns the real `running` flag. `autostart` is a separate axis: it only decides
+whether the loop comes back up after a server restart. They were previously
+conflated, so a loop created with `autostart=true` reported as running while the
+PWA banner correctly said `stopped`.
+
+**Approval policy.** Every `_READ`/`_WRITE` tool in this catalog is passed to the
+SDK's `allowed_tools` (see `AUTO_APPROVED_MCP_TOOLS` in
+`ciao/execution_modes.py`), so Auto mode does not raise an approval card for the
+app's own control plane: these are the programmatic twins of PWA buttons, scoped
+by bearer token, and visible/reversible in the UI. The `_DESTRUCTIVE` tools
+(`project_complete`, `project_delete`, `chat_delete`, `chat_stop`,
+`handoff_cancel`, `schedule_action`, `loop_action`) are deliberately excluded and
+still prompt. Plan mode gets no allowlist at all. `tests/test_mcp_server.py`
+fails if a new tool is added without placing it on one side of that line.
 
 The catalog covers application actions that are safe and meaningful for a
 scoped agent. Browser-session administration, login/OAuth secrets, Web Push

@@ -18,6 +18,8 @@ export interface WorkspaceInfo {
   claude_ai_mcps?: boolean | null
   gws_profile: string
   model_bucket: string
+  // PWA accent preset: pink | cyan | amber | emerald | violet. Missing → pink.
+  color?: string
 }
 
 export interface WorkspacesResponse {
@@ -30,11 +32,37 @@ export interface WorkspacesResponse {
   claude_ai_connectors?: string[]
 }
 
+export interface McpEnvKey {
+  key: string
+  configured: boolean
+  source: string
+}
+
+export interface McpProjectServer {
+  name: string
+  url?: string
+  command?: string
+  args?: string[]
+  transport?: 'http' | 'stdio' | string
+  source: string
+  config_path?: string
+  env_path?: string
+  env_keys?: McpEnvKey[]
+  ready?: boolean
+  tool_prefix?: string
+  tools?: string[]
+  tools_source?: 'observed' | 'probed' | 'none' | string
+  tools_note?: string
+}
+
 export interface McpStatus {
   enabled: boolean
   bound: boolean
   url?: string
   tool_count: number
+  tools?: string[]
+  env_path?: string
+  project_servers?: McpProjectServer[]
   active_sessions?: number
   providers?: string[]
   last_error?: string
@@ -133,6 +161,10 @@ export interface ChatMessage {
   usage?: Record<string, string>
   quota?: Record<string, unknown>
   images?: string[]
+  // True when this user turn was fired by a loop or schedule rather than
+  // typed. Drives the ↻ marker on the bubble, so a self-driven turn is not
+  // mistaken for something the reader sent. Only present on user messages.
+  unattended?: boolean
   // Monotonic per-chat user-turn index. Server-assigned; used to dedup
   // user_echo events replayed on WS reconnect against already-rendered
   // history or an optimistic local push. Only present on user messages.
@@ -248,11 +280,19 @@ export type WsEvent =
   | { type: 'result'; text: string; is_error: boolean; effective_model: string; usage: Record<string, string>; quota?: Record<string, unknown>; session_id: string; sent_at?: string; completed_at?: string; duration_ms?: number }
   | { type: 'permission_request'; tool_name: string; tool_input?: string; message: string; request_id: string }
   | { type: 'chat_title'; chat_id: string; title: string }
-  | { type: 'user_echo'; text: string; images?: string[]; turn_index?: number; sent_at?: string }
+  | { type: 'user_echo'; text: string; images?: string[]; turn_index?: number; sent_at?: string; unattended?: boolean; entry_id?: string }
+  // A tool call was refused (user Deny, or the auto-deny on an unattended
+  // run). The call never executed, so any file card already painted for this
+  // tool_use_id has to be retracted.
+  | { type: 'tool_denied'; tool_use_id: string }
   | { type: 'queued'; id?: string; text: string; images?: string[] }
   | { type: 'queue_state'; queue: Array<{ id: string; text: string; images?: string[] }> }
   | { type: 'steered'; text: string; images?: string[] }
   | { type: 'error'; message: string }
+  // The local client proxy could not open the remote host socket. This is a
+  // connection state, not a chat/model failure, so the PWA renders one
+  // reconnecting card instead of appending an error to conversation history.
+  | { type: 'host_unreachable' }
   // Server is draining for restart; client should show RestartOverlay, not
   // treat this as a chat failure.
   | { type: 'server_restarting'; message: string }
@@ -272,12 +312,17 @@ export type EventsWsMessage =
   | { type: 'chat_read'; chat_id: string; last_read_at: string }
   | { type: 'chat_title'; chat_id: string; title: string; status?: 'pending' | 'ready' }
   | { type: 'chat_moved'; chat_id: string; project_id: string; old_project_id: string }
+  | { type: 'chat_archived'; chat_id: string; project_id: string; archive_path?: string }
   | { type: 'chat_deleted'; chat_id: string; project_id: string; reason?: string }
   | { type: 'chat_retry'; chat_id: string; project_id: string; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number }
   | { type: 'project_created'; project: ProjectInfo }
   | { type: 'project_updated'; project: ProjectInfo }
   | { type: 'project_deleted'; project_id: string }
   | { type: 'projects_reordered'; workspace: string; order: string[] }
+  // A loop was created, edited, started, stopped, or deleted. Carries no
+  // payload: the client refetches /api/loops, which is the only place the
+  // computed running/next_run fields are assembled.
+  | { type: 'loops_changed' }
   | { type: 'open_chat'; chat_id: string }
   | { type: 'server_restarting'; message?: string }
   | { type: 'provider_subchat_created'; subchat_id: string; parent_chat_id: string; record: ProviderSubchatRecord }
@@ -486,6 +531,8 @@ export interface ProviderConnection {
   version?: string
   account?: string
   protocol?: string
+  mcps?: string[]
+  skills?: string[]
 }
 
 export interface ProviderConfigSettings {

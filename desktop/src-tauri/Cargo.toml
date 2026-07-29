@@ -1,0 +1,50 @@
+[package]
+name = "ciaobot-desktop"
+version = "0.6.0"
+description = "Native macOS shell for Ciaobot"
+edition = "2024"
+rust-version = "1.90"
+publish = false
+
+[lib]
+name = "ciaobot_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.6.3", features = [] }
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+mac-usernotifications = "=0.3.1"
+block2 = "=0.6.2"
+objc2 = "=0.6.4"
+objc2-foundation = "=0.3.2"
+objc2-user-notifications = { version = "=0.3.2", features = [
+  "UNNotification",
+  "UNNotificationContent",
+  "UNNotificationRequest",
+  "UNNotificationResponse",
+  "UNUserNotificationCenter",
+] }
+plist = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "=2.11.5", features = ["tray-icon", "image-png"] }
+tauri-plugin-autostart = "=2.5.1"
+tauri-plugin-dialog = "=2.7.2"
+tauri-plugin-single-instance = "=2.4.3"
+tauri-plugin-updater = "=2.10.1"
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+# Xcode 26's linker can emit malformed proc-macro dylibs when Cargo strips
+# debuginfo during the release dependency build. The final app is still
+# ad-hoc signed and packaged by Tauri; keeping these build-time dylibs
+# unstripped makes release builds deterministic on supported macOS hosts.
+[profile.release]
+strip = "none"

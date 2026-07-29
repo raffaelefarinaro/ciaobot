@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from ciao.execution_modes import normalize_claude_mode
+from ciao.execution_modes import HARNESS_DISABLED_SKILLS, normalize_claude_mode
 from ciao.models import BridgeMode
 from ciao.providers.codex import CodexSettings
 from ciao.providers.ollama import OllamaSettings
@@ -51,17 +51,86 @@ _DEFAULT_HARNESS_DISALLOWED_TOOLS: tuple[str, ...] = (
     "ScheduleWakeup",
     "PushNotification",
     "RemoteTrigger",
+    # The CLI's bundled `schedule` / `loop` skills. They're already hidden
+    # from the model by the `skillOverrides` settings layer (see
+    # HARNESS_DISABLED_SKILLS in ciao/execution_modes.py for why); these
+    # `Skill(<name>)` deny rules are the second lever, blocking execution
+    # ("Skill execution blocked by permission rules") if one is re-enabled
+    # downstream.
+    *(f"Skill({name})" for name in HARNESS_DISABLED_SKILLS),
 )
 
-# Non-connector tools blocked by default in the personal workspace on top of
-# the harness set. The self-hosted n8n MCP (project-scoped in .mcp.json) is
-# work-only, so it stays blocked even when the claude.ai MCP toggle is on.
-# Operators add or remove entries via the per-workspace "Extra disallowed
-# tools" field (PWA) or ``CIAO_DISALLOWED_TOOLS_PERSONAL`` (CSV; literal
-# ``none`` clears).
-_DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL: tuple[str, ...] = (
-    "mcp__n8n_mcp",
-)
+# The self-hosted n8n MCP used to be denied by default in a workspace literally
+# named ``personal``. Ciaobot no longer ships an opinion about it: n8n is
+# project-scoped in ``.mcp.json``, so it exists only where someone configured it
+# deliberately, and *which* workspaces should see it is a per-workspace
+# preference — which is exactly what the "Extra disallowed tools" field is for.
+#
+# Keying it on a name meant any other private workspace went unprotected, and
+# universalising the deny instead gave users a documented escape hatch that did
+# not work: clearing the field sends null, which restores the defaults, and the
+# value that does clear them drops the harness denies too.
+
+
+def _clean_relative_path(raw: str) -> str:
+    """Normalize a safe relative path so equivalent spellings resolve alike.
+
+    ``research``, ``research/`` and ``./research`` all name one segment; without
+    this they took different branches and two of them put the vault outside the
+    vault root. The free-text "Vault name" field in Settings invites exactly
+    that trailing slash.
+
+    Absolute paths are preserved for setup-created external vaults. Relative
+    paths may never contain ``..``: a workspace registry is trusted
+    configuration, but resolving a malformed value outside ``workspace_root``
+    would turn one bad setting into filesystem-wide reads and writes.
+    """
+    cleaned = (raw or "").strip()
+    if not cleaned:
+        return ""
+    # Setup uses "." deliberately when the selected notes folder is both the
+    # operational workspace and the vault. It is a safe, exact location (the
+    # resolved workspace root), not an empty or traversal path.
+    if cleaned in {".", "./"}:
+        return "."
+    path = Path(cleaned)
+    if path.is_absolute():
+        return str(path)
+    parts = [part for part in path.parts if part not in {".", ""}]
+    if ".." in parts:
+        raise ValueError("relative vault_root must not contain '..'")
+    return str(Path(*parts)) if parts else ""
+
+
+def _looks_like_vault(path: Path) -> bool:
+    """Whether a directory is plausibly a workspace vault, not a stray folder."""
+    try:
+        if not path.is_dir():
+            return False
+    except OSError:
+        return False
+    return any(
+        (
+            (path / "MEMORY.md").is_file(),
+            (path / "INDEX.md").is_file(),
+            (path / "Workspace").is_dir(),
+            (path / "projects").is_dir(),
+            (path / "Logs").is_dir(),
+        )
+    )
+
+
+def _vault_evidence_score(path: Path) -> int:
+    """Rank vault evidence when both legacy and standard locations exist."""
+    if not _looks_like_vault(path):
+        return 0
+    score = 0
+    score += 8 if (path / "MEMORY.md").is_file() else 0
+    score += 4 if (path / "INDEX.md").is_file() else 0
+    score += 4 if (path / "projects").is_dir() else 0
+    score += 2 if (path / "Logs").is_dir() else 0
+    score += 1 if (path / "Workspace").is_dir() else 0
+    return score
 
 
 def coerce_claude_ai_mcps(raw: object) -> bool | None:
@@ -85,6 +154,26 @@ def coerce_claude_ai_mcps(raw: object) -> bool | None:
     return None
 
 
+# Accent presets for the PWA. Missing/unknown values resolve to pink
+# (Ciao brand). Only accents shift; canvas tokens stay stable.
+WORKSPACE_COLOR_IDS = ("pink", "cyan", "amber", "emerald", "violet")
+DEFAULT_WORKSPACE_COLOR = "pink"
+
+
+def coerce_workspace_color(raw: object) -> str:
+    """Normalize a workspace accent id. Empty/missing → pink."""
+    if raw is None:
+        return DEFAULT_WORKSPACE_COLOR
+    cleaned = str(raw).strip().lower()
+    if not cleaned:
+        return DEFAULT_WORKSPACE_COLOR
+    if cleaned in WORKSPACE_COLOR_IDS:
+        return cleaned
+    raise ValueError(
+        f"color must be one of: {', '.join(WORKSPACE_COLOR_IDS)}"
+    )
+
+
 @dataclass(slots=True)
 class WorkspaceConfig:
     """Config for one logical chat workspace."""
@@ -105,6 +194,8 @@ class WorkspaceConfig:
     claude_ai_mcps: bool | None = None
     gws_profile: str = ""
     model_bucket: str = ""
+    # PWA accent preset id. Defaults to Ciao pink.
+    color: str = DEFAULT_WORKSPACE_COLOR
 
 
 def _coerce_workspace_disallowed(raw: object) -> list[str] | None:
@@ -122,6 +213,10 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
     if not name:
         return None
     vault_root = str(data.get("vault_root", name)).strip() or name
+    try:
+        color = coerce_workspace_color(data.get("color"))
+    except ValueError:
+        color = DEFAULT_WORKSPACE_COLOR
     return WorkspaceConfig(
         name=name,
         vault_root=vault_root,
@@ -131,6 +226,7 @@ def _workspace_from_mapping(data: dict) -> WorkspaceConfig | None:
         claude_ai_mcps=coerce_claude_ai_mcps(data.get("claude_ai_mcps")),
         gws_profile=str(data.get("gws_profile", "")).strip(),
         model_bucket=str(data.get("model_bucket", "")).strip(),
+        color=color,
     )
 
 
@@ -309,6 +405,9 @@ class CiaoConfig:
     claude_ai_mcps_personal: bool | None = None
     claude_ai_mcps_work: bool | None = None
     workspaces: dict[str, WorkspaceConfig] = field(default_factory=dict)
+    _workspace_registry_changed: bool = field(
+        init=False, default=False, repr=False
+    )
     claude_mode: BridgeMode = "auto"
     restart_exit_code: int = 75
     auto_sync_on_start: bool = True
@@ -401,6 +500,7 @@ class CiaoConfig:
                 claude_ai_mcps_work=self.claude_ai_mcps_work,
                 gws_default_profile=self.gws_default_profile,
             )
+        self._workspace_registry_changed = self._normalize_workspace_vault_roots()
 
     def workspace(self, name: str | None) -> WorkspaceConfig | None:
         if not name:
@@ -409,6 +509,278 @@ class CiaoConfig:
 
     def workspace_names(self) -> list[str]:
         return list(self.workspaces.keys())
+
+    def primary_workspace(self) -> str:
+        """The workspace to use when a caller has no better idea.
+
+        Prefers one literally named ``personal`` for continuity with installs
+        that predate a configurable registry, then falls back to whatever is
+        registered first. Callers must not hardcode ``"personal"`` themselves:
+        workspace names are the user's, and an install may have none by that
+        name at all.
+        """
+        if "personal" in self.workspaces:
+            return "personal"
+        names = self.workspace_names()
+        return names[0] if names else ""
+
+    def legacy_entity_workspace(self) -> str:
+        """Workspace that owns unprefixed entries in the global vault index.
+
+        First-run setup historically pointed the user's chosen logical
+        workspace at ``CIAO_VAULT_ROOT`` itself. If a workspace literally named
+        ``personal`` is added later, it must not steal those legacy entities
+        merely because :meth:`primary_workspace` prefers that name.
+        """
+        owners: list[str] = []
+        for name in self.workspace_names():
+            try:
+                if self.workspace_vault_root(name) == self.vault_root:
+                    owners.append(name)
+            except ValueError:
+                continue
+        if len(owners) == 1:
+            return owners[0]
+        if len(owners) > 1:
+            logger.warning(
+                "Legacy entity ownership is ambiguous across workspaces: %s",
+                ", ".join(owners),
+            )
+            return ""
+        return self.primary_workspace()
+
+    def workspace_vault_root(self, workspace: str | None) -> Path:
+        """Absolute vault directory for one logical workspace.
+
+        Pure: the answer depends only on the registry, never on what happens to
+        exist on disk right now. An earlier version chose between two candidate
+        paths by probing the filesystem on every call, which meant an install's
+        vault silently relocated the moment the other candidate appeared —
+        stranding everything written at the first one. Legacy layouts are
+        reconciled once, at load (see ``_normalize_workspace_vault_roots``).
+
+        Registered ``vault_root`` shapes:
+
+        - absolute — preserved setup/external roots and pinned legacy vaults.
+        - ``.`` — existing-folder setup where the operational workspace itself
+          is the vault.
+        - one path segment — a legacy ambiguous value, normalized and persisted
+          at load.
+        - several segments (normally ``memory-vault/clientA``) — the standard
+          named workspace path, resolved against ``workspace_root`` so it is not
+          nested twice.
+        """
+        name = workspace or ""
+        workspace_config = self.workspace(name)
+        raw_root = (workspace_config.vault_root if workspace_config else name) or name
+        return self._resolve_vault_root(raw_root)
+
+    def canonical_workspace_vault_root(self, workspace: str) -> Path:
+        """Standard location for a user-named workspace under the vault."""
+        name = _clean_relative_path(workspace)
+        if not name or len(Path(name).parts) != 1:
+            raise ValueError("workspace name must identify one vault folder")
+        candidate = self.vault_root / name
+        if candidate.is_symlink():
+            raise ValueError("workspace vault folder must not be a symlink")
+        resolved = candidate.resolve()
+        if resolved.parent != self.vault_root:
+            raise ValueError("workspace vault folder must stay inside the vault root")
+        if resolved.exists() and not resolved.is_dir():
+            raise ValueError("workspace vault folder must be a directory")
+        return resolved
+
+    def stored_workspace_vault_root(self, workspace: str) -> str:
+        """Portable registry value for a workspace's standard vault folder."""
+        root = self.canonical_workspace_vault_root(workspace)
+        try:
+            return str(root.relative_to(self.workspace_root))
+        except ValueError:
+            return str(root)
+
+    def _resolve_vault_root(self, raw_root: str) -> Path:
+        cleaned = _clean_relative_path(raw_root)
+        if not cleaned:
+            raise ValueError("vault_root must not be empty")
+        root = Path(cleaned).expanduser()
+        if root.is_absolute():
+            resolved = root.resolve()
+            if resolved == Path(resolved.anchor):
+                raise ValueError("vault_root must not be the filesystem root")
+            # Absolute compatibility roots are canonicalized when the registry
+            # loads. If that pinned path (or one of its descendants below the
+            # already-resolved workspace root) later becomes a symlink, do not
+            # silently redirect agent reads and writes to a different vault.
+            if resolved != root:
+                raise ValueError("workspace vault path must not contain symlinks")
+            return resolved
+        if len(root.parts) == 1:
+            candidate = self.vault_root / root
+            if candidate.is_symlink():
+                raise ValueError("workspace vault folder must not be a symlink")
+            resolved = candidate.resolve()
+            if resolved.parent != self.vault_root:
+                raise ValueError(
+                    "workspace vault folder must stay inside the vault root"
+                )
+            return resolved
+        candidate = self.workspace_root / root
+        resolved = candidate.resolve()
+        if resolved == Path(resolved.anchor):
+            raise ValueError("vault_root must not be the filesystem root")
+        if resolved != candidate:
+            raise ValueError("workspace vault path must not contain symlinks")
+        if not resolved.is_relative_to(self.workspace_root):
+            raise ValueError("relative vault_root must stay inside workspace_root")
+        return resolved
+
+    def _normalize_workspace_vault_roots(self) -> bool:
+        """Pin a legacy vault's location into the registry, once.
+
+        Before vault nesting applied to every workspace, a workspace named
+        anything but ``personal``/``work`` kept its vault beside ``memory-vault/``
+        rather than inside it. Such an install must not appear to lose its data,
+        but it also must not have its location re-decided on every call. So the
+        one-segment ``vault_root`` is rewritten to the absolute legacy path here:
+        resolution downstream stays pure, and the change is visible in
+        ``.runtime/workspaces.json`` the next time it is written.
+
+        The legacy directory has to actually look like a vault. Gating on mere
+        existence would capture an unrelated sibling — naming a workspace after
+        a ``clients/`` or ``skills/`` folder that already sits in the workspace
+        root would silently adopt it, and the agent would then write memory into
+        someone's document folder.
+        """
+        changed = False
+        for name, workspace_config in list(self.workspaces.items()):
+            try:
+                raw_root = _clean_relative_path(workspace_config.vault_root or name)
+                if not raw_root:
+                    raise ValueError("vault_root must not be empty")
+                canonical = self.canonical_workspace_vault_root(name)
+            except ValueError:
+                logger.warning(
+                    "Workspace %s has an unsafe vault_root %r; using its "
+                    "standard folder under %s",
+                    name,
+                    workspace_config.vault_root,
+                    self.vault_root,
+                )
+                try:
+                    canonical = self.canonical_workspace_vault_root(name)
+                except ValueError:
+                    continue
+                workspace_config.vault_root = self.stored_workspace_vault_root(name)
+                changed = True
+                continue
+            root = Path(raw_root).expanduser()
+            if root.is_absolute():
+                absolute = root.resolve()
+                if absolute == Path(absolute.anchor):
+                    workspace_config.vault_root = (
+                        self.stored_workspace_vault_root(name)
+                    )
+                    changed = True
+                    continue
+                # Preserve a setup-selected symlink by pinning its current
+                # target. Resolution can then fail closed if the pinned path
+                # itself is replaced by a symlink after startup/restart.
+                if workspace_config.vault_root != str(absolute):
+                    workspace_config.vault_root = str(absolute)
+                    changed = True
+                # Backward compatibility for an older/manual sibling move:
+                # when the pinned source disappeared and the standard folder
+                # now has vault evidence, follow the completed move. The
+                # current guided migration updates the registry explicitly.
+                if (
+                    absolute != self.vault_root
+                    and absolute.parent == self.workspace_root
+                    and not absolute.exists()
+                    and _looks_like_vault(canonical)
+                ):
+                    workspace_config.vault_root = self.stored_workspace_vault_root(name)
+                    changed = True
+                continue
+            if len(root.parts) != 1:
+                candidate = self.workspace_root / root
+                absolute = candidate.resolve()
+                if absolute == Path(absolute.anchor):
+                    workspace_config.vault_root = (
+                        self.stored_workspace_vault_root(name)
+                    )
+                    changed = True
+                    continue
+                # A relative setup path may run through the configured vault
+                # alias (for example memory-vault -> an external notes
+                # directory). Pin the alias's current target exactly once;
+                # later resolver calls can then reject any replacement without
+                # breaking an intentional symlink that existed at setup time.
+                if absolute != candidate:
+                    workspace_config.vault_root = str(absolute)
+                    changed = True
+                continue
+            legacy = (self.workspace_root / root).resolve()
+            if legacy == self.vault_root:
+                # A one-segment value equal to CIAO_VAULT_ROOT is the
+                # setup-era "this workspace owns the whole vault" shape. Pin
+                # it absolutely; leaving it as ``memory-vault`` would make the
+                # generic one-segment resolver nest it a second time.
+                stored = str(legacy)
+                if workspace_config.vault_root != stored:
+                    workspace_config.vault_root = stored
+                    changed = True
+                continue
+            if legacy == canonical:
+                continue
+            if (
+                _looks_like_vault(legacy)
+                and _vault_evidence_score(legacy)
+                >= _vault_evidence_score(canonical)
+            ):
+                workspace_config.vault_root = str(legacy)
+                changed = True
+                logger.info(
+                    "Workspace %s keeps its vault at the pre-nesting location "
+                    "%s; pinned in the registry until an interactive migration "
+                    "moves it under %s.",
+                    name,
+                    legacy,
+                    self.vault_root,
+                )
+                continue
+
+            # New workspaces and already-nested legacy workspaces get an
+            # explicit registry path. That removes the old ambiguous
+            # one-segment shape, so later filesystem changes cannot relocate
+            # the workspace.
+            stored = self.stored_workspace_vault_root(name)
+            if workspace_config.vault_root != stored:
+                workspace_config.vault_root = stored
+                changed = True
+        return changed
+
+    def persist_workspace_registry(self) -> None:
+        """Atomically persist the live workspace registry."""
+        path = self.state_path.parent / "workspaces.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = [
+            {
+                "name": workspace.name,
+                "vault_root": workspace.vault_root,
+                "default_provider": workspace.default_provider,
+                "default_model": workspace.default_model,
+                "disallowed_tools": workspace.disallowed_tools,
+                "claude_ai_mcps": workspace.claude_ai_mcps,
+                "gws_profile": workspace.gws_profile,
+                "model_bucket": workspace.model_bucket,
+                "color": workspace.color,
+            }
+            for workspace in self.workspaces.values()
+        ]
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        tmp.replace(path)
+        self._workspace_registry_changed = False
 
     def default_model_for_workspace(self, workspace: str | None) -> str:
         """Pick the new-chat / new-schedule default for a workspace.
@@ -440,8 +812,13 @@ class CiaoConfig:
                 return "work"
             if provider == "codex":
                 return ""
-        if workspace == "work":
-            return "work"
+        # An unregistered name (typo, stale reference, renamed workspace) has
+        # no bucket of its own; fall back to the primary workspace's rather
+        # than guessing from the name, which only ever worked for the two
+        # names the first release happened to ship.
+        primary = self.workspace(self.primary_workspace())
+        if primary and primary.model_bucket and workspace != self.primary_workspace():
+            return primary.model_bucket
         return "personal"
 
     def sonnet_model_for_workspace(self, workspace: str | None) -> str:
@@ -493,32 +870,30 @@ class CiaoConfig:
           ``claude_ai_mcps`` resolves to False, and
         * the workspace's extra tools (``disallowed_tools``), which defaults to
           the harness set (``_DEFAULT_HARNESS_DISALLOWED_TOOLS``) for every
-          workspace plus n8n (``_DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL``) for
-          personal.
+          workspace.
 
         So, with the toggle at its default (on), every chat blocks the
         PWA-irrelevant harness tools (plan mode, cron, /loop wakeup, routine
-        trigger, push, notebook edit, design-system sync), a personal chat
-        additionally blocks n8n, and the 8 claude.ai connectors are allowed in
-        both until the toggle is flipped off. Both are overridable: the toggle
-        via ``CIAO_CLAUDE_AI_MCPS_PERSONAL`` / ``CIAO_CLAUDE_AI_MCPS_WORK`` /
-        the PWA switch, the extras via ``CIAO_DISALLOWED_TOOLS_PERSONAL`` /
-        ``CIAO_DISALLOWED_TOOLS_WORK`` / the "Extra disallowed tools" field.
+        trigger, push, notebook edit, design-system sync) and the 8 claude.ai
+        connectors are allowed until the toggle is flipped off. Both are
+        overridable: the toggle via the per-workspace claude.ai env var or the
+        PWA switch, the extras via the per-workspace disallowed-tools env var or
+        the "Extra disallowed tools" field (the literal ``none`` denies nothing
+        at all).
+
+        An unregistered workspace name — a stale reference, or a renamed or
+        deleted workspace — gets the defaults rather than an empty denylist. It
+        was the one input that reached the model with nothing denied.
         """
         workspace_config = self.workspace(workspace)
-        if workspace_config is None:
-            return []
         connectors = (
             list(CLAUDE_AI_CONNECTORS)
             if not self.claude_ai_mcps_for_workspace(workspace)
             else []
         )
-        extras = workspace_config.disallowed_tools
+        extras = workspace_config.disallowed_tools if workspace_config else None
         if extras is None:
-            # The harness set applies to every workspace; personal adds n8n.
             extras = list(_DEFAULT_HARNESS_DISALLOWED_TOOLS)
-            if workspace_config.name == "personal":
-                extras += _DEFAULT_EXTRA_DISALLOWED_TOOLS_PERSONAL
         # Union, preserving order, deduped.
         seen: set[str] = set()
         effective: list[str] = []

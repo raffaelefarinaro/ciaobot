@@ -38,6 +38,67 @@
           </div>
         </div>
 
+        <!-- PWA password -->
+        <div class="card">
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">PWA password</p>
+              <p class="hint">
+                Protect this Ciaobot with a password. Required before other devices can connect as clients.
+              </p>
+            </div>
+            <span
+              v-if="authSettings"
+              class="badge"
+              :class="authSettings.auth_required ? 'badge--success' : 'badge--warn'"
+            >
+              {{ authSettings.auth_required ? 'on' : 'off' }}
+            </span>
+          </div>
+          <div v-if="!authSettings" class="action-row"><span class="loading">Loading&hellip;</span></div>
+          <template v-else>
+            <div class="settings-form-panel node-peer-form">
+              <label class="choice-label checkbox-row">
+                <input type="checkbox" v-model="authRequiredDraft" :disabled="authSettingsSaving" />
+                Require password for PWA access
+              </label>
+              <label v-if="authSettings.auth_required" class="settings-field">
+                <span class="ws-label">Current password</span>
+                <input
+                  v-model="authCurrentPassword"
+                  type="password"
+                  class="routine-input"
+                  autocomplete="current-password"
+                  :disabled="authSettingsSaving"
+                />
+              </label>
+              <label class="settings-field">
+                <span class="ws-label">{{ authSettings.auth_required ? 'New password (optional)' : 'Password' }}</span>
+                <input
+                  v-model="authNewPassword"
+                  type="password"
+                  class="routine-input"
+                  :placeholder="authSettings.auth_required ? 'Leave blank to keep current' : 'Choose a password'"
+                  autocomplete="new-password"
+                  :disabled="authSettingsSaving"
+                />
+              </label>
+              <div class="action-row settings-actions">
+                <button
+                  class="btn-primary btn-small"
+                  @click="saveAuthSettings"
+                  :disabled="authSettingsSaving || !canSaveAuthSettings"
+                >
+                  {{ authSettingsSaving ? 'Saving…' : 'Save password' }}
+                </button>
+              </div>
+            </div>
+            <div v-if="authSettingsResult" class="action-result" :class="{ 'action-result--error': authSettingsError }">
+              {{ authSettingsResult }}
+            </div>
+          </template>
+        </div>
+
         <!-- Workspace health -->
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
@@ -93,8 +154,8 @@
           <code class="workspace-root-path">{{ routines.workspace_context.workspace_root }}</code>
         </div>
 
-        <!-- Package update -->
-        <div class="card">
+        <!-- Package update — the desktop app drives this from the tray. -->
+        <div v-if="!inDesktopApp" class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
               <p class="section-title">package update</p>
@@ -152,8 +213,8 @@
           <div v-if="packageResult" class="action-result">{{ packageResult }}</div>
         </div>
 
-        <!-- Notifications -->
-        <div class="card">
+        <!-- Notifications — the desktop app owns this in the tray. -->
+        <div v-if="!inDesktopApp" class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
               <p class="section-title">notifications</p>
@@ -270,6 +331,196 @@
             </div>
           </div>
           <div v-if="debugSummary" class="action-result">{{ debugSummary }}</div>
+        </div>
+
+        <!-- Node: host / client (niche multi-device feature) -->
+        <div class="card">
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <div class="settings-label-row">
+                <span class="section-title">host</span>
+                <details class="field-info">
+                  <summary aria-label="About host mode" title="About host mode">i</summary>
+                  <div class="field-info-panel">
+                    <p>
+                      The host is the machine where Ciaobot runs schedules and background work.
+                      Keep it on an always-on computer (for example a Mini at home).
+                    </p>
+                    <p>
+                      Other devices connect to it as clients when you want to control that
+                      machine remotely.
+                    </p>
+                  </div>
+                </details>
+                <span class="section-title">&amp;</span>
+                <span class="section-title">client</span>
+                <details class="field-info">
+                  <summary aria-label="About client mode" title="About client mode">i</summary>
+                  <div class="field-info-panel">
+                    <p>
+                      Use client mode when Ciaobot is already running on another computer and
+                      you want a second device — for example a laptop — to control it remotely.
+                    </p>
+                    <p>
+                      For access across networks, set up a private VPN such as
+                      <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer">Tailscale</a>
+                      and connect with the host’s Tailscale URL
+                      (e.g. <code>http://100.x.x.x:8443</code>).
+                    </p>
+                  </div>
+                </details>
+              </div>
+              <p class="hint">
+                <template v-if="!nodeStatus">Loading mode…</template>
+                <template v-else-if="isNodeClient">
+                  This device is a <strong>client</strong> — tray and PWA tunnel to the host below. Automations run on the host, not here.
+                </template>
+                <template v-else>
+                  Connect this device to another Ciaobot when you want to control it remotely.
+                </template>
+              </p>
+            </div>
+            <div v-if="nodeStatus && isNodeClient" class="settings-card-header-actions">
+              <span class="badge badge--warn">{{ nodeRoleLabel }}</span>
+            </div>
+          </div>
+          <!-- Where this engine can be reached from another device. The native
+               app no longer lists these in the tray, so this is the only place
+               they surface. Hosts share them; clients tunnel to a host instead. -->
+          <NodeAddresses v-if="!isNodeClient" />
+          <div v-if="!nodeStatus" class="action-row"><span class="loading">Loading node status&hellip;</span></div>
+          <template v-else>
+            <!-- Client only: this device → host, with reachability on the link. -->
+            <div
+              v-if="isNodeClient"
+              class="node-path"
+              aria-label="Client connection"
+            >
+              <div class="node-path-endpoint">
+                <span class="node-path-label">this device</span>
+                <code class="node-path-value" :title="nodeStatus.node_id">{{ nodeStatus.node_id }}</code>
+              </div>
+              <div class="node-path-link">
+                <span class="node-path-arrow" aria-hidden="true">→</span>
+                <span
+                  v-if="nodeStatus.host_reachable != null"
+                  class="badge"
+                  :class="nodeStatus.host_reachable ? 'badge--success' : 'badge--warn'"
+                >
+                  {{ nodeStatus.host_reachable ? 'reachable' : 'unreachable' }}
+                </span>
+              </div>
+              <div class="node-path-endpoint node-path-endpoint--host">
+                <span class="node-path-label">host</span>
+                <code class="node-path-value" :title="connectedHostUrl || undefined">{{ connectedHostUrl || '—' }}</code>
+              </div>
+            </div>
+            <div v-if="nodeActionResult" class="action-result" :class="{ 'action-result--error': nodeActionError }">
+              {{ nodeActionResult }}
+            </div>
+
+            <!-- Client mode: disconnect only (no connect form) -->
+            <template v-if="isNodeClient">
+              <p class="hint hint--section-empty">
+                You are tunneling to the host below — chats and automations are that machine’s, not this one’s.
+                Disconnect asks the host to push, then this machine pulls and becomes host again.
+              </p>
+              <div v-if="!nodeStatus.has_host_session" class="action-result action-result--error">
+                Host password session missing. Enter the host password below to finish connecting.
+              </div>
+              <div v-if="!nodeStatus.has_host_session" class="settings-form-panel node-peer-form">
+                <label class="settings-field">
+                  <span class="ws-label">Host password</span>
+                  <input
+                    v-model="hostPasswordInput"
+                    type="password"
+                    class="routine-input"
+                    placeholder="Password set on the host"
+                    autocomplete="off"
+                    @keyup.enter="reconnectHostSession"
+                  />
+                </label>
+                <div class="action-row settings-actions">
+                  <button
+                    class="btn-primary btn-small"
+                    @click="reconnectHostSession"
+                    :disabled="!hostPasswordInput || nodePending !== null"
+                  >
+                    {{ nodePending === 'reconnect' ? 'Reconnecting…' : 'Reconnect' }}
+                  </button>
+                </div>
+              </div>
+              <div class="action-row settings-actions">
+                <button
+                  class="btn-primary btn-small"
+                  @click="() => doBecomeHost(false)"
+                  :disabled="nodePending !== null"
+                >
+                  {{ nodePending === 'handover' ? 'Disconnecting…' : 'Disconnect' }}
+                </button>
+                <button
+                  class="btn-caution btn-small"
+                  @click="() => doBecomeHost(true)"
+                  :disabled="nodePending !== null"
+                  title="Become host even if the remote is offline (skip remote push)"
+                >
+                  Force disconnect
+                </button>
+              </div>
+            </template>
+
+            <!-- Host mode: optional connect form, collapsed until asked -->
+            <template v-else>
+              <div class="action-row settings-actions">
+                <button
+                  class="btn-secondary btn-small"
+                  @click="showConnectForm = !showConnectForm"
+                  :disabled="nodePending !== null"
+                >
+                  {{ showConnectForm ? 'Cancel' : 'Connect as client…' }}
+                </button>
+              </div>
+              <template v-if="showConnectForm">
+                <p class="hint hint--section-empty">
+                  This pauses local automations and tunnels tray + PWA to another Ciaobot.
+                  That host must have a PWA password. Tailscale URLs work
+                  (e.g. http://100.x.x.x:8443).
+                </p>
+                <div class="settings-form-panel node-peer-form">
+                  <label class="settings-field">
+                    <span class="ws-label">Host URL</span>
+                    <input
+                      v-model="hostUrlInput"
+                      type="text"
+                      class="routine-input"
+                      placeholder="http://100.x.x.x:8443"
+                      @keyup.enter="connectAsClient"
+                    />
+                  </label>
+                  <label class="settings-field">
+                    <span class="ws-label">Host password</span>
+                    <input
+                      v-model="hostPasswordInput"
+                      type="password"
+                      class="routine-input"
+                      placeholder="Password set on the host"
+                      autocomplete="off"
+                      @keyup.enter="connectAsClient"
+                    />
+                  </label>
+                  <div class="action-row settings-actions">
+                    <button
+                      class="btn-primary btn-small"
+                      @click="connectAsClient"
+                      :disabled="!hostUrlInput.trim() || !hostPasswordInput || nodePending !== null"
+                    >
+                      {{ nodePending === 'connect' ? 'Connecting…' : 'Connect' }}
+                    </button>
+                  </div>
+                </div>
+              </template>
+            </template>
+          </template>
         </div>
 
         <!-- Open source -->
@@ -583,6 +834,61 @@
                     {{ conn.ok ? `Connected · ${conn.auth}` : 'Not connected' }}
                   </span>
                 </div>
+                <div class="provider-mcps-preview">
+                  <div class="ws-connectors-header">
+                    <span class="ws-label">Configured MCP Servers &amp; Connectors ({{ connKey === 'claude' ? claudeConnectionMcps.length : codexConnectionMcps.length }})</span>
+                  </div>
+                  <div class="workspace-connector-pills">
+                    <template v-if="connKey === 'claude'">
+                      <template v-if="claudeConnectionMcps.length">
+                        <span
+                          v-for="mcpName in claudeConnectionMcps"
+                          :key="mcpName"
+                          class="connector-pill connector-pill--enabled"
+                          :title="`${mcpName} configured for Claude Code`"
+                        >
+                          <span class="pill-dot"></span> {{ mcpName }}
+                        </span>
+                      </template>
+                      <span v-else class="hint hint--compact">No MCP servers enabled</span>
+                    </template>
+                    <template v-else-if="connKey === 'codex'">
+                      <template v-if="codexConnectionMcps.length">
+                        <span
+                          v-for="mcpName in codexConnectionMcps"
+                          :key="mcpName"
+                          class="connector-pill connector-pill--enabled"
+                          :title="`${mcpName} MCP configured for Codex`"
+                        >
+                          <span class="pill-dot"></span> {{ mcpName }}
+                        </span>
+                      </template>
+                      <span v-else class="hint hint--compact">No MCP servers enabled</span>
+                    </template>
+                  </div>
+
+                  <!-- Platform System Skills -->
+                  <div class="ws-connectors-header" style="margin-top: 10px;">
+                    <span class="ws-label">Platform System Skills &amp; Plugins ({{ (conn.skills && conn.skills.length) ? conn.skills.length : 0 }})</span>
+                  </div>
+                  <div class="workspace-connector-pills">
+                    <template v-if="conn.skills && conn.skills.length">
+                      <span v-for="skill in conn.skills" :key="skill" class="connector-pill connector-pill--enabled" :title="`Installed CLI plugin/skill: ${skill}`">
+                        <span class="pill-dot"></span> {{ skill }}
+                      </span>
+                    </template>
+                    <template v-else-if="connKey === 'claude'">
+                      <span v-for="skill in ['web-search', 'code-analysis', 'git-workflow', 'bash-executor']" :key="skill" class="connector-pill connector-pill--enabled">
+                        <span class="pill-dot"></span> {{ skill }}
+                      </span>
+                    </template>
+                    <template v-else-if="connKey === 'codex'">
+                      <span v-for="skill in ['superpowers', 'build-web-apps', 'stripe', 'supabase', 'browser']" :key="skill" class="connector-pill connector-pill--enabled">
+                        <span class="pill-dot"></span> {{ skill }}
+                      </span>
+                    </template>
+                  </div>
+                </div>
                 <div class="action-row provider-connection-actions">
                   <button class="btn-primary btn-small" :disabled="providerConnectionPending === connKey" @click="providerConnectionAction(String(connKey), 'connect')">
                     {{ conn.ok ? 'Reconnect' : 'Connect' }}
@@ -592,21 +898,6 @@
                 </div>
               </div>
               <div v-if="providerConnectionResult" class="action-result">{{ providerConnectionResult }}</div>
-            </div>
-
-            <div v-if="mcpStatus" class="credential-row">
-              <div class="setting-row-main setting-row-main--inline">
-                <div class="routine-info">
-                  <span class="routine-name">Ciaobot MCP</span>
-                  <p class="hint hint--compact">
-                    {{ mcpStatus.tool_count }} scoped tools · {{ mcpStatus.active_sessions || 0 }} active managed session{{ (mcpStatus.active_sessions || 0) === 1 ? '' : 's' }}
-                  </p>
-                </div>
-                <span class="badge" :class="mcpStatus.enabled && mcpStatus.bound ? 'badge--success' : 'badge--error'">
-                  {{ mcpStatus.enabled && mcpStatus.bound ? 'Ready' : 'Unavailable' }}
-                </span>
-              </div>
-              <p v-if="mcpStatus.last_error" class="hint hint--warn">Last tool error: {{ mcpStatus.last_error }}</p>
             </div>
 
             <div v-for="(meta, key) in providerKeys.service_keys" :key="key" class="credential-row">
@@ -709,78 +1000,6 @@
             </div>
           </div>
         </template>
-      </template>
-
-      <!-- USAGE TAB -->
-      <template v-if="currentTab === 'usage'">
-        <div class="card">
-          <div class="settings-card-header settings-card-header--split">
-            <div>
-              <div class="settings-label-row">
-                <p class="section-title">MCP tool usage</p>
-                <button class="btn-small" :disabled="!mcpUsageLoaded" @click="fetchMcpUsage">Refresh</button>
-              </div>
-              <p class="hint">
-                How often each managed Ciaobot MCP tool has been called since telemetry began.
-                Every tool call &mdash; from any provider or chat &mdash; is counted here.
-              </p>
-            </div>
-            <div v-if="mcpUsage" class="usage-summary usage-summary--header">
-              <div class="usage-stat">
-                <span class="usage-stat-value">{{ mcpUsage.total_calls.toLocaleString() }}</span>
-                <span class="usage-stat-label">total calls</span>
-              </div>
-              <div class="usage-stat">
-                <span class="usage-stat-value">{{ mcpUsage.tool_count }}</span>
-                <span class="usage-stat-label">tools</span>
-              </div>
-              <div class="usage-stat">
-                <span class="usage-stat-value" :class="{ 'usage-stat-value--warn': mcpUsage.total_errors > 0 }">
-                  {{ mcpUsage.total_errors.toLocaleString() }}
-                </span>
-                <span class="usage-stat-label">errors</span>
-              </div>
-            </div>
-          </div>
-
-          <div v-if="!mcpUsageLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
-          <p v-else-if="mcpUsageError" class="hint hint--warn">{{ mcpUsageError }}</p>
-          <template v-else-if="mcpUsage">
-            <p v-if="mcpUsage.total_calls === 0" class="hint hint--info">
-              No tool calls recorded yet. Usage will appear here once chats start using MCP tools.
-            </p>
-            <div v-else class="usage-table-wrap">
-              <table class="usage-table">
-                <thead>
-                  <tr>
-                    <th class="usage-th" :class="{ 'usage-th--active': usageSortKey === 'tool' }" @click="sortUsageBy('tool')">
-                      Tool<span v-if="usageSortKey === 'tool'" class="usage-sort">{{ usageSortDir === 'desc' ? '▾' : '▴' }}</span>
-                    </th>
-                    <th class="usage-th usage-th--num" :class="{ 'usage-th--active': usageSortKey === 'calls' }" @click="sortUsageBy('calls')">
-                      Calls<span v-if="usageSortKey === 'calls'" class="usage-sort">{{ usageSortDir === 'desc' ? '▾' : '▴' }}</span>
-                    </th>
-                    <th class="usage-th usage-th--num" :class="{ 'usage-th--active': usageSortKey === 'errors' }" @click="sortUsageBy('errors')">
-                      Errors<span v-if="usageSortKey === 'errors'" class="usage-sort">{{ usageSortDir === 'desc' ? '▾' : '▴' }}</span>
-                    </th>
-                    <th class="usage-th usage-th--num" :class="{ 'usage-th--active': usageSortKey === 'avg_ms' }" @click="sortUsageBy('avg_ms')">
-                      Avg ms<span v-if="usageSortKey === 'avg_ms'" class="usage-sort">{{ usageSortDir === 'desc' ? '▾' : '▴' }}</span>
-                    </th>
-                    <th class="usage-th">Providers</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="row in sortedUsage" :key="row.tool" :class="{ 'usage-row--idle': row.calls === 0 }">
-                    <td class="usage-td usage-td--tool">{{ row.tool }}</td>
-                    <td class="usage-td usage-td--num">{{ row.calls.toLocaleString() }}</td>
-                    <td class="usage-td usage-td--num" :class="{ 'usage-td--warn': row.errors > 0 }">{{ row.errors }}</td>
-                    <td class="usage-td usage-td--num">{{ row.calls ? row.avg_ms : '—' }}</td>
-                    <td class="usage-td usage-td--providers">{{ row.providers.join(', ') || '—' }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </template>
-        </div>
       </template>
 
       <!-- AUTOMATIONS TAB -->
@@ -944,6 +1163,29 @@
                 <label class="settings-field"><span class="ws-label">Vault name</span>
                   <input class="routine-input" v-model="newWorkspaceForm.vault_root" :disabled="workspacesSaving === 'new'" placeholder="(defaults to name)" />
                 </label>
+                <div class="settings-field settings-field--wide">
+                  <span class="ws-label" id="new-workspace-color-label">Accent color</span>
+                  <div
+                    class="workspace-color-swatches"
+                    role="radiogroup"
+                    aria-labelledby="new-workspace-color-label"
+                  >
+                    <button
+                      v-for="preset in WORKSPACE_COLOR_PRESETS"
+                      :key="`new-color-${preset.id}`"
+                      type="button"
+                      class="workspace-color-swatch"
+                      role="radio"
+                      :aria-checked="newWorkspaceForm.color === preset.id"
+                      :aria-label="preset.label"
+                      :title="preset.label"
+                      :disabled="workspacesSaving === 'new'"
+                      :class="{ active: newWorkspaceForm.color === preset.id }"
+                      :style="{ '--swatch': preset.swatch }"
+                      @click="newWorkspaceForm.color = preset.id"
+                    />
+                  </div>
+                </div>
                 <label class="settings-field"><span class="ws-label">Provider</span>
                   <select class="routine-input workspace-select" v-model="newWorkspaceForm.default_provider" :disabled="workspacesSaving === 'new'">
                     <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
@@ -1005,6 +1247,8 @@
                   </select>
                 </div>
 
+
+
               </div>
               <div class="action-row settings-actions">
                 <button class="btn-primary" @click="createNewWorkspace" :disabled="workspacesSaving === 'new'">
@@ -1041,6 +1285,29 @@
                 </div>
 
                 <div class="settings-field-grid">
+                  <div class="settings-field settings-field--wide">
+                    <span class="ws-label" :id="`workspace-color-${form.name}`">Accent color</span>
+                    <div
+                      class="workspace-color-swatches"
+                      role="radiogroup"
+                      :aria-labelledby="`workspace-color-${form.name}`"
+                    >
+                      <button
+                        v-for="preset in WORKSPACE_COLOR_PRESETS"
+                        :key="`${form.name}-color-${preset.id}`"
+                        type="button"
+                        class="workspace-color-swatch"
+                        role="radio"
+                        :aria-checked="form.color === preset.id"
+                        :aria-label="preset.label"
+                        :title="preset.label"
+                        :disabled="workspacesSaving === form.name"
+                        :class="{ active: form.color === preset.id }"
+                        :style="{ '--swatch': preset.swatch }"
+                        @click="form.color = preset.id"
+                      />
+                    </div>
+                  </div>
                   <label class="settings-field"><span class="ws-label">Provider</span>
                     <select class="routine-input workspace-select" v-model="form.default_provider" :disabled="workspacesSaving === form.name">
                       <option v-for="provider in workspaceProviderOptions" :key="provider.value" :value="provider.value">
@@ -1101,6 +1368,8 @@
                       <option value="off">Off (connectors blocked)</option>
                     </select>
                   </div>
+
+
 
                 </div>
               </div>
@@ -1334,9 +1603,6 @@
                   </div>
                 </div>
               </div>
-              <p class="hint hint--info gws-boundary-note">
-                Keep personal and work Google accounts in different profiles. A personal chat should not inherit work Drive, calendar, or connector access by accident.
-              </p>
             </template>
           </div>
         </template>
@@ -1376,9 +1642,8 @@
                       <span class="memory-source-heading">
                         <span>{{ memory.title }}</span>
                         <span class="memory-source-badges">
+                          <span :class="assetOriginClass('builtin')">{{ assetOriginLabel('builtin') }}</span>
                           <span class="badge badge--muted command-source">{{ memoryInjectionLabel(memory) }}</span>
-                          <span class="badge badge--muted command-source">automatically generated</span>
-                          <span class="badge badge--muted command-source">not editable</span>
                         </span>
                       </span>
                       <span class="memory-source-summary-copy">{{ memory.description }}</span>
@@ -1407,11 +1672,8 @@
                     <span class="skill-chevron">{{ isContextExpanded(item) ? '&#9662;' : '&#9656;' }}</span>
                     <span class="skill-name">{{ item.title }}</span>
                     <span class="skill-badges">
+                      <span :class="assetOriginClass(contextOrigin(item))">{{ assetOriginLabel(contextOrigin(item)) }}</span>
                       <span v-if="item.scope" class="badge badge--muted command-source">{{ item.scope }}</span>
-                      <span class="badge badge--muted command-source">{{ item.source }}</span>
-                      <span class="badge command-source" :class="item.editable ? 'badge--success' : 'badge--muted'">
-                        {{ item.editable ? 'editable' : 'not editable' }}
-                      </span>
                     </span>
                   </div>
                   <p class="skill-description">{{ item.description }}</p>
@@ -1477,27 +1739,6 @@
             Ciaobot runs chats through Claude Code or Codex. Ciaobot-managed skills are synchronized into both CLIs where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed custom and GitHub/package skills.
           </p>
 
-          <!-- Auto-update GitHub skills -->
-          <div class="setting-row setting-row--inline setting-row--toggle">
-            <div class="routine-info">
-              <span class="routine-name">Auto-update GitHub skills</span>
-              <p class="hint hint--compact">
-                If enabled, Ciaobot checks GitHub for updates to locked package skills on boot.
-              </p>
-            </div>
-            <label class="settings-checkbox-hit">
-              <input
-                type="checkbox"
-                class="settings-checkbox"
-                v-model="autoUpdateGithubSkills"
-                :disabled="autoUpdateSaving"
-                aria-label="Auto-update GitHub skills"
-                @change="saveAutoUpdateGithubSkills"
-              />
-            </label>
-          </div>
-          <div v-if="autoUpdateResult" class="action-result">{{ autoUpdateResult }}</div>
-
           <!-- Add Github Skill Form -->
           <div
             v-if="showAddGithubSkill"
@@ -1547,6 +1788,27 @@
                 </div>
               </div>
             </div>
+
+            <!-- Auto-update GitHub skills -->
+            <div class="setting-row setting-row--inline setting-row--toggle">
+              <div class="routine-info">
+                <span class="routine-name">Auto-update GitHub skills</span>
+                <p class="hint hint--compact">
+                  If enabled, Ciaobot checks GitHub for updates to locked package skills on boot.
+                </p>
+              </div>
+              <label class="settings-checkbox-hit">
+                <input
+                  type="checkbox"
+                  class="settings-checkbox"
+                  v-model="autoUpdateGithubSkills"
+                  :disabled="autoUpdateSaving"
+                  aria-label="Auto-update GitHub skills"
+                  @change="saveAutoUpdateGithubSkills"
+                />
+              </label>
+            </div>
+            <div v-if="autoUpdateResult" class="action-result">{{ autoUpdateResult }}</div>
 
             <!-- GitHub Skills Section -->
             <div class="skill-section skill-section--spaced">
@@ -1638,8 +1900,8 @@
                     <span class="skill-chevron">{{ isSubagentExpanded(agent) ? '&#9662;' : '&#9656;' }}</span>
                     <span class="skill-name">{{ agent.name }}</span>
                     <span class="skill-badges">
-                      <span class="badge badge--muted command-source">{{ agent.scope }}</span>
-                      <span v-if="agent.editable" class="badge badge--success command-source">custom</span>
+                      <span :class="assetOriginClass(subagentOrigin(agent))">{{ assetOriginLabel(subagentOrigin(agent)) }}</span>
+                      <span v-if="agent.scope && agent.scope !== 'custom' && agent.scope !== 'built-in'" class="badge badge--muted command-source">{{ agent.scope }}</span>
                     </span>
                   </div>
                   <p v-if="agent.description" class="skill-description">{{ agent.description }}</p>
@@ -1691,7 +1953,6 @@
               </p>
             </div>
             <div class="settings-card-header-actions">
-              <span class="badge badge--muted">{{ commandAssets.length || commands.length }} loaded</span>
               <button class="btn-small" @click="toggleAddCommand">
                 {{ showAddCommand ? 'Cancel' : '+ New command' }}
               </button>
@@ -1742,8 +2003,8 @@
                     <span class="command-name">/{{ command.name }}</span>
                     <span v-if="command.argument_hint" class="command-args">{{ command.argument_hint }}</span>
                     <span class="skill-badges">
-                      <span class="badge badge--muted command-source">{{ command.scope }}</span>
-                      <span v-if="command.editable" class="badge badge--success command-source">custom</span>
+                      <span :class="assetOriginClass(commandOrigin(command))">{{ assetOriginLabel(commandOrigin(command)) }}</span>
+                      <span v-if="command.scope && command.scope !== 'custom' && command.scope !== 'built-in'" class="badge badge--muted command-source">{{ command.scope }}</span>
                     </span>
                   </div>
                   <p v-if="command.description" class="skill-description">{{ command.description }}</p>
@@ -1798,6 +2059,261 @@
             </div>
           </template>
         </div>
+
+        <!-- MCP SERVERS CARD -->
+        <div class="card" id="mcp-servers">
+          <div class="settings-card-header settings-card-header--split">
+            <div>
+              <p class="section-title">mcp servers</p>
+              <p class="hint">
+                Model Context Protocol (MCP) servers and tools available to Ciaobot agents.
+              </p>
+            </div>
+            <div class="settings-card-header-actions">
+              <button class="btn-small" @click="createMcpViaChat">Add via chat</button>
+              <button class="btn-small" @click="toggleAddMcpServer">
+                {{ showAddMcpServer ? 'Cancel' : '+ New MCP server' }}
+              </button>
+            </div>
+          </div>
+
+          <!-- Add MCP Server Form -->
+          <div v-if="showAddMcpServer" class="settings-form-panel">
+            <div class="settings-field-grid">
+              <label class="settings-field">
+                <span class="ws-label">Server Name</span>
+                <input class="routine-input" v-model="newMcpName" :disabled="addingMcpServer" placeholder="e.g. postgres-db" />
+              </label>
+              <label class="settings-field">
+                <span class="ws-label">Transport Type</span>
+                <select class="routine-select" v-model="newMcpTransport" :disabled="addingMcpServer">
+                  <option value="http">HTTP / SSE</option>
+                  <option value="stdio">stdio (Command)</option>
+                </select>
+              </label>
+              <label v-if="newMcpTransport === 'http'" class="settings-field settings-field--wide">
+                <span class="ws-label">Server URL</span>
+                <input class="routine-input" v-model="newMcpUrl" :disabled="addingMcpServer" placeholder="https://mcp.example.com/http" />
+              </label>
+              <label v-else class="settings-field settings-field--wide">
+                <span class="ws-label">Command Line</span>
+                <input class="routine-input" v-model="newMcpCommand" :disabled="addingMcpServer" placeholder="npx -y @modelcontextprotocol/server-postgres postgresql://..." />
+              </label>
+            </div>
+            <div class="action-row settings-actions">
+              <button class="btn-primary" @click="addCustomMcpServer" :disabled="addingMcpServer || !newMcpName.trim() || (newMcpTransport === 'http' ? !newMcpUrl.trim() : !newMcpCommand.trim())">
+                {{ addingMcpServer ? 'Adding...' : 'Add MCP server' }}
+              </button>
+            </div>
+            <div v-if="addMcpServerResult" class="action-result" :class="{ '--error': addMcpServerError }">{{ addMcpServerResult }}</div>
+          </div>
+
+          <!-- List of MCP Servers (exact skill-list / skill-row UI) -->
+          <div class="skill-list">
+            <!-- 1. Built-in Ciaobot FastMCP Server -->
+            <div
+              class="skill-row"
+              :class="{ expanded: isMcpExpanded('ciaobot-fastmcp') }"
+              @click="toggleMcp('ciaobot-fastmcp')"
+            >
+              <div class="skill-main">
+                <div class="skill-title-row command-title-row">
+                  <span class="skill-chevron">{{ isMcpExpanded('ciaobot-fastmcp') ? '&#9662;' : '&#9656;' }}</span>
+                  <span class="skill-name">ciaobot</span>
+                  <span class="skill-badges">
+                    <span :class="assetOriginClass('builtin')">{{ assetOriginLabel('builtin') }}</span>
+                    <span class="badge" :class="fastMcpEnabled ? 'badge--success' : 'badge--muted'">
+                      {{ fastMcpEnabled ? 'enabled' : 'disabled' }}
+                    </span>
+                  </span>
+                </div>
+                <p class="skill-description">Vault, chats, projects, and schedules.</p>
+                <div v-if="isMcpExpanded('ciaobot-fastmcp')" class="skill-detail" @click.stop>
+                  <p class="skill-meta"><span class="skill-meta-label">Endpoint</span><code>http://127.0.0.1:8443/mcp/</code></p>
+                  <div class="setting-row setting-row--inline setting-row--toggle" style="margin-top: 8px;">
+                    <span class="routine-name">FastMCP Control Plane Active</span>
+                    <label class="settings-checkbox-hit">
+                      <input type="checkbox" class="settings-checkbox" v-model="fastMcpEnabled" @change="saveFastMcpToggle" />
+                    </label>
+                  </div>
+                  <p class="skill-meta" style="margin-top: 8px;"><span class="skill-meta-label">Embedded Tools ({{ inspectorEmbeddedTools.length }})</span></p>
+                  <div class="mcp-tag-grid mcp-tag-grid--wide">
+                    <span v-for="tool in inspectorEmbeddedTools" :key="tool" class="mcp-tag mcp-tag--embedded">{{ tool }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 2. Custom & Project .mcp.json Servers -->
+            <template v-if="mcpStatus?.project_servers && mcpStatus.project_servers.length">
+              <div
+                v-for="srv in mcpStatus.project_servers"
+                :key="srv.name"
+                class="skill-row"
+                :class="{ expanded: isMcpExpanded(srv.name) }"
+                @click="toggleMcp(srv.name)"
+              >
+                <div class="skill-main">
+                  <div class="skill-title-row command-title-row">
+                    <span class="skill-chevron">{{ isMcpExpanded(srv.name) ? '&#9662;' : '&#9656;' }}</span>
+                    <span class="skill-name">{{ srv.name }}</span>
+                    <span class="skill-badges">
+                      <span :class="assetOriginClass(mcpServerOrigin(srv))">{{ assetOriginLabel(mcpServerOrigin(srv)) }}</span>
+                      <span
+                        class="badge"
+                        :class="srv.ready === false ? 'badge--warn' : 'badge--success'"
+                      >
+                        {{ srv.ready === false ? 'needs .env' : 'ready' }}
+                      </span>
+                    </span>
+                  </div>
+                  <p v-if="srv.url" class="skill-description">URL: {{ srv.url }}</p>
+                  <p v-else-if="srv.command" class="skill-description">
+                    Command: {{ srv.command }}<template v-if="srv.args?.length"> {{ srv.args.join(' ') }}</template>
+                  </p>
+                  <div v-if="isMcpExpanded(srv.name)" class="skill-detail" @click.stop>
+                    <div class="settings-field-grid mcp-edit-grid">
+                      <label v-if="(mcpEditDraft(srv).transport || srv.transport) === 'http'" class="settings-field settings-field--wide">
+                        <span class="ws-label">URL</span>
+                        <input
+                          class="routine-input"
+                          :value="mcpEditDraft(srv).url"
+                          :disabled="mcpServerSaving === srv.name"
+                          aria-label="MCP server URL"
+                          @input="setMcpEditField(srv.name, 'url', ($event.target as HTMLInputElement).value)"
+                        />
+                      </label>
+                      <template v-else>
+                        <label class="settings-field">
+                          <span class="ws-label">Command</span>
+                          <input
+                            class="routine-input"
+                            :value="mcpEditDraft(srv).command"
+                            :disabled="mcpServerSaving === srv.name"
+                            aria-label="MCP server command"
+                            @input="setMcpEditField(srv.name, 'command', ($event.target as HTMLInputElement).value)"
+                          />
+                        </label>
+                        <label class="settings-field settings-field--wide">
+                          <span class="ws-label">Args</span>
+                          <input
+                            class="routine-input"
+                            :value="mcpEditDraft(srv).argsText"
+                            :disabled="mcpServerSaving === srv.name"
+                            placeholder="e.g. -y @notionhq/notion-mcp-server"
+                            aria-label="MCP server args"
+                            @input="setMcpEditField(srv.name, 'argsText', ($event.target as HTMLInputElement).value)"
+                          />
+                        </label>
+                      </template>
+                      <p v-if="srv.env_path || mcpStatus?.env_path" class="settings-field settings-field--wide hint hint--compact">
+                        Secrets are saved to <code>{{ srv.env_path || mcpStatus?.env_path }}</code>. Connection config stays in <code>.mcp.json</code>.
+                      </p>
+                    </div>
+
+                    <div class="mcp-env-block">
+                      <p class="skill-meta">
+                        <span class="skill-meta-label">Secrets for this server</span>
+                      </p>
+                      <p class="hint hint--compact">
+                        Paste the token into the field below. It is saved to the workspace <code>.env</code> (not into <code>.mcp.json</code>).
+                      </p>
+                      <div
+                        v-for="envKey in mcpEnvKeysFor(srv)"
+                        :key="`${srv.name}:${envKey.key}`"
+                        class="credential-row mcp-env-row"
+                      >
+                        <div class="setting-row-main setting-row-main--inline">
+                          <div class="routine-info">
+                            <span class="routine-name">{{ envKey.key }}</span>
+                            <p v-if="envKey.hint" class="hint hint--compact">{{ envKey.hint }}</p>
+                          </div>
+                          <span class="badge" :class="envKey.configured ? 'badge--success' : 'badge--error'">
+                            {{ envKey.configured ? 'Configured' : 'Missing' }}
+                          </span>
+                        </div>
+                        <input
+                          type="password"
+                          class="routine-input"
+                          :value="mcpEnvInputs[envKey.key] || ''"
+                          :placeholder="envKey.configured ? '•••••••••••• (leave blank to keep)' : `Paste ${envKey.key}`"
+                          :disabled="mcpEnvSaving"
+                          :aria-label="envKey.key"
+                          @input="mcpEnvInputs[envKey.key] = ($event.target as HTMLInputElement).value"
+                        />
+                      </div>
+                      <p v-if="!mcpEnvKeysFor(srv).length" class="hint hint--compact">
+                        No secrets referenced by this server's <code>.mcp.json</code> config.
+                      </p>
+                      <div class="action-row settings-actions">
+                        <button
+                          class="btn-small"
+                          :disabled="mcpEnvSaving || !hasMcpEnvEdits(srv)"
+                          @click="saveMcpEnvKeys(srv)"
+                        >
+                          {{ mcpEnvSaving ? 'Saving...' : 'Save secrets' }}
+                        </button>
+                        <button
+                          class="btn-small"
+                          :disabled="mcpServerSaving === srv.name || !mcpEditDirty(srv)"
+                          @click="saveMcpServer(srv)"
+                        >
+                          {{ mcpServerSaving === srv.name ? 'Saving...' : 'Save connection' }}
+                        </button>
+                      </div>
+                      <div
+                        v-if="(mcpEnvResult && mcpEnvResultServer === srv.name) || (mcpServerResult && mcpServerResultName === srv.name)"
+                        class="action-result"
+                        :class="{ '--error': (mcpEnvResultServer === srv.name && mcpEnvError) || (mcpServerResultName === srv.name && mcpServerError) }"
+                      >{{ (mcpEnvResultServer === srv.name && mcpEnvResult) || (mcpServerResultName === srv.name && mcpServerResult) }}</div>
+                    </div>
+
+                    <div class="mcp-tools-block">
+                      <div class="setting-row setting-row--inline" style="margin-top: 8px;">
+                        <p class="skill-meta" style="margin: 0;">
+                          <span class="skill-meta-label">
+                            Tools ({{ (mcpServerTools[srv.name] || srv.tools || []).length }})
+                            <template v-if="srv.tools_source && srv.tools_source !== 'none'">
+                              · {{ srv.tools_source }}
+                            </template>
+                          </span>
+                        </p>
+                        <button
+                          class="btn-small"
+                          :disabled="mcpToolsLoading[srv.name]"
+                          @click="refreshMcpServerTools(srv)"
+                        >
+                          {{ mcpToolsLoading[srv.name] ? 'Loading...' : (srv.transport === 'http' ? 'Probe tools' : 'Refresh') }}
+                        </button>
+                      </div>
+                      <p
+                        v-if="mcpToolsError[srv.name] || (!(mcpServerTools[srv.name] || srv.tools || []).length && srv.tools_note)"
+                        class="hint hint--compact"
+                        :class="{ 'hint--warn': !!mcpToolsError[srv.name] }"
+                      >
+                        {{ mcpToolsError[srv.name] || srv.tools_note }}
+                      </p>
+                      <div
+                        v-if="(mcpServerTools[srv.name] || srv.tools || []).length"
+                        class="mcp-tag-grid mcp-tag-grid--wide"
+                      >
+                        <span
+                          v-for="tool in (mcpServerTools[srv.name] || srv.tools || [])"
+                          :key="tool"
+                          class="mcp-tag mcp-tag--embedded"
+                        >{{ tool }}</span>
+                      </div>
+                    </div>
+
+                    <div class="asset-actions">
+                      <button class="btn-small btn-danger" @click.stop="deleteCustomMcpServer(srv.name)">Delete</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
       </template>
 
 
@@ -1809,9 +2325,11 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import { formatTime, formatDuration } from '../lib/time'
+import { isDesktopApp } from '../lib/desktop'
+import NodeAddresses from './NodeAddresses.vue'
 import type {
   AgentAssetsResponse,
   AutomationProcess,
@@ -1826,6 +2344,8 @@ import type {
   McpStatus,
   McpUsage,
   McpToolUsage,
+  McpProjectServer,
+  McpEnvKey,
   PromptAsset,
   ProviderConfigSettings,
   RoutineSettings,
@@ -1846,19 +2366,355 @@ import ModelSelector from './ModelSelector.vue'
 import OnboardingCard from './OnboardingCard.vue'
 import { providerModelBadges, sectionsFromModelOptions, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 
+// The tray owns package updates and native notifications in the desktop app.
+const inDesktopApp = isDesktopApp()
+import {
+  DEFAULT_WORKSPACE_COLOR,
+  WORKSPACE_COLOR_PRESETS,
+  normalizeWorkspaceColor,
+  type WorkspaceColorId,
+} from '../lib/workspaceColors'
+
 const emit = defineEmits<{ 'open-sidebar': [] }>()
 
 const route = useRoute()
+const router = useRouter()
 const fileViewer = useFileViewerStore()
 const projectStore = useProjectStore()
 const taskStore = useTaskStore()
-const currentTab = computed(() => (route.params.tab as string) || 'home')
+const currentTab = computed(() => {
+  const tab = (route.params.tab as string) || 'home'
+  if (tab === 'mcp') return 'skills'
+  return tab
+})
 
 const expandedSkills = ref<Record<string, boolean>>({})
 const expandedCommands = ref<Record<string, boolean>>({})
 const expandedSubagents = ref<Record<string, boolean>>({})
 const expandedContext = ref<Record<string, boolean>>({})
 const workspaceMemoryExpanded = ref(false)
+
+// MCP Server management state
+const showAddMcpServer = ref(false)
+const addingMcpServer = ref(false)
+const addMcpServerResult = ref('')
+const addMcpServerError = ref(false)
+const newMcpName = ref('')
+const newMcpTransport = ref<'http' | 'stdio'>('http')
+const newMcpUrl = ref('')
+const newMcpCommand = ref('')
+const fastMcpEnabled = ref(true)
+const expandedMcp = ref<Record<string, boolean>>({})
+const mcpEnvInputs = ref<Record<string, string>>({})
+const mcpEnvSaving = ref(false)
+const mcpEnvResult = ref('')
+const mcpEnvError = ref(false)
+const mcpEnvResultServer = ref('')
+const mcpEditDrafts = ref<Record<string, { transport: string; url: string; command: string; argsText: string }>>({})
+const mcpServerSaving = ref('')
+const mcpServerResult = ref('')
+const mcpServerError = ref(false)
+const mcpServerResultName = ref('')
+const mcpServerTools = ref<Record<string, string[]>>({})
+const mcpToolsLoading = ref<Record<string, boolean>>({})
+const mcpToolsError = ref<Record<string, string>>({})
+
+function toggleAddMcpServer() {
+  showAddMcpServer.value = !showAddMcpServer.value
+  addMcpServerResult.value = ''
+}
+
+function isMcpExpanded(name: string) {
+  return !!expandedMcp.value[name]
+}
+
+function ensureMcpEditDraft(srv: McpProjectServer) {
+  if (!mcpEditDrafts.value[srv.name]) {
+    mcpEditDrafts.value[srv.name] = {
+      transport: srv.transport || (srv.url ? 'http' : 'stdio'),
+      url: srv.url || '',
+      command: srv.command || '',
+      argsText: (srv.args || []).join(' '),
+    }
+  }
+}
+
+function mcpEditDraft(srv: McpProjectServer) {
+  ensureMcpEditDraft(srv)
+  return mcpEditDrafts.value[srv.name]
+}
+
+function setMcpEditField(name: string, field: 'url' | 'command' | 'argsText', value: string) {
+  const draft = mcpEditDrafts.value[name]
+  if (!draft) return
+  draft[field] = value
+}
+
+function mcpEditDirty(srv: McpProjectServer) {
+  const draft = mcpEditDraft(srv)
+  const args = (srv.args || []).join(' ')
+  if ((draft.transport || srv.transport) === 'http') {
+    return draft.url.trim() !== (srv.url || '').trim()
+  }
+  return draft.command.trim() !== (srv.command || '').trim() || draft.argsText.trim() !== args.trim()
+}
+
+function toggleMcp(name: string) {
+  const next = !expandedMcp.value[name]
+  expandedMcp.value[name] = next
+  if (next) {
+    const srv = mcpStatus.value?.project_servers?.find((s) => s.name === name)
+    if (srv) {
+      ensureMcpEditDraft(srv)
+      if (!(mcpServerTools.value[name]?.length) && !(srv.tools?.length)) {
+        void refreshMcpServerTools(srv)
+      }
+    }
+  }
+}
+
+function hasMcpEnvEdits(srv: McpProjectServer) {
+  return mcpEnvKeysFor(srv).some((entry) => (mcpEnvInputs.value[entry.key] || '').length > 0)
+}
+
+/** Well-known secrets when the status API has not returned env_keys yet. */
+const MCP_DEFAULT_ENV_KEYS: Record<string, { key: string; hint: string }> = {
+  n8n_mcp: {
+    key: 'N8N_MCP_TOKEN',
+    hint: 'Bearer token for your n8n MCP HTTP endpoint.',
+  },
+  notion: {
+    key: 'NOTION_TOKEN',
+    hint: 'Notion internal integration secret.',
+  },
+}
+
+type McpEnvKeyView = McpEnvKey & { hint?: string }
+
+function mcpEnvKeysFor(srv: McpProjectServer): McpEnvKeyView[] {
+  if (srv.env_keys?.length) {
+    return srv.env_keys.map((entry) => {
+      const fallback = MCP_DEFAULT_ENV_KEYS[srv.name]
+      return {
+        ...entry,
+        hint: fallback?.key === entry.key ? fallback.hint : undefined,
+      }
+    })
+  }
+  const fallback = MCP_DEFAULT_ENV_KEYS[srv.name]
+  if (!fallback) return []
+  return [{
+    key: fallback.key,
+    configured: false,
+    source: 'suggested',
+    hint: fallback.hint,
+  }]
+}
+
+function splitMcpArgs(text: string): string[] {
+  return text.trim().split(/\s+/).filter(Boolean)
+}
+
+async function saveMcpEnvKeys(srv: McpProjectServer) {
+  const keys: Record<string, string> = {}
+  for (const entry of mcpEnvKeysFor(srv)) {
+    const value = mcpEnvInputs.value[entry.key]
+    if (value != null && value.length > 0) {
+      keys[entry.key] = value
+    }
+  }
+  if (!Object.keys(keys).length) return
+  mcpEnvSaving.value = true
+  mcpEnvResult.value = ''
+  mcpEnvError.value = false
+  mcpEnvResultServer.value = srv.name
+  try {
+    const res = await api.post<McpStatus>('/api/mcp/env-keys', { keys, server: srv.name })
+    mcpStatus.value = res
+    for (const key of Object.keys(keys)) {
+      mcpEnvInputs.value[key] = ''
+    }
+    const updated = res.project_servers?.find((s) => s.name === srv.name)
+    if (updated) {
+      mcpEditDrafts.value[srv.name] = {
+        transport: updated.transport || (updated.url ? 'http' : 'stdio'),
+        url: updated.url || '',
+        command: updated.command || '',
+        argsText: (updated.args || []).join(' '),
+      }
+    }
+    mcpEnvResult.value = 'Saved to workspace .env. New chats will pick up the keys.'
+    notifySaved(`Saved MCP secrets for ${srv.name}.`)
+    setTimeout(() => {
+      if (mcpEnvResultServer.value === srv.name) mcpEnvResult.value = ''
+    }, 3000)
+  } catch (e: any) {
+    mcpEnvError.value = true
+    mcpEnvResult.value = e?.message || 'Failed to save MCP secrets.'
+  } finally {
+    mcpEnvSaving.value = false
+  }
+}
+
+async function saveMcpServer(srv: McpProjectServer) {
+  const draft = mcpEditDraft(srv)
+  mcpServerSaving.value = srv.name
+  mcpServerResult.value = ''
+  mcpServerError.value = false
+  mcpServerResultName.value = srv.name
+  try {
+    const body: Record<string, unknown> = {}
+    if ((draft.transport || srv.transport) === 'http') {
+      body.url = draft.url.trim()
+      body.command = ''
+      body.args = []
+    } else {
+      body.command = draft.command.trim()
+      body.args = splitMcpArgs(draft.argsText)
+      body.url = ''
+    }
+    const res = await api.patch<McpStatus>(`/api/mcp/servers/${encodeURIComponent(srv.name)}`, body)
+    mcpStatus.value = res
+    const updated = res.project_servers?.find((s) => s.name === srv.name)
+    if (updated) {
+      mcpEditDrafts.value[srv.name] = {
+        transport: updated.transport || (updated.url ? 'http' : 'stdio'),
+        url: updated.url || '',
+        command: updated.command || '',
+        argsText: (updated.args || []).join(' '),
+      }
+    }
+    mcpServerResult.value = 'Connection saved to .mcp.json.'
+    notifySaved(`Updated MCP server ${srv.name}.`)
+    setTimeout(() => {
+      if (mcpServerResultName.value === srv.name) mcpServerResult.value = ''
+    }, 3000)
+  } catch (e: any) {
+    mcpServerError.value = true
+    mcpServerResult.value = e?.message || 'Failed to save MCP server.'
+  } finally {
+    mcpServerSaving.value = ''
+  }
+}
+
+async function refreshMcpServerTools(srv: McpProjectServer) {
+  mcpToolsLoading.value[srv.name] = true
+  mcpToolsError.value[srv.name] = ''
+  try {
+    const res = await api.get<{
+      ok: boolean
+      tools?: string[]
+      error?: string
+      tools_note?: string
+      tools_source?: string
+    }>(`/api/mcp/servers/${encodeURIComponent(srv.name)}/tools`)
+    const tools = res.tools || []
+    mcpServerTools.value[srv.name] = tools
+    if (mcpStatus.value?.project_servers) {
+      const target = mcpStatus.value.project_servers.find((s) => s.name === srv.name)
+      if (target) {
+        target.tools = tools
+        target.tools_source = res.tools_source || (tools.length ? 'probed' : 'none')
+        if (res.tools_note) target.tools_note = res.tools_note
+      }
+    }
+    if (!res.ok && res.error) {
+      mcpToolsError.value[srv.name] = res.error
+    }
+  } catch (e: any) {
+    const message = e?.message || 'Could not load tools.'
+    mcpToolsError.value[srv.name] = /not available on the running server|Unexpected token|<!DOCTYPE|not valid JSON/i.test(message)
+      ? 'MCP tools endpoint not available on the running server yet. Use Settings → Deploy, then restart Ciaobot.'
+      : message
+  } finally {
+    mcpToolsLoading.value[srv.name] = false
+  }
+}
+
+function saveFastMcpToggle() {
+  notifySaved(fastMcpEnabled.value ? 'Ciaobot FastMCP enabled.' : 'Ciaobot FastMCP disabled.')
+}
+
+async function createMcpViaChat() {
+  const activeProj = projectStore.activeProject
+  let projectId = activeProj?.project_id
+  if (!projectId) {
+    projectId = projectStore.workspaceProjects[0]?.project_id
+  }
+  if (!projectId) {
+    projectId = projectStore.projects[0]?.project_id
+  }
+  if (!projectId) {
+    alert('Please create a project first before starting a chat.')
+    return
+  }
+
+  try {
+    const chat = await projectStore.createChat(projectId, 'New MCP Server')
+    if (chat) {
+      router.push({
+        path: `/chat/${chat.chat_id}`,
+        query: { initialPrompt: 'Help me set up and configure a new MCP server for this project.' }
+      })
+    }
+  } catch (e: any) {
+    alert(`Failed to create chat: ${e?.message || e}`)
+  }
+}
+
+async function addCustomMcpServer() {
+  if (!newMcpName.value.trim()) return
+  addingMcpServer.value = true
+  addMcpServerResult.value = ''
+  addMcpServerError.value = false
+  const name = newMcpName.value.trim()
+  try {
+    const body: Record<string, unknown> = { name }
+    if (newMcpTransport.value === 'http') {
+      body.url = newMcpUrl.value.trim()
+    } else {
+      const parts = splitMcpArgs(newMcpCommand.value)
+      body.command = parts[0] || ''
+      body.args = parts.slice(1)
+    }
+    const res = await api.post<McpStatus>('/api/mcp/servers', body)
+    mcpStatus.value = res
+    newMcpName.value = ''
+    newMcpUrl.value = ''
+    newMcpCommand.value = ''
+    showAddMcpServer.value = false
+    expandedMcp.value[name] = true
+    const created = res.project_servers?.find((s) => s.name === name)
+    if (created) {
+      mcpEditDrafts.value[name] = {
+        transport: created.transport || (created.url ? 'http' : 'stdio'),
+        url: created.url || '',
+        command: created.command || '',
+        argsText: (created.args || []).join(' '),
+      }
+    }
+    notifySaved(`Added MCP server ${name}.`)
+  } catch (e: any) {
+    addMcpServerError.value = true
+    addMcpServerResult.value = e?.message || `Failed to add MCP server`
+  } finally {
+    addingMcpServer.value = false
+  }
+}
+
+async function deleteCustomMcpServer(name: string) {
+  if (!confirm(`Are you sure you want to delete MCP server "${name}"?`)) return
+  try {
+    const res = await api.del<McpStatus>(`/api/mcp/servers/${encodeURIComponent(name)}`)
+    mcpStatus.value = res
+    delete mcpEditDrafts.value[name]
+    delete mcpServerTools.value[name]
+    delete mcpToolsError.value[name]
+    notifySaved(`Removed MCP server ${name}.`)
+  } catch (e: any) {
+    alert(e?.message || `Failed to delete MCP server ${name}`)
+  }
+}
 
 // ── Appearance settings ────────────────────────────────────────────────────
 const activeTheme = ref('system')
@@ -2890,6 +3746,46 @@ const githubSkills = computed(() => {
   return skillsInventory.value?.skills.filter(s => s.label === 'github') || []
 })
 
+/** Shared origin labels: Ciaobot-shipped vs user-authored. */
+type AssetOrigin = 'builtin' | 'custom' | 'installed' | 'global'
+
+function assetOriginLabel(origin: AssetOrigin): string {
+  if (origin === 'custom') return 'Custom'
+  if (origin === 'installed') return 'Installed'
+  if (origin === 'global') return 'Global'
+  return 'Built-in'
+}
+
+function assetOriginClass(origin: AssetOrigin): string {
+  if (origin === 'custom') return 'badge badge--success command-source'
+  if (origin === 'builtin') return 'badge badge--builtin command-source'
+  return 'badge badge--muted command-source'
+}
+
+function commandOrigin(command: { editable?: boolean; scope?: string }): AssetOrigin {
+  if (command.editable || command.scope === 'custom') return 'custom'
+  if (command.scope === 'built-in') return 'builtin'
+  if (command.scope === 'global') return 'global'
+  return 'installed'
+}
+
+function subagentOrigin(agent: { editable?: boolean; scope?: string }): AssetOrigin {
+  return commandOrigin(agent)
+}
+
+function mcpServerOrigin(_srv: { name?: string; source?: string }): AssetOrigin {
+  return 'custom'
+}
+
+function contextOrigin(item: { editable?: boolean; source?: string; scope?: string }): AssetOrigin {
+  if (item.editable) return 'custom'
+  const source = `${item.source || ''} ${item.scope || ''}`.toLowerCase()
+  if (source.includes('generated') || source.includes('ciaobot') || source.includes('session')) {
+    return 'builtin'
+  }
+  return 'builtin'
+}
+
 function contextGuideAsset(
   id: string,
   title: string,
@@ -3479,6 +4375,7 @@ type WorkspaceForm = {
   model_bucket: string
   disallowed_tools: string
   claude_ai_mcps: 'on' | 'off'
+  color: WorkspaceColorId
 }
 
 function defaultWorkspaceProvider(): WorkspaceProvider {
@@ -3495,6 +4392,7 @@ function blankWorkspaceForm(): WorkspaceForm {
     model_bucket: '',
     disallowed_tools: '',
     claude_ai_mcps: 'on',
+    color: DEFAULT_WORKSPACE_COLOR,
   }
 }
 
@@ -3509,6 +4407,7 @@ function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
     model_bucket: ws.model_bucket || '',
     disallowed_tools: Array.isArray(ws.disallowed_tools) ? ws.disallowed_tools.join(', ') : '',
     claude_ai_mcps: mcps === false ? 'off' : 'on',
+    color: normalizeWorkspaceColor(ws.color),
   }
 }
 
@@ -3609,6 +4508,87 @@ function disallowedToolsPayload(raw: string): string[] | null {
   return cleaned.split(',').map((s) => s.trim()).filter(Boolean)
 }
 
+const defaultClaudeAiConnectors = [
+  'mcp__claude_ai_Airtable',
+  'mcp__claude_ai_Asana',
+  'mcp__claude_ai_Atlassian',
+  'mcp__claude_ai_Google_Cloud_BigQuery',
+  'mcp__claude_ai_Salesforce',
+  'mcp__claude_ai_Sentry',
+  'mcp__claude_ai_Slack',
+  'mcp__claude_ai_incident_io',
+]
+
+function formatConnectorLabel(name: string): string {
+  let clean = name.replace(/^mcp__claude_ai_/, '').replace(/^mcp__/, '')
+  if (clean === 'Google_Cloud_BigQuery') return 'BigQuery'
+  if (clean === 'incident_io') return 'incident.io'
+  return clean
+}
+
+const inspectorWorkspace = ref(projectStore.activeWorkspace || 'personal')
+const inspectorProvider = ref<WorkspaceProvider>('claude')
+
+const inspectorConnectorsActive = computed(() => {
+  if (inspectorProvider.value === 'codex') return false
+  const targetForm = workspaceForms.value.find((f) => f.name === inspectorWorkspace.value)
+  if (!targetForm) return true
+  return targetForm.claude_ai_mcps !== 'off'
+})
+
+const inspectorEmbeddedTools = computed(() => {
+  if (mcpStatus.value?.tools && mcpStatus.value.tools.length) {
+    return mcpStatus.value.tools
+  }
+  return [
+    'context_get', 'vault_search', 'projects_list', 'project_get', 'project_create',
+    'project_update', 'chats_list', 'chat_get', 'chat_create', 'chat_send',
+    'chat_continue', 'chat_retry', 'chat_handover', 'chat_archive', 'chat_delete',
+    'schedules_list', 'schedule_create', 'schedule_update', 'schedule_action',
+    'loops_list', 'loop_create', 'loop_update', 'loop_action', 'file_surface',
+    'handoffs_list', 'handoff_start', 'handoff_send', 'handoff_close', 'adversarial_review',
+  ]
+})
+
+const codexConnectionMcps = computed(() => {
+  const codexConn = providerKeys.value?.connections?.codex
+  // Platform MCP list only — exclude Ciaobot project servers from .mcp.json
+  // (n8n_mcp, notion, ciaobot), which have their own MCP status section.
+  const excluded = new Set(['n8n_mcp', 'notion', 'ciaobot', 'ciaobot-fastmcp'])
+  return (codexConn?.mcps || []).filter((name: string) => !excluded.has(name))
+})
+
+const claudeConnectionMcps = computed(() => {
+  const result: string[] = []
+  const excluded = new Set(['n8n_mcp', 'notion', 'ciaobot', 'ciaobot-fastmcp'])
+  // Platform connectors only. Project .mcp.json servers (n8n_mcp, notion, …)
+  // are managed under the MCP status section, not the Providers tab.
+  const discoveredMcps = providerKeys.value?.connections?.claude?.mcps || []
+  if (discoveredMcps.length) {
+    for (const mcpName of discoveredMcps) {
+      if (excluded.has(mcpName)) continue
+      const label = formatConnectorLabel(mcpName)
+      if (!result.includes(label)) {
+        result.push(label)
+      }
+    }
+  } else {
+    const currentWs = workspaceForms.value.find((w) => w.name === projectStore.activeWorkspace) || workspaceForms.value[0]
+    if (!currentWs || currentWs.claude_ai_mcps !== 'off') {
+      const connectors = projectStore.workspaceClaudeAiConnectors.length
+        ? projectStore.workspaceClaudeAiConnectors
+        : defaultClaudeAiConnectors
+      for (const c of connectors) {
+        const label = formatConnectorLabel(c)
+        if (!result.includes(label)) {
+          result.push(label)
+        }
+      }
+    }
+  }
+  return result
+})
+
 async function fetchWorkspacesList() {
   workspacesError.value = ''
   try {
@@ -3639,13 +4619,17 @@ async function saveWorkspace(name: string) {
   workspacesResult.value = ''
   try {
     await projectStore.updateWorkspace(name, {
-      vault_root: name,
+      // Send what the form holds. Overwriting it with the workspace name
+      // silently discarded any vault path the user had set, and reset an
+      // adopted workspace's `memory-vault/<name>` root to a bare name.
+      vault_root: form.vault_root.trim() || name,
       default_provider: form.default_provider,
       default_model: form.default_model,
       gws_profile: form.gws_profile,
       model_bucket: form.model_bucket,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
       claude_ai_mcps: claudeAiMcpsPayload(form.claude_ai_mcps),
+      color: form.color,
     })
     notifySaved(`Workspace "${name}" saved.`, 'Workspaces')
     await fetchWorkspacesList()
@@ -3667,13 +4651,15 @@ async function createNewWorkspace() {
   try {
     await projectStore.createWorkspace({
       name: form.name.trim(),
-      vault_root: form.name.trim(),
+      // The "Vault name" field is optional and defaults to the workspace name.
+      vault_root: form.vault_root.trim() || form.name.trim(),
       default_provider: form.default_provider,
       default_model: form.default_model,
       gws_profile: form.gws_profile,
       model_bucket: form.model_bucket,
       disallowed_tools: disallowedToolsPayload(form.disallowed_tools),
       claude_ai_mcps: claudeAiMcpsPayload(form.claude_ai_mcps),
+      color: form.color,
     })
     notifySaved(`Workspace "${form.name.trim()}" created.`, 'Workspaces')
     showNewWorkspace.value = false
@@ -3709,6 +4695,8 @@ onMounted(async () => {
   fetchLocalStatus().then(() => {
     if (localStatus.value?.dev_mode) refreshDebugIssues()
   })
+  fetchNodeStatus()
+  fetchAuthSettings()
   fetchRoutines()
   fetchAutomation()
   fetchPackageStatus()
@@ -3943,6 +4931,218 @@ async function fetchLocalStatus() {
   } catch {
     /* leave null on failure */
   }
+}
+
+// ── PWA password (Settings → home) ─────────────────────────────────────
+interface AuthSettings {
+  auth_required: boolean
+  password_configured: boolean
+}
+
+const authSettings = ref<AuthSettings | null>(null)
+const authRequiredDraft = ref(false)
+const authCurrentPassword = ref('')
+const authNewPassword = ref('')
+const authSettingsSaving = ref(false)
+const authSettingsResult = ref('')
+const authSettingsError = ref(false)
+
+const canSaveAuthSettings = computed(() => {
+  if (!authSettings.value) return false
+  const turningOn = authRequiredDraft.value && !authSettings.value.auth_required
+  const turningOff = !authRequiredDraft.value && authSettings.value.auth_required
+  const changingPassword = Boolean(authNewPassword.value.trim())
+  if (!(turningOn || turningOff || changingPassword)) return false
+  if (turningOn && !authNewPassword.value.trim()) return false
+  if (authSettings.value.auth_required && !authCurrentPassword.value) return false
+  return true
+})
+
+async function fetchAuthSettings() {
+  try {
+    const res = await api.get<AuthSettings>('/api/auth/settings')
+    authSettings.value = res
+    authRequiredDraft.value = res.auth_required
+  } catch {
+    authSettings.value = null
+  }
+}
+
+async function saveAuthSettings() {
+  if (!authSettings.value || !canSaveAuthSettings.value) return
+  authSettingsSaving.value = true
+  authSettingsResult.value = ''
+  authSettingsError.value = false
+  try {
+    const res = await api.post<AuthSettings & { ok?: boolean }>('/api/auth/settings', {
+      auth_required: authRequiredDraft.value,
+      password: authNewPassword.value,
+      current_password: authCurrentPassword.value,
+    })
+    authSettings.value = {
+      auth_required: res.auth_required,
+      password_configured: res.password_configured,
+    }
+    authRequiredDraft.value = res.auth_required
+    authCurrentPassword.value = ''
+    authNewPassword.value = ''
+    authSettingsResult.value = res.auth_required
+      ? 'Password protection is on.'
+      : 'Password protection is off.'
+  } catch (e: any) {
+    authSettingsError.value = true
+    authSettingsResult.value = e?.payload?.error || e.message || 'Could not save password settings'
+  }
+  authSettingsSaving.value = false
+}
+
+// ── Host / client (multi-device tunnel) ────────────────────────────────
+interface NodePeer {
+  node_id: string
+  url: string
+  last_seen: string
+  is_active: boolean
+}
+
+interface NodeStatus {
+  node_id: string
+  role: 'host' | 'client' | 'active' | 'standby'
+  mode?: 'host' | 'client'
+  active_since: string | null
+  last_handover: string | null
+  host_url?: string | null
+  active_peer_url?: string | null
+  host_reachable?: boolean | null
+  active_peer_reachable?: boolean | null
+  has_host_session?: boolean
+  peers: NodePeer[]
+  git?: any
+}
+
+const nodeStatus = ref<NodeStatus | null>(null)
+const nodePending = ref<string | null>(null)
+const nodeActionResult = ref('')
+const nodeActionError = ref(false)
+const hostUrlInput = ref('')
+const hostPasswordInput = ref('')
+const showConnectForm = ref(false)
+
+const isNodeClient = computed(() => {
+  const role = nodeStatus.value?.role
+  return role === 'client' || role === 'standby'
+})
+
+const nodeRoleLabel = computed(() => (isNodeClient.value ? 'client' : 'host'))
+
+const connectedHostUrl = computed(
+  () => nodeStatus.value?.host_url || nodeStatus.value?.active_peer_url || '',
+)
+
+async function fetchNodeStatus() {
+  try {
+    nodeStatus.value = await api.get<NodeStatus>('/api/node/status')
+    if (isNodeClient.value) showConnectForm.value = false
+  } catch {
+    /* leave null on failure */
+  }
+}
+
+async function connectAsClient() {
+  const hostUrl = hostUrlInput.value.trim()
+  const password = hostPasswordInput.value
+  if (!hostUrl) return
+  if (!password) {
+    nodeActionError.value = true
+    nodeActionResult.value =
+      'Enter the host password. If the host has none yet, enable PWA password protection on that machine first.'
+    return
+  }
+  if (!confirm(`Connect as client to ${hostUrl}? This machine will stop being host and tunnel to that Ciaobot.`)) return
+
+  nodePending.value = 'connect'
+  nodeActionResult.value = ''
+  nodeActionError.value = false
+  try {
+    const r = await api.post<any>('/api/node/connect', {
+      host_url: hostUrl,
+      password,
+    })
+    if (r?.ok) {
+      hostPasswordInput.value = ''
+      showConnectForm.value = false
+      // Full reload so stores/chats pick up the tunneled host and the client banner appears.
+      window.location.assign('/')
+      return
+    } else {
+      nodeActionError.value = true
+      nodeActionResult.value = r?.error || 'Connect failed'
+    }
+  } catch (e: any) {
+    nodeActionError.value = true
+    const detail = e?.payload?.error || e.message || 'Connect failed'
+    nodeActionResult.value = e?.payload?.password_required_on_host
+      ? detail
+      : `Error: ${detail}`
+  }
+  nodePending.value = null
+}
+
+async function reconnectHostSession() {
+  const password = hostPasswordInput.value
+  if (!password) return
+  nodePending.value = 'reconnect'
+  nodeActionResult.value = ''
+  nodeActionError.value = false
+  try {
+    await api.post('/api/auth', { token: password })
+    hostPasswordInput.value = ''
+    window.location.assign('/')
+    return
+  } catch (e: any) {
+    nodeActionError.value = true
+    nodeActionResult.value = `Error: ${e?.payload?.error || e.message || 'Reconnect failed'}`
+  }
+  nodePending.value = null
+}
+
+async function doBecomeHost(force = false) {
+  if (
+    !force &&
+    !confirm(
+      'Disconnect and become host here? The remote will push its changes, then this machine pulls and resumes automations.',
+    )
+  ) {
+    return
+  }
+
+  nodePending.value = 'handover'
+  nodeActionResult.value = ''
+  nodeActionError.value = false
+
+  try {
+    const targetUrl = connectedHostUrl.value
+    const r = await api.post<any>('/api/node/handover', { target_node_url: targetUrl, force })
+    if (r?.ok) {
+      nodeActionResult.value = force
+        ? 'Force disconnect complete. This device is now the host.'
+        : 'Disconnected. This device is now the host.'
+      await fetchNodeStatus()
+      await fetchLocalStatus()
+    } else {
+      nodeActionError.value = true
+      nodeActionResult.value = r?.error || 'Disconnect failed'
+    }
+  } catch (e: any) {
+    nodeActionError.value = true
+    if (e?.payload?.peer_unreachable) {
+      if (confirm('Host is unreachable. Force disconnect anyway (skip remote push)?')) {
+        nodePending.value = null
+        return doBecomeHost(true)
+      }
+    }
+    nodeActionResult.value = `Error: ${e?.payload?.error || e.message || 'Disconnect failed'}`
+  }
+  nodePending.value = null
 }
 
 async function localHandback(confirmWarnings = false) {
@@ -4290,6 +5490,102 @@ async function doPackageUpdate() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.node-path {
+  display: flex;
+  align-items: stretch;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-top: var(--space-1);
+}
+.node-path-endpoint {
+  flex: 1 1 140px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.node-path-endpoint--host {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+  background: color-mix(in srgb, var(--accent) 5%, var(--bg));
+}
+.node-path-label {
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--fg3, var(--fg2));
+}
+.node-path-value {
+  color: var(--fg);
+  font-size: var(--text-sm);
+  font-family: var(--font);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.node-path-link {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 2px;
+  min-width: 72px;
+}
+.node-path-arrow {
+  color: var(--accent);
+  font-size: calc(18px * var(--font-scale));
+  font-weight: 700;
+  line-height: 1;
+}
+@container (max-width: 720px) {
+  .node-path {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .node-path-link {
+    flex-direction: row;
+    justify-content: flex-start;
+    min-width: 0;
+    padding: 2px 0;
+    gap: var(--space-2);
+  }
+  .node-path .node-path-arrow {
+    transform: rotate(90deg);
+  }
+}
+
+.node-peer-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+.node-peer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+.node-peer-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.node-peer-form {
+  margin-top: 0;
+  margin-bottom: 0;
 }
 
 .deploy-steps {
@@ -4810,9 +6106,6 @@ async function doPackageUpdate() {
 .gws-command {
   display: inline-block;
 }
-.gws-boundary-note {
-  margin-top: var(--space-3);
-}
 .status-text--ok {
   color: var(--success);
 }
@@ -5219,6 +6512,43 @@ async function doPackageUpdate() {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-3);
 }
+.settings-field--wide {
+  grid-column: 1 / -1;
+}
+.workspace-color-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+.workspace-color-swatch {
+  width: var(--touch);
+  height: var(--touch);
+  padding: 0;
+  border: 2px solid var(--border);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at center, var(--swatch) 0 58%, transparent 60%),
+    var(--bg);
+  cursor: pointer;
+  transition: border-color 120ms var(--ease), transform 120ms var(--ease);
+}
+.workspace-color-swatch:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+}
+.workspace-color-swatch.active {
+  border-color: var(--swatch);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--swatch) 35%, transparent);
+}
+.workspace-color-swatch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.workspace-color-swatch:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 .settings-field {
   display: flex;
   flex-direction: column;
@@ -5266,9 +6596,9 @@ async function doPackageUpdate() {
   position: absolute;
   z-index: 30;
   top: calc(100% + 6px);
-  right: 0;
-  left: auto;
-  width: min(380px, calc(100vw - 48px));
+  left: 0;
+  right: auto;
+  width: min(360px, calc(100vw - 48px));
   padding: var(--space-3);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -5293,9 +6623,6 @@ async function doPackageUpdate() {
 }
 .field-info-panel a {
   color: var(--accent);
-}
-.settings-field--wide {
-  grid-column: 1 / -1;
 }
 .settings-field .routine-input {
   max-width: none;
@@ -6005,5 +7332,217 @@ async function doPackageUpdate() {
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 350px;
+}
+
+/* Provider & Workspace MCP Connectors Bar */
+.provider-mcps-preview {
+  margin-top: var(--space-3);
+  margin-bottom: var(--space-3);
+  padding: var(--space-3);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.workspace-connectors-preview {
+  grid-column: 1 / -1;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  margin-top: var(--space-2);
+}
+
+.workspace-connectors-preview--disabled {
+  background: var(--bg);
+}
+
+.ws-connectors-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-2);
+}
+
+.workspace-connector-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.connector-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  font-weight: 500;
+}
+
+.connector-pill--enabled {
+  background: var(--bg);
+  color: var(--fg);
+  border-color: rgba(46, 160, 67, 0.4);
+}
+
+.connector-pill--enabled .pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: #2ea44f;
+}
+
+.connector-pill--blocked {
+  background: var(--bg);
+  color: var(--fg3);
+  opacity: 0.6;
+  text-decoration: line-through;
+}
+
+.connector-pill--blocked .pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: var(--fg3);
+}
+
+/* MCP Inspector */
+.mcp-inspector-bar {
+  display: flex;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.mcp-inspector-field {
+  flex: 1;
+  max-width: 250px;
+}
+
+.mcp-inspector-panels {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4);
+}
+
+@media (max-width: 768px) {
+  .mcp-inspector-panels {
+    grid-template-columns: 1fr;
+  }
+}
+
+.mcp-inspector-panel {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+}
+
+.panel-header {
+  margin-bottom: var(--space-3);
+}
+
+.panel-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2px;
+}
+
+.panel-title {
+  font-weight: 600;
+  font-size: var(--text-sm);
+}
+
+.mcp-env-block,
+.mcp-tools-block {
+  margin-top: 10px;
+}
+
+.mcp-env-row {
+  margin-top: 8px;
+}
+
+.mcp-edit-grid {
+  margin-top: 8px;
+}
+
+.mcp-tag-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mcp-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono, monospace);
+}
+
+.mcp-tag--embedded {
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.mcp-tag--active {
+  background: rgba(46, 160, 67, 0.1);
+  color: var(--fg);
+  border-color: rgba(46, 160, 67, 0.4);
+}
+
+.mcp-tag--active .pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: #2ea44f;
+}
+
+.mcp-tag--blocked {
+  background: var(--bg);
+  color: var(--fg3);
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+
+.badge--compact {
+  font-size: 10px;
+  padding: 1px 6px;
+}
+
+.mcp-server-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+
+.mcp-server-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+}
+
+.mcp-server-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-2);
+}
+
+.mcp-server-name {
+  font-weight: 600;
+  font-size: var(--text-sm);
+  margin-right: var(--space-2);
+}
+
+.mcp-tag-grid--wide {
+  gap: 8px;
 }
 </style>

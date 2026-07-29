@@ -10,10 +10,9 @@ a turn:
 
 Entries are separated by the ``§`` section sign on its own line. The agent
 edits these files through ``ciao memory`` (also exposed through the
-``scripts/memory-cli.py`` compatibility wrapper). Both the parent Claude
-session and Pi subagents
-take the same CLI path — Pi has no MCP support, and Claude subagents cannot
-load MCP servers, so a single CLI route keeps behavior in sync.
+``scripts/memory-cli.py`` compatibility wrapper). Both parent sessions and
+subagents take the same CLI path — subagents cannot load MCP servers, so a
+single CLI route keeps behavior in sync.
 
 Actions exposed by the CLI:
 

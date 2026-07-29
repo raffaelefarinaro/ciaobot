@@ -176,3 +176,81 @@ def test_block_handles_load_failure_gracefully(
 
     monkeypatch.setattr(mi, "load_entries", boom)
     assert mi.build_memory_block(memory_dir=tmp_path) == ""
+
+
+def test_expired_memory_entries_filtered(tmp_path: Path) -> None:
+    import datetime
+
+    mt.add_entry(tmp_path / "memory.md", "durable fact", char_limit=200)
+    mt.add_entry(tmp_path / "memory.md", "temporary note [expires: 2026-01-01]", char_limit=200)
+
+    # With reference date 2026-07-26, the 2026-01-01 entry is expired
+    today = datetime.date(2026, 7, 26)
+    block = mi.build_memory_block(memory_dir=tmp_path, today=today)
+
+    assert "durable fact" in block
+    assert "temporary note" not in block
+    assert "1 expired" in block
+    assert "stored" in block
+
+
+def test_expired_only_memory_is_not_described_as_empty(tmp_path: Path) -> None:
+    import datetime
+
+    mt.add_entry(
+        tmp_path / "memory.md",
+        ("x" * 150) + " [expires: 2020-01-01]",
+        char_limit=200,
+    )
+
+    block = mi.build_memory_block(
+        memory_dir=tmp_path,
+        memory_char_limit=200,
+        today=datetime.date(2026, 7, 26),
+    )
+    stored_chars = mt.total_chars(mt.load_entries(tmp_path / "memory.md"))
+
+    assert "are empty" not in block
+    assert "1 expired" in block
+    assert f"stored {stored_chars:,}/200 chars" in block
+    assert "remove expired entries" in block
+    assert "x" * 20 not in block
+
+
+def test_entry_expires_after_its_stated_date() -> None:
+    import datetime
+
+    entry = "temporary note [expires: 2026-07-26]"
+    assert mi.is_entry_expired(entry, datetime.date(2026, 7, 26)) is False
+    assert mi.is_entry_expired(entry, datetime.date(2026, 7, 27)) is True
+
+
+def test_noncanonical_or_ambiguous_expiration_tags_stay_visible(
+    tmp_path: Path,
+) -> None:
+    import datetime
+
+    mt.add_entry(
+        tmp_path / "memory.md",
+        "compact [expires: 20260720]",
+        char_limit=400,
+    )
+    mt.add_entry(
+        tmp_path / "memory.md",
+        "multiple [expires: 2026-07-20] [expires: someday]",
+        char_limit=400,
+    )
+
+    block = mi.build_memory_block(
+        memory_dir=tmp_path,
+        today=datetime.date(2026, 7, 26),
+    )
+
+    assert "compact" in block
+    assert "multiple" in block
+
+
+def test_system_prompt_payload_includes_expertise_header() -> None:
+    payload = mi.system_prompt_payload("memory block")
+    assert payload is not None
+    assert "[SYSTEM EXPERTISE: SOPs & Durable Memory]" in payload["append"]

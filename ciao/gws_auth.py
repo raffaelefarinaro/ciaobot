@@ -406,6 +406,17 @@ class GwsHealthMonitor:
         events_hub=None,
         runtime_root: Path | None = None,
         status_fn: Callable[..., dict[str, Any]] = auth_status,
+        # When ``auth status`` reports the token invalid (but the probe itself
+        # ran), re-probe once after this delay before believing it. A single
+        # ``token_valid: false`` reading can be a transient Google API hiccup
+        # (momentary 401/500/rate-limit) or a startup refresh race that
+        # recovers on its own; see issue #173.
+        retry_delay: float = 8.0,
+        # Only surface the "re-authenticate" notification after this many
+        # consecutive invalid readings across separate ``check_once`` runs,
+        # so one transient reading (even after the in-process retry) cannot
+        # false-alarm the user. Reset to 0 on the first valid reading.
+        notify_threshold: int = 2,
     ) -> None:
         self._config = config
         self._push = push_manager
@@ -416,6 +427,8 @@ class GwsHealthMonitor:
             else Path(config.state_path).parent
         )
         self._status_fn = status_fn
+        self._retry_delay = max(0.0, retry_delay)
+        self._notify_threshold = max(1, int(notify_threshold))
         self._lock = threading.Lock()
 
     def _cache_path(self) -> Path:
@@ -449,6 +462,13 @@ class GwsHealthMonitor:
 
         Serialized with a lock so overlapping periodic + on-demand runs cannot
         interleave their read-modify-write of the cache.
+
+        A single ``token_valid: false`` reading does not notify on its own.
+        The monitor first re-probes in-process (``retry_delay``) to ride out
+        transient Google API errors or startup refresh races, and then requires
+        ``notify_threshold`` consecutive invalid readings across separate runs
+        before alerting the user (issue #173). The counter and the
+        ``notified_invalid`` flag both reset on the first valid reading.
         """
         with self._lock:
             state = self._load()
@@ -464,21 +484,49 @@ class GwsHealthMonitor:
                     continue
                 token_valid = bool(status.get("token_valid"))
                 token_error = status.get("token_error", "")
+                if not token_valid:
+                    # Re-probe once: a single invalid reading may be a transient
+                    # false negative (momentary 401/500/rate-limit, or a startup
+                    # race where the first refresh fails and a later one
+                    # succeeds). Only treat the token as invalid if the retry
+                    # agrees. If the retry itself goes unavailable, treat the
+                    # whole probe as inconclusive and skip, like an
+                    # unavailable first probe.
+                    if self._retry_delay > 0:
+                        time.sleep(self._retry_delay)
+                    retry = self._status_fn(self._config, profile)
+                    if not retry.get("available"):
+                        continue
+                    if retry.get("token_valid"):
+                        token_valid = True
+                    else:
+                        # Prefer the most recent error text if non-empty.
+                        retry_error = retry.get("token_error", "")
+                        if retry_error:
+                            token_error = retry_error
+                consecutive_invalid = int(prior.get("consecutive_invalid", 0))
                 entry = {
                     "token_valid": token_valid,
                     "token_error": token_error,
                     "has_refresh_token": bool(status.get("has_refresh_token")),
                     "checked_at": time.time(),
                     "notified_invalid": bool(prior.get("notified_invalid")),
+                    "consecutive_invalid": consecutive_invalid,
                 }
                 if not token_valid:
                     summary["invalid"].append(profile)
-                    if not prior.get("notified_invalid"):
+                    consecutive_invalid += 1
+                    entry["consecutive_invalid"] = consecutive_invalid
+                    if (
+                        consecutive_invalid >= self._notify_threshold
+                        and not prior.get("notified_invalid")
+                    ):
                         self._notify(profile, token_error)
                         entry["notified_invalid"] = True
                         summary["notified"].append(profile)
                 else:
                     entry["notified_invalid"] = False
+                    entry["consecutive_invalid"] = 0
                 state[profile] = entry
             try:
                 self._save(state)
@@ -489,8 +537,8 @@ class GwsHealthMonitor:
     def _notify(self, profile: str, token_error: str) -> None:
         title = "Google Workspace login needs attention"
         body = (
-            f"The '{profile}' Google login has expired or been revoked. "
-            "Re-authenticate in Settings → Integrations to restore Gmail, "
+            f"The '{profile}' Google login may have expired or been revoked. "
+            "Re-authenticate in Settings → Workspaces to restore Gmail, "
             "Calendar, Drive, and scheduled Google tasks."
         )
         if self._push is not None:

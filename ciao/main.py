@@ -18,7 +18,7 @@ from typing import Callable, Literal
 from ciao.config import CiaoConfig
 from ciao.git_sync import sync_workspace
 from ciao.models import ChatContext
-from ciao.loops import LoopManager, LoopStore
+from ciao.loops import LoopEntry, LoopManager, LoopStore
 from ciao.schedules import ScheduleManager, ScheduleStore
 from ciao.sessions import StateStore
 from ciao.signals import RestartRequested
@@ -236,6 +236,11 @@ async def _async_main() -> int:
         port=config.pwa_port,
     )
     with lock:
+        if (
+            config._workspace_registry_changed
+            and not os.environ.get("CIAO_WORKSPACES", "").strip()
+        ):
+            config.persist_workspace_registry()
         return await _run_server_locked(config)
 
 
@@ -423,11 +428,15 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         provider, model, _workspace = pcm.schedule_effective_routing(entry)
         return ("claude", model, mode, provider)
 
+    from ciao.node_state import NodeStateManager
+    node_state_manager = NodeStateManager(config.state_path.parent)
+
     schedule_manager = ScheduleManager(
         store=schedule_store,
         resolve_target=_resolve_schedule_target,
         dispatch_to_web=_dispatch_to_web,
         prepare_chat=_prepare_chat,
+        is_node_active=node_state_manager.is_active,
     )
 
     # Loop manager: minute-interval re-dispatch into a fixed chat. Iterations
@@ -440,15 +449,18 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     # archived (or deleted) target as not-dispatchable so LoopManager
     # auto-stops the loop instead of erroring every interval with
     # "Cannot send messages to an archived chat" (issue #126).
-    def _loop_target_dispatchable(chat_id: str) -> bool:
-        chat = pcm.get_chat(chat_id)
-        return chat is not None and not chat.archived
+    def _loop_target_dispatchable(target: LoopEntry) -> bool:
+        chat = pcm.get_chat(target.web_chat_id)
+        if chat is not None and not chat.archived:
+            return True
+        return pcm._resolve_loop_project(target) is not None
 
     loop_manager = LoopManager(
         store=LoopStore(config.state_path.parent),
         dispatch=_dispatch_loop,
         chat_busy=pcm.chat_stream_active,
         chat_exists=_loop_target_dispatchable,
+        is_node_active=node_state_manager.is_active,
     )
 
     # Create and wire up web app. MCP stays available while legacy remains
@@ -461,6 +473,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         mcp_service = CiaoMcpService(config)
     app = create_app(config, app_settings=app_settings, mcp_service=mcp_service)
     app.state.startup_tracker = tracker
+    app.state.node_state_manager = node_state_manager
     app.state.schedule_manager = schedule_manager
     app.state.loop_manager = loop_manager
     app.state.state_store = state
@@ -708,6 +721,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                     "branch_backup", "Branch backup",
                     category="system", extra={"branch": branch},
                 ) as run:
+                    if not node_state_manager.is_active():
+                        run.skip("client mode — host owns backup push")
+                        continue
                     ok, detail = await push_branch(git_sync_root, branch=branch)
                     if ok:
                         if last_failure_detail is not None:

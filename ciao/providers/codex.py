@@ -410,7 +410,132 @@ def codex_login_status(
         "version": version,
         "account": "ChatGPT account" if logged_in and "chatgpt" in output.lower() else ("OpenAI API" if logged_in else ""),
         "protocol": protocol_detail,
+        "mcps": codex_mcps_and_plugins(env),
+        "skills": codex_system_skills(env),
     }
+
+
+def codex_system_skills(env: Mapping[str, str] | None = None) -> list[str]:
+    """Discover enabled Codex plugins via 'codex plugin list', falling back to config.toml."""
+    import subprocess
+
+    binary = resolve_codex_binary(env)
+    if binary:
+        try:
+            path_env = _codex_path_env(binary)
+            res = subprocess.run(
+                [str(binary), "plugin", "list"],
+                capture_output=True, text=True, timeout=8.0, check=False,
+                env=path_env,
+            )
+            output = (res.stdout or "") + "\n" + (res.stderr or "")
+            skills: set[str] = set()
+            for line in output.splitlines():
+                line = line.strip()
+                if "installed, enabled" in line:
+                    name = line.split("@")[0].strip()
+                    if name:
+                        skills.add(name)
+            if skills:
+                return sorted(skills)
+        except Exception:
+            pass
+    # Fallback: config.toml enabled check
+    skills_fb: set[str] = set()
+    codex_config = Path.home() / ".codex" / "config.toml"
+    if codex_config.is_file():
+        try:
+            import tomli
+            data = tomli.loads(codex_config.read_text(encoding="utf-8"))
+            plugins = data.get("plugins", {})
+            for key, meta in plugins.items():
+                if isinstance(meta, dict) and meta.get("enabled") is False:
+                    continue
+                skills_fb.add(str(key).split("@")[0])
+        except Exception:
+            pass
+    return sorted(skills_fb)
+
+
+def codex_mcps_and_plugins(env: Mapping[str, str] | None = None) -> list[str]:
+    """Discover enabled Codex MCP servers via ``codex mcp list --json``.
+
+    Codex reports an ``enabled`` flag per server (not a live Connected probe like
+    Claude Code). Prefer CLI JSON; fall back to ``~/.codex/config.toml`` only
+    when the CLI is unavailable or fails.
+
+    Excludes Ciaobot-managed servers (``ciaobot``) and workspace project MCPs
+    from ``.mcp.json`` (``n8n_mcp``, ``notion``) — those belong to the instance
+    MCP status panel, not the platform Providers list.
+    """
+    import subprocess
+
+    excluded = {"ciaobot", "n8n_mcp", "notion", "ciaobot-fastmcp"}
+
+    binary = resolve_codex_binary(env)
+    if binary:
+        path_env = _codex_path_env(binary)
+        merged_env = {**os.environ, **dict(env or {})}
+        if "PATH" in path_env:
+            existing = merged_env.get("PATH", "")
+            pe = path_env["PATH"]
+            merged_env["PATH"] = f"{pe}:{existing}" if existing else pe
+        try:
+            res = subprocess.run(
+                [str(binary), "mcp", "list", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=8.0,
+                check=False,
+                env=merged_env,
+            )
+            raw = (res.stdout or "").strip()
+            if res.returncode == 0 and raw.startswith("["):
+                entries = json.loads(raw)
+                if isinstance(entries, list):
+                    return sorted(
+                        {
+                            str(item.get("name") or "").strip()
+                            for item in entries
+                            if isinstance(item, dict)
+                            and item.get("enabled") is True
+                            and str(item.get("name") or "").strip()
+                            and str(item.get("name") or "").strip() not in excluded
+                        }
+                    )
+        except Exception:
+            pass
+
+    servers: list[str] = []
+    config_path = Path.home() / ".codex" / "config.toml"
+    if config_path.is_file():
+        try:
+            import tomli
+
+            data = tomli.loads(config_path.read_text(encoding="utf-8"))
+            mcp_servers = data.get("mcp_servers") or {}
+            if isinstance(mcp_servers, dict):
+                for name, meta in mcp_servers.items():
+                    key = str(name).strip()
+                    if not key or key in excluded:
+                        continue
+                    if isinstance(meta, dict) and meta.get("enabled") is False:
+                        continue
+                    if key not in servers:
+                        servers.append(key)
+        except Exception:
+            try:
+                import re
+
+                content = config_path.read_text(encoding="utf-8")
+                for match in re.finditer(r"\[mcp_servers\.([^.\]]+)\]", content):
+                    name = match.group(1)
+                    if name and name not in servers and name not in excluded:
+                        servers.append(name)
+            except Exception:
+                pass
+
+    return sorted(servers)
 
 
 def _mode_settings(mode: BridgeMode) -> tuple[str, str, str]:
@@ -663,8 +788,20 @@ class CodexProvider(BaseSDKProvider):
         vault_root = Path(getattr(self.config, "vault_root", self.workspace_root / "memory-vault"))
         workspace = str((request.extra_env or {}).get("CIAO_ACTIVE_WORKSPACE") or "")
         try:
+            owner = str(
+                (request.extra_env or {}).get("CIAO_LEGACY_ENTITY_WORKSPACE")
+                or ""
+            )
+            if not owner:
+                legacy_owner = getattr(self.config, "legacy_entity_workspace", None)
+                owner = legacy_owner() if callable(legacy_owner) else ""
             entities = format_entities(
-                find_entities(request.prompt, vault_root, workspace=workspace)
+                find_entities(
+                    request.prompt,
+                    vault_root,
+                    workspace=workspace,
+                    legacy_workspace=owner,
+                )
             )
         except Exception:  # noqa: BLE001 - context enrichment is fail-open
             logger.debug("Codex entity context failed", exc_info=True)
@@ -813,6 +950,22 @@ class CodexProvider(BaseSDKProvider):
         except RpcError:
             logger.info("Codex active turn rejected steer", exc_info=True)
             return False
+
+    def tool_use_id_for_request(self, request_id: str) -> str:
+        """Map one of our ``codex-N`` request ids to the Codex item it gates.
+
+        The SDK providers use the tool_use_id itself as the request id, so a
+        caller holding a request id can address the tool call directly. Codex
+        mints its own counter-based ids while its tool events are keyed by
+        ``itemId``, so anything wanting to act on the *call* (retracting the
+        file card for a refused patch, say) has to come through here. Returns
+        "" when the id is stale or the request names no item.
+        """
+        pending = self._permission_requests.get(request_id)
+        if pending is None:
+            return ""
+        _rpc_id, _method, params = pending
+        return str(params.get("itemId") or "")
 
     def send_permission_response(self, request_id: str, approved: bool) -> bool:
         pending = self._permission_requests.pop(request_id, None)

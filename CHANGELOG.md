@@ -1,5 +1,175 @@
 # Changelog
 
+## v0.6.0 - 2026-07-29
+
+### Added
+- **Native macOS app.** The Homebrew cask now installs `Ciaobot.app` together
+  with the engine. The Tauri shell owns the window, menu bar, native
+  notifications, Finder drag-and-drop bridge, start-at-login preference, and
+  a single signed updater that advances the engine and app together. Existing
+  Homebrew installs migrate in place: the workspace and server LaunchAgent are
+  reused, the legacy menu-bar helper is disabled with a recoverable backup,
+  and the old `Ciaobot Server.app` moves to the Trash once the engine is
+  healthy.
+- **Host/client nodes.** A Ciaobot instance can now run as a *client* that tunnels to a
+  *host* over a passworded connection. The client proxies API calls and WebSocket streams
+  to the active leader, rewrites `Origin`/`Referer` on state-changing requests, and keeps
+  the menu bar tray in sync with standby/leader status. Peer URLs are normalised
+  (protocol prefix, default port 8443) so a bare hostname is enough
+  (`257022b`, `66b04b5`, `0374c97`, `c8f31ba`, `8b58041`, `1a8ef5d`).
+- **Comments as overlays.** The legacy comment sidebars are gone. Comments now open as
+  floating, hover-pinned popovers in the transcript, the file viewer, and the pinned-file
+  panel, all sharing one `CommentComposePopover`. The composer drops the redundant
+  selection quote — the highlight already shows what was picked — and editing an existing
+  comment happens in a popover anchored to its chip rather than a full-height drawer.
+  A comment now also carries the role and paragraph of the text it quotes, so the model
+  is not left guessing which reply a repeated phrase came from
+  (`501a01a`, `25f31ea`, `82d60dd`, `0da5348`, `6e627a4`, `76f1d4c`).
+- **Superseded harness skills are hidden.** The bundled CLI ships skills that either bypass
+  Ciaobot's own surfaces (cloud routines, harness cron loops, design sync) or duplicate one
+  the PWA owns (settings, permissions, diagnostics, per-project run stubs). These are now
+  removed from the model's context via `skillOverrides` *and* denied at execution, which
+  keeps the model from reaching for the wrong surface and saves the per-turn context cost
+  of their descriptions (`556263c`).
+- **Auto-turn marks.** A user turn fired by a loop or schedule is marked `↻ auto` in the
+  transcript, so a self-driven turn is no longer indistinguishable from something you typed
+  (`556263c`, `6e627a4`).
+- **Per-workspace accent colour.** Each workspace picks one of five presets in Settings and
+  the PWA tints its chrome to match, so which workspace you are in is visible at a glance
+  instead of something you read off a label (`9ae33bb`).
+- **MCP settings you can actually edit.** Servers, secrets, and asset labels are editable
+  from Settings, and the Providers page lists only the platform connectors and skills that
+  are enabled (`9c42f5e`, `5afe526`).
+- **AI OS context hygiene.** Entity tagging, memory expiration, and an `os-audit` suite for
+  workspace roots, vault links, skill budgets, instruction clashes, and stale memory
+  (`7ae596d`).
+- `/pr` skill, and releases are now gated on `/code-review --fix` (`1cbd8e8`).
+
+### Changed
+- Host and client settings are simplified for host mode, with the card moved lower in
+  Settings (`1aeb3e8`, `2baee33`).
+- Hovering a comment no longer re-renders the whole transcript (`ae41941`).
+- Claude's mid-turn progress narration folds into Activity instead of interrupting the
+  reply (`7e60815`).
+- Creating a loop over MCP starts its cadence immediately and arms it for the next server
+  boot, and loop mutations broadcast `loops_changed` so open tabs stop showing stale state
+  until a reload. `autostart` only ever governed server boot, so a fresh loop used to sit
+  stopped while the model reported it running (`556263c`).
+- Trimmed over-constraint from the system prompt for Claude 5-generation context
+  engineering (`094b0cd`).
+- Dependency refresh across backend and frontend (`3843eaa`).
+
+### Security
+- **Workspace names are the user's, not the app's.** Nine sites branched on a
+  workspace being called literally `personal` or `work` — the names the first
+  release happened to ship (#197).
+
+  Most consequentially, a workspace with any other name had its vault placed
+  *next to* `memory-vault/` instead of inside it, where the vault index, the
+  linter and the memory-proposal scans never looked. Vault resolution now lives
+  once on the config, is the same for every name, and is *pure* — it reads the
+  workspace registry and never probes the filesystem, so a vault cannot silently
+  relocate mid-life. New workspaces — including a fresh first workspace from
+  setup — always receive `<CIAO_VAULT_ROOT>/<workspace-name>`. An adopted notes
+  folder or install whose vault sits at an older location keeps that location
+  pinned and persisted: nothing moves silently, and `ciao os-audit` (and PWA
+  diagnostics) direct the operator to an interactive Ciaobot migration chat
+  that can inspect conflicts, back up the source, update the registry, and
+  restart into the standard layout.
+
+  Saving *any* workspace setting used to rewrite that workspace's `vault_root`
+  to its bare name, which pointed a setup-created or external vault at a
+  directory that did not exist while the real content stayed put. Fixed:
+  workspace locations are read-only in Settings, existing locations are
+  preserved, and request-body paths such as `/` or `..` cannot redirect agent
+  writes or filesystem scans. Named vault children are also rejected when a
+  symlink would resolve them outside the configured vault.
+
+  Also: the sync-conflict chat no longer hard-errors without a `personal`
+  project; title/insights model routing resolves against the primary workspace;
+  a new project with no workspace lands in one that exists; the vault linter
+  checks every workspace root; the model-bucket fallback no longer keys on the
+  name `work`; an unregistered workspace name gets the default denylist instead
+  of an empty one; and legacy unprefixed vault entries, memory proposals, and
+  skill proposals take an explicit owner from the registry rather than from
+  directory order, transcript labels, or a workspace literally named
+  `personal`, which could expose or file a private workspace's data in a client
+  workspace.
+- Ciaobot no longer ships an opinion about the self-hosted n8n MCP. It was
+  denied by default in a workspace named `personal` and nowhere else; it is
+  project-scoped in `.mcp.json`, so it exists only where you configured it, and
+  which workspaces see it belongs in that workspace's "Extra disallowed tools"
+  field.
+- **Local-only endpoints are gated on the peer address, not the `Host` header.**
+  `/api/node/handover` and `/api/menubar-chats` were reachable unauthenticated from the
+  network: the first could force-promote a node — demoting the real host, pushing its vault
+  — and forward the stored host session cookie to a URL of the caller's choosing; the
+  second leaked chat titles and workspace names. Both now require a loopback peer or a
+  session, and the handover target must be the host the node is actually connected to.
+  Setup-token redemption moved to the same check — its old gate read the caller-supplied
+  `Host` header. Enabling password protection from a non-local device is still allowed and
+  now logged with the peer address: a headless host reached over a tailnet has no localhost
+  browser, so requiring a local caller would leave it permanently unprotectable
+  (`4fad3a2`).
+- The pre-commit secret scan no longer exempts everything under any `tests` directory or
+  any file merely named `test_*`. A `tests/credentials.json` inside the vault, or a stray
+  `test_config.json`, was being committed and pushed unscanned (`4fad3a2`).
+
+### Fixed
+- **Loops:** a loop whose target chat was deleted no longer recreates one every interval
+  forever — the replacement chat is persisted instead of being discarded by the status
+  write-back — and an orphaned loop is no longer re-homed into an arbitrary workspace
+  (`4fad3a2`).
+- **Transcript:** past turns keep their Activity trace while a later reply streams, and a
+  tool call that was denied no longer leaves an Outputs card for a file it never wrote —
+  including on Codex, whose approval ids needed mapping to the tool call they gate
+  (`4fad3a2`, `556263c`).
+- **Unattended turns really do run in bypass.** The mode was documented and plumbed but
+  never applied, so a loop that fetched a page and wrote a file auto-denied its own first
+  tool call and did nothing, every interval. A message you type while a tick is in flight
+  is no longer treated as unattended either, so it keeps its approval prompts.
+- **Comment editing works again.** Clicking a staged comment's chip reopens it in the
+  shared composer; the edit popover had lost its markup.
+- **Comment composer:** the popover clamps itself to the viewport, so commenting near the
+  bottom of a transcript or file no longer puts Save below the fold where a fixed-position
+  element cannot be scrolled to (`4fad3a2`).
+- **API errors:** the "redeploy your server" hint is now reserved for a genuinely missing
+  route. A plain-text 500, a proxy 502/503, and a real `404 {"error": …}` each report
+  themselves, instead of sending people to redeploy a healthy build (`4fad3a2`).
+- **Node/auth:** stop client login loops and the host auth-check storm; restore
+  host-password login; guard against self-proxying; restore the standby role check in
+  `get_proxy_target_url` (`4db2291`, `2abf265`, `e7436e0`, `7859140`).
+- **MCP:** schedules and loops inherit the calling chat's project and workspace;
+  project/chat resolution defaults to the active session; `chat_archive` targets the caller
+  chat (`7a32a9c`, `6211c44`, `f5205c2`).
+- **Loops:** preserve project context and auto-create a chat when the loop target is gone
+  (`276c2d8`).
+- **Chat:** reject prompts and WebSocket requests to archived chats early; skip non-vision
+  model fallbacks for image prompts; broadcast `chat_archived` over `/ws/events` for
+  cross-tab sync; defer meta-question openers to the first assistant reply
+  (`2732fab`, `a28323f`, `8f46354`, `65ac6cd`).
+- **Mobile/UI:** stop iOS auto-zoom on input focus and hide the homepage under an open
+  sidebar; stretch lone home tiles with an auto-fit grid; keep the model selector dropdown
+  clear of header controls; anchor late subagent panels to their spawning turn; auto-align
+  the active workspace and expand the parent project when navigating
+  (`5bbcb11`, `a518af9`, `33b3b02`, `b5d260b`, `feba77b`).
+- **Streaming:** refine trace-buffer clearing and the thinking threshold (`8ebf888`).
+- **Providers/GWS:** name the host and error category on connection failures; require
+  confirmation before a GWS health "re-authenticate" push; debounce GWS health monitor
+  false alarms (`31652ec`, `3cd67ca`, `5ba9a18`).
+- **Preflight secret scan:** ignore worktrees and env templates, and stop `secretary.md`
+  style names from warning (`30e00b1`, `aeaa77b`; scope corrected in `4fad3a2`, above).
+- **Sessions:** recover from a non-fast-forward push rejection via auto-merge (`041b84a`).
+- Entity tagger no longer false-positives on README collisions and self-scans (`51616b3`).
+- Removed stale Pi references from engine comments, docstrings, and tests (`88e1fa0`).
+- CI: cleared the mypy and PWA-docs errors blocking Ciao CI (`3c00005`, `989cb5c`, `cb7ee30`).
+
+### Maintenance
+- Documented auth settings, menu bar chats, and node connect in the API docs (`4df84ca`).
+- Added #agentswelcome AI agent contribution guidelines (`e14cabc`).
+- Aligned docs and the capability skill with shipped Settings and MCP memory (`5524f29`).
+- Bumped the service-worker cache name to v0.6.0 so clients pick up the new build.
+
 ## v0.5.3 - 2026-07-23
 
 ### Added

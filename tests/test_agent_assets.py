@@ -14,6 +14,7 @@ from ciao.web.agent_assets import (
     create_subagent_endpoint,
     delete_command_endpoint,
     delete_subagent_endpoint,
+    os_audit_endpoint,
     update_command_endpoint,
     update_subagent_endpoint,
     workspace_health_endpoint,
@@ -21,22 +22,26 @@ from ciao.web.agent_assets import (
 )
 
 
-def _config(root: Path) -> SimpleNamespace:
+def _config(root: Path, *, state_path: Path | None = None) -> SimpleNamespace:
     vault = root / "memory-vault"
     vault.mkdir(parents=True, exist_ok=True)
+    state_path = state_path or (root / ".runtime" / "state.json")
+    state_path.parent.mkdir(parents=True, exist_ok=True)
     return SimpleNamespace(
         workspace_root=root,
         vault_root=vault,
+        state_path=state_path,
         memory_enabled=False,
         memory_char_limit=2200,
         user_char_limit=1800,
     )
 
 
-def _client(root: Path) -> TestClient:
+def _client(root: Path, *, state_path: Path | None = None) -> TestClient:
     app = Starlette(
         routes=[
             Route("/api/agent-assets", agent_assets_endpoint, methods=["GET"]),
+            Route("/api/agent-assets/audit", os_audit_endpoint, methods=["GET"]),
             Route("/api/workspace-health", workspace_health_endpoint, methods=["GET"]),
             Route("/api/workspace-health/fix", workspace_health_fix_endpoint, methods=["POST"]),
             Route("/api/agent-assets/subagents", create_subagent_endpoint, methods=["POST"]),
@@ -47,8 +52,45 @@ def _client(root: Path) -> TestClient:
             Route("/api/agent-assets/commands/{name}", delete_command_endpoint, methods=["DELETE"]),
         ]
     )
-    app.state.config = _config(root)
+    app.state.config = _config(root, state_path=state_path)
     return TestClient(app)
+
+
+def test_os_audit_endpoint_uses_configured_runtime_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "CLAUDE.md").write_text("- Use rtk for shell commands.\n", encoding="utf-8")
+    (tmp_path / "AGENTS.md").symlink_to("CLAUDE.md")
+    bounded = tmp_path / "bounded"
+    bounded.mkdir()
+    monkeypatch.setenv("CIAO_MEMORY_DIR", str(bounded))
+    runtime = tmp_path / "custom-runtime"
+    runtime.mkdir()
+    (runtime / "job_runs_latest.json").write_text(
+        """{
+  "broken_job": {
+    "job": "broken_job",
+    "status": "error",
+    "error": "boom",
+    "started_at": "2026-07-26T10:00:00+00:00",
+    "ended_at": "2026-07-26T10:01:00+00:00"
+  }
+}
+""",
+        encoding="utf-8",
+    )
+
+    response = _client(
+        tmp_path,
+        state_path=runtime / "state.json",
+    ).get("/api/agent-assets/audit")
+
+    assert response.status_code == 200
+    report = response.json()
+    assert report["status"] == "needs_attention"
+    assert report["job_runs_audit"]["failed_runs"] == 1
+    assert report["job_runs_audit"]["recent_failures"][0]["job"] == "broken_job"
 
 
 def test_agent_assets_lists_instruction_sources(tmp_path: Path) -> None:

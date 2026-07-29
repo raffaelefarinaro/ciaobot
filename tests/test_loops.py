@@ -34,7 +34,7 @@ def _make_manager(
         store=store,
         dispatch=dispatch,
         chat_busy=lambda chat_id: busy,
-        chat_exists=lambda chat_id: exists,
+        chat_exists=lambda entry: exists,
     )
     return mgr, dispatched
 
@@ -201,7 +201,7 @@ async def test_fires_as_soon_as_chat_frees_up(store: LoopStore) -> None:
         store=store,
         dispatch=dispatch,
         chat_busy=lambda chat_id: busy_flag["busy"],
-        chat_exists=lambda chat_id: True,
+        chat_exists=lambda entry: True,
     )
     mgr.start_loop(entry.loop_id)
     t0 = datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
@@ -252,7 +252,7 @@ async def test_inflight_iteration_blocks_refire(store: LoopStore) -> None:
         store=store,
         dispatch=dispatch,
         chat_busy=lambda chat_id: False,
-        chat_exists=lambda chat_id: True,
+        chat_exists=lambda entry: True,
     )
     mgr.start_loop(entry.loop_id)
     t0 = datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
@@ -264,6 +264,57 @@ async def test_inflight_iteration_blocks_refire(store: LoopStore) -> None:
     release.set()
     await _settle()
     assert store.get(entry.loop_id).last_status == "ok"
+
+
+async def test_dispatch_rechat_is_persisted(store: LoopStore) -> None:
+    """A dispatch that re-points the entry must survive the status write-back.
+
+    `dispatch_loop` creates a replacement chat when the target is gone and sets
+    `entry.web_chat_id` in memory. `_run_dispatch` then re-reads the entry to
+    stamp status; without carrying the re-point over, the loop forgets its new
+    chat and builds another one every interval.
+    """
+    entry = store.create(prompt="p", web_chat_id="dead-chat", interval_minutes=1)
+
+    async def dispatch(e: LoopEntry) -> dict:
+        e.web_chat_id = "fresh-chat"
+        return {"status": "ok", "chat_id": e.web_chat_id}
+
+    mgr = LoopManager(
+        store=store,
+        dispatch=dispatch,
+        chat_busy=lambda chat_id: False,
+        chat_exists=lambda entry: True,
+    )
+    mgr.start_loop(entry.loop_id)
+    await mgr.tick()
+    await _settle()
+
+    assert store.get(entry.loop_id).web_chat_id == "fresh-chat"
+
+
+async def test_dispatch_does_not_clobber_a_concurrent_user_edit(store: LoopStore) -> None:
+    """Only a re-point made by dispatch itself is carried over."""
+    entry = store.create(prompt="p", web_chat_id="chat-x", interval_minutes=1)
+
+    async def dispatch(e: LoopEntry) -> dict:
+        # The user re-targets the loop while the iteration streams.
+        edited = store.get(e.loop_id)
+        edited.web_chat_id = "user-picked"
+        store.replace(edited)
+        return {"status": "ok"}
+
+    mgr = LoopManager(
+        store=store,
+        dispatch=dispatch,
+        chat_busy=lambda chat_id: False,
+        chat_exists=lambda entry: True,
+    )
+    mgr.start_loop(entry.loop_id)
+    await mgr.tick()
+    await _settle()
+
+    assert store.get(entry.loop_id).web_chat_id == "user-picked"
 
 
 async def test_dispatch_error_recorded(store: LoopStore) -> None:
@@ -286,7 +337,7 @@ async def test_dispatch_exception_recorded_as_error(store: LoopStore) -> None:
         store=store,
         dispatch=dispatch,
         chat_busy=lambda chat_id: False,
-        chat_exists=lambda chat_id: True,
+        chat_exists=lambda entry: True,
     )
     mgr.start_loop(entry.loop_id)
     await mgr.tick()
