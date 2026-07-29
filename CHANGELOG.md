@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.6.3 - 2026-07-29
+
+### Fixed
+- fix: detach app launch in release smoke (`5cb7683`)
+
 ## v0.6.2 - 2026-07-29
 
 ### Fixed
