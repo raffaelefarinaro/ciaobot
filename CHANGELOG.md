@@ -1,25 +1,29 @@
 # Changelog
 
-## v0.6.5 - 2026-07-29
-
-### Added
-- feat: opt-in Developer ID signing and notarization for the desktop app (`13c3c58`)
-
-### Changed
-- Merge pull request #209 from raffaelefarinaro/chore/sync-develop-v0.6.4 (`c4eadd5`)
-- Revert "feat: opt-in Developer ID signing and notarization for the desktop app" (`7a42cd7`)
-- Merge pull request #210 from raffaelefarinaro/fix/release-smoke-engine-start (`7fe7dff`)
-- Merge pull request #211 from raffaelefarinaro/fix/issues-207-206 (`8f1099a`)
+## v0.6.5 - 2026-07-30
 
 ### Fixed
-- fix: surface engine start failures and make release smoke runnable (`bac8dd7`)
-- fix: install the cask unquarantined in release-smoke (`b5f3b5d`)
-- fix: clear the quarantine attribute instead of using --no-quarantine (`ebd8214`)
-- fix: enlarge the loop banner icon and enforce defuddle-first URL reading (`61f8968`)
+- The loop indicator in a chat's loop banner is now legible. It inherited body
+  text size, so the heartbeat glyph was lost next to the loop title and the
+  Start/Stop buttons.
+- Pasted URLs are read with `defuddle` first instead of `WebFetch`. The rule
+  existed but lived only in a file that PWA chat turns never load, so it never
+  applied where most turns happen; `WebFetch` is now explicitly the fallback for
+  non-HTML targets.
+- The release verification job works again. It had been failing since v0.6.3
+  because a freshly installed app cannot launch unattended while the download
+  quarantine flag is set, which halted the app before it started its engine.
+  This never affected published releases — the engine, app, and Homebrew
+  packages shipped normally each time — only the automated check that installs
+  and launches them afterwards.
 
 ### Maintenance
-- chore: sample the stuck app in release-smoke diagnostics (`753d54a`)
-- test: cold-start the built app bundle in CI (`35a5a88`)
+- The desktop app records engine start-up failures to its log instead of
+  discarding them, so a backend that fails to come up says why.
+- Release verification can now be re-run on demand against an already published
+  version, and runs on any change to itself, rather than only once per release.
+- CI launches the app bundle it just built and waits for the engine, so a
+  start-up regression is caught on the pull request that introduces it.
 
 ## v0.6.4 - 2026-07-29
 
