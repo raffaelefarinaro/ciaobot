@@ -102,6 +102,70 @@ jobs:
         --bundles app
         --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
+    # release-smoke installs from the Homebrew tap, so it can only ever test the
+    # previously released app. This exercises the cold-start path of the bundle
+    # built from *this* branch, which is the only way an app-side startup fix can
+    # be verified before it ships.
+    - name: Cold-start the built app and wait for the engine
+      run: |
+        app="desktop/src-tauri/target/release/bundle/macos/Ciaobot.app"
+        test -d "$app"
+        # The app resolves the CLI from /opt/homebrew/bin, then /usr/local/bin,
+        # then PATH -- and `open` does not hand the job's PATH to the launched
+        # app, so the pip-installed ciao has to be visible at a fixed path.
+        sudo ln -sf "$(command -v ciao)" /usr/local/bin/ciao
+        ciao setup --workspace "${RUNNER_TEMP}/ci-workspace" --app-dir "${RUNNER_TEMP}/ci-apps"
+        # Locally built bundles are not quarantined, but be explicit: a
+        # Gatekeeper wait on a quarantined bundle is what pinned the app in
+        # _dyld_start and kept release-smoke red across v0.6.3 and v0.6.4.
+        xattr -dr com.apple.quarantine "$app" 2>/dev/null || true
+        open -g "$app" --args --background >"${RUNNER_TEMP}/ci-open.log" 2>&1 &
+        for _ in {1..30}; do
+          pgrep -x ciaobot-desktop >/dev/null && break
+          sleep 1
+        done
+        # pgrep only proves the process exists; the engine probe below is what
+        # proves the app actually ran.
+        pgrep -x ciaobot-desktop >/dev/null
+        for _ in {1..45}; do
+          curl -fsS http://localhost:8443/api/startup-status >/dev/null 2>&1 && break
+          sleep 1
+        done
+        curl -fsS http://localhost:8443/api/startup-status | jq -e '.desktop_api_version == 1'
+
+    - name: Cold-start diagnostics
+      if: failure()
+      run: |
+        workspace="${RUNNER_TEMP}/ci-workspace"
+        echo "--- processes ---"
+        pgrep -lf 'ciaobot|ciao' || echo "(none)"
+        echo "--- listening TCP sockets ---"
+        lsof -nP -iTCP -sTCP:LISTEN || true
+        echo "--- launchd state ---"
+        launchctl print "gui/$(id -u)/com.ciao.server" 2>&1 | head -30 || true
+        echo "--- app stack sample ---"
+        app_pid="$(pgrep -x ciaobot-desktop || true)"
+        if [ -n "$app_pid" ]; then
+          sample "$app_pid" 2 -file "${RUNNER_TEMP}/ci-sample.txt" >/dev/null 2>&1 || true
+          sed -n '1,80p' "${RUNNER_TEMP}/ci-sample.txt" 2>/dev/null || echo "(sample unavailable)"
+        else
+          echo "(app not running)"
+        fi
+        echo "--- desktop-service status ---"
+        ciao desktop-service status --json 2>&1 | head -20 || true
+        echo "--- app launch log ---"
+        cat "${RUNNER_TEMP}/ci-open.log" 2>/dev/null || echo "(absent)"
+        for log in ciao.stderr.log ciao.stdout.log desktop-tray.log; do
+          echo "--- ${log} ---"
+          tail -60 "${workspace}/.runtime/${log}" 2>/dev/null || echo "(absent)"
+        done
+
+    - name: Stop the app and engine
+      if: always()
+      run: |
+        pkill -x ciaobot-desktop || true
+        ciao desktop-service stop --force >/dev/null 2>&1 || true
+
     - name: Smoke-test wheel
       run: |
         ciao package-smoke --skip-frontend
