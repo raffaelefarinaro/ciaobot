@@ -252,6 +252,97 @@ async def test_watch_subagent_completion_nudges_parent_synthesis(
     assert ready_events[1]["nudged"] is True
 
 
+async def test_watch_subagent_completion_holds_nudge_when_parent_asked_a_question(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A parent that ended its turn with a question to the user is left alone.
+
+    Nudging there answers on the user's behalf and buries the question under a
+    report they never asked for."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("subagent-question", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="subagent-question-test")
+    chat.session_id = "sess-nudge-question"
+    pcm._save()
+
+    session_path = tmp_path / "sess-nudge-question.jsonl"
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "kick off work"}},
+        *_dispatch_records("toolu_1", "agent-a"),
+    ]
+    # The parent's parting words: a question, not an "I'll report back".
+    question = {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Two agents are digging in.\n\nWhich slice do you want removed?",
+                }
+            ],
+        },
+    }
+    completions = iter([question, _completion_record("agent-a")])
+
+    def flush() -> None:
+        session_path.write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+        )
+
+    flush()
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root: session_path,
+    )
+
+    async def fake_sleep(seconds: float) -> None:
+        record = next(completions, None)
+        if record is not None:
+            records.append(record)
+            flush()
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    steer_calls: list = []
+
+    class FakeProvider:
+        can_drain = True
+
+        async def steer(self, request) -> bool:
+            steer_calls.append(request)
+            return True
+
+    pcm._providers[chat.chat_id] = FakeProvider()  # type: ignore[assignment]
+    running_drain = asyncio.get_running_loop().create_future()
+    pcm._between_turn_drains[chat.chat_id] = running_drain  # type: ignore[assignment]
+
+    published: list[dict] = []
+    original_publish = pcm._events.publish
+
+    def capture_publish(payload: dict) -> None:
+        published.append(payload)
+        original_publish(payload)
+
+    monkeypatch.setattr(pcm._events, "publish", capture_publish)
+
+    try:
+        await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+    finally:
+        running_drain.cancel()
+
+    assert steer_calls == []
+    ready_events = [ev for ev in published if ev.get("type") == "chat_subagents_ready"]
+    # The count still drops to zero so the PWA clears its "agents running"
+    # indicator and reconciles history; only the injected prompt is withheld.
+    assert ready_events[-1]["remaining"] == 0
+    assert ready_events[-1]["nudged"] is False
+
+
 def test_chat_subagents_falls_back_to_nested_jsonl_and_progress_entries(
     tmp_path: Path,
     monkeypatch,

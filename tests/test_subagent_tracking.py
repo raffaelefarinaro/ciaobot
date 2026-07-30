@@ -5,8 +5,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from ciao.subagent_tracking import (
+    SUBAGENT_SYNTHESIS_NUDGE,
     SessionSubagentState,
+    ends_with_user_question,
+    is_synthesis_nudge,
     parse_session_subagents,
 )
 
@@ -34,6 +39,13 @@ def _assistant_dispatch(tool_use_id: str, description: str, subagent_type: str =
                 },
             ],
         },
+    }
+
+
+def _assistant_text(text: str) -> dict:
+    return {
+        "type": "assistant",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
     }
 
 
@@ -151,6 +163,84 @@ def test_missing_file_returns_empty_state(tmp_path: Path) -> None:
     state = parse_session_subagents(tmp_path / "missing.jsonl")
     assert state.subagents == {}
     assert state.running_background == 0
+
+
+def test_synthesis_nudge_recognized_with_context_prefix() -> None:
+    assert is_synthesis_nudge(SUBAGENT_SYNTHESIS_NUDGE)
+    # Sent with the chat's context prefix attached, and re-wrapped by whatever
+    # wrote the JSONL, so matching must survive both.
+    prefixed = (
+        '[Chat ID: "chat-1"]\n[Project: "Ciaobot"]\n\n'
+        + SUBAGENT_SYNTHESIS_NUDGE.replace(" results ", "\n  results  ")
+    )
+    assert is_synthesis_nudge(prefixed)
+    assert not is_synthesis_nudge("")
+    assert not is_synthesis_nudge("post your consolidated final report")
+
+
+def test_synthesis_nudge_does_not_advance_turn_index(tmp_path: Path) -> None:
+    # The nudge is server-injected, so it must not shift `turn_index` — the
+    # /messages renderer skips it the same way (see routes_api.chat_messages).
+    records = [
+        _user_text("first real turn"),
+        _user_text(SUBAGENT_SYNTHESIS_NUDGE),
+        _user_text("second real turn"),
+        _assistant_dispatch("toolu_2", "Dig in"),
+        _dispatch_result("toolu_2", "def456"),
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.subagents["def456"].turn_index == 1
+
+
+def test_last_assistant_text_tracks_awaiting_user_answer(tmp_path: Path) -> None:
+    records = [
+        _user_text("go"),
+        _assistant_dispatch("toolu_1", "Research"),
+        _dispatch_result("toolu_1", "abc123"),
+        _assistant_text("Agents are running.\n\nWhich slice do you want removed?"),
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.last_assistant_text.endswith("removed?")
+    assert state.awaiting_user_answer is True
+
+    records.append(_assistant_text("Never mind, I'll report back when they finish."))
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.awaiting_user_answer is False
+
+
+def test_last_assistant_text_ignores_textless_records(tmp_path: Path) -> None:
+    # A trailing tool-only assistant record must not blank out the question.
+    records = [
+        _assistant_text("Which slice do you want removed?"),
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_9", "name": "Read", "input": {}}
+                ],
+            },
+        },
+    ]
+    state = parse_session_subagents(_write_session(tmp_path, records))
+    assert state.awaiting_user_answer is True
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("Which slice do you want removed?", True),
+        ("**Which slice do you want removed?**", True),
+        ("Done. (Want me to also drop the welcome chat?)", True),
+        ("Which one?\n\n", True),
+        ("I'll report back when they finish.", False),
+        ("Shall I proceed? Yes — starting now.", False),
+        ("", False),
+        ("---", False),
+    ],
+)
+def test_ends_with_user_question(text: str, expected: bool) -> None:
+    assert ends_with_user_question(text) is expected
 
 
 def test_running_background_counts_only_async_running() -> None:

@@ -134,14 +134,11 @@ _MAX_CONNECTION_DROP_RETRIES = 6
 # completes (see ciao/system_prompt.md), so without this nudge the chat stays
 # stuck on the interim "I'll report back when they finish" message. The nudge
 # is delivered on the persistent client so the already-running between-turns
-# drain captures and publishes the synthesis turn like a normal reply.
-_SUBAGENT_SYNTHESIS_NUDGE = (
-    "The background agent(s) you dispatched have now finished. Review their "
-    "results (read their transcripts or output as needed) and post your "
-    "consolidated final report for this task now. Do not dispatch new "
-    "background agents to answer this. If you already posted the final "
-    "report, reply with a brief confirmation instead of repeating it."
-)
+# drain captures and publishes the synthesis turn like a normal reply. The text
+# is owned by ciao/subagent_tracking.py, which also has to recognize it (the
+# /messages renderer collapses it into a system line rather than showing a user
+# bubble nobody typed).
+_SUBAGENT_SYNTHESIS_NUDGE = subagent_tracking.SUBAGENT_SYNTHESIS_NUDGE
 _HANDOVER_ROLES = {"user", "assistant", "system"}
 _HANDOVER_MAX_MESSAGES = 80
 _HANDOVER_MAX_CHARS = 60_000
@@ -5667,9 +5664,8 @@ class ProjectChatManager:
                     break
                 if size != last_size:
                     last_size = size
-                    count = subagent_tracking.parse_session_subagents(
-                        path
-                    ).running_background
+                    state = subagent_tracking.parse_session_subagents(path)
+                    count = state.running_background
                     if count != last_count:
                         nudged = False
                         if count == 0 and last_count > 0:
@@ -5693,7 +5689,8 @@ class ProjectChatManager:
                             # chat's own result push (user feedback). The in-app
                             # subagent count below still updates the UI.
                             nudged = await self._nudge_synthesis_after_subagents(
-                                chat_id
+                                chat_id,
+                                awaiting_user_answer=state.awaiting_user_answer,
                             )
                         self._publish_subagent_count(chat_id, project_id, count, nudged=nudged)
                         last_count = count
@@ -5745,7 +5742,9 @@ class ProjectChatManager:
             if current is asyncio.current_task():
                 self._pending_subagent_watchers.pop(chat_id, None)
 
-    async def _nudge_synthesis_after_subagents(self, chat_id: str) -> bool:
+    async def _nudge_synthesis_after_subagents(
+        self, chat_id: str, awaiting_user_answer: bool = False
+    ) -> bool:
         """Ask the parent to post a final report once its subagents finish.
 
         A background ``Agent`` dispatch ends the parent turn immediately and
@@ -5755,7 +5754,16 @@ class ProjectChatManager:
         drain (started alongside this watcher) consumes the resulting turn and
         publishes it like any other reply. Returns True when the nudge reached
         a live client, False otherwise (caller falls back to a plain push).
+
+        ``awaiting_user_answer`` holds the nudge back when the parent ended its
+        turn by asking the user a question: answering it is the user's move, and
+        nudging would both bury the question and answer on their behalf. The
+        question stays the last thing in the transcript; the finished agents are
+        still surfaced by the ``chat_subagents_ready`` count dropping to zero
+        and by the subagent panel refresh it triggers.
         """
+        if awaiting_user_answer:
+            return False
         provider = self._providers.get(chat_id)
         if provider is None or not provider.can_drain:
             return False
