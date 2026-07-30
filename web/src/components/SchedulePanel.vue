@@ -552,6 +552,7 @@ import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
 import { loopInWorkspace, scheduleInWorkspace, workspaceForLoop } from '../lib/automationWorkspace'
+import { askConfirm } from '../lib/confirm'
 
 const props = defineProps<{ showNew?: boolean }>()
 const emit = defineEmits<{ (e: 'created'): void; (e: 'open-sidebar'): void; (e: 'close'): void }>()
@@ -844,7 +845,11 @@ async function onRunLoopNow() {
 
 async function onDeleteLoop() {
   if (!loop.value) return
-  if (!confirm('Delete this loop?')) return
+  if (!await askConfirm('Delete this loop? Future iterations will stop.', {
+    title: 'Delete loop',
+    confirmLabel: 'Delete loop',
+    destructive: true,
+  })) return
   const id = loop.value.loop_id
   await store.deleteLoop(id)
   router.push('/schedules')
@@ -1221,7 +1226,11 @@ async function onToggleEnabled() {
 
 async function onDelete() {
   if (!schedule.value) return
-  if (!confirm('Delete this schedule?')) return
+  if (!await askConfirm('Delete this schedule? It will stop running.', {
+    title: 'Delete schedule',
+    confirmLabel: 'Delete schedule',
+    destructive: true,
+  })) return
   const id = schedule.value.schedule_id
   await store.deleteSchedule(id)
   router.push('/schedules')

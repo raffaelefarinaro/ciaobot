@@ -987,9 +987,12 @@ async function finishEditProject(event: Event, id: string) {
 
 async function confirmDeleteProject(id: string) {
   projectMenu.value = null
-  if (confirm('Delete this project and archive all its chats?')) {
-    await store.deleteProject(id)
-  }
+  if (!await askConfirm('Delete this project and archive all its chats?', {
+    title: 'Delete project',
+    confirmLabel: 'Delete project',
+    destructive: true,
+  })) return
+  await store.deleteProject(id)
 }
 
 async function addChat(projectId: string) {
@@ -1056,9 +1059,12 @@ async function stopRetry(chatId: string) {
 
 async function confirmDeleteChat(chatId: string) {
   chatMenu.value = null
-  if (confirm('Delete this chat permanently?')) {
-    await store.deleteChat(chatId)
-  }
+  if (!await askConfirm('Delete this chat permanently? It cannot be recovered.', {
+    title: 'Delete chat',
+    confirmLabel: 'Delete chat',
+    destructive: true,
+  })) return
+  await store.deleteChat(chatId)
 }
 </script>
 

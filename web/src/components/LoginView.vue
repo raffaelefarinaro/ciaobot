@@ -378,6 +378,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useAuthStore } from '../stores/auth'
 import { api } from '../lib/api'
+import { askConfirm } from '../lib/confirm'
 
 const auth = useAuthStore()
 const token = ref('')
@@ -404,11 +405,13 @@ const loginTokenPlaceholder = computed(() =>
 
 async function switchBackToHost() {
   if (switchingToHost.value) return
-  if (
-    !confirm(
-      'Stop client mode and become host on this machine? Skips asking the remote to push (use this when the host is unreachable or you do not have the password).',
-    )
-  ) {
+  if (!await askConfirm(
+    'Stop client mode and become host on this machine? Skips asking the remote to push (use this when the host is unreachable or you do not have the password).',
+    {
+      title: 'Become host on this device?',
+      confirmLabel: 'Disconnect and become host',
+    },
+  )) {
     return
   }
   switchingToHost.value = true

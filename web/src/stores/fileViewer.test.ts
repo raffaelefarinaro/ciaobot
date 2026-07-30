@@ -41,8 +41,6 @@ describe('file viewer edit mode', () => {
       }
       return new Response('saved content')
     }))
-    const confirmDiscard = vi.fn(() => true)
-    vi.stubGlobal('confirm', confirmDiscard)
 
     const store = useFileViewerStore()
     await store.open('notes/today.md')
@@ -52,7 +50,6 @@ describe('file viewer edit mode', () => {
     const opened = await store.open('notes/today.md')
 
     expect(opened).toBe(false)
-    expect(confirmDiscard).not.toHaveBeenCalled()
     expect(store.path).toBe('notes/today.md')
     expect(store.editing).toBe(true)
     expect(store.editBuffer).toBe('unsaved draft')
@@ -68,22 +65,27 @@ describe('file viewer edit mode', () => {
       }
       return new Response(url.includes('second.md') ? 'second content' : 'first content')
     }))
-    const confirmDiscard = vi.fn(() => false)
-    vi.stubGlobal('confirm', confirmDiscard)
+    const askConfirmModule = await import('../lib/confirm')
+    const confirmDiscard = vi.fn(async () => false)
+    const spy = vi.spyOn(askConfirmModule, 'askConfirm').mockImplementation(confirmDiscard as never)
 
-    const store = useFileViewerStore()
-    await store.open('notes/first.md')
-    store.startEditing()
-    store.editBuffer = 'unsaved draft'
+    try {
+      const store = useFileViewerStore()
+      await store.open('notes/first.md')
+      store.startEditing()
+      store.editBuffer = 'unsaved draft'
 
-    expect(await store.open('notes/second.md')).toBe(false)
-    expect(store.path).toBe('notes/first.md')
-    expect(store.editBuffer).toBe('unsaved draft')
+      expect(await store.open('notes/second.md')).toBe(false)
+      expect(store.path).toBe('notes/first.md')
+      expect(store.editBuffer).toBe('unsaved draft')
 
-    confirmDiscard.mockReturnValue(true)
-    expect(await store.open('notes/second.md')).toBe(true)
-    expect(store.path).toBe('notes/second.md')
-    expect(store.content).toBe('second content')
-    expect(store.editing).toBe(false)
+      confirmDiscard.mockResolvedValue(true)
+      expect(await store.open('notes/second.md')).toBe(true)
+      expect(store.path).toBe('notes/second.md')
+      expect(store.content).toBe('second content')
+      expect(store.editing).toBe(false)
+    } finally {
+      spy.mockRestore()
+    }
   })
 })

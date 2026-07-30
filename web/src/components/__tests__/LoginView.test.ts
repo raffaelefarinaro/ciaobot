@@ -331,7 +331,9 @@ describe('LoginView setup wizard tests', () => {
 
     mockApiPost.mockResolvedValue({ ok: true, status: { role: 'host' } })
     const assign = vi.fn()
-    vi.stubGlobal('confirm', () => true)
+    // LoginView asks through lib/confirm now, not window.confirm.
+    const confirmModule = await import('../../lib/confirm')
+    const askConfirmSpy = vi.spyOn(confirmModule, 'askConfirm').mockResolvedValue(true)
     Object.defineProperty(window, 'location', {
       configurable: true,
       value: { ...window.location, assign, pathname: '/login', href: 'http://localhost/login' },
@@ -345,6 +347,7 @@ describe('LoginView setup wizard tests', () => {
       force: true,
     })
     expect(assign).toHaveBeenCalledWith('/')
+    askConfirmSpy.mockRestore()  // clearAllMocks does not undo a spy
     vi.unstubAllGlobals()
   })
 })

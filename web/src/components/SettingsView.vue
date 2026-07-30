@@ -2373,6 +2373,7 @@ import type {
   WorkspaceProvider,
 } from '../lib/types'
 import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSupported } from '../lib/push'
+import { askConfirm } from '../lib/confirm'
 import { useAuthStore } from '../stores/auth'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
@@ -2718,7 +2719,11 @@ async function addCustomMcpServer() {
 }
 
 async function deleteCustomMcpServer(name: string) {
-  if (!confirm(`Are you sure you want to delete MCP server "${name}"?`)) return
+  if (!await askConfirm(`Are you sure you want to delete MCP server "${name}"?`, {
+    title: 'Delete MCP server',
+    confirmLabel: 'Delete server',
+    destructive: true,
+  })) return
   try {
     const res = await api.del<McpStatus>(`/api/mcp/servers/${encodeURIComponent(name)}`)
     mcpStatus.value = res
@@ -3458,7 +3463,11 @@ async function disconnectGwsProfile(profileName: string, deleteClientSecret: boo
     ? `Are you sure you want to delete the OAuth Client Secret for the ${profileName} profile?`
     : `Are you sure you want to disconnect/sign out the ${profileName} Google account?`
 
-  if (!confirm(message)) return
+  if (!await askConfirm(message, {
+    title: deleteClientSecret ? 'Delete OAuth Client Secret' : 'Disconnect Google account',
+    confirmLabel: deleteClientSecret ? 'Delete secret' : 'Disconnect',
+    destructive: true,
+  })) return
 
   gwsSavingProfile.value = profileName
   try {
@@ -3569,7 +3578,11 @@ const sortedUsage = computed<McpToolUsage[]>(() => {
 })
 
 async function providerConnectionAction(provider: string, action: 'connect' | 'verify' | 'logout') {
-  if (action === 'logout' && !confirm(`Log out of ${provider === 'codex' ? 'OpenAI Codex' : 'Claude Code'} on this computer?`)) {
+  if (action === 'logout' && !await askConfirm(`Log out of ${provider === 'codex' ? 'OpenAI Codex' : 'Claude Code'} on this computer?`, {
+    title: 'Log out',
+    confirmLabel: 'Log out',
+    destructive: true,
+  })) {
     return
   }
   providerConnectionPending.value = provider
@@ -4106,7 +4119,11 @@ async function saveSubagent(agent: SubagentAsset) {
 
 async function deleteSubagent(agent: SubagentAsset) {
   if (!agent.editable) return
-  if (!window.confirm(`Delete custom subagent "${agent.name}"?`)) return
+  if (!await askConfirm(`Delete custom subagent "${agent.name}"?`, {
+    title: 'Delete subagent',
+    confirmLabel: 'Delete subagent',
+    destructive: true,
+  })) return
   savingSubagent.value = agent.name
   assetLifecycleResult.value = 'Deleting subagent...'
   assetLifecycleError.value = false
@@ -4166,7 +4183,11 @@ async function saveCommand(command: CommandAsset) {
 
 async function deleteCommand(command: CommandAsset) {
   if (!command.editable) return
-  if (!window.confirm(`Delete custom command "/${command.name}"?`)) return
+  if (!await askConfirm(`Delete custom command "/${command.name}"?`, {
+    title: 'Delete command',
+    confirmLabel: 'Delete command',
+    destructive: true,
+  })) return
   savingCommand.value = command.name
   assetLifecycleResult.value = 'Deleting command...'
   assetLifecycleError.value = false
@@ -4694,7 +4715,11 @@ async function createNewWorkspace() {
 }
 
 async function removeWorkspace(name: string) {
-  if (!window.confirm(`Delete workspace "${name}"? Chats keep their history but lose workspace routing.`)) return
+  if (!await askConfirm(`Delete workspace "${name}"? Chats keep their history but lose workspace routing.`, {
+    title: 'Delete workspace',
+    confirmLabel: 'Delete workspace',
+    destructive: true,
+  })) return
   workspacesSaving.value = name
   workspacesResult.value = ''
   try {
@@ -4787,7 +4812,10 @@ async function doSnapshot(confirmWarnings = false) {
       alert(`Snapshot blocked by secrets:\n\n${payload.blockers.join('\n')}`)
       actionResult.value = 'Blocked by secrets.'
     } else if (payload?.warnings) {
-      if (confirm(`Warnings found:\n\n${payload.warnings.join('\n')}\n\nDo you want to proceed anyway?`)) {
+      if (await askConfirm(`Warnings found:\n\n${payload.warnings.join('\n')}\n\nDo you want to proceed anyway?`, {
+        title: 'Snapshot warnings',
+        confirmLabel: 'Proceed anyway',
+      })) {
         actionPending.value = null
         return doSnapshot(true)
       }
@@ -4808,7 +4836,10 @@ function restartAndReload(message: string) {
 }
 
 async function doDeploy(confirmWarnings = false) {
-  if (!confirmWarnings && !confirm('Restart? This will pull latest, rebuild, and restart.')) return
+  if (!confirmWarnings && !await askConfirm('Restart? This will pull latest, rebuild, and restart.', {
+    title: 'Restart and redeploy',
+    confirmLabel: 'Restart',
+  })) return
   actionPending.value = 'deploy'
   actionResult.value = ''
   deploySteps.value = []
@@ -4828,7 +4859,10 @@ async function doDeploy(confirmWarnings = false) {
       alert(`Restart blocked by secrets:\n\n${payload.blockers.join('\n')}`)
       actionResult.value = 'Blocked by secrets.'
     } else if (payload?.warnings) {
-      if (confirm(`Warnings found:\n\n${payload.warnings.join('\n')}\n\nDo you want to proceed anyway?`)) {
+      if (await askConfirm(`Warnings found:\n\n${payload.warnings.join('\n')}\n\nDo you want to proceed anyway?`, {
+        title: 'Deploy warnings',
+        confirmLabel: 'Proceed anyway',
+      })) {
         actionPending.value = null
         return doDeploy(true)
       }
@@ -4932,7 +4966,11 @@ async function doLogout() {
   // delete from document.cookie). After success the auth store routes back
   // to /login and the next login re-issues the cookie with the wider
   // Host-only cookie: no Domain attribute, scoped to the exact host.
-  if (!confirm('Log out of Ciaobot?')) return
+  if (!await askConfirm('Log out of Ciaobot?', {
+    title: 'Log out',
+    confirmLabel: 'Log out',
+    destructive: true,
+  })) return
   actionPending.value = 'logout'
   actionResult.value = ''
   try {
@@ -5078,7 +5116,10 @@ async function connectAsClient() {
       'Enter the host password. If the host has none yet, enable PWA password protection on that machine first.'
     return
   }
-  if (!confirm(`Connect as client to ${hostUrl}? This machine will stop being host and tunnel to that Ciaobot.`)) return
+  if (!await askConfirm(`Connect as client to ${hostUrl}? This machine will stop being host and tunnel to that Ciaobot.`, {
+    title: 'Connect as client',
+    confirmLabel: 'Connect as client',
+  })) return
 
   nodePending.value = 'connect'
   nodeActionResult.value = ''
@@ -5129,8 +5170,12 @@ async function reconnectHostSession() {
 async function doBecomeHost(force = false) {
   if (
     !force &&
-    !confirm(
+    !await askConfirm(
       'Disconnect and become host here? The remote will push its changes, then this machine pulls and resumes automations.',
+      {
+        title: 'Become host on this device?',
+        confirmLabel: 'Disconnect and become host',
+      },
     )
   ) {
     return
@@ -5156,7 +5201,10 @@ async function doBecomeHost(force = false) {
   } catch (e: any) {
     nodeActionError.value = true
     if (e?.payload?.peer_unreachable) {
-      if (confirm('Host is unreachable. Force disconnect anyway (skip remote push)?')) {
+      if (await askConfirm('Host is unreachable. Force disconnect anyway (skip remote push)?', {
+        title: 'Force disconnect',
+        confirmLabel: 'Force disconnect',
+      })) {
         nodePending.value = null
         return doBecomeHost(true)
       }
@@ -5167,7 +5215,10 @@ async function doBecomeHost(force = false) {
 }
 
 async function localHandback(confirmWarnings = false) {
-  if (!confirmWarnings && !confirm('Sync changes with the remote repository?')) return
+  if (!confirmWarnings && !await askConfirm('Sync changes with the remote repository?', {
+    title: 'Sync with remote',
+    confirmLabel: 'Sync with remote',
+  })) return
 
   actionPending.value = 'snapshot'
   actionResult.value = ''
@@ -5188,7 +5239,10 @@ async function localHandback(confirmWarnings = false) {
       alert(`Sync blocked by secrets:\n\n${payload.blockers.join('\n')}`)
       actionResult.value = 'Blocked by secrets.'
     } else if (payload?.warnings) {
-      if (confirm(`Warnings found:\n\n${payload.warnings.join('\n')}\n\nDo you want to proceed anyway?`)) {
+      if (await askConfirm(`Warnings found:\n\n${payload.warnings.join('\n')}\n\nDo you want to proceed anyway?`, {
+        title: 'Sync warnings',
+        confirmLabel: 'Proceed anyway',
+      })) {
         actionPending.value = null
         return localHandback(true)
       }

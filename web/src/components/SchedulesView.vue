@@ -264,6 +264,7 @@
 <script setup lang="ts">
 import { onMounted, ref, reactive, computed } from 'vue'
 import { useTaskStore } from '../stores/tasks'
+import { askConfirm } from '../lib/confirm'
 import { useProjectStore } from '../stores/projects'
 import type { Schedule } from '../lib/types'
 import NewScheduleForm from './NewScheduleForm.vue'
@@ -428,8 +429,13 @@ async function runNow(id: string) {
   await refresh()
 }
 
-function confirmDelete(id: string) {
-  if (confirm('Delete this schedule?')) store.deleteSchedule(id)
+async function confirmDelete(id: string) {
+  if (!await askConfirm('Delete this schedule? It will stop running.', {
+    title: 'Delete schedule',
+    confirmLabel: 'Delete schedule',
+    destructive: true,
+  })) return
+  await store.deleteSchedule(id)
 }
 
 async function togglePause(schedule: Schedule) {

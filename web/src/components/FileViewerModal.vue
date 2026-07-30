@@ -403,6 +403,7 @@ import { buildMarkdownIndex, resolveWikilinkTarget } from '../lib/wikilinks'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { createTerminalDiffLines, terminalDiffPrefix, type TerminalDiffKind } from '../lib/terminalDiff'
 import { isCsvPath } from '../lib/csv'
+import { askConfirm } from '../lib/confirm'
 import { formatCommentLocation } from '../lib/commentContext'
 import CommentComposePopover from './CommentComposePopover.vue'
 const ExcalidrawViewer = defineAsyncComponent(() => import('./ExcalidrawViewer.vue'))
@@ -524,7 +525,11 @@ async function diffAgainstSeq(seq: number): Promise<void> {
 }
 
 async function restoreSeq(seq: number): Promise<void> {
-  if (!confirm(`Restore snapshot #${seq} to disk? This writes a new snapshot so it can be undone.`)) return
+  if (!await askConfirm(`Restore snapshot #${seq} to disk? This writes a new snapshot so it can be undone.`, {
+    title: 'Restore snapshot',
+    confirmLabel: 'Restore',
+    destructive: true,
+  })) return
   const ok = await store.restoreSnapshot(seq)
   if (!ok) projectsStore.pushErrorToast('Restore failed', `Could not restore snapshot #${seq}. See network console for details.`)
 }
