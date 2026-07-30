@@ -774,3 +774,38 @@ export interface AutomationProcess {
   recent: JobRun[]
   stats: AutomationStats
 }
+
+// ── Multi-device (host / client) ───────────────────────────────────────────
+export interface NodePeer {
+  node_id: string
+  url: string
+  last_seen: string
+  is_active: boolean
+}
+
+export interface NodeStatus {
+  node_id: string
+  role: 'host' | 'client' | 'active' | 'standby'
+  mode?: 'host' | 'client'
+  active_since: string | null
+  last_handover: string | null
+  host_url?: string | null
+  active_peer_url?: string | null
+  host_reachable?: boolean | null
+  active_peer_reachable?: boolean | null
+  // Name and version of the machine a client is mirroring. Only present when
+  // the host answered the reachability ping.
+  host_node_id?: string
+  host_version?: string
+  has_host_session?: boolean
+  peers: NodePeer[]
+  git?: any
+}
+
+export interface PackageStatus {
+  current_version?: string
+  latest_version?: string
+  update_available?: boolean
+  mode?: string
+  error?: string
+}

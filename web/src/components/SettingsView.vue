@@ -5,12 +5,30 @@
 
       <!-- HOME TAB -->
       <template v-if="currentTab === 'home'">
+        <!-- Whose settings am I looking at? In client mode every card below is
+             the host's, because the API calls behind them are tunneled. Say so
+             once, at the top, and point at the one screen that is local. -->
+        <div v-if="isNodeClient" class="card scope-card">
+          <div class="settings-card-header">
+            <p class="section-title">you are viewing {{ hostScopeLabel }}</p>
+            <p class="hint">
+              This is the host's Settings, exactly as it looks on that machine. Changes here apply
+              there, including the password and restarts.
+              <router-link to="/device">This device</router-link>
+              has its own panel for role, host connection and its local app version.
+            </p>
+          </div>
+        </div>
+
         <!-- Actions -->
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
               <p class="section-title">app actions</p>
-              <p class="hint">Snapshot, sync, or restart this local Ciaobot instance.</p>
+              <p class="hint">
+                Snapshot, sync, or restart
+                {{ isNodeClient ? `the host (${hostScopeLabel})` : 'this local Ciaobot instance' }}.
+              </p>
             </div>
             <div class="settings-card-header-actions">
               <button class="btn-primary btn-small" @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()" :disabled="!!actionPending">
@@ -44,7 +62,13 @@
             <div>
               <p class="section-title">PWA password</p>
               <p class="hint">
-                Protect this Ciaobot with a password. Required before other devices can connect as clients.
+                <template v-if="isNodeClient">
+                  The password on {{ hostScopeLabel }} — the one you typed to open this client.
+                  Changing it here keeps this device connected; other clients have to log in again.
+                </template>
+                <template v-else>
+                  Protect this Ciaobot with a password. Required before other devices can connect as clients.
+                </template>
               </p>
             </div>
             <span
@@ -159,7 +183,15 @@
           <div class="settings-card-header settings-card-header--split">
             <div>
               <p class="section-title">package update</p>
-              <p class="hint">Check the installed package version and upgrade this local app.</p>
+              <p class="hint">
+                <template v-if="isNodeClient">
+                  The version installed on {{ hostScopeLabel }}. Updating restarts the host.
+                  To upgrade this computer, open <router-link to="/device">this device</router-link>.
+                </template>
+                <template v-else>
+                  Check the installed package version and upgrade this local app.
+                </template>
+              </p>
             </div>
             <div v-if="packageStatus" class="settings-card-header-actions">
               <button
@@ -344,198 +376,27 @@
           <div v-if="debugSummary" class="action-result">{{ debugSummary }}</div>
         </div>
 
-        <!-- Node: host / client (niche multi-device feature) -->
+        <!-- This device (role, host connection, local app) lives on its own
+             route so nothing on this page is about the machine in front of you. -->
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
-              <div class="settings-label-row">
-                <span class="section-title">host</span>
-                <details class="field-info">
-                  <summary aria-label="About host mode" title="About host mode">i</summary>
-                  <div class="field-info-panel">
-                    <p>
-                      The host is the machine where Ciaobot runs schedules and background work.
-                      Keep it on an always-on computer (for example a Mini at home).
-                    </p>
-                    <p>
-                      Other devices connect to it as clients when you want to control that
-                      machine remotely.
-                    </p>
-                  </div>
-                </details>
-                <span class="section-title">&amp;</span>
-                <span class="section-title">client</span>
-                <details class="field-info">
-                  <summary aria-label="About client mode" title="About client mode">i</summary>
-                  <div class="field-info-panel">
-                    <p>
-                      Use client mode when Ciaobot is already running on another computer and
-                      you want a second device — for example a laptop — to control it remotely.
-                    </p>
-                    <p>
-                      For access across networks, set up a private VPN such as
-                      <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer">Tailscale</a>
-                      and connect with the host’s Tailscale URL
-                      (e.g. <code>http://100.x.x.x:8443</code>).
-                    </p>
-                  </div>
-                </details>
-              </div>
+              <p class="section-title">this device</p>
               <p class="hint">
-                <template v-if="!nodeStatus">Loading mode…</template>
-                <template v-else-if="isNodeClient">
-                  This device is a <strong>client</strong> — tray and PWA tunnel to the host below. Automations run on the host, not here.
+                <template v-if="isNodeClient">
+                  Client mode, host connection and the app installed on this computer.
+                  Everything else on this page belongs to {{ hostScopeLabel }}.
                 </template>
                 <template v-else>
-                  Connect this device to another Ciaobot when you want to control it remotely.
+                  Role, addresses other devices can reach, connected clients, and the app
+                  installed on this computer.
                 </template>
               </p>
             </div>
-            <div v-if="nodeStatus && isNodeClient" class="settings-card-header-actions">
-              <span class="badge badge--warn">{{ nodeRoleLabel }}</span>
+            <div class="settings-card-header-actions">
+              <router-link class="btn-secondary btn-small" to="/device">Open device settings</router-link>
             </div>
           </div>
-          <!-- Where this engine can be reached from another device. The native
-               app no longer lists these in the tray, so this is the only place
-               they surface. Hosts share them; clients tunnel to a host instead. -->
-          <NodeAddresses v-if="!isNodeClient" />
-          <div v-if="!isNodeClient && nodeStatus" class="connected-clients-panel">
-            <p class="section-title">connected clients</p>
-            <ConnectedClients />
-          </div>
-          <div v-if="!nodeStatus" class="action-row"><span class="loading">Loading node status&hellip;</span></div>
-          <template v-else>
-            <!-- Client only: this device → host, with reachability on the link. -->
-            <div
-              v-if="isNodeClient"
-              class="node-path"
-              aria-label="Client connection"
-            >
-              <div class="node-path-endpoint">
-                <span class="node-path-label">this device</span>
-                <code class="node-path-value" :title="nodeStatus.node_id">{{ nodeStatus.node_id }}</code>
-              </div>
-              <div class="node-path-link">
-                <span class="node-path-arrow" aria-hidden="true">→</span>
-                <span
-                  v-if="nodeStatus.host_reachable != null"
-                  class="badge"
-                  :class="nodeStatus.host_reachable ? 'badge--success' : 'badge--warn'"
-                >
-                  {{ nodeStatus.host_reachable ? 'reachable' : 'unreachable' }}
-                </span>
-              </div>
-              <div class="node-path-endpoint node-path-endpoint--host">
-                <span class="node-path-label">host</span>
-                <code class="node-path-value" :title="connectedHostUrl || undefined">{{ connectedHostUrl || '—' }}</code>
-              </div>
-            </div>
-            <div v-if="nodeActionResult" class="action-result" :class="{ 'action-result--error': nodeActionError }">
-              {{ nodeActionResult }}
-            </div>
-
-            <!-- Client mode: disconnect only (no connect form) -->
-            <template v-if="isNodeClient">
-              <p class="hint hint--section-empty">
-                You are tunneling to the host below — chats and automations are that machine’s, not this one’s.
-                Disconnect asks the host to push, then this machine pulls and becomes host again.
-              </p>
-              <div v-if="!nodeStatus.has_host_session" class="action-result action-result--error">
-                Host password session missing. Enter the host password below to finish connecting.
-              </div>
-              <div v-if="!nodeStatus.has_host_session" class="settings-form-panel node-peer-form">
-                <label class="settings-field">
-                  <span class="ws-label">Host password</span>
-                  <input
-                    v-model="hostPasswordInput"
-                    type="password"
-                    class="routine-input"
-                    placeholder="Password set on the host"
-                    autocomplete="off"
-                    @keyup.enter="reconnectHostSession"
-                  />
-                </label>
-                <div class="action-row settings-actions">
-                  <button
-                    class="btn-primary btn-small"
-                    @click="reconnectHostSession"
-                    :disabled="!hostPasswordInput || nodePending !== null"
-                  >
-                    {{ nodePending === 'reconnect' ? 'Reconnecting…' : 'Reconnect' }}
-                  </button>
-                </div>
-              </div>
-              <div class="action-row settings-actions">
-                <button
-                  class="btn-primary btn-small"
-                  @click="() => doBecomeHost(false)"
-                  :disabled="nodePending !== null"
-                >
-                  {{ nodePending === 'handover' ? 'Disconnecting…' : 'Disconnect' }}
-                </button>
-                <button
-                  class="btn-caution btn-small"
-                  @click="() => doBecomeHost(true)"
-                  :disabled="nodePending !== null"
-                  title="Become host even if the remote is offline (skip remote push)"
-                >
-                  Force disconnect
-                </button>
-              </div>
-            </template>
-
-            <!-- Host mode: optional connect form, collapsed until asked -->
-            <template v-else>
-              <div class="action-row settings-actions">
-                <button
-                  class="btn-secondary btn-small"
-                  @click="showConnectForm = !showConnectForm"
-                  :disabled="nodePending !== null"
-                >
-                  {{ showConnectForm ? 'Cancel' : 'Connect as client…' }}
-                </button>
-              </div>
-              <template v-if="showConnectForm">
-                <p class="hint hint--section-empty">
-                  This pauses local automations and tunnels tray + PWA to another Ciaobot.
-                  That host must have a PWA password. Tailscale URLs work
-                  (e.g. http://100.x.x.x:8443).
-                </p>
-                <div class="settings-form-panel node-peer-form">
-                  <label class="settings-field">
-                    <span class="ws-label">Host URL</span>
-                    <input
-                      v-model="hostUrlInput"
-                      type="text"
-                      class="routine-input"
-                      placeholder="http://100.x.x.x:8443"
-                      @keyup.enter="connectAsClient"
-                    />
-                  </label>
-                  <label class="settings-field">
-                    <span class="ws-label">Host password</span>
-                    <input
-                      v-model="hostPasswordInput"
-                      type="password"
-                      class="routine-input"
-                      placeholder="Password set on the host"
-                      autocomplete="off"
-                      @keyup.enter="connectAsClient"
-                    />
-                  </label>
-                  <div class="action-row settings-actions">
-                    <button
-                      class="btn-primary btn-small"
-                      @click="connectAsClient"
-                      :disabled="!hostUrlInput.trim() || !hostPasswordInput || nodePending !== null"
-                    >
-                      {{ nodePending === 'connect' ? 'Connecting…' : 'Connect' }}
-                    </button>
-                  </div>
-                </div>
-              </template>
-            </template>
-          </template>
         </div>
 
         <!-- Open source -->
@@ -2344,8 +2205,6 @@ import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import { formatTime, formatDuration } from '../lib/time'
 import { isDesktopApp } from '../lib/desktop'
-import NodeAddresses from './NodeAddresses.vue'
-import ConnectedClients from './ConnectedClients.vue'
 import type {
   AgentAssetsResponse,
   AutomationProcess,
@@ -2357,6 +2216,7 @@ import type {
   GwsIntegrationSettings,
   LocalStatus,
   ModelsResponse,
+  NodeStatus,
   McpStatus,
   McpUsage,
   McpToolUsage,
@@ -5055,163 +4915,34 @@ async function saveAuthSettings() {
   authSettingsSaving.value = false
 }
 
-// ── Host / client (multi-device tunnel) ────────────────────────────────
-interface NodePeer {
-  node_id: string
-  url: string
-  last_seen: string
-  is_active: boolean
-}
-
-interface NodeStatus {
-  node_id: string
-  role: 'host' | 'client' | 'active' | 'standby'
-  mode?: 'host' | 'client'
-  active_since: string | null
-  last_handover: string | null
-  host_url?: string | null
-  active_peer_url?: string | null
-  host_reachable?: boolean | null
-  active_peer_reachable?: boolean | null
-  has_host_session?: boolean
-  peers: NodePeer[]
-  git?: any
-}
-
+// ── Host / client: labeling only ──────────────────────────────────────────
+// The device-scoped controls live in DeviceView (/device). What is left here is
+// just enough to answer "whose settings am I editing": in client mode every
+// other card on this page is served by the host through the tunnel.
 const nodeStatus = ref<NodeStatus | null>(null)
-const nodePending = ref<string | null>(null)
-const nodeActionResult = ref('')
-const nodeActionError = ref(false)
-const hostUrlInput = ref('')
-const hostPasswordInput = ref('')
-const showConnectForm = ref(false)
 
 const isNodeClient = computed(() => {
   const role = nodeStatus.value?.role
   return role === 'client' || role === 'standby'
 })
 
-const nodeRoleLabel = computed(() => (isNodeClient.value ? 'client' : 'host'))
-
 const connectedHostUrl = computed(
   () => nodeStatus.value?.host_url || nodeStatus.value?.active_peer_url || '',
 )
 
+const hostScopeLabel = computed(() => {
+  const named = nodeStatus.value?.host_node_id
+  const url = connectedHostUrl.value
+  if (named && url) return `${named} (${url})`
+  return named || url || 'the host'
+})
+
 async function fetchNodeStatus() {
   try {
     nodeStatus.value = await api.get<NodeStatus>('/api/node/status')
-    if (isNodeClient.value) showConnectForm.value = false
   } catch {
-    /* leave null on failure */
+    /* leave null on failure: cards then read as host-mode, which is the default */
   }
-}
-
-async function connectAsClient() {
-  const hostUrl = hostUrlInput.value.trim()
-  const password = hostPasswordInput.value
-  if (!hostUrl) return
-  if (!password) {
-    nodeActionError.value = true
-    nodeActionResult.value =
-      'Enter the host password. If the host has none yet, enable PWA password protection on that machine first.'
-    return
-  }
-  if (!await askConfirm(`Connect as client to ${hostUrl}? This machine will stop being host and tunnel to that Ciaobot.`, {
-    title: 'Connect as client',
-    confirmLabel: 'Connect as client',
-  })) return
-
-  nodePending.value = 'connect'
-  nodeActionResult.value = ''
-  nodeActionError.value = false
-  try {
-    const r = await api.post<any>('/api/node/connect', {
-      host_url: hostUrl,
-      password,
-    })
-    if (r?.ok) {
-      hostPasswordInput.value = ''
-      showConnectForm.value = false
-      // Full reload so stores/chats pick up the tunneled host and the client banner appears.
-      window.location.assign('/')
-      return
-    } else {
-      nodeActionError.value = true
-      nodeActionResult.value = r?.error || 'Connect failed'
-    }
-  } catch (e: any) {
-    nodeActionError.value = true
-    const detail = e?.payload?.error || e.message || 'Connect failed'
-    nodeActionResult.value = e?.payload?.password_required_on_host
-      ? detail
-      : `Error: ${detail}`
-  }
-  nodePending.value = null
-}
-
-async function reconnectHostSession() {
-  const password = hostPasswordInput.value
-  if (!password) return
-  nodePending.value = 'reconnect'
-  nodeActionResult.value = ''
-  nodeActionError.value = false
-  try {
-    await api.post('/api/auth', { token: password })
-    hostPasswordInput.value = ''
-    window.location.assign('/')
-    return
-  } catch (e: any) {
-    nodeActionError.value = true
-    nodeActionResult.value = `Error: ${e?.payload?.error || e.message || 'Reconnect failed'}`
-  }
-  nodePending.value = null
-}
-
-async function doBecomeHost(force = false) {
-  if (
-    !force &&
-    !await askConfirm(
-      'Disconnect and become host here? The remote will push its changes, then this machine pulls and resumes automations.',
-      {
-        title: 'Become host on this device?',
-        confirmLabel: 'Disconnect and become host',
-      },
-    )
-  ) {
-    return
-  }
-
-  nodePending.value = 'handover'
-  nodeActionResult.value = ''
-  nodeActionError.value = false
-
-  try {
-    const targetUrl = connectedHostUrl.value
-    const r = await api.post<any>('/api/node/handover', { target_node_url: targetUrl, force })
-    if (r?.ok) {
-      nodeActionResult.value = force
-        ? 'Force disconnect complete. This device is now the host.'
-        : 'Disconnected. This device is now the host.'
-      await fetchNodeStatus()
-      await fetchLocalStatus()
-    } else {
-      nodeActionError.value = true
-      nodeActionResult.value = r?.error || 'Disconnect failed'
-    }
-  } catch (e: any) {
-    nodeActionError.value = true
-    if (e?.payload?.peer_unreachable) {
-      if (await askConfirm('Host is unreachable. Force disconnect anyway (skip remote push)?', {
-        title: 'Force disconnect',
-        confirmLabel: 'Force disconnect',
-      })) {
-        nodePending.value = null
-        return doBecomeHost(true)
-      }
-    }
-    nodeActionResult.value = `Error: ${e?.payload?.error || e.message || 'Disconnect failed'}`
-  }
-  nodePending.value = null
 }
 
 async function localHandback(confirmWarnings = false) {
@@ -5478,6 +5209,18 @@ async function doPackageUpdate() {
 .settings-actions {
   justify-content: flex-end;
   margin-top: var(--space-2);
+}
+
+/* Router links used as buttons in card headers (e.g. "Open device settings"). */
+a.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+/* Client mode: names the machine whose settings the rest of the page edits. */
+.scope-card {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg2));
 }
 .settings-actions > button {
   flex: 0 0 auto;

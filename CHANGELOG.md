@@ -2,7 +2,22 @@
 
 ## v0.6.5 - 2026-07-30
 
+### Changed
+- A device connected as a client now looks exactly like opening the host's own
+  address in a browser: it serves the host's app build instead of its own, so a
+  newer host can no longer be driven by an older local screen without saying so.
+  The password in Settings is the host's, the one you typed to get in, and every
+  card on that page belongs to the host and now names it.
+- Everything about the computer in front of you moved to one page, **This
+  device** (`/device`), reachable from the client banner and from Settings: its
+  role, its connection to the host, disconnect, and its own version and update.
+  Nothing else in the app is about the local machine anymore, so it is always
+  clear whose data a screen is showing. That page keeps working when the host is
+  unreachable, since it is where you go to disconnect.
+
 ### Fixed
+- Changing the host's password from a connected client no longer cuts that
+  client off.
 - The loop indicator in a chat's loop banner is now legible. It inherited body
   text size, so the heartbeat glyph was lost next to the loop title and the
   Start/Stop buttons.

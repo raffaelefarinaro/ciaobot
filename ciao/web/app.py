@@ -332,6 +332,12 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/package/status", package_status_endpoint, methods=["GET"]),
         Route("/api/package/changelog", package_changelog_endpoint, methods=["GET"]),
         Route("/api/package/update", package_update_endpoint, methods=["POST"]),
+        # Device-scoped copies of the package routes. In client mode /api/package/*
+        # is tunneled (it reports and updates the host), so the Device panel needs
+        # its own never-proxied path to see and update *this* machine's install.
+        Route("/api/device/package-status", package_status_endpoint, methods=["GET"]),
+        Route("/api/device/changelog", package_changelog_endpoint, methods=["GET"]),
+        Route("/api/device/update", package_update_endpoint, methods=["POST"]),
         Route("/api/voice/install-local", voice_install_local_endpoint, methods=["POST"]),
         Route("/api/tts/install-local", tts_install_local_endpoint, methods=["POST"]),
         # Node & Handover (Multi-device Active-Standby)

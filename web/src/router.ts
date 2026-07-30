@@ -7,6 +7,15 @@ const routes = [
     component: () => import('./components/LoginView.vue'),
   },
   {
+    // This machine, not the host it mirrors: role, host connection, local
+    // install. Deliberately outside the auth guard and outside ChatLayout —
+    // it is the way out of client mode, so it must load when the host (and
+    // with it every proxied API call) is unreachable.
+    path: '/device',
+    name: 'device',
+    component: () => import('./components/DeviceView.vue'),
+  },
+  {
     path: '/',
     name: 'chat',
     component: () => import('./components/ChatLayout.vue'),

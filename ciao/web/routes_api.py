@@ -4824,6 +4824,9 @@ async def startup_status_endpoint(request: Request) -> JSONResponse:
     payload.update({
         "version": __version__,
         "desktop_api_version": 1,
+        # Identifies the machine that answered. A client asks its host for this
+        # so the mirrored UI can name whose data it is showing.
+        "node_id": node_mgr.node_id if node_mgr else "",
         "node_role": role,
         "active_peer_url": active_peer_url,
         "host_url": node_mgr.get_host_url() if node_mgr else None,
@@ -5985,6 +5988,17 @@ async def node_status_endpoint(request: Request) -> JSONResponse:
                 res = await client.get(f"{host_url}/api/startup-status", headers=headers)
                 status["host_reachable"] = res.status_code == 200
                 status["active_peer_reachable"] = status["host_reachable"]
+                # Name and version of the machine the UI is mirroring, so the
+                # client can label host-scoped screens instead of leaving the
+                # user guessing whose settings they are editing.
+                if status["host_reachable"]:
+                    try:
+                        payload = res.json()
+                    except ValueError:
+                        payload = {}
+                    if isinstance(payload, dict):
+                        status["host_node_id"] = str(payload.get("node_id") or "")
+                        status["host_version"] = str(payload.get("version") or "")
         except Exception:
             status["host_reachable"] = False
             status["active_peer_reachable"] = False

@@ -178,7 +178,11 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 
 ### Required env vars
 
-- `PWA_AUTH_TOKEN` (required): pre-shared token for PWA auth.
+- `PWA_AUTH_TOKEN` (required): pre-shared token for PWA auth. On a node in client
+  mode this local token is not what you log in with: the login screen
+  authenticates against the *host's* token, and Settings → PWA password edits the
+  host's too (that card is proxied). The local token still guards this machine's
+  own never-proxied routes, `/api/node/*` and `/api/device/*`.
 - `CIAO_PUSH_CONTACT` (optional): push notification contact string for the Web Push VAPID subject, for example `mailto:you@example.com`. Empty disables Web Push delivery until set (in `.env` or Settings), but the macOS menu-bar companion still posts local alerts from the runtime notification log.
 - `PWA_PORT` (default `8443`), `PWA_HOST` (default `0.0.0.0`).
 - `CIAO_RUNTIME_ROOT` (optional): runtime-state directory. `Ciaobot.app` reads

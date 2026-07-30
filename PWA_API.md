@@ -110,6 +110,9 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/package/status` | Read installed package version and best-effort latest GitHub release version |
 | GET | `/api/package/changelog` | List commits between the installed and latest release for the update prompt |
 | POST | `/api/package/update` | Upgrade ciaobot (`brew upgrade ciaobot` or latest release wheel) and restart |
+| GET | `/api/device/package-status` | Same as `/api/package/status`, but never proxied: in client mode this reports *this* machine's install while `/api/package/status` reports the host's |
+| GET | `/api/device/changelog` | Commits between this machine's installed version and the latest release (never proxied) |
+| POST | `/api/device/update` | Upgrade and restart *this* machine, not the host it mirrors (never proxied) |
 | POST | `/api/voice/install-local` | Install local voice transcription dependencies and restart |
 | POST | `/api/tts/install-local` | Install local speech synthesis dependencies (kokoro-onnx) and restart |
 | POST | `/api/setup/finish` | Finish first-run setup from bootstrap mode |
