@@ -299,11 +299,24 @@ _LEGACY_APP_BUNDLE_NAMES = (
     "Ciaobot.app",
     "Ciaobot Menu Bar.app",
 )
+# Executable inside the Tauri desktop app (the Homebrew cask's Ciaobot.app).
+_DESKTOP_EXECUTABLE_NAME = "ciaobot-desktop"
 
 
 def _is_our_app_bundle(app_root: Path) -> bool:
-    """Whether ``app_root`` is a launcher bundle created by Ciaobot."""
+    """Whether ``app_root`` is a launcher bundle created by Ciaobot.
 
+    The Tauri desktop app ships as ``Ciaobot.app`` under the same
+    ``local.ciaobot.app`` identifier our pre-rename launcher used, so the
+    bundle id cannot tell them apart. Misidentifying it is destructive rather
+    than merely wasteful: the launcher we write is named ``Ciaobot Server.app``,
+    so ``_remove_legacy_app_shortcuts`` deletes the cask's app and never puts
+    anything back in its place, leaving a running process on a bundle that no
+    longer exists on disk. The executable name is the discriminator.
+    """
+
+    if (app_root / "Contents" / "MacOS" / _DESKTOP_EXECUTABLE_NAME).is_file():
+        return False
     plist = app_root / "Contents" / "Info.plist"
     try:
         text = plist.read_text(encoding="utf-8")
@@ -529,7 +542,7 @@ def _desktop_app_installed(app_dir: Path | None = None) -> bool:
         else (Path("/Applications"), Path.home() / "Applications")
     )
     return any(
-        (root / "Ciaobot.app" / "Contents" / "MacOS" / "ciaobot-desktop").is_file()
+        (root / "Ciaobot.app" / "Contents" / "MacOS" / _DESKTOP_EXECUTABLE_NAME).is_file()
         for root in roots
     )
 
@@ -556,6 +569,13 @@ def refresh_app_bundle_if_stale(
     app_dir = _installed_app_dir()
     if app_dir is None:
         return None  # setup never created a bundle; nothing to refresh
+    if _desktop_app_installed(app_dir):
+        # A leftover Ciaobot Server.app next to the Tauri app: setup
+        # deliberately skips the Python launcher when the desktop app is
+        # present, so refreshing would rewrite a bundle the desktop app
+        # replaced -- and delete the desktop app on the way through
+        # _remove_legacy_app_shortcuts.
+        return None
     try:
         last = _app_bundle_marker_path(workspace).read_text(encoding="utf-8").strip()
     except OSError:

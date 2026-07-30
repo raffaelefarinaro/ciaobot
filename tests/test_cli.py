@@ -471,6 +471,51 @@ def test_refresh_app_bundle_noop_off_darwin(tmp_path: Path, monkeypatch) -> None
     assert cli.refresh_app_bundle_if_stale(tmp_path, 8443) is None
 
 
+def _write_desktop_app(app_dir: Path) -> Path:
+    """Materialize the Tauri cask's ``Ciaobot.app``, bundle id and all."""
+
+    app_root = app_dir / "Ciaobot.app"
+    macos = app_root / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    (macos / "ciaobot-desktop").write_text("", encoding="utf-8")
+    (app_root / "Contents" / "Info.plist").write_text(
+        "<plist><string>local.ciaobot.app</string></plist>", encoding="utf-8"
+    )
+    return app_root
+
+
+def test_is_our_app_bundle_rejects_the_tauri_desktop_app(tmp_path: Path) -> None:
+    # Same bundle id as our pre-rename launcher; only the executable differs.
+    assert cli._is_our_app_bundle(_write_desktop_app(tmp_path)) is False
+
+
+def test_remove_legacy_app_shortcuts_keeps_the_tauri_desktop_app(tmp_path: Path) -> None:
+    app_root = _write_desktop_app(tmp_path)
+
+    assert cli._remove_legacy_app_shortcuts(tmp_path) is False
+    assert (app_root / "Contents" / "MacOS" / "ciaobot-desktop").is_file()
+
+
+def test_refresh_app_bundle_skips_when_desktop_app_shares_the_dir(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import ciao
+
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.setattr(ciao, "__version__", "9.9.9")
+    app_dir = tmp_path / "Applications"
+    _write_desktop_app(app_dir)
+    monkeypatch.setattr(cli, "_installed_app_dir", lambda: app_dir)
+    marker = cli._app_bundle_marker_path(tmp_path)
+    marker.parent.mkdir(parents=True)
+    marker.write_text("9.9.8\n", encoding="utf-8")  # stale: would rewrite
+    calls: list = []
+    monkeypatch.setattr(cli, "_write_app_shortcut", lambda **k: calls.append(k))
+
+    assert cli.refresh_app_bundle_if_stale(tmp_path, 8443) is None
+    assert calls == []  # never reaches the rmtree that ate the cask app
+
+
 def test_migrate_menubar_launch_agent_repoints_legacy_bundle(tmp_path: Path) -> None:
     launch_dir = tmp_path / "LaunchAgents"
     launch_dir.mkdir()
