@@ -123,15 +123,28 @@ export function sectionsFromModelsResponse(response: ModelsResponse | null): Mod
     if (fableModel && modelBadges[fableModel]) {
       modelBadges[fableModel] = modelBadges[fableModel].filter((badge) => badge !== 'Fable')
     }
-    const models = fableModel && !codexModels.includes('fable') ? [...codexModels, 'fable'] : codexModels
-    const modelLabels = fableModel ? { fable: `${fableModel}-ultra` } : undefined
-    if (fableModel) modelBadges.fable = ['Fable']
+    // Temporary pseudo-model until Codex ships a real fable-tier model.
+    // Selecting it resolves to fableModel at reasoning effort 'ultra' and locks
+    // the thinking level.
+    const FABLE_PSEUDO_MODEL = 'gpt-5.6-sol-ultra'
+    const hasFablePseudo = fableModel === 'gpt-5.6-sol' && !codexModels.includes(FABLE_PSEUDO_MODEL)
+    const finalCodexModels = hasFablePseudo ? [...codexModels, FABLE_PSEUDO_MODEL] : codexModels
+    if (hasFablePseudo) {
+      modelBadges[FABLE_PSEUDO_MODEL] = ['Fable']
+    } else if (fableModel && !codexModels.includes('fable')) {
+      finalCodexModels.push('fable')
+      if (modelBadges[fableModel]) {
+        modelBadges[fableModel] = modelBadges[fableModel].filter((badge) => badge !== 'Fable')
+      }
+      modelBadges.fable = ['Fable']
+    }
+    const sortedCodexModels = sortModelsByTier(finalCodexModels, modelBadges)
     sections.push({
       key: 'codex',
       label: 'OpenAI Codex',
-      models: sortModelsByTier(models, modelBadges),
+      models: sortedCodexModels,
       modelBadges,
-      modelLabels,
+      modelLabels: hasFablePseudo ? { [FABLE_PSEUDO_MODEL]: `${fableModel}-ultra` } : (fableModel ? { fable: `${fableModel}-ultra` } : undefined),
     })
   }
 

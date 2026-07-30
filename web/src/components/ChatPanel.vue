@@ -110,7 +110,29 @@
             placement="bottom-end"
             @select="selectModel"
             @close="showModelPicker = false"
-          />
+          >
+            <template #footer>
+              <div
+                v-if="filteredThinkingLevels.length && !(chat.model === CODEX_FABLE_PSEUDO_MODEL || (chat.model === 'gpt-5.6-sol' && chat.thinking_level === 'ultra'))"
+                class="thinking-levels"
+              >
+                <span class="thinking-levels__label">Thinking</span>
+                <div class="thinking-levels__chips">
+                  <button
+                    v-for="level in ['', ...filteredThinkingLevels]"
+                    :key="level"
+                    type="button"
+                    class="thinking-chip"
+                    :class="{ 'thinking-chip--active': (chat.thinking_level || '') === level }"
+                    :aria-pressed="(chat.thinking_level || '') === level"
+                    @click="selectThinking(level)"
+                  >
+                    {{ level || 'auto' }}
+                  </button>
+                </div>
+              </div>
+            </template>
+          </ModelSelector>
         </div>
         <button
           class="archive-btn touch-hit"
@@ -1538,6 +1560,9 @@ const activeModelHighlights = computed(() => {
     const provider = activeBucket.value === 'claude_personal' ? 'ollama' : activeBucket.value
     const nativeModel = modelsResponse.value?.alias_tiers?.[provider]?.[tier]
     return nativeModel ? [nativeModel] : [c.model]
+  }
+  if (c.model === CODEX_FABLE_PSEUDO_MODEL || (c.model === 'gpt-5.6-sol' && c.thinking_level === 'ultra')) {
+    return [CODEX_FABLE_PSEUDO_MODEL]
   }
   const effective = effectiveModelForBucket(c.model, activeBucket.value)
   return [effective || c.model]
@@ -3086,9 +3111,13 @@ function tierForModel(model: string, bucket: BucketKey): TierAlias | null {
   return null
 }
 
+// Temporary pseudo-model for Codex fable until a real fable-tier model ships.
+const CODEX_FABLE_PSEUDO_MODEL = 'gpt-5.6-sol-ultra'
+
 function canonicalTier(model: string): string {
   const alias = tierAlias(model)
   if (alias) return alias
+  if (model === CODEX_FABLE_PSEUDO_MODEL) return model
   const resolvedAlias = tierForModel(model, activeBucket.value)
   return resolvedAlias || model
 }
@@ -3107,6 +3136,7 @@ function bucketForSelectedModel(model: string): BucketKey {
   const response = modelsResponse.value
   if (response?.alias_tiers?.codex?.[model]) return 'codex'
   if ((response?.codex_models || []).includes(model)) return 'codex'
+  if (model === CODEX_FABLE_PSEUDO_MODEL) return 'codex'
   const openrouterModels = response?.openrouter_models || []
   if (openrouterModels.includes(model) || (model.includes('/') && !model.includes(':'))) {
     return 'openrouter'
@@ -3198,7 +3228,9 @@ async function selectModel(value: string | string[], sectionKey = '') {
     showModelPicker.value = false
     return
   }
-  const targetRoute = routeKindFor(model, targetBucket)
+  const isFablePseudo = model === CODEX_FABLE_PSEUDO_MODEL
+  const realModel = isFablePseudo ? 'gpt-5.6-sol' : model
+  const targetRoute = routeKindFor(realModel, targetBucket)
   const currentRoute = routeKindFor(chat.value.model, activeBucket.value)
   const updates: {
     provider: ProviderKey
@@ -5542,6 +5574,51 @@ details[open] > .activity-summary::before {
   cursor: pointer;
 }
 .model-picker-btn:active { transform: scale(0.96); }
+
+.thinking-levels {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.thinking-levels__label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--fg2);
+}
+
+.thinking-levels__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.thinking-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
+}
+
+.thinking-chip:hover {
+  background: var(--bg3);
+}
+
+.thinking-chip--active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
 
 .archive-btn {
   display: inline-flex;

@@ -385,6 +385,10 @@ onBeforeUnmount(() => {
       <div v-else class="model-selector__empty">
         No models match "{{ query }}"
       </div>
+
+      <div v-if="$slots.footer" class="model-selector__footer">
+        <slot name="footer" />
+      </div>
     </div>
   </div>
 </template>
@@ -683,6 +687,14 @@ onBeforeUnmount(() => {
   text-align: center;
   font-size: 13px;
   color: var(--fg2);
+}
+
+.model-selector__footer {
+  flex: 0 0 auto;
+  padding: 8px 10px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  background: var(--bg2);
+  border-radius: 0 0 var(--radius) var(--radius);
 }
 
 @media (max-width: 768px) {
