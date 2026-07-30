@@ -66,6 +66,60 @@ _CLI_ENVELOPE_RE = re.compile(
     r"^\s*<(?:" + "|".join(re.escape(t) for t in _CLI_ENVELOPE_TAGS) + r")(?:\s[^>]*)?>"
 )
 
+# Prompt the server injects into the parent turn when its background subagents
+# all finish, so the chat doesn't sit on the interim "I'll report back" message
+# forever (delivered by
+# ``ProjectChatManager._nudge_synthesis_after_subagents``). It lives here
+# because three call sites need the same string: the sender, the /messages
+# renderer that collapses it into a system line instead of a user bubble, and
+# the turn counter below — it is machine-generated, so it must not advance
+# `turn_index` any more than the CLI's own synthetic user records do.
+SUBAGENT_SYNTHESIS_NUDGE = (
+    "The background agent(s) you dispatched have now finished. Review their "
+    "results (read their transcripts or output as needed) and post your "
+    "consolidated final report for this task now. Do not dispatch new "
+    "background agents to answer this. If you already posted the final "
+    "report, reply with a brief confirmation instead of repeating it."
+)
+
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _collapse_whitespace(text: str) -> str:
+    return _WHITESPACE_RE.sub(" ", text).strip()
+
+
+_NUDGE_COLLAPSED = _collapse_whitespace(SUBAGENT_SYNTHESIS_NUDGE)
+
+
+def is_synthesis_nudge(text: str) -> bool:
+    """True when ``text`` is the injected subagent-synthesis nudge.
+
+    Matches on the tail: the nudge is sent with the chat's context prefix
+    attached, and the /messages prefix stripper only removes the shapes it
+    recognizes.
+    """
+    return _collapse_whitespace(text).endswith(_NUDGE_COLLAPSED)
+
+
+# Markdown punctuation that can trail a question mark ("**...?**", "(...?)").
+_QUESTION_TAIL_CHARS = "*_`~)]}>\"' \t"
+
+
+def ends_with_user_question(text: str) -> bool:
+    """True when the last prose line of ``text`` reads as a question.
+
+    The synthesis nudge is held back in that case: the parent ended its turn
+    by asking the user something, and injecting the nudge answers on their
+    behalf and buries the question.
+    """
+    for line in reversed(text.strip().splitlines()):
+        stripped = line.strip().rstrip(_QUESTION_TAIL_CHARS)
+        if not stripped:
+            continue
+        return stripped.endswith("?")
+    return False
+
 
 @dataclass
 class SubagentInfo:
@@ -89,6 +143,14 @@ class SessionSubagentState:
     """Aggregate subagent state parsed from a parent session JSONL."""
 
     subagents: dict[str, SubagentInfo] = field(default_factory=dict)
+    # Last assistant message that carried prose. The synthesis nudge is held
+    # back when it ends in a question to the user.
+    last_assistant_text: str = ""
+
+    @property
+    def awaiting_user_answer(self) -> bool:
+        """True when the parent's last word was a question to the user."""
+        return ends_with_user_question(self.last_assistant_text)
 
     @property
     def running_background(self) -> int:
@@ -148,6 +210,8 @@ def _is_countable_user_turn(content: str) -> bool:
         return False
     if _CLI_ENVELOPE_RE.match(text):
         return False
+    if is_synthesis_nudge(text):
+        return False
     return True
 
 
@@ -201,6 +265,9 @@ def parse_session_subagents(path: Path) -> SessionSubagentState:
             message = record.get("message")
 
             if rtype == "assistant" and isinstance(message, dict):
+                assistant_text = _text_content(message)
+                if assistant_text.strip():
+                    state.last_assistant_text = assistant_text
                 blocks = message.get("content")
                 if not isinstance(blocks, list):
                     continue

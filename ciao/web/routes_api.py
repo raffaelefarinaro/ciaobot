@@ -582,6 +582,11 @@ def _is_cli_internal_envelope(content: str) -> bool:
     return bool(_CLI_ENVELOPE_RE.match(content))
 
 
+# Stands in for the injected subagent-synthesis nudge in the transcript. Same
+# icon as the subagent-completion lines above so the pair reads as one story.
+_SYNTHESIS_NUDGE_LABEL = "\U0001F916 Background agents finished — asked for a consolidated report"
+
+
 def _summarize_task_notification(content: str) -> str | None:
     """Render a <task-notification> envelope as a one-line system bubble.
 
@@ -3029,6 +3034,15 @@ async def chat_messages(request: Request) -> JSONResponse:
                 result.append({"role": "system", "content": task_summary})
                 continue
             if _is_cli_internal_envelope(content):
+                continue
+            # Our own subagent-synthesis nudge (ciao/subagent_tracking.py).
+            # It's a server-injected prompt, not something the user typed, so
+            # showing the paragraph verbatim reads as words they never wrote.
+            # Collapse it to a status line, and skip without incrementing
+            # user_idx — subagent_tracking._is_countable_user_turn applies the
+            # same rule, so the two turn counters stay aligned.
+            if subagent_tracking.is_synthesis_nudge(content):
+                result.append({"role": "system", "content": _SYNTHESIS_NUDGE_LABEL})
                 continue
         entry: dict = {
             "role": m.type,
