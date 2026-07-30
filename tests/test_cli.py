@@ -420,11 +420,18 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     assert (menubar_app_exe.parent / "python").is_symlink()
 
 
+def _isolate_app_roots(monkeypatch, *roots: Path) -> None:
+    """Keep the desktop-app check off the developer's real /Applications."""
+
+    monkeypatch.setattr(cli, "_app_search_roots", lambda: tuple(roots))
+
+
 def test_refresh_app_bundle_skips_when_version_current(tmp_path: Path, monkeypatch) -> None:
     import ciao
 
     monkeypatch.setattr(cli.sys, "platform", "darwin")
     monkeypatch.setattr(ciao, "__version__", "9.9.9")
+    _isolate_app_roots(monkeypatch, tmp_path / "Applications")
     monkeypatch.setattr(cli, "_installed_app_dir", lambda: tmp_path / "Applications")
     marker = cli._app_bundle_marker_path(tmp_path)
     marker.parent.mkdir(parents=True)
@@ -442,6 +449,7 @@ def test_refresh_app_bundle_rewrites_when_stale(tmp_path: Path, monkeypatch) -> 
     monkeypatch.setattr(cli.sys, "platform", "darwin")
     monkeypatch.setattr(ciao, "__version__", "9.9.9")
     app_dir = tmp_path / "Applications"
+    _isolate_app_roots(monkeypatch, app_dir)
     monkeypatch.setattr(cli, "_installed_app_dir", lambda: app_dir)
     marker = cli._app_bundle_marker_path(tmp_path)
     marker.parent.mkdir(parents=True)
@@ -505,6 +513,7 @@ def test_refresh_app_bundle_skips_when_desktop_app_shares_the_dir(
     monkeypatch.setattr(ciao, "__version__", "9.9.9")
     app_dir = tmp_path / "Applications"
     _write_desktop_app(app_dir)
+    _isolate_app_roots(monkeypatch, app_dir)
     monkeypatch.setattr(cli, "_installed_app_dir", lambda: app_dir)
     marker = cli._app_bundle_marker_path(tmp_path)
     marker.parent.mkdir(parents=True)
@@ -514,6 +523,32 @@ def test_refresh_app_bundle_skips_when_desktop_app_shares_the_dir(
 
     assert cli.refresh_app_bundle_if_stale(tmp_path, 8443) is None
     assert calls == []  # never reaches the rmtree that ate the cask app
+
+
+def test_refresh_app_bundle_skips_when_desktop_app_is_in_another_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Non-admin layout: the launcher lives in ~/Applications while the cask
+    # installs into /Applications. Checking only the launcher's own directory
+    # resurrects Ciaobot Server.app on every `brew upgrade`.
+    import ciao
+
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.setattr(ciao, "__version__", "9.9.9")
+    home_apps = tmp_path / "home-apps"
+    system_apps = tmp_path / "system-apps"
+    home_apps.mkdir()
+    _write_desktop_app(system_apps)
+    _isolate_app_roots(monkeypatch, home_apps, system_apps)
+    monkeypatch.setattr(cli, "_installed_app_dir", lambda: home_apps)
+    marker = cli._app_bundle_marker_path(tmp_path)
+    marker.parent.mkdir(parents=True)
+    marker.write_text("9.9.8\n", encoding="utf-8")  # stale: would rewrite
+    calls: list = []
+    monkeypatch.setattr(cli, "_write_app_shortcut", lambda **k: calls.append(k))
+
+    assert cli.refresh_app_bundle_if_stale(tmp_path, 8443) is None
+    assert calls == []
 
 
 def test_migrate_menubar_launch_agent_repoints_legacy_bundle(tmp_path: Path) -> None:
@@ -697,6 +732,32 @@ def test_setup_skips_legacy_companion_when_tauri_app_is_installed(
     assert (launch_agents / "com.ciao.server.plist").is_file()
     assert not (launch_agents / "com.ciao.menubar.plist").exists()
     assert not (apps / "Ciaobot Server.app").exists()
+
+
+def test_setup_skips_legacy_companion_when_tauri_app_is_in_another_root(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Non-admin default: setup writes to ~/Applications, the cask sits in
+    # /Applications. Without --app-dir the check spans every standard root.
+    home_apps = tmp_path / "home-apps"
+    system_apps = tmp_path / "system-apps"
+    home_apps.mkdir()
+    _write_desktop_app(system_apps)
+    _isolate_app_roots(monkeypatch, home_apps, system_apps)
+    monkeypatch.setattr(cli, "_default_app_dir", lambda: home_apps)
+    launch_agents = tmp_path / "LaunchAgents"
+
+    assert cli.main([
+        "setup",
+        "--workspace",
+        str(tmp_path / "workspace"),
+        "--launch-agents-dir",
+        str(launch_agents),
+    ]) == 0
+
+    assert (launch_agents / "com.ciao.server.plist").is_file()
+    assert not (launch_agents / "com.ciao.menubar.plist").exists()
+    assert not (home_apps / "Ciaobot Server.app").exists()
 
 
 def test_default_app_dir_prefers_system_applications(monkeypatch) -> None:
