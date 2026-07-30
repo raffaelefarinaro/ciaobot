@@ -17,6 +17,22 @@
 - `WebFetch` is the fallback, never the default: reach for it only when defuddle cannot handle the target (non-HTML, API endpoints, raw binary files).
 - The `web-research` skill carries the details, including YouTube — `defuddle` returns the description plus a timestamped transcript when captions exist. Subagents that read the web follow that skill, so the rule holds in their contexts too.
 
+## Issue labeling
+
+When you open a GitHub issue via `gh issue create` on `raffaelefarinaro/ciaobot`, apply at least one label that classifies the issue. Title prefix and label must agree. Every open issue should carry exactly one classification label; the `report` label may sit alongside it for issues opened by `scripts/sync_bug_reports.py`.
+
+| Title prefix | Label | Meaning |
+|---|---|---|
+| `[Bug]` | `bug` | Confirmed defect |
+| `[Feature]` | `enhancement` | Net-new capability |
+| `[Docs]` | `documentation` | Docs-only change |
+| `[Chore]` | `chore` | Internal maintenance (SDK bumps, refactors, repo hygiene) |
+| `[Goal]` | `enhancement` | Strategic/architectural direction |
+| `[Agent]` | (matching type) | Triage-loop surfaced; classification follows content |
+| `[Report]` | `report` | Auto-opened from `scripts/sync_bug_reports.py`; likely noise unless reviewed |
+
+When fixing labels on existing issues, only adjust labels that are missing or wrong. Do not relabel issues a human has intentionally marked. The triage loop enforces this convention every 4h.
+
 ## Deliverables and the pinned file panel
 
 - The PWA renders `.md`, `.csv`, `.excalidraw` (diagrams), `.pdf`, `.pptx` (slides), and image files in a side-by-side pinned panel the user can read, view, comment on, and edit inline. A file you create or surface via `file_surface` is auto-surfaced there (desktop, when nothing is already pinned), so the user sees the artifact next to the chat instead of scrolling a long reply.
