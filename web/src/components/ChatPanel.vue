@@ -520,22 +520,6 @@
             v-html="renderMarkdown(store.currentStreamingThinking)"
           ></div>
           <div v-if="store.currentStreamingText" class="trace-text trace-streaming" v-html="renderMarkdown(store.currentStreamingText)"></div>
-          <!-- Ollama-routed models (glm-5.2, minimax-m3, kimi-k2.7) sometimes
-               return their final answer wrapped in a thinking block instead
-               of a text block. The text stream stays empty, so the user
-               can't tell their reply is right there in the reasoning trace.
-               Offer a one-click way to surface it as a real assistant bubble
-               when the heuristic (long thinking, no text, still streaming)
-               fires. -->
-          <button
-            v-if="showPromoteThinkingAction"
-            type="button"
-            class="trace-action"
-            @click="promoteStreamingThinkingToAnswer"
-            title="This model returned the reply inside its reasoning trace. Promote it to a normal assistant bubble."
-          >
-            Show reply as text
-          </button>
           <!-- Subagents for the in-flight turn nest in the live trace -->
           <SubagentPanel v-if="liveSubagents.length" :subagents="liveSubagents" />
         </div>
@@ -1303,15 +1287,6 @@ function toggleTrace(i: number) {
 
 function toggleLiveTrace() {
   liveTraceOpen.value = !liveTraceOpen.value
-}
-
-// Manual recovery for Ollama-routed models (glm-5.2, minimax-m3, kimi-k2.7)
-// that wrap the final reply in a thinking block. Delegates to the store
-// action so the message list, timeline, and persistence all stay in sync
-// with the rest of the chat-state mutations.
-function promoteStreamingThinkingToAnswer() {
-  if (!chat.value?.chat_id) return
-  store.promoteStreamingThinkingToAnswer(chat.value.chat_id)
 }
 
 function checkScroll() {
@@ -2545,40 +2520,12 @@ const liveTraceMetaParts = computed(() => {
   return parts
 })
 
-// Heuristic for the "model returned its reply inside the thinking block" case.
-// Ollama-routed models (glm-5.2, minimax-m3, kimi-k2.7) sometimes wrap the
-// final answer in a thinking content block, so the visible text stream stays
-// empty and the user sees the response painted as reasoning. When the
-// thinking buffer is long and no text has streamed in for this turn, that's
-// almost certainly the reply, not background reasoning. The length gate keeps
-// short model introspection from flashing the affordance on well-behaved
-// models.
-const LIKELY_ANSWER_THINKING_CHARS = 1000
-const thinkingIsLikelyAnswer = computed(() => {
-  const thinking = store.currentStreamingThinking
-  if (!thinking || thinking.length < LIKELY_ANSWER_THINKING_CHARS) return false
-  if (store.currentStreamingText) return false
-  if (store.activeBackgroundAgents > 0) return false
-  if (store.currentTimeline.some(entry => entry.kind === 'tool')) return false
-  return true
-})
-
-// Live trace label: distinguish "Working..." (real tool work in progress)
-// from "Reply pending (delivered as thinking)" (the model put its answer
-// in the reasoning stream and we should show the affordance).
+// Live trace label: "Working..." when real tool work or visible text is in
+// progress, otherwise "Thinking..." while the model reasons.
 const liveTraceLabel = computed(() => {
-  if (thinkingIsLikelyAnswer.value) return 'Reply pending (in thinking)'
   if (store.currentTimeline.length || store.currentStreamingText) return 'Working...'
   return 'Thinking...'
 })
-
-// Only show the "Show reply as text" action once the thinking is actually
-// long enough to plausibly be the answer AND the turn is still live. After
-// the result event fires the thinking gets committed to the timeline as a
-// _thinking step, where the existing expand/collapse UI already covers it.
-const showPromoteThinkingAction = computed(() =>
-  store.isStreaming && thinkingIsLikelyAnswer.value,
-)
 
 // Compact token label: 1234 -> "1.2k", 1_200_000 -> "1.2M". Keeps the live
 // trace meta short while the count grows.
@@ -3186,8 +3133,12 @@ async function selectBucket(bucket: BucketKey) {
   // OpenRouter also keeps its bucket so tier aliases resolve through
   // the OpenRouter alias map instead of the Claude subscription.
   if (bucketLocked.value) {
-    const ok = window.confirm(
+    const ok = await askConfirm(
       `Hand over this chat to ${def.label} / ${defaultModel}? The same visible chat will continue with a fresh provider session.`,
+      {
+        title: 'Hand over chat',
+        confirmLabel: 'Hand over',
+      },
     )
     if (!ok) return
     await store.handoverChat(chat.value.chat_id, {
@@ -3239,20 +3190,28 @@ async function selectModel(value: string | string[], sectionKey = '') {
     thinking_level?: string
   } = {
     provider: (BUCKET_DEFS.find(def => def.key === targetBucket)?.provider || 'claude') as ProviderKey,
-    model,
+    model: realModel,
     model_bucket: modelBucket,
   }
-  const targetLevels = modelsResponse.value?.model_reasoning_levels?.[model]
-  if (
-    chat.value.thinking_level
-    && targetLevels
-    && !targetLevels.includes(chat.value.thinking_level)
-  ) {
-    updates.thinking_level = ''
+  if (isFablePseudo) {
+    updates.thinking_level = 'ultra'
+  } else {
+    const targetLevels = modelsResponse.value?.model_reasoning_levels?.[model]
+    if (
+      chat.value.thinking_level
+      && targetLevels
+      && !targetLevels.includes(chat.value.thinking_level)
+    ) {
+      updates.thinking_level = ''
+    }
   }
   if (bucketLocked.value && targetRoute !== currentRoute) {
-    const ok = window.confirm(
+    const ok = await askConfirm(
       `Hand over this chat to ${bucketLabel(targetBucket)} / ${model}? The same visible chat will continue with a fresh provider session.`,
+      {
+        title: 'Hand over chat',
+        confirmLabel: 'Hand over',
+      },
     )
     if (!ok) return
     await store.handoverChat(chat.value.chat_id, updates)
@@ -4312,26 +4271,6 @@ function insertImageRef(n: number) {
   gap: 2px;
 }
 
-/* "Show reply as text" affordance shown when the model returned its answer
-   inside the thinking stream (Ollama-routed models). Inline button so it
-   reads as an action, not a trace line. Sits below the thinking block. */
-.trace-action {
-  align-self: flex-start;
-  margin-top: 4px;
-  padding: 4px 10px;
-  font-size: var(--text-sm);
-  font-style: normal;
-  color: var(--accent);
-  background: transparent;
-  border: 1px solid var(--accent);
-  border-radius: 4px;
-  cursor: pointer;
-  font-family: inherit;
-}
-.trace-action:hover {
-  background: var(--accent);
-  color: var(--bg);
-}
 
 /* Inline file card. Rendered inside the activity trace whenever the agent
    calls Write/Edit/MultiEdit/NotebookEdit. Tapping opens the FileViewerModal
