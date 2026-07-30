@@ -2326,6 +2326,16 @@ export const useProjectStore = defineStore('projects', () => {
         } catch { /* ignore */ }
         break
       }
+      case 'chat_created': {
+        // A new chat (fresh or fork) was created on this instance. Other
+        // tabs/devices have no other real-time signal for this: create/fork
+        // emit no streaming event, so without this handler the sidebar only
+        // learns about the chat via the 15s syncLatest poll or a manual
+        // refresh. replaceChat is idempotent (update-in-place if we already
+        // pushed optimistically, push otherwise).
+        replaceChat(msg.chat)
+        break
+      }
       case 'chat_title': {
         const chat = chats.value.find(c => c.chat_id === msg.chat_id)
         if (chat) {

@@ -2703,6 +2703,7 @@ class ProjectChatManager:
             chat.thinking_level = CODEX_FABLE_THINKING_LEVEL
         self._chats[cid] = chat
         self._save()
+        self._events.publish({"type": "chat_created", "chat": chat.to_dict(local=True)})
         return chat
 
     def _is_empty_chat(self, chat: ChatInfo) -> bool:
@@ -3069,6 +3070,11 @@ class ProjectChatManager:
             self._chats.pop(fork.chat_id, None)
             self._unlink_chat_images(fork)
             raise
+        # Announce the new chat so other tabs/devices (and this tab if a
+        # racing syncLatest clobbered the optimistic push) render it without
+        # waiting for the 15s poll. A fork starts no streaming turn, so no
+        # chat_result_ready refetch would otherwise restore it (#fork-list-sync).
+        self._events.publish({"type": "chat_created", "chat": fork.to_dict(local=True)})
         return fork
 
     def handover_chat(
