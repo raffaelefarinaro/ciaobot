@@ -35,7 +35,7 @@ try {
     (mediaQuery as any).addListener(listener)
   }
 
-  const savedFontScale = localStorage.getItem('ciao-font-scale') || '1.0'
+  const savedFontScale = localStorage.getItem('ciao-font-scale') || '1.2'
   document.documentElement.style.setProperty('--font-scale', savedFontScale)
 } catch (e) {
   // Ignore localStorage restrictions
