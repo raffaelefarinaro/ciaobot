@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -341,6 +343,134 @@ async def test_watch_subagent_completion_holds_nudge_when_parent_asked_a_questio
     # indicator and reconciles history; only the injected prompt is withheld.
     assert ready_events[-1]["remaining"] == 0
     assert ready_events[-1]["nudged"] is False
+
+
+async def test_watch_subagent_completion_clears_on_idle_agent_transcript(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A missing <task-notification> must not pin the count at 1 forever.
+
+    The CLI can defer the notification to the next turn boundary (or replace it
+    with a synthetic "stopped" record on resume), so the parent JSONL alone can
+    never clear. The agent's own transcript going quiet on its final answer is
+    the fallback signal.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("subagent-idle", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="subagent-idle-test")
+    chat.session_id = "sess-idle-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-idle-1.jsonl"
+    # The parent file never changes: no completion ever lands in it.
+    _write_jsonl(
+        session_path,
+        [
+            {"type": "user", "message": {"role": "user", "content": "kick off work"}},
+            *_dispatch_records("toolu_1", "aaa111"),
+        ],
+    )
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root: session_path,
+    )
+
+    def finish_agent() -> None:
+        path = subagent_tracking.subagent_transcript_path(session_path, "aaa111")
+        _write_jsonl(
+            path,
+            [
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "Here is the trace."}],
+                    },
+                }
+            ],
+        )
+        stale = time.time() - 600
+        os.utime(path, (stale, stale))
+
+    ticks = iter([finish_agent])
+
+    async def fake_sleep(seconds: float) -> None:
+        step = next(ticks, None)
+        if step is not None:
+            step()
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    published: list[dict] = []
+    original_publish = pcm._events.publish
+
+    def capture_publish(payload: dict) -> None:
+        published.append(payload)
+        original_publish(payload)
+
+    monkeypatch.setattr(pcm._events, "publish", capture_publish)
+
+    await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+
+    ready = [ev["remaining"] for ev in published if ev.get("type") == "chat_subagents_ready"]
+    assert ready == [1, 0]
+
+
+async def test_watch_subagent_completion_publishes_zero_when_it_gives_up(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Exiting with a positive count would strand the badge on every client."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("subagent-giveup", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="subagent-giveup-test")
+    chat.session_id = "sess-giveup-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-giveup-1.jsonl"
+    _write_jsonl(
+        session_path,
+        [
+            {"type": "user", "message": {"role": "user", "content": "kick off work"}},
+            *_dispatch_records("toolu_1", "aaa111"),
+        ],
+    )
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root: session_path,
+    )
+
+    # Second tick: the session file is gone (session reset, workspace moved).
+    async def fake_sleep(seconds: float) -> None:
+        session_path.unlink(missing_ok=True)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    published: list[dict] = []
+    original_publish = pcm._events.publish
+
+    def capture_publish(payload: dict) -> None:
+        published.append(payload)
+        original_publish(payload)
+
+    monkeypatch.setattr(pcm._events, "publish", capture_publish)
+
+    # Go through the real registration path: the zero-on-exit publish is
+    # deliberately skipped when a replacement watcher already owns the slot.
+    pcm._start_subagent_watcher(chat.chat_id, project.project_id)
+    await pcm._pending_subagent_watchers[chat.chat_id]
+
+    ready = [ev["remaining"] for ev in published if ev.get("type") == "chat_subagents_ready"]
+    assert ready == [1, 0]
+    assert pcm.background_agent_counts == {}
+    assert chat.chat_id not in pcm._pending_subagent_watchers
 
 
 def test_chat_subagents_falls_back_to_nested_jsonl_and_progress_entries(

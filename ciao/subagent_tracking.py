@@ -24,13 +24,23 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 _DISPATCH_TOOL_NAMES = {"Agent", "Task", "agent", "task"}
+
+# How long a background agent's own transcript must sit untouched before we
+# treat it as finished without a ``<task-notification>``. See
+# ``has_finished_transcript`` for why that fallback exists.
+FINISHED_AGENT_IDLE_SECONDS = 60.0
+
+# Bytes read from the tail of an agent transcript to recover its last record.
+_TAIL_WINDOW_BYTES = 65536
 
 _TASK_NOTIFICATION_RE = re.compile(
     r"<task-notification>(.*?)</task-notification>", re.DOTALL
@@ -180,6 +190,115 @@ def find_parent_session_file(session_id: str, workspace_root: Path | str) -> Pat
     except OSError:
         pass
     return None
+
+
+def subagent_transcript_path(parent_path: Path, agent_id: str) -> Path:
+    """Where the CLI keeps ``agent_id``'s transcript for this parent session."""
+    return (
+        parent_path.parent
+        / parent_path.stem
+        / "subagents"
+        / f"agent-{_normalize_agent_id(agent_id)}.jsonl"
+    )
+
+
+def _last_json_record(path: Path) -> dict | None:
+    """Last complete JSON record in ``path``, read from the tail only."""
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            window = min(size, _TAIL_WINDOW_BYTES)
+            fh.seek(size - window)
+            chunk = fh.read(window)
+    except OSError:
+        return None
+    for raw in reversed(chunk.splitlines()):
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # Either the window cut the oldest line in half, or we caught a
+            # torn write on the newest one. Fall back to the next record.
+            continue
+        if isinstance(record, dict):
+            return record
+    return None
+
+
+def _is_final_answer_record(record: dict) -> bool:
+    """True when ``record`` is an agent's closing prose message.
+
+    A working agent's tail record is a ``tool_use`` assistant message or a
+    ``tool_result`` user message; only the final answer is text (optionally
+    preceded by thinking) with nothing left to execute.
+    """
+    if record.get("type") != "assistant":
+        return False
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return False
+    content = message.get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    if not isinstance(content, list):
+        return False
+    kinds = [b.get("type") for b in content if isinstance(b, dict)]
+    return "text" in kinds and all(k in ("text", "thinking") for k in kinds)
+
+
+def has_finished_transcript(
+    parent_path: Path,
+    agent_id: str,
+    *,
+    now: float | None = None,
+    idle_seconds: float = FINISHED_AGENT_IDLE_SECONDS,
+) -> bool:
+    """True when ``agent_id``'s own transcript shows it is done.
+
+    The parent JSONL only learns a background agent finished when the CLI
+    writes a ``<task-notification>``, and that record can be deferred to the
+    next turn boundary — or replaced, on session resume, by a synthetic
+    ``<status>stopped</status>`` "no completion record was found" envelope.
+    Either way the parent's running count can sit above zero long after the
+    work landed, with nothing left to ever bring it down.
+
+    The agent's transcript is the corroborating signal: it stops growing the
+    moment the agent stops. Both conditions are required so a slow tool call
+    (minutes of silence mid-run) can't be mistaken for completion.
+    """
+    path = subagent_transcript_path(parent_path, agent_id)
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        # No transcript yet: the agent was dispatched but hasn't written
+        # anything, so it is still starting up.
+        return False
+    if (time.time() if now is None else now) - mtime < idle_seconds:
+        return False
+    record = _last_json_record(path)
+    return record is not None and _is_final_answer_record(record)
+
+
+def running_background_agents(
+    parent_path: Path,
+    state: SessionSubagentState,
+    *,
+    now: float | None = None,
+    idle_seconds: float = FINISHED_AGENT_IDLE_SECONDS,
+) -> int:
+    """Background agents still running, per the parent *and* their transcripts."""
+    return sum(
+        1
+        for info in state.subagents.values()
+        if info.is_async
+        and info.status == "running"
+        and not has_finished_transcript(
+            parent_path, info.agent_id, now=now, idle_seconds=idle_seconds
+        )
+    )
 
 
 def _text_content(message: object) -> str:

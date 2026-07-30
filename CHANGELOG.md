@@ -16,6 +16,12 @@
   This never affected published releases — the engine, app, and Homebrew
   packages shipped normally each time — only the automated check that installs
   and launches them afterwards.
+- The "background agents running" indicator no longer sticks after the agents
+  have finished. Ciaobot waited on a completion record that the CLI sometimes
+  writes only at the start of the next turn, or never writes at all, so the
+  count could sit at one until you sent another message. It now reads each
+  agent's own transcript as well, and clears the count whenever it stops
+  watching instead of leaving a badge that nothing can take down.
 
 ### Maintenance
 - The desktop app records engine start-up failures to its log instead of

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -11,8 +13,11 @@ from ciao.subagent_tracking import (
     SUBAGENT_SYNTHESIS_NUDGE,
     SessionSubagentState,
     ends_with_user_question,
+    has_finished_transcript,
     is_synthesis_nudge,
     parse_session_subagents,
+    running_background_agents,
+    subagent_transcript_path,
 )
 
 
@@ -251,3 +256,78 @@ def test_running_background_counts_only_async_running() -> None:
     state.subagents["b"] = SubagentInfo(agent_id="b", is_async=True, status="completed")
     state.subagents["c"] = SubagentInfo(agent_id="c", is_async=False, status="completed")
     assert state.running_background == 1
+
+
+# ── Transcript-side completion fallback ──────────────────────────────────
+
+
+def _write_agent_transcript(
+    parent_path: Path, agent_id: str, records: list[dict], *, age_seconds: float = 0.0
+) -> Path:
+    path = subagent_transcript_path(parent_path, agent_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+    if age_seconds:
+        stamp = time.time() - age_seconds
+        os.utime(path, (stamp, stamp))
+    return path
+
+
+def _tool_use_record(name: str = "Bash") -> dict:
+    return {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "toolu_x", "name": name, "input": {}}],
+        },
+    }
+
+
+def test_finished_transcript_needs_final_prose_and_idleness(tmp_path: Path) -> None:
+    parent = _write_session(tmp_path, [_user_text("go")])
+
+    # Idle long enough, and the tail is the agent's closing answer.
+    _write_agent_transcript(
+        parent, "done", [_tool_use_record(), _assistant_text("Here is the report.")],
+        age_seconds=600,
+    )
+    assert has_finished_transcript(parent, "done") is True
+    # The CLI's own ids carry an "agent-" prefix; both spellings resolve.
+    assert has_finished_transcript(parent, "agent-done") is True
+
+    # Same tail, but written moments ago: too soon to call it.
+    _write_agent_transcript(parent, "fresh", [_assistant_text("Here is the report.")])
+    assert has_finished_transcript(parent, "fresh") is False
+
+    # Idle for ages but parked on a tool call: a slow Bash step, still running.
+    _write_agent_transcript(
+        parent, "slow", [_assistant_text("Running the suite."), _tool_use_record()],
+        age_seconds=600,
+    )
+    assert has_finished_transcript(parent, "slow") is False
+
+    # Dispatched but nothing written yet: still starting up.
+    assert has_finished_transcript(parent, "missing") is False
+
+
+def test_running_background_agents_drops_agents_with_finished_transcripts(
+    tmp_path: Path,
+) -> None:
+    """The parent JSONL can miss a completion; the transcript still shows it."""
+    records = [
+        _user_text("investigate this"),
+        _assistant_dispatch("toolu_1", "Trace the bug"),
+        _dispatch_result("toolu_1", "aaa111"),
+        _assistant_dispatch("toolu_2", "Check the tests"),
+        _dispatch_result("toolu_2", "bbb222"),
+    ]
+    parent = _write_session(tmp_path, records)
+    state = parse_session_subagents(parent)
+    # No <task-notification> for either agent: the parent still says both run.
+    assert state.running_background == 2
+    assert running_background_agents(parent, state) == 2
+
+    _write_agent_transcript(
+        parent, "aaa111", [_assistant_text("Traced it.")], age_seconds=600
+    )
+    assert running_background_agents(parent, state) == 1
