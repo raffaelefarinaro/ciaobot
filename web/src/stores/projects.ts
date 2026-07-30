@@ -64,7 +64,7 @@ export const useProjectStore = defineStore('projects', () => {
   const activeWorkspace = ref<WorkspaceName>('personal')
   const activeChatId = ref<string | null>(null)
   // False until the first fetchAll() resolves. Gates the home empty state so
-  // a restored active chat does not flash the getting-started screen.
+  // a restored active chat does not flash a blank placeholder.
   const bootstrapped = ref(false)
   const messages = ref<Record<string, ChatMessage[]>>({})
   // Subagent transcripts keyed by chat_id. Loaded lazily on chat switch and

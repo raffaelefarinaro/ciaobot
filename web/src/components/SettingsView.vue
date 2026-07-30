@@ -2367,7 +2367,6 @@ import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
-import OnboardingCard from './OnboardingCard.vue'
 import { providerModelBadges, sectionsFromModelOptions, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 
 // The tray owns package updates and native notifications in the desktop app.

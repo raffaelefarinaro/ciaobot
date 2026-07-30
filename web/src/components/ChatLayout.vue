@@ -162,8 +162,7 @@
                 {{ action.isCreating ? 'Creating...' : `+ ${action.label} chat` }}
               </button>
               </div>
-            <OnboardingCard variant="home" @open-sidebar="sidebarCollapsed = false" />
-          </div>
+                      </div>
         </div>
       </template>
     </div>
@@ -187,7 +186,6 @@ import FileViewerModal from './FileViewerModal.vue'
 import PinnedFilePanel from './PinnedFilePanel.vue'
 import PaneHeader from './PaneHeader.vue'
 import ProductTour from './ProductTour.vue'
-import OnboardingCard from './OnboardingCard.vue'
 import HomeRecentChats from './HomeRecentChats.vue'
 import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
 import { normalizeWorkspaceColor } from '../lib/workspaceColors'
