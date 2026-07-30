@@ -306,9 +306,21 @@
             <div class="settings-control">
               <div class="font-scale-row">
                 <button class="btn-small" @click="adjustFontScale(-0.05)" :disabled="fontScale <= 0.8">Decrease</button>
-                <span class="font-scale-display">{{ Math.round(fontScale * 100) }}%</span>
+                <span class="font-scale-display">{{ fontScalePercent }}%</span>
                 <button class="btn-small" @click="adjustFontScale(0.05)" :disabled="fontScale >= 1.5">Increase</button>
-                <button class="btn-small font-reset" @click="resetFontScale" :disabled="fontScale === 1.0">Reset</button>
+                <button class="btn-small font-reset" @click="resetFontScale" :disabled="fontScale === DEFAULT_FONT_SCALE">Reset</button>
+              </div>
+              <div class="font-scale-presets">
+                <button
+                  class="btn-small"
+                  :class="{ active: fontScale === DEFAULT_FONT_SCALE }"
+                  @click="setFontScale(DEFAULT_FONT_SCALE)"
+                >100%</button>
+                <button
+                  class="btn-small"
+                  :class="{ active: Math.abs(fontScale - LARGE_FONT_SCALE) < 0.001 }"
+                  @click="setFontScale(LARGE_FONT_SCALE)"
+                >120%</button>
               </div>
             </div>
           </div>
@@ -2718,14 +2730,20 @@ async function deleteCustomMcpServer(name: string) {
 
 // ── Appearance settings ────────────────────────────────────────────────────
 const activeTheme = ref('system')
-const fontScale = ref(1.0)
+// The font scale is anchored to the pre-rescale UI: DEFAULT_FONT_SCALE (1.2)
+// displays as "100%" and LARGE_FONT_SCALE (1.44) as "120%". The raw multiplier
+// still drives --font-scale; only the displayed percentage is rescaled.
+const DEFAULT_FONT_SCALE = 1.2
+const LARGE_FONT_SCALE = 1.44
+const fontScale = ref(DEFAULT_FONT_SCALE)
+const fontScalePercent = computed(() => Math.round((fontScale.value / DEFAULT_FONT_SCALE) * 100))
 
 function loadAppearanceSettings() {
   try {
     activeTheme.value = localStorage.getItem('ciao-theme') || 'system'
     const savedScale = localStorage.getItem('ciao-font-scale')
     if (savedScale) {
-      fontScale.value = parseFloat(savedScale) || 1.0
+      fontScale.value = parseFloat(savedScale) || DEFAULT_FONT_SCALE
     }
   } catch (e) {
     // Ignore localStorage block
@@ -2756,19 +2774,19 @@ function adjustFontScale(delta: number) {
   let next = parseFloat((fontScale.value + delta).toFixed(2))
   if (next < 0.8) next = 0.8
   if (next > 1.5) next = 1.5
+  setFontScale(next)
+}
+
+function resetFontScale() {
+  setFontScale(DEFAULT_FONT_SCALE)
+}
+
+function setFontScale(next: number) {
   fontScale.value = next
   try {
     localStorage.setItem('ciao-font-scale', next.toString())
   } catch (e) {}
   document.documentElement.style.setProperty('--font-scale', next.toString())
-}
-
-function resetFontScale() {
-  fontScale.value = 1.0
-  try {
-    localStorage.setItem('ciao-font-scale', '1.0')
-  } catch (e) {}
-  document.documentElement.style.setProperty('--font-scale', '1.0')
 }
 function isSkillExpanded(name: string) {
   return expandedSkills.value[name] || false
@@ -6989,6 +7007,21 @@ async function doPackageUpdate() {
   color: var(--fg);
   flex: 0 0 56px;
   text-align: center;
+}
+.font-scale-presets {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  width: 100%;
+}
+.font-scale-presets .btn-small {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.font-scale-presets .btn-small.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
 }
 .ws-label {
   font-size: var(--text-sm);

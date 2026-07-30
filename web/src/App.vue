@@ -245,8 +245,10 @@ watch(showStartup, (show) => {
 }
 
 :root {
-  /* Font scale multiplier */
-  --font-scale: 1.0;
+  /* Font scale multiplier. The reference is the original (pre-rescale) UI;
+     the default 1.2 corresponds to "100%" in the Settings display, so the
+     slider's display math (scale / 1.2 * 100) yields 100 at this value. */
+  --font-scale: 1.2;
 
   /* Surface */
   --bg: #1a1a2e;        /* page */
