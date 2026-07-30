@@ -126,9 +126,16 @@ cask "ciaobot-desktop" do
   uninstall quit: "local.ciaobot.app"
 
   caveats <<~EOS
-    Ciaobot is ad-hoc signed and is not notarized. On first launch, macOS may
-    require you to Control-click Ciaobot.app, choose Open, and confirm once.
-    Do not disable Gatekeeper.
+    Ciaobot is ad-hoc signed and is not notarized, so macOS blocks the first
+    launch with "Apple could not verify Ciaobot is free of malware".
+
+    To allow it: open Ciaobot.app once, then go to System Settings -> Privacy &
+    Security, scroll to Security, and click "Open Anyway" next to the Ciaobot
+    message. Authenticate, launch the app again, and confirm Open.
+
+    Control-clicking the app and choosing Open does not clear this dialog --
+    Apple removed that bypass in macOS 15. The "Open Anyway" button only appears
+    for about an hour after a blocked launch. Do not disable Gatekeeper.
   EOS
 end
 EOF

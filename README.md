@@ -20,9 +20,20 @@ Installing the fully qualified formula first grants Homebrew trust only to the
 Ciaobot engine; installing the fully qualified cask grants trust only to the
 desktop app. The cask then places `Ciaobot.app` in `/Applications`.
 
-The app is ad-hoc signed and not notarized. If macOS blocks the first launch,
-Control-click `Ciaobot.app`, choose **Open**, and confirm once. Do not disable
-Gatekeeper. First launch opens the setup wizard when no server is configured.
+The app is ad-hoc signed and not notarized, so macOS blocks the first launch
+with *"Apple could not verify Ciaobot is free of malware"*. Open `Ciaobot.app`
+once to trigger the block, then go to **System Settings → Privacy & Security**
+and scroll to **Security**:
+
+<img src="docs/gatekeeper-open-anyway.png" alt="System Settings, Privacy &amp; Security, Security section, with the Open Anyway button highlighted" width="620">
+
+Click **Open Anyway**, authenticate, then launch the app again and confirm
+**Open**. Two things worth knowing: Control-clicking the app and choosing
+**Open** does *not* clear this dialog — Apple removed that bypass in macOS 15 —
+and the **Open Anyway** button only appears for about an hour after a blocked
+launch, so re-trigger the block if you don't see it. You may need to repeat this
+after an app update or a macOS upgrade. Do not disable Gatekeeper. First launch
+opens the setup wizard when no server is configured.
 
 Already using the Homebrew engine from an earlier release? Move to the app
 without recreating your workspace:
@@ -34,6 +45,21 @@ brew upgrade ciaobot
 brew install --cask raffaelefarinaro/ciaobot/ciaobot-desktop
 open -a Ciaobot
 ```
+
+If a copy of `Ciaobot.app` is already in `/Applications` that Homebrew did not
+install — from the 0.6.0 DMG, say — the cask stops with `It seems there is
+already an App at '/Applications/Ciaobot.app'`. Quit Ciaobot and add `--force`
+so the cask adopts and replaces it; the bundle holds no user data, so your
+workspace, config, and desktop preferences survive:
+
+```bash
+brew install --cask --force raffaelefarinaro/ciaobot/ciaobot-desktop
+```
+
+Upgrade the engine in the same sitting. The engine and app ship from one tag and
+are meant to report the same version; a split between them surfaces as an opaque
+`Invalid desktop-service response`, because the app resolves the `ciao`
+executable from fixed Homebrew paths.
 
 The first app launch reuses the existing workspace and server LaunchAgent,
 disables the legacy menu-bar helper, and moves the old `Ciaobot Server.app` to
