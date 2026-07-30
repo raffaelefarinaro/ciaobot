@@ -525,6 +525,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         )
     app.state.push_manager = PushManager(config.state_path.parent, subject=push_subject)
     app.state.focused_chats = {}
+    from ciao.web.connection_tracker import ConnectionTracker
+
+    app.state.connection_tracker = ConnectionTracker()
     pcm._push_manager = app.state.push_manager
 
     # Google Workspace token health + server-managed re-login (issue #145).

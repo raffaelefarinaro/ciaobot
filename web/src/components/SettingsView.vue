@@ -314,8 +314,7 @@
           </div>
         </div>
 
-        <OnboardingCard variant="settings" @open-sidebar="emit('open-sidebar')" />
-
+        
         <!-- Debug (dev mode only) -->
         <div v-if="localStatus?.dev_mode" class="card">
           <div class="settings-card-header settings-card-header--split">
@@ -388,6 +387,10 @@
                app no longer lists these in the tray, so this is the only place
                they surface. Hosts share them; clients tunnel to a host instead. -->
           <NodeAddresses v-if="!isNodeClient" />
+          <div v-if="!isNodeClient && nodeStatus" class="connected-clients-panel">
+            <p class="section-title">connected clients</p>
+            <ConnectedClients />
+          </div>
           <div v-if="!nodeStatus" class="action-row"><span class="loading">Loading node status&hellip;</span></div>
           <template v-else>
             <!-- Client only: this device → host, with reachability on the link. -->
@@ -2330,6 +2333,7 @@ import { api } from '../lib/api'
 import { formatTime, formatDuration } from '../lib/time'
 import { isDesktopApp } from '../lib/desktop'
 import NodeAddresses from './NodeAddresses.vue'
+import ConnectedClients from './ConnectedClients.vue'
 import type {
   AgentAssetsResponse,
   AutomationProcess,
@@ -5586,6 +5590,15 @@ async function doPackageUpdate() {
 .node-peer-form {
   margin-top: 0;
   margin-bottom: 0;
+}
+
+.connected-clients-panel {
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.connected-clients-panel .section-title {
+  margin-bottom: var(--space-2);
 }
 
 .deploy-steps {

@@ -143,6 +143,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/handover/merge` | Open an interactive chat that resolves sync conflicts on a branch |
 | GET | `/api/node/addresses` | URLs this engine is reachable at (localhost, Bonjour `.local`, each LAN/VPN IPv4), each flagged `loopback` so the PWA can mark the ones a phone cannot use. Session-protected, unlike the loopback-public tray endpoints, because it enumerates LAN interfaces |
 | GET | `/api/node/status` | Read multi-device node failover status and role |
+| GET | `/api/node/connected-clients` | Live remote WebSocket clients connected to this host (excludes loopback) |
 | POST | `/api/node/connect` | Connect this node as a client tunnel to a remote host |
 | POST | `/api/node/demote` | Demote active node to standby |
 | POST | `/api/node/handover` | Handover active role to another node |

@@ -6236,3 +6236,16 @@ async def node_peers_endpoint(request: Request) -> JSONResponse:
         status = node_mgr.add_peer(url, peer_id=node_id)
 
     return JSONResponse({"ok": True, "status": status})
+
+
+async def node_connected_clients_endpoint(request: Request) -> JSONResponse:
+    """Live WebSocket clients connected to this node.
+
+    Useful on a host: it shows phones/laptops that currently have an open
+    Ciaobot tab or tunneled client. Local loopback sockets are excluded so the
+    list only surfaces remote/secondary-device connections.
+    """
+    tracker = getattr(request.app.state, "connection_tracker", None)
+    if tracker is None:
+        return JSONResponse({"ok": True, "clients": []})
+    return JSONResponse({"ok": True, "clients": tracker.list_clients(remote_only=True)})
