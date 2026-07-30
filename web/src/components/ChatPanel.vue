@@ -164,7 +164,7 @@
     <div class="chat-with-sidebar">
     <div class="messages" ref="messagesEl" data-tour="chat-messages" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
       <div class="messages-content">
-      <template v-for="(item, i) in renderItems" :key="i">
+      <template v-for="(item, i) in renderItems" :key="item.key">
         <!-- Reasoning trace: intermediate assistant text + tool calls grouped -->
         <div v-if="item.kind === 'trace'" class="trace-block" :class="{ open: openTraces[i] }">
           <button
@@ -895,11 +895,59 @@ import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 
-type RenderItem =
+type RenderItemInput =
   | { kind: 'user'; msg: ChatMessage; turnIndex?: number }
   | { kind: 'assistant'; msg: ChatMessage; outputs?: TraceOutput[]; subchats?: ProviderSubchatRecord[]; turnIndex?: number }
   | { kind: 'system'; msg: ChatMessage }
   | { kind: 'trace'; steps: ChatMessage[]; subs?: SubagentTranscript[]; outputs?: TraceOutput[]; subchats?: ProviderSubchatRecord[]; turnIndex?: number }
+
+type RenderItem = RenderItemInput & { key: string }
+
+function renderItemKey(item: RenderItemInput): string {
+  switch (item.kind) {
+    case 'user':
+    case 'assistant':
+    case 'system': {
+      const m = item.msg
+      const ts = m.timestamp || ''
+      const content = (m.content || '').slice(0, 60)
+      const tool = m.tool_name || ''
+      const phase = m.phase || ''
+      const file = m.file_path || ''
+      const images = (m.images || []).length
+      const error = m.is_error ? '1' : '0'
+      return `${item.kind}:${ts}:${tool}:${phase}:${file}:${content}:${images}:${error}`
+    }
+    case 'trace': {
+      const firstTs = item.steps[0]?.timestamp || ''
+      const lastTs = item.steps[item.steps.length - 1]?.timestamp || ''
+      const stepSig = item.steps
+        .map(s => `${s.role}:${s.tool_name || ''}:${s.phase || ''}:${(s.content || '').slice(0, 40)}:${s.file_path || ''}:${s.timestamp || ''}`)
+        .join('|')
+      return `trace:${item.turnIndex ?? 'x'}:${item.steps.length}:${firstTs}:${lastTs}:${stepSig.slice(0, 200)}`
+    }
+  }
+}
+
+function withKey<T extends RenderItemInput>(item: T): T & { key: string } {
+  return { ...item, key: renderItemKey(item) }
+}
+
+/** Defensive dedup: if two RenderItems would get the same key, disambiguate by
+ *  appending a running counter. This should not happen for well-formed history,
+ *  but it protects against duplicate server entries or hash collisions. */
+function dedupeRenderItemKeys(items: RenderItem[]): RenderItem[] {
+  const seen = new Map<string, number>()
+  return items.map((item) => {
+    let key = item.key
+    let count = seen.get(key) || 0
+    if (count > 0) {
+      key = `${item.key}:dup:${count}`
+    }
+    seen.set(item.key, count + 1)
+    return { ...item, key }
+  })
+}
 
 type ChatComment = {
   id: string
@@ -2644,14 +2692,14 @@ const renderData = computed<{
     const turnSubchats = currentTurnIndex !== null ? subchatsByTurn.get(currentTurnIndex) || [] : []
     if (trailingHasThinking && finalMsg) {
       const traceSubs = takeForegroundSubs(currentTurnIndex)
-      items.push({
+      items.push(withKey({
         kind: 'trace',
         steps: buffer.slice(),
         turnIndex: currentTurnIndex ?? undefined,
         ...(traceSubs.length ? { subs: traceSubs } : {}),
         ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
         ...(turnSubchats.length ? { subchats: turnSubchats } : {}),
-      })
+      }))
       buffer = []
       return
     }
@@ -2679,8 +2727,8 @@ const renderData = computed<{
     // with the turn's outputs/subchats attached.
     const turnItems: RenderItem[] = buildTurnParts(buffer, finalIdx).map((part) =>
       part.kind === 'assistant'
-        ? { kind: 'assistant', msg: part.msg, turnIndex: currentTurnIndex ?? undefined }
-        : { kind: 'trace', steps: part.steps, turnIndex: currentTurnIndex ?? undefined },
+        ? withKey({ kind: 'assistant', msg: part.msg, turnIndex: currentTurnIndex ?? undefined })
+        : withKey({ kind: 'trace', steps: part.steps, turnIndex: currentTurnIndex ?? undefined }),
     )
     // Foreground subagents / (when there's no answer bubble) file outputs and
     // handoffs belong to the one Activity trace that sits right before the
@@ -2693,7 +2741,7 @@ const renderData = computed<{
     const last = turnItems[turnItems.length - 1]
     let host = last && last.kind === 'trace' ? last : null
     if (!host && needsHost) {
-      host = { kind: 'trace', steps: [], turnIndex: currentTurnIndex ?? undefined }
+      host = withKey({ kind: 'trace', steps: [], turnIndex: currentTurnIndex ?? undefined })
       turnItems.push(host)
     }
     if (host) {
@@ -2703,13 +2751,13 @@ const renderData = computed<{
     }
     for (const it of turnItems) items.push(it)
     if (finalMsg) {
-      items.push({
+      items.push(withKey({
         kind: 'assistant',
         msg: finalMsg,
         turnIndex: currentTurnIndex ?? undefined,
         ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
         ...(turnSubchats.length ? { subchats: turnSubchats } : {}),
-      })
+      }))
     }
     buffer = []
   }
@@ -2720,7 +2768,7 @@ const renderData = computed<{
       currentTurnIndex = typeof msg.turn_index === 'number'
         ? msg.turn_index
         : currentTurnIndex === null ? 0 : currentTurnIndex + 1
-      items.push({ kind: 'user', msg, turnIndex: currentTurnIndex })
+      items.push(withKey({ kind: 'user', msg, turnIndex: currentTurnIndex }))
     } else if (
       msg.role === 'system'
       && msg.tool_name !== '_activity'
@@ -2728,7 +2776,7 @@ const renderData = computed<{
       && msg.tool_name !== '_filecard'
     ) {
       flushTurn()
-      items.push({ kind: 'system', msg })
+      items.push(withKey({ kind: 'system', msg }))
     } else {
       // assistant text, _activity tool block, _thinking note, or _filecard:
       // part of the current turn's trace.
@@ -2788,7 +2836,7 @@ const renderData = computed<{
       } else {
         let insertAt = turnStart + 1
         while (insertAt < items.length && items[insertAt].kind === 'user') insertAt++
-        items.splice(insertAt, 0, { kind: 'trace', steps: [], subs, turnIndex: turnIdx })
+        items.splice(insertAt, 0, withKey({ kind: 'trace', steps: [], subs, turnIndex: turnIdx }))
       }
     }
 
@@ -2800,11 +2848,11 @@ const renderData = computed<{
       if (lastTrace && lastTrace.kind === 'trace') {
         lastTrace.subs = [...(lastTrace.subs || []), ...unanchored]
       } else {
-        items.push({ kind: 'trace', steps: [], subs: unanchored })
+        items.push(withKey({ kind: 'trace', steps: [], subs: unanchored }))
       }
     }
   }
-  return { items, liveSubs: [], liveStandaloneSubs: [] }
+  return { items: dedupeRenderItemKeys(items), liveSubs: [], liveStandaloneSubs: [] }
 })
 
 const renderItems = computed<RenderItem[]>(() => renderData.value.items)
