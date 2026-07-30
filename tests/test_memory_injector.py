@@ -97,10 +97,13 @@ def test_system_prompt_includes_issue_labeling_notes() -> None:
         ("[Feature]", "enhancement"),
         ("[Docs]", "documentation"),
         ("[Chore]", "chore"),
-        ("[Report]", "report"),
     ):
         assert prefix in append, f"missing title prefix {prefix}"
         assert label in append, f"missing label {label}"
+    # The anonymous bug-report form was retired on 2026-07-30, so nothing can
+    # open a `[Report]` issue any more. The prompt must say so rather than
+    # listing it as a live option.
+    assert "retired `[Report]` prefix" in append
 
 
 def test_system_prompt_includes_ciaobot_diagnostics_notes() -> None:

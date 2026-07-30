@@ -19,7 +19,7 @@
 
 ## Issue labeling
 
-When you open a GitHub issue via `gh issue create` on `raffaelefarinaro/ciaobot`, apply at least one label that classifies the issue. Title prefix and label must agree. Every open issue should carry exactly one classification label; the `report` label may sit alongside it for issues opened by `scripts/sync_bug_reports.py`.
+When you open a GitHub issue via `gh issue create` on `raffaelefarinaro/ciaobot`, apply at least one label that classifies the issue. Title prefix and label must agree. Every open issue should carry exactly one classification label. GitHub issues are the only bug inbox — there is no other reporting channel to fall back on.
 
 | Title prefix | Label | Meaning |
 |---|---|---|
@@ -29,7 +29,8 @@ When you open a GitHub issue via `gh issue create` on `raffaelefarinaro/ciaobot`
 | `[Chore]` | `chore` | Internal maintenance (SDK bumps, refactors, repo hygiene) |
 | `[Goal]` | `enhancement` | Strategic/architectural direction |
 | `[Agent]` | (matching type) | Triage-loop surfaced; classification follows content |
-| `[Report]` | `report` | Auto-opened from `scripts/sync_bug_reports.py`; likely noise unless reviewed |
+
+The retired `[Report]` prefix and `report` label belong to the anonymous bug-report form, removed on 2026-07-30. Never apply them to a new issue; they survive only on closed historical ones.
 
 When fixing labels on existing issues, only adjust labels that are missing or wrong. Do not relabel issues a human has intentionally marked. The triage loop enforces this convention every 4h.
 
