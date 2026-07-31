@@ -117,7 +117,7 @@
           @close="closeProject"
           @open-sidebar="sidebarCollapsed = false"
         />
-        <ChatPanel v-else-if="store.activeChat" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+        <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
         <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
           <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
         </div>
@@ -149,7 +149,7 @@
                 />
               </button>
             </div>
-            <HomeRecentChats />
+            <HomeRecentChats ref="homeRecentRef" />
             <div class="empty-actions">
               <button
                 v-for="action in generalWorkspaceActions"
@@ -196,8 +196,14 @@ const store = useProjectStore()
 const tourStore = useProductTourStore()
 
 // Refs into the active ChatPanel, used by the global keyboard shortcuts to
-// reach composer-owned actions (dictation, archive). Only one of the two
-// ChatPanel instances (desktop vs mobile) is mounted at a time.
+// reach composer-owned actions (dictation, archive).
+//
+// The template declares ChatPanel and HomeRecentChats twice, once under
+// `v-if="pinnedFilePath"` (split view) and once under the `v-else` (no pinned
+// file). Both copies must carry the ref: only one is ever mounted, so the ref
+// holds whichever that is, but tagging only the split-view copy left Cmd+D,
+// Cmd+A and the home arrow keys silently dead in the far more common
+// no-pinned-file layout.
 const chatPanelRef = ref<InstanceType<typeof ChatPanel> | null>(null)
 // Ref into HomeRecentChats for arrow-key navigation on the home screen.
 const homeRecentRef = ref<InstanceType<typeof HomeRecentChats> | null>(null)
