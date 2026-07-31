@@ -31,6 +31,7 @@ ciao vault-lint --vault-root memory-vault
 ciao os-audit --json
 ciao create-chat --prompt "Start here" --workspace default
 ciao cleanup-sdk-blobs --workspace .       # dry-run by default
+ciao label-hygiene --json                  # audit issue labels, dry-run by default
 ciao dev                                   # backend :8543 + Vite :5173
 ciao public-preflight export . /tmp/ciao-public-export
 ciao public-preflight scan /tmp/ciao-public-export --private-patterns /tmp/private-patterns.txt
