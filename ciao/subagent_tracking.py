@@ -53,7 +53,14 @@ _INNER_TAG_RE = re.compile(r"<([a-z-]+)>(.*?)</\1>", re.DOTALL)
 # `turn_index` anchoring drifts.
 _CONTROL_SLASH_PREFIXES = ("/model", "/mode")
 _NO_RESPONSE_SENTINEL = "No response requested."
-_INTERRUPTED_REQUEST_SENTINEL = "[Request interrupted by user]"
+# Matches the Claude Agent SDK's _SKIP_FIRST_PROMPT_PATTERN
+# ([Request interrupted by user[^\]]*]) so we cover every CLI variant,
+# including "[Request interrupted by user for tool use]". Routes_api renders
+# the /messages endpoint on the same predicate; if it skips here but not
+# there, `turn_index` anchoring drifts.
+_INTERRUPTED_REQUEST_RE = re.compile(
+    r"\[Request interrupted by user[^\]]*\]"
+)
 _CLI_ENVELOPE_TAGS = (
     "task-notification",
     "bash-input",
@@ -325,7 +332,9 @@ def _is_countable_user_turn(content: str) -> bool:
     head = text.split(None, 1)[0]
     if head in _CONTROL_SLASH_PREFIXES:
         return False
-    if text in (_NO_RESPONSE_SENTINEL, _INTERRUPTED_REQUEST_SENTINEL):
+    if text == _NO_RESPONSE_SENTINEL:
+        return False
+    if _INTERRUPTED_REQUEST_RE.fullmatch(text):
         return False
     if _CLI_ENVELOPE_RE.match(text):
         return False

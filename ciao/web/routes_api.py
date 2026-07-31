@@ -500,7 +500,16 @@ def _is_control_slash_command(content: str) -> bool:
 # own UI hides these (`case UXH: return null`); we mirror that here so reloads
 # don't render a literal "No response requested." bubble after every interrupt.
 _NO_RESPONSE_SENTINEL = "No response requested."
-_INTERRUPTED_REQUEST_SENTINEL = "[Request interrupted by user]"
+
+# Matches the Claude Agent SDK's own _SKIP_FIRST_PROMPT_PATTERN
+# ([Request interrupted by user[^\]]*]) so we cover every CLI variant, not
+# just the bare form. Steer/queue interrupts an in-flight tool call produce
+# "[Request interrupted by user for tool use]" — without this wildcard that
+# variant survives as a synthetic user record and renders as a quoted bubble
+# that looks like an error reply to a question.
+_INTERRUPTED_REQUEST_RE = re.compile(
+    r"\[Request interrupted by user[^\]]*\]"
+)
 
 
 def _is_no_response_sentinel(text: str) -> bool:
@@ -508,7 +517,7 @@ def _is_no_response_sentinel(text: str) -> bool:
 
 
 def _is_interrupted_request_sentinel(text: str) -> bool:
-    return text.strip() == _INTERRUPTED_REQUEST_SENTINEL
+    return bool(_INTERRUPTED_REQUEST_RE.fullmatch(text.strip()))
 
 
 def _classify_control_ack(text: str) -> str | None:
@@ -5642,6 +5651,34 @@ def _run_step(args: list[str], *, cwd: str, timeout: int) -> subprocess.Complete
         )
 
 
+def _resolve_codebase_root(config) -> Path:
+    """Where the deploy steps run git, pip, and npm.
+
+    ``CIAO_APP_REPO`` wins over the module path because the engine can be an
+    installed package (Homebrew cask, wheel): there ``__file__`` sits in
+    site-packages, which has no ``.git`` and no ``web/``, so every build step
+    below would operate on the wrong directory.
+    """
+    configured = getattr(config, "app_repo", None)
+    if configured:
+        return Path(configured)
+    return Path(__file__).resolve().parents[2]
+
+
+def _checkout_problem(codebase_root: Path) -> str:
+    """Why ``codebase_root`` cannot be deployed from, or an empty string.
+
+    Checked up front because the underlying failures are misleading: git says
+    "not a git repository" and npm says ENOENT, neither of which points at an
+    engine that was installed rather than checked out.
+    """
+    if not (codebase_root / ".git").exists():
+        return f"{codebase_root} is not a git checkout"
+    if not (codebase_root / "web" / "package.json").exists():
+        return f"{codebase_root} has no web/package.json"
+    return ""
+
+
 def _run_root_npm_install(codebase_root: Path) -> subprocess.CompletedProcess:
     args = ["npm", "install", "--no-audit", "--no-fund"]
     if not (codebase_root / "package.json").exists():
@@ -5679,12 +5716,22 @@ async def admin_deploy(request: Request) -> JSONResponse:
 
     config = request.app.state.config
     ws = config.workspace_root
-    codebase_root = Path(__file__).resolve().parents[2]
+    codebase_root = _resolve_codebase_root(config)
     steps = []
 
     def _record(step: str, result: subprocess.CompletedProcess) -> dict:
         out = (result.stdout.strip() or result.stderr.strip())[:500]
         return {"step": step, "ok": result.returncode == 0, "output": out}
+
+    problem = _checkout_problem(codebase_root)
+    if problem:
+        hint = (
+            f"{problem}. Set CIAO_APP_REPO to the ciaobot checkout so Restart can "
+            "pull, reinstall, and rebuild from source."
+        )
+        steps.append({"step": "locate checkout", "ok": False, "output": hint})
+        return JSONResponse({"steps": steps, "ok": False, "error": hint}, status_code=400)
+    steps.append({"step": "locate checkout", "ok": True, "output": str(codebase_root)})
 
     # 0. Snapshot: stage, commit (if dirty), rebase, push.
     #    Captures in-flight writes so the pull that follows can't clobber them
@@ -5747,6 +5794,31 @@ async def admin_deploy(request: Request) -> JSONResponse:
             status_code=500,
         )
 
+    # 3b. Desktop shell. Changes under desktop/ only reach the window through a
+    # rebuilt bundle, so dev instances rebuild it here and swap it in during the
+    # restart below. Released installs skip this: no checkout, no cargo. The
+    # rebuild is minutes long, hence the staleness check rather than doing it on
+    # every restart.
+    from ciao import desktop_build
+
+    relaunch_desktop = False
+    if getattr(config, "dev_mode", False):
+        needed, reason = await asyncio.to_thread(desktop_build.needs_rebuild, codebase_root)
+        if not needed:
+            steps.append({"step": "desktop app", "ok": True, "output": f"skipped: {reason}"})
+        else:
+            steps.append({"step": "desktop app", "ok": True, "output": f"rebuilding: {reason}"})
+            desktop_steps, relaunch_desktop = await asyncio.to_thread(
+                desktop_build.build_and_stage, codebase_root, runner=_run_step,
+            )
+            steps.extend(desktop_steps)
+            failed = next((s for s in desktop_steps if not s["ok"]), None)
+            if failed is not None:
+                return JSONResponse(
+                    {"steps": steps, "ok": False, "error": f"{failed['step']} failed: {failed['output']}"},
+                    status_code=500,
+                )
+
     # 4. Signal restart. Must go through app.state.request_restart (which sets
     # the restart flag and calls server.shutdown()). Raising RestartRequested
     # inside this detached task does NOT work:
@@ -5758,6 +5830,24 @@ async def admin_deploy(request: Request) -> JSONResponse:
 
     async def _do_restart():
         await asyncio.sleep(2)
+        # The desktop swap runs before the engine restart, not after: the
+        # relaunched app comes up against a live engine and then rides the
+        # normal restart-drain path, instead of racing launchd for the runtime
+        # directory while the engine is down.
+        if relaunch_desktop:
+            try:
+                installed = await asyncio.to_thread(
+                    desktop_build.install_staged_and_relaunch, runner=_run_step,
+                )
+                for step in installed:
+                    if step["ok"]:
+                        logger.info("deploy: %s: %s", step["step"], step["output"])
+                    else:
+                        logger.error("deploy: %s: %s", step["step"], step["output"])
+            except Exception:
+                # A failed relaunch must not strand the engine on stale code;
+                # the operator can reopen the app by hand.
+                logger.exception("deploy: desktop install and relaunch failed")
         fn = getattr(request.app.state, "request_restart", None)
         if callable(fn):
             fn(config.restart_exit_code)
@@ -5765,7 +5855,11 @@ async def admin_deploy(request: Request) -> JSONResponse:
             raise RestartRequested(config.restart_exit_code)
 
     asyncio.create_task(_do_restart())
-    steps.append({"step": "restart", "ok": True})
+    steps.append({
+        "step": "restart",
+        "ok": True,
+        "output": "swapping in the rebuilt desktop app first" if relaunch_desktop else "",
+    })
 
     return JSONResponse({"steps": steps, "ok": True})
 
