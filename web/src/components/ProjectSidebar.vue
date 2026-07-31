@@ -1662,7 +1662,13 @@ async function confirmDeleteChat(chatId: string) {
    without competing with the streaming dot next to it. */
 .loop-mark {
   flex: 0 0 auto;
-  font-size: 11px;
+  /* Badge-sized (11px) was too small to see: ⟳ is a thin outline glyph, so it
+     read as a speck beside the solid 8px streaming dot. Sized above the row
+     text, and through the token so it follows the Settings > Appearance font
+     scale that a hardcoded px ignored. Still under the 18px unread badge, so
+     the row height does not move. */
+  font-size: var(--text-lg);
+  font-weight: 700;
   line-height: 1;
   color: var(--accent);
 }
