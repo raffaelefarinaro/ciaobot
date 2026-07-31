@@ -246,7 +246,20 @@ def install_staged_and_relaunch(
         steps.append({"step": "desktop install", "ok": False, "output": f"nothing staged at {staging}"})
         return steps
 
-    if _app_is_running(runner=runner):
+    running = _app_is_running(runner=runner)
+    if running is None:
+        steps.append({
+            "step": "desktop install",
+            "ok": False,
+            "output": (
+                "could not tell whether the desktop app is running (pgrep failed), "
+                f"so the swap was skipped rather than risk deleting a live bundle; "
+                f"the new bundle stays staged at {staging}"
+            ),
+        })
+        return steps
+
+    if running:
         # `if ... is running` matters: a bare `tell application id ... to quit`
         # launches the app first when it is not running.
         runner(
@@ -260,7 +273,10 @@ def install_staged_and_relaunch(
             timeout=30,
         )
         deadline = monotonic() + QUIT_TIMEOUT_S
-        while _app_is_running(runner=runner):
+        # Only a confirmed False leaves this loop. An unreadable probe (None)
+        # keeps waiting rather than falling through to the swap, so the bundle
+        # is never deleted while the app might still hold it open.
+        while _app_is_running(runner=runner) is not False:
             if monotonic() >= deadline:
                 steps.append({
                     "step": "desktop install",
@@ -274,13 +290,40 @@ def install_staged_and_relaunch(
                 return steps
             sleep(0.5)
 
+    # Move the old bundle aside, put the new one in place, then delete the old.
+    # Never rmtree the installed app first: a delete that fails halfway (a
+    # permission on /Applications, a quarantine xattr) would leave a gutted
+    # Ciaobot.app and the only good copy hidden in the staging dir. Renames
+    # within one directory are atomic, so every failure below is recoverable.
+    previous = Path(install_dir) / f"{STAGING_NAME}.previous"
+    try:
+        if previous.exists():
+            shutil.rmtree(previous)
+    except OSError as exc:
+        steps.append({
+            "step": "desktop install",
+            "ok": False,
+            "output": f"could not clear {previous}: {exc}",
+        })
+        return steps
+
+    moved_aside = False
     try:
         if destination.exists():
-            shutil.rmtree(destination)
+            destination.rename(previous)
+            moved_aside = True
         staging.rename(destination)
     except OSError as exc:
+        if moved_aside and not destination.exists():
+            # Put the working app back before giving up.
+            try:
+                previous.rename(destination)
+            except OSError:
+                logger.exception("desktop install: could not restore %s", destination)
         steps.append({"step": "desktop install", "ok": False, "output": f"could not install {destination}: {exc}"})
         return steps
+    if moved_aside:
+        shutil.rmtree(previous, ignore_errors=True)
 
     result = runner(["open", "-a", str(destination)], cwd=str(install_dir), timeout=60)
     output = (result.stdout or "").strip() or (result.stderr or "").strip()
@@ -292,16 +335,26 @@ def install_staged_and_relaunch(
     return steps
 
 
-def _app_is_running(*, runner: Runner) -> bool:
+def _app_is_running(*, runner: Runner) -> bool | None:
     """Whether a Ciaobot desktop process is alive, by bundle executable path.
 
     Matches the path inside the bundle rather than the bare process name so a
     locally built bundle counts too, and so unrelated processes with "Ciaobot"
     in their command line do not.
+
+    Returns None when the probe itself failed rather than answering. ``pgrep``
+    exits 1 for "no match", so only that is a real negative; ``_run_step`` turns
+    a missing binary into 127 and a timeout into 124, and reading either as "not
+    running" would delete the bundle out from under a live app, which is the one
+    thing the staging design exists to prevent.
     """
     result = runner(
         ["pgrep", "-f", f"{APP_BUNDLE_NAME}/Contents/MacOS/Ciaobot"],
         cwd="/",
         timeout=15,
     )
-    return result.returncode == 0 and bool((result.stdout or "").strip())
+    if result.returncode == 0:
+        return bool((result.stdout or "").strip())
+    if result.returncode == 1:
+        return False
+    return None

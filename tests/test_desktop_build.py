@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from unittest import mock
 
 from ciao import desktop_build
 from ciao.web.routes_api import _checkout_problem, _resolve_codebase_root
@@ -273,6 +274,68 @@ def test_install_launches_the_app_when_none_is_running(tmp_path: Path) -> None:
     assert steps[0]["ok"] is True
     assert "osascript" not in seen
     assert desktop_build.installed_bundle(install_dir).exists()
+
+
+def test_install_skips_the_swap_when_pgrep_cannot_answer(tmp_path: Path) -> None:
+    # `_run_step` reports a missing binary as 127 and a timeout as 124. Reading
+    # either as "not running" would delete the bundle under a live app, so an
+    # unreadable probe has to abort and leave the staged copy alone.
+    install_dir = tmp_path / "Applications"
+    install_dir.mkdir()
+    _write_bundle(desktop_build.installed_bundle(install_dir), mtime=1_000.0)
+    _write_bundle(install_dir / desktop_build.STAGING_NAME, mtime=3_000.0)
+
+    seen: list[str] = []
+
+    def runner(args, *, cwd, timeout):
+        seen.append(args[0])
+        if args[0] == "pgrep":
+            return subprocess.CompletedProcess(
+                args=args, returncode=127, stdout="", stderr="pgrep not found on PATH"
+            )
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    steps = desktop_build.install_staged_and_relaunch(runner=runner, install_dir=install_dir)
+
+    assert steps[0]["ok"] is False
+    assert "could not tell whether" in steps[0]["output"]
+    # Nothing was quit, nothing was swapped, nothing was opened.
+    assert seen == ["pgrep"]
+    assert (install_dir / desktop_build.STAGING_NAME).exists()
+    assert desktop_build.installed_bundle(install_dir).exists()
+
+
+def test_install_restores_the_old_app_when_the_swap_fails(tmp_path: Path) -> None:
+    # The installed bundle is moved aside rather than deleted, so a failed swap
+    # leaves a working app in /Applications instead of a gutted one.
+    install_dir = tmp_path / "Applications"
+    install_dir.mkdir()
+    destination = desktop_build.installed_bundle(install_dir)
+    _write_bundle(destination, mtime=1_000.0)
+    (destination / "Contents" / "MacOS" / "Ciaobot").write_text("old", encoding="utf-8")
+    staging = install_dir / desktop_build.STAGING_NAME
+    _write_bundle(staging, mtime=3_000.0)
+
+    real_rename = Path.rename
+
+    def flaky_rename(self, target):
+        # Fail only the staged -> installed move, after the old app is aside.
+        if Path(self) == staging:
+            raise OSError("Operation not permitted")
+        return real_rename(self, target)
+
+    def runner(args, *, cwd, timeout):
+        if args[0] == "pgrep":
+            return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    with mock.patch.object(Path, "rename", flaky_rename):
+        steps = desktop_build.install_staged_and_relaunch(runner=runner, install_dir=install_dir)
+
+    assert steps[0]["ok"] is False
+    assert "could not install" in steps[0]["output"]
+    # The working app is back where it belongs, not left as a hole.
+    assert (destination / "Contents" / "MacOS" / "Ciaobot").read_text(encoding="utf-8") == "old"
 
 
 def test_tauri_build_skips_the_dmg_and_the_signed_updater_artifacts(tmp_path: Path) -> None:
