@@ -1852,6 +1852,42 @@ _DESKTOP_DROP_GRANT_TTL_SECONDS = 5 * 60
 _DESKTOP_DROP_MAX_FILES = 100
 
 
+def _desktop_drop_read_error(path: Path, exc: OSError) -> str:
+    """User-facing text for a dropped file this process cannot read.
+
+    A drag straight from the macOS screenshot thumbnail hands over a path only
+    the app that received the drop may read, so the desktop shell stages a copy
+    first (`stage_dropped_file` in desktop/src-tauri/src/lib.rs). When there is
+    no staged copy, because the shell is older than that fix or the drop was not
+    an image, the raw errno tells the user nothing they can act on.
+    """
+    if isinstance(exc, PermissionError):
+        return (
+            f"macOS would not let Ciaobot read {path.name}. Save the file to a "
+            "folder first, then drag it in."
+        )
+    return str(exc)
+
+
+def _clear_desktop_drop_staging(request: Request, grant_id: str) -> None:
+    """Delete the desktop shell's staged copies for a consumed grant.
+
+    Only images are staged, and by this point their bytes are in media_root or
+    on the host, so the copies are dead weight. Best-effort: the shell's own
+    stale sweep covers a grant that errored out before reaching here.
+    """
+    try:
+        # The id reaches us from the request body, and this builds an rmtree
+        # target. Re-check the UUID form here rather than trusting that every
+        # caller validated it first.
+        if str(UUID(grant_id)) != grant_id:
+            return
+    except (ValueError, AttributeError):
+        return
+    grant_dir = request.app.state.config.state_path.parent / "desktop-drop-grants"
+    shutil.rmtree(grant_dir / "staged" / grant_id, ignore_errors=True)
+
+
 def _consume_desktop_drop_grant(request: Request, grant_id: str) -> list[Path]:
     """Consume a native-app grant and return only its explicitly dropped paths."""
     try:
@@ -1940,8 +1976,16 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
                     host_image_refs.append(
                         pcm.save_image_upload(path.read_bytes(), path.name).path.name
                     )
-                except (OSError, ValueError) as exc:
+                except OSError as exc:
+                    errors.append(
+                        {
+                            "filename": path.name,
+                            "error": _desktop_drop_read_error(path, exc),
+                        }
+                    )
+                except ValueError as exc:
                     errors.append({"filename": path.name, "error": str(exc)})
+        _clear_desktop_drop_staging(request, grant_id)
         return JSONResponse(
             {
                 "paths": [str(path) for path in regular_paths],
@@ -1976,15 +2020,27 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
             if image_paths:
                 image_files = []
                 for index, path in enumerate(image_paths):
-                    if path.stat().st_size > request.app.state.config.max_image_size_bytes:
-                        errors.append({"filename": path.name, "error": "image too large"})
+                    # Per-file, like the host branch above: one unreadable
+                    # screenshot must not turn the whole drop into a 502.
+                    try:
+                        if path.stat().st_size > request.app.state.config.max_image_size_bytes:
+                            errors.append({"filename": path.name, "error": "image too large"})
+                            continue
+                        data = path.read_bytes()
+                    except OSError as exc:
+                        errors.append(
+                            {
+                                "filename": path.name,
+                                "error": _desktop_drop_read_error(path, exc),
+                            }
+                        )
                         continue
                     image_files.append(
                         (
                             f"file{index}",
                             (
                                 path.name,
-                                path.read_bytes(),
+                                data,
                                 mimetypes.guess_type(path.name)[0] or "application/octet-stream",
                             ),
                         )
@@ -2014,7 +2070,7 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
                             else "host image upload failed"
                         )
 
-            uploadable_paths = []
+            files: list[tuple[str, tuple[str, bytes, str]]] = []
             for path in regular_paths:
                 if path.is_dir():
                     errors.append(
@@ -2023,22 +2079,31 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
                             "error": "folders cannot be transferred to the host",
                         }
                     )
-                elif path.stat().st_size > _PROJECT_UPLOAD_MAX_BYTES:
-                    errors.append({"filename": path.name, "error": "file too large"})
-                else:
-                    uploadable_paths.append(path)
-            if uploadable_paths:
-                files = [
+                    continue
+                try:
+                    if path.stat().st_size > _PROJECT_UPLOAD_MAX_BYTES:
+                        errors.append({"filename": path.name, "error": "file too large"})
+                        continue
+                    data = path.read_bytes()
+                except OSError as exc:
+                    errors.append(
+                        {
+                            "filename": path.name,
+                            "error": _desktop_drop_read_error(path, exc),
+                        }
+                    )
+                    continue
+                files.append(
                     (
-                        f"file{index}",
+                        f"file{len(files)}",
                         (
                             path.name,
-                            path.read_bytes(),
+                            data,
                             mimetypes.guess_type(path.name)[0] or "application/octet-stream",
                         ),
                     )
-                    for index, path in enumerate(uploadable_paths)
-                ]
+                )
+            if files:
                 response = await client.post(
                     f"{host_url.rstrip('/')}/api/projects/{project_id}/files",
                     headers=headers,
@@ -2065,6 +2130,8 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
                 )
     except (OSError, httpx.HTTPError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=502)
+    finally:
+        _clear_desktop_drop_staging(request, grant_id)
 
     return JSONResponse(
         {"paths": imported_paths, "image_refs": image_refs, "errors": errors}

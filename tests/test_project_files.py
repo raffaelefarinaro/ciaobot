@@ -455,6 +455,79 @@ def test_native_desktop_drop_returns_full_host_path_and_image_ref(
     ).status_code == 404
 
 
+def test_native_desktop_drop_explains_an_unreadable_image(tmp_path: Path) -> None:
+    """A screenshot the server cannot read gets advice, not a raw errno.
+
+    The macOS case (issue #238) is a drag from the capture thumbnail, whose
+    path only the app that received the drop may read. Unreadable is unreadable
+    here, so chmod stands in for the TCC denial.
+    """
+    pcm = _make_manager(tmp_path)
+    config = pcm._config
+    project = next(iter(pcm.list_projects()))
+    chat = pcm.create_chat(project.project_id, title="Drop test")
+    dropped_image = tmp_path / "Screenshot 2026-07-31 at 09.54.13.png"
+    dropped_image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    dropped_image.chmod(0o000)
+    grant_id = _write_desktop_drop_grant(config, [dropped_image.resolve()])
+    client = _make_client(pcm, config)
+
+    try:
+        response = client.post(
+            "/api/desktop-drop",
+            json={
+                "grant_id": grant_id,
+                "project_id": project.project_id,
+                "chat_id": chat.chat_id,
+            },
+        )
+    finally:
+        dropped_image.chmod(0o600)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["image_refs"] == []
+    assert len(body["errors"]) == 1
+    error = body["errors"][0]
+    assert error["filename"] == dropped_image.name
+    assert "Save the file to a folder first" in error["error"]
+    assert "Errno" not in error["error"]
+
+
+def test_native_desktop_drop_clears_staged_copies(tmp_path: Path) -> None:
+    """The shell's staged copy is deleted once its bytes are in media_root."""
+    pcm = _make_manager(tmp_path)
+    config = pcm._config
+    project = next(iter(pcm.list_projects()))
+    chat = pcm.create_chat(project.project_id, title="Drop test")
+    grant_dir = config.state_path.parent / "desktop-drop-grants"
+    grant_id = _write_desktop_drop_grant(config, [tmp_path / "placeholder.png"])
+    staged_dir = grant_dir / "staged" / grant_id / "0"
+    staged_dir.mkdir(parents=True)
+    staged_image = staged_dir / "shot.png"
+    staged_image.write_bytes(b"\x89PNG\r\n\x1a\n")
+    (grant_dir / f"{grant_id}.json").write_text(
+        json.dumps({"created_at": time.time(), "paths": [str(staged_image)]}),
+        encoding="utf-8",
+    )
+    client = _make_client(pcm, config)
+
+    response = client.post(
+        "/api/desktop-drop",
+        json={
+            "grant_id": grant_id,
+            "project_id": project.project_id,
+            "chat_id": chat.chat_id,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["image_refs"]) == 1
+    assert body["errors"] == []
+    assert not (grant_dir / "staged" / grant_id).exists()
+
+
 def test_native_desktop_drop_rejects_expired_grant(tmp_path: Path) -> None:
     pcm = _make_manager(tmp_path)
     config = pcm._config
