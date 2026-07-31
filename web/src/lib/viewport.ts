@@ -7,6 +7,12 @@
  * `.keyboard-open` class so the home-indicator safe-area can collapse while
  * the keyboard is covering it.
  *
+ * `viewportHeight()` / `viewportWidth()` are the size any `position: fixed`
+ * element should measure itself against: with `interactive-widget=resizes-content`
+ * the layout viewport shrinks with the keyboard, so the visual viewport is what
+ * "on screen" means. `onViewportChange()` lets code that positioned itself once
+ * re-run when the keyboard opens.
+ *
  * See `web/README.md` → "iOS PWA gotchas" before changing any of this.
  */
 
@@ -19,28 +25,60 @@ const RESETTLE_DELAYS_MS = [50, 200, 500]
 /** Fraction of the tallest seen viewport below which we call the keyboard open. */
 const KEYBOARD_OPEN_RATIO = 0.85
 
-export function installViewportPlumbing(): void {
-  let maxViewportHeight = window.innerHeight
+/** Height of the visible viewport, i.e. excluding the on-screen keyboard. */
+export function viewportHeight(): number {
+  return window.visualViewport?.height ?? window.innerHeight
+}
 
-  function measure(): void {
-    const vv = window.visualViewport
-    const h = vv?.height ?? window.innerHeight
-    maxViewportHeight = Math.max(maxViewportHeight, h)
-    document.documentElement.style.setProperty('--app-h', `${h}px`)
-    // With `interactive-widget=resizes-content` the layout viewport shrinks
-    // along with the visual viewport, so the old `innerHeight - h > 100`
-    // heuristic always returns false. Detect keyboard open by comparing
-    // against the tallest viewport height we've seen for this orientation.
-    const keyboardOpen = h < maxViewportHeight * KEYBOARD_OPEN_RATIO
-    document.documentElement.classList.toggle('keyboard-open', keyboardOpen)
-  }
+/** Width of the visible viewport. */
+export function viewportWidth(): number {
+  return window.visualViewport?.width ?? window.innerWidth
+}
 
-  function remeasureWhileSettling(): void {
-    measure()
-    for (const delay of RESETTLE_DELAYS_MS) setTimeout(measure, delay)
-  }
+const subscribers = new Set<(height: number) => void>()
 
+/**
+ * Run `cb` whenever the viewport size changes, including keyboard open/close.
+ * Returns an unsubscribe function. Installs the plumbing if it is not up yet,
+ * so a component can depend on this without ordering against `main.ts`.
+ */
+export function onViewportChange(cb: (height: number) => void): () => void {
+  installViewportPlumbing()
+  subscribers.add(cb)
+  return () => { subscribers.delete(cb) }
+}
+
+let maxViewportHeight = 0
+let listenersAttached = false
+
+function measure(): void {
+  const h = viewportHeight()
+  maxViewportHeight = Math.max(maxViewportHeight, h)
+  document.documentElement.style.setProperty('--app-h', `${h}px`)
+  // With `interactive-widget=resizes-content` the layout viewport shrinks
+  // along with the visual viewport, so the old `innerHeight - h > 100`
+  // heuristic always returns false. Detect keyboard open by comparing
+  // against the tallest viewport height we've seen for this orientation.
+  const keyboardOpen = h < maxViewportHeight * KEYBOARD_OPEN_RATIO
+  document.documentElement.classList.toggle('keyboard-open', keyboardOpen)
+  for (const cb of subscribers) cb(h)
+}
+
+function remeasureWhileSettling(): void {
   measure()
+  for (const delay of RESETTLE_DELAYS_MS) setTimeout(measure, delay)
+}
+
+/** Idempotent: safe to call from `main.ts` and lazily from `onViewportChange`. */
+export function installViewportPlumbing(): void {
+  if (listenersAttached) {
+    // Already wired; still take a fresh reading for the new caller.
+    remeasureWhileSettling()
+    return
+  }
+  listenersAttached = true
+  maxViewportHeight = window.innerHeight
+
   // iOS PWA: visualViewport.height can be transiently wrong on first load
   // before the standalone UI chrome settles.
   remeasureWhileSettling()

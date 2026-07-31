@@ -8,11 +8,13 @@ const KEYBOARD_HEIGHT = 596
 
 type FakeViewport = EventTarget & { height: number }
 
-function fakeVisualViewport(height: number): FakeViewport {
-  const target = new EventTarget() as FakeViewport
-  target.height = height
-  return target
-}
+// One shared fake for the whole file. The plumbing attaches its listeners once,
+// so swapping in a fresh EventTarget per test would orphan them and the fake
+// keyboard would stop reaching the code under test.
+const vv = new EventTarget() as FakeViewport
+vv.height = FULL_HEIGHT
+Object.defineProperty(window, 'visualViewport', { value: vv, configurable: true })
+Object.defineProperty(window, 'innerHeight', { value: FULL_HEIGHT, configurable: true, writable: true })
 
 function appHeight(): string {
   return document.documentElement.style.getPropertyValue('--app-h')
@@ -23,13 +25,9 @@ function keyboardOpen(): boolean {
 }
 
 describe('installViewportPlumbing', () => {
-  let vv: FakeViewport
-
   beforeEach(() => {
     vi.useFakeTimers()
-    vv = fakeVisualViewport(FULL_HEIGHT)
-    Object.defineProperty(window, 'visualViewport', { value: vv, configurable: true })
-    Object.defineProperty(window, 'innerHeight', { value: FULL_HEIGHT, configurable: true, writable: true })
+    vv.height = FULL_HEIGHT
     Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true, writable: true })
     document.documentElement.classList.remove('keyboard-open')
     document.documentElement.style.removeProperty('--app-h')
