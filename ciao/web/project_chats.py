@@ -4859,6 +4859,29 @@ class ProjectChatManager:
             flat = flat[: limit - 3] + "..."
         return flat
 
+    @staticmethod
+    def _has_visible_assistant_text(text: str) -> bool:
+        """True when ``text`` carries a real user-visible reply.
+
+        Used by the regular turn-done branch and the synthesis-nudge drain
+        to gate ``chat_result_ready`` + ``_schedule_push``: an OS push with
+        no content behind it is exactly the "internal comment from the
+        model" notification that landed on devices where the chat had no
+        foreground focus. Empty / whitespace-only / very short replies all
+        fall through to the in-app UI only (subagent count drop + Activity
+        row), matching the intent of the 2026-07-30 watcher-exit fix.
+        """
+        flat = " ".join((text or "").strip().splitlines()).strip()
+        if len(flat) < 4:
+            return False
+        # `StreamEvent.result` only collects assistant text blocks (the SDK
+        # hands ``ThinkingBlock`` separately), so anything that lands here is
+        # already a user-visible block by construction. The length guard above
+        # is enough; the rest of this function is the place to add new
+        # heuristics if a future provider starts emitting short banner-only
+        # result strings.
+        return True
+
     def start_stream(
         self,
         chat_id: str,
@@ -5461,7 +5484,15 @@ class ProjectChatManager:
                 # Successful turn(s): announce result ready (drives unread
                 # badges + in-app toast on clients that aren't focused on
                 # this chat) and dispatch web push (decoupled from any WS).
-                if not had_error and last_assistant_text:
+                # Skip both publish + push when the reply carries no
+                # user-visible text — keeps the in-app UI as the sole signal
+                # for short banner replies (e.g. synthesis-nudge intros) so
+                # an unfocused device doesn't get a content-free OS toast.
+                if (
+                    not had_error
+                    and last_assistant_text
+                    and self._has_visible_assistant_text(last_assistant_text)
+                ):
                     snippet = self._result_snippet(last_assistant_text)
                     chat_now = self._chats.get(chat_id)
                     if chat_now is not None:
@@ -5919,7 +5950,21 @@ class ProjectChatManager:
                     # settle (see _await_schedule_subagents / dispatch_schedule).
                     self._last_drain_result[chat_id] = (text, is_error)
                     close_stream(is_error)
-                    if not is_error and text:
+                    # The 2026-07-30 watcher fix disabled the standalone
+                    # "Background agents finished" push, but the synthesis
+                    # nudge the watcher triggers writes its own ResultEvent
+                    # here. A short banner-only reply (e.g. "Synthesis
+                    # complete — see trace.") still passed the old `text`
+                    # truthy check and produced an OS push whose snippet was
+                    # a one-line internal comment. Gate the publish+push on
+                    # a real visible reply so devices without foreground
+                    # focus keep getting the in-app count drop and Activity
+                    # row as the only signal.
+                    if (
+                        not is_error
+                        and text
+                        and self._has_visible_assistant_text(text)
+                    ):
                         chat_now = self._chats.get(chat_id)
                         if chat_now is not None:
                             chat_now.last_activity_at = _now_iso()

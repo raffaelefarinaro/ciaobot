@@ -527,3 +527,118 @@ def test_chat_subagents_falls_back_to_nested_jsonl_and_progress_entries(
     assert any(msg["role"] == "user" and "Research" in msg["content"] for msg in by_id["researcher"])
     assert any(msg.get("tool_name") == "_activity" and "Read" in msg["content"] for msg in by_id["researcher"])
     assert any("Progress entry survived" in msg["content"] for msg in by_id["progress-agent"])
+
+
+# --- Empty / banner-only ResultEvent guards ----------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "   ",
+        "\n\n",
+        "ok",
+        "...",
+    ],
+)
+def test_has_visible_assistant_text_rejects_empty_and_banner_only(text: str) -> None:
+    """A bare banner or whitespace must not be treated as a real reply."""
+    assert ProjectChatManager._has_visible_assistant_text(text) is False
+
+
+def test_has_visible_assistant_text_accepts_real_reply() -> None:
+    """Anything with at least a few characters of real prose passes."""
+    assert ProjectChatManager._has_visible_assistant_text(
+        "Synthesis complete — see the trace."
+    ) is True
+    assert ProjectChatManager._has_visible_assistant_text(
+        "Found the bug in routes_api.py"
+    ) is True
+
+
+async def test_drain_between_turns_skips_publish_and_push_for_banner_only_result(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A short banner-only ResultEvent must not trigger chat_result_ready or a push.
+
+    The synthesis-nudge parent turn can return a one-line reply like "ok" or
+    "Synthesis complete — see trace." before the real report lands. Without the
+    visibility guard, that single short string used to publish chat_result_ready
+    and queue a delayed push, producing an OS-level notification whose body was
+    the model's internal comment. With the guard, the in-app Activity row and
+    the subagent-count drop remain the only signal.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("drain-banner", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="drain-banner-test")
+    chat.session_id = "sess-drain-banner"
+    pcm._save()
+
+    class _FakeProvider:
+        can_drain = True
+
+        async def drain_events(self):
+            from ciao.models import ResultEvent
+
+            yield ResultEvent(
+                type="result",
+                result="ok",
+                session_id=chat.session_id,
+                is_error=False,
+            )
+
+    pcm._providers[chat.chat_id] = _FakeProvider()  # type: ignore[assignment]
+
+    published: list[dict] = []
+    pushes: list = []
+
+    monkeypatch.setattr(pcm._events, "publish", published.append)
+    monkeypatch.setattr(pcm, "_schedule_push", lambda *a, **k: pushes.append(a))
+
+    # The drain runs until the provider raises StopAsyncIteration after one
+    # event; run it and let it unwind naturally.
+    await pcm._drain_between_turns(chat.chat_id, project.project_id)
+
+    assert pushes == []
+    assert not any(ev.get("type") == "chat_result_ready" for ev in published)
+
+
+async def test_drain_between_turns_publishes_and_pushes_for_real_reply(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A real reply still drives chat_result_ready + the push."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("drain-real", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="drain-real-test")
+    chat.session_id = "sess-drain-real"
+    pcm._save()
+
+    class _FakeProvider:
+        can_drain = True
+
+        async def drain_events(self):
+            from ciao.models import ResultEvent
+
+            yield ResultEvent(
+                type="result",
+                result="Found the bug in routes_api.py line 482.",
+                session_id=chat.session_id,
+                is_error=False,
+            )
+
+    pcm._providers[chat.chat_id] = _FakeProvider()  # type: ignore[assignment]
+
+    published: list[dict] = []
+    pushes: list = []
+
+    monkeypatch.setattr(pcm._events, "publish", published.append)
+    monkeypatch.setattr(pcm, "_schedule_push", lambda *a, **k: pushes.append(a))
+
+    await pcm._drain_between_turns(chat.chat_id, project.project_id)
+
+    ready_events = [ev for ev in published if ev.get("type") == "chat_result_ready"]
+    assert len(ready_events) == 1
+    assert "Found the bug" in ready_events[0]["snippet"]
+    assert len(pushes) == 1
+    assert "Found the bug" in pushes[0][2]
