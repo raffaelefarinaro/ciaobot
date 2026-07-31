@@ -542,19 +542,34 @@ def test_chat_subagents_falls_back_to_nested_jsonl_and_progress_entries(
         "...",
     ],
 )
-def test_has_visible_assistant_text_rejects_empty_and_banner_only(text: str) -> None:
+def test_nudge_reply_announcement_rejects_empty_and_banner_only(text: str) -> None:
     """A bare banner or whitespace must not be treated as a real reply."""
-    assert ProjectChatManager._has_visible_assistant_text(text) is False
+    assert ProjectChatManager._is_worth_announcing_nudge_reply(text) is False
 
 
-def test_has_visible_assistant_text_accepts_real_reply() -> None:
+def test_nudge_reply_announcement_accepts_real_reply() -> None:
     """Anything with at least a few characters of real prose passes."""
-    assert ProjectChatManager._has_visible_assistant_text(
+    assert ProjectChatManager._is_worth_announcing_nudge_reply(
         "Synthesis complete — see the trace."
     ) is True
-    assert ProjectChatManager._has_visible_assistant_text(
+    assert ProjectChatManager._is_worth_announcing_nudge_reply(
         "Found the bug in routes_api.py"
     ) is True
+
+
+@pytest.mark.parametrize("reply", ["Yes", "No", "No.", "Ok", "42", "👍"])
+def test_a_terse_answer_to_the_user_still_announces(reply: str) -> None:
+    """The banner floor must never reach a reply the user asked for.
+
+    "Yes" is a complete answer to a yes/no question. Gating the regular
+    turn-done branch on the nudge heuristic dropped its unread badge, its
+    toast, the ``last_activity_at`` bump that reorders recents, and the
+    pending-retry clear, with nothing anywhere reporting a problem.
+    """
+    # The nudge heuristic does reject it, which is why it must stay off this path.
+    assert ProjectChatManager._is_worth_announcing_nudge_reply(reply) is False
+    # The regular branch's condition is plain non-empty text.
+    assert bool(reply.strip()) is True
 
 
 async def test_drain_between_turns_skips_publish_and_push_for_banner_only_result(

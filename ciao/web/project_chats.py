@@ -118,6 +118,11 @@ _PROJECT_UPLOAD_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 _RETRY_INTERVAL_SECONDS = 60 * 60
 _RETRY_CONNECTION_INTERVAL_SECONDS = 30
 _RETRY_STATUSES = {"pending", "stopped", ""}
+# Shortest synthesis-nudge reply that still earns an unread badge and a push.
+# Anything shorter is the model's own bookkeeping ("ok", "done."). Applies only
+# to the nudge drain, never to a reply the user asked for: see
+# ProjectChatManager._is_worth_announcing_nudge_reply.
+_NUDGE_ANNOUNCE_MIN_CHARS = 4
 # Prompt used to resume a session after a mid-response connection drop. The
 # original prompt is NOT replayed — the partial turn already ran (and may have
 # executed tools), so we resume the existing session and ask it to continue,
@@ -4874,27 +4879,24 @@ class ProjectChatManager:
         return flat
 
     @staticmethod
-    def _has_visible_assistant_text(text: str) -> bool:
-        """True when ``text`` carries a real user-visible reply.
+    def _is_worth_announcing_nudge_reply(text: str) -> bool:
+        """True when a synthesis-nudge reply is worth an unread badge and a push.
 
-        Used by the regular turn-done branch and the synthesis-nudge drain
-        to gate ``chat_result_ready`` + ``_schedule_push``: an OS push with
-        no content behind it is exactly the "internal comment from the
-        model" notification that landed on devices where the chat had no
-        foreground focus. Empty / whitespace-only / very short replies all
-        fall through to the in-app UI only (subagent count drop + Activity
-        row), matching the intent of the 2026-07-30 watcher-exit fix.
+        Only for ``_drain_between_turns``. That path is not a user question: the
+        completion watcher asked for the turn, so a stub reply ("ok", "done.")
+        is the model's own bookkeeping and an OS toast carrying it is noise.
+        Below the floor the in-app UI stays the sole signal (subagent count drop
+        plus Activity row), matching the 2026-07-30 watcher-exit fix.
+
+        Deliberately NOT used on the regular turn-done branch. There the reply
+        answers something the user actually asked, and "Yes" or "No" is a
+        complete answer: suppressing it would drop the unread badge, the toast,
+        the ``last_activity_at`` bump that reorders recents, and the pending-retry
+        clear. A length floor cannot tell a terse answer from a stub, so the
+        regular path gates on non-empty text only.
         """
         flat = " ".join((text or "").strip().splitlines()).strip()
-        if len(flat) < 4:
-            return False
-        # `StreamEvent.result` only collects assistant text blocks (the SDK
-        # hands ``ThinkingBlock`` separately), so anything that lands here is
-        # already a user-visible block by construction. The length guard above
-        # is enough; the rest of this function is the place to add new
-        # heuristics if a future provider starts emitting short banner-only
-        # result strings.
-        return True
+        return len(flat) >= _NUDGE_ANNOUNCE_MIN_CHARS
 
     def start_stream(
         self,
@@ -5498,15 +5500,12 @@ class ProjectChatManager:
                 # Successful turn(s): announce result ready (drives unread
                 # badges + in-app toast on clients that aren't focused on
                 # this chat) and dispatch web push (decoupled from any WS).
-                # Skip both publish + push when the reply carries no
-                # user-visible text — keeps the in-app UI as the sole signal
-                # for short banner replies (e.g. synthesis-nudge intros) so
-                # an unfocused device doesn't get a content-free OS toast.
-                if (
-                    not had_error
-                    and last_assistant_text
-                    and self._has_visible_assistant_text(last_assistant_text)
-                ):
+                # Gated on non-empty text only. This reply answers something the
+                # user asked, so "Yes" counts: a length floor here also withheld
+                # the last_activity_at bump that reorders recents and the
+                # pending-retry clear below. The banner heuristic belongs to the
+                # synthesis-nudge drain, which nobody asked for.
+                if not had_error and last_assistant_text.strip():
                     snippet = self._result_snippet(last_assistant_text)
                     chat_now = self._chats.get(chat_id)
                     if chat_now is not None:
@@ -5977,7 +5976,7 @@ class ProjectChatManager:
                     if (
                         not is_error
                         and text
-                        and self._has_visible_assistant_text(text)
+                        and self._is_worth_announcing_nudge_reply(text)
                     ):
                         chat_now = self._chats.get(chat_id)
                         if chat_now is not None:
