@@ -579,6 +579,15 @@ class ChatStream:
         return bool(self._pending)
 
     @property
+    def subscriber_count(self) -> int:
+        """Clients currently attached to this stream.
+
+        Zero means nothing this turn emits reaches a browser right now, which is
+        how ``file_surface`` can tell that its pin request went nowhere.
+        """
+        return len(self._subs)
+
+    @property
     def done(self) -> bool:
         return self._done
 

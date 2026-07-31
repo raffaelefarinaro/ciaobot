@@ -5,6 +5,7 @@ import { getPendingBucket, normalizePendingBuckets, setPendingBucket } from '../
 import { buildFixPrompt } from '../lib/fixError'
 import { formatChatComments, formatFileComments, type ChatCommentAnchor } from '../lib/commentContext'
 import { isPlausibleFilePath } from '../lib/filePaths'
+import { useFileViewerStore } from './fileViewer'
 import { isRateLimitTelemetry } from '../lib/rateLimit'
 import {
   DEFAULT_RESTART_MESSAGE,
@@ -146,11 +147,14 @@ export const useProjectStore = defineStore('projects', () => {
       persistPendingChatComments()
     },
   })
-  // Pinned file paths per chat/project. A separate dismissal flag remembers
-  // when the user closed the split panel so replayed file_surface events do
-  // not reopen it the next time that chat connects.
+  // Pinned file paths per chat/project. Dismissals are remembered per *path*,
+  // not per chat: a replayed `file_surface` event (WS reconnect replays the
+  // in-flight stream's buffer) must not reopen a file the user closed, but a
+  // later surface of a *different* file is a new deliverable and must still
+  // open. A chat-wide flag conflated the two and silently swallowed every
+  // subsequent surface request for the rest of the chat.
   const pinnedFilePaths = ref<Record<string, string>>({})
-  const dismissedAutoPins = ref<Record<string, true>>({})
+  const dismissedAutoPins = ref<Record<string, string[]>>({})
   // 'filecard' carries a file-write tool call (Write/Edit/MultiEdit/NotebookEdit).
   // It breaks contiguous 'tool' groups so the PWA can render a standalone
   // clickable card with a preview link instead of folding it into _activity.
@@ -803,7 +807,7 @@ export const useProjectStore = defineStore('projects', () => {
       const pf = localStorage.getItem('ciao-pinned-files')
       if (pf) pinnedFilePaths.value = JSON.parse(pf)
       const pd = localStorage.getItem('ciao-dismissed-auto-pins')
-      if (pd) dismissedAutoPins.value = JSON.parse(pd)
+      if (pd) dismissedAutoPins.value = normalizeDismissedAutoPins(JSON.parse(pd))
       const pi = localStorage.getItem('ciao-pending-images')
       if (pi) pendingImagesByChat.value = normalizePendingBuckets<string>(JSON.parse(pi), activeChatId.value)
       const pc = localStorage.getItem('ciao-pending-comments')
@@ -831,6 +835,21 @@ export const useProjectStore = defineStore('projects', () => {
     try {
       localStorage.setItem('ciao-pinned-files', JSON.stringify(pinnedFilePaths.value))
     } catch { /* ignore */ }
+  }
+
+  // Older builds stored `{ [chatId]: true }`, a chat-wide block. Drop those
+  // rather than translating them: the flag they encoded ("never surface here
+  // again") is the bug this shape replaces, and the file it referred to is not
+  // recoverable from it.
+  function normalizeDismissedAutoPins(raw: unknown): Record<string, string[]> {
+    if (!raw || typeof raw !== 'object') return {}
+    const out: Record<string, string[]> = {}
+    for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
+      if (!Array.isArray(value)) continue
+      const paths = value.filter((p): p is string => typeof p === 'string' && !!p)
+      if (paths.length) out[id] = paths
+    }
+    return out
   }
 
   function persistDismissedAutoPins() {
@@ -2917,9 +2936,14 @@ export const useProjectStore = defineStore('projects', () => {
   // ── Pinned file viewer (per chat/project) ──────────────────────────
   function pinFile(id: string, path: string): void {
     pinnedFilePaths.value = { ...pinnedFilePaths.value, [id]: path }
-    if (dismissedAutoPins.value[id]) {
+    // Pinning a file the user had closed clears that path's dismissal, so a
+    // later surface of it is allowed to reopen it again.
+    const dismissed = dismissedAutoPins.value[id]
+    if (dismissed?.includes(path)) {
+      const remaining = dismissed.filter(p => p !== path)
       const nextDismissed = { ...dismissedAutoPins.value }
-      delete nextDismissed[id]
+      if (remaining.length) nextDismissed[id] = remaining
+      else delete nextDismissed[id]
       dismissedAutoPins.value = nextDismissed
       persistDismissedAutoPins()
     }
@@ -2927,12 +2951,18 @@ export const useProjectStore = defineStore('projects', () => {
   }
   function unpinFile(id: string): void {
     const next = { ...pinnedFilePaths.value }
-    const hadPinnedFile = Boolean(next[id])
+    const closedPath = next[id]
     delete next[id]
     pinnedFilePaths.value = next
-    if (hadPinnedFile) {
-      dismissedAutoPins.value = { ...dismissedAutoPins.value, [id]: true }
-      persistDismissedAutoPins()
+    if (closedPath) {
+      const dismissed = dismissedAutoPins.value[id] || []
+      if (!dismissed.includes(closedPath)) {
+        dismissedAutoPins.value = {
+          ...dismissedAutoPins.value,
+          [id]: [...dismissed, closedPath],
+        }
+        persistDismissedAutoPins()
+      }
     }
     persistPinnedFiles()
   }
@@ -3116,32 +3146,49 @@ export const useProjectStore = defineStore('projects', () => {
     })
   }
 
-  // Auto-surface a file in the pinned side panel, but only when the agent
-  // deliberately asked to via the `file_surface` MCP tool (action === 'surfaced')
-  // — not for every ordinary Write/Edit, which used to be guessed at by
-  // extension (.md/.csv) plus a bookkeeping-file skip-list. That heuristic
-  // both missed real deliverables (non-.md/.csv, or written by a subagent)
-  // and fired on noisy writes the agent never meant to highlight. An explicit
-  // tool call is a genuine signal; a file extension is not. Fills the empty
-  // state only — never yanks a file the user already pinned — and only on
-  // desktop, where the split layout exists (mirrors FileViewerModal's canPin
-  // gate). localStorage-backed like every other pin; no backend state.
-  function _maybeAutoPin(
+  // Show a file the agent deliberately surfaced via the `file_surface` MCP
+  // tool (action === 'surfaced'). Ordinary Write/Edit touches only ever get an
+  // inline card: this used to be guessed at by extension (.md/.csv) plus a
+  // bookkeeping skip-list, which both missed real deliverables and fired on
+  // noisy writes. An explicit tool call is a genuine signal; an extension is not.
+  //
+  // Because the call is explicit, it outranks whatever is currently pinned and
+  // replaces it. The only thing it respects is a dismissal of the *same* path
+  // (see dismissedAutoPins): the user closed that file, and a WS reconnect
+  // replaying the stream buffer must not shove it back. On a narrow viewport
+  // there is no split panel, so open the viewer modal instead of dropping the
+  // request on the floor. localStorage-backed like every other pin.
+  function _applySurfaceRequests(
     chatId: string,
     touches: Array<{ file_path?: string; action?: string }>,
   ): void {
-    if (typeof window === 'undefined' || window.innerWidth <= 768) return
-    if (dismissedAutoPins.value[chatId]) return
-    if (pinnedFileFor(chatId)) return
+    if (typeof window === 'undefined') return
     // Freshest surfaced artifact wins (last touch in the batch).
     for (let i = touches.length - 1; i >= 0; i--) {
       const touch = touches[i]
       if (touch?.action !== 'surfaced') continue
       const raw = touch.file_path
       if (!raw || !isPlausibleFilePath(raw)) continue
+      if (dismissedAutoPins.value[chatId]?.includes(raw)) return
+      if (pinnedFileFor(chatId) === raw) return
+      if (window.innerWidth <= 768) {
+        _openSurfacedInViewer(raw, chatId)
+        return
+      }
       pinFile(chatId, raw)
       return
     }
+  }
+
+  // Mobile fallback for an explicit surface. Never interrupts: an already-open
+  // viewer (the user may be mid-edit there) keeps whatever it is showing, and
+  // the inline file card stays as the way in.
+  function _openSurfacedInViewer(path: string, chatId: string): void {
+    try {
+      const viewer = useFileViewerStore()
+      if (viewer.isOpen) return
+      void viewer.open(path, null, chatId)
+    } catch { /* store unavailable outside an app context */ }
   }
 
   function _flushTimeline(chatId: string): StreamEntry[] {
@@ -3413,7 +3460,7 @@ export const useProjectStore = defineStore('projects', () => {
               tool_use_id: event.tool_use_id,
             })
           }
-          _maybeAutoPin(chatId, touches)
+          _applySurfaceRequests(chatId, touches)
           break
         }
 

@@ -433,7 +433,7 @@ wheels = [
 
 [[package]]
 name = "ciaobot"
-version = "0.6.0"
+version = "0.6.5"
 source = { editable = "." }
 dependencies = [
     { name = "claude-agent-sdk" },

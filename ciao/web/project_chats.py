@@ -435,8 +435,6 @@ def _is_question_shaped_prompt(text: str) -> bool:
     snippet = (text or "").strip()
     if not snippet:
         return False
-    if snippet.endswith("?"):
-        return True
     return bool(_QUESTION_OPENER_RE.match(snippet))
 
 

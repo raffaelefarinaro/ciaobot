@@ -25,6 +25,16 @@
   notifications and both machines alert you at the same time.
 - Changing the host's password from a connected client no longer cuts that
   client off.
+- A file the assistant surfaces now actually opens. Closing one pinned file used
+  to block every later surface request in that chat, silently, so deliverables
+  stopped appearing with no sign anything had been suppressed. Dismissals are
+  remembered per file instead of per chat: the file you closed stays closed
+  across reconnects, a new one still opens. An explicit surface also replaces
+  whatever is pinned, and on a phone it opens the file viewer instead of doing
+  nothing, since there is no side panel there.
+- The `file_surface` tool reports how many clients were listening, so the
+  assistant can no longer claim a file is in your panel when nobody had the chat
+  open.
 - The loop indicator in a chat's loop banner is now legible. It inherited body
   text size, so the heartbeat glyph was lost next to the loop title and the
   Start/Stop buttons.
