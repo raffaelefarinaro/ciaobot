@@ -138,6 +138,20 @@
       </div>
     </div>
 
+    <!-- Schedule banner: this chat was created or is driven by a schedule -->
+    <div v-if="chatSchedules.length" class="loop-banner">
+      <div v-for="s in chatSchedules" :key="s.schedule_id" class="loop-banner-row">
+        <span class="loop-banner-ico" aria-hidden="true">&#9201;</span>
+        <span class="loop-banner-text">
+          <strong>{{ s.title || 'Schedule' }}</strong>
+          · {{ scheduleCadence(s) }}
+          · {{ s.enabled ? 'enabled' : 'paused' }}<template v-if="s.enabled && scheduleCountdown(s)"> · next {{ scheduleCountdown(s) }}</template>
+        </span>
+        <button class="btn-small" :disabled="scheduleRunningId === s.schedule_id" @click="runScheduleNow(s)">{{ scheduleRunningId === s.schedule_id ? 'Running…' : 'Run now' }}</button>
+        <router-link :to="`/schedules/${s.schedule_id}`" class="btn-small loop-banner-manage">Manage</router-link>
+      </div>
+    </div>
+
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
     <div class="messages" ref="messagesEl" data-tour="chat-messages" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
@@ -874,7 +888,7 @@ import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { formatAttachedFilePath, nativeAbsoluteFilePath } from '../lib/chatAttachments'
 import { readChatDraft, writeChatDraft } from '../lib/chatDrafts'
-import type { Loop, ModelsResponse, ChatMessage, SubagentTranscript, ProviderSubchatRecord } from '../lib/types'
+import type { Loop, Schedule, ModelsResponse, ChatMessage, SubagentTranscript, ProviderSubchatRecord } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
@@ -1060,8 +1074,20 @@ const taskStore = useTaskStore()
 const chatLoops = computed(() =>
   taskStore.loops.filter(l => l.web_chat_id === chat.value?.chat_id),
 )
+// Schedules linked to this chat: either the chat carries a schedule_id
+// backlink (project schedules, stamped at creation) or the schedule pins
+// this chat via web_chat_id (fixed-chat schedules). Mirrors the loop banner
+// but durable across runs because each run stamps the backlink on the chat.
+const chatSchedules = computed(() => {
+  const cid = chat.value?.chat_id
+  const sid = chat.value?.schedule_id
+  return taskStore.schedules.filter(s =>
+    (sid && s.schedule_id === sid) || (cid && s.web_chat_id === cid),
+  )
+})
 onMounted(() => {
   taskStore.fetchLoops().catch(() => {})
+  taskStore.fetchSchedules().catch(() => {})
 })
 async function toggleLoop(l: Loop) {
   await taskStore.updateLoop(l.loop_id, { running: !l.running })
@@ -1071,12 +1097,13 @@ async function toggleLoop(l: Loop) {
 // banner.  Only runs while there are running loops bound to this chat.
 const loopNow = ref(Date.now())
 let loopTick: ReturnType<typeof setInterval> | null = null
-watch(chatLoops, (loops) => {
+watch([chatLoops, chatSchedules], ([loops, scheds]) => {
   const hasRunning = loops.some(l => l.running)
-  if (hasRunning && !loopTick) {
+  const hasScheduled = scheds.some(s => s.enabled && s.next_run)
+  if ((hasRunning || hasScheduled) && !loopTick) {
     loopNow.value = Date.now()
     loopTick = setInterval(() => { loopNow.value = Date.now() }, 30_000)
-  } else if (!hasRunning && loopTick) {
+  } else if (!hasRunning && !hasScheduled && loopTick) {
     clearInterval(loopTick)
     loopTick = null
   }
@@ -1093,6 +1120,43 @@ function loopCountdown(l: Loop): string {
   const hrs = Math.floor(mins / 60)
   const rm = mins % 60
   return rm ? `in ${hrs}h ${rm}m` : `in ${hrs}h`
+}
+
+// ── Schedule banner helpers ──
+const scheduleRunningId = ref<string | null>(null)
+function scheduleCadence(s: Schedule): string {
+  const time = s.daily_time_utc ? s.daily_time_utc.slice(0, 5) : ''
+  switch (s.frequency) {
+    case 'daily': return time ? `daily ${time}` : 'daily'
+    case 'weekly': {
+      const days = s.days_of_week && s.days_of_week.length
+        ? s.days_of_week.map(d => d.charAt(0).toUpperCase() + d.slice(1)).join('/')
+        : ''
+      return days ? `weekly ${days}${time ? ' ' + time : ''}` : 'weekly'
+    }
+    case 'monthly': return s.day_of_month ? `monthly on day ${s.day_of_month}` : 'monthly'
+    case 'once': return s.run_at_date ? `once ${s.run_at_date}` : 'once'
+    case 'manual': return 'manual'
+    default: return s.frequency
+  }
+}
+function scheduleCountdown(s: Schedule): string {
+  if (!s.next_run) return ''
+  const diffMs = new Date(s.next_run).getTime() - loopNow.value
+  if (diffMs <= 0) return 'soon'
+  const mins = Math.ceil(diffMs / 60_000)
+  if (mins < 60) return `in ${mins}m`
+  const hrs = Math.floor(mins / 60)
+  const rm = mins % 60
+  return rm ? `in ${hrs}h ${rm}m` : `in ${hrs}h`
+}
+async function runScheduleNow(s: Schedule) {
+  scheduleRunningId.value = s.schedule_id
+  try {
+    await taskStore.runScheduleNow(s.schedule_id)
+  } finally {
+    scheduleRunningId.value = null
+  }
 }
 const project = computed(() => store.activeProject)
 const models = ref<string[]>(['haiku', 'sonnet', 'opus', 'fable'])

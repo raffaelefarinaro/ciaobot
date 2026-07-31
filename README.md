@@ -148,7 +148,7 @@ When your message mentions a name that appears in the vault index, the agent get
 
 **Automations**
 
-- Schedules: recurring or one-off cron routines that dispatch fresh prompts into a project or chat.
+- Schedules: recurring or one-off cron routines that dispatch fresh prompts into a project or chat. A schedule-triggered chat carries a banner with Run now / Manage controls, mirroring the loop banner; because a project schedule spawns a new chat each run, the chat holds a durable `schedule_id` backlink (stamped when the schedule creates it) so the banner survives later runs instead of only marking the latest chat.
 - Loops: re-run a prompt inside one chat every N minutes, keeping the conversation's context between iterations. A loop-driven chat is marked with `↻` in the sidebar and on the home grid, and carries a banner with start/stop controls; the harness's own `/schedule` and `/loop` skills are removed from the model's context and denied, so automations land in Ciaobot instead of a cloud routine it cannot see.
 - System routines ship enabled (memory curation, workspace hygiene, skill evolution); every background run is visible under **Settings → Automation**.
 
