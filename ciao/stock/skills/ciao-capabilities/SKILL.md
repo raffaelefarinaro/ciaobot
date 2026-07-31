@@ -87,11 +87,11 @@ Local-first: the server, vault, and runtime state live on the user's machine; tr
 
 ## Guided tour (new users)
 
-When onboarding someone, start with the **in-app product tour** (auto-starts on first launch; replay from Settings → Home), then walk through hands-on:
+When onboarding someone, walk through these hands-on:
 
 1. **Orient** — workspaces → projects → chats; create or rename a project for something they're working on.
 2. **Chat** — model picker, voice input, and project context the agent always sees.
-3. **Annotate & files** — message comments, inline file cards, pin, line comments, and rich previews (replay from the product tour if needed).
+3. **Annotate & files** — message comments, inline file cards, pin, line comments, and rich previews.
 4. **Memory** — archive → insights → memory proposals; nothing becomes durable without approval.
 5. **Schedules** — set up one small routine they'd actually use.
 6. **Settings** — providers/models, package updates, and on macOS the menu bar companion.

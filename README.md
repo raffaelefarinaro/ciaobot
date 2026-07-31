@@ -197,10 +197,7 @@ When your message mentions a name that appears in the vault index, the agent get
 
 - Installable PWA with web-push notifications and in-app package updates.
 - macOS desktop app: one Dock window and menu-bar companion with native notifications, updates, and a launchd-managed engine.
-- First-run product tour plus a getting-started checklist whose steps deep-link into the real pages.
 - A local HTTP API an in-chat agent can drive (create chats, subagents, commands — see [PWA_API.md](PWA_API.md)).
-
-On first launch, an in-app product tour walks through the core flows. Replay it anytime from **Settings → Home → Product tour**.
 
 ## What ships by default
 

@@ -7,7 +7,6 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { defineComponent, h, nextTick } from 'vue'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
-import { useProductTourStore } from '../../stores/productTour'
 
 const ChatPanelStub = defineComponent({
   name: 'ChatPanel',
@@ -66,7 +65,6 @@ describe('ChatLayout', () => {
     const taskStore = useTaskStore()
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
     vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
-    vi.spyOn(useProductTourStore(), 'maybeAutoStart').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
     const wrapper = mount(ChatLayout, {
@@ -81,7 +79,6 @@ describe('ChatLayout', () => {
           FileViewerModal: EmptyStub,
           PinnedFilePanel: EmptyStub,
           PaneHeader: EmptyStub,
-          ProductTour: EmptyStub,
           HomeRecentChats: EmptyStub,
         },
       },

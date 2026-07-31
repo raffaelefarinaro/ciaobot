@@ -56,7 +56,6 @@
             }"
             title="automations"
             :aria-label="hasAutomationWarning ? 'automations (attention required)' : 'automations'"
-            data-tour="nav-schedules"
           >
             <!-- Clock face with hour markers: more diagrammatic than calendar grid -->
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -91,7 +90,7 @@
         <span class="sidebar-section-title">automations</span>
         <button class="btn-small" @click="emit('new-schedule')" title="New automation">+ New</button>
       </div>
-      <div class="workspace-toggle" data-tour="automation-workspaces">
+      <div class="workspace-toggle">
         <button
           v-for="workspace in store.workspaceOptions"
           :key="workspace.name"
@@ -296,7 +295,7 @@
 
     <template v-if="!collapsed && (!mode || mode === 'chat' || mode === 'project')">
       <!-- Workspace toggle -->
-      <div class="workspace-toggle" data-tour="sidebar-workspaces">
+      <div class="workspace-toggle">
         <button
           v-for="workspace in store.workspaceOptions"
           :key="workspace.name"
@@ -352,7 +351,7 @@
         </div>
 
         <!-- Project list -->
-        <div class="project-list" data-tour="sidebar-projects">
+        <div class="project-list">
           <div
             v-for="project in store.workspaceProjects"
             :key="project.project_id"

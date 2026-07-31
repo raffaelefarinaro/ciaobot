@@ -91,7 +91,7 @@
           <span class="bg-agents-dot" aria-hidden="true"></span>
           {{ store.activeBackgroundAgents }} agent{{ store.activeBackgroundAgents === 1 ? '' : 's' }}
         </span>
-        <div class="model-picker-wrap" ref="modelPickerRef" data-tour="model-picker">
+        <div class="model-picker-wrap" ref="modelPickerRef">
           <button
             class="model-picker-btn touch-hit"
             :title="chat.model + (chat.thinking_level ? ' · ' + chat.thinking_level : '')"
@@ -176,7 +176,7 @@
 
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
-    <div class="messages" ref="messagesEl" data-tour="chat-messages" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
+    <div class="messages" ref="messagesEl" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
       <div class="messages-content">
       <template v-for="(item, i) in renderItems" :key="item.key">
         <!-- Reasoning trace: intermediate assistant text + tool calls grouped -->
@@ -829,7 +829,7 @@
       </div>
     </div>
 
-    <div class="input-bar" data-tour="chat-input" :class="{ disabled: chat.archived }">
+    <div class="input-bar" :class="{ disabled: chat.archived }">
       <template v-if="chat.archived">
         <div class="archived-notice">
           <span>This chat is archived.</span>

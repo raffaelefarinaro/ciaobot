@@ -167,7 +167,6 @@
       </template>
     </div>
     <FileViewerModal />
-    <ProductTour />
   </div>
 </template>
 
@@ -176,7 +175,6 @@ import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
-import { useProductTourStore } from '../stores/productTour'
 import ProjectSidebar from './ProjectSidebar.vue'
 import ChatPanel from './ChatPanel.vue'
 import ProjectView from './ProjectView.vue'
@@ -185,7 +183,6 @@ import SettingsView from './SettingsView.vue'
 import FileViewerModal from './FileViewerModal.vue'
 import PinnedFilePanel from './PinnedFilePanel.vue'
 import PaneHeader from './PaneHeader.vue'
-import ProductTour from './ProductTour.vue'
 import HomeRecentChats from './HomeRecentChats.vue'
 import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
 import { normalizeWorkspaceColor } from '../lib/workspaceColors'
@@ -193,7 +190,6 @@ import { pendingConfirm } from '../lib/confirm'
 import { isDesktopApp } from '../lib/desktop'
 
 const store = useProjectStore()
-const tourStore = useProductTourStore()
 
 // Refs into the active ChatPanel, used by the global keyboard shortcuts to
 // reach composer-owned actions (dictation, archive).
@@ -490,38 +486,6 @@ function unpinCurrent(): void {
   if (activePinKey.value) store.unpinFile(activePinKey.value)
 }
 
-function openSidebarForTour() {
-  sidebarCollapsed.value = false
-}
-
-async function navigateToChatForTour() {
-  if (viewMode.value !== 'chat') {
-    await router.push('/')
-  }
-}
-
-async function ensureWelcomeChatForTour() {
-  if (store.activeChat) return
-  const welcome = store.chats.find(c => /welcome|connect existing vault/i.test(c.title))
-  const target = welcome
-    ?? (() => {
-      const general = store.projects.find(p => p.name === 'General')
-      if (!general) return store.chats[0]
-      return store.chats.find(c => c.project_id === general.project_id)
-    })()
-  if (!target) return
-  await store.switchChat(target.chat_id)
-  await router.push(`/chat/${target.chat_id}`)
-  if (isMobile.value) sidebarCollapsed.value = true
-}
-
-async function waitForStartupDismissed() {
-  for (let i = 0; i < 120; i++) {
-    if (!document.querySelector('.startup-overlay')) return
-    await new Promise<void>(resolve => setTimeout(resolve, 250))
-  }
-}
-
 function onResize() {
   const wasMobile = isMobile.value
   isMobile.value = window.innerWidth < 768
@@ -549,11 +513,6 @@ function stopLatestStatusSync() {
 }
 
 onMounted(async () => {
-  tourStore.registerHooks({
-    openSidebar: openSidebarForTour,
-    navigateToChat: navigateToChatForTour,
-    ensureWelcomeChat: ensureWelcomeChatForTour,
-  })
   await store.fetchAll()
   startLatestStatusSync()
   taskStore.fetchSchedules().catch(() => {})
@@ -566,8 +525,6 @@ onMounted(async () => {
   if (isMobile.value && store.activeChat) {
     sidebarCollapsed.value = true
   }
-  await waitForStartupDismissed()
-  void tourStore.maybeAutoStart()
 })
 
 watch(() => route.path, (p) => {
