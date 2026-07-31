@@ -42,7 +42,7 @@ def _make_repo(tmp_path: Path, *, bundle: bool = True) -> Path:
 
 
 def _write_bundle(bundle: Path, *, mtime: float) -> Path:
-    binary = bundle / "Contents" / "MacOS" / "Ciaobot"
+    binary = bundle / "Contents" / "MacOS" / desktop_build.APP_EXECUTABLE_NAME
     binary.parent.mkdir(parents=True, exist_ok=True)
     binary.write_text("macho", encoding="utf-8")
     import os
@@ -55,6 +55,45 @@ def _touch(path: Path, mtime: float) -> None:
     import os
 
     os.utime(path, (mtime, mtime))
+
+
+def test_the_executable_name_matches_the_cargo_package() -> None:
+    """The Mach-O is named after the Cargo package, not tauri's productName.
+
+    `productName: "Ciaobot"` names the .app wrapper; the binary inside it comes
+    from `[package] name` in Cargo.toml. Assuming "Ciaobot" for both made
+    build_and_stage reject every real build as "no executable", which returned
+    500 from the deploy and stopped Settings -> Restart before it restarted.
+    Every fixture in this file fabricates the bundle, so only reading the real
+    manifest catches a drift here.
+    """
+    cargo_toml = Path(__file__).resolve().parents[1] / "desktop" / "src-tauri" / "Cargo.toml"
+    package_name = ""
+    in_package = False
+    for line in cargo_toml.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_package = stripped == "[package]"
+            continue
+        if in_package and stripped.startswith("name"):
+            package_name = stripped.split("=", 1)[1].strip().strip('"')
+            break
+    assert package_name, "could not read [package] name from Cargo.toml"
+    assert desktop_build.APP_EXECUTABLE_NAME == package_name
+
+
+def test_bundle_executable_falls_back_to_whatever_is_in_macos(tmp_path: Path) -> None:
+    """A renamed binary should degrade the freshness check, not break the build."""
+    bundle = tmp_path / "Ciaobot.app"
+    macos = bundle / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    (macos / "something-else").write_text("macho", encoding="utf-8")
+
+    assert desktop_build.bundle_executable(bundle) == macos / "something-else"
+    # And an empty bundle is still reported as having no executable.
+    empty = tmp_path / "Empty.app"
+    (empty / "Contents" / "MacOS").mkdir(parents=True)
+    assert desktop_build.bundle_executable(empty) is None
 
 
 def test_rebuild_is_skipped_when_desktop_sources_are_older(tmp_path: Path) -> None:
@@ -155,7 +194,7 @@ def test_build_stages_beside_the_installed_app_without_touching_it(tmp_path: Pat
     assert all(s["ok"] for s in steps)
     assert (install_dir / desktop_build.STAGING_NAME).exists()
     # The live app is untouched until install_staged_and_relaunch runs.
-    assert (live / "Contents" / "MacOS" / "Ciaobot").read_text(encoding="utf-8") == "macho"
+    assert (live / "Contents" / "MacOS" / desktop_build.APP_EXECUTABLE_NAME).read_text(encoding="utf-8") == "macho"
 
 
 def test_build_installs_npm_deps_only_when_node_modules_is_missing(tmp_path: Path) -> None:
@@ -193,7 +232,7 @@ def test_install_quits_before_swapping_then_reopens(tmp_path: Path) -> None:
     install_dir.mkdir()
     _write_bundle(desktop_build.installed_bundle(install_dir), mtime=1_000.0)
     staging = _write_bundle(install_dir / desktop_build.STAGING_NAME, mtime=3_000.0)
-    (staging / "Contents" / "MacOS" / "Ciaobot").write_text("new", encoding="utf-8")
+    (staging / "Contents" / "MacOS" / desktop_build.APP_EXECUTABLE_NAME).write_text("new", encoding="utf-8")
 
     order: list[str] = []
     alive = {"value": True}
@@ -208,7 +247,7 @@ def test_install_quits_before_swapping_then_reopens(tmp_path: Path) -> None:
             alive["value"] = False
         if args[0] == "open":
             # The swap must already have happened by the time the app relaunches.
-            assert (desktop_build.installed_bundle(install_dir) / "Contents" / "MacOS" / "Ciaobot").read_text(
+            assert (desktop_build.installed_bundle(install_dir) / "Contents" / "MacOS" / desktop_build.APP_EXECUTABLE_NAME).read_text(
                 encoding="utf-8"
             ) == "new"
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
@@ -312,7 +351,7 @@ def test_install_restores_the_old_app_when_the_swap_fails(tmp_path: Path) -> Non
     install_dir.mkdir()
     destination = desktop_build.installed_bundle(install_dir)
     _write_bundle(destination, mtime=1_000.0)
-    (destination / "Contents" / "MacOS" / "Ciaobot").write_text("old", encoding="utf-8")
+    (destination / "Contents" / "MacOS" / desktop_build.APP_EXECUTABLE_NAME).write_text("old", encoding="utf-8")
     staging = install_dir / desktop_build.STAGING_NAME
     _write_bundle(staging, mtime=3_000.0)
 
@@ -335,7 +374,7 @@ def test_install_restores_the_old_app_when_the_swap_fails(tmp_path: Path) -> Non
     assert steps[0]["ok"] is False
     assert "could not install" in steps[0]["output"]
     # The working app is back where it belongs, not left as a hole.
-    assert (destination / "Contents" / "MacOS" / "Ciaobot").read_text(encoding="utf-8") == "old"
+    assert (destination / "Contents" / "MacOS" / desktop_build.APP_EXECUTABLE_NAME).read_text(encoding="utf-8") == "old"
 
 
 def test_tauri_build_skips_the_dmg_and_the_signed_updater_artifacts(tmp_path: Path) -> None:

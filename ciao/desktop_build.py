@@ -31,6 +31,12 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 APP_BUNDLE_NAME = "Ciaobot.app"
+# The Mach-O inside the bundle is named after the Cargo package
+# (desktop/src-tauri/Cargo.toml `name`), NOT after tauri.conf.json
+# `productName`, which only names the .app wrapper. Getting this wrong makes
+# every freshness check fall back to the directory mtime and every build fail
+# its "did tauri actually produce a binary" check.
+APP_EXECUTABLE_NAME = "ciaobot-desktop"
 BUNDLE_IDENTIFIER = "local.ciaobot.app"
 INSTALL_DIR = Path("/Applications")
 STAGING_NAME = ".Ciaobot.app.deploy"
@@ -88,6 +94,24 @@ def installed_bundle(install_dir: Path = INSTALL_DIR) -> Path:
     return Path(install_dir) / APP_BUNDLE_NAME
 
 
+def bundle_executable(bundle: Path) -> Path | None:
+    """The Mach-O inside ``bundle``, or None when there is none.
+
+    Prefers the known name but falls back to whatever single file sits in
+    ``Contents/MacOS``, so renaming the Cargo package degrades the freshness
+    check instead of breaking the build outright.
+    """
+    macos_dir = bundle / "Contents" / "MacOS"
+    expected = macos_dir / APP_EXECUTABLE_NAME
+    if expected.is_file():
+        return expected
+    try:
+        found = [path for path in sorted(macos_dir.iterdir()) if path.is_file()]
+    except OSError:
+        return None
+    return found[0] if found else None
+
+
 def _bundle_stamp(bundle: Path) -> float | None:
     """Modification time of a bundle, or None when it is not there.
 
@@ -95,7 +119,10 @@ def _bundle_stamp(bundle: Path) -> float | None:
     into an existing .app touches the directory without producing a new binary,
     and the binary is what a rebuild is actually for.
     """
-    for candidate in (bundle / "Contents" / "MacOS" / "Ciaobot", bundle):
+    executable = bundle_executable(bundle)
+    for candidate in (executable, bundle):
+        if candidate is None:
+            continue
         try:
             return candidate.stat().st_mtime
         except OSError:
@@ -200,7 +227,7 @@ def build_and_stage(
         return steps, False
 
     bundle = built_bundle(repo)
-    if not (bundle / "Contents" / "MacOS" / "Ciaobot").exists():
+    if bundle_executable(bundle) is None:
         steps.append({
             "step": "desktop stage",
             "ok": False,
@@ -349,7 +376,7 @@ def _app_is_running(*, runner: Runner) -> bool | None:
     thing the staging design exists to prevent.
     """
     result = runner(
-        ["pgrep", "-f", f"{APP_BUNDLE_NAME}/Contents/MacOS/Ciaobot"],
+        ["pgrep", "-f", f"{APP_BUNDLE_NAME}/Contents/MacOS/{APP_EXECUTABLE_NAME}"],
         cwd="/",
         timeout=15,
     )
