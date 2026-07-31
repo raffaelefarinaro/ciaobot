@@ -31,6 +31,9 @@ def test_fallback_model_returns_none_for_cheapest_tier() -> None:
 
 def test_runtime_context_includes_today(monkeypatch) -> None:
     monkeypatch.delenv("CIAO_WORKSPACE", raising=False)
+    # Set in every agent process Ciaobot spawns, so a suite run from inside a
+    # chat inherited it and the "no env" case was never actually reached.
+    monkeypatch.delenv("CIAO_ACTIVE_WORKSPACE", raising=False)
     monkeypatch.delenv("CIAO_ACTIVE_PROJECT", raising=False)
     monkeypatch.delenv("CIAO_CHAT_ID", raising=False)
     monkeypatch.delenv("GWS_PROFILE", raising=False)
