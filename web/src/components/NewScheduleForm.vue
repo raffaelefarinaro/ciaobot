@@ -93,7 +93,6 @@ import { useProjectStore } from '../stores/projects'
 import type { ScheduleArchivePolicy } from '../lib/types'
 import ModelSelector from '../components/ModelSelector.vue'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
-const props = defineProps<{}>()
 const emit = defineEmits<{ created: [] }>()
 const store = useTaskStore()
 const projectStore = useProjectStore()

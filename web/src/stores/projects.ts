@@ -646,16 +646,6 @@ export const useProjectStore = defineStore('projects', () => {
     return legacy.trim() || content
   }
 
-  function sanitizeCachedMessages() {
-    let changed = false
-    for (const [chatId, chatMessages] of Object.entries(messages.value)) {
-      const nextMessages = normalizeMessages(chatMessages)
-      if (JSON.stringify(nextMessages) !== JSON.stringify(chatMessages)) changed = true
-      messages.value[chatId] = nextMessages
-    }
-    if (changed) persistMessages()
-  }
-
   function normalizeMessages(chatMessages: ChatMessage[]): ChatMessage[] {
     return chatMessages
       .map((message) => {
@@ -2019,7 +2009,10 @@ export const useProjectStore = defineStore('projects', () => {
     // reconnect brings no events and the UI stays on the stale state.
     // Mirrors what switchChat does, so users don't have to re-tap the
     // chat in the sidebar.
-    async function resumeActiveChat() {
+    // A const arrow rather than a function declaration: no-inner-declarations
+    // objects to hoisting a declaration out of this block, and both callers
+    // below run from listeners, well after this line.
+    const resumeActiveChat = async () => {
       const chatId = activeChatId.value
       if (chatId) {
         await reloadAndReconnectChat(chatId)

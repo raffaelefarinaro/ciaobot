@@ -25,7 +25,9 @@ export function parseFrontmatter(source: string): FrontmatterResult {
 
   // Allow a BOM or leading newlines but require `---` on the actual first
   // non-empty line. Without an opening fence we leave the document alone.
-  const m = source.match(/^﻿?(?:\s*\r?\n)*---\r?\n/)
+  // The BOM is written as \uFEFF: as a literal it is invisible in a diff and
+  // trips no-irregular-whitespace.
+  const m = source.match(/^\uFEFF?(?:\s*\r?\n)*---\r?\n/)
   if (!m) return { frontmatter: null, body: source }
 
   const after = source.slice(m[0].length)

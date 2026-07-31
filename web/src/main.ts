@@ -27,22 +27,27 @@ try {
           document.documentElement.classList.add('theme-light')
         }
       }
-    } catch (err) {}
+    } catch { /* localStorage blocked: leave the class as it is */ }
   }
   if (mediaQuery.addEventListener) {
     mediaQuery.addEventListener('change', listener)
   } else {
-    (mediaQuery as any).addListener(listener)
+    // Safari before 14 only has the deprecated MediaQueryList.addListener.
+    type LegacyMediaQueryList = MediaQueryList & {
+      addListener(cb: (event: { matches: boolean }) => void): void
+    }
+    (mediaQuery as LegacyMediaQueryList).addListener(listener)
   }
 
   const savedFontScale = localStorage.getItem('ciao-font-scale') || '1.2'
   document.documentElement.style.setProperty('--font-scale', savedFontScale)
-} catch (e) {
+} catch {
   // Ignore localStorage restrictions
 }
 
 // Set Excalidraw asset path to host fonts locally (loaded from /fonts)
-;(window as any).EXCALIDRAW_ASSET_PATH = '/'
+const excalidrawGlobals = window as unknown as { EXCALIDRAW_ASSET_PATH: string }
+excalidrawGlobals.EXCALIDRAW_ASSET_PATH = '/'
 
 const app = createApp(App)
 app.use(createPinia())

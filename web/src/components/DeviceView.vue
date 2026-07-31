@@ -254,6 +254,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import ConnectedClients from './ConnectedClients.vue'
+import { errorMessage, apiErrorMessage, errorPayload } from '../lib/errorMessage'
 import NodeAddresses from './NodeAddresses.vue'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
@@ -334,8 +335,8 @@ async function openUpdatePanel() {
   changelog.value = { commits: [], compare_url: '', error: '' }
   try {
     changelog.value = await api.get<any>('/api/device/changelog')
-  } catch (e: any) {
-    changelog.value = { commits: [], compare_url: '', error: e?.message || 'unknown error' }
+  } catch (e) {
+    changelog.value = { commits: [], compare_url: '', error: errorMessage(e, 'unknown error') }
   } finally {
     changelogLoading.value = false
   }
@@ -349,8 +350,8 @@ async function doUpdate() {
     updateResult.value = res?.ok
       ? 'Updated. This device is restarting; reload in a few seconds.'
       : res?.error || 'Update failed'
-  } catch (e: any) {
-    updateResult.value = `Error: ${e?.payload?.error || e.message || 'update failed'}`
+  } catch (e) {
+    updateResult.value = `Error: ${apiErrorMessage(e, 'update failed')}`
   }
   updating.value = false
 }
@@ -384,10 +385,10 @@ async function connectAsClient() {
     }
     nodeActionError.value = true
     nodeActionResult.value = r?.error || 'Connect failed'
-  } catch (e: any) {
+  } catch (e) {
     nodeActionError.value = true
-    const detail = e?.payload?.error || e.message || 'Connect failed'
-    nodeActionResult.value = e?.payload?.password_required_on_host ? detail : `Error: ${detail}`
+    const detail = apiErrorMessage(e, 'Connect failed')
+    nodeActionResult.value = errorPayload(e)?.password_required_on_host ? detail : `Error: ${detail}`
   }
   nodePending.value = null
 }
@@ -403,9 +404,9 @@ async function reconnectHostSession() {
     hostPasswordInput.value = ''
     window.location.assign('/')
     return
-  } catch (e: any) {
+  } catch (e) {
     nodeActionError.value = true
-    nodeActionResult.value = `Error: ${e?.payload?.error || e.message || 'Reconnect failed'}`
+    nodeActionResult.value = `Error: ${apiErrorMessage(e, 'Reconnect failed')}`
   }
   nodePending.value = null
 }
@@ -438,9 +439,9 @@ async function becomeHost(force = false) {
       nodeActionError.value = true
       nodeActionResult.value = r?.error || 'Disconnect failed'
     }
-  } catch (e: any) {
+  } catch (e) {
     nodeActionError.value = true
-    if (e?.payload?.peer_unreachable) {
+    if (errorPayload(e)?.peer_unreachable) {
       if (await askConfirm('Host is unreachable. Force disconnect anyway (skip remote push)?', {
         title: 'Force disconnect',
         confirmLabel: 'Force disconnect',
@@ -449,7 +450,7 @@ async function becomeHost(force = false) {
         return becomeHost(true)
       }
     }
-    nodeActionResult.value = `Error: ${e?.payload?.error || e.message || 'Disconnect failed'}`
+    nodeActionResult.value = `Error: ${apiErrorMessage(e, 'Disconnect failed')}`
   }
   nodePending.value = null
 }

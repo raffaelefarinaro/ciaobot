@@ -252,7 +252,6 @@ const sidebarStyle = computed(() => {
 
 let dragStartWidth = 0
 let dragStartX = 0
-let dragStartRatio = 0
 let dragContainerWidth = 0
 let dragContainerLeft = 0
 
@@ -293,7 +292,6 @@ function stopSidebarDrag() {
 function startSplitDrag(e: MouseEvent) {
   e.preventDefault()
   isDraggingSplit.value = true
-  dragStartRatio = chatSplitRatio.value
   dragStartX = e.clientX
   
   const splitContainer = document.querySelector('.chat-main')

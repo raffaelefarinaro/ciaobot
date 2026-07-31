@@ -2216,9 +2216,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
+import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
 import { formatTime, formatDuration } from '../lib/time'
 import { isDesktopApp } from '../lib/desktop'
 import type {
@@ -2235,7 +2236,6 @@ import type {
   NodeStatus,
   McpStatus,
   McpUsage,
-  McpToolUsage,
   McpProjectServer,
   McpEnvKey,
   PromptAsset,
@@ -2250,13 +2250,12 @@ import type {
 } from '../lib/types'
 import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSupported } from '../lib/push'
 import { askConfirm } from '../lib/confirm'
-import { useAuthStore } from '../stores/auth'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
-import { providerModelBadges, sectionsFromModelOptions, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
+import { providerModelBadges, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 
 // The tray owns package updates and native notifications in the desktop app.
 const inDesktopApp = isDesktopApp()
@@ -2440,9 +2439,9 @@ async function saveMcpEnvKeys(srv: McpProjectServer) {
     setTimeout(() => {
       if (mcpEnvResultServer.value === srv.name) mcpEnvResult.value = ''
     }, 3000)
-  } catch (e: any) {
+  } catch (e) {
     mcpEnvError.value = true
-    mcpEnvResult.value = e?.message || 'Failed to save MCP secrets.'
+    mcpEnvResult.value = errorMessage(e, 'Failed to save MCP secrets.')
   } finally {
     mcpEnvSaving.value = false
   }
@@ -2481,9 +2480,9 @@ async function saveMcpServer(srv: McpProjectServer) {
     setTimeout(() => {
       if (mcpServerResultName.value === srv.name) mcpServerResult.value = ''
     }, 3000)
-  } catch (e: any) {
+  } catch (e) {
     mcpServerError.value = true
-    mcpServerResult.value = e?.message || 'Failed to save MCP server.'
+    mcpServerResult.value = errorMessage(e, 'Failed to save MCP server.')
   } finally {
     mcpServerSaving.value = ''
   }
@@ -2513,8 +2512,8 @@ async function refreshMcpServerTools(srv: McpProjectServer) {
     if (!res.ok && res.error) {
       mcpToolsError.value[srv.name] = res.error
     }
-  } catch (e: any) {
-    const message = e?.message || 'Could not load tools.'
+  } catch (e) {
+    const message = errorMessage(e, 'Could not load tools.')
     mcpToolsError.value[srv.name] = /not available on the running server|Unexpected token|<!DOCTYPE|not valid JSON/i.test(message)
       ? 'MCP tools endpoint not available on the running server yet. Use Settings → Deploy, then restart Ciaobot.'
       : message
@@ -2549,8 +2548,8 @@ async function createMcpViaChat() {
         query: { initialPrompt: 'Help me set up and configure a new MCP server for this project.' }
       })
     }
-  } catch (e: any) {
-    alert(`Failed to create chat: ${e?.message || e}`)
+  } catch (e) {
+    alert(`Failed to create chat: ${errorMessage(e)}`)
   }
 }
 
@@ -2586,9 +2585,9 @@ async function addCustomMcpServer() {
       }
     }
     notifySaved(`Added MCP server ${name}.`)
-  } catch (e: any) {
+  } catch (e) {
     addMcpServerError.value = true
-    addMcpServerResult.value = e?.message || `Failed to add MCP server`
+    addMcpServerResult.value = errorMessage(e, `Failed to add MCP server`)
   } finally {
     addingMcpServer.value = false
   }
@@ -2607,8 +2606,8 @@ async function deleteCustomMcpServer(name: string) {
     delete mcpServerTools.value[name]
     delete mcpToolsError.value[name]
     notifySaved(`Removed MCP server ${name}.`)
-  } catch (e: any) {
-    alert(e?.message || `Failed to delete MCP server ${name}`)
+  } catch (e) {
+    alert(errorMessage(e, `Failed to delete MCP server ${name}`))
   }
 }
 
@@ -2629,7 +2628,7 @@ function loadAppearanceSettings() {
     if (savedScale) {
       fontScale.value = parseFloat(savedScale) || DEFAULT_FONT_SCALE
     }
-  } catch (e) {
+  } catch {
     // Ignore localStorage block
   }
 }
@@ -2638,7 +2637,7 @@ function setTheme(theme: 'dark' | 'light' | 'system') {
   activeTheme.value = theme
   try {
     localStorage.setItem('ciao-theme', theme)
-  } catch (e) {}
+  } catch { /* localStorage blocked */ }
 
   if (theme === 'light') {
     document.documentElement.classList.add('theme-light')
@@ -2669,7 +2668,7 @@ function setFontScale(next: number) {
   fontScale.value = next
   try {
     localStorage.setItem('ciao-font-scale', next.toString())
-  } catch (e) {}
+  } catch { /* localStorage blocked */ }
   document.documentElement.style.setProperty('--font-scale', next.toString())
 }
 function isSkillExpanded(name: string) {
@@ -2814,8 +2813,8 @@ const routineDefaultTiers: Record<RoutineModelKey, TierKey> = {
 async function fetchRoutines() {
   try {
     routines.value = await api.get<RoutineSettings>('/api/settings/routines')
-  } catch (e: any) {
-    routinesError.value = `Failed to load model settings: ${e?.message || e}`
+  } catch (e) {
+    routinesError.value = `Failed to load model settings: ${errorMessage(e)}`
   } finally {
     routinesLoaded.value = true
   }
@@ -2827,8 +2826,8 @@ async function saveRoutines(patch: Record<string, string>) {
   try {
     routines.value = await api.patch<RoutineSettings>('/api/settings/routines', patch)
     notifySaved('Model settings saved.')
-  } catch (e: any) {
-    routinesResult.value = `Error: ${e?.message || e}`
+  } catch (e) {
+    routinesResult.value = `Error: ${errorMessage(e)}`
   } finally {
     routinesSaving.value = false
   }
@@ -3187,8 +3186,6 @@ const mcpStatus = ref<McpStatus | null>(null)
 const mcpUsage = ref<McpUsage | null>(null)
 const mcpUsageLoaded = ref(false)
 const mcpUsageError = ref('')
-const usageSortKey = ref<'calls' | 'errors' | 'avg_ms' | 'tool'>('calls')
-const usageSortDir = ref<'asc' | 'desc'>('desc')
 const providerKeyInputs = ref<Record<string, string>>({})
 const providerConnectionPending = ref('')
 const providerConnectionResult = ref('')
@@ -3237,8 +3234,8 @@ async function fetchGwsIntegration() {
   gwsIntegrationError.value = ''
   try {
     gwsIntegration.value = await api.get<GwsIntegrationSettings>('/api/integrations/gws')
-  } catch (e: any) {
-    gwsIntegrationError.value = `Failed to load Google Workspace integration: ${e?.message || e}`
+  } catch (e) {
+    gwsIntegrationError.value = `Failed to load Google Workspace integration: ${errorMessage(e)}`
   } finally {
     gwsIntegrationLoaded.value = true
   }
@@ -3261,8 +3258,8 @@ async function installGws() {
     } else {
       gwsInstallResult.value = res.error || 'Installation failed.'
     }
-  } catch (e: any) {
-    gwsInstallResult.value = `Error installing gws: ${e?.message || e}`
+  } catch (e) {
+    gwsInstallResult.value = `Error installing gws: ${errorMessage(e)}`
   } finally {
     gwsInstalling.value = false
   }
@@ -3285,8 +3282,8 @@ async function handleClientSecretUpload(event: Event, profileName: string) {
       client_secret: content,
     })
     gwsIntegration.value = updated
-  } catch (e: any) {
-    alert(e?.message || 'Failed to upload client secret')
+  } catch (e) {
+    alert(errorMessage(e, 'Failed to upload client secret'))
   } finally {
     gwsSavingProfile.value = null
     target.value = ''
@@ -3302,8 +3299,8 @@ async function startGwsAuth(profileName: string) {
     gwsAuthUrls.value[profileName] = res.auth_url
     gwsRedirectUrls.value[profileName] = ''
     window.open(res.auth_url, '_blank')
-  } catch (e: any) {
-    alert(e?.message || 'Failed to generate authorization URL')
+  } catch (e) {
+    alert(errorMessage(e, 'Failed to generate authorization URL'))
   } finally {
     gwsSavingProfile.value = null
   }
@@ -3322,8 +3319,8 @@ async function exchangeGwsCode(profileName: string) {
     gwsIntegration.value = updated
     delete gwsAuthUrls.value[profileName]
     delete gwsRedirectUrls.value[profileName]
-  } catch (e: any) {
-    alert(e?.message || 'Failed to complete connection')
+  } catch (e) {
+    alert(errorMessage(e, 'Failed to complete connection'))
   } finally {
     gwsSavingProfile.value = null
   }
@@ -3353,8 +3350,8 @@ async function disconnectGwsProfile(profileName: string, deleteClientSecret: boo
     })
     gwsIntegration.value = updated
     cancelGwsAuth(profileName)
-  } catch (e: any) {
-    alert(e?.message || 'Failed to update profile connection')
+  } catch (e) {
+    alert(errorMessage(e, 'Failed to update profile connection'))
   } finally {
     gwsSavingProfile.value = null
   }
@@ -3374,8 +3371,8 @@ async function saveAutoUpdateGithubSkills() {
       providerKeys.value = res
     }
     notifySaved('Saved.')
-  } catch (e: any) {
-    autoUpdateResult.value = `Error: ${e?.message || e}`
+  } catch (e) {
+    autoUpdateResult.value = `Error: ${errorMessage(e)}`
     autoUpdateGithubSkills.value = !autoUpdateGithubSkills.value
   } finally {
     autoUpdateSaving.value = false
@@ -3395,8 +3392,8 @@ async function fetchProviderKeys() {
     if (res.auto_update_github_skills !== undefined) {
       autoUpdateGithubSkills.value = res.auto_update_github_skills
     }
-  } catch (e: any) {
-    providerKeysError.value = `Failed to load provider keys: ${e?.message || e}`
+  } catch (e) {
+    providerKeysError.value = `Failed to load provider keys: ${errorMessage(e)}`
   } finally {
     providerKeysLoaded.value = true
   }
@@ -3427,31 +3424,7 @@ async function fetchMcpUsage() {
   }
 }
 
-function sortUsageBy(key: 'calls' | 'errors' | 'avg_ms' | 'tool') {
-  if (usageSortKey.value === key) {
-    usageSortDir.value = usageSortDir.value === 'desc' ? 'asc' : 'desc'
-  } else {
-    usageSortKey.value = key
-    usageSortDir.value = key === 'tool' ? 'asc' : 'desc'
-  }
-}
 
-const sortedUsage = computed<McpToolUsage[]>(() => {
-  const rows = [...(mcpUsage.value?.tools ?? [])]
-  const key = usageSortKey.value
-  const factor = usageSortDir.value === 'desc' ? -1 : 1
-  rows.sort((a, b) => {
-    let cmp: number
-    if (key === 'tool') {
-      cmp = a.tool.localeCompare(b.tool)
-    } else {
-      cmp = (a[key] as number) - (b[key] as number)
-      if (cmp === 0) cmp = a.tool.localeCompare(b.tool) * -1
-    }
-    return cmp * factor
-  })
-  return rows
-})
 
 async function providerConnectionAction(provider: string, action: 'connect' | 'verify' | 'logout') {
   if (action === 'logout' && !await askConfirm(`Log out of ${provider === 'codex' ? 'OpenAI Codex' : 'Claude Code'} on this computer?`, {
@@ -3475,8 +3448,8 @@ async function providerConnectionAction(provider: string, action: 'connect' | 'v
       providerConnectionResult.value = result.ok ? `Connection verified (${result.auth}).` : result.detail || 'Not connected.'
     }
     await fetchProviderKeys()
-  } catch (e: any) {
-    providerConnectionResult.value = `Error: ${e?.message || e}`
+  } catch (e) {
+    providerConnectionResult.value = `Error: ${errorMessage(e)}`
   } finally {
     providerConnectionPending.value = ''
   }
@@ -3526,8 +3499,8 @@ async function saveProviderKeys() {
     }
     providerKeysResult.value = ''
     await restartAndReload('Configuration saved. Restarting Ciaobot to apply…')
-  } catch (e: any) {
-    providerKeysResult.value = `Error: ${e?.message || e}`
+  } catch (e) {
+    providerKeysResult.value = `Error: ${errorMessage(e)}`
   } finally {
     providerKeysSaving.value = false
   }
@@ -3547,8 +3520,8 @@ async function installLocalVoice() {
     } else {
       routinesResult.value = 'Installation failed.'
     }
-  } catch (e: any) {
-    routinesResult.value = `Error installing engine: ${e?.message || e}`
+  } catch (e) {
+    routinesResult.value = `Error installing engine: ${errorMessage(e)}`
   } finally {
     voiceInstalling.value = false
   }
@@ -3569,8 +3542,8 @@ async function installApfel() {
     } else {
       routinesResult.value = `apfel install failed: ${res.error || 'unknown error'}`
     }
-  } catch (e: any) {
-    routinesResult.value = `Error installing apfel: ${e?.message || e}`
+  } catch (e) {
+    routinesResult.value = `Error installing apfel: ${errorMessage(e)}`
   } finally {
     apfelInstalling.value = false
   }
@@ -3589,8 +3562,8 @@ async function installLocalTts() {
     } else {
       routinesResult.value = 'Installation failed.'
     }
-  } catch (e: any) {
-    routinesResult.value = `Error installing engine: ${e?.message || e}`
+  } catch (e) {
+    routinesResult.value = `Error installing engine: ${errorMessage(e)}`
   } finally {
     ttsInstalling.value = false
   }
@@ -3599,8 +3572,8 @@ async function installLocalTts() {
 async function fetchSkills() {
   try {
     skillsInventory.value = await api.get<SkillInventory>('/api/admin/skills')
-  } catch (e: any) {
-    skillsError.value = `Failed to load skills: ${e?.message || e}`
+  } catch (e) {
+    skillsError.value = `Failed to load skills: ${errorMessage(e)}`
   } finally {
     skillsLoaded.value = true
   }
@@ -3611,8 +3584,8 @@ async function fetchCommands() {
   try {
     const res = await api.get<CommandsResponse>('/api/commands')
     commands.value = Array.isArray(res.commands) ? res.commands : []
-  } catch (e: any) {
-    commandsError.value = `Failed to load commands: ${e?.message || e}`
+  } catch (e) {
+    commandsError.value = `Failed to load commands: ${errorMessage(e)}`
   } finally {
     commandsLoaded.value = true
   }
@@ -3622,8 +3595,8 @@ async function fetchAgentAssets() {
   agentAssetsError.value = ''
   try {
     agentAssets.value = await api.get<AgentAssetsResponse>('/api/agent-assets')
-  } catch (e: any) {
-    agentAssetsError.value = `Failed to load agent assets: ${e?.message || e}`
+  } catch (e) {
+    agentAssetsError.value = `Failed to load agent assets: ${errorMessage(e)}`
   } finally {
     agentAssetsLoaded.value = true
   }
@@ -3641,8 +3614,8 @@ async function fixWorkspaceHealth() {
     // the fresh report.
     await api.post('/api/workspace-health/fix', {})
     await fetchAgentAssets()
-  } catch (e: any) {
-    healthFixError.value = e?.message || 'fix failed'
+  } catch (e) {
+    healthFixError.value = errorMessage(e, 'fix failed')
   } finally {
     healthFixPending.value = false
   }
@@ -3923,9 +3896,9 @@ async function addSubagent() {
     resetSubagentForm(false)
     showAddSubagent.value = false
     await fetchAgentAssets()
-  } catch (e: any) {
+  } catch (e) {
     addSubagentError.value = true
-    addSubagentResult.value = `Error: ${e?.message || e}`
+    addSubagentResult.value = `Error: ${errorMessage(e)}`
   } finally {
     addingSubagent.value = false
   }
@@ -3948,9 +3921,9 @@ async function addCommand() {
     resetCommandForm(false)
     showAddCommand.value = false
     await Promise.all([fetchAgentAssets(), fetchCommands()])
-  } catch (e: any) {
+  } catch (e) {
     addCommandError.value = true
-    addCommandResult.value = `Error: ${e?.message || e}`
+    addCommandResult.value = `Error: ${errorMessage(e)}`
   } finally {
     addingCommand.value = false
   }
@@ -3985,9 +3958,9 @@ async function saveSubagent(agent: SubagentAsset) {
     notifySaved(`Saved ${agent.name}. Restart or sync Claude Code sessions to pick it up.`, 'Subagent')
     cancelEditSubagent()
     await fetchAgentAssets()
-  } catch (e: any) {
+  } catch (e) {
     assetLifecycleError.value = true
-    assetLifecycleResult.value = `Error: ${e?.message || e}`
+    assetLifecycleResult.value = `Error: ${errorMessage(e)}`
   } finally {
     savingSubagent.value = null
   }
@@ -4009,9 +3982,9 @@ async function deleteSubagent(agent: SubagentAsset) {
     notifySaved(`Deleted ${agent.name}. Restart or sync Claude Code sessions to pick it up.`, 'Subagent')
     if (editingSubagent.value === agent.name) cancelEditSubagent()
     await fetchAgentAssets()
-  } catch (e: any) {
+  } catch (e) {
     assetLifecycleError.value = true
-    assetLifecycleResult.value = `Error: ${e?.message || e}`
+    assetLifecycleResult.value = `Error: ${errorMessage(e)}`
   } finally {
     savingSubagent.value = null
   }
@@ -4049,9 +4022,9 @@ async function saveCommand(command: CommandAsset) {
     notifySaved(`Saved /${command.name}. Restart or sync Claude Code sessions to pick it up.`, 'Command')
     cancelEditCommand()
     await Promise.all([fetchAgentAssets(), fetchCommands()])
-  } catch (e: any) {
+  } catch (e) {
     assetLifecycleError.value = true
-    assetLifecycleResult.value = `Error: ${e?.message || e}`
+    assetLifecycleResult.value = `Error: ${errorMessage(e)}`
   } finally {
     savingCommand.value = null
   }
@@ -4073,9 +4046,9 @@ async function deleteCommand(command: CommandAsset) {
     notifySaved(`Deleted /${command.name}. Restart or sync Claude Code sessions to pick it up.`, 'Command')
     if (editingCommand.value === command.name) cancelEditCommand()
     await Promise.all([fetchAgentAssets(), fetchCommands()])
-  } catch (e: any) {
+  } catch (e) {
     assetLifecycleError.value = true
-    assetLifecycleResult.value = `Error: ${e?.message || e}`
+    assetLifecycleResult.value = `Error: ${errorMessage(e)}`
   } finally {
     savingCommand.value = null
   }
@@ -4117,9 +4090,9 @@ async function addGithubSkill() {
       addGithubSkillError.value = true
       addGithubSkillResult.value = res.error || 'Failed to add skill.'
     }
-  } catch (e: any) {
+  } catch (e) {
     addGithubSkillError.value = true
-    addGithubSkillResult.value = `Error: ${e?.message || e}`
+    addGithubSkillResult.value = `Error: ${errorMessage(e)}`
   } finally {
     addingGithubSkill.value = false
   }
@@ -4145,8 +4118,8 @@ async function createSkillViaChat() {
       const prompt = 'I want to create a new custom skill. Please guide me through writing a new skill (creating the SKILL.md under the skills/ directory).'
       projectStore.sendMessage(chat.chat_id, prompt)
     }
-  } catch (e: any) {
-    alert(`Failed to start chat: ${e?.message || e}`)
+  } catch (e) {
+    alert(`Failed to start chat: ${errorMessage(e)}`)
   }
 }
 
@@ -4201,8 +4174,8 @@ async function fetchAutomation() {
   automationError.value = ''
   try {
     automationItems.value = await api.get<AutomationProcess[]>('/api/automation')
-  } catch (e: any) {
-    automationError.value = `Failed to load automation: ${e?.message || e}`
+  } catch (e) {
+    automationError.value = `Failed to load automation: ${errorMessage(e)}`
   } finally {
     automationLoaded.value = true
   }
@@ -4224,8 +4197,8 @@ async function triggerJob(jobId: string) {
     await taskStore.runScheduleNow(scheduleId)
     notifySaved(`Triggered automation job "${jobId}" via schedule "${scheduleId}".`, 'Automations')
     await fetchAutomation()
-  } catch (e: any) {
-    alert(`Failed to trigger job: ${e?.message || e}`)
+  } catch (e) {
+    alert(`Failed to trigger job: ${errorMessage(e)}`)
   } finally {
     triggeringJobs.value[jobId] = false
   }
@@ -4242,8 +4215,8 @@ async function triggerBackfill() {
     await api.post('/api/automation/backfill-insights', {})
     notifySaved('Insights backfill started in the background.', 'Automations')
     setTimeout(fetchAutomation, 2000)
-  } catch (e: any) {
-    alert(`Failed to start backfill: ${e?.message || e}`)
+  } catch (e) {
+    alert(`Failed to start backfill: ${errorMessage(e)}`)
   } finally {
     backfillRunning.value = false
   }
@@ -4266,7 +4239,7 @@ function isMacDesktop(): boolean {
 function isStandalone(): boolean {
   return (
     (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
-    (navigator as any).standalone === true
+    (navigator as Navigator & { standalone?: boolean }).standalone === true
   )
 }
 
@@ -4335,24 +4308,7 @@ function claudeAiMcpsPayload(value: 'default' | 'on' | 'off'): boolean | null {
   return null
 }
 
-function workspaceCustomDefaultModel(model: string): boolean {
-  const value = model.trim()
-  return Boolean(value) && !modelTiers.some((tier) => tier.key === value)
-}
 
-function isCustomWorkspaceModel(model: string): boolean {
-  const value = model.trim()
-  if (!value) return false
-  if (modelTiers.some((tier) => tier.key === value)) return false
-  const options = routines.value?.model_options
-  if (!options) return true
-  const allKnown = [
-    ...(options.ollama_local || []),
-    ...(options.ollama_cloud || []),
-    ...(options.openrouter || []),
-  ]
-  return !allKnown.includes(value)
-}
 
 function workspaceModelSectionsForProvider(provider: WorkspaceProvider, currentModelValue: string): ModelSection[] {
   if (provider === 'codex') {
@@ -4444,15 +4400,7 @@ function formatConnectorLabel(name: string): string {
   return clean
 }
 
-const inspectorWorkspace = ref(projectStore.activeWorkspace || 'personal')
-const inspectorProvider = ref<WorkspaceProvider>('claude')
 
-const inspectorConnectorsActive = computed(() => {
-  if (inspectorProvider.value === 'codex') return false
-  const targetForm = workspaceForms.value.find((f) => f.name === inspectorWorkspace.value)
-  if (!targetForm) return true
-  return targetForm.claude_ai_mcps !== 'off'
-})
 
 const inspectorEmbeddedTools = computed(() => {
   if (mcpStatus.value?.tools && mcpStatus.value.tools.length) {
@@ -4515,8 +4463,8 @@ async function fetchWorkspacesList() {
     if (!workspaceProviderOptions.value.some((provider) => provider.value === newWorkspaceForm.value.default_provider)) {
       newWorkspaceForm.value.default_provider = defaultWorkspaceProvider()
     }
-  } catch (e: any) {
-    workspacesError.value = `Failed to load workspaces: ${e?.message || e}`
+  } catch (e) {
+    workspacesError.value = `Failed to load workspaces: ${errorMessage(e)}`
   } finally {
     workspacesLoaded.value = true
   }
@@ -4551,8 +4499,8 @@ async function saveWorkspace(name: string) {
     })
     notifySaved(`Workspace "${name}" saved.`, 'Workspaces')
     await fetchWorkspacesList()
-  } catch (e: any) {
-    workspacesResult.value = `Error: ${e?.message || e}`
+  } catch (e) {
+    workspacesResult.value = `Error: ${errorMessage(e)}`
   } finally {
     workspacesSaving.value = null
   }
@@ -4583,8 +4531,8 @@ async function createNewWorkspace() {
     showNewWorkspace.value = false
     newWorkspaceForm.value = blankWorkspaceForm()
     await fetchWorkspacesList()
-  } catch (e: any) {
-    workspacesResult.value = `Error: ${e?.message || e}`
+  } catch (e) {
+    workspacesResult.value = `Error: ${errorMessage(e)}`
   } finally {
     workspacesSaving.value = null
   }
@@ -4602,8 +4550,8 @@ async function removeWorkspace(name: string) {
     await projectStore.deleteWorkspace(name)
     notifySaved(`Workspace "${name}" deleted.`, 'Workspaces')
     await fetchWorkspacesList()
-  } catch (e: any) {
-    workspacesResult.value = `Error: ${e?.message || e}`
+  } catch (e) {
+    workspacesResult.value = `Error: ${errorMessage(e)}`
   } finally {
     workspacesSaving.value = null
   }
@@ -4668,8 +4616,8 @@ async function togglePush() {
       await enablePush()
       pushEnabledFlag.value = true
     }
-  } catch (e: any) {
-    pushError.value = e?.message || String(e)
+  } catch (e) {
+    pushError.value = errorMessage(e)
   } finally {
     pushPending.value = false
   }
@@ -4682,13 +4630,14 @@ async function doSnapshot(confirmWarnings = false) {
   try {
     const r = await api.post<{ message: string }>('/api/admin/snapshot', { confirm_warnings: confirmWarnings })
     actionResult.value = r.message
-  } catch (e: any) {
-    const payload = e?.payload
-    if (payload?.blockers) {
-      alert(`Snapshot blocked by secrets:\n\n${payload.blockers.join('\n')}`)
+  } catch (e) {
+    const blockers = errorPayloadList(e, 'blockers')
+    const warnings = errorPayloadList(e, 'warnings')
+    if (blockers) {
+      alert(`Snapshot blocked by secrets:\n\n${blockers.join('\n')}`)
       actionResult.value = 'Blocked by secrets.'
-    } else if (payload?.warnings) {
-      if (await askConfirm(`Warnings found:\n\n${payload.warnings.join('\n')}\n\nDo you want to proceed anyway?`, {
+    } else if (warnings) {
+      if (await askConfirm(`Warnings found:\n\n${warnings.join('\n')}\n\nDo you want to proceed anyway?`, {
         title: 'Snapshot warnings',
         confirmLabel: 'Proceed anyway',
       })) {
@@ -4697,7 +4646,7 @@ async function doSnapshot(confirmWarnings = false) {
       }
       actionResult.value = 'Cancelled by user due to warnings.'
     } else {
-      actionResult.value = `Error: ${e.message}`
+      actionResult.value = `Error: ${errorMessage(e)}`
     }
   }
   actionPending.value = null
@@ -4734,14 +4683,16 @@ async function doDeploy(confirmWarnings = false) {
     } else {
       actionResult.value = 'Restart failed. See steps above.'
     }
-  } catch (e: any) {
-    const payload = e?.payload
+  } catch (e) {
+    const payload = errorPayload(e)
+    const blockers = errorPayloadList(e, 'blockers')
+    const warnings = errorPayloadList(e, 'warnings')
     if (Array.isArray(payload?.steps)) deploySteps.value = payload.steps
-    if (payload?.blockers) {
-      alert(`Restart blocked by secrets:\n\n${payload.blockers.join('\n')}`)
+    if (blockers) {
+      alert(`Restart blocked by secrets:\n\n${blockers.join('\n')}`)
       actionResult.value = 'Blocked by secrets.'
-    } else if (payload?.warnings) {
-      if (await askConfirm(`Warnings found:\n\n${payload.warnings.join('\n')}\n\nDo you want to proceed anyway?`, {
+    } else if (warnings) {
+      if (await askConfirm(`Warnings found:\n\n${warnings.join('\n')}\n\nDo you want to proceed anyway?`, {
         title: 'Deploy warnings',
         confirmLabel: 'Proceed anyway',
       })) {
@@ -4750,7 +4701,7 @@ async function doDeploy(confirmWarnings = false) {
       }
       actionResult.value = 'Cancelled by user due to warnings.'
     } else {
-      actionResult.value = `Error: ${e.message || 'unknown error'}`
+      actionResult.value = `Error: ${errorMessage(e, 'unknown error')}`
     }
   }
   actionPending.value = null
@@ -4777,8 +4728,8 @@ async function fixDeployErrorInChat() {
   if (!project) {
     try {
       project = await projectStore.createProject('General')
-    } catch (e: any) {
-      alert(`Failed to create project: ${e?.message || e}`)
+    } catch (e) {
+      alert(`Failed to create project: ${errorMessage(e)}`)
       return
     }
   }
@@ -4791,8 +4742,8 @@ async function fixDeployErrorInChat() {
       const { router } = await import('../router')
       router.push(`/chat/${chat.chat_id}`)
     }
-  } catch (e: any) {
-    alert(`Failed to start chat: ${e?.message || e}`)
+  } catch (e) {
+    alert(`Failed to start chat: ${errorMessage(e)}`)
   }
 }
 
@@ -4836,32 +4787,13 @@ async function fixIssuesInChat() {
       const { router } = await import('../router')
       router.push(`/chat/${chat.chat_id}`)
     }
-  } catch (e: any) {
-    alert(`Failed to start issue-triage chat: ${e?.message || e}`)
+  } catch (e) {
+    alert(`Failed to start issue-triage chat: ${errorMessage(e)}`)
   } finally {
     debugPending.value = false
   }
 }
 
-async function doLogout() {
-  // Clears the HttpOnly session cookie via /api/auth/logout (which JS can't
-  // delete from document.cookie). After success the auth store routes back
-  // to /login and the next login re-issues the cookie with the wider
-  // Host-only cookie: no Domain attribute, scoped to the exact host.
-  if (!await askConfirm('Log out of Ciaobot?', {
-    title: 'Log out',
-    confirmLabel: 'Log out',
-    destructive: true,
-  })) return
-  actionPending.value = 'logout'
-  actionResult.value = ''
-  try {
-    await useAuthStore().logout()
-  } catch (e: any) {
-    actionResult.value = `Error: ${e.message || 'logout failed'}`
-  }
-  actionPending.value = null
-}
 
 // ── Workspace git sync (current branch) ──────────────────────────────────
 const localStatus = ref<LocalStatus | null>(null)
@@ -4930,9 +4862,9 @@ async function saveAuthSettings() {
     authSettingsResult.value = res.auth_required
       ? 'Password protection is on.'
       : 'Password protection is off.'
-  } catch (e: any) {
+  } catch (e) {
     authSettingsError.value = true
-    authSettingsResult.value = e?.payload?.error || e.message || 'Could not save password settings'
+    authSettingsResult.value = apiErrorMessage(e, 'Could not save password settings')
   }
   authSettingsSaving.value = false
 }
@@ -4986,13 +4918,14 @@ async function localHandback(confirmWarnings = false) {
       actionResult.value = 'Sync conflict — opened a chat to resolve it. Answer it, then Sync again.'
     }
     await fetchLocalStatus()
-  } catch (e: any) {
-    const payload = e?.payload
-    if (payload?.blockers) {
-      alert(`Sync blocked by secrets:\n\n${payload.blockers.join('\n')}`)
+  } catch (e) {
+    const blockers = errorPayloadList(e, 'blockers')
+    const warnings = errorPayloadList(e, 'warnings')
+    if (blockers) {
+      alert(`Sync blocked by secrets:\n\n${blockers.join('\n')}`)
       actionResult.value = 'Blocked by secrets.'
-    } else if (payload?.warnings) {
-      if (await askConfirm(`Warnings found:\n\n${payload.warnings.join('\n')}\n\nDo you want to proceed anyway?`, {
+    } else if (warnings) {
+      if (await askConfirm(`Warnings found:\n\n${warnings.join('\n')}\n\nDo you want to proceed anyway?`, {
         title: 'Sync warnings',
         confirmLabel: 'Proceed anyway',
       })) {
@@ -5001,7 +4934,7 @@ async function localHandback(confirmWarnings = false) {
       }
       actionResult.value = 'Cancelled by user due to warnings.'
     } else {
-      actionResult.value = `Error: ${e.message || 'sync failed'}`
+      actionResult.value = `Error: ${errorMessage(e, 'sync failed')}`
     }
   }
   actionPending.value = null
@@ -5020,7 +4953,7 @@ async function fetchPackageStatus() {
   packageLoading.value = true
   try {
     packageStatus.value = await api.get<any>('/api/package/status')
-  } catch (e: any) {
+  } catch {
     // best-effort
   } finally {
     packageLoading.value = false
@@ -5033,8 +4966,8 @@ async function openUpdatePanel() {
   changelog.value = { commits: [], compare_url: '', error: '' }
   try {
     changelog.value = await api.get<any>('/api/package/changelog')
-  } catch (e: any) {
-    changelog.value = { commits: [], compare_url: '', error: e?.message || 'unknown error' }
+  } catch (e) {
+    changelog.value = { commits: [], compare_url: '', error: errorMessage(e, 'unknown error') }
   } finally {
     changelogLoading.value = false
   }
@@ -5053,8 +4986,8 @@ async function doPackageUpdate() {
       packageResult.value = `Update failed: ${res.error || 'unknown error'}`
       await fetchPackageStatus()
     }
-  } catch (e: any) {
-    packageResult.value = `Update failed: ${e.message || 'unknown error'}`
+  } catch (e) {
+    packageResult.value = `Update failed: ${errorMessage(e, 'unknown error')}`
     await fetchPackageStatus()
   } finally {
     packageUpdating.value = false

@@ -49,6 +49,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import ConfirmDialog from './components/ConfirmDialog.vue'
+import { errorMessage } from './lib/errorMessage'
 import InAppToast from './components/InAppToast.vue'
 import RestartOverlay from './components/RestartOverlay.vue'
 import StartupView from './components/StartupView.vue'
@@ -124,9 +125,9 @@ async function switchBackToHost() {
       throw new Error((payload as { error?: string }).error || `HTTP ${res.status}`)
     }
     window.location.assign('/')
-  } catch (e: any) {
+  } catch (e) {
     switchingToHost.value = false
-    window.alert(e?.message || 'Failed to switch back to host')
+    window.alert(errorMessage(e, 'Failed to switch back to host'))
   }
 }
 

@@ -90,21 +90,6 @@ const hasAnyModels = computed(
   () => filteredSections.value.length > 0
 )
 
-const singleSelectedModel = computed(() => {
-  if (props.multiple) return ''
-  const v = effectiveValue.value as string
-  return v
-})
-
-const multiSelectedModels = computed(() => {
-  if (!props.multiple) return []
-  return effectiveValue.value as string[]
-})
-
-const selectedCount = computed(() =>
-  props.multiple ? (effectiveValue.value as string[]).length : effectiveValue.value ? 1 : 0
-)
-
 function displayModelLabel(model: string): string {
   const section = normalizedSections.value.find((item) => item.models.includes(model))
   return section?.modelLabels?.[model] || model
@@ -134,7 +119,8 @@ const activeModelSet = computed(() => {
 
 function toggle() {
   if (props.disabled) return
-  open.value ? close() : openPopover()
+  if (open.value) close()
+  else openPopover()
 }
 
 function openPopover() {

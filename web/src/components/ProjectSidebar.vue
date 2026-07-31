@@ -590,6 +590,7 @@
 import { ref, reactive, computed, watch, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
+import { errorMessage } from '../lib/errorMessage'
 import { useTaskStore } from '../stores/tasks'
 import { useFileViewerStore } from '../stores/fileViewer'
 import NotificationBell from './NotificationBell.vue'
@@ -816,8 +817,8 @@ async function doMoveChat(targetProjectId: string) {
   try {
     await store.moveChat(cid, targetProjectId)
     expandedProjects.add(targetProjectId)
-  } catch (e: any) {
-    store.pushErrorToast('Could not move chat', `${e?.message || e}`)
+  } catch (e) {
+    store.pushErrorToast('Could not move chat', `${errorMessage(e)}`)
   }
 }
 
@@ -943,8 +944,8 @@ async function openArchive() {
   loadingCompleted.value = true
   try {
     completedProjects.value = await store.fetchCompletedProjects()
-  } catch (e: any) {
-    store.pushErrorToast('Could not load completed projects', `${e?.message || e}`)
+  } catch (e) {
+    store.pushErrorToast('Could not load completed projects', `${errorMessage(e)}`)
     archiveOpen.value = false
   } finally {
     loadingCompleted.value = false
@@ -964,8 +965,8 @@ async function doRestore(cp: CompletedProject) {
     completedProjects.value = completedProjects.value.filter(p => p.stem !== cp.stem)
     if (restored) expandedProjects.add(restored.project_id)
     if (!completedProjects.value.length) archiveOpen.value = false
-  } catch (e: any) {
-    store.pushErrorToast('Could not restore project', `${e?.message || e}`)
+  } catch (e) {
+    store.pushErrorToast('Could not restore project', `${errorMessage(e)}`)
   } finally {
     restoringStem.value = null
   }
@@ -1023,8 +1024,8 @@ async function copyChatId(chatId: string) {
       title: 'Chat ID copied',
       body: chatId,
     })
-  } catch (e: any) {
-    store.pushErrorToast('Could not copy chat ID', `${e?.message || e}`)
+  } catch (e) {
+    store.pushErrorToast('Could not copy chat ID', `${errorMessage(e)}`)
   }
 }
 

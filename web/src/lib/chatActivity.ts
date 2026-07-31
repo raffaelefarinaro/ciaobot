@@ -23,13 +23,13 @@ export function collectTraceOutputs(
   return outputs
 }
 
-export function formatTokenUsage(usage?: Record<string, any>): string {
+export function formatTokenUsage(usage?: Record<string, unknown>): string {
   if (!usage) return ''
   const hasInput = usage.input_tokens !== undefined && usage.input_tokens !== null && usage.input_tokens !== ''
   const hasOutput = usage.output_tokens !== undefined && usage.output_tokens !== null && usage.output_tokens !== ''
   if (!hasInput && !hasOutput) return ''
 
-  const formatNum = (val: any) => {
+  const formatNum = (val: unknown) => {
     const num = typeof val === 'number' ? val : parseInt(String(val), 10)
     return isNaN(num) ? String(val) : num.toLocaleString('en-US')
   }

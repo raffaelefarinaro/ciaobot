@@ -883,6 +883,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useProjectStore } from '../stores/projects'
+import { errorMessage, apiErrorMessage } from '../lib/errorMessage'
 import { useFileViewerStore } from '../stores/fileViewer'
 import VoiceRecorder from './VoiceRecorder.vue'
 // Subagent transcripts carry `turn_index` (the user turn that dispatched
@@ -909,7 +910,7 @@ import {
 } from '../lib/fableModel'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
 import { formatTime, formatDuration } from '../lib/time'
-import { buildTurnParts, collectTraceOutputs, findFinalAnswerIndex, formatTokenUsage, traceSummaryMeta, traceSummaryMetaParts, type TraceOutput } from '../lib/chatActivity'
+import { buildTurnParts, collectTraceOutputs, findFinalAnswerIndex, formatTokenUsage, traceSummaryMetaParts, type TraceOutput } from '../lib/chatActivity'
 import { buildForkSnapshot } from '../lib/chatFork'
 import { formatCommentLocation, type ChatCommentAnchor } from '../lib/commentContext'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
@@ -970,12 +971,6 @@ function dedupeRenderItemKeys(items: RenderItem[]): RenderItem[] {
   })
 }
 
-type ChatComment = {
-  id: string
-  selection: string
-  comment: string
-  images?: string[]
-}
 
 const emit = defineEmits<{ close: [], 'open-sidebar': [] }>()
 
@@ -1012,8 +1007,8 @@ async function disconnectAndBecomeHost() {
     const result = await api.post<{ ok: boolean }>('/api/node/handover', { force: true })
     if (!result.ok) throw new Error('Could not make this device the host')
     window.location.assign('/')
-  } catch (e: any) {
-    hostHandoverError.value = e?.payload?.error || e?.message || 'Could not make this device the host'
+  } catch (e) {
+    hostHandoverError.value = apiErrorMessage(e, 'Could not make this device the host')
     becomingHost.value = false
   }
 }
@@ -1399,7 +1394,6 @@ const BUCKET_DEFS: { key: BucketKey; label: string; provider: ProviderKey }[] = 
   { key: 'codex', label: 'Codex', provider: 'codex' },
 ]
 
-const bucketOptions = computed(() => BUCKET_DEFS.filter(b => (providerModels.value[b.key] || []).length > 0))
 
 function toggleTrace(i: number) {
   openTraces.value = { ...openTraces.value, [i]: !openTraces.value[i] }
@@ -2022,17 +2016,6 @@ function removeEditImage(index: number): void {
   editingChatCommentImages.value.splice(index, 1)
 }
 
-function onEditChatCommentKeydown(e: KeyboardEvent, id: string): void {
-  if (e.key === 'Escape') {
-    e.preventDefault()
-    cancelEditChatComment()
-    return
-  }
-  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-    e.preventDefault()
-    saveEditChatComment(id)
-  }
-}
 function deleteChatComment(id: string): void {
   if (commentPopover.value?.openId === id) closeChatCommentPopover()
   store.removePendingChatComment(id)
@@ -3085,24 +3068,7 @@ function send() {
   })
 }
 
-// Compact label for a pending file comment — shows the file basename so a
-// long workspace path doesn't blow out the chip width.
-function commentBasename(path: string): string {
-  const idx = path.lastIndexOf('/')
-  return idx === -1 ? path : path.slice(idx + 1)
-}
 
-// Pretty line label: empty when no range, "42" for single line, "42-57"
-// for ranges. Mirrors the structured `lines="L42-L57"` attribute we send
-// to the model, minus the `L` prefix to keep the chip tight.
-function commentLineLabel(c: {
-  lineStart?: number | null
-  lineEnd?: number | null
-  colIndex?: number | null
-  colHeader?: string | null
-}): string {
-  return formatCommentLocation(c)
-}
 
 // Retry support: error messages are system bubbles whose content starts
 // with "Error:" (set in stores/projects.ts error-event handler). If the
@@ -3248,40 +3214,6 @@ function routeKindFor(model: string, bucket: BucketKey): RouteKind {
   return 'anthropic'
 }
 
-async function selectBucket(bucket: BucketKey) {
-  if (!chat.value || bucket === activeBucket.value) return
-  const models = providerModels.value[bucket] || []
-  const defaultModel = providerDefaults.value[bucket] || models[0] || chat.value.model
-  const def = BUCKET_DEFS.find(b => b.key === bucket)
-  if (!def) return
-  // Persist the explicit Claude bucket so alias models keep routing to
-  // the intended backend on future turns.
-  const modelBucket = modelBucketForBucket(bucket)
-  // OpenRouter also keeps its bucket so tier aliases resolve through
-  // the OpenRouter alias map instead of the Claude subscription.
-  if (bucketLocked.value) {
-    const ok = await askConfirm(
-      `Hand over this chat to ${def.label} / ${defaultModel}? The same visible chat will continue with a fresh provider session.`,
-      {
-        title: 'Hand over chat',
-        confirmLabel: 'Hand over',
-      },
-    )
-    if (!ok) return
-    await store.handoverChat(chat.value.chat_id, {
-      provider: def.provider,
-      model: defaultModel,
-      model_bucket: modelBucket,
-    })
-    showModelPicker.value = false
-    return
-  }
-  await store.updateChat(chat.value.chat_id, {
-    provider: def.provider,
-    model: defaultModel,
-    model_bucket: modelBucket,
-  })
-}
 
 async function selectModel(value: string | string[], sectionKey = '') {
   const model = Array.isArray(value) ? value[0] : value
@@ -3390,9 +3322,9 @@ async function continueChat() {
   isContinuing.value = true
   try {
     await store.continueArchivedChat(chat.value.chat_id)
-  } catch (e: any) {
+  } catch (e) {
     console.error('Failed to continue archived chat:', e)
-    store.pushErrorToast('Could not continue chat', `${e?.message || e}`)
+    store.pushErrorToast('Could not continue chat', `${errorMessage(e)}`)
   } finally {
     isContinuing.value = false
   }
@@ -3406,9 +3338,9 @@ async function handleVoice(blob: Blob) {
       nextTick(autoResize)
       inputEl.value?.focus()
     }
-  } catch (e: any) {
+  } catch (e) {
     console.error('Voice error:', e)
-    store.pushErrorToast('Voice transcription failed', `${e?.message || e}`)
+    store.pushErrorToast('Voice transcription failed', `${errorMessage(e)}`)
   } finally {
     transcribing.value = false
   }

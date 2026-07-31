@@ -192,7 +192,7 @@ watch(
   () => [props.content, props.name, props.readOnly],
   (newValues, oldValues) => {
     const [newContent, newName, newReadOnly] = newValues
-    const [oldContent, oldName, oldReadOnly] = oldValues || [undefined, undefined, undefined]
+    const [, oldName, oldReadOnly] = oldValues || [undefined, undefined, undefined]
     // Only re-render if file name/path/readOnly changed or external content update occurred
     if (
       newName !== oldName ||

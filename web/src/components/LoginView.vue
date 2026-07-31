@@ -377,6 +377,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useAuthStore } from '../stores/auth'
+import { errorMessage } from '../lib/errorMessage'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 
@@ -422,8 +423,8 @@ async function switchBackToHost() {
       force: true,
     })
     window.location.assign('/')
-  } catch (e: any) {
-    error.value = e?.message || 'Failed to switch back to host'
+  } catch (e) {
+    error.value = errorMessage(e, 'Failed to switch back to host')
     switchingToHost.value = false
   }
 }
@@ -529,8 +530,8 @@ async function openPicker() {
       listing = await fetchListing()
     }
     applyPickerListing(listing)
-  } catch (e: any) {
-    pickerError.value = e.message || 'failed to list folder'
+  } catch (e) {
+    pickerError.value = errorMessage(e, 'failed to list folder')
   } finally {
     pickerLoading.value = false
   }
@@ -541,8 +542,8 @@ async function loadPickerDirs(path?: string) {
   pickerError.value = ''
   try {
     applyPickerListing(await fetchListing(path))
-  } catch (e: any) {
-    pickerError.value = e.message || 'failed to list folder'
+  } catch (e) {
+    pickerError.value = errorMessage(e, 'failed to list folder')
   } finally {
     pickerLoading.value = false
   }
@@ -560,8 +561,8 @@ async function createPickerFolder() {
     })
     applyPickerListing(listing)
     newFolderName.value = ''
-  } catch (e: any) {
-    pickerError.value = e.message || 'failed to create folder'
+  } catch (e) {
+    pickerError.value = errorMessage(e, 'failed to create folder')
   } finally {
     pickerLoading.value = false
   }
@@ -592,8 +593,8 @@ async function doLogin() {
   error.value = ''
   try {
     await auth.login(token.value)
-  } catch (e: any) {
-    error.value = e.message || 'login failed'
+  } catch (e) {
+    error.value = errorMessage(e, 'login failed')
   } finally {
     loading.value = false
   }
@@ -604,7 +605,7 @@ async function fetchSetupStatus() {
     const status = await api.get<any>('/api/setup-status')
     setupStatus.value = status
     isBootstrap.value = !!status.bootstrap
-  } catch (e) {
+  } catch {
     isBootstrap.value = false
   }
 }
@@ -664,14 +665,14 @@ async function doFinish() {
       clearInterval(pollInterval)
       pollInterval = null
     }
-  } catch (e: any) {
-    error.value = e.message || 'setup finish failed'
+  } catch (e) {
+    error.value = errorMessage(e, 'setup finish failed')
   } finally {
     loading.value = false
   }
 }
 
-let pollInterval: any = null
+let pollInterval: ReturnType<typeof setInterval> | null = null
 
 watch(isBootstrap, (newVal) => {
   if (newVal) {
@@ -681,7 +682,7 @@ watch(isBootstrap, (newVal) => {
           const status = await api.get<any>('/api/setup-status')
           setupStatus.value = status
           isBootstrap.value = !!status.bootstrap
-        } catch (e) {
+        } catch {
           // ignore transient poll errors
         }
       }, 2000)
