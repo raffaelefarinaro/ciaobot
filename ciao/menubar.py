@@ -706,12 +706,49 @@ def _notification_entry_id(entry: dict[str, object]) -> str:
     return json.dumps(entry, sort_keys=True, separators=(",", ":"), default=str)
 
 
+def _entry_ts(entry: dict[str, object]) -> float:
+    """Epoch seconds of one notification entry, 0.0 when missing or malformed."""
+
+    try:
+        return float(entry.get("ts") or 0.0)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def fetch_notification_feed(
+    port: int, after: float, *, timeout: float = 2.0
+) -> list[dict[str, object]] | None:
+    """Notifications from the live server, or ``None`` when unreachable.
+
+    Prefer this over reading the local log: on a client node the local file is
+    never written (the host runs the chats), so the tray would sit silent
+    forever. The local server tunnels this call to the host, which makes the
+    native banner work on every device instead of only on the machine that
+    happens to run the turn.
+    """
+
+    url = f"http://localhost:{port}/api/menubar-notifications?after={after:.6f}"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    rows = payload.get("notifications")
+    if not isinstance(rows, list):
+        return None
+    return [row for row in rows if isinstance(row, dict)]
+
+
 def read_notification_log(workspace: Path) -> list[dict[str, object]]:
     """Read valid entries from the local notification log.
 
-    The PushManager appends this file from a background thread, so a reader
-    can occasionally see a partial last line. Ignore that line and retry on
-    the next refresh rather than letting a transient write break the tray.
+    Fallback for when the local server is down; ``fetch_notification_feed`` is
+    the normal path. The PushManager appends this file from a background
+    thread, so a reader can occasionally see a partial last line. Ignore that
+    line and retry on the next refresh rather than letting a transient write
+    break the tray.
     """
 
     path = workspace / ".runtime" / "notifications.jsonl"
@@ -733,28 +770,55 @@ def read_notification_log(workspace: Path) -> list[dict[str, object]]:
 
 @dataclass(slots=True)
 class NotificationLogTail:
-    """Track local push entries already observed by this menu-bar process."""
+    """Track push entries already observed by this menu-bar process.
+
+    The cursor is a timestamp rather than a file offset because the entries can
+    come from the host over HTTP, not just from the local file. It starts unset:
+    the first read only primes it, so a tray that launches before the server (or
+    that just connected to a host with a full log) never replays a backlog.
+    """
 
     seen_entry_ids: set[str]
+    cursor: float | None = None
 
     @classmethod
-    def at_end(cls, workspace: Path) -> "NotificationLogTail":
-        """Start at the current end, so relaunching never replays old alerts."""
+    def at_end(cls) -> "NotificationLogTail":
+        """Start with an unset cursor, so relaunching never replays old alerts.
 
-        return cls({_notification_entry_id(entry) for entry in read_notification_log(workspace)})
+        Deliberately does no I/O: the tray builds this before the run loop, and
+        the engine may still be booting. The first ``read_new`` primes the
+        cursor and returns nothing.
+        """
 
-    def read_new(self, workspace: Path) -> list[dict[str, object]]:
+        return cls(set())
+
+    def read_new(self, workspace: Path, port: int) -> list[dict[str, object]]:
         """Return entries appended since the last read and advance the tail."""
 
-        entries = read_notification_log(workspace)
-        current_ids = {_notification_entry_id(entry) for entry in entries}
-        new_entries = [
+        since = self.cursor
+        entries = fetch_notification_feed(port, since or 0.0)
+        if entries is None:
+            # Server down: fall back to this machine's own log, applying the
+            # cursor the server would have applied.
+            entries = read_notification_log(workspace)
+            if since is not None:
+                entries = [entry for entry in entries if _entry_ts(entry) >= since]
+
+        newest = max((_entry_ts(entry) for entry in entries), default=None)
+        fresh = [
             entry for entry in entries if _notification_entry_id(entry) not in self.seen_entry_ids
         ]
-        # PushManager retains a bounded log. Discard IDs it trimmed so the
-        # tracker stays bounded as well.
-        self.seen_entry_ids = current_ids
-        return new_entries
+        if newest is not None:
+            # The cursor is inclusive, so entries sharing the newest timestamp
+            # come back next poll too. Remembering only those IDs dedupes them
+            # while keeping the tracker bounded.
+            self.cursor = newest
+            self.seen_entry_ids = {
+                _notification_entry_id(entry)
+                for entry in entries
+                if _entry_ts(entry) >= newest
+            }
+        return [] if since is None else fresh
 
 
 def _load_web_state(workspace: Path) -> tuple[dict[str, dict], dict[str, dict]]:
@@ -999,7 +1063,7 @@ def run_menubar(workspace: Path, port: int) -> int:
             launch_ui(open_url(workspace, port), workspace)
 
     # Only notify for entries newer than launch, not the whole backlog.
-    notification_log = NotificationLogTail.at_end(workspace)
+    notification_log = NotificationLogTail.at_end()
     status_fetcher = make_cached_package_status()
     state: dict[str, Any] = {
         "fingerprint": None,
@@ -1351,11 +1415,11 @@ def run_menubar(workspace: Path, port: int) -> int:
             time.sleep(WORKING_POLL_SECONDS)
 
     def refresh(_timer=None) -> None:
-        # notifications.jsonl is already a fallback-only queue: the server logs
-        # an entry only when Web Push did NOT reach a subscription on this
-        # machine. So post every new entry (respecting the toggle) — it's
-        # exactly the notifications the local browser/PWA won't show.
-        new_notifications = notification_log.read_new(workspace)
+        # The server owns the notification queue and Web Push is only a
+        # best-effort channel for other devices (see PushManager.send), so the
+        # tray posts every new entry, respecting the toggle. In client mode the
+        # feed comes from the host, which is the machine that runs the turns.
+        new_notifications = notification_log.read_new(workspace, port)
         if notifications_enabled(workspace):
             for notification in new_notifications:
                 chat_id = str(notification.get("chat_id") or "")

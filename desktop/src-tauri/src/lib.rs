@@ -1048,9 +1048,7 @@ fn start_tray_icon_animation(app: AppHandle) {
 fn start_notification_tail(app: AppHandle, runtime: RuntimeConfig) {
     let path = runtime.runtime_root.join("notifications.jsonl");
     thread::spawn(move || {
-        let Ok(mut tail) = NotificationLogTail::at_end(path) else {
-            return;
-        };
+        let mut tail = NotificationLogTail::at_end(path);
         loop {
             thread::sleep(Duration::from_secs(1));
             let still_current = app
@@ -1062,6 +1060,12 @@ fn start_notification_tail(app: AppHandle, runtime: RuntimeConfig) {
             if !still_current {
                 return;
             }
+            // Poll even when the toggle is off, so the cursor keeps moving and
+            // turning notifications back on does not dump the whole backlog.
+            let fetched =
+                tauri::async_runtime::block_on(capture::notifications(&runtime, tail.cursor()))
+                    .ok();
+            let pending = tail.poll(fetched);
             let enabled = app
                 .state::<DesktopModel>()
                 .settings
@@ -1071,7 +1075,7 @@ fn start_notification_tail(app: AppHandle, runtime: RuntimeConfig) {
             if !enabled {
                 continue;
             }
-            for payload in tail.poll().unwrap_or_default() {
+            for payload in pending {
                 let notification = NativeNotification::from_value(&payload);
                 tauri::async_runtime::spawn(async move {
                     let _ = notification.post().await;

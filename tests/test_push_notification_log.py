@@ -119,6 +119,36 @@ def test_remote_push_failure_does_not_lose_local_notification(tmp_path: Path, mo
     assert manager.count() == 1  # non-404 failure does not prune the sub
 
 
+def test_read_log_is_inclusive_of_the_cursor(tmp_path: Path) -> None:
+    """The tray's cursor is a timestamp, so ``after`` has to be inclusive: two
+    notifications sharing a timestamp must not be split across polls."""
+    manager = PushManager(tmp_path)
+    manager.send({"title": "t", "body": "first", "chat_id": "c1"})
+    manager.send({"title": "t", "body": "second", "chat_id": "c2"})
+
+    all_entries = manager.read_log()
+    assert [entry["body"] for entry in all_entries] == ["first", "second"]
+
+    cursor = float(all_entries[-1]["ts"])
+    assert [entry["body"] for entry in manager.read_log(after=cursor)] == ["second"]
+    assert manager.read_log(after=cursor + 1) == []
+
+
+def test_read_log_skips_a_partially_written_line(tmp_path: Path) -> None:
+    manager = PushManager(tmp_path)
+    manager.send({"title": "t", "body": "whole", "chat_id": "c1"})
+    with (tmp_path / "notifications.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write('{"ts": 9.0, "body": "half')
+
+    assert [entry["body"] for entry in manager.read_log()] == ["whole"]
+
+
+def test_read_log_on_a_client_node_is_empty(tmp_path: Path) -> None:
+    """A client never runs a turn, so nothing writes its log. The tray reads the
+    host's feed through the proxy instead of this."""
+    assert PushManager(tmp_path).read_log() == []
+
+
 def test_notification_log_is_trimmed(tmp_path: Path) -> None:
     manager = PushManager(tmp_path)
 

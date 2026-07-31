@@ -739,23 +739,77 @@ def test_read_open_chats_missing_state_returns_empty(tmp_path: Path) -> None:
     assert menubar.read_open_chats(tmp_path) == []
 
 
-def test_notification_log_tail_only_returns_entries_after_startup(tmp_path: Path) -> None:
+def test_notification_log_tail_only_returns_entries_after_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Server unreachable, so the tail falls back to this machine's own log.
+    monkeypatch.setattr(menubar, "fetch_notification_feed", lambda *_a, **_k: None)
     runtime = tmp_path / ".runtime"
     runtime.mkdir()
     log = runtime / "notifications.jsonl"
     old_entry = {"ts": 1.0, "title": "Ciaobot", "body": "Old", "chat_id": "old"}
     log.write_text(json.dumps(old_entry) + "\n", encoding="utf-8")
 
-    tail = menubar.NotificationLogTail.at_end(tmp_path)
-    assert tail.read_new(tmp_path) == []
+    tail = menubar.NotificationLogTail.at_end()
+    assert tail.read_new(tmp_path, 8443) == []
 
     new_entry = {"ts": 2.0, "title": "Ciaobot", "body": "New", "chat_id": "new"}
     with log.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(new_entry) + "\n")
         handle.write("{partial")
 
-    assert tail.read_new(tmp_path) == [new_entry]
-    assert tail.read_new(tmp_path) == []
+    assert tail.read_new(tmp_path, 8443) == [new_entry]
+    assert tail.read_new(tmp_path, 8443) == []
+
+
+def test_notification_log_tail_prefers_the_server_feed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A client node's own log stays empty forever: the host runs the chats.
+
+    Without the feed the tray on a client never posts a banner, which left Web
+    Push as the only channel to that device.
+    """
+    asked: list[float] = []
+    feed = [{"ts": 5.0, "title": "Ciaobot", "body": "From the host", "chat_id": "c1"}]
+
+    def fake_feed(_port: int, after: float, **_kwargs: object) -> list[dict[str, object]]:
+        asked.append(after)
+        # Same inclusive filter the endpoint applies.
+        return [entry for entry in feed if float(entry["ts"]) >= after]
+
+    monkeypatch.setattr(menubar, "fetch_notification_feed", fake_feed)
+    # No local .runtime/notifications.jsonl at all, as on a client node.
+    tail = menubar.NotificationLogTail.at_end()
+    assert tail.read_new(tmp_path, 8443) == []  # first read only primes
+    assert asked == [0.0]
+
+    feed.append({"ts": 6.0, "title": "Ciaobot", "body": "Newer", "chat_id": "c2"})
+    posted = tail.read_new(tmp_path, 8443)
+    assert [entry["chat_id"] for entry in posted] == ["c2"]
+    # The cursor is inclusive so a shared timestamp is never split across polls.
+    assert asked[-1] == 5.0
+    assert tail.read_new(tmp_path, 8443) == []
+
+
+def test_notification_log_tail_posts_every_entry_sharing_the_newest_stamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = {"ts": 5.0, "title": "Ciaobot", "body": "a", "chat_id": "a"}
+    tie_one = {"ts": 6.0, "title": "Ciaobot", "body": "b", "chat_id": "b"}
+    tie_two = {"ts": 6.0, "title": "Ciaobot", "body": "c", "chat_id": "c"}
+    feed = [first]
+    monkeypatch.setattr(
+        menubar,
+        "fetch_notification_feed",
+        lambda _port, after, **_k: [e for e in feed if float(e["ts"]) >= after],
+    )
+
+    tail = menubar.NotificationLogTail.at_end()
+    assert tail.read_new(tmp_path, 8443) == []  # first read only primes
+    feed.extend([tie_one, tie_two])
+    assert tail.read_new(tmp_path, 8443) == [tie_one, tie_two]
+    assert tail.read_new(tmp_path, 8443) == []
 
 
 def test_parse_inet_addresses_excludes_loopback_and_dupes() -> None:

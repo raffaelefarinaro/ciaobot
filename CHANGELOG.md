@@ -16,6 +16,13 @@
   unreachable, since it is where you go to disconnect.
 
 ### Fixed
+- A device connected as a client gets notifications again. Its menu bar read a
+  queue that only the machine running the chats ever writes, so on a client it
+  stayed empty forever and the native banner never fired. The host's tray showed
+  your notifications while you were sitting at the other Mac, which left browser
+  push, the least reliable channel, as the only way to reach you. The tray now
+  reads that queue through the engine, so in client mode it shows the host's
+  notifications and both machines alert you at the same time.
 - Changing the host's password from a connected client no longer cuts that
   client off.
 - The loop indicator in a chat's loop banner is now legible. It inherited body

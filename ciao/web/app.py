@@ -155,6 +155,7 @@ from ciao.web.routes_api import (
 )
 from ciao.web.routes_chat import ws_chat, ws_events
 from ciao.web.routes_push import (
+    push_notification_feed,
     push_public_key,
     push_status,
     push_subscribe,
@@ -364,6 +365,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/push/unsubscribe", push_unsubscribe, methods=["POST"]),
         Route("/api/push/status", push_status, methods=["GET"]),
         Route("/api/push/subscription", push_subscription_check, methods=["GET"]),
+        Route("/api/menubar-notifications", push_notification_feed, methods=["GET"]),
         # Per-device working-branch flow: commit-to-main + agent-merged handover
         Route("/api/local/status", local_status, methods=["GET"]),
         Route("/api/local/preflight", local_preflight, methods=["GET"]),
