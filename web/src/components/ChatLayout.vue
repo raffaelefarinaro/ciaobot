@@ -37,7 +37,7 @@
             @close="closeProject"
             @open-sidebar="sidebarCollapsed = false"
           />
-          <ChatPanel v-else-if="store.activeChat" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+          <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
           <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
             <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
           </div>
@@ -69,7 +69,7 @@
                   />
                 </button>
               </div>
-              <HomeRecentChats />
+              <HomeRecentChats ref="homeRecentRef" />
               <div class="empty-actions">
                 <button
                   v-for="action in generalWorkspaceActions"
@@ -189,9 +189,18 @@ import ProductTour from './ProductTour.vue'
 import HomeRecentChats from './HomeRecentChats.vue'
 import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
 import { normalizeWorkspaceColor } from '../lib/workspaceColors'
+import { pendingConfirm } from '../lib/confirm'
+import { isDesktopApp } from '../lib/desktop'
 
 const store = useProjectStore()
 const tourStore = useProductTourStore()
+
+// Refs into the active ChatPanel, used by the global keyboard shortcuts to
+// reach composer-owned actions (dictation, archive). Only one of the two
+// ChatPanel instances (desktop vs mobile) is mounted at a time.
+const chatPanelRef = ref<InstanceType<typeof ChatPanel> | null>(null)
+// Ref into HomeRecentChats for arrow-key navigation on the home screen.
+const homeRecentRef = ref<InstanceType<typeof HomeRecentChats> | null>(null)
 
 const DEFAULT_SIDEBAR_WIDTH = 280
 const MIN_SIDEBAR_WIDTH = 180
@@ -590,6 +599,64 @@ function closeChat() {
   store.activeChatId = null
 }
 
+// ── Global keyboard shortcuts ───────────────────────────────────────
+// Desktop-only (the PWA in a browser would fight the OS for Cmd+T etc.).
+// These run inside the Tauri webview, where those combos are free.
+function isTypingTarget(el: EventTarget | null): boolean {
+  if (!(el instanceof HTMLElement)) return false
+  return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable
+}
+
+function onShortcutKeydown(e: KeyboardEvent) {
+  // Defer to full-screen views (settings, schedules) and the confirm dialog.
+  if (viewMode.value !== 'chat') return
+  if (pendingConfirm.value) return
+
+  // Home screen: arrow keys roam the recent-chat grid, Enter opens the
+  // focused card (handled natively by the focused button). Only when no
+  // chat is open and focus isn't in a text field, so typing is unaffected.
+  if (!store.activeChat && !isTypingTarget(e.target) && e.key.startsWith('Arrow')) {
+    if (homeRecentRef.value?.onArrow(e.key)) e.preventDefault()
+    return
+  }
+
+  const mod = e.metaKey || e.ctrlKey
+
+  // Cmd+T: new chat in the default General project.
+  if (mod && (e.key === 't' || e.key === 'T')) {
+    e.preventDefault()
+    void store.newChatInGeneral()
+    return
+  }
+
+  // Cmd+D: toggle dictation in the active chat's composer (start/stop).
+  if (mod && (e.key === 'd' || e.key === 'D')) {
+    if (!store.activeChat) return
+    e.preventDefault()
+    chatPanelRef.value?.toggleDictation()
+    return
+  }
+
+  // Cmd+A: archive the active chat. Skip while typing so Cmd+A keeps its
+  // select-all meaning inside text fields.
+  if (mod && (e.key === 'a' || e.key === 'A')) {
+    if (isTypingTarget(e.target) || !store.activeChat) return
+    e.preventDefault()
+    chatPanelRef.value?.archiveActiveChat()
+    return
+  }
+
+  // Esc: close the open chat. Input fields own their Esc (cancel edit, close
+  // the slash-command picker, clear the draft), so we only close when the
+  // focus is outside a text field.
+  if (e.key === 'Escape') {
+    if (!store.activeChat || isTypingTarget(e.target)) return
+    e.preventDefault()
+    closeChat()
+    return
+  }
+}
+
 function closeProject() {
   router.push('/')
   if (isMobile.value) sidebarCollapsed.value = false
@@ -648,6 +715,9 @@ onMounted(() => {
   window.addEventListener('touchstart', onTouchStart, { passive: true })
   window.addEventListener('touchend', onTouchEnd, { passive: true })
   window.addEventListener('touchcancel', onTouchEnd, { passive: true })
+  // Global keyboard shortcuts live in the desktop app only: in a browser tab
+  // Cmd+T/Cmd+A are owned by the browser and shouldn't be hijacked.
+  if (isDesktopApp()) window.addEventListener('keydown', onShortcutKeydown)
 })
 
 onBeforeUnmount(() => {
@@ -656,6 +726,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('touchstart', onTouchStart)
   window.removeEventListener('touchend', onTouchEnd)
   window.removeEventListener('touchcancel', onTouchEnd)
+  if (isDesktopApp()) window.removeEventListener('keydown', onShortcutKeydown)
   window.removeEventListener('mousemove', handleSidebarDrag)
   window.removeEventListener('mouseup', stopSidebarDrag)
   window.removeEventListener('mousemove', handleSplitDrag)

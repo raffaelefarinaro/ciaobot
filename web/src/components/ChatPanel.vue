@@ -113,7 +113,7 @@
           >
             <template #footer>
               <div
-                v-if="filteredThinkingLevels.length && !(chat.model === CODEX_FABLE_PSEUDO_MODEL || (chat.model === 'gpt-5.6-sol' && chat.thinking_level === 'ultra'))"
+                v-if="showThinkingLevels"
                 class="thinking-levels"
               >
                 <span class="thinking-levels__label">Thinking</span>
@@ -839,7 +839,7 @@
         <div class="input-actions">
           <!-- Voice recording is allowed during streaming too: the user's
                transcript becomes a queued follow-up, same as typed text. -->
-          <VoiceRecorder v-if="!transcribing" @recorded="handleVoice" />
+          <VoiceRecorder v-if="!transcribing" ref="voiceRecorderRef" @recorded="handleVoice" />
           <span v-else class="voice-transcribing" title="Transcribing...">
             <span class="transcribe-spinner"></span>
           </span>
@@ -886,6 +886,13 @@ import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
+import {
+  CODEX_FABLE_LEVEL,
+  CODEX_FABLE_PSEUDO_MODEL,
+  CODEX_FABLE_REAL_MODEL,
+  isFableSelection,
+  selectableThinkingLevels,
+} from '../lib/fableModel'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
 import { formatTime, formatDuration } from '../lib/time'
 import { buildTurnParts, collectTraceOutputs, findFinalAnswerIndex, formatTokenUsage, traceSummaryMeta, traceSummaryMetaParts, type TraceOutput } from '../lib/chatActivity'
@@ -1174,6 +1181,7 @@ function toggleMessageActions(key: string, e: MouseEvent): void {
   tappedMessageKey.value = tappedMessageKey.value === key ? null : key
 }
 const transcribing = ref(false)
+const voiceRecorderRef = ref<InstanceType<typeof VoiceRecorder> | null>(null)
 const isNearBottom = ref(true)
 let messagesResizeObserver: ResizeObserver | null = null
 const showScrollBtn = computed(() => Boolean(messagesEl.value && store.activeMessages.length > 0 && !isNearBottom.value))
@@ -1584,7 +1592,7 @@ const activeModelHighlights = computed(() => {
     const nativeModel = modelsResponse.value?.alias_tiers?.[provider]?.[tier]
     return nativeModel ? [nativeModel] : [c.model]
   }
-  if (c.model === CODEX_FABLE_PSEUDO_MODEL || (c.model === 'gpt-5.6-sol' && c.thinking_level === 'ultra')) {
+  if (isFableSelection(c.model, c.thinking_level)) {
     return [CODEX_FABLE_PSEUDO_MODEL]
   }
   const effective = effectiveModelForBucket(c.model, activeBucket.value)
@@ -1605,9 +1613,19 @@ const bucketLocked = computed(() => {
 // effort from the model catalog), so they key off the provider — narrowed per
 // model when the catalog reports levels — not the bucket.
 const filteredThinkingLevels = computed(() => {
-  const modelLevels = modelsResponse.value?.model_reasoning_levels?.[chat.value?.model || '']
-  if (modelLevels?.length) return modelLevels
-  return thinkingLevels.value[activeProvider.value] || []
+  const model = chat.value?.model || ''
+  const modelLevels = modelsResponse.value?.model_reasoning_levels?.[model]
+  const levels = modelLevels?.length
+    ? modelLevels
+    : thinkingLevels.value[activeProvider.value] || []
+  return selectableThinkingLevels(model, levels)
+})
+
+// Fable is a model choice, not a thinking level, so the chips have nothing to
+// offer while it is selected.
+const showThinkingLevels = computed(() => {
+  if (!filteredThinkingLevels.value.length) return false
+  return !isFableSelection(chat.value?.model, chat.value?.thinking_level)
 })
 
 const inputPlaceholder = computed(() => {
@@ -3106,9 +3124,6 @@ function tierForModel(model: string, bucket: BucketKey): TierAlias | null {
   return null
 }
 
-// Temporary pseudo-model for Codex fable until a real fable-tier model ships.
-const CODEX_FABLE_PSEUDO_MODEL = 'gpt-5.6-sol-ultra'
-
 function canonicalTier(model: string): string {
   const alias = tierAlias(model)
   if (alias) return alias
@@ -3228,7 +3243,7 @@ async function selectModel(value: string | string[], sectionKey = '') {
     return
   }
   const isFablePseudo = model === CODEX_FABLE_PSEUDO_MODEL
-  const realModel = isFablePseudo ? 'gpt-5.6-sol' : model
+  const realModel = isFablePseudo ? CODEX_FABLE_REAL_MODEL : model
   const targetRoute = routeKindFor(realModel, targetBucket)
   const currentRoute = routeKindFor(chat.value.model, activeBucket.value)
   const updates: {
@@ -3242,7 +3257,7 @@ async function selectModel(value: string | string[], sectionKey = '') {
     model_bucket: modelBucket,
   }
   if (isFablePseudo) {
-    updates.thinking_level = 'ultra'
+    updates.thinking_level = CODEX_FABLE_LEVEL
   } else {
     const targetLevels = modelsResponse.value?.model_reasoning_levels?.[model]
     if (
@@ -3555,6 +3570,21 @@ function insertTextAtCursor(token: string) {
 function insertImageRef(n: number) {
   insertTextAtCursor(`[Image ${n}]`)
 }
+
+// Cmd+D toggles a voice recording from the composer: first press starts,
+// second press stops (same as the on-screen mic/stop button).
+function toggleDictation() {
+  voiceRecorderRef.value?.toggleRecording()
+}
+
+// Cmd+A mirrors the header archive button (including its confirm dialog).
+function archiveActiveChat() {
+  if (!chat.value || chat.value.archived) return
+  void doArchive()
+}
+
+// Expose app-level shortcuts to the layout, which owns the global keydown.
+defineExpose({ toggleDictation, archiveActiveChat })
 </script>
 
 <style scoped>

@@ -74,6 +74,16 @@ function stopRecording() {
   }
 }
 
+// Allow the parent (and the Cmd+D global shortcut) to kick off recording.
+// Toggles: a second call while recording stops it, mirroring the on-screen
+// stop button so Cmd+D is press-once-to-start, press-again-to-stop.
+function toggleRecording() {
+  if (state.value === 'recording') stopRecording()
+  else startRecording()
+}
+
+defineExpose({ toggleRecording })
+
 onUnmounted(() => {
   if (timer) clearInterval(timer)
   if (mediaRecorder && state.value === 'recording') {

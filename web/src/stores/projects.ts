@@ -530,14 +530,22 @@ export const useProjectStore = defineStore('projects', () => {
   // Open a fresh chat in the active workspace's auto-managed General project,
   // pre-filled with a prompt asking the agent to diagnose and fix `errorText`
   // (falling back to a GitHub issue if the bug is in Ciaobot itself).
+  // The active workspace's auto-managed General project, or null if absent.
+  // Shared by fixError and the Cmd+T "new chat in General" shortcut.
+  function generalProject() {
+    return (
+      projects.value.find(
+        p => p.workspace === activeWorkspace.value && p.is_auto && p.name === 'General',
+      ) ?? null
+    )
+  }
+
   async function fixError(opts: {
     errorText: string
     context?: string
     title?: string
   }): Promise<ChatInfo | undefined> {
-    const general = projects.value.find(
-      p => p.workspace === activeWorkspace.value && p.is_auto && p.name === 'General',
-    )
+    const general = generalProject()
     if (!general) {
       pushErrorToast(
         'Cannot open fix chat',
@@ -549,6 +557,16 @@ export const useProjectStore = defineStore('projects', () => {
     const prompt = buildFixPrompt({ errorText: opts.errorText, context: opts.context })
     await sendMessage(chat.chat_id, prompt, 'queue')
     return chat
+  }
+
+  // Cmd+T: open a fresh, empty chat in the default General project.
+  async function newChatInGeneral(): Promise<ChatInfo | undefined> {
+    const general = generalProject()
+    if (!general) {
+      pushErrorToast('Cannot open a new chat', 'No General project found in this workspace.')
+      return
+    }
+    return createChat(general.project_id)
   }
 
   // ── Persistence ─────────────────────────────────────────────────────
@@ -3811,7 +3829,7 @@ export const useProjectStore = defineStore('projects', () => {
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
-    createChat, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, archiveChat, continueArchivedChat, newSession,
+    createChat, newChatInGeneral, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest,
