@@ -1169,19 +1169,33 @@ class CiaoControlPlane:
     def _file_surface_signal(self, chat_id: str) -> tuple[int, str]:
         """Client-presence and stream-state signal for ``file_surface``.
 
-        ``viewers`` used to be ``ChatStream.subscriber_count``, which is 0
-        whenever there is no in-flight stream for the chat (the common case
-        between turns) and can also read 0 for a stream a client is genuinely
-        attached to: `_attach_streams` (ciao/web/routes_chat.py) only re-polls
-        the broker after its current stream forward finishes, so a client can
-        be stuck relaying a superseded `ChatStream` that was replaced in the
-        broker without `finish()` being called on it (see the orphaned-stream
-        note on `ChatStreamBroker.register`, ciao/web/chat_broker.py). That
-        stuck client shows up as 0 subscribers on the new stream, even though
-        its socket is open and its earlier `file_surface` calls did pin
-        successfully. Counting live `/ws/chat/{chat_id}` sockets via the
-        connection tracker instead reports client presence directly, so it is
-        not fooled by that broker-level state.
+        ``viewers`` used to be ``ChatStream.subscriber_count``, a value
+        scoped to one turn, sampled once, to answer a question scoped to one
+        connection ("is a client attached to this chat"). That mismatch made
+        it flaky by construction, not just wrong on one code path:
+
+        - Every turn boundary has a real gap. `_attach_streams`
+          (ciao/web/routes_chat.py) polls the broker for a new stream every
+          `_ATTACH_POLL_SECONDS` (0.5s, routes_chat.py:57), so a healthy,
+          fully-attached client reads 0 subscribers on the new stream for up
+          to half a second after it is registered, before flipping to 1 with
+          no state change on the client's end. Observed in production: two
+          `file_surface` calls minutes apart on one unbroken connection
+          returned 0, 0, then a third returned 1 — consistent with sampling
+          landing in that gap twice, then past it.
+        - A worse, longer-lived version of the same mismatch: a client can be
+          stuck relaying a superseded `ChatStream` that was replaced in the
+          broker without `finish()` being called on it, because
+          `_attach_streams` only re-polls after its current stream forward
+          returns (see the orphaned-stream note on `ChatStreamBroker.register`,
+          ciao/web/chat_broker.py). That client shows 0 subscribers on the
+          new stream indefinitely, not just for one poll window.
+
+        Both are symptoms of the same design error: a per-turn object cannot
+        answer a per-connection question. Counting live `/ws/chat/{chat_id}`
+        sockets via the connection tracker fixes this structurally — the
+        socket's lifetime already matches the question being asked, so
+        neither turn boundaries nor broker replacement can make it flicker.
         """
         viewers = 0
         if chat_id and self.connection_tracker is not None:
