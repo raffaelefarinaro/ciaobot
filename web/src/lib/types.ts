@@ -147,6 +147,19 @@ export interface ChatInfo {
   // because a schedule spawns a new chat each time).
   schedule_id?: string
   schedule_title?: string
+  // Set when this chat was spawned as a delegate by another chat's agent. The
+  // sidebar nests delegates under their supervisor; the engine wakes the
+  // supervisor with a fresh turn when a delegate finishes.
+  spawned_from_chat_id?: string
+  // Shared tag across delegates dispatched as one batch.
+  delegation_id?: string
+}
+
+// One sidebar chat row. Delegates follow their supervisor and render indented,
+// so the list stays a single flat v-for instead of a nested one.
+export interface ChatRow {
+  chat: ChatInfo
+  isDelegate: boolean
 }
 
 export interface ChatRetryInfo {

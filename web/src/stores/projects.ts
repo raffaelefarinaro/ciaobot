@@ -15,6 +15,7 @@ import {
 import type {
   ProjectInfo,
   ChatInfo,
+  ChatRow,
   ChatMessage,
   SubagentTranscript,
   ProviderSubchatRecord,
@@ -446,6 +447,35 @@ export const useProjectStore = defineStore('projects', () => {
     return chats.value
       .filter(c => c.project_id === projectId && !c.archived && c.local !== false)
       .sort((a, b) => a.created_at.localeCompare(b.created_at))
+  }
+
+  // Sidebar ordering: every supervisor immediately followed by its delegates,
+  // which render indented. Deliberately separate from projectChats, which stays
+  // the flat list the counts (unread, needs-input) are summed over — a
+  // delegate's unread still belongs to its project.
+  function projectChatRows(projectId: string): ChatRow[] {
+    const all = projectChats(projectId)
+    const visible = new Set(all.map(c => c.chat_id))
+    const byParent = new Map<string, ChatInfo[]>()
+    for (const chat of all) {
+      const parent = chat.spawned_from_chat_id
+      if (!parent || !visible.has(parent)) continue
+      const siblings = byParent.get(parent) || []
+      siblings.push(chat)
+      byParent.set(parent, siblings)
+    }
+    const rows: ChatRow[] = []
+    for (const chat of all) {
+      // A delegate nests only when its supervisor is visible in this same
+      // project. Orphans (supervisor archived, deleted, or moved elsewhere)
+      // stay top-level rather than vanishing from the sidebar entirely.
+      if (chat.spawned_from_chat_id && visible.has(chat.spawned_from_chat_id)) continue
+      rows.push({ chat, isDelegate: false })
+      for (const delegate of byParent.get(chat.chat_id) || []) {
+        rows.push({ chat: delegate, isDelegate: true })
+      }
+    }
+    return rows
   }
 
   function chatActivity(chat: ChatInfo): string {
@@ -3816,7 +3846,7 @@ export const useProjectStore = defineStore('projects', () => {
     serverRestarting, serverRestartMessage, hostConnectionUnavailable,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
-    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
+    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats, projectChatRows,
     chatUnread, chatNeedsInput, projectNeedsInput, projectUnread, workspaceUnread, totalUnread, clearUnread, markRead, markAllRead,
     recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
     // Actions

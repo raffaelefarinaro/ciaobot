@@ -435,13 +435,14 @@
             <!-- Chats in project -->
             <div v-if="expandedProjects.has(project.project_id)" class="chat-list">
               <div
-                v-for="chat in store.projectChats(project.project_id)"
+                v-for="{ chat, isDelegate } in store.projectChatRows(project.project_id)"
                 :key="chat.chat_id"
                 class="chat-item"
                 :class="{
                   active: chat.chat_id === store.activeChatId,
                   remote: chat.local === false,
                   'needs-input': store.chatNeedsInput(chat.chat_id),
+                  delegate: isDelegate,
                 }"
                 @click="chat.local !== false && selectChat(chat.chat_id)"
                 @keydown.enter.self.prevent="chat.local !== false && selectChat(chat.chat_id)"
@@ -452,6 +453,12 @@
                 :aria-disabled="chat.local === false"
                 :title="chat.local === false ? 'This chat lives on another instance' : ''"
               >
+                <span
+                  v-if="isDelegate"
+                  class="delegate-mark"
+                  title="Delegate: spawned by this chat's supervisor"
+                  aria-label="Delegate chat"
+                >&#8627;</span>
                 <span
                   v-if="chat.title_status === 'pending'"
                   class="title-shimmer"
@@ -1655,6 +1662,21 @@ async function confirmDeleteChat(chatId: string) {
 
 .chat-item:last-child {
   border-bottom: none;
+}
+
+/* A delegate is a real chat, so it keeps the full row (streaming dot, unread
+   badge, actions menu) and only shifts right to read as owned by the chat
+   above it. Indent is on padding rather than margin so the hover/active
+   background still spans the full sidebar width. */
+.chat-item.delegate {
+  padding-left: 34px;
+}
+
+.delegate-mark {
+  flex: none;
+  color: var(--fg3, var(--fg2));
+  font-size: var(--text-sm, 0.85em);
+  line-height: 1;
 }
 
 /* Loop marker on a chat row. Accent while the cadence is live, muted when the

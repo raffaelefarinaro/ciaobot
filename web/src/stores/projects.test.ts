@@ -1869,3 +1869,74 @@ describe('switchChat workspace alignment', () => {
     expect(store.activeChatId).toBe('c-work')
   })
 })
+
+describe('projectChatRows (delegate grouping)', () => {
+  function seed(store: ReturnType<typeof useProjectStore>, chats: Partial<ChatInfo>[]) {
+    store.projects = [
+      { project_id: 'p1', name: 'Proj', workspace: 'personal' } as unknown as ProjectInfo,
+    ]
+    store.chats = chats.map((c, i) => ({
+      project_id: 'p1',
+      title: c.chat_id,
+      archived: false,
+      created_at: `2026-07-31T00:0${i}:00Z`,
+      ...c,
+    })) as unknown as ChatInfo[]
+  }
+
+  test('delegates follow their supervisor and are marked', () => {
+    const store = useProjectStore()
+    seed(store, [
+      { chat_id: 'boss' },
+      { chat_id: 'other' },
+      { chat_id: 'd1', spawned_from_chat_id: 'boss' },
+      { chat_id: 'd2', spawned_from_chat_id: 'boss' },
+    ])
+
+    const rows = store.projectChatRows('p1')
+
+    expect(rows.map(r => r.chat.chat_id)).toEqual(['boss', 'd1', 'd2', 'other'])
+    expect(rows.map(r => r.isDelegate)).toEqual([false, true, true, false])
+  })
+
+  test('an orphaned delegate stays top-level instead of disappearing', () => {
+    const store = useProjectStore()
+    // Supervisor archived, so it is not in the visible list at all.
+    seed(store, [
+      { chat_id: 'boss', archived: true },
+      { chat_id: 'orphan', spawned_from_chat_id: 'boss' },
+    ])
+
+    const rows = store.projectChatRows('p1')
+
+    expect(rows.map(r => r.chat.chat_id)).toEqual(['orphan'])
+    expect(rows[0].isDelegate).toBe(false)
+  })
+
+  test('a delegate whose supervisor lives in another project is not hidden', () => {
+    const store = useProjectStore()
+    seed(store, [{ chat_id: 'orphan', spawned_from_chat_id: 'boss-elsewhere' }])
+    store.chats = [
+      ...store.chats,
+      {
+        chat_id: 'boss-elsewhere',
+        project_id: 'p2',
+        title: 'Boss',
+        archived: false,
+        created_at: '2026-07-31T00:00:00Z',
+      } as unknown as ChatInfo,
+    ]
+
+    expect(store.projectChatRows('p1').map(r => r.chat.chat_id)).toEqual(['orphan'])
+  })
+
+  test('chats with no delegates produce a plain flat list', () => {
+    const store = useProjectStore()
+    seed(store, [{ chat_id: 'a' }, { chat_id: 'b' }])
+
+    const rows = store.projectChatRows('p1')
+
+    expect(rows.map(r => r.chat.chat_id)).toEqual(['a', 'b'])
+    expect(rows.every(r => !r.isDelegate)).toBe(true)
+  })
+})
