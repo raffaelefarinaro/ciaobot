@@ -207,6 +207,64 @@ def test_wake_prompt_batches_and_notes_siblings_still_running(
     assert f"1 still running: {slow.chat_id}" in prompt
 
 
+def test_wake_prompt_reports_a_quota_deferred_delegate_as_deferred_not_failed(
+    tmp_path: Path,
+) -> None:
+    """A provider quota rejection sets had_error AND arms a deferred retry.
+
+    Reporting that as FAILED tells the supervisor the work is dead when it will
+    resume on its own, inviting a duplicate re-dispatch. Hit for real on the
+    first live run: an Ollama weekly-limit 429 armed a 1h retry.
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor")
+    child = _spawn_delegate(manager, parent, title="Quota-limited")
+    child.retry_status = "pending"
+    child.retry_next_at = "2026-07-31T17:05:41Z"
+
+    prompt = manager._build_delegate_wake_prompt(
+        parent.chat_id,
+        [{
+            "chat_id": child.chat_id,
+            "title": "Quota-limited",
+            "delegation_id": "",
+            "reply": "API Error: Request rejected (429) weekly usage limit",
+            "had_error": True,
+        }],
+    )
+
+    assert "DEFERRED, retrying at 2026-07-31T17:05:41Z" in prompt
+    assert "FAILED" not in prompt
+    assert "it is not dead" in prompt
+    assert "Do not re-dispatch" in prompt
+
+
+def test_wake_prompt_still_says_failed_for_a_genuinely_dead_delegate(
+    tmp_path: Path,
+) -> None:
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor")
+    child = _spawn_delegate(manager, parent, title="Broken")
+    assert child.retry_status == ""
+
+    prompt = manager._build_delegate_wake_prompt(
+        parent.chat_id,
+        [{
+            "chat_id": child.chat_id,
+            "title": "Broken",
+            "delegation_id": "",
+            "reply": "traceback",
+            "had_error": True,
+        }],
+    )
+
+    assert "FAILED" in prompt
+    assert "DEFERRED" not in prompt
+    assert "it is not dead" not in prompt
+
+
 def test_wake_prompt_handles_a_delegate_that_said_nothing(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     project = manager.create_project("Delegates", workspace="work")

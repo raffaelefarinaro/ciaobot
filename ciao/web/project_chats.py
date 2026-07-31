@@ -5993,8 +5993,24 @@ class ProjectChatManager:
             lines.append(
                 f"{len(still_running)} still running: {', '.join(still_running)}."
             )
+        deferred = False
         for entry in finished:
-            status = "FAILED" if entry["had_error"] else "done"
+            child = self._chats.get(entry["chat_id"])
+            # A provider quota rejection sets had_error AND arms a deferred
+            # retry, so reporting it as FAILED tells the supervisor the work is
+            # dead when it is actually going to resume on its own. A supervisor
+            # that believes "failed" re-dispatches and duplicates the work.
+            if child is not None and child.retry_status == "pending":
+                status = (
+                    f"DEFERRED, retrying at {child.retry_next_at}"
+                    if child.retry_next_at
+                    else "DEFERRED, retry pending"
+                )
+                deferred = True
+            elif entry["had_error"]:
+                status = "FAILED"
+            else:
+                status = "done"
             lines.append("")
             lines.append(
                 f"— {entry['title']} ({entry['chat_id']}, {status})"
@@ -6004,6 +6020,15 @@ class ProjectChatManager:
             ) if entry["reply"].strip() else "(no final message)"
             lines.append(excerpt)
         lines.append("")
+        if deferred:
+            lines.append(
+                "A DEFERRED delegate hit a provider limit and will resume by "
+                "itself at the time shown — it is not dead. Do not re-dispatch "
+                "its work or report it as failed; you will be woken again when "
+                "it finishes. Use chat_retry to run it sooner, or chat_stop to "
+                "abandon it."
+            )
+            lines.append("")
         lines.append(
             "Review this against what you asked each delegate to do. The "
             "excerpt above is truncated and is the delegate's own account, so "
