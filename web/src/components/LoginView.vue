@@ -171,7 +171,7 @@
                 class="btn-small"
                 type="button"
                 :disabled="loading"
-                @click="copyCommand(setupStatus.providers[provider].command)"
+                @click="copyCommand(setupStatus.providers[provider].command || '')"
               >
                 {{ copyStatus || 'Copy' }}
               </button>
@@ -377,6 +377,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useAuthStore } from '../stores/auth'
+import type { SetupStatus } from '../lib/types'
 import { errorMessage } from '../lib/errorMessage'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
@@ -432,7 +433,7 @@ async function switchBackToHost() {
 // Setup Wizard states
 const isBootstrap = ref(false)
 const bootstrapLoading = ref(true)
-const setupStatus = ref<any>(null)
+const setupStatus = ref<SetupStatus | null>(null)
 const workspace = ref('~/ciaobot')
 const port = ref(8443)
 const python = ref('')
@@ -602,7 +603,7 @@ async function doLogin() {
 
 async function fetchSetupStatus() {
   try {
-    const status = await api.get<any>('/api/setup-status')
+    const status = await api.get<SetupStatus>('/api/setup-status')
     setupStatus.value = status
     isBootstrap.value = !!status.bootstrap
   } catch {
@@ -679,7 +680,7 @@ watch(isBootstrap, (newVal) => {
     if (!pollInterval) {
       pollInterval = setInterval(async () => {
         try {
-          const status = await api.get<any>('/api/setup-status')
+          const status = await api.get<SetupStatus>('/api/setup-status')
           setupStatus.value = status
           isBootstrap.value = !!status.bootstrap
         } catch {

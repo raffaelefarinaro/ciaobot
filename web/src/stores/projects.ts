@@ -27,6 +27,7 @@ import type {
   WorkspaceName,
   WorkspaceProviderOption,
   WorkspacesResponse,
+  ProviderSubchatEvent,
 } from '../lib/types'
 
 export function shouldReconnectActiveChatOnStreamingStarted(
@@ -74,7 +75,7 @@ export const useProjectStore = defineStore('projects', () => {
   // Provider sub-chats keyed by parent chat_id.
   const providerSubchats = ref<Record<string, ProviderSubchatRecord[]>>({})
   // Provider sub-chat transcript events keyed by subchat_id.
-  const providerSubchatEvents = ref<Record<string, any[]>>({})
+  const providerSubchatEvents = ref<Record<string, ProviderSubchatEvent[]>>({})
   const sockets = ref<Record<string, WebSocket>>({})
   const streaming = ref<Record<string, boolean>>({})
   const streamingText = ref<Record<string, string>>({})
@@ -1753,7 +1754,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   async function loadProviderSubchatEvents(subchatId: string): Promise<void> {
     try {
-      const r = await api.get<any[]>(`/api/provider-subchats/${subchatId}/events`)
+      const r = await api.get<ProviderSubchatEvent[]>(`/api/provider-subchats/${subchatId}/events`)
       providerSubchatEvents.value[subchatId] = Array.isArray(r) ? r : []
     } catch {
       // ignore

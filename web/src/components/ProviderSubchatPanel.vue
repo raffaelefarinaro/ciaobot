@@ -71,7 +71,7 @@
               <!-- Messages -->
               <template v-if="ev.type === 'message'">
                 <div class="event-role">{{ ev.role === 'owner' ? 'Owner' : 'Participant' }}</div>
-                <div class="event-text" v-html="renderMarkdown(ev.content)"></div>
+                <div class="event-text" v-html="renderMarkdown(ev.content || '')"></div>
               </template>
 
               <!-- Text Deltas -->
@@ -92,8 +92,8 @@
                   <div class="card-title">Permission Needed: {{ ev.tool_name }}</div>
                   <pre class="card-detail">{{ ev.message }}</pre>
                   <div class="card-buttons">
-                    <button type="button" class="approve" @click="resolvePermission(sub.subchat_id, ev.request_id, true)">Approve</button>
-                    <button type="button" class="deny" @click="resolvePermission(sub.subchat_id, ev.request_id, false)">Deny</button>
+                    <button type="button" class="approve" @click="resolvePermission(sub.subchat_id, ev.request_id || '', true)">Approve</button>
+                    <button type="button" class="deny" @click="resolvePermission(sub.subchat_id, ev.request_id || '', false)">Deny</button>
                   </div>
                 </div>
               </template>
@@ -105,12 +105,12 @@
                   <div class="options-list">
                     <button
                       v-for="opt in ev.options"
-                      :key="opt.value || opt"
+                      :key="optionValue(opt)"
                       type="button"
                       class="option-btn"
-                      @click="resolveQuestion(sub.subchat_id, ev.request_id, opt.value || opt)"
+                      @click="resolveQuestion(sub.subchat_id, ev.request_id || '', optionValue(opt))"
                     >
-                      {{ opt.label || opt }}
+                      {{ optionLabel(opt) }}
                     </button>
                   </div>
                 </div>
@@ -135,7 +135,7 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
-import type { ProviderSubchatRecord } from '../lib/types'
+import type { ProviderSubchatRecord, ProviderSubchatQuestionOption } from '../lib/types'
 import { useProjectStore } from '../stores/projects'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
 import { api } from '../lib/api'
@@ -160,6 +160,15 @@ async function toggleSubchat(subchatId: string) {
 
 function getEvents(subchatId: string) {
   return store.providerSubchatEvents[subchatId] || []
+}
+
+// A question option is either a bare string or a {value, label} pair.
+function optionValue(opt: ProviderSubchatQuestionOption): string {
+  return typeof opt === 'string' ? opt : opt.value || ''
+}
+
+function optionLabel(opt: ProviderSubchatQuestionOption): string {
+  return typeof opt === 'string' ? opt : opt.label || opt.value || ''
 }
 
 function isTerminal(status: string): boolean {

@@ -264,6 +264,7 @@
 <script setup lang="ts">
 import { onMounted, ref, reactive, computed } from 'vue'
 import { useTaskStore } from '../stores/tasks'
+import type { ScheduleUpdate } from '../stores/tasks'
 import { askConfirm } from '../lib/confirm'
 import { useProjectStore } from '../stores/projects'
 import type { Schedule } from '../lib/types'
@@ -391,7 +392,7 @@ function startEdit(s: Schedule) {
 
 async function saveEdit(id: string) {
   const d = editData[id]
-  const updates: Record<string, unknown> = {
+  const updates: ScheduleUpdate = {
     time: d.frequency === 'manual' ? '' : d.time,
     prompt: d.prompt,
     timezone: d.timezone,
@@ -420,7 +421,7 @@ async function saveEdit(id: string) {
     updates.thread_id = parts.length > 1 ? parseInt(parts[1], 10) : null
   }
 
-  await store.updateSchedule(id, updates as any)
+  await store.updateSchedule(id, updates)
   editing[id] = false
 }
 

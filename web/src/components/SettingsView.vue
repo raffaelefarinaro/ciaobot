@@ -2247,6 +2247,11 @@ import type {
   WorkspaceInfo,
   WorkspaceHealthResponse,
   WorkspaceProvider,
+  PackageStatus,
+  PackageChangelog,
+  PackageUpdateResult,
+  ProviderActionResult,
+  LocalHandbackResult,
 } from '../lib/types'
 import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSupported } from '../lib/push'
 import { askConfirm } from '../lib/confirm'
@@ -3437,7 +3442,7 @@ async function providerConnectionAction(provider: string, action: 'connect' | 'v
   providerConnectionPending.value = provider
   providerConnectionResult.value = ''
   try {
-    const result = await api.post<any>(`/api/settings/providers/${provider}/${action}`)
+    const result = await api.post<ProviderActionResult>(`/api/settings/providers/${provider}/${action}`)
     if (action === 'connect') {
       providerConnectionResult.value = result.opened
         ? `Opened ${provider === 'codex' ? 'Codex' : 'Claude Code'} login in Terminal.`
@@ -3484,7 +3489,7 @@ async function saveProviderKeys() {
   }
   
   try {
-    const payload: any = { keys: patchKeys }
+    const payload: { keys: Record<string, string> } = { keys: patchKeys }
     
     const res = await api.patch<ProviderConfigSettings>('/api/settings/providers', payload)
     providerKeys.value = res
@@ -4909,7 +4914,7 @@ async function localHandback(confirmWarnings = false) {
   actionResult.value = ''
 
   try {
-    const r = await api.post<any>('/api/local/handback', { confirm_warnings: confirmWarnings })
+    const r = await api.post<LocalHandbackResult>('/api/local/handback', { confirm_warnings: confirmWarnings })
     if (r?.ok === false) {
       actionResult.value = `${r.step}: ${r.error}`
     } else if (r?.merged === true) {
@@ -4941,18 +4946,18 @@ async function localHandback(confirmWarnings = false) {
 }
 
 // ── Package update ────────────────────────────────────────────────────────
-const packageStatus = ref<any>(null)
+const packageStatus = ref<PackageStatus | null>(null)
 const packageLoading = ref(false)
 const packageUpdating = ref(false)
 const packageResult = ref('')
 const showUpdatePanel = ref(false)
 const changelogLoading = ref(false)
-const changelog = ref<any>({ commits: [], compare_url: '', error: '' })
+const changelog = ref<PackageChangelog>({ commits: [], compare_url: '', error: '' })
 
 async function fetchPackageStatus() {
   packageLoading.value = true
   try {
-    packageStatus.value = await api.get<any>('/api/package/status')
+    packageStatus.value = await api.get<PackageStatus>('/api/package/status')
   } catch {
     // best-effort
   } finally {
@@ -4965,7 +4970,7 @@ async function openUpdatePanel() {
   changelogLoading.value = true
   changelog.value = { commits: [], compare_url: '', error: '' }
   try {
-    changelog.value = await api.get<any>('/api/package/changelog')
+    changelog.value = await api.get<PackageChangelog>('/api/package/changelog')
   } catch (e) {
     changelog.value = { commits: [], compare_url: '', error: errorMessage(e, 'unknown error') }
   } finally {
@@ -4977,7 +4982,7 @@ async function doPackageUpdate() {
   packageUpdating.value = true
   packageResult.value = 'Updating Ciaobot and restarting...'
   try {
-    const res = await api.post<any>('/api/package/update')
+    const res = await api.post<PackageUpdateResult>('/api/package/update')
     if (res.ok) {
       showUpdatePanel.value = false
       packageResult.value = ''

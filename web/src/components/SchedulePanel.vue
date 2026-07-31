@@ -544,6 +544,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useTaskStore } from '../stores/tasks'
+import type { ScheduleUpdate } from '../stores/tasks'
 import { useProjectStore } from '../stores/projects'
 import type { Loop, Schedule, ScheduleArchivePolicy } from '../lib/types'
 import NewScheduleForm from './NewScheduleForm.vue'
@@ -1089,7 +1090,7 @@ function startEdit() {
 async function saveEdit() {
   if (!schedule.value) return
   const d = editData.value
-  const updates: Record<string, unknown> = {
+  const updates: ScheduleUpdate = {
     workspace: d.workspace,
     title: d.title,
     description: d.description,
@@ -1120,7 +1121,7 @@ async function saveEdit() {
     updates.chat_id = parseInt(parts[0], 10)
     updates.thread_id = parts.length > 1 ? parseInt(parts[1], 10) : null
   }
-  await store.updateSchedule(schedule.value.schedule_id, updates as any)
+  await store.updateSchedule(schedule.value.schedule_id, updates)
   editing.value = false
 }
 

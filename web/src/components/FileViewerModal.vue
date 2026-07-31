@@ -547,7 +547,9 @@ const splitContent = computed(() => parseFrontmatter(store.content))
 const frontmatter = computed(() => splitContent.value.frontmatter)
 const bodyOnly = computed(() => splitContent.value.body)
 
-const fmName = computed(() => fmString('name'))
+// `title` is the canonical human label in the vault schema; `name` is the
+// retired synonym still present on older pages. Prefer title, fall back.
+const fmName = computed(() => fmString('title') || fmString('name'))
 const fmType = computed(() => fmString('type'))
 const fmStatus = computed(() => fmString('status'))
 const fmTags = computed(() => fmList('tags'))

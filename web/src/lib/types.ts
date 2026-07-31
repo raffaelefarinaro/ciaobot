@@ -327,7 +327,7 @@ export type EventsWsMessage =
   | { type: 'server_restarting'; message?: string }
   | { type: 'provider_subchat_created'; subchat_id: string; parent_chat_id: string; record: ProviderSubchatRecord }
   | { type: 'provider_subchat_status'; subchat_id: string; parent_chat_id: string; status: string; record: ProviderSubchatRecord }
-  | { type: 'provider_subchat_event'; subchat_id: string; parent_chat_id: string; event: any }
+  | { type: 'provider_subchat_event'; subchat_id: string; parent_chat_id: string; event: ProviderSubchatEvent }
   | { type: 'provider_subchat_deleted'; subchat_id: string; parent_chat_id: string }
   | { type: 'gws_health'; profile: string; token_valid: boolean; token_error: string; title: string; body: string }
 
@@ -805,7 +805,126 @@ export interface NodeStatus {
   host_version?: string
   has_host_session?: boolean
   peers: NodePeer[]
-  git?: any
+  // From LocalSessionManager.status() on the host (ciao/local_session.py).
+  git?: LocalGitStatus
+}
+
+/** Workspace git state, as `/api/node/status` reports it under `git`. */
+export interface LocalGitStatus {
+  git_repo?: boolean
+  branch?: string
+  dirty?: boolean
+  dev_mode?: boolean
+}
+
+/**
+ * What the small action endpoints answer with: `/api/device/update`,
+ * `/api/node/connect`, `/api/node/handover`. Callers only branch on `ok` and
+ * show `error`; the rest of the body is diagnostic, hence the index signature.
+ */
+export interface ActionResult {
+  ok?: boolean
+  error?: string
+  [key: string]: unknown
+}
+
+/** One commit row in the update modal, from ciao/package_version.py. */
+export interface ChangelogCommit {
+  sha: string
+  subject: string
+}
+
+/** `/api/package/changelog` and `/api/device/changelog`. */
+export interface PackageChangelog {
+  commits: ChangelogCommit[]
+  compare_url: string
+  repo?: string
+  error: string
+  current_version?: string
+  latest_version?: string
+  update_available?: boolean
+}
+
+/** `/api/package/update` and `/api/device/update`. */
+export interface PackageUpdateResult {
+  ok?: boolean
+  mode?: string
+  output?: string
+  command?: string
+  error?: string
+}
+
+/** One provider row inside {@link SetupStatus}. */
+export interface SetupProviderStatus {
+  ok: boolean
+  auth?: string
+  command?: string
+  detail?: string
+}
+
+/** One requirement row inside {@link SetupStatus}. */
+export interface SetupCheck {
+  ok: boolean
+  required?: boolean
+  detail?: string
+  command?: string
+  [key: string]: unknown
+}
+
+/** `/api/setup-status`, from ciao/setup_status.py::setup_status. */
+export interface SetupStatus {
+  configured: boolean
+  bootstrap: boolean
+  mode: string
+  workspace_root: string
+  vault_root: string
+  checks: SetupCheck[]
+  providers: Record<string, SetupProviderStatus>
+  provider_ready: boolean
+}
+
+/** `/api/settings/providers/{provider}/{connect|logout|check}`. */
+export interface ProviderActionResult {
+  ok?: boolean
+  opened?: boolean
+  command?: string
+  auth?: string
+  detail?: string
+}
+
+/** `/api/local/handback`. */
+export interface LocalHandbackResult {
+  ok?: boolean
+  step?: string
+  error?: string
+  merged?: boolean
+  conflict?: boolean
+}
+
+/**
+ * A choice offered by a subchat `question` event.
+ *
+ * Providers send either a bare string or a `{value, label}` pair, which is why
+ * the template always fell back with `opt.value || opt`.
+ */
+export type ProviderSubchatQuestionOption = string | { value?: string; label?: string }
+
+/**
+ * One entry in a provider subchat transcript
+ * (`/api/provider-subchats/{id}/events`). Kept open with an index signature
+ * because the renderer switches on `type` and ignores what it does not know.
+ */
+export interface ProviderSubchatEvent {
+  type: string
+  role?: string
+  content?: string
+  text?: string
+  message?: string
+  question?: string
+  options?: ProviderSubchatQuestionOption[]
+  request_id?: string
+  tool_name?: string
+  [key: string]: unknown
 }
 
 export interface PackageStatus {

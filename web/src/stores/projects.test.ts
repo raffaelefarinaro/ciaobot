@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
-import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { beforeEach, describe, expect, test, vi, type Mock } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
+import type { ProjectInfo, ChatInfo } from '../lib/types'
 import {
   shouldReconnectActiveChatOnStreamingStarted,
   chatWsReconnectDelayMs,
@@ -1743,7 +1744,7 @@ describe('workspace and chat transitions', () => {
     expect(apiPost).toHaveBeenCalledWith('/api/projects/pg/chats', { title: 'Fix error' })
 
     // The fix prompt (with the error log + approval-gated GitHub-issue fallback) was sent over the WS.
-    const sent = fakeSockets.flatMap(s => (s.send as any).mock.calls.map((c: any[]) => String(c[0])))
+    const sent = fakeSockets.flatMap(s => (s.send as Mock).mock.calls.map((c: unknown[]) => String(c[0])))
     const fixMsg = sent.find(m => m.includes('Error: boom'))
     expect(fixMsg).toBeTruthy()
     expect(fixMsg).toContain('ask for my approval')
@@ -1854,12 +1855,12 @@ describe('switchChat workspace alignment', () => {
     const store = useProjectStore()
     store.activeWorkspace = 'personal'
     store.projects = [
-      { project_id: 'p-personal', name: 'Personal Proj', workspace: 'personal' } as any,
-      { project_id: 'p-work', name: 'Work Proj', workspace: 'work' } as any,
+      { project_id: 'p-personal', name: 'Personal Proj', workspace: 'personal' } as unknown as ProjectInfo,
+      { project_id: 'p-work', name: 'Work Proj', workspace: 'work' } as unknown as ProjectInfo,
     ]
     store.chats = [
-      { chat_id: 'c-personal', project_id: 'p-personal', title: 'Personal Chat' } as any,
-      { chat_id: 'c-work', project_id: 'p-work', title: 'Work Chat' } as any,
+      { chat_id: 'c-personal', project_id: 'p-personal', title: 'Personal Chat' } as unknown as ChatInfo,
+      { chat_id: 'c-work', project_id: 'p-work', title: 'Work Chat' } as unknown as ChatInfo,
     ]
 
     await store.switchChat('c-work')

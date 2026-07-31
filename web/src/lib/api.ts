@@ -1,5 +1,12 @@
 const BASE = ''
 
+/** The JSON body an error response may carry. Every field is best-effort. */
+export interface ApiErrorBody {
+  error?: string
+  steps?: Array<{ step?: string; ok?: boolean; output?: string }>
+  [key: string]: unknown
+}
+
 export class ApiError extends Error {
   status?: number
   payload?: unknown
@@ -51,27 +58,33 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   const looksLikeHtml = raw.trimStart().startsWith('<!') || raw.trimStart().startsWith('<html')
   const looksLikeJson = contentType.includes('application/json') || raw.trimStart().startsWith('{') || raw.trimStart().startsWith('[')
   if (!res.ok) {
-    let err: any = {}
+    // The error body is whatever the server sent, so it is read through a
+    // narrow shape rather than trusted: `error` for the message and `steps`
+    // for the deploy/preflight routes that report per-step failures.
+    let err: ApiErrorBody = {}
     if (looksLikeJson) {
-      try { err = JSON.parse(raw) } catch { err = {} }
+      try {
+        const parsed: unknown = JSON.parse(raw)
+        if (parsed && typeof parsed === 'object') err = parsed as ApiErrorBody
+      } catch { err = {} }
     }
     // A server running older code answers an unknown route with the SPA shell
     // (HTML), or a 404 with no JSON error to explain itself. Only those warrant
     // the redeploy hint: a real `404 {"error": "not found"}` has a reason worth
     // showing, and a plain-text 500 or a proxy 502/503 is a live failure — hide
     // either behind "redeploy" and the user goes and redeploys a healthy build.
-    if (looksLikeHtml || (res.status === 404 && !err?.error)) {
+    if (looksLikeHtml || (res.status === 404 && !err.error)) {
       throw new ApiError(
         `API route ${path} is not available on the running server yet. Use Settings → Deploy, then restart Ciaobot.`,
         { status: res.status, payload: err },
       )
     }
-    const stepDetail = Array.isArray(err?.steps)
-      ? err.steps.filter((s: any) => s && !s.ok).map((s: any) =>
-          s.output ? `${s.step}: ${s.output}` : s.step).join('; ')
+    const stepDetail = Array.isArray(err.steps)
+      ? err.steps.filter((step) => step && !step.ok).map((step) =>
+          step.output ? `${step.step}: ${step.output}` : step.step).join('; ')
       : ''
     const bodyDetail = !looksLikeJson ? raw.trim().slice(0, 200) : ''
-    const msg = err?.error || stepDetail || bodyDetail || res.statusText || `HTTP ${res.status}`
+    const msg = err.error || stepDetail || bodyDetail || res.statusText || `HTTP ${res.status}`
     throw new ApiError(msg, { status: res.status, payload: err })
   }
   if (looksLikeHtml || !looksLikeJson) {

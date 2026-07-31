@@ -53,12 +53,12 @@ describe('ChatLayout', () => {
       project_id: 'project-1',
       name: 'General',
       workspace: 'personal',
-    }] as any
+    }] as unknown as typeof store.projects
     store.chats = [{
       chat_id: 'chat-1',
       project_id: 'project-1',
       title: 'Test chat',
-    }] as any
+    }] as unknown as typeof store.chats
     store.activeChatId = 'chat-1'
     store.bootstrapped = true
     vi.spyOn(store, 'fetchAll').mockResolvedValue()

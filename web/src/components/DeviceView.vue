@@ -258,7 +258,7 @@ import { errorMessage, apiErrorMessage, errorPayload } from '../lib/errorMessage
 import NodeAddresses from './NodeAddresses.vue'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
-import type { NodeStatus, PackageStatus } from '../lib/types'
+import type { NodeStatus, PackageStatus, PackageChangelog, PackageUpdateResult, ActionResult } from '../lib/types'
 
 // Every request on this page targets a never-proxied route, so the panel keeps
 // working (and can disconnect) while the host is unreachable.
@@ -278,7 +278,7 @@ const updating = ref(false)
 const updateResult = ref('')
 const showUpdatePanel = ref(false)
 const changelogLoading = ref(false)
-const changelog = ref<any>({ commits: [], compare_url: '', error: '' })
+const changelog = ref<PackageChangelog>({ commits: [], compare_url: '', error: '' })
 
 const isClient = computed(() => {
   const role = nodeStatus.value?.role
@@ -334,7 +334,7 @@ async function openUpdatePanel() {
   changelogLoading.value = true
   changelog.value = { commits: [], compare_url: '', error: '' }
   try {
-    changelog.value = await api.get<any>('/api/device/changelog')
+    changelog.value = await api.get<PackageChangelog>('/api/device/changelog')
   } catch (e) {
     changelog.value = { commits: [], compare_url: '', error: errorMessage(e, 'unknown error') }
   } finally {
@@ -346,7 +346,7 @@ async function doUpdate() {
   updating.value = true
   updateResult.value = `Updating ${deviceName.value} and restarting…`
   try {
-    const res = await api.post<any>('/api/device/update')
+    const res = await api.post<PackageUpdateResult>('/api/device/update')
     updateResult.value = res?.ok
       ? 'Updated. This device is restarting; reload in a few seconds.'
       : res?.error || 'Update failed'
@@ -375,7 +375,7 @@ async function connectAsClient() {
   nodeActionResult.value = ''
   nodeActionError.value = false
   try {
-    const r = await api.post<any>('/api/node/connect', { host_url: hostUrlValue, password })
+    const r = await api.post<ActionResult>('/api/node/connect', { host_url: hostUrlValue, password })
     if (r?.ok) {
       hostPasswordInput.value = ''
       showConnectForm.value = false
@@ -426,7 +426,7 @@ async function becomeHost(force = false) {
   nodeActionResult.value = ''
   nodeActionError.value = false
   try {
-    const r = await api.post<any>('/api/node/handover', {
+    const r = await api.post<ActionResult>('/api/node/handover', {
       target_node_url: hostUrl.value,
       force,
     })
