@@ -135,6 +135,8 @@ Copy `.env.example` to `.env` and fill in the app-level settings first:
 
 The endpoint is mounted at `http://127.0.0.1:<PWA_PORT>/mcp/`. Do not place a static token in `.mcp.json` or Codex config: Ciaobot generates a scoped short-lived token and configures its managed Claude Code/Codex child process. See [docs/MCP.md](docs/MCP.md).
 
+The embedded server pins the Python MCP SDK at `mcp>=1.29.0,<2.0`, bumped for the MCP spec release `2026-07-28`. v1.29.0 is a compatibility release that speaks both the prior wire format and `2026-07-28`; Ciaobot stays on the v1 SDK line and does not migrate to the `2.0.0` rewrite. The `2026-07-28` spec opens a 12-month deprecation window for Roots, Sampling, Logging, and the legacy HTTP+SSE transport. `ciao/mcp_server.py` already runs `stateless_http=True`, `json_response=True`, with no session id and no Roots/Sampling/Elicitation usage, so none of that deprecated surface is in play here.
+
 **Internal command markers:** `CIAO_COMMAND_BEGIN`, `CIAO_COMMAND_INSTRUCTIONS`, and `CIAO_COMMAND_END` are reserved transcript markers used when Ciaobot expands a Claude-style slash command for Codex. They are not environment variables and should not be configured.
 
 **Optional direct-service keys:** `OPENAI_API_KEY` for Ciaobot cloud voice features and `CIAO_OLLAMA_API_KEY` for Ollama Cloud. Claude Code and Codex own their authentication through their respective CLIs.
