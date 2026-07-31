@@ -5,12 +5,30 @@
 
       <!-- HOME TAB -->
       <template v-if="currentTab === 'home'">
+        <!-- Whose settings am I looking at? In client mode every card below is
+             the host's, because the API calls behind them are tunneled. Say so
+             once, at the top, and point at the one screen that is local. -->
+        <div v-if="isNodeClient" class="card scope-card">
+          <div class="settings-card-header">
+            <p class="section-title">you are viewing {{ hostScopeLabel }}</p>
+            <p class="hint">
+              This is the host's Settings, exactly as it looks on that machine. Changes here apply
+              there, including the password and restarts.
+              <router-link to="/device">This device</router-link>
+              has its own panel for role, host connection and its local app version.
+            </p>
+          </div>
+        </div>
+
         <!-- Actions -->
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
               <p class="section-title">app actions</p>
-              <p class="hint">Snapshot, sync, or restart this local Ciaobot instance.</p>
+              <p class="hint">
+                Snapshot, sync, or restart
+                {{ isNodeClient ? `the host (${hostScopeLabel})` : 'this local Ciaobot instance' }}.
+              </p>
             </div>
             <div class="settings-card-header-actions">
               <button class="btn-primary btn-small" @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()" :disabled="!!actionPending">
@@ -38,13 +56,35 @@
           </div>
         </div>
 
+        <!-- Keyboard shortcuts (desktop app only) -->
+        <div v-if="inDesktopApp" class="card">
+          <div class="settings-card-header">
+            <p class="section-title">keyboard shortcuts</p>
+            <p class="hint">Global combos that work while a chat is open. Text fields keep their normal meaning: Cmd+A still selects all, and Esc inside the composer closes the slash-command picker instead of the chat.</p>
+          </div>
+          <ul class="shortcut-list">
+            <li><kbd>&#8984;T</kbd><span>Open a new chat in the default General project</span></li>
+            <li><kbd>&#8984;D</kbd><span>Toggle voice dictation (start / stop)</span></li>
+            <li><kbd>&#8984;A</kbd><span>Archive the open chat (asks to confirm)</span></li>
+            <li><kbd>Esc</kbd><span>Close the open chat (when not typing)</span></li>
+            <li><kbd>&#8593;&#8595;&#8592;&#8594;</kbd><span>On the home screen: move between recent chats</span></li>
+            <li><kbd>&#8629;</kbd><span>On the home screen: open the highlighted chat</span></li>
+          </ul>
+        </div>
+
         <!-- PWA password -->
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
               <p class="section-title">PWA password</p>
               <p class="hint">
-                Protect this Ciaobot with a password. Required before other devices can connect as clients.
+                <template v-if="isNodeClient">
+                  The password on {{ hostScopeLabel }} — the one you typed to open this client.
+                  Changing it here keeps this device connected; other clients have to log in again.
+                </template>
+                <template v-else>
+                  Protect this Ciaobot with a password. Required before other devices can connect as clients.
+                </template>
               </p>
             </div>
             <span
@@ -159,7 +199,15 @@
           <div class="settings-card-header settings-card-header--split">
             <div>
               <p class="section-title">package update</p>
-              <p class="hint">Check the installed package version and upgrade this local app.</p>
+              <p class="hint">
+                <template v-if="isNodeClient">
+                  The version installed on {{ hostScopeLabel }}. Updating restarts the host.
+                  To upgrade this computer, open <router-link to="/device">this device</router-link>.
+                </template>
+                <template v-else>
+                  Check the installed package version and upgrade this local app.
+                </template>
+              </p>
             </div>
             <div v-if="packageStatus" class="settings-card-header-actions">
               <button
@@ -306,16 +354,27 @@
             <div class="settings-control">
               <div class="font-scale-row">
                 <button class="btn-small" @click="adjustFontScale(-0.05)" :disabled="fontScale <= 0.8">Decrease</button>
-                <span class="font-scale-display">{{ Math.round(fontScale * 100) }}%</span>
+                <span class="font-scale-display">{{ fontScalePercent }}%</span>
                 <button class="btn-small" @click="adjustFontScale(0.05)" :disabled="fontScale >= 1.5">Increase</button>
-                <button class="btn-small font-reset" @click="resetFontScale" :disabled="fontScale === 1.0">Reset</button>
+                <button class="btn-small font-reset" @click="resetFontScale" :disabled="fontScale === DEFAULT_FONT_SCALE">Reset</button>
+              </div>
+              <div class="font-scale-presets">
+                <button
+                  class="btn-small"
+                  :class="{ active: fontScale === DEFAULT_FONT_SCALE }"
+                  @click="setFontScale(DEFAULT_FONT_SCALE)"
+                >100%</button>
+                <button
+                  class="btn-small"
+                  :class="{ active: Math.abs(fontScale - LARGE_FONT_SCALE) < 0.001 }"
+                  @click="setFontScale(LARGE_FONT_SCALE)"
+                >120%</button>
               </div>
             </div>
           </div>
         </div>
 
-        <OnboardingCard variant="settings" @open-sidebar="emit('open-sidebar')" />
-
+        
         <!-- Debug (dev mode only) -->
         <div v-if="localStatus?.dev_mode" class="card">
           <div class="settings-card-header settings-card-header--split">
@@ -333,194 +392,27 @@
           <div v-if="debugSummary" class="action-result">{{ debugSummary }}</div>
         </div>
 
-        <!-- Node: host / client (niche multi-device feature) -->
+        <!-- This device (role, host connection, local app) lives on its own
+             route so nothing on this page is about the machine in front of you. -->
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
-              <div class="settings-label-row">
-                <span class="section-title">host</span>
-                <details class="field-info">
-                  <summary aria-label="About host mode" title="About host mode">i</summary>
-                  <div class="field-info-panel">
-                    <p>
-                      The host is the machine where Ciaobot runs schedules and background work.
-                      Keep it on an always-on computer (for example a Mini at home).
-                    </p>
-                    <p>
-                      Other devices connect to it as clients when you want to control that
-                      machine remotely.
-                    </p>
-                  </div>
-                </details>
-                <span class="section-title">&amp;</span>
-                <span class="section-title">client</span>
-                <details class="field-info">
-                  <summary aria-label="About client mode" title="About client mode">i</summary>
-                  <div class="field-info-panel">
-                    <p>
-                      Use client mode when Ciaobot is already running on another computer and
-                      you want a second device — for example a laptop — to control it remotely.
-                    </p>
-                    <p>
-                      For access across networks, set up a private VPN such as
-                      <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer">Tailscale</a>
-                      and connect with the host’s Tailscale URL
-                      (e.g. <code>http://100.x.x.x:8443</code>).
-                    </p>
-                  </div>
-                </details>
-              </div>
+              <p class="section-title">this device</p>
               <p class="hint">
-                <template v-if="!nodeStatus">Loading mode…</template>
-                <template v-else-if="isNodeClient">
-                  This device is a <strong>client</strong> — tray and PWA tunnel to the host below. Automations run on the host, not here.
+                <template v-if="isNodeClient">
+                  Client mode, host connection and the app installed on this computer.
+                  Everything else on this page belongs to {{ hostScopeLabel }}.
                 </template>
                 <template v-else>
-                  Connect this device to another Ciaobot when you want to control it remotely.
+                  Role, addresses other devices can reach, connected clients, and the app
+                  installed on this computer.
                 </template>
               </p>
             </div>
-            <div v-if="nodeStatus && isNodeClient" class="settings-card-header-actions">
-              <span class="badge badge--warn">{{ nodeRoleLabel }}</span>
+            <div class="settings-card-header-actions">
+              <router-link class="btn-secondary btn-small" to="/device">Open device settings</router-link>
             </div>
           </div>
-          <!-- Where this engine can be reached from another device. The native
-               app no longer lists these in the tray, so this is the only place
-               they surface. Hosts share them; clients tunnel to a host instead. -->
-          <NodeAddresses v-if="!isNodeClient" />
-          <div v-if="!nodeStatus" class="action-row"><span class="loading">Loading node status&hellip;</span></div>
-          <template v-else>
-            <!-- Client only: this device → host, with reachability on the link. -->
-            <div
-              v-if="isNodeClient"
-              class="node-path"
-              aria-label="Client connection"
-            >
-              <div class="node-path-endpoint">
-                <span class="node-path-label">this device</span>
-                <code class="node-path-value" :title="nodeStatus.node_id">{{ nodeStatus.node_id }}</code>
-              </div>
-              <div class="node-path-link">
-                <span class="node-path-arrow" aria-hidden="true">→</span>
-                <span
-                  v-if="nodeStatus.host_reachable != null"
-                  class="badge"
-                  :class="nodeStatus.host_reachable ? 'badge--success' : 'badge--warn'"
-                >
-                  {{ nodeStatus.host_reachable ? 'reachable' : 'unreachable' }}
-                </span>
-              </div>
-              <div class="node-path-endpoint node-path-endpoint--host">
-                <span class="node-path-label">host</span>
-                <code class="node-path-value" :title="connectedHostUrl || undefined">{{ connectedHostUrl || '—' }}</code>
-              </div>
-            </div>
-            <div v-if="nodeActionResult" class="action-result" :class="{ 'action-result--error': nodeActionError }">
-              {{ nodeActionResult }}
-            </div>
-
-            <!-- Client mode: disconnect only (no connect form) -->
-            <template v-if="isNodeClient">
-              <p class="hint hint--section-empty">
-                You are tunneling to the host below — chats and automations are that machine’s, not this one’s.
-                Disconnect asks the host to push, then this machine pulls and becomes host again.
-              </p>
-              <div v-if="!nodeStatus.has_host_session" class="action-result action-result--error">
-                Host password session missing. Enter the host password below to finish connecting.
-              </div>
-              <div v-if="!nodeStatus.has_host_session" class="settings-form-panel node-peer-form">
-                <label class="settings-field">
-                  <span class="ws-label">Host password</span>
-                  <input
-                    v-model="hostPasswordInput"
-                    type="password"
-                    class="routine-input"
-                    placeholder="Password set on the host"
-                    autocomplete="off"
-                    @keyup.enter="reconnectHostSession"
-                  />
-                </label>
-                <div class="action-row settings-actions">
-                  <button
-                    class="btn-primary btn-small"
-                    @click="reconnectHostSession"
-                    :disabled="!hostPasswordInput || nodePending !== null"
-                  >
-                    {{ nodePending === 'reconnect' ? 'Reconnecting…' : 'Reconnect' }}
-                  </button>
-                </div>
-              </div>
-              <div class="action-row settings-actions">
-                <button
-                  class="btn-primary btn-small"
-                  @click="() => doBecomeHost(false)"
-                  :disabled="nodePending !== null"
-                >
-                  {{ nodePending === 'handover' ? 'Disconnecting…' : 'Disconnect' }}
-                </button>
-                <button
-                  class="btn-caution btn-small"
-                  @click="() => doBecomeHost(true)"
-                  :disabled="nodePending !== null"
-                  title="Become host even if the remote is offline (skip remote push)"
-                >
-                  Force disconnect
-                </button>
-              </div>
-            </template>
-
-            <!-- Host mode: optional connect form, collapsed until asked -->
-            <template v-else>
-              <div class="action-row settings-actions">
-                <button
-                  class="btn-secondary btn-small"
-                  @click="showConnectForm = !showConnectForm"
-                  :disabled="nodePending !== null"
-                >
-                  {{ showConnectForm ? 'Cancel' : 'Connect as client…' }}
-                </button>
-              </div>
-              <template v-if="showConnectForm">
-                <p class="hint hint--section-empty">
-                  This pauses local automations and tunnels tray + PWA to another Ciaobot.
-                  That host must have a PWA password. Tailscale URLs work
-                  (e.g. http://100.x.x.x:8443).
-                </p>
-                <div class="settings-form-panel node-peer-form">
-                  <label class="settings-field">
-                    <span class="ws-label">Host URL</span>
-                    <input
-                      v-model="hostUrlInput"
-                      type="text"
-                      class="routine-input"
-                      placeholder="http://100.x.x.x:8443"
-                      @keyup.enter="connectAsClient"
-                    />
-                  </label>
-                  <label class="settings-field">
-                    <span class="ws-label">Host password</span>
-                    <input
-                      v-model="hostPasswordInput"
-                      type="password"
-                      class="routine-input"
-                      placeholder="Password set on the host"
-                      autocomplete="off"
-                      @keyup.enter="connectAsClient"
-                    />
-                  </label>
-                  <div class="action-row settings-actions">
-                    <button
-                      class="btn-primary btn-small"
-                      @click="connectAsClient"
-                      :disabled="!hostUrlInput.trim() || !hostPasswordInput || nodePending !== null"
-                    >
-                      {{ nodePending === 'connect' ? 'Connecting…' : 'Connect' }}
-                    </button>
-                  </div>
-                </div>
-              </template>
-            </template>
-          </template>
         </div>
 
         <!-- Open source -->
@@ -2329,7 +2221,6 @@ import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
 import { formatTime, formatDuration } from '../lib/time'
 import { isDesktopApp } from '../lib/desktop'
-import NodeAddresses from './NodeAddresses.vue'
 import type {
   AgentAssetsResponse,
   AutomationProcess,
@@ -2341,6 +2232,7 @@ import type {
   GwsIntegrationSettings,
   LocalStatus,
   ModelsResponse,
+  NodeStatus,
   McpStatus,
   McpUsage,
   McpToolUsage,
@@ -2357,13 +2249,13 @@ import type {
   WorkspaceProvider,
 } from '../lib/types'
 import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSupported } from '../lib/push'
+import { askConfirm } from '../lib/confirm'
 import { useAuthStore } from '../stores/auth'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
-import OnboardingCard from './OnboardingCard.vue'
 import { providerModelBadges, sectionsFromModelOptions, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 
 // The tray owns package updates and native notifications in the desktop app.
@@ -2703,7 +2595,11 @@ async function addCustomMcpServer() {
 }
 
 async function deleteCustomMcpServer(name: string) {
-  if (!confirm(`Are you sure you want to delete MCP server "${name}"?`)) return
+  if (!await askConfirm(`Are you sure you want to delete MCP server "${name}"?`, {
+    title: 'Delete MCP server',
+    confirmLabel: 'Delete server',
+    destructive: true,
+  })) return
   try {
     const res = await api.del<McpStatus>(`/api/mcp/servers/${encodeURIComponent(name)}`)
     mcpStatus.value = res
@@ -2718,14 +2614,20 @@ async function deleteCustomMcpServer(name: string) {
 
 // ── Appearance settings ────────────────────────────────────────────────────
 const activeTheme = ref('system')
-const fontScale = ref(1.0)
+// The font scale is anchored to the pre-rescale UI: DEFAULT_FONT_SCALE (1.2)
+// displays as "100%" and LARGE_FONT_SCALE (1.44) as "120%". The raw multiplier
+// still drives --font-scale; only the displayed percentage is rescaled.
+const DEFAULT_FONT_SCALE = 1.2
+const LARGE_FONT_SCALE = 1.44
+const fontScale = ref(DEFAULT_FONT_SCALE)
+const fontScalePercent = computed(() => Math.round((fontScale.value / DEFAULT_FONT_SCALE) * 100))
 
 function loadAppearanceSettings() {
   try {
     activeTheme.value = localStorage.getItem('ciao-theme') || 'system'
     const savedScale = localStorage.getItem('ciao-font-scale')
     if (savedScale) {
-      fontScale.value = parseFloat(savedScale) || 1.0
+      fontScale.value = parseFloat(savedScale) || DEFAULT_FONT_SCALE
     }
   } catch (e) {
     // Ignore localStorage block
@@ -2756,19 +2658,19 @@ function adjustFontScale(delta: number) {
   let next = parseFloat((fontScale.value + delta).toFixed(2))
   if (next < 0.8) next = 0.8
   if (next > 1.5) next = 1.5
+  setFontScale(next)
+}
+
+function resetFontScale() {
+  setFontScale(DEFAULT_FONT_SCALE)
+}
+
+function setFontScale(next: number) {
   fontScale.value = next
   try {
     localStorage.setItem('ciao-font-scale', next.toString())
   } catch (e) {}
   document.documentElement.style.setProperty('--font-scale', next.toString())
-}
-
-function resetFontScale() {
-  fontScale.value = 1.0
-  try {
-    localStorage.setItem('ciao-font-scale', '1.0')
-  } catch (e) {}
-  document.documentElement.style.setProperty('--font-scale', '1.0')
 }
 function isSkillExpanded(name: string) {
   return expandedSkills.value[name] || false
@@ -3437,7 +3339,11 @@ async function disconnectGwsProfile(profileName: string, deleteClientSecret: boo
     ? `Are you sure you want to delete the OAuth Client Secret for the ${profileName} profile?`
     : `Are you sure you want to disconnect/sign out the ${profileName} Google account?`
 
-  if (!confirm(message)) return
+  if (!await askConfirm(message, {
+    title: deleteClientSecret ? 'Delete OAuth Client Secret' : 'Disconnect Google account',
+    confirmLabel: deleteClientSecret ? 'Delete secret' : 'Disconnect',
+    destructive: true,
+  })) return
 
   gwsSavingProfile.value = profileName
   try {
@@ -3548,7 +3454,11 @@ const sortedUsage = computed<McpToolUsage[]>(() => {
 })
 
 async function providerConnectionAction(provider: string, action: 'connect' | 'verify' | 'logout') {
-  if (action === 'logout' && !confirm(`Log out of ${provider === 'codex' ? 'OpenAI Codex' : 'Claude Code'} on this computer?`)) {
+  if (action === 'logout' && !await askConfirm(`Log out of ${provider === 'codex' ? 'OpenAI Codex' : 'Claude Code'} on this computer?`, {
+    title: 'Log out',
+    confirmLabel: 'Log out',
+    destructive: true,
+  })) {
     return
   }
   providerConnectionPending.value = provider
@@ -4085,7 +3995,11 @@ async function saveSubagent(agent: SubagentAsset) {
 
 async function deleteSubagent(agent: SubagentAsset) {
   if (!agent.editable) return
-  if (!window.confirm(`Delete custom subagent "${agent.name}"?`)) return
+  if (!await askConfirm(`Delete custom subagent "${agent.name}"?`, {
+    title: 'Delete subagent',
+    confirmLabel: 'Delete subagent',
+    destructive: true,
+  })) return
   savingSubagent.value = agent.name
   assetLifecycleResult.value = 'Deleting subagent...'
   assetLifecycleError.value = false
@@ -4145,7 +4059,11 @@ async function saveCommand(command: CommandAsset) {
 
 async function deleteCommand(command: CommandAsset) {
   if (!command.editable) return
-  if (!window.confirm(`Delete custom command "/${command.name}"?`)) return
+  if (!await askConfirm(`Delete custom command "/${command.name}"?`, {
+    title: 'Delete command',
+    confirmLabel: 'Delete command',
+    destructive: true,
+  })) return
   savingCommand.value = command.name
   assetLifecycleResult.value = 'Deleting command...'
   assetLifecycleError.value = false
@@ -4673,7 +4591,11 @@ async function createNewWorkspace() {
 }
 
 async function removeWorkspace(name: string) {
-  if (!window.confirm(`Delete workspace "${name}"? Chats keep their history but lose workspace routing.`)) return
+  if (!await askConfirm(`Delete workspace "${name}"? Chats keep their history but lose workspace routing.`, {
+    title: 'Delete workspace',
+    confirmLabel: 'Delete workspace',
+    destructive: true,
+  })) return
   workspacesSaving.value = name
   workspacesResult.value = ''
   try {
@@ -4766,7 +4688,10 @@ async function doSnapshot(confirmWarnings = false) {
       alert(`Snapshot blocked by secrets:\n\n${payload.blockers.join('\n')}`)
       actionResult.value = 'Blocked by secrets.'
     } else if (payload?.warnings) {
-      if (confirm(`Warnings found:\n\n${payload.warnings.join('\n')}\n\nDo you want to proceed anyway?`)) {
+      if (await askConfirm(`Warnings found:\n\n${payload.warnings.join('\n')}\n\nDo you want to proceed anyway?`, {
+        title: 'Snapshot warnings',
+        confirmLabel: 'Proceed anyway',
+      })) {
         actionPending.value = null
         return doSnapshot(true)
       }
@@ -4787,7 +4712,16 @@ function restartAndReload(message: string) {
 }
 
 async function doDeploy(confirmWarnings = false) {
-  if (!confirmWarnings && !confirm('Restart? This will pull latest, rebuild, and restart.')) return
+  // In dev mode the restart also rebuilds the Tauri shell when desktop/ changed,
+  // which is a multi-minute Rust build that ends by quitting and relaunching the
+  // app. Worth warning about before the window disappears.
+  const devNote = localStatus.value?.dev_mode
+    ? '\n\nDev mode: if desktop/ changed, this also rebuilds the desktop app (several minutes) and relaunches it.'
+    : ''
+  if (!confirmWarnings && !await askConfirm(`Restart? This will pull latest, rebuild, and restart.${devNote}`, {
+    title: 'Restart and redeploy',
+    confirmLabel: 'Restart',
+  })) return
   actionPending.value = 'deploy'
   actionResult.value = ''
   deploySteps.value = []
@@ -4807,7 +4741,10 @@ async function doDeploy(confirmWarnings = false) {
       alert(`Restart blocked by secrets:\n\n${payload.blockers.join('\n')}`)
       actionResult.value = 'Blocked by secrets.'
     } else if (payload?.warnings) {
-      if (confirm(`Warnings found:\n\n${payload.warnings.join('\n')}\n\nDo you want to proceed anyway?`)) {
+      if (await askConfirm(`Warnings found:\n\n${payload.warnings.join('\n')}\n\nDo you want to proceed anyway?`, {
+        title: 'Deploy warnings',
+        confirmLabel: 'Proceed anyway',
+      })) {
         actionPending.value = null
         return doDeploy(true)
       }
@@ -4911,7 +4848,11 @@ async function doLogout() {
   // delete from document.cookie). After success the auth store routes back
   // to /login and the next login re-issues the cookie with the wider
   // Host-only cookie: no Domain attribute, scoped to the exact host.
-  if (!confirm('Log out of Ciaobot?')) return
+  if (!await askConfirm('Log out of Ciaobot?', {
+    title: 'Log out',
+    confirmLabel: 'Log out',
+    destructive: true,
+  })) return
   actionPending.value = 'logout'
   actionResult.value = ''
   try {
@@ -4996,157 +4937,41 @@ async function saveAuthSettings() {
   authSettingsSaving.value = false
 }
 
-// ── Host / client (multi-device tunnel) ────────────────────────────────
-interface NodePeer {
-  node_id: string
-  url: string
-  last_seen: string
-  is_active: boolean
-}
-
-interface NodeStatus {
-  node_id: string
-  role: 'host' | 'client' | 'active' | 'standby'
-  mode?: 'host' | 'client'
-  active_since: string | null
-  last_handover: string | null
-  host_url?: string | null
-  active_peer_url?: string | null
-  host_reachable?: boolean | null
-  active_peer_reachable?: boolean | null
-  has_host_session?: boolean
-  peers: NodePeer[]
-  git?: any
-}
-
+// ── Host / client: labeling only ──────────────────────────────────────────
+// The device-scoped controls live in DeviceView (/device). What is left here is
+// just enough to answer "whose settings am I editing": in client mode every
+// other card on this page is served by the host through the tunnel.
 const nodeStatus = ref<NodeStatus | null>(null)
-const nodePending = ref<string | null>(null)
-const nodeActionResult = ref('')
-const nodeActionError = ref(false)
-const hostUrlInput = ref('')
-const hostPasswordInput = ref('')
-const showConnectForm = ref(false)
 
 const isNodeClient = computed(() => {
   const role = nodeStatus.value?.role
   return role === 'client' || role === 'standby'
 })
 
-const nodeRoleLabel = computed(() => (isNodeClient.value ? 'client' : 'host'))
-
 const connectedHostUrl = computed(
   () => nodeStatus.value?.host_url || nodeStatus.value?.active_peer_url || '',
 )
 
+const hostScopeLabel = computed(() => {
+  const named = nodeStatus.value?.host_node_id
+  const url = connectedHostUrl.value
+  if (named && url) return `${named} (${url})`
+  return named || url || 'the host'
+})
+
 async function fetchNodeStatus() {
   try {
     nodeStatus.value = await api.get<NodeStatus>('/api/node/status')
-    if (isNodeClient.value) showConnectForm.value = false
   } catch {
-    /* leave null on failure */
+    /* leave null on failure: cards then read as host-mode, which is the default */
   }
-}
-
-async function connectAsClient() {
-  const hostUrl = hostUrlInput.value.trim()
-  const password = hostPasswordInput.value
-  if (!hostUrl) return
-  if (!password) {
-    nodeActionError.value = true
-    nodeActionResult.value =
-      'Enter the host password. If the host has none yet, enable PWA password protection on that machine first.'
-    return
-  }
-  if (!confirm(`Connect as client to ${hostUrl}? This machine will stop being host and tunnel to that Ciaobot.`)) return
-
-  nodePending.value = 'connect'
-  nodeActionResult.value = ''
-  nodeActionError.value = false
-  try {
-    const r = await api.post<any>('/api/node/connect', {
-      host_url: hostUrl,
-      password,
-    })
-    if (r?.ok) {
-      hostPasswordInput.value = ''
-      showConnectForm.value = false
-      // Full reload so stores/chats pick up the tunneled host and the client banner appears.
-      window.location.assign('/')
-      return
-    } else {
-      nodeActionError.value = true
-      nodeActionResult.value = r?.error || 'Connect failed'
-    }
-  } catch (e: any) {
-    nodeActionError.value = true
-    const detail = e?.payload?.error || e.message || 'Connect failed'
-    nodeActionResult.value = e?.payload?.password_required_on_host
-      ? detail
-      : `Error: ${detail}`
-  }
-  nodePending.value = null
-}
-
-async function reconnectHostSession() {
-  const password = hostPasswordInput.value
-  if (!password) return
-  nodePending.value = 'reconnect'
-  nodeActionResult.value = ''
-  nodeActionError.value = false
-  try {
-    await api.post('/api/auth', { token: password })
-    hostPasswordInput.value = ''
-    window.location.assign('/')
-    return
-  } catch (e: any) {
-    nodeActionError.value = true
-    nodeActionResult.value = `Error: ${e?.payload?.error || e.message || 'Reconnect failed'}`
-  }
-  nodePending.value = null
-}
-
-async function doBecomeHost(force = false) {
-  if (
-    !force &&
-    !confirm(
-      'Disconnect and become host here? The remote will push its changes, then this machine pulls and resumes automations.',
-    )
-  ) {
-    return
-  }
-
-  nodePending.value = 'handover'
-  nodeActionResult.value = ''
-  nodeActionError.value = false
-
-  try {
-    const targetUrl = connectedHostUrl.value
-    const r = await api.post<any>('/api/node/handover', { target_node_url: targetUrl, force })
-    if (r?.ok) {
-      nodeActionResult.value = force
-        ? 'Force disconnect complete. This device is now the host.'
-        : 'Disconnected. This device is now the host.'
-      await fetchNodeStatus()
-      await fetchLocalStatus()
-    } else {
-      nodeActionError.value = true
-      nodeActionResult.value = r?.error || 'Disconnect failed'
-    }
-  } catch (e: any) {
-    nodeActionError.value = true
-    if (e?.payload?.peer_unreachable) {
-      if (confirm('Host is unreachable. Force disconnect anyway (skip remote push)?')) {
-        nodePending.value = null
-        return doBecomeHost(true)
-      }
-    }
-    nodeActionResult.value = `Error: ${e?.payload?.error || e.message || 'Disconnect failed'}`
-  }
-  nodePending.value = null
 }
 
 async function localHandback(confirmWarnings = false) {
-  if (!confirmWarnings && !confirm('Sync changes with the remote repository?')) return
+  if (!confirmWarnings && !await askConfirm('Sync changes with the remote repository?', {
+    title: 'Sync with remote',
+    confirmLabel: 'Sync with remote',
+  })) return
 
   actionPending.value = 'snapshot'
   actionResult.value = ''
@@ -5167,7 +4992,10 @@ async function localHandback(confirmWarnings = false) {
       alert(`Sync blocked by secrets:\n\n${payload.blockers.join('\n')}`)
       actionResult.value = 'Blocked by secrets.'
     } else if (payload?.warnings) {
-      if (confirm(`Warnings found:\n\n${payload.warnings.join('\n')}\n\nDo you want to proceed anyway?`)) {
+      if (await askConfirm(`Warnings found:\n\n${payload.warnings.join('\n')}\n\nDo you want to proceed anyway?`, {
+        title: 'Sync warnings',
+        confirmLabel: 'Proceed anyway',
+      })) {
         actionPending.value = null
         return localHandback(true)
       }
@@ -5242,6 +5070,36 @@ async function doPackageUpdate() {
   height: 100%;
   min-width: 0;
   container-type: inline-size;
+}
+
+.shortcut-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.shortcut-list li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--fg2);
+}
+
+.shortcut-list kbd {
+  font-family: var(--font);
+  font-size: 12px;
+  min-width: 44px;
+  text-align: center;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg2);
+  color: var(--fg);
+  flex: 0 0 auto;
 }
 .pane-body {
   flex: 1;
@@ -5403,6 +5261,18 @@ async function doPackageUpdate() {
 .settings-actions {
   justify-content: flex-end;
   margin-top: var(--space-2);
+}
+
+/* Router links used as buttons in card headers (e.g. "Open device settings"). */
+a.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+/* Client mode: names the machine whose settings the rest of the page edits. */
+.scope-card {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg2));
 }
 .settings-actions > button {
   flex: 0 0 auto;
@@ -5586,6 +5456,15 @@ async function doPackageUpdate() {
 .node-peer-form {
   margin-top: 0;
   margin-bottom: 0;
+}
+
+.connected-clients-panel {
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.connected-clients-panel .section-title {
+  margin-bottom: var(--space-2);
 }
 
 .deploy-steps {
@@ -6989,6 +6868,21 @@ async function doPackageUpdate() {
   color: var(--fg);
   flex: 0 0 56px;
   text-align: center;
+}
+.font-scale-presets {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  width: 100%;
+}
+.font-scale-presets .btn-small {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.font-scale-presets .btn-small.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
 }
 .ws-label {
   font-size: var(--text-sm);

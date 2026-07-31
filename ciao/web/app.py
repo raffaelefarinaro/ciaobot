@@ -85,6 +85,7 @@ from ciao.web.routes_api import (
     local_preflight,
     local_resync,
     local_status,
+    node_connected_clients_endpoint,
     node_demote_endpoint,
     node_handover_endpoint,
     node_connect_endpoint,
@@ -154,6 +155,7 @@ from ciao.web.routes_api import (
 )
 from ciao.web.routes_chat import ws_chat, ws_events
 from ciao.web.routes_push import (
+    push_notification_feed,
     push_public_key,
     push_status,
     push_subscribe,
@@ -331,6 +333,12 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/package/status", package_status_endpoint, methods=["GET"]),
         Route("/api/package/changelog", package_changelog_endpoint, methods=["GET"]),
         Route("/api/package/update", package_update_endpoint, methods=["POST"]),
+        # Device-scoped copies of the package routes. In client mode /api/package/*
+        # is tunneled (it reports and updates the host), so the Device panel needs
+        # its own never-proxied path to see and update *this* machine's install.
+        Route("/api/device/package-status", package_status_endpoint, methods=["GET"]),
+        Route("/api/device/changelog", package_changelog_endpoint, methods=["GET"]),
+        Route("/api/device/update", package_update_endpoint, methods=["POST"]),
         Route("/api/voice/install-local", voice_install_local_endpoint, methods=["POST"]),
         Route("/api/tts/install-local", tts_install_local_endpoint, methods=["POST"]),
         # Node & Handover (Multi-device Active-Standby)
@@ -339,6 +347,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/node/handover", node_handover_endpoint, methods=["POST"]),
         Route("/api/node/demote", node_demote_endpoint, methods=["POST"]),
         Route("/api/node/peers", node_peers_endpoint, methods=["POST"]),
+        Route("/api/node/connected-clients", node_connected_clients_endpoint, methods=["GET"]),
         Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"]),
         Route("/api/setup/list-dirs", setup_list_dirs_endpoint, methods=["GET"]),
         Route("/api/setup/inspect-folder", setup_inspect_folder_endpoint, methods=["GET"]),
@@ -356,6 +365,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/push/unsubscribe", push_unsubscribe, methods=["POST"]),
         Route("/api/push/status", push_status, methods=["GET"]),
         Route("/api/push/subscription", push_subscription_check, methods=["GET"]),
+        Route("/api/menubar-notifications", push_notification_feed, methods=["GET"]),
         # Per-device working-branch flow: commit-to-main + agent-merged handover
         Route("/api/local/status", local_status, methods=["GET"]),
         Route("/api/local/preflight", local_preflight, methods=["GET"]),

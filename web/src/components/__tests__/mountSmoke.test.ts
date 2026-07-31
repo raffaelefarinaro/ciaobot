@@ -579,21 +579,6 @@ describe('component mount smoke', () => {
     wrapper.unmount()
   })
 
-  it('OnboardingCard mounts and lists open items', async () => {
-    const router = makeRouter()
-    await router.push('/')
-    await router.isReady()
-    const mod = await import('../OnboardingCard.vue')
-    const wrapper = mount(mod.default as never, {
-      global: { plugins: [router] },
-    })
-    await flushPromises()
-    // Fresh mocked state: nothing completed, checklist visible with all items.
-    expect(wrapper.text()).toContain('getting started')
-    expect(wrapper.findAll('.onboarding-row').length).toBeGreaterThanOrEqual(5)
-    wrapper.unmount()
-  })
-
   it('SettingsView renders skills with custom and github labels on /settings/skills', async () => {
     const router = makeRouter()
     await router.push('/settings/skills')

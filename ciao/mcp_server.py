@@ -1595,10 +1595,15 @@ class CiaoMcpService:
         async def file_surface(path: str) -> dict[str, Any]:
             """Deliberately open a workspace file in the user's pinned preview panel.
 
-            Use this to show the user a file you produced or want to highlight —
-            even one you only read, or one a subagent wrote — instead of relying on
+            Use this to show the user a file you produced or want to highlight,
+            even one you only read, or one a subagent wrote, instead of relying on
             them to notice it. Ordinary Write/Edit calls no longer auto-open the
-            panel; call this when a file is worth surfacing."""
+            panel; call this when a file is worth surfacing.
+
+            The pin happens in the browser, so this validates the path and reports
+            how many live clients were listening. ``viewers: 0`` means nobody had
+            the chat open and no panel opened: do not tell the user the file is in
+            their panel in that case."""
             return await self._invoke("file_surface", lambda cp, p: cp.file_surface(p, path))
 
         # File history/snapshot/restore are covered by the workspace git repo.

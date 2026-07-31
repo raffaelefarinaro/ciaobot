@@ -118,6 +118,11 @@ _PROJECT_UPLOAD_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 _RETRY_INTERVAL_SECONDS = 60 * 60
 _RETRY_CONNECTION_INTERVAL_SECONDS = 30
 _RETRY_STATUSES = {"pending", "stopped", ""}
+# Shortest synthesis-nudge reply that still earns an unread badge and a push.
+# Anything shorter is the model's own bookkeeping ("ok", "done."). Applies only
+# to the nudge drain, never to a reply the user asked for: see
+# ProjectChatManager._is_worth_announcing_nudge_reply.
+_NUDGE_ANNOUNCE_MIN_CHARS = 4
 # Prompt used to resume a session after a mid-response connection drop. The
 # original prompt is NOT replayed — the partial turn already ran (and may have
 # executed tools), so we resume the existing session and ask it to continue,
@@ -134,14 +139,11 @@ _MAX_CONNECTION_DROP_RETRIES = 6
 # completes (see ciao/system_prompt.md), so without this nudge the chat stays
 # stuck on the interim "I'll report back when they finish" message. The nudge
 # is delivered on the persistent client so the already-running between-turns
-# drain captures and publishes the synthesis turn like a normal reply.
-_SUBAGENT_SYNTHESIS_NUDGE = (
-    "The background agent(s) you dispatched have now finished. Review their "
-    "results (read their transcripts or output as needed) and post your "
-    "consolidated final report for this task now. Do not dispatch new "
-    "background agents to answer this. If you already posted the final "
-    "report, reply with a brief confirmation instead of repeating it."
-)
+# drain captures and publishes the synthesis turn like a normal reply. The text
+# is owned by ciao/subagent_tracking.py, which also has to recognize it (the
+# /messages renderer collapses it into a system line rather than showing a user
+# bubble nobody typed).
+_SUBAGENT_SYNTHESIS_NUDGE = subagent_tracking.SUBAGENT_SYNTHESIS_NUDGE
 _HANDOVER_ROLES = {"user", "assistant", "system"}
 _HANDOVER_MAX_MESSAGES = 80
 _HANDOVER_MAX_CHARS = 60_000
@@ -438,8 +440,6 @@ def _is_question_shaped_prompt(text: str) -> bool:
     snippet = (text or "").strip()
     if not snippet:
         return False
-    if snippet.endswith("?"):
-        return True
     return bool(_QUESTION_OPENER_RE.match(snippet))
 
 
@@ -825,6 +825,14 @@ class ChatInfo:
     fork_root_chat_id: str = ""
     fork_index: int = 0
     fork_base_title: str = ""
+    # Backlink to the schedule that created or drives this chat. Stamped in
+    # prepare_schedule_chat for both branches (web_project_id spawns a new
+    # chat per run, web_chat_id reuses a fixed chat). Lets the PWA show a
+    # "triggered by schedule X" banner on the chat that survives later runs
+    # (a schedule is 1:many with chats, so unlike loops the link can't live
+    # only on the automation side). Empty for interactive chats.
+    schedule_id: str = ""
+    schedule_title: str = ""
 
     def to_dict(self, *, local: bool | None = None) -> dict:
         d = {
@@ -849,6 +857,8 @@ class ChatInfo:
             "fork_root_chat_id": self.fork_root_chat_id,
             "fork_index": self.fork_index,
             "fork_base_title": self.fork_base_title,
+            "schedule_id": self.schedule_id,
+            "schedule_title": self.schedule_title,
             "retry": {
                 "status": self.retry_status,
                 "next_at": self.retry_next_at,
@@ -1131,6 +1141,8 @@ class ProjectChatManager:
                 fork_root_chat_id=cd.get("fork_root_chat_id", ""),
                 fork_index=int(cd.get("fork_index", 0) or 0),
                 fork_base_title=cd.get("fork_base_title", ""),
+                schedule_id=cd.get("schedule_id", ""),
+                schedule_title=cd.get("schedule_title", ""),
             )
         logger.info(
             "Restored %d project(s) and %d chat(s)",
@@ -1215,6 +1227,8 @@ class ProjectChatManager:
                     "fork_root_chat_id": c.fork_root_chat_id,
                     "fork_index": c.fork_index,
                     "fork_base_title": c.fork_base_title,
+                    "schedule_id": c.schedule_id,
+                    "schedule_title": c.schedule_title,
                 }
                 for cid, c in self._chats.items()
             },
@@ -2706,6 +2720,7 @@ class ProjectChatManager:
             chat.thinking_level = CODEX_FABLE_THINKING_LEVEL
         self._chats[cid] = chat
         self._save()
+        self._events.publish({"type": "chat_created", "chat": chat.to_dict(local=True)})
         return chat
 
     def _is_empty_chat(self, chat: ChatInfo) -> bool:
@@ -3072,6 +3087,11 @@ class ProjectChatManager:
             self._chats.pop(fork.chat_id, None)
             self._unlink_chat_images(fork)
             raise
+        # Announce the new chat so other tabs/devices (and this tab if a
+        # racing syncLatest clobbered the optimistic push) render it without
+        # waiting for the 15s poll. A fork starts no streaming turn, so no
+        # chat_result_ready refetch would otherwise restore it (#fork-list-sync).
+        self._events.publish({"type": "chat_created", "chat": fork.to_dict(local=True)})
         return fork
 
     def handover_chat(
@@ -4858,6 +4878,26 @@ class ProjectChatManager:
             flat = flat[: limit - 3] + "..."
         return flat
 
+    @staticmethod
+    def _is_worth_announcing_nudge_reply(text: str) -> bool:
+        """True when a synthesis-nudge reply is worth an unread badge and a push.
+
+        Only for ``_drain_between_turns``. That path is not a user question: the
+        completion watcher asked for the turn, so a stub reply ("ok", "done.")
+        is the model's own bookkeeping and an OS toast carrying it is noise.
+        Below the floor the in-app UI stays the sole signal (subagent count drop
+        plus Activity row), matching the 2026-07-30 watcher-exit fix.
+
+        Deliberately NOT used on the regular turn-done branch. There the reply
+        answers something the user actually asked, and "Yes" or "No" is a
+        complete answer: suppressing it would drop the unread badge, the toast,
+        the ``last_activity_at`` bump that reorders recents, and the pending-retry
+        clear. A length floor cannot tell a terse answer from a stub, so the
+        regular path gates on non-empty text only.
+        """
+        flat = " ".join((text or "").strip().splitlines()).strip()
+        return len(flat) >= _NUDGE_ANNOUNCE_MIN_CHARS
+
     def start_stream(
         self,
         chat_id: str,
@@ -5460,7 +5500,12 @@ class ProjectChatManager:
                 # Successful turn(s): announce result ready (drives unread
                 # badges + in-app toast on clients that aren't focused on
                 # this chat) and dispatch web push (decoupled from any WS).
-                if not had_error and last_assistant_text:
+                # Gated on non-empty text only. This reply answers something the
+                # user asked, so "Yes" counts: a length floor here also withheld
+                # the last_activity_at bump that reorders recents and the
+                # pending-retry clear below. The banner heuristic belongs to the
+                # synthesis-nudge drain, which nobody asked for.
+                if not had_error and last_assistant_text.strip():
                     snippet = self._result_snippet(last_assistant_text)
                     chat_now = self._chats.get(chat_id)
                     if chat_now is not None:
@@ -5635,9 +5680,15 @@ class ProjectChatManager:
 
         The SDK's ``list_subagents`` enumerates transcript *files*, which
         persist after completion, so its count never drops. The parent
-        session JSONL is the reliable signal: async Agent dispatches are
-        recorded with ``toolUseResult.isAsync`` and each completion appends a
-        ``<task-notification>`` envelope (see ciao/subagent_tracking.py).
+        session JSONL carries the dispatches (``toolUseResult.isAsync``) and,
+        usually, a ``<task-notification>`` envelope per completion.
+
+        "Usually" is why every tick also consults the agents' own transcripts
+        (``subagent_tracking.running_background_agents``): the CLI can defer
+        that notification to the next turn boundary, so an agent that finished
+        while the parent turn was still running leaves the count pinned at N
+        with nothing left in the parent file to ever bring it down. Recheck on
+        every tick, not just when the parent file grows, for the same reason.
 
         Emits ``chat_subagents_ready`` whenever the running count changes and
         schedules a delayed push when the last one completes.
@@ -5656,6 +5707,7 @@ class ProjectChatManager:
 
         last_count = -1
         last_size = -1
+        state: subagent_tracking.SessionSubagentState | None = None
         # Background agents can run for a long while; poll cheaply (a stat
         # per tick, a re-parse only when the file grew) with a wide horizon.
         deadline = time.perf_counter() + 3600
@@ -5665,47 +5717,56 @@ class ProjectChatManager:
                     size = path.stat().st_size
                 except OSError:
                     break
-                if size != last_size:
+                if size != last_size or state is None:
                     last_size = size
-                    count = subagent_tracking.parse_session_subagents(
-                        path
-                    ).running_background
-                    if count != last_count:
-                        nudged = False
-                        if count == 0 and last_count > 0:
-                            chat_now = self._chats.get(chat_id)
-                            if chat_now is not None:
-                                chat_now.last_activity_at = _now_iso()
-                                self._save()
-                            # Poke the parent to synthesize a final report. The
-                            # CLI won't auto-continue the turn on its own, so
-                            # without this the chat sits on the interim
-                            # "I'll report back" message forever. When the
-                            # nudge lands on the live client the between-turns
-                            # drain publishes the reply (and its own push); we
-                            # only fall back to a bare push if the nudge could
-                            # not be delivered.
-                            # Nudge the parent to synthesize a final report; its
-                            # completion pushes the real chat notification. We
-                            # intentionally do NOT send a separate generic
-                            # "Background agents finished" push — it stacked a
-                            # second, content-free notification on top of the
-                            # chat's own result push (user feedback). The in-app
-                            # subagent count below still updates the UI.
-                            nudged = await self._nudge_synthesis_after_subagents(
-                                chat_id
-                            )
-                        self._publish_subagent_count(chat_id, project_id, count, nudged=nudged)
-                        last_count = count
-                    if count == 0:
-                        break
+                    state = subagent_tracking.parse_session_subagents(path)
+                count = subagent_tracking.running_background_agents(path, state)
+                if count != last_count:
+                    nudged = False
+                    if count == 0 and last_count > 0:
+                        chat_now = self._chats.get(chat_id)
+                        if chat_now is not None:
+                            chat_now.last_activity_at = _now_iso()
+                            self._save()
+                        # Poke the parent to synthesize a final report. The
+                        # CLI won't auto-continue the turn on its own, so
+                        # without this the chat sits on the interim
+                        # "I'll report back" message forever. When the
+                        # nudge lands on the live client the between-turns
+                        # drain publishes the reply (and its own push); we
+                        # only fall back to a bare push if the nudge could
+                        # not be delivered.
+                        # Nudge the parent to synthesize a final report; its
+                        # completion pushes the real chat notification. We
+                        # intentionally do NOT send a separate generic
+                        # "Background agents finished" push — it stacked a
+                        # second, content-free notification on top of the
+                        # chat's own result push (user feedback). The in-app
+                        # subagent count below still updates the UI.
+                        nudged = await self._nudge_synthesis_after_subagents(
+                            chat_id,
+                            awaiting_user_answer=state.awaiting_user_answer,
+                        )
+                    self._publish_subagent_count(chat_id, project_id, count, nudged=nudged)
+                    last_count = count
+                if count == 0:
+                    break
                 await asyncio.sleep(3)
         finally:
-            self._background_agents_last.pop(chat_id, None)
             # Clean up our slot when the watcher exits.
             current = self._pending_subagent_watchers.get(chat_id)
             if current is asyncio.current_task():
                 self._pending_subagent_watchers.pop(chat_id, None)
+                if last_count > 0:
+                    # Exiting on the deadline, a vanished session file, or a
+                    # crash while the count is still positive would leave every
+                    # connected client showing a badge that can never clear
+                    # (the events snapshot only heals it on reconnect). We are
+                    # no longer watching, so announce zero. Cancellation by a
+                    # replacement watcher skips this: it already owns the slot
+                    # and will publish the real count on its first tick.
+                    self._publish_subagent_count(chat_id, project_id, 0)
+            self._background_agents_last.pop(chat_id, None)
 
     async def _watch_codex_subagent_completion(
         self, chat_id: str, project_id: str
@@ -5740,12 +5801,18 @@ class ProjectChatManager:
                     break
                 await asyncio.sleep(3)
         finally:
-            self._background_agents_last.pop(chat_id, None)
             current = self._pending_subagent_watchers.get(chat_id)
             if current is asyncio.current_task():
                 self._pending_subagent_watchers.pop(chat_id, None)
+                if last_count > 0:
+                    # See the Claude watcher: never leave clients holding a
+                    # count we have stopped maintaining.
+                    self._publish_subagent_count(chat_id, project_id, 0)
+            self._background_agents_last.pop(chat_id, None)
 
-    async def _nudge_synthesis_after_subagents(self, chat_id: str) -> bool:
+    async def _nudge_synthesis_after_subagents(
+        self, chat_id: str, awaiting_user_answer: bool = False
+    ) -> bool:
         """Ask the parent to post a final report once its subagents finish.
 
         A background ``Agent`` dispatch ends the parent turn immediately and
@@ -5755,7 +5822,16 @@ class ProjectChatManager:
         drain (started alongside this watcher) consumes the resulting turn and
         publishes it like any other reply. Returns True when the nudge reached
         a live client, False otherwise (caller falls back to a plain push).
+
+        ``awaiting_user_answer`` holds the nudge back when the parent ended its
+        turn by asking the user a question: answering it is the user's move, and
+        nudging would both bury the question and answer on their behalf. The
+        question stays the last thing in the transcript; the finished agents are
+        still surfaced by the ``chat_subagents_ready`` count dropping to zero
+        and by the subagent panel refresh it triggers.
         """
+        if awaiting_user_answer:
+            return False
         provider = self._providers.get(chat_id)
         if provider is None or not provider.can_drain:
             return False
@@ -5887,7 +5963,21 @@ class ProjectChatManager:
                     # settle (see _await_schedule_subagents / dispatch_schedule).
                     self._last_drain_result[chat_id] = (text, is_error)
                     close_stream(is_error)
-                    if not is_error and text:
+                    # The 2026-07-30 watcher fix disabled the standalone
+                    # "Background agents finished" push, but the synthesis
+                    # nudge the watcher triggers writes its own ResultEvent
+                    # here. A short banner-only reply (e.g. "Synthesis
+                    # complete — see trace.") still passed the old `text`
+                    # truthy check and produced an OS push whose snippet was
+                    # a one-line internal comment. Gate the publish+push on
+                    # a real visible reply so devices without foreground
+                    # focus keep getting the in-app count drop and Activity
+                    # row as the only signal.
+                    if (
+                        not is_error
+                        and text
+                        and self._is_worth_announcing_nudge_reply(text)
+                    ):
                         chat_now = self._chats.get(chat_id)
                         if chat_now is not None:
                             chat_now.last_activity_at = _now_iso()
@@ -6223,12 +6313,13 @@ class ProjectChatManager:
         last_size = -1
         running = 0
         had_async = False
+        state: subagent_tracking.SessionSubagentState | None = None
         while time.perf_counter() < deadline:
             try:
                 size = path.stat().st_size
             except OSError:
                 return True, had_async
-            if size != last_size:
+            if size != last_size or state is None:
                 last_size = size
                 try:
                     state = subagent_tracking.parse_session_subagents(path)
@@ -6237,13 +6328,16 @@ class ProjectChatManager:
                         "Subagent wait: parse failed for %s", chat_id
                     )
                     return True, had_async
-                running = state.running_background
                 if not had_async:
                     had_async = any(
                         info.is_async for info in state.subagents.values()
                     )
-                if running == 0:
-                    return True, had_async
+            # Recomputed every tick, not just when the parent file grows: a
+            # completion the CLI never wrote there still shows up as the
+            # agent's own transcript going quiet (see the watcher above).
+            running = subagent_tracking.running_background_agents(path, state)
+            if running == 0:
+                return True, had_async
             await asyncio.sleep(3)
         if running:
             logger.warning(
@@ -6409,6 +6503,14 @@ class ProjectChatManager:
 
         web_project_id = getattr(entry, "web_project_id", None)
         web_chat_id = getattr(entry, "web_chat_id", None)
+        sched_id = getattr(entry, "schedule_id", "") or ""
+        sched_title = (getattr(entry, "title", "") or "").strip()
+
+        def _stamp(chat: ChatInfo) -> None:
+            # Record the schedule backlink so the PWA can show a
+            # "triggered by schedule X" banner that survives later runs.
+            chat.schedule_id = sched_id
+            chat.schedule_title = sched_title
 
         if web_project_id:
             project = self._projects.get(web_project_id)
@@ -6436,6 +6538,8 @@ class ProjectChatManager:
                 mode=mode,
                 provider=provider or None,
             )
+            _stamp(chat)
+            self._save()
             return chat.chat_id
         elif web_chat_id:
             target_chat = self._chats.get(web_chat_id)
@@ -6444,6 +6548,8 @@ class ProjectChatManager:
                 return None
             target_chat.model = model
             target_chat.mode = mode
+            _stamp(target_chat)
+            self._save()
             return cast(str, web_chat_id)
         elif getattr(entry, "scope", "") == "system":
             project = self._resolve_schedule_project("", entry)
@@ -6469,6 +6575,8 @@ class ProjectChatManager:
                 mode=mode,
                 provider=provider or None,
             )
+            _stamp(chat)
+            self._save()
             return chat.chat_id
         else:
             logger.warning("Schedule has no web target, skipping")

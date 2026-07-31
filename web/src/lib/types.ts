@@ -141,6 +141,12 @@ export interface ChatInfo {
   fork_root_chat_id?: string
   fork_index?: number
   fork_base_title?: string
+  // Backlink to the schedule that created or drives this chat. Empty for
+  // interactive chats. Drives the "triggered by schedule X" banner in
+  // ChatPanel (mirrors the loop banner, but durable across schedule runs
+  // because a schedule spawns a new chat each time).
+  schedule_id?: string
+  schedule_title?: string
 }
 
 export interface ChatRetryInfo {
@@ -182,13 +188,6 @@ export interface ChatMessage {
   // trace; only final_answer is eligible for the terminal response bubble.
   // Undefined keeps the legacy last-assistant-message inference.
   phase?: 'commentary' | 'final_answer'
-  // True when this assistant bubble was promoted from a live streaming
-  // thinking buffer via the PWA's "Show reply as text" affordance. Marks the
-  // bubble for any UI that wants to label promoted replies differently; it is
-  // not itself a dedup key. If the model's eventual result event repeats the
-  // same text a second bubble can appear — an accepted edge for this manual
-  // recovery path.
-  promoted_from_thinking?: boolean
 }
 
 // Subagent transcripts from /api/chats/{id}/subagents. One entry per subagent
@@ -305,6 +304,7 @@ export type WsEvent =
 export type EventsWsMessage =
   | { type: 'keepalive' }
   | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; restarting?: boolean }
+  | { type: 'chat_created'; chat: ChatInfo }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean }
   | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string }
@@ -779,4 +779,39 @@ export interface AutomationProcess {
   last_run: JobRun | null
   recent: JobRun[]
   stats: AutomationStats
+}
+
+// ── Multi-device (host / client) ───────────────────────────────────────────
+export interface NodePeer {
+  node_id: string
+  url: string
+  last_seen: string
+  is_active: boolean
+}
+
+export interface NodeStatus {
+  node_id: string
+  role: 'host' | 'client' | 'active' | 'standby'
+  mode?: 'host' | 'client'
+  active_since: string | null
+  last_handover: string | null
+  host_url?: string | null
+  active_peer_url?: string | null
+  host_reachable?: boolean | null
+  active_peer_reachable?: boolean | null
+  // Name and version of the machine a client is mirroring. Only present when
+  // the host answered the reachability ping.
+  host_node_id?: string
+  host_version?: string
+  has_host_session?: boolean
+  peers: NodePeer[]
+  git?: any
+}
+
+export interface PackageStatus {
+  current_version?: string
+  latest_version?: string
+  update_available?: boolean
+  mode?: string
+  error?: string
 }

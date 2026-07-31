@@ -299,11 +299,24 @@ _LEGACY_APP_BUNDLE_NAMES = (
     "Ciaobot.app",
     "Ciaobot Menu Bar.app",
 )
+# Executable inside the Tauri desktop app (the Homebrew cask's Ciaobot.app).
+_DESKTOP_EXECUTABLE_NAME = "ciaobot-desktop"
 
 
 def _is_our_app_bundle(app_root: Path) -> bool:
-    """Whether ``app_root`` is a launcher bundle created by Ciaobot."""
+    """Whether ``app_root`` is a launcher bundle created by Ciaobot.
 
+    The Tauri desktop app ships as ``Ciaobot.app`` under the same
+    ``local.ciaobot.app`` identifier our pre-rename launcher used, so the
+    bundle id cannot tell them apart. Misidentifying it is destructive rather
+    than merely wasteful: the launcher we write is named ``Ciaobot Server.app``,
+    so ``_remove_legacy_app_shortcuts`` deletes the cask's app and never puts
+    anything back in its place, leaving a running process on a bundle that no
+    longer exists on disk. The executable name is the discriminator.
+    """
+
+    if (app_root / "Contents" / "MacOS" / _DESKTOP_EXECUTABLE_NAME).is_file():
+        return False
     plist = app_root / "Contents" / "Info.plist"
     try:
         text = plist.read_text(encoding="utf-8")
@@ -509,11 +522,21 @@ def _write_app_bundle_marker(workspace: Path) -> None:
         pass
 
 
+def _app_search_roots() -> tuple[Path, ...]:
+    """Directories macOS installs app bundles into, per-user first.
+
+    A single definition so the launcher search and the desktop-app check can
+    never disagree about where to look; tests point it at a temporary tree.
+    """
+
+    return (Path.home() / "Applications", Path("/Applications"))
+
+
 def _installed_app_dir() -> Path | None:
     """Directory holding our current or legacy native launcher bundle."""
 
     for name in (_APP_BUNDLE_NAME, *_LEGACY_APP_BUNDLE_NAMES):
-        for base in (Path.home() / "Applications", Path("/Applications")):
+        for base in _app_search_roots():
             candidate = base / name
             if candidate.is_dir() and _is_our_app_bundle(candidate):
                 return base
@@ -521,15 +544,19 @@ def _installed_app_dir() -> Path | None:
 
 
 def _desktop_app_installed(app_dir: Path | None = None) -> bool:
-    """Whether the authoritative Tauri ``Ciaobot.app`` is installed."""
+    """Whether the authoritative Tauri ``Ciaobot.app`` is installed.
+
+    ``app_dir`` narrows the check to one directory. The default scans every
+    standard root, because the desktop app and a leftover launcher need not
+    share one: a non-admin account keeps the launcher in ``~/Applications``
+    while the cask installs into ``/Applications``.
+    """
 
     roots = (
-        (Path(app_dir).expanduser(),)
-        if app_dir is not None
-        else (Path("/Applications"), Path.home() / "Applications")
+        (Path(app_dir).expanduser(),) if app_dir is not None else _app_search_roots()
     )
     return any(
-        (root / "Ciaobot.app" / "Contents" / "MacOS" / "ciaobot-desktop").is_file()
+        (root / "Ciaobot.app" / "Contents" / "MacOS" / _DESKTOP_EXECUTABLE_NAME).is_file()
         for root in roots
     )
 
@@ -556,6 +583,15 @@ def refresh_app_bundle_if_stale(
     app_dir = _installed_app_dir()
     if app_dir is None:
         return None  # setup never created a bundle; nothing to refresh
+    if _desktop_app_installed(app_dir) or _desktop_app_installed():
+        # A leftover Ciaobot Server.app while the Tauri app is installed: setup
+        # deliberately skips the Python launcher when the desktop app is
+        # present, so refreshing would rewrite a bundle the desktop app
+        # replaced -- and delete the desktop app on the way through
+        # _remove_legacy_app_shortcuts. The second check covers the split
+        # layout, where the launcher and the desktop app sit in different
+        # roots and the scoped check alone would resurrect the launcher.
+        return None
     try:
         last = _app_bundle_marker_path(workspace).read_text(encoding="utf-8").strip()
     except OSError:
@@ -1137,7 +1173,13 @@ def setup_workspace(
     launch_dir = Path(launch_agents_dir) if launch_agents_dir is not None else Path.home() / "Library" / "LaunchAgents"
     app_root_dir = Path(app_dir) if app_dir is not None else _default_app_dir()
     resolved_python = python_path or sys.executable
-    desktop_installed = _desktop_app_installed(app_root_dir)
+    # An explicit --app-dir means "operate on this directory only" (CI, tests,
+    # headless installs). A default install is the real machine, so look in
+    # every standard root: a non-admin account writes the launcher into
+    # ~/Applications, where the /Applications cask would go unnoticed.
+    desktop_installed = _desktop_app_installed(app_root_dir) or (
+        app_dir is None and _desktop_app_installed()
+    )
     app_root: Path | None = None
     menubar_executable = ""
     plist_names = ["com.ciao.server.plist"]
@@ -1741,28 +1783,6 @@ def _resolve_project(
         if project.get("is_auto") or project.get("name") == "General":
             return cast(str, project["project_id"])
     return cast(str, projects[0]["project_id"])
-
-
-def _report_bug_command(args: argparse.Namespace) -> int:
-    """Submit an anonymous bug report to the central Ciaobot inbox (Google Form).
-
-    Used by startup triage when ``gh`` is unavailable/unauthenticated so a real
-    app bug still reaches the maintainer without requiring the user to open
-    GitHub by hand.
-    """
-    from ciao.bug_report import gather_system_info, submit_bug_report
-
-    system = args.system or gather_system_info()
-    if submit_bug_report(args.title, args.details, system):
-        print("Bug report submitted anonymously. Thank you!")
-        return 0
-    print(
-        "Could not submit the bug report automatically. Paste this into a new "
-        "issue at https://github.com/raffaelefarinaro/ciaobot/issues :\n\n"
-        f"Title: {args.title}\n\n{args.details}\n\n---\nSystem: {system}",
-        file=sys.stderr,
-    )
-    return 1
 
 
 def _create_chat_command(args: argparse.Namespace) -> int:
@@ -2391,23 +2411,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Ciaobot server URL. Defaults to PWA_HOST/PWA_PORT.",
     )
     chat_parser.set_defaults(func=_create_chat_command)
-
-    report_bug_parser = subparsers.add_parser(
-        "report-bug",
-        help="Submit an anonymous bug report to the central Ciaobot inbox.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    report_bug_parser.add_argument("--title", required=True, help="Short bug title.")
-    report_bug_parser.add_argument(
-        "--details",
-        required=True,
-        help="Traceback, logs, and what triggered the bug.",
-    )
-    report_bug_parser.add_argument(
-        "--system",
-        help="System/version info. Auto-detected (OS, Python, Ciaobot version) when omitted.",
-    )
-    report_bug_parser.set_defaults(func=_report_bug_command)
 
     cleanup_parser = subparsers.add_parser(
         "cleanup-sdk-blobs",

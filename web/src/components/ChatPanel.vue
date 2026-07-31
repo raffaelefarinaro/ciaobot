@@ -110,7 +110,29 @@
             placement="bottom-end"
             @select="selectModel"
             @close="showModelPicker = false"
-          />
+          >
+            <template #footer>
+              <div
+                v-if="showThinkingLevels"
+                class="thinking-levels"
+              >
+                <span class="thinking-levels__label">Thinking</span>
+                <div class="thinking-levels__chips">
+                  <button
+                    v-for="level in ['', ...filteredThinkingLevels]"
+                    :key="level"
+                    type="button"
+                    class="thinking-chip"
+                    :class="{ 'thinking-chip--active': (chat.thinking_level || '') === level }"
+                    :aria-pressed="(chat.thinking_level || '') === level"
+                    @click="selectThinking(level)"
+                  >
+                    {{ level || 'auto' }}
+                  </button>
+                </div>
+              </div>
+            </template>
+          </ModelSelector>
         </div>
         <button
           class="archive-btn touch-hit"
@@ -138,11 +160,25 @@
       </div>
     </div>
 
+    <!-- Schedule banner: this chat was created or is driven by a schedule -->
+    <div v-if="chatSchedules.length" class="loop-banner">
+      <div v-for="s in chatSchedules" :key="s.schedule_id" class="loop-banner-row">
+        <span class="loop-banner-ico" aria-hidden="true">&#9201;</span>
+        <span class="loop-banner-text">
+          <strong>{{ s.title || 'Schedule' }}</strong>
+          · {{ scheduleCadence(s) }}
+          · {{ s.enabled ? 'enabled' : 'paused' }}<template v-if="s.enabled && scheduleCountdown(s)"> · next {{ scheduleCountdown(s) }}</template>
+        </span>
+        <button class="btn-small" :disabled="scheduleRunningId === s.schedule_id" @click="runScheduleNow(s)">{{ scheduleRunningId === s.schedule_id ? 'Running…' : 'Run now' }}</button>
+        <router-link :to="`/schedules/${s.schedule_id}`" class="btn-small loop-banner-manage">Manage</router-link>
+      </div>
+    </div>
+
     <!-- Messages + comment sidebar -->
     <div class="chat-with-sidebar">
     <div class="messages" ref="messagesEl" data-tour="chat-messages" @click="handleHighlightClick" @mouseover="onChatHighlightHover" @mouseout="onChatHighlightHoverOut">
       <div class="messages-content">
-      <template v-for="(item, i) in renderItems" :key="i">
+      <template v-for="(item, i) in renderItems" :key="item.key">
         <!-- Reasoning trace: intermediate assistant text + tool calls grouped -->
         <div v-if="item.kind === 'trace'" class="trace-block" :class="{ open: openTraces[i] }">
           <button
@@ -498,22 +534,6 @@
             v-html="renderMarkdown(store.currentStreamingThinking)"
           ></div>
           <div v-if="store.currentStreamingText" class="trace-text trace-streaming" v-html="renderMarkdown(store.currentStreamingText)"></div>
-          <!-- Ollama-routed models (glm-5.2, minimax-m3, kimi-k2.7) sometimes
-               return their final answer wrapped in a thinking block instead
-               of a text block. The text stream stays empty, so the user
-               can't tell their reply is right there in the reasoning trace.
-               Offer a one-click way to surface it as a real assistant bubble
-               when the heuristic (long thinking, no text, still streaming)
-               fires. -->
-          <button
-            v-if="showPromoteThinkingAction"
-            type="button"
-            class="trace-action"
-            @click="promoteStreamingThinkingToAnswer"
-            title="This model returned the reply inside its reasoning trace. Promote it to a normal assistant bubble."
-          >
-            Show reply as text
-          </button>
           <!-- Subagents for the in-flight turn nest in the live trace -->
           <SubagentPanel v-if="liveSubagents.length" :subagents="liveSubagents" />
         </div>
@@ -833,7 +853,7 @@
         <div class="input-actions">
           <!-- Voice recording is allowed during streaming too: the user's
                transcript becomes a queued follow-up, same as typed text. -->
-          <VoiceRecorder v-if="!transcribing" @recorded="handleVoice" />
+          <VoiceRecorder v-if="!transcribing" ref="voiceRecorderRef" @recorded="handleVoice" />
           <span v-else class="voice-transcribing" title="Transcribing...">
             <span class="transcribe-spinner"></span>
           </span>
@@ -874,12 +894,19 @@ import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { formatAttachedFilePath, nativeAbsoluteFilePath } from '../lib/chatAttachments'
 import { readChatDraft, writeChatDraft } from '../lib/chatDrafts'
-import type { Loop, ModelsResponse, ChatMessage, SubagentTranscript, ProviderSubchatRecord } from '../lib/types'
+import type { Loop, Schedule, ModelsResponse, ChatMessage, SubagentTranscript, ProviderSubchatRecord } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
 import { linkifyText } from '../lib/filePaths'
 import { sectionsFromModelsResponse } from '../lib/modelSections'
+import {
+  CODEX_FABLE_LEVEL,
+  CODEX_FABLE_PSEUDO_MODEL,
+  CODEX_FABLE_REAL_MODEL,
+  isFableSelection,
+  selectableThinkingLevels,
+} from '../lib/fableModel'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
 import { formatTime, formatDuration } from '../lib/time'
 import { buildTurnParts, collectTraceOutputs, findFinalAnswerIndex, formatTokenUsage, traceSummaryMeta, traceSummaryMetaParts, type TraceOutput } from '../lib/chatActivity'
@@ -889,11 +916,59 @@ import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 
-type RenderItem =
+type RenderItemInput =
   | { kind: 'user'; msg: ChatMessage; turnIndex?: number }
   | { kind: 'assistant'; msg: ChatMessage; outputs?: TraceOutput[]; subchats?: ProviderSubchatRecord[]; turnIndex?: number }
   | { kind: 'system'; msg: ChatMessage }
   | { kind: 'trace'; steps: ChatMessage[]; subs?: SubagentTranscript[]; outputs?: TraceOutput[]; subchats?: ProviderSubchatRecord[]; turnIndex?: number }
+
+type RenderItem = RenderItemInput & { key: string }
+
+function renderItemKey(item: RenderItemInput): string {
+  switch (item.kind) {
+    case 'user':
+    case 'assistant':
+    case 'system': {
+      const m = item.msg
+      const ts = m.timestamp || ''
+      const content = (m.content || '').slice(0, 60)
+      const tool = m.tool_name || ''
+      const phase = m.phase || ''
+      const file = m.file_path || ''
+      const images = (m.images || []).length
+      const error = m.is_error ? '1' : '0'
+      return `${item.kind}:${ts}:${tool}:${phase}:${file}:${content}:${images}:${error}`
+    }
+    case 'trace': {
+      const firstTs = item.steps[0]?.timestamp || ''
+      const lastTs = item.steps[item.steps.length - 1]?.timestamp || ''
+      const stepSig = item.steps
+        .map(s => `${s.role}:${s.tool_name || ''}:${s.phase || ''}:${(s.content || '').slice(0, 40)}:${s.file_path || ''}:${s.timestamp || ''}`)
+        .join('|')
+      return `trace:${item.turnIndex ?? 'x'}:${item.steps.length}:${firstTs}:${lastTs}:${stepSig.slice(0, 200)}`
+    }
+  }
+}
+
+function withKey<T extends RenderItemInput>(item: T): T & { key: string } {
+  return { ...item, key: renderItemKey(item) }
+}
+
+/** Defensive dedup: if two RenderItems would get the same key, disambiguate by
+ *  appending a running counter. This should not happen for well-formed history,
+ *  but it protects against duplicate server entries or hash collisions. */
+function dedupeRenderItemKeys(items: RenderItem[]): RenderItem[] {
+  const seen = new Map<string, number>()
+  return items.map((item) => {
+    let key = item.key
+    let count = seen.get(key) || 0
+    if (count > 0) {
+      key = `${item.key}:dup:${count}`
+    }
+    seen.set(item.key, count + 1)
+    return { ...item, key }
+  })
+}
 
 type ChatComment = {
   id: string
@@ -1060,8 +1135,20 @@ const taskStore = useTaskStore()
 const chatLoops = computed(() =>
   taskStore.loops.filter(l => l.web_chat_id === chat.value?.chat_id),
 )
+// Schedules linked to this chat: either the chat carries a schedule_id
+// backlink (project schedules, stamped at creation) or the schedule pins
+// this chat via web_chat_id (fixed-chat schedules). Mirrors the loop banner
+// but durable across runs because each run stamps the backlink on the chat.
+const chatSchedules = computed(() => {
+  const cid = chat.value?.chat_id
+  const sid = chat.value?.schedule_id
+  return taskStore.schedules.filter(s =>
+    (sid && s.schedule_id === sid) || (cid && s.web_chat_id === cid),
+  )
+})
 onMounted(() => {
   taskStore.fetchLoops().catch(() => {})
+  taskStore.fetchSchedules().catch(() => {})
 })
 async function toggleLoop(l: Loop) {
   await taskStore.updateLoop(l.loop_id, { running: !l.running })
@@ -1071,12 +1158,13 @@ async function toggleLoop(l: Loop) {
 // banner.  Only runs while there are running loops bound to this chat.
 const loopNow = ref(Date.now())
 let loopTick: ReturnType<typeof setInterval> | null = null
-watch(chatLoops, (loops) => {
+watch([chatLoops, chatSchedules], ([loops, scheds]) => {
   const hasRunning = loops.some(l => l.running)
-  if (hasRunning && !loopTick) {
+  const hasScheduled = scheds.some(s => s.enabled && s.next_run)
+  if ((hasRunning || hasScheduled) && !loopTick) {
     loopNow.value = Date.now()
     loopTick = setInterval(() => { loopNow.value = Date.now() }, 30_000)
-  } else if (!hasRunning && loopTick) {
+  } else if (!hasRunning && !hasScheduled && loopTick) {
     clearInterval(loopTick)
     loopTick = null
   }
@@ -1093,6 +1181,43 @@ function loopCountdown(l: Loop): string {
   const hrs = Math.floor(mins / 60)
   const rm = mins % 60
   return rm ? `in ${hrs}h ${rm}m` : `in ${hrs}h`
+}
+
+// ── Schedule banner helpers ──
+const scheduleRunningId = ref<string | null>(null)
+function scheduleCadence(s: Schedule): string {
+  const time = s.daily_time_utc ? s.daily_time_utc.slice(0, 5) : ''
+  switch (s.frequency) {
+    case 'daily': return time ? `daily ${time}` : 'daily'
+    case 'weekly': {
+      const days = s.days_of_week && s.days_of_week.length
+        ? s.days_of_week.map(d => d.charAt(0).toUpperCase() + d.slice(1)).join('/')
+        : ''
+      return days ? `weekly ${days}${time ? ' ' + time : ''}` : 'weekly'
+    }
+    case 'monthly': return s.day_of_month ? `monthly on day ${s.day_of_month}` : 'monthly'
+    case 'once': return s.run_at_date ? `once ${s.run_at_date}` : 'once'
+    case 'manual': return 'manual'
+    default: return s.frequency
+  }
+}
+function scheduleCountdown(s: Schedule): string {
+  if (!s.next_run) return ''
+  const diffMs = new Date(s.next_run).getTime() - loopNow.value
+  if (diffMs <= 0) return 'soon'
+  const mins = Math.ceil(diffMs / 60_000)
+  if (mins < 60) return `in ${mins}m`
+  const hrs = Math.floor(mins / 60)
+  const rm = mins % 60
+  return rm ? `in ${hrs}h ${rm}m` : `in ${hrs}h`
+}
+async function runScheduleNow(s: Schedule) {
+  scheduleRunningId.value = s.schedule_id
+  try {
+    await taskStore.runScheduleNow(s.schedule_id)
+  } finally {
+    scheduleRunningId.value = null
+  }
 }
 const project = computed(() => store.activeProject)
 const models = ref<string[]>(['haiku', 'sonnet', 'opus', 'fable'])
@@ -1120,6 +1245,7 @@ function toggleMessageActions(key: string, e: MouseEvent): void {
   tappedMessageKey.value = tappedMessageKey.value === key ? null : key
 }
 const transcribing = ref(false)
+const voiceRecorderRef = ref<InstanceType<typeof VoiceRecorder> | null>(null)
 const isNearBottom = ref(true)
 let messagesResizeObserver: ResizeObserver | null = null
 const showScrollBtn = computed(() => Boolean(messagesEl.value && store.activeMessages.length > 0 && !isNearBottom.value))
@@ -1281,15 +1407,6 @@ function toggleTrace(i: number) {
 
 function toggleLiveTrace() {
   liveTraceOpen.value = !liveTraceOpen.value
-}
-
-// Manual recovery for Ollama-routed models (glm-5.2, minimax-m3, kimi-k2.7)
-// that wrap the final reply in a thinking block. Delegates to the store
-// action so the message list, timeline, and persistence all stay in sync
-// with the rest of the chat-state mutations.
-function promoteStreamingThinkingToAnswer() {
-  if (!chat.value?.chat_id) return
-  store.promoteStreamingThinkingToAnswer(chat.value.chat_id)
 }
 
 function checkScroll() {
@@ -1539,6 +1656,9 @@ const activeModelHighlights = computed(() => {
     const nativeModel = modelsResponse.value?.alias_tiers?.[provider]?.[tier]
     return nativeModel ? [nativeModel] : [c.model]
   }
+  if (isFableSelection(c.model, c.thinking_level)) {
+    return [CODEX_FABLE_PSEUDO_MODEL]
+  }
   const effective = effectiveModelForBucket(c.model, activeBucket.value)
   return [effective || c.model]
 })
@@ -1557,9 +1677,19 @@ const bucketLocked = computed(() => {
 // effort from the model catalog), so they key off the provider — narrowed per
 // model when the catalog reports levels — not the bucket.
 const filteredThinkingLevels = computed(() => {
-  const modelLevels = modelsResponse.value?.model_reasoning_levels?.[chat.value?.model || '']
-  if (modelLevels?.length) return modelLevels
-  return thinkingLevels.value[activeProvider.value] || []
+  const model = chat.value?.model || ''
+  const modelLevels = modelsResponse.value?.model_reasoning_levels?.[model]
+  const levels = modelLevels?.length
+    ? modelLevels
+    : thinkingLevels.value[activeProvider.value] || []
+  return selectableThinkingLevels(model, levels)
+})
+
+// Fable is a model choice, not a thinking level, so the chips have nothing to
+// offer while it is selected.
+const showThinkingLevels = computed(() => {
+  if (!filteredThinkingLevels.value.length) return false
+  return !isFableSelection(chat.value?.model, chat.value?.thinking_level)
 })
 
 const inputPlaceholder = computed(() => {
@@ -2520,40 +2650,12 @@ const liveTraceMetaParts = computed(() => {
   return parts
 })
 
-// Heuristic for the "model returned its reply inside the thinking block" case.
-// Ollama-routed models (glm-5.2, minimax-m3, kimi-k2.7) sometimes wrap the
-// final answer in a thinking content block, so the visible text stream stays
-// empty and the user sees the response painted as reasoning. When the
-// thinking buffer is long and no text has streamed in for this turn, that's
-// almost certainly the reply, not background reasoning. The length gate keeps
-// short model introspection from flashing the affordance on well-behaved
-// models.
-const LIKELY_ANSWER_THINKING_CHARS = 1000
-const thinkingIsLikelyAnswer = computed(() => {
-  const thinking = store.currentStreamingThinking
-  if (!thinking || thinking.length < LIKELY_ANSWER_THINKING_CHARS) return false
-  if (store.currentStreamingText) return false
-  if (store.activeBackgroundAgents > 0) return false
-  if (store.currentTimeline.some(entry => entry.kind === 'tool')) return false
-  return true
-})
-
-// Live trace label: distinguish "Working..." (real tool work in progress)
-// from "Reply pending (delivered as thinking)" (the model put its answer
-// in the reasoning stream and we should show the affordance).
+// Live trace label: "Working..." when real tool work or visible text is in
+// progress, otherwise "Thinking..." while the model reasons.
 const liveTraceLabel = computed(() => {
-  if (thinkingIsLikelyAnswer.value) return 'Reply pending (in thinking)'
   if (store.currentTimeline.length || store.currentStreamingText) return 'Working...'
   return 'Thinking...'
 })
-
-// Only show the "Show reply as text" action once the thinking is actually
-// long enough to plausibly be the answer AND the turn is still live. After
-// the result event fires the thinking gets committed to the timeline as a
-// _thinking step, where the existing expand/collapse UI already covers it.
-const showPromoteThinkingAction = computed(() =>
-  store.isStreaming && thinkingIsLikelyAnswer.value,
-)
 
 // Compact token label: 1234 -> "1.2k", 1_200_000 -> "1.2M". Keeps the live
 // trace meta short while the count grows.
@@ -2672,14 +2774,14 @@ const renderData = computed<{
     const turnSubchats = currentTurnIndex !== null ? subchatsByTurn.get(currentTurnIndex) || [] : []
     if (trailingHasThinking && finalMsg) {
       const traceSubs = takeForegroundSubs(currentTurnIndex)
-      items.push({
+      items.push(withKey({
         kind: 'trace',
         steps: buffer.slice(),
         turnIndex: currentTurnIndex ?? undefined,
         ...(traceSubs.length ? { subs: traceSubs } : {}),
         ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
         ...(turnSubchats.length ? { subchats: turnSubchats } : {}),
-      })
+      }))
       buffer = []
       return
     }
@@ -2707,8 +2809,8 @@ const renderData = computed<{
     // with the turn's outputs/subchats attached.
     const turnItems: RenderItem[] = buildTurnParts(buffer, finalIdx).map((part) =>
       part.kind === 'assistant'
-        ? { kind: 'assistant', msg: part.msg, turnIndex: currentTurnIndex ?? undefined }
-        : { kind: 'trace', steps: part.steps, turnIndex: currentTurnIndex ?? undefined },
+        ? withKey({ kind: 'assistant', msg: part.msg, turnIndex: currentTurnIndex ?? undefined })
+        : withKey({ kind: 'trace', steps: part.steps, turnIndex: currentTurnIndex ?? undefined }),
     )
     // Foreground subagents / (when there's no answer bubble) file outputs and
     // handoffs belong to the one Activity trace that sits right before the
@@ -2721,7 +2823,7 @@ const renderData = computed<{
     const last = turnItems[turnItems.length - 1]
     let host = last && last.kind === 'trace' ? last : null
     if (!host && needsHost) {
-      host = { kind: 'trace', steps: [], turnIndex: currentTurnIndex ?? undefined }
+      host = withKey({ kind: 'trace', steps: [], turnIndex: currentTurnIndex ?? undefined })
       turnItems.push(host)
     }
     if (host) {
@@ -2731,13 +2833,13 @@ const renderData = computed<{
     }
     for (const it of turnItems) items.push(it)
     if (finalMsg) {
-      items.push({
+      items.push(withKey({
         kind: 'assistant',
         msg: finalMsg,
         turnIndex: currentTurnIndex ?? undefined,
         ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
         ...(turnSubchats.length ? { subchats: turnSubchats } : {}),
-      })
+      }))
     }
     buffer = []
   }
@@ -2748,7 +2850,7 @@ const renderData = computed<{
       currentTurnIndex = typeof msg.turn_index === 'number'
         ? msg.turn_index
         : currentTurnIndex === null ? 0 : currentTurnIndex + 1
-      items.push({ kind: 'user', msg, turnIndex: currentTurnIndex })
+      items.push(withKey({ kind: 'user', msg, turnIndex: currentTurnIndex }))
     } else if (
       msg.role === 'system'
       && msg.tool_name !== '_activity'
@@ -2756,7 +2858,7 @@ const renderData = computed<{
       && msg.tool_name !== '_filecard'
     ) {
       flushTurn()
-      items.push({ kind: 'system', msg })
+      items.push(withKey({ kind: 'system', msg }))
     } else {
       // assistant text, _activity tool block, _thinking note, or _filecard:
       // part of the current turn's trace.
@@ -2816,7 +2918,7 @@ const renderData = computed<{
       } else {
         let insertAt = turnStart + 1
         while (insertAt < items.length && items[insertAt].kind === 'user') insertAt++
-        items.splice(insertAt, 0, { kind: 'trace', steps: [], subs, turnIndex: turnIdx })
+        items.splice(insertAt, 0, withKey({ kind: 'trace', steps: [], subs, turnIndex: turnIdx }))
       }
     }
 
@@ -2828,11 +2930,11 @@ const renderData = computed<{
       if (lastTrace && lastTrace.kind === 'trace') {
         lastTrace.subs = [...(lastTrace.subs || []), ...unanchored]
       } else {
-        items.push({ kind: 'trace', steps: [], subs: unanchored })
+        items.push(withKey({ kind: 'trace', steps: [], subs: unanchored }))
       }
     }
   }
-  return { items, liveSubs: [], liveStandaloneSubs: [] }
+  return { items: dedupeRenderItemKeys(items), liveSubs: [], liveStandaloneSubs: [] }
 })
 
 const renderItems = computed<RenderItem[]>(() => renderData.value.items)
@@ -3089,6 +3191,7 @@ function tierForModel(model: string, bucket: BucketKey): TierAlias | null {
 function canonicalTier(model: string): string {
   const alias = tierAlias(model)
   if (alias) return alias
+  if (model === CODEX_FABLE_PSEUDO_MODEL) return model
   const resolvedAlias = tierForModel(model, activeBucket.value)
   return resolvedAlias || model
 }
@@ -3107,6 +3210,7 @@ function bucketForSelectedModel(model: string): BucketKey {
   const response = modelsResponse.value
   if (response?.alias_tiers?.codex?.[model]) return 'codex'
   if ((response?.codex_models || []).includes(model)) return 'codex'
+  if (model === CODEX_FABLE_PSEUDO_MODEL) return 'codex'
   const openrouterModels = response?.openrouter_models || []
   if (openrouterModels.includes(model) || (model.includes('/') && !model.includes(':'))) {
     return 'openrouter'
@@ -3156,8 +3260,12 @@ async function selectBucket(bucket: BucketKey) {
   // OpenRouter also keeps its bucket so tier aliases resolve through
   // the OpenRouter alias map instead of the Claude subscription.
   if (bucketLocked.value) {
-    const ok = window.confirm(
+    const ok = await askConfirm(
       `Hand over this chat to ${def.label} / ${defaultModel}? The same visible chat will continue with a fresh provider session.`,
+      {
+        title: 'Hand over chat',
+        confirmLabel: 'Hand over',
+      },
     )
     if (!ok) return
     await store.handoverChat(chat.value.chat_id, {
@@ -3198,7 +3306,9 @@ async function selectModel(value: string | string[], sectionKey = '') {
     showModelPicker.value = false
     return
   }
-  const targetRoute = routeKindFor(model, targetBucket)
+  const isFablePseudo = model === CODEX_FABLE_PSEUDO_MODEL
+  const realModel = isFablePseudo ? CODEX_FABLE_REAL_MODEL : model
+  const targetRoute = routeKindFor(realModel, targetBucket)
   const currentRoute = routeKindFor(chat.value.model, activeBucket.value)
   const updates: {
     provider: ProviderKey
@@ -3207,20 +3317,28 @@ async function selectModel(value: string | string[], sectionKey = '') {
     thinking_level?: string
   } = {
     provider: (BUCKET_DEFS.find(def => def.key === targetBucket)?.provider || 'claude') as ProviderKey,
-    model,
+    model: realModel,
     model_bucket: modelBucket,
   }
-  const targetLevels = modelsResponse.value?.model_reasoning_levels?.[model]
-  if (
-    chat.value.thinking_level
-    && targetLevels
-    && !targetLevels.includes(chat.value.thinking_level)
-  ) {
-    updates.thinking_level = ''
+  if (isFablePseudo) {
+    updates.thinking_level = CODEX_FABLE_LEVEL
+  } else {
+    const targetLevels = modelsResponse.value?.model_reasoning_levels?.[model]
+    if (
+      chat.value.thinking_level
+      && targetLevels
+      && !targetLevels.includes(chat.value.thinking_level)
+    ) {
+      updates.thinking_level = ''
+    }
   }
   if (bucketLocked.value && targetRoute !== currentRoute) {
-    const ok = window.confirm(
+    const ok = await askConfirm(
       `Hand over this chat to ${bucketLabel(targetBucket)} / ${model}? The same visible chat will continue with a fresh provider session.`,
+      {
+        title: 'Hand over chat',
+        confirmLabel: 'Hand over',
+      },
     )
     if (!ok) return
     await store.handoverChat(chat.value.chat_id, updates)
@@ -3516,6 +3634,21 @@ function insertTextAtCursor(token: string) {
 function insertImageRef(n: number) {
   insertTextAtCursor(`[Image ${n}]`)
 }
+
+// Cmd+D toggles a voice recording from the composer: first press starts,
+// second press stops (same as the on-screen mic/stop button).
+function toggleDictation() {
+  voiceRecorderRef.value?.toggleRecording()
+}
+
+// Cmd+A mirrors the header archive button (including its confirm dialog).
+function archiveActiveChat() {
+  if (!chat.value || chat.value.archived) return
+  void doArchive()
+}
+
+// Expose app-level shortcuts to the layout, which owns the global keydown.
+defineExpose({ toggleDictation, archiveActiveChat })
 </script>
 
 <style scoped>
@@ -4280,26 +4413,6 @@ function insertImageRef(n: number) {
   gap: 2px;
 }
 
-/* "Show reply as text" affordance shown when the model returned its answer
-   inside the thinking stream (Ollama-routed models). Inline button so it
-   reads as an action, not a trace line. Sits below the thinking block. */
-.trace-action {
-  align-self: flex-start;
-  margin-top: 4px;
-  padding: 4px 10px;
-  font-size: var(--text-sm);
-  font-style: normal;
-  color: var(--accent);
-  background: transparent;
-  border: 1px solid var(--accent);
-  border-radius: 4px;
-  cursor: pointer;
-  font-family: inherit;
-}
-.trace-action:hover {
-  background: var(--accent);
-  color: var(--bg);
-}
 
 /* Inline file card. Rendered inside the activity trace whenever the agent
    calls Write/Edit/MultiEdit/NotebookEdit. Tapping opens the FileViewerModal
@@ -5542,6 +5655,51 @@ details[open] > .activity-summary::before {
   cursor: pointer;
 }
 .model-picker-btn:active { transform: scale(0.96); }
+
+.thinking-levels {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.thinking-levels__label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--fg2);
+}
+
+.thinking-levels__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.thinking-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elev);
+  color: var(--fg);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
+}
+
+.thinking-chip:hover {
+  background: var(--bg3);
+}
+
+.thinking-chip--active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
 
 .archive-btn {
   display: inline-flex;

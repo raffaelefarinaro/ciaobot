@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { api } from '../lib/api'
+import { askConfirm } from '../lib/confirm'
 
 // File viewer for workspace files. Opened by clicking a linkified file path
 // in a chat or by tapping an inline file-card. Backed by /api/workspace-file
@@ -140,12 +141,16 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     return markdownPaths.value
   }
 
-  function canReplaceOpenFile(nextPath: string): boolean {
+  async function canReplaceOpenFile(nextPath: string): Promise<boolean> {
     if (!isDirty.value) return true
     // A background refresh of the currently-open file must never interrupt an
     // in-progress edit. Explicit navigation to a different file asks first.
     if (nextPath === path.value) return false
-    return confirm('You have unsaved file changes. Discard them and open another file?')
+    return askConfirm('You have unsaved file changes. Discard them and open another file?', {
+      title: 'Discard unsaved changes?',
+      confirmLabel: 'Discard and open',
+      destructive: true,
+    })
   }
 
   async function open(
@@ -153,7 +158,7 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     lineNumber: number | null = null,
     chat: string = '',
   ): Promise<boolean> {
-    if (!filePath || !canReplaceOpenFile(filePath)) return false
+    if (!filePath || !await canReplaceOpenFile(filePath)) return false
     _reset()
     isOpen.value = true
     path.value = filePath
@@ -192,8 +197,8 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     return true
   }
 
-  function openImage(filePath: string, chat: string = ''): boolean {
-    if (!filePath || !canReplaceOpenFile(filePath)) return false
+  async function openImage(filePath: string, chat: string = ''): Promise<boolean> {
+    if (!filePath || !await canReplaceOpenFile(filePath)) return false
     _reset()
     isOpen.value = true
     kind.value = 'image'
@@ -203,9 +208,13 @@ export const useFileViewerStore = defineStore('fileViewer', () => {
     return true
   }
 
-  function close(force = false): boolean {
+  async function close(force = false): Promise<boolean> {
     if (!force && isDirty.value) {
-      if (!confirm('You have unsaved file changes. Are you sure you want to close?')) {
+      if (!await askConfirm('You have unsaved file changes. Are you sure you want to close?', {
+        title: 'Discard unsaved changes?',
+        confirmLabel: 'Discard and close',
+        destructive: true,
+      })) {
         return false
       }
     }

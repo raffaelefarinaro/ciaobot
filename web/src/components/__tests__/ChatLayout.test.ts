@@ -82,7 +82,6 @@ describe('ChatLayout', () => {
           PinnedFilePanel: EmptyStub,
           PaneHeader: EmptyStub,
           ProductTour: EmptyStub,
-          OnboardingCard: EmptyStub,
           HomeRecentChats: EmptyStub,
         },
       },

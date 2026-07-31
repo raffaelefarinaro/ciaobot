@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -252,6 +254,225 @@ async def test_watch_subagent_completion_nudges_parent_synthesis(
     assert ready_events[1]["nudged"] is True
 
 
+async def test_watch_subagent_completion_holds_nudge_when_parent_asked_a_question(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A parent that ended its turn with a question to the user is left alone.
+
+    Nudging there answers on the user's behalf and buries the question under a
+    report they never asked for."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("subagent-question", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="subagent-question-test")
+    chat.session_id = "sess-nudge-question"
+    pcm._save()
+
+    session_path = tmp_path / "sess-nudge-question.jsonl"
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "kick off work"}},
+        *_dispatch_records("toolu_1", "agent-a"),
+    ]
+    # The parent's parting words: a question, not an "I'll report back".
+    question = {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Two agents are digging in.\n\nWhich slice do you want removed?",
+                }
+            ],
+        },
+    }
+    completions = iter([question, _completion_record("agent-a")])
+
+    def flush() -> None:
+        session_path.write_text(
+            "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+        )
+
+    flush()
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root: session_path,
+    )
+
+    async def fake_sleep(seconds: float) -> None:
+        record = next(completions, None)
+        if record is not None:
+            records.append(record)
+            flush()
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    steer_calls: list = []
+
+    class FakeProvider:
+        can_drain = True
+
+        async def steer(self, request) -> bool:
+            steer_calls.append(request)
+            return True
+
+    pcm._providers[chat.chat_id] = FakeProvider()  # type: ignore[assignment]
+    running_drain = asyncio.get_running_loop().create_future()
+    pcm._between_turn_drains[chat.chat_id] = running_drain  # type: ignore[assignment]
+
+    published: list[dict] = []
+    original_publish = pcm._events.publish
+
+    def capture_publish(payload: dict) -> None:
+        published.append(payload)
+        original_publish(payload)
+
+    monkeypatch.setattr(pcm._events, "publish", capture_publish)
+
+    try:
+        await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+    finally:
+        running_drain.cancel()
+
+    assert steer_calls == []
+    ready_events = [ev for ev in published if ev.get("type") == "chat_subagents_ready"]
+    # The count still drops to zero so the PWA clears its "agents running"
+    # indicator and reconciles history; only the injected prompt is withheld.
+    assert ready_events[-1]["remaining"] == 0
+    assert ready_events[-1]["nudged"] is False
+
+
+async def test_watch_subagent_completion_clears_on_idle_agent_transcript(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A missing <task-notification> must not pin the count at 1 forever.
+
+    The CLI can defer the notification to the next turn boundary (or replace it
+    with a synthetic "stopped" record on resume), so the parent JSONL alone can
+    never clear. The agent's own transcript going quiet on its final answer is
+    the fallback signal.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("subagent-idle", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="subagent-idle-test")
+    chat.session_id = "sess-idle-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-idle-1.jsonl"
+    # The parent file never changes: no completion ever lands in it.
+    _write_jsonl(
+        session_path,
+        [
+            {"type": "user", "message": {"role": "user", "content": "kick off work"}},
+            *_dispatch_records("toolu_1", "aaa111"),
+        ],
+    )
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root: session_path,
+    )
+
+    def finish_agent() -> None:
+        path = subagent_tracking.subagent_transcript_path(session_path, "aaa111")
+        _write_jsonl(
+            path,
+            [
+                {
+                    "type": "assistant",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "Here is the trace."}],
+                    },
+                }
+            ],
+        )
+        stale = time.time() - 600
+        os.utime(path, (stale, stale))
+
+    ticks = iter([finish_agent])
+
+    async def fake_sleep(seconds: float) -> None:
+        step = next(ticks, None)
+        if step is not None:
+            step()
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    published: list[dict] = []
+    original_publish = pcm._events.publish
+
+    def capture_publish(payload: dict) -> None:
+        published.append(payload)
+        original_publish(payload)
+
+    monkeypatch.setattr(pcm._events, "publish", capture_publish)
+
+    await pcm._watch_subagent_completion(chat.chat_id, project.project_id)
+
+    ready = [ev["remaining"] for ev in published if ev.get("type") == "chat_subagents_ready"]
+    assert ready == [1, 0]
+
+
+async def test_watch_subagent_completion_publishes_zero_when_it_gives_up(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Exiting with a positive count would strand the badge on every client."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("subagent-giveup", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="subagent-giveup-test")
+    chat.session_id = "sess-giveup-1"
+    pcm._save()
+
+    session_path = tmp_path / "sess-giveup-1.jsonl"
+    _write_jsonl(
+        session_path,
+        [
+            {"type": "user", "message": {"role": "user", "content": "kick off work"}},
+            *_dispatch_records("toolu_1", "aaa111"),
+        ],
+    )
+
+    from ciao import subagent_tracking
+
+    monkeypatch.setattr(
+        subagent_tracking,
+        "find_parent_session_file",
+        lambda session_id, workspace_root: session_path,
+    )
+
+    # Second tick: the session file is gone (session reset, workspace moved).
+    async def fake_sleep(seconds: float) -> None:
+        session_path.unlink(missing_ok=True)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    published: list[dict] = []
+    original_publish = pcm._events.publish
+
+    def capture_publish(payload: dict) -> None:
+        published.append(payload)
+        original_publish(payload)
+
+    monkeypatch.setattr(pcm._events, "publish", capture_publish)
+
+    # Go through the real registration path: the zero-on-exit publish is
+    # deliberately skipped when a replacement watcher already owns the slot.
+    pcm._start_subagent_watcher(chat.chat_id, project.project_id)
+    await pcm._pending_subagent_watchers[chat.chat_id]
+
+    ready = [ev["remaining"] for ev in published if ev.get("type") == "chat_subagents_ready"]
+    assert ready == [1, 0]
+    assert pcm.background_agent_counts == {}
+    assert chat.chat_id not in pcm._pending_subagent_watchers
+
+
 def test_chat_subagents_falls_back_to_nested_jsonl_and_progress_entries(
     tmp_path: Path,
     monkeypatch,
@@ -306,3 +527,133 @@ def test_chat_subagents_falls_back_to_nested_jsonl_and_progress_entries(
     assert any(msg["role"] == "user" and "Research" in msg["content"] for msg in by_id["researcher"])
     assert any(msg.get("tool_name") == "_activity" and "Read" in msg["content"] for msg in by_id["researcher"])
     assert any("Progress entry survived" in msg["content"] for msg in by_id["progress-agent"])
+
+
+# --- Empty / banner-only ResultEvent guards ----------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "   ",
+        "\n\n",
+        "ok",
+        "...",
+    ],
+)
+def test_nudge_reply_announcement_rejects_empty_and_banner_only(text: str) -> None:
+    """A bare banner or whitespace must not be treated as a real reply."""
+    assert ProjectChatManager._is_worth_announcing_nudge_reply(text) is False
+
+
+def test_nudge_reply_announcement_accepts_real_reply() -> None:
+    """Anything with at least a few characters of real prose passes."""
+    assert ProjectChatManager._is_worth_announcing_nudge_reply(
+        "Synthesis complete — see the trace."
+    ) is True
+    assert ProjectChatManager._is_worth_announcing_nudge_reply(
+        "Found the bug in routes_api.py"
+    ) is True
+
+
+@pytest.mark.parametrize("reply", ["Yes", "No", "No.", "Ok", "42", "👍"])
+def test_a_terse_answer_to_the_user_still_announces(reply: str) -> None:
+    """The banner floor must never reach a reply the user asked for.
+
+    "Yes" is a complete answer to a yes/no question. Gating the regular
+    turn-done branch on the nudge heuristic dropped its unread badge, its
+    toast, the ``last_activity_at`` bump that reorders recents, and the
+    pending-retry clear, with nothing anywhere reporting a problem.
+    """
+    # The nudge heuristic does reject it, which is why it must stay off this path.
+    assert ProjectChatManager._is_worth_announcing_nudge_reply(reply) is False
+    # The regular branch's condition is plain non-empty text.
+    assert bool(reply.strip()) is True
+
+
+async def test_drain_between_turns_skips_publish_and_push_for_banner_only_result(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A short banner-only ResultEvent must not trigger chat_result_ready or a push.
+
+    The synthesis-nudge parent turn can return a one-line reply like "ok" or
+    "Synthesis complete — see trace." before the real report lands. Without the
+    visibility guard, that single short string used to publish chat_result_ready
+    and queue a delayed push, producing an OS-level notification whose body was
+    the model's internal comment. With the guard, the in-app Activity row and
+    the subagent-count drop remain the only signal.
+    """
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("drain-banner", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="drain-banner-test")
+    chat.session_id = "sess-drain-banner"
+    pcm._save()
+
+    class _FakeProvider:
+        can_drain = True
+
+        async def drain_events(self):
+            from ciao.models import ResultEvent
+
+            yield ResultEvent(
+                type="result",
+                result="ok",
+                session_id=chat.session_id,
+                is_error=False,
+            )
+
+    pcm._providers[chat.chat_id] = _FakeProvider()  # type: ignore[assignment]
+
+    published: list[dict] = []
+    pushes: list = []
+
+    monkeypatch.setattr(pcm._events, "publish", published.append)
+    monkeypatch.setattr(pcm, "_schedule_push", lambda *a, **k: pushes.append(a))
+
+    # The drain runs until the provider raises StopAsyncIteration after one
+    # event; run it and let it unwind naturally.
+    await pcm._drain_between_turns(chat.chat_id, project.project_id)
+
+    assert pushes == []
+    assert not any(ev.get("type") == "chat_result_ready" for ev in published)
+
+
+async def test_drain_between_turns_publishes_and_pushes_for_real_reply(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A real reply still drives chat_result_ready + the push."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("drain-real", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="drain-real-test")
+    chat.session_id = "sess-drain-real"
+    pcm._save()
+
+    class _FakeProvider:
+        can_drain = True
+
+        async def drain_events(self):
+            from ciao.models import ResultEvent
+
+            yield ResultEvent(
+                type="result",
+                result="Found the bug in routes_api.py line 482.",
+                session_id=chat.session_id,
+                is_error=False,
+            )
+
+    pcm._providers[chat.chat_id] = _FakeProvider()  # type: ignore[assignment]
+
+    published: list[dict] = []
+    pushes: list = []
+
+    monkeypatch.setattr(pcm._events, "publish", published.append)
+    monkeypatch.setattr(pcm, "_schedule_push", lambda *a, **k: pushes.append(a))
+
+    await pcm._drain_between_turns(chat.chat_id, project.project_id)
+
+    ready_events = [ev for ev in published if ev.get("type") == "chat_result_ready"]
+    assert len(ready_events) == 1
+    assert "Found the bug" in ready_events[0]["snippet"]
+    assert len(pushes) == 1
+    assert "Found the bug" in pushes[0][2]

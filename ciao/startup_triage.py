@@ -55,17 +55,15 @@ Steps:
    - SSL certificate failures (`SSLCertVerificationError` due to missing CA bundle).
    - File permission errors or locked SQLite databases in the workspace.
    If the error is an environment issue, fix it locally (or explain to the user how to fix it) and do NOT file a bug report.
-4. When the root cause is a bug in the Ciaobot app itself, find the installed version (by reading `ciao/__init__.py` or running `ciao --version`) and gather basic system details (OS, Python version). If the `gh` CLI is authenticated, search for an existing report \
+4. When the root cause is a bug in the Ciaobot app itself, find the installed version (by reading `ciao/__init__.py` or running `ciao --version`) and gather basic system details (OS, Python version). GitHub issues are the only bug inbox; never submit a report through any other channel. If the `gh` CLI is authenticated, search for an existing report \
 (`gh issue list --repo raffaelefarinaro/ciaobot --search "..."`), then file one if none exists \
 (`gh issue create --repo raffaelefarinaro/ciaobot --title "[Agent] ..." --body "..."`) \
-with the system info, error excerpt, version, and reproduction steps. If `gh` is \
-unavailable/unauthenticated, file the report automatically and anonymously by running \
-`ciao report-bug --title "..." --details "<traceback + what triggered it>"` \
-(the `--system` field is auto-detected). Write a short, human-readable title that \
-summarizes the bug in one line; never paste raw log lines, object reprs (such as \
-`<MagicMock ...>` or `object at 0x...`), or full tracebacks into the title — put \
-those in `--details`. If the only "error" you can find is a leaked object repr or \
-test mock, do not file a report; say so in your summary instead. If that command also fails, end with:
+with the system info, error excerpt, version, and reproduction steps. Write a short, \
+human-readable title that summarizes the bug in one line; never paste raw log lines, \
+object reprs (such as `<MagicMock ...>` or `object at 0x...`), or full tracebacks into \
+the title — put those in the body. If the only "error" you can find is a leaked object \
+repr or test mock, do not file a report; say so in your summary instead. If `gh` is \
+unavailable, unauthenticated, or the command fails, do not file anything — end with:
    - A clickable pre-filled GitHub issue URL (https://github.com/raffaelefarinaro/ciaobot/issues/new?title=...&body=...) pre-filling the title and summary (properly URL-encoded).
    - A separate, paste-ready detailed traceback and system info block for them to copy into the issue description.
 5. Close with a short summary: what was found, what was fixed, what was escalated.

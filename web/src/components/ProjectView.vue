@@ -226,6 +226,7 @@ import { ref, computed, watch, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { useFileViewerStore } from '../stores/fileViewer'
+import { askConfirm } from '../lib/confirm'
 import PaneHeader from './PaneHeader.vue'
 
 interface ProjectFile {
@@ -340,14 +341,21 @@ function openArchive(chat: { archive_path?: string }) {
 
 async function doComplete() {
   if (!project.value) return
-  if (!confirm(`Complete "${project.value.name}"? This will move the vault entry to completed/ and remove the project from the PWA.`)) return
+  if (!await askConfirm(`Complete "${project.value.name}"? This will move the vault entry to completed/ and remove the project from the PWA.`, {
+    title: 'Complete project',
+    confirmLabel: 'Complete project',
+  })) return
   await store.completeProject(project.value.project_id)
   emit('close')
 }
 
 async function doDelete() {
   if (!project.value) return
-  if (!confirm('Delete this project and archive all its chats?')) return
+  if (!await askConfirm('Delete this project and archive all its chats?', {
+    title: 'Delete project',
+    confirmLabel: 'Delete project',
+    destructive: true,
+  })) return
   await store.deleteProject(project.value.project_id)
   emit('close')
 }

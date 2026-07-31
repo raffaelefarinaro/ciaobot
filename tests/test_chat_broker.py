@@ -373,6 +373,26 @@ async def test_stream_replay_and_live_events() -> None:
     ]
 
 
+@pytest.mark.asyncio
+async def test_subscriber_count_tracks_attached_clients() -> None:
+    """`file_surface` reports this so a pin request into an empty room is
+    visible to the agent instead of reading as a successful surface."""
+    stream = ChatStream("hi")
+    assert stream.subscriber_count == 0
+
+    async def consume() -> None:
+        async for _ in stream.subscribe():
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0)  # let the subscriber register
+    assert stream.subscriber_count == 1
+
+    stream.finish()
+    await task
+    assert stream.subscriber_count == 0
+
+
 def test_broker_get_returns_none_when_stream_done() -> None:
     broker = ChatStreamBroker()
     stream = ChatStream("hi")

@@ -25,6 +25,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from ciao.node_proxy import get_proxy_target_url, proxy_websocket
 from ciao.web.auth import authorize_websocket
 from ciao.web.chat_broker import ChatStream
+from ciao.web.connection_tracker import ConnectionTracker
 from ciao.models import ImageAttachment
 from ciao.web.project_chats import RestartDrainingError
 
@@ -90,6 +91,11 @@ async def ws_chat(websocket: WebSocket) -> None:
         await websocket.send_json({"type": "error", "message": "chat not found"})
         await websocket.close(code=4004)
         return
+
+    tracker: ConnectionTracker | None = getattr(
+        websocket.app.state, "connection_tracker", None
+    )
+    conn_id = tracker.register(websocket, "chat", chat_id=chat_id) if tracker else ""
 
     is_focused = False
 
@@ -296,6 +302,8 @@ async def ws_chat(websocket: WebSocket) -> None:
         # so a later reconnect can resume it.
         if not forward_task.done():
             forward_task.cancel()
+        if tracker and conn_id:
+            tracker.unregister(conn_id)
 
 
 async def ws_events(websocket: WebSocket) -> None:
@@ -348,6 +356,11 @@ async def ws_events(websocket: WebSocket) -> None:
     except (WebSocketDisconnect, RuntimeError):
         return
 
+    tracker: ConnectionTracker | None = getattr(
+        websocket.app.state, "connection_tracker", None
+    )
+    conn_id = tracker.register(websocket, "events") if tracker else ""
+
     sub_task: asyncio.Task | None = None
 
     async def _pump_events() -> None:
@@ -368,3 +381,5 @@ async def ws_events(websocket: WebSocket) -> None:
     finally:
         if sub_task is not None and not sub_task.done():
             sub_task.cancel()
+        if tracker and conn_id:
+            tracker.unregister(conn_id)

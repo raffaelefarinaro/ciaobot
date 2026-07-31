@@ -16,6 +16,13 @@ function onLoginPage(): boolean {
   return window.location.pathname === '/login' || window.location.pathname.startsWith('/login/')
 }
 
+function onDevicePage(): boolean {
+  // /device is the escape hatch out of client mode. Bouncing it to a login
+  // screen — which authenticates against the very host the user is trying to
+  // leave — would strand a client whose host is gone.
+  return window.location.pathname === '/device' || window.location.pathname.startsWith('/device/')
+}
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const opts: RequestInit = {
     method,
@@ -30,7 +37,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     // Never hard-reload while already on /login — that caused a refresh loop
     // when client mode's /api/auth/check returns 401 (host password needed).
     const isAuthProbe = path === '/api/auth/check' || path === '/api/auth'
-    if (!onLoginPage() && !isAuthProbe) {
+    if (!onLoginPage() && !onDevicePage() && !isAuthProbe) {
       window.location.href = '/login'
     }
     const payload = await res.json().catch(() => ({}))

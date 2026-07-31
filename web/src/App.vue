@@ -1,12 +1,12 @@
 <template>
   <div id="ciao-app" :data-workspace-color="workspaceColor">
     <div
-      v-if="clientMode"
+      v-if="clientMode && !onDevicePage"
       class="client-mode-banner"
       role="status"
     >
       <span>
-        Client mode — viewing
+        Client mode — everything below is
         <code>{{ clientHostLabel }}</code>
         <template v-if="!clientHasSession"> · host password needed</template>
       </span>
@@ -19,11 +19,11 @@
         >
           {{ switchingToHost ? 'Switching…' : 'Switch to host' }}
         </button>
+        <!-- The one screen that is about this computer, not the host. -->
         <router-link
-          v-if="clientHasSession"
           class="client-mode-banner-link"
-          to="/settings"
-        >Manage</router-link>
+          to="/device"
+        >This device</router-link>
       </div>
     </div>
     <Transition name="fade">
@@ -47,6 +47,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import InAppToast from './components/InAppToast.vue'
 import RestartOverlay from './components/RestartOverlay.vue'
@@ -64,6 +65,7 @@ interface Phase {
 }
 
 const projectStore = useProjectStore()
+const route = useRoute()
 const phases = ref<Phase[]>([])
 const overallReady = ref(false)
 const serverVersion = ref('')
@@ -75,6 +77,9 @@ const clientHasSession = ref(false)
 const switchingToHost = ref(false)
 
 const showStartup = computed(() => !startupDone.value && !skipped.value)
+// The device panel is about this machine, so the "you are seeing the host"
+// banner would contradict it.
+const onDevicePage = computed(() => route.path.startsWith('/device'))
 const workspaceColor = computed(() => {
   const active = projectStore.activeWorkspace
   const ws = projectStore.workspaces.find((item) => item.name === active)
@@ -245,8 +250,10 @@ watch(showStartup, (show) => {
 }
 
 :root {
-  /* Font scale multiplier */
-  --font-scale: 1.0;
+  /* Font scale multiplier. The reference is the original (pre-rescale) UI;
+     the default 1.2 corresponds to "100%" in the Settings display, so the
+     slider's display math (scale / 1.2 * 100) yields 100 at this value. */
+  --font-scale: 1.2;
 
   /* Surface */
   --bg: #1a1a2e;        /* page */

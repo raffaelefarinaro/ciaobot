@@ -26,7 +26,8 @@ web/
   src/
     main.ts               Vue bootstrap + iOS viewport / keyboard / zoom plumbing
     App.vue               root component, global CSS tokens (--bg, --fg, --accent), wordmark + caret + noise overlay
-    router.ts             routes: /login, /, /chat/:id, /project/:id, /schedules, /settings, /settings/:tab
+    router.ts             routes: /login, /device, /, /chat/:id, /project/:id, /schedules, /settings, /settings/:tab
+                          (/device is device-scoped and unguarded: it must load when a client's host is down)
     components/           one Vue SFC per feature pane (including CommandPaletteModal.vue and FileViewerModal.vue)
     stores/               Pinia stores (auth, projects, tasks, fileViewer)
     composables/          reactive logic shared between components (useHoverPinPopover)

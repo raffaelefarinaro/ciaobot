@@ -159,6 +159,38 @@ class PushManager:
         except Exception:
             logger.exception("Failed to log notification")
 
+    def read_log(self, *, after: float = 0.0, limit: int = NOTIFICATION_LOG_MAX) -> list[dict[str, Any]]:
+        """Logged notifications with ``ts >= after``, oldest first.
+
+        Backs ``/api/menubar-notifications`` so a client node's tray reads the
+        log of the host that actually ran the chats instead of its own, which
+        stays empty forever.
+
+        ``after`` is inclusive so two entries sharing a timestamp are never
+        split across polls; the caller dedupes. A partial trailing line (the
+        log is appended from a worker thread) is skipped rather than raising —
+        the next poll sees it whole.
+        """
+        try:
+            lines = self._log_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+        entries: list[dict[str, Any]] = []
+        for line in lines:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            try:
+                ts = float(entry.get("ts") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if ts >= after:
+                entries.append(entry)
+        return entries[-limit:] if limit > 0 else entries
+
     # ── Send ────────────────────────────────────────────────────────────
 
     def send(self, payload: dict[str, Any]) -> None:

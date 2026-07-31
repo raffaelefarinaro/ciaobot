@@ -17,9 +17,28 @@
 - `WebFetch` is the fallback, never the default: reach for it only when defuddle cannot handle the target (non-HTML, API endpoints, raw binary files).
 - The `web-research` skill carries the details, including YouTube — `defuddle` returns the description plus a timestamped transcript when captions exist. Subagents that read the web follow that skill, so the rule holds in their contexts too.
 
+## Issue labeling
+
+When you open a GitHub issue via `gh issue create` on `raffaelefarinaro/ciaobot`, apply at least one label that classifies the issue. Title prefix and label must agree. Every open issue should carry exactly one classification label. GitHub issues are the only bug inbox — there is no other reporting channel to fall back on.
+
+| Title prefix | Label | Meaning |
+|---|---|---|
+| `[Bug]` | `bug` | Confirmed defect |
+| `[Feature]` | `enhancement` | Net-new capability |
+| `[Docs]` | `documentation` | Docs-only change |
+| `[Chore]` | `chore` | Internal maintenance (SDK bumps, refactors, repo hygiene) |
+| `[Goal]` | `enhancement` | Strategic/architectural direction |
+| `[Agent]` | (matching type) | Triage-loop surfaced; classification follows content |
+
+The retired `[Report]` prefix and `report` label belong to the anonymous bug-report form, removed on 2026-07-30. Never apply them to a new issue; they survive only on closed historical ones.
+
+When fixing labels on existing issues, only adjust labels that are missing or wrong. Do not relabel issues a human has intentionally marked. The triage loop enforces this convention every 4h.
+
 ## Deliverables and the pinned file panel
 
-- The PWA renders `.md`, `.csv`, `.excalidraw` (diagrams), `.pdf`, `.pptx` (slides), and image files in a side-by-side pinned panel the user can read, view, comment on, and edit inline. A file you create or surface via `file_surface` is auto-surfaced there (desktop, when nothing is already pinned), so the user sees the artifact next to the chat instead of scrolling a long reply.
+- The PWA renders `.md`, `.csv`, `.excalidraw` (diagrams), `.pdf`, `.pptx` (slides), and image files in a side-by-side pinned panel the user can read, view, comment on, and edit inline, so the user sees the artifact next to the chat instead of scrolling a long reply.
+- **Writing a file does not open the panel.** Ordinary `Write`/`Edit` calls only paint an inline file card. To put a file in the panel you must call `file_surface` on it explicitly, and it is worth doing for any real deliverable, including one a subagent wrote or one you only read.
+- **`file_surface` returning `ok` does not mean the panel opened.** The tool only validates that the path exists inside the workspace; the pin itself happens client-side. Because the call is explicit it outranks whatever is already pinned and replaces it, and on a narrow window (≤768px, so phones) it opens the file viewer rather than dropping the request. It is skipped silently in three cases: the user dismissed an auto-pin of that same path in this chat, the phone viewer is already open on something else, or no client is watching. So never tell the user something is "in the panel" as if you had confirmed it. Say you surfaced it, and if they see nothing, check those cases before calling it an MCP failure.
 - **Prefer a file for substantial or iterative output.** When the response is a plan, spec, comparison, report, structured draft, or any table of data — something the user will read closely, edit, or come back to — write it to a `.md` (prose/structured) or `.csv` (tabular) file in the workspace rather than burying it in a long chat message. Tabular data with consistent columns → `.csv` (renders as a sortable table with cell comments); everything prose-shaped → `.md`.
 - **Keep quick answers inline.** Do not create a file for a one- or two-paragraph reply, a direct question, or conversational back-and-forth. When the panel already shows a file you just wrote, a brief pointer is enough — don't paste the whole document back into chat.
 - Put deliverables where they belong: durable notes in the vault, project work under the project's canonical doc/log, one-off working documents under `<vault>/Workspace/`. Update an existing file rather than spawning near-duplicates.

@@ -987,9 +987,12 @@ async function finishEditProject(event: Event, id: string) {
 
 async function confirmDeleteProject(id: string) {
   projectMenu.value = null
-  if (confirm('Delete this project and archive all its chats?')) {
-    await store.deleteProject(id)
-  }
+  if (!await askConfirm('Delete this project and archive all its chats?', {
+    title: 'Delete project',
+    confirmLabel: 'Delete project',
+    destructive: true,
+  })) return
+  await store.deleteProject(id)
 }
 
 async function addChat(projectId: string) {
@@ -1056,9 +1059,12 @@ async function stopRetry(chatId: string) {
 
 async function confirmDeleteChat(chatId: string) {
   chatMenu.value = null
-  if (confirm('Delete this chat permanently?')) {
-    await store.deleteChat(chatId)
-  }
+  if (!await askConfirm('Delete this chat permanently? It cannot be recovered.', {
+    title: 'Delete chat',
+    confirmLabel: 'Delete chat',
+    destructive: true,
+  })) return
+  await store.deleteChat(chatId)
 }
 </script>
 
@@ -1656,7 +1662,13 @@ async function confirmDeleteChat(chatId: string) {
    without competing with the streaming dot next to it. */
 .loop-mark {
   flex: 0 0 auto;
-  font-size: 11px;
+  /* Badge-sized (11px) was too small to see: ⟳ is a thin outline glyph, so it
+     read as a speck beside the solid 8px streaming dot. Sized above the row
+     text, and through the token so it follows the Settings > Appearance font
+     scale that a hardcoded px ignored. Still under the 18px unread badge, so
+     the row height does not move. */
+  font-size: var(--text-lg);
+  font-weight: 700;
   line-height: 1;
   color: var(--accent);
 }

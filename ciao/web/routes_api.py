@@ -500,7 +500,16 @@ def _is_control_slash_command(content: str) -> bool:
 # own UI hides these (`case UXH: return null`); we mirror that here so reloads
 # don't render a literal "No response requested." bubble after every interrupt.
 _NO_RESPONSE_SENTINEL = "No response requested."
-_INTERRUPTED_REQUEST_SENTINEL = "[Request interrupted by user]"
+
+# Matches the Claude Agent SDK's own _SKIP_FIRST_PROMPT_PATTERN
+# ([Request interrupted by user[^\]]*]) so we cover every CLI variant, not
+# just the bare form. Steer/queue interrupts an in-flight tool call produce
+# "[Request interrupted by user for tool use]" — without this wildcard that
+# variant survives as a synthetic user record and renders as a quoted bubble
+# that looks like an error reply to a question.
+_INTERRUPTED_REQUEST_RE = re.compile(
+    r"\[Request interrupted by user[^\]]*\]"
+)
 
 
 def _is_no_response_sentinel(text: str) -> bool:
@@ -508,7 +517,7 @@ def _is_no_response_sentinel(text: str) -> bool:
 
 
 def _is_interrupted_request_sentinel(text: str) -> bool:
-    return text.strip() == _INTERRUPTED_REQUEST_SENTINEL
+    return bool(_INTERRUPTED_REQUEST_RE.fullmatch(text.strip()))
 
 
 def _classify_control_ack(text: str) -> str | None:
@@ -580,6 +589,11 @@ _AGENT_SELF_STATUS_RE = re.compile(
 def _is_cli_internal_envelope(content: str) -> bool:
     """True if `content` starts with a CLI-synthesized user-message wrapper."""
     return bool(_CLI_ENVELOPE_RE.match(content))
+
+
+# Stands in for the injected subagent-synthesis nudge in the transcript. Same
+# icon as the subagent-completion lines above so the pair reads as one story.
+_SYNTHESIS_NUDGE_LABEL = "\U0001F916 Background agents finished — asked for a consolidated report"
 
 
 def _summarize_task_notification(content: str) -> str | None:
@@ -1847,6 +1861,42 @@ _DESKTOP_DROP_GRANT_TTL_SECONDS = 5 * 60
 _DESKTOP_DROP_MAX_FILES = 100
 
 
+def _desktop_drop_read_error(path: Path, exc: OSError) -> str:
+    """User-facing text for a dropped file this process cannot read.
+
+    A drag straight from the macOS screenshot thumbnail hands over a path only
+    the app that received the drop may read, so the desktop shell stages a copy
+    first (`stage_dropped_file` in desktop/src-tauri/src/lib.rs). When there is
+    no staged copy, because the shell is older than that fix or the drop was not
+    an image, the raw errno tells the user nothing they can act on.
+    """
+    if isinstance(exc, PermissionError):
+        return (
+            f"macOS would not let Ciaobot read {path.name}. Save the file to a "
+            "folder first, then drag it in."
+        )
+    return str(exc)
+
+
+def _clear_desktop_drop_staging(request: Request, grant_id: str) -> None:
+    """Delete the desktop shell's staged copies for a consumed grant.
+
+    Only images are staged, and by this point their bytes are in media_root or
+    on the host, so the copies are dead weight. Best-effort: the shell's own
+    stale sweep covers a grant that errored out before reaching here.
+    """
+    try:
+        # The id reaches us from the request body, and this builds an rmtree
+        # target. Re-check the UUID form here rather than trusting that every
+        # caller validated it first.
+        if str(UUID(grant_id)) != grant_id:
+            return
+    except (ValueError, AttributeError):
+        return
+    grant_dir = request.app.state.config.state_path.parent / "desktop-drop-grants"
+    shutil.rmtree(grant_dir / "staged" / grant_id, ignore_errors=True)
+
+
 def _consume_desktop_drop_grant(request: Request, grant_id: str) -> list[Path]:
     """Consume a native-app grant and return only its explicitly dropped paths."""
     try:
@@ -1935,8 +1985,16 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
                     host_image_refs.append(
                         pcm.save_image_upload(path.read_bytes(), path.name).path.name
                     )
-                except (OSError, ValueError) as exc:
+                except OSError as exc:
+                    errors.append(
+                        {
+                            "filename": path.name,
+                            "error": _desktop_drop_read_error(path, exc),
+                        }
+                    )
+                except ValueError as exc:
                     errors.append({"filename": path.name, "error": str(exc)})
+        _clear_desktop_drop_staging(request, grant_id)
         return JSONResponse(
             {
                 "paths": [str(path) for path in regular_paths],
@@ -1971,15 +2029,27 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
             if image_paths:
                 image_files = []
                 for index, path in enumerate(image_paths):
-                    if path.stat().st_size > request.app.state.config.max_image_size_bytes:
-                        errors.append({"filename": path.name, "error": "image too large"})
+                    # Per-file, like the host branch above: one unreadable
+                    # screenshot must not turn the whole drop into a 502.
+                    try:
+                        if path.stat().st_size > request.app.state.config.max_image_size_bytes:
+                            errors.append({"filename": path.name, "error": "image too large"})
+                            continue
+                        data = path.read_bytes()
+                    except OSError as exc:
+                        errors.append(
+                            {
+                                "filename": path.name,
+                                "error": _desktop_drop_read_error(path, exc),
+                            }
+                        )
                         continue
                     image_files.append(
                         (
                             f"file{index}",
                             (
                                 path.name,
-                                path.read_bytes(),
+                                data,
                                 mimetypes.guess_type(path.name)[0] or "application/octet-stream",
                             ),
                         )
@@ -2009,7 +2079,7 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
                             else "host image upload failed"
                         )
 
-            uploadable_paths = []
+            files: list[tuple[str, tuple[str, bytes, str]]] = []
             for path in regular_paths:
                 if path.is_dir():
                     errors.append(
@@ -2018,22 +2088,31 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
                             "error": "folders cannot be transferred to the host",
                         }
                     )
-                elif path.stat().st_size > _PROJECT_UPLOAD_MAX_BYTES:
-                    errors.append({"filename": path.name, "error": "file too large"})
-                else:
-                    uploadable_paths.append(path)
-            if uploadable_paths:
-                files = [
+                    continue
+                try:
+                    if path.stat().st_size > _PROJECT_UPLOAD_MAX_BYTES:
+                        errors.append({"filename": path.name, "error": "file too large"})
+                        continue
+                    data = path.read_bytes()
+                except OSError as exc:
+                    errors.append(
+                        {
+                            "filename": path.name,
+                            "error": _desktop_drop_read_error(path, exc),
+                        }
+                    )
+                    continue
+                files.append(
                     (
-                        f"file{index}",
+                        f"file{len(files)}",
                         (
                             path.name,
-                            path.read_bytes(),
+                            data,
                             mimetypes.guess_type(path.name)[0] or "application/octet-stream",
                         ),
                     )
-                    for index, path in enumerate(uploadable_paths)
-                ]
+                )
+            if files:
                 response = await client.post(
                     f"{host_url.rstrip('/')}/api/projects/{project_id}/files",
                     headers=headers,
@@ -2060,6 +2139,8 @@ async def desktop_drop_import(request: Request) -> JSONResponse:
                 )
     except (OSError, httpx.HTTPError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=502)
+    finally:
+        _clear_desktop_drop_staging(request, grant_id)
 
     return JSONResponse(
         {"paths": imported_paths, "image_refs": image_refs, "errors": errors}
@@ -3029,6 +3110,15 @@ async def chat_messages(request: Request) -> JSONResponse:
                 result.append({"role": "system", "content": task_summary})
                 continue
             if _is_cli_internal_envelope(content):
+                continue
+            # Our own subagent-synthesis nudge (ciao/subagent_tracking.py).
+            # It's a server-injected prompt, not something the user typed, so
+            # showing the paragraph verbatim reads as words they never wrote.
+            # Collapse it to a status line, and skip without incrementing
+            # user_idx — subagent_tracking._is_countable_user_turn applies the
+            # same rule, so the two turn counters stay aligned.
+            if subagent_tracking.is_synthesis_nudge(content):
+                result.append({"role": "system", "content": _SYNTHESIS_NUDGE_LABEL})
                 continue
         entry: dict = {
             "role": m.type,
@@ -4810,6 +4900,9 @@ async def startup_status_endpoint(request: Request) -> JSONResponse:
     payload.update({
         "version": __version__,
         "desktop_api_version": 1,
+        # Identifies the machine that answered. A client asks its host for this
+        # so the mirrored UI can name whose data it is showing.
+        "node_id": node_mgr.node_id if node_mgr else "",
         "node_role": role,
         "active_peer_url": active_peer_url,
         "host_url": node_mgr.get_host_url() if node_mgr else None,
@@ -5558,6 +5651,34 @@ def _run_step(args: list[str], *, cwd: str, timeout: int) -> subprocess.Complete
         )
 
 
+def _resolve_codebase_root(config) -> Path:
+    """Where the deploy steps run git, pip, and npm.
+
+    ``CIAO_APP_REPO`` wins over the module path because the engine can be an
+    installed package (Homebrew cask, wheel): there ``__file__`` sits in
+    site-packages, which has no ``.git`` and no ``web/``, so every build step
+    below would operate on the wrong directory.
+    """
+    configured = getattr(config, "app_repo", None)
+    if configured:
+        return Path(configured)
+    return Path(__file__).resolve().parents[2]
+
+
+def _checkout_problem(codebase_root: Path) -> str:
+    """Why ``codebase_root`` cannot be deployed from, or an empty string.
+
+    Checked up front because the underlying failures are misleading: git says
+    "not a git repository" and npm says ENOENT, neither of which points at an
+    engine that was installed rather than checked out.
+    """
+    if not (codebase_root / ".git").exists():
+        return f"{codebase_root} is not a git checkout"
+    if not (codebase_root / "web" / "package.json").exists():
+        return f"{codebase_root} has no web/package.json"
+    return ""
+
+
 def _run_root_npm_install(codebase_root: Path) -> subprocess.CompletedProcess:
     args = ["npm", "install", "--no-audit", "--no-fund"]
     if not (codebase_root / "package.json").exists():
@@ -5595,12 +5716,22 @@ async def admin_deploy(request: Request) -> JSONResponse:
 
     config = request.app.state.config
     ws = config.workspace_root
-    codebase_root = Path(__file__).resolve().parents[2]
+    codebase_root = _resolve_codebase_root(config)
     steps = []
 
     def _record(step: str, result: subprocess.CompletedProcess) -> dict:
         out = (result.stdout.strip() or result.stderr.strip())[:500]
         return {"step": step, "ok": result.returncode == 0, "output": out}
+
+    problem = _checkout_problem(codebase_root)
+    if problem:
+        hint = (
+            f"{problem}. Set CIAO_APP_REPO to the ciaobot checkout so Restart can "
+            "pull, reinstall, and rebuild from source."
+        )
+        steps.append({"step": "locate checkout", "ok": False, "output": hint})
+        return JSONResponse({"steps": steps, "ok": False, "error": hint}, status_code=400)
+    steps.append({"step": "locate checkout", "ok": True, "output": str(codebase_root)})
 
     # 0. Snapshot: stage, commit (if dirty), rebase, push.
     #    Captures in-flight writes so the pull that follows can't clobber them
@@ -5663,6 +5794,31 @@ async def admin_deploy(request: Request) -> JSONResponse:
             status_code=500,
         )
 
+    # 3b. Desktop shell. Changes under desktop/ only reach the window through a
+    # rebuilt bundle, so dev instances rebuild it here and swap it in during the
+    # restart below. Released installs skip this: no checkout, no cargo. The
+    # rebuild is minutes long, hence the staleness check rather than doing it on
+    # every restart.
+    from ciao import desktop_build
+
+    relaunch_desktop = False
+    if getattr(config, "dev_mode", False):
+        needed, reason = await asyncio.to_thread(desktop_build.needs_rebuild, codebase_root)
+        if not needed:
+            steps.append({"step": "desktop app", "ok": True, "output": f"skipped: {reason}"})
+        else:
+            steps.append({"step": "desktop app", "ok": True, "output": f"rebuilding: {reason}"})
+            desktop_steps, relaunch_desktop = await asyncio.to_thread(
+                desktop_build.build_and_stage, codebase_root, runner=_run_step,
+            )
+            steps.extend(desktop_steps)
+            failed = next((s for s in desktop_steps if not s["ok"]), None)
+            if failed is not None:
+                return JSONResponse(
+                    {"steps": steps, "ok": False, "error": f"{failed['step']} failed: {failed['output']}"},
+                    status_code=500,
+                )
+
     # 4. Signal restart. Must go through app.state.request_restart (which sets
     # the restart flag and calls server.shutdown()). Raising RestartRequested
     # inside this detached task does NOT work:
@@ -5674,6 +5830,24 @@ async def admin_deploy(request: Request) -> JSONResponse:
 
     async def _do_restart():
         await asyncio.sleep(2)
+        # The desktop swap runs before the engine restart, not after: the
+        # relaunched app comes up against a live engine and then rides the
+        # normal restart-drain path, instead of racing launchd for the runtime
+        # directory while the engine is down.
+        if relaunch_desktop:
+            try:
+                installed = await asyncio.to_thread(
+                    desktop_build.install_staged_and_relaunch, runner=_run_step,
+                )
+                for step in installed:
+                    if step["ok"]:
+                        logger.info("deploy: %s: %s", step["step"], step["output"])
+                    else:
+                        logger.error("deploy: %s: %s", step["step"], step["output"])
+            except Exception:
+                # A failed relaunch must not strand the engine on stale code;
+                # the operator can reopen the app by hand.
+                logger.exception("deploy: desktop install and relaunch failed")
         fn = getattr(request.app.state, "request_restart", None)
         if callable(fn):
             fn(config.restart_exit_code)
@@ -5681,7 +5855,11 @@ async def admin_deploy(request: Request) -> JSONResponse:
             raise RestartRequested(config.restart_exit_code)
 
     asyncio.create_task(_do_restart())
-    steps.append({"step": "restart", "ok": True})
+    steps.append({
+        "step": "restart",
+        "ok": True,
+        "output": "swapping in the rebuilt desktop app first" if relaunch_desktop else "",
+    })
 
     return JSONResponse({"steps": steps, "ok": True})
 
@@ -5971,6 +6149,17 @@ async def node_status_endpoint(request: Request) -> JSONResponse:
                 res = await client.get(f"{host_url}/api/startup-status", headers=headers)
                 status["host_reachable"] = res.status_code == 200
                 status["active_peer_reachable"] = status["host_reachable"]
+                # Name and version of the machine the UI is mirroring, so the
+                # client can label host-scoped screens instead of leaving the
+                # user guessing whose settings they are editing.
+                if status["host_reachable"]:
+                    try:
+                        payload = res.json()
+                    except ValueError:
+                        payload = {}
+                    if isinstance(payload, dict):
+                        status["host_node_id"] = str(payload.get("node_id") or "")
+                        status["host_version"] = str(payload.get("version") or "")
         except Exception:
             status["host_reachable"] = False
             status["active_peer_reachable"] = False
@@ -6236,3 +6425,16 @@ async def node_peers_endpoint(request: Request) -> JSONResponse:
         status = node_mgr.add_peer(url, peer_id=node_id)
 
     return JSONResponse({"ok": True, "status": status})
+
+
+async def node_connected_clients_endpoint(request: Request) -> JSONResponse:
+    """Live WebSocket clients connected to this node.
+
+    Useful on a host: it shows phones/laptops that currently have an open
+    Ciaobot tab or tunneled client. Local loopback sockets are excluded so the
+    list only surfaces remote/secondary-device connections.
+    """
+    tracker = getattr(request.app.state, "connection_tracker", None)
+    if tracker is None:
+        return JSONResponse({"ok": True, "clients": []})
+    return JSONResponse({"ok": True, "clients": tracker.list_clients(remote_only=True)})

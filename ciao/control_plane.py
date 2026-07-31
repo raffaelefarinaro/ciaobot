@@ -1138,12 +1138,33 @@ class CiaoControlPlane:
         """Validate a workspace file exists so the PWA can open it in the pinned
         preview panel. The actual surfacing happens client-side, keyed off this
         tool call showing up in the turn's trace — see extract_file_touches in
-        ciao/web/chat_broker.py."""
+        ciao/web/chat_broker.py.
+
+        ``viewers`` is how many clients were subscribed to this chat's stream at
+        call time. Zero means the request was emitted into an empty room, which
+        is the one failure mode the server can see, so report it instead of
+        answering a bare ok that reads as "the panel is open".
+        """
         root = Path(self.config.workspace_root).resolve()
         target = self._safe_relative(root, path, must_exist=True)
         if not target.is_file():
             raise ControlPlaneError("unsupported_file", "Only an existing file can be surfaced.")
-        return _ok({"path": target.relative_to(root).as_posix()})
+        return _ok(
+            {
+                "path": target.relative_to(root).as_posix(),
+                "viewers": self._chat_stream_viewers(principal.chat_id),
+            }
+        )
+
+    def _chat_stream_viewers(self, chat_id: str) -> int:
+        """Live subscriber count for a chat's in-flight stream (0 when none)."""
+        if not chat_id:
+            return 0
+        try:
+            stream = self.pcm.get_active_stream(chat_id)
+        except Exception:
+            return 0
+        return stream.subscriber_count if stream is not None else 0
 
     def file_history_list(
         self, principal: McpPrincipal, chat_id: str, file_path: str

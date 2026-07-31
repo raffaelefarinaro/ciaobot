@@ -84,6 +84,28 @@ def test_system_prompt_includes_url_reading_notes() -> None:
     assert "web-research" in append
 
 
+def test_system_prompt_includes_issue_labeling_notes() -> None:
+    """Every gh issue create from a chat turn must apply the convention;
+    a drift test pins the table so a future edit cannot silently drop it."""
+    payload = mi.system_prompt_payload("")
+    assert payload is not None
+    append = payload["append"]
+    assert "Issue labeling" in append
+    # Title-prefix -> label mapping is the rule. Each row must stay.
+    for prefix, label in (
+        ("[Bug]", "bug"),
+        ("[Feature]", "enhancement"),
+        ("[Docs]", "documentation"),
+        ("[Chore]", "chore"),
+    ):
+        assert prefix in append, f"missing title prefix {prefix}"
+        assert label in append, f"missing label {label}"
+    # The anonymous bug-report form was retired on 2026-07-30, so nothing can
+    # open a `[Report]` issue any more. The prompt must say so rather than
+    # listing it as a live option.
+    assert "retired `[Report]` prefix" in append
+
+
 def test_system_prompt_includes_ciaobot_diagnostics_notes() -> None:
     """Installed agents should know which local logs to inspect for support."""
     payload = mi.system_prompt_payload("")
