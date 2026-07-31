@@ -574,6 +574,7 @@ Global `/ws/events` payloads the PWA reacts to:
 
 - `chat_streaming_started` / `chat_streaming_done` / `chat_result_ready`: lifecycle of the main chat turn.
 - `chat_subagents_ready`: emitted when a background `Agent` (run_in_background) finishes or its count drops. Fields: `{chat_id, project_id, remaining}`.
+- `chat_delegates_reported`: emitted on the *supervisor* chat once finished delegates (chats carrying `spawned_from_chat_id`) have been reported back to it. Fields: `{chat_id, project_id, count, delivery}`, where `delivery` is `"queued"` (supervisor was mid-turn, so the wake was appended as a follow-up) or `"started"` (supervisor was idle, so a new turn began). Completions inside a 5s window coalesce into one event.
 - `chat_read`: another client/device marked the chat read.
 - `chat_title`: auto-title finished.
 - `chat_created`: a new chat was created (fresh or fork). Fields: `{chat: ChatInfo}`. The acting tab already pushes optimistically; this event is what makes other tabs/devices, or the acting tab after a racing `syncLatest` clobber, render the chat without waiting for the 15s poll. Without it a fork (which starts no streaming turn, so no `chat_result_ready` refetch) stayed invisible until a manual reload.

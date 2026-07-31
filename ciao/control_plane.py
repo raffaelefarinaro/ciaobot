@@ -31,6 +31,7 @@ from ciao.memory_tool import (
 )
 from ciao.loops import publish_loops_changed
 from ciao.models import ControlSurface
+from ciao.web.project_chats import _MAX_ACTIVE_DELEGATES
 from ciao.schedules import ScheduleEntry, compute_next_run
 
 logger = logging.getLogger(__name__)
@@ -866,6 +867,93 @@ class CiaoControlPlane:
         self._handoff_record(principal, subchat_id)
         self._handoff_manager().extend_subchat(subchat_id, user_authorized=user_authorized)
         return _ok(self._handoff_manager().get_record(subchat_id).to_dict())
+
+    # ---- delegates -----------------------------------------------------
+
+    def _delegate_payload(self, chat: Any, *, streaming: bool) -> dict[str, Any]:
+        return {
+            "chat_id": chat.chat_id,
+            "title": chat.title,
+            "provider": chat.provider,
+            "model": chat.model,
+            "delegation_id": chat.delegation_id,
+            "archived": chat.archived,
+            "running": streaming,
+            "created_at": chat.created_at,
+            "last_activity_at": chat.last_activity_at,
+        }
+
+    def delegate_spawn(
+        self,
+        principal: McpPrincipal,
+        *,
+        prompt: str,
+        title: str = "",
+        provider: str | None = None,
+        model: str | None = None,
+        model_bucket: str | None = None,
+        mode: str | None = None,
+        delegation_id: str = "",
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Spawn a writable delegate chat that wakes this chat when it finishes."""
+        parent = self._chat(principal, "")
+        # Server-side recursion guard. CIAO_DELEGATE_OF tells a delegate what it
+        # is, but a child could unset its own env, so the authoritative check is
+        # the calling chat's own lineage.
+        if parent.spawned_from_chat_id:
+            raise ControlPlaneError(
+                "nested_delegate_forbidden",
+                "A delegate cannot spawn delegates. Report back to your "
+                "supervisor instead.",
+            )
+        if not prompt.strip():
+            raise ControlPlaneError("empty_prompt", "prompt is required.")
+        active = self.pcm.active_delegate_count(parent.chat_id)
+        if active >= _MAX_ACTIVE_DELEGATES:
+            raise ControlPlaneError(
+                "delegate_limit_reached",
+                f"{active} delegates are already running (limit "
+                f"{_MAX_ACTIVE_DELEGATES}). Wait for one to report before "
+                f"spawning another.",
+            )
+        project = self._resolve_project(principal, project_id)
+        chat = self.pcm.create_chat(
+            project.project_id,
+            title=title.strip() or "Delegate",
+            provider=provider,
+            model=model,
+            model_bucket=model_bucket,
+            mode=mode,
+            spawned_from_chat_id=parent.chat_id,
+            delegation_id=delegation_id.strip(),
+        )
+        # Same start/queue split as chat_send: a brand-new chat is never
+        # streaming, so this normally starts immediately.
+        if self.pcm.queue_message(chat.chat_id, prompt.strip()):
+            send_status = "queued"
+        else:
+            self.pcm.start_stream(chat.chat_id, prompt.strip())
+            send_status = "started"
+        result = chat.to_dict(local=True)
+        result["send_status"] = send_status
+        result["active_delegates"] = active + 1
+        return _ok(result)
+
+    def delegates_list(self, principal: McpPrincipal, chat_id: str = "") -> dict[str, Any]:
+        """List delegates spawned by a chat, with which ones are still running."""
+        parent_id = self._chat_id(principal, chat_id)
+        running = set(self.pcm.active_chat_ids())
+        rows = [
+            self._delegate_payload(c, streaming=c.chat_id in running)
+            for c in self.pcm.delegates_for_chat(parent_id)
+        ]
+        return _ok({
+            "chat_id": parent_id,
+            "delegates": rows,
+            "active": sum(1 for r in rows if r["running"] and not r["archived"]),
+            "limit": _MAX_ACTIVE_DELEGATES,
+        })
 
     # ---- schedules/loops ----------------------------------------------
 

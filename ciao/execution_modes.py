@@ -131,6 +131,8 @@ AUTO_APPROVED_MCP_TOOLS: tuple[str, ...] = (
     "chat_handover",
     "chat_fork",
     "chat_archive",
+    "delegate_spawn",
+    "delegates_list",
     "handoffs_list",
     "handoff_start",
     "handoff_send",

@@ -48,6 +48,19 @@ When fixing labels on existing issues, only adjust labels that are missing or wr
 - Background `Agent` dispatches do not auto-continue the parent turn. The parent finishes, and subagents complete later. If a result must be synthesized inline, use a foreground `Agent` call. When dispatching background agents, tell the user to follow up or read the subagents endpoint.
 - Do not store secrets unless explicitly requested.
 
+**Picking a delegation primitive.** Three exist and they are not interchangeable:
+
+| You need | Use | Shape |
+|---|---|---|
+| Long-running work that edits files, on a model you choose | `delegate_spawn` | Async. Returns immediately, wakes you with a fresh turn when the delegate finishes. |
+| A second opinion from other models, inside this turn | `adversarial_review` | Blocking. Returns inline. |
+| Parallel read-only investigation inside this turn | `Agent` (foreground) | Blocking, in-process, no separate chat. |
+
+- A **delegate** is a real Ciaobot chat with full tool access, its own model, and its own resumable session that the user can open, inspect, and stop. After spawning, end your turn: say what you dispatched and that you will report back. Do not poll `delegates_list` in a loop, and do not claim a delegate's work is done until its wake turn arrives and you have verified the work yourself (read the diff, run the tests). A delegate's excerpt in the wake prompt is truncated and can overstate; `chat_get` gets you the real transcript.
+- Give each delegate its own git worktree when several touch one repo, and state that path in the brief. Delegates cannot see your chat, so the brief must be self-contained.
+- A delegate cannot spawn delegates, and at most 6 run at once per chat. Both are enforced server-side.
+- Never invoke a provider binary (`codex`, `ollama`) directly to fake any of this.
+
 ## Custom Commands, Agents, and Skills
 
 - Custom commands live in `commands/`, subagents in `subagents/`, and skills in `skills/`. Edit these source folders; do not hand-edit generated `.claude/` or execution-environment directories.

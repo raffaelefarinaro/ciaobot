@@ -151,7 +151,8 @@ When your message mentions a name that appears in the vault index, the agent get
 - Comment on any passage of a reply — select text, attach a note, and it rides along with your next prompt; queue follow-ups while the agent is still working.
 - Per-chat model picker with provider thinking levels on top of per-workspace defaults.
 - Fork conversation: create a new independent chat in the same project starting from any completed agent answer, preserving history.
-- Agent handoffs: spawn and communicate with a second provider route (the participant) as a read-only sub-chat attached to the originating turn.
+- Delegates: a chat's agent spawns writable delegate chats (own model, own resumable session, full tool access) to work in parallel, and is woken with a fresh turn when each finishes. Capped at 6 per chat; delegates cannot nest.
+- Agent handoffs: spawn and communicate with a second provider route (the participant) as a sub-chat attached to the originating turn. "Read-only" describes the user's access to the participant, not the participant's tools.
 
 **Voice — dictation and read-aloud**
 
