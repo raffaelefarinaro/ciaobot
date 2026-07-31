@@ -43,15 +43,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/new` | Start a new provider session |
 | POST | `/api/chats/{chat_id}/handover` | Continue chat on a fresh provider session |
 | POST | `/api/chats/{chat_id}/fork` | Fork chat continuing from a completed turn |
-| GET | `/api/chats/{chat_id}/provider-subchats` | List provider sub-chats |
-| POST | `/api/chats/{chat_id}/provider-subchats` | Create provider sub-chat |
-| GET | `/api/provider-subchats/{subchat_id}/events` | Read provider sub-chat events |
-| POST | `/api/provider-subchats/{subchat_id}/messages` | Send message to provider sub-chat |
-| POST | `/api/provider-subchats/{subchat_id}/close` | Close provider sub-chat |
-| POST | `/api/provider-subchats/{subchat_id}/cancel` | Cancel active provider sub-chat work |
-| POST | `/api/provider-subchats/{subchat_id}/extend` | Extend provider sub-chat limits |
-| POST | `/api/provider-subchats/{subchat_id}/permission-response` | Resolve permission request in provider sub-chat |
-| POST | `/api/provider-subchats/{subchat_id}/question-response` | Resolve structured question in provider sub-chat |
 | POST | `/api/chats/{chat_id}/archive` | Archive chat |
 | POST | `/api/chats/{chat_id}/continue` | Create a new active chat continuing from this archived one |
 | POST | `/api/chats/{chat_id}/read` | Mark chat read |
@@ -344,45 +335,34 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 # Delete.
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chats/$CID"
 
-# Provider Sub-chats — list all sub-chats for a parent chat.
-curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/provider-subchats"
-
 # Create Provider Sub-chat.
 # Body keys: parent_turn_index, owner (object with provider, model, label), participant (object), task_prompt (optional), user_authorized (optional).
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/provider-subchats" \
   -H 'content-type: application/json' \
   -d '{"parent_turn_index":0,"owner":{"provider":"claude","model":"opus","label":"Claude"},"participant":{"provider":"codex","model":"gpt-4","label":"Codex"},"task_prompt":"Analyze this issue"}'
 
 # Read Sub-chat Events.
-curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/provider-subchats/$SUBID/events"
 
 # Send Message/Prompt to Sub-chat.
 # Body keys: message, user_authorized (optional).
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/provider-subchats/$SUBID/messages" \
   -H 'content-type: application/json' \
   -d '{"message":"Next instruction"}'
 
 # Close Sub-chat.
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/provider-subchats/$SUBID/close"
 
 # Cancel Sub-chat.
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/provider-subchats/$SUBID/cancel"
 
 # Extend Sub-chat limits.
 # Body keys: user_authorized (required).
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/provider-subchats/$SUBID/extend" \
   -H 'content-type: application/json' \
   -d '{"user_authorized":true}'
 
 # Resolve Permission Request in Sub-chat.
 # Body keys: request_id, approved, reason (optional).
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/provider-subchats/$SUBID/permission-response" \
   -H 'content-type: application/json' \
   -d '{"request_id":"req-1","approved":true}'
 
 # Resolve Structured Question in Sub-chat.
 # Body keys: request_id, answers (dict).
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/provider-subchats/$SUBID/question-response" \
   -H 'content-type: application/json' \
   -d '{"request_id":"req-2","answers":{"choice":["option-a"]}}'
 ```

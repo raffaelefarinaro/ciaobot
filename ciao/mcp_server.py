@@ -248,7 +248,6 @@ class McpSessionRegistry:
         workspace: str,
         provider: str,
         role: str = "chat",
-        handoff_depth: int = 0,
     ) -> tuple[str, McpPrincipal]:
         key = (chat_id, provider, role)
         now = int(time.time())
@@ -262,7 +261,6 @@ class McpSessionRegistry:
                 if (
                     prior.project_id == project_id
                     and prior.workspace == workspace
-                    and prior.handoff_depth == handoff_depth
                 ):
                     return existing.token, existing.principal
                 # revoke() owns the _by_token/_by_key pairing; the lock is an
@@ -276,7 +274,6 @@ class McpSessionRegistry:
                 workspace=workspace,
                 provider=provider,
                 role=role,  # type: ignore[arg-type]
-                handoff_depth=handoff_depth,
             )
             session = _Session(
                 principal=principal,
@@ -381,7 +378,6 @@ class CiaoMcpService:
             workspace=project.workspace,
             provider=chat.provider,
             role=role,
-            handoff_depth=1 if role == "handoff" else 0,
         )
         return self.url, token
 
@@ -887,11 +883,6 @@ class CiaoMcpService:
             if self.control_plane is None:
                 raise ControlPlaneError("unavailable", "Ciaobot control plane is not ready.", retryable=True)
             principal = self._principal()
-            if mutating and principal.role == "handoff":
-                raise ControlPlaneError(
-                    "handoff_read_only",
-                    "Agent handoff participants have read-only Ciaobot access.",
-                )
             if mutating and self.control_plane.chat_mode(principal) == "plan":
                 raise ControlPlaneError("plan_mode_read_only", "Mutating Ciaobot tools are disabled in plan mode.")
             value = operation(self.control_plane, principal)
@@ -1307,102 +1298,6 @@ class CiaoMcpService:
             """
             return await self._invoke(
                 "delegates_list", lambda cp, p: cp.delegates_list(p, chat_id)
-            )
-
-        @tool(name="handoffs_list", annotations=_READ, structured_output=True)
-        async def handoffs_list(chat_id: str = "") -> dict[str, Any]:
-            """List agent handoffs (cross-provider sub-chats) attached to a chat."""
-            return await self._invoke(
-                "handoffs_list", lambda cp, p: cp.handoffs_list(p, chat_id)
-            )
-
-        @tool(name="handoff_start", annotations=_WRITE, structured_output=True)
-        async def handoff_start(
-            provider: str,
-            model: str,
-            message: str,
-            chat_id: str = "",
-            model_bucket: str = "",
-            user_authorized: bool = False,
-        ) -> dict[str, Any]:
-            """Start a bounded handoff to another provider/model and return its first reply.
-
-            Spawns a read-only sub-chat (the participant) attached to this turn.
-            Start one only after the user explicitly asks to consult, hand off to,
-            delegate to, or route work to another model or provider — never
-            unsolicited. You are the sole conduit: the user cannot write directly
-            into the participant, and a participant cannot itself start a nested
-            handoff. Never search for or invoke a provider binary (like `codex` or
-            `ollama`) directly — this tool is the only supported path for
-            cross-provider delegation. If the participant asks a clarifying
-            question that needs the user's input, relay it through this chat,
-            then send the answer back via handoff_send.
-            """
-            return await self._invoke(
-                "handoff_start",
-                lambda cp, p: cp.handoff_start(
-                    p,
-                    provider=provider,
-                    model=model,
-                    message=message,
-                    chat_id=chat_id,
-                    model_bucket=model_bucket,
-                    user_authorized=user_authorized,
-                ),
-                mutating=True,
-            )
-
-        @tool(name="handoff_send", annotations=_WRITE, structured_output=True)
-        async def handoff_send(
-            subchat_id: str,
-            message: str,
-            user_authorized: bool = False,
-        ) -> dict[str, Any]:
-            """Send a follow-up message to an active handoff."""
-            return await self._invoke(
-                "handoff_send",
-                lambda cp, p: cp.handoff_send(
-                    p, subchat_id, message, user_authorized=user_authorized
-                ),
-                mutating=True,
-            )
-
-        @tool(name="handoff_events", annotations=_READ, structured_output=True)
-        async def handoff_events(subchat_id: str) -> dict[str, Any]:
-            """Read the event transcript for a handoff."""
-            return await self._invoke(
-                "handoff_events", lambda cp, p: cp.handoff_events(p, subchat_id)
-            )
-
-        @tool(name="handoff_close", annotations=_WRITE, structured_output=True)
-        async def handoff_close(subchat_id: str) -> dict[str, Any]:
-            """Close a handoff once it has successfully finished and you have
-            enough information — don't leave it open once you're done with it."""
-            return await self._invoke(
-                "handoff_close", lambda cp, p: cp.handoff_close(p, subchat_id), mutating=True
-            )
-
-        @tool(name="handoff_cancel", annotations=_DESTRUCTIVE, structured_output=True)
-        async def handoff_cancel(subchat_id: str) -> dict[str, Any]:
-            """Abort active work in a handoff."""
-            return await self._invoke(
-                "handoff_cancel", lambda cp, p: cp.handoff_cancel(p, subchat_id), mutating=True
-            )
-
-        @tool(name="handoff_extend", annotations=_WRITE, structured_output=True)
-        async def handoff_extend(
-            subchat_id: str,
-            user_authorized: bool = False,
-        ) -> dict[str, Any]:
-            """Extend a handoff past its message/time limit (12 messages / 30
-            minutes) — call this only after explicitly asking the user for
-            authorization; never pass user_authorized=True on your own judgment."""
-            return await self._invoke(
-                "handoff_extend",
-                lambda cp, p: cp.handoff_extend(
-                    p, subchat_id, user_authorized=user_authorized
-                ),
-                mutating=True,
             )
 
         @tool(name="schedules_list", annotations=_READ, structured_output=True)

@@ -140,7 +140,7 @@ def test_system_prompt_includes_memory_and_vault_notes() -> None:
     assert "ciao vault-lint" in append
     assert "ciao sync-skills" in append
     assert "ciao create-chat" in append
-    assert "ciao provider-chat" in append
+    assert "delegate_spawn" in append
     assert "Memory-Proposals.md" in append
 
 

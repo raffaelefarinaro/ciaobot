@@ -247,7 +247,7 @@ Canonical example: `ciao/skill_evolution.py:_process_skill_dag`. Use a DAG when 
 
 `ScheduleManager.catch_up()` runs once at server startup. It dispatches only the latest missed occurrence for each enabled schedule, leaves the prompt unchanged, and records the missed occurrence's local date so a later slot on the startup day can still fire normally. Cover changes to this behavior in `tests/test_schedules.py`.
 
-`ProviderSubchatManager` handles routing, limits, and executing participant turns. Cover changes to this behavior in `tests/test_provider_subchats.py` (for manager logic/limit tracking) and `tests/test_provider_subchat_routes.py` (for Starlette HTTP handlers).
+Delegates are normal chats carrying `spawned_from_chat_id`; the wake-on-completion path lives in `ProjectChatManager` (`_queue_delegate_wake` / `_flush_delegate_wake`). Cover changes in `tests/test_delegates.py`.
 
 ## MCP control plane
 

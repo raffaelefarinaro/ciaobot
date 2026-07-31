@@ -222,38 +222,6 @@ export interface SubagentTranscript {
   turn_index?: number
 }
 
-export interface ProviderRoute {
-  provider: string
-  model: string
-  model_bucket: string
-  label: string
-}
-
-export interface ProviderSubchatRecord {
-  subchat_id: string
-  parent_chat_id: string
-  parent_turn_index: number
-  workspace: string
-  project_id: string
-  owner: ProviderRoute
-  participant: ProviderRoute
-  participant_session_id: string
-  status: 'created' | 'running' | 'waiting_owner' | 'completed' | 'cancelled' | 'failed' | 'interrupted'
-  created_at: string
-  started_at: string
-  updated_at: string
-  completed_at: string
-  active_seconds: number
-  message_count: number
-  input_tokens: number
-  output_tokens: number
-  quota_limit_hit: boolean
-  last_error: string
-  limit_extended_at: string
-  limit_messages_extended: number
-  limit_seconds_extended: number
-}
-
 // ── WebSocket events ────────────────────────────────────────────────────
 
 export type WsEvent =
@@ -338,10 +306,6 @@ export type EventsWsMessage =
   | { type: 'loops_changed' }
   | { type: 'open_chat'; chat_id: string }
   | { type: 'server_restarting'; message?: string }
-  | { type: 'provider_subchat_created'; subchat_id: string; parent_chat_id: string; record: ProviderSubchatRecord }
-  | { type: 'provider_subchat_status'; subchat_id: string; parent_chat_id: string; status: string; record: ProviderSubchatRecord }
-  | { type: 'provider_subchat_event'; subchat_id: string; parent_chat_id: string; event: ProviderSubchatEvent }
-  | { type: 'provider_subchat_deleted'; subchat_id: string; parent_chat_id: string }
   | { type: 'gws_health'; profile: string; token_valid: boolean; token_error: string; title: string; body: string }
 
 export interface InAppToast {
@@ -912,32 +876,6 @@ export interface LocalHandbackResult {
   error?: string
   merged?: boolean
   conflict?: boolean
-}
-
-/**
- * A choice offered by a subchat `question` event.
- *
- * Providers send either a bare string or a `{value, label}` pair, which is why
- * the template always fell back with `opt.value || opt`.
- */
-export type ProviderSubchatQuestionOption = string | { value?: string; label?: string }
-
-/**
- * One entry in a provider subchat transcript
- * (`/api/provider-subchats/{id}/events`). Kept open with an index signature
- * because the renderer switches on `type` and ignores what it does not know.
- */
-export interface ProviderSubchatEvent {
-  type: string
-  role?: string
-  content?: string
-  text?: string
-  message?: string
-  question?: string
-  options?: ProviderSubchatQuestionOption[]
-  request_id?: string
-  tool_name?: string
-  [key: string]: unknown
 }
 
 export interface PackageStatus {

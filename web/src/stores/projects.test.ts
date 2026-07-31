@@ -1818,33 +1818,6 @@ describe('conversation forks', () => {
   })
 })
 
-describe('provider sub-chats', () => {
-  test('loads provider sub-chats and events', async () => {
-    const store = useProjectStore()
-    const chatId = 'parent-chat-1'
-    const subchatId = 'sub-chat-1'
-
-    const records = [{ subchat_id: subchatId, parent_chat_id: chatId, status: 'created' }]
-    const events = [{ type: 'message', role: 'owner', content: 'test' }]
-
-    apiGet.mockImplementation((path: string) => {
-      if (path === `/api/chats/${chatId}/provider-subchats`) {
-        return Promise.resolve(records)
-      }
-      if (path === `/api/provider-subchats/${subchatId}/events`) {
-        return Promise.resolve(events)
-      }
-      return Promise.resolve([])
-    })
-
-    await store.loadProviderSubchats(chatId)
-    expect(store.providerSubchats[chatId]).toEqual(records)
-
-    await store.loadProviderSubchatEvents(subchatId)
-    expect(store.providerSubchatEvents[subchatId]).toEqual(events)
-  })
-})
-
 describe('switchChat workspace alignment', () => {
   test('automatically switches activeWorkspace to match target chat workspace', async () => {
     apiGet.mockImplementation((url: string) => {

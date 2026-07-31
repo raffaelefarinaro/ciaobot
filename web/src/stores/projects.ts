@@ -18,7 +18,6 @@ import type {
   ChatRow,
   ChatMessage,
   SubagentTranscript,
-  ProviderSubchatRecord,
   WsEvent,
   EventsWsMessage,
   VoiceResult,
@@ -28,7 +27,6 @@ import type {
   WorkspaceName,
   WorkspaceProviderOption,
   WorkspacesResponse,
-  ProviderSubchatEvent,
 } from '../lib/types'
 
 export function shouldReconnectActiveChatOnStreamingStarted(
@@ -73,10 +71,6 @@ export const useProjectStore = defineStore('projects', () => {
   // Subagent transcripts keyed by chat_id. Loaded lazily on chat switch and
   // after each streaming turn (subagents can be spawned mid-turn).
   const subagents = ref<Record<string, SubagentTranscript[]>>({})
-  // Provider sub-chats keyed by parent chat_id.
-  const providerSubchats = ref<Record<string, ProviderSubchatRecord[]>>({})
-  // Provider sub-chat transcript events keyed by subchat_id.
-  const providerSubchatEvents = ref<Record<string, ProviderSubchatEvent[]>>({})
   const sockets = ref<Record<string, WebSocket>>({})
   const streaming = ref<Record<string, boolean>>({})
   const streamingText = ref<Record<string, string>>({})
@@ -1770,25 +1764,6 @@ export const useProjectStore = defineStore('projects', () => {
     } catch {
       // No session locally / SDK error — leave any prior data in place.
     }
-    void loadProviderSubchats(chatId)
-  }
-
-  async function loadProviderSubchats(chatId: string): Promise<void> {
-    try {
-      const r = await api.get<ProviderSubchatRecord[]>(`/api/chats/${chatId}/provider-subchats`)
-      providerSubchats.value[chatId] = Array.isArray(r) ? r : []
-    } catch {
-      // ignore
-    }
-  }
-
-  async function loadProviderSubchatEvents(subchatId: string): Promise<void> {
-    try {
-      const r = await api.get<ProviderSubchatEvent[]>(`/api/provider-subchats/${subchatId}/events`)
-      providerSubchatEvents.value[subchatId] = Array.isArray(r) ? r : []
-    } catch {
-      // ignore
-    }
   }
 
   // ── Chat switching ──────────────────────────────────────────────────
@@ -2449,13 +2424,6 @@ export const useProjectStore = defineStore('projects', () => {
         }
         if (messages.value[msg.chat_id]) delete messages.value[msg.chat_id]
         if (subagents.value[msg.chat_id]) delete subagents.value[msg.chat_id]
-        if (providerSubchats.value[msg.chat_id]) {
-          const list = providerSubchats.value[msg.chat_id] || []
-          for (const sc of list) {
-            delete providerSubchatEvents.value[sc.subchat_id]
-          }
-          delete providerSubchats.value[msg.chat_id]
-        }
         if (streaming.value[msg.chat_id]) delete streaming.value[msg.chat_id]
         if (streamingText.value[msg.chat_id]) delete streamingText.value[msg.chat_id]
         delete streamingTextPhase.value[msg.chat_id]
@@ -2464,44 +2432,6 @@ export const useProjectStore = defineStore('projects', () => {
           delete unread.value[msg.chat_id]
           persistUnread()
         }
-        break
-      }
-      case 'provider_subchat_created': {
-        const list = providerSubchats.value[msg.parent_chat_id] || []
-        if (!list.some(r => r.subchat_id === msg.subchat_id)) {
-          list.push(msg.record)
-          providerSubchats.value[msg.parent_chat_id] = list
-        }
-        break
-      }
-      case 'provider_subchat_status': {
-        const list = providerSubchats.value[msg.parent_chat_id] || []
-        const idx = list.findIndex(r => r.subchat_id === msg.subchat_id)
-        if (idx !== -1) {
-          list[idx] = msg.record
-        } else {
-          list.push(msg.record)
-        }
-        providerSubchats.value[msg.parent_chat_id] = [...list]
-        break
-      }
-      case 'provider_subchat_event': {
-        const events = providerSubchatEvents.value[msg.subchat_id] || []
-        events.push(msg.event)
-        providerSubchatEvents.value[msg.subchat_id] = [...events]
-        // Record metrics (status, token/message counts) arrive via
-        // `provider_subchat_status`; there is no need to re-fetch the whole
-        // list on every streamed event, which would flood the backend during
-        // active streaming.
-        break
-      }
-      case 'provider_subchat_deleted': {
-        if (providerSubchats.value[msg.parent_chat_id]) {
-          providerSubchats.value[msg.parent_chat_id] = providerSubchats.value[msg.parent_chat_id].filter(
-            r => r.subchat_id !== msg.subchat_id
-          )
-        }
-        delete providerSubchatEvents.value[msg.subchat_id]
         break
       }
       case 'open_chat':
@@ -3840,7 +3770,7 @@ export const useProjectStore = defineStore('projects', () => {
 
   return {
     // State
-    projects, chats, workspaces, workspaceProviderOptions, workspaceClaudeAiConnectors, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, subagents, providerSubchats, providerSubchatEvents, unread,
+    projects, chats, workspaces, workspaceProviderOptions, workspaceClaudeAiConnectors, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, subagents, unread,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
     projectStreaming, backgroundAgents, toasts, pendingPermissions, activeQuestions, creatingChatProjectIds,
     serverRestarting, serverRestartMessage, hostConnectionUnavailable,
@@ -3865,7 +3795,7 @@ export const useProjectStore = defineStore('projects', () => {
     fileCommentsFor, removeFileComment, updateFileComment,
     pinFile, unpinFile, pinnedFileFor,
     removeQueued, removeQueuedById, reorderQueued, editQueued, clearQueued,
-    loadMessages, loadSubagents, loadProviderSubchats, loadProviderSubchatEvents,
+    loadMessages, loadSubagents,
     connectWs, disconnectWs, connectEventsWs,
     beginServerRestart,
     pushToast, pushErrorToast, dismissToast, fixError,

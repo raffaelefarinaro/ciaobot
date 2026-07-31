@@ -46,8 +46,7 @@ class McpPrincipal:
     project_id: str
     workspace: str
     provider: str
-    role: Literal["chat", "automation", "handoff"] = "chat"
-    handoff_depth: int = 0
+    role: Literal["chat", "automation"] = "chat"
 
     def to_claims(self) -> dict[str, Any]:
         return asdict(self)
@@ -61,7 +60,6 @@ class McpPrincipal:
             workspace=str(claims.get("workspace") or ""),
             provider=str(claims.get("provider") or ""),
             role=str(claims.get("role") or "chat"),  # type: ignore[arg-type]
-            handoff_depth=int(claims.get("handoff_depth") or 0),
         )
 
 
@@ -99,7 +97,6 @@ class CiaoControlPlane:
         project_chat_manager: Any,
         schedule_manager: Any,
         loop_manager: Any,
-        provider_subchat_manager: Any | None = None,
         local_session_manager: Any | None = None,
         app_settings: Any | None = None,
         startup_tracker: Any | None = None,
@@ -109,7 +106,6 @@ class CiaoControlPlane:
         self.pcm = project_chat_manager
         self.schedules = schedule_manager
         self.loops = loop_manager
-        self.handoffs = provider_subchat_manager
         self.local_sessions = local_session_manager
         self.app_settings = app_settings
         self.startup_tracker = startup_tracker
@@ -293,7 +289,6 @@ class CiaoControlPlane:
             "chat": chat.to_dict(local=self.pcm.is_session_local(chat)) if chat else None,
             "provider": principal.provider,
             "role": principal.role,
-            "handoff_depth": principal.handoff_depth,
             "control_surface": getattr(chat, "control_surface", "")
             or getattr(self.config, "control_surface", "legacy"),
         })
@@ -770,103 +765,6 @@ class CiaoControlPlane:
                 "The current turn cannot stop itself through MCP; use the PWA stop control.",
             )
         return _ok({"chat_id": chat_id, "stopped": await self.pcm.stop_chat(chat_id)})
-
-    # ---- agent handoffs -------------------------------------------------
-
-    def _handoff_manager(self) -> Any:
-        if self.handoffs is None:
-            raise ControlPlaneError("unavailable", "Agent handoff manager is unavailable.")
-        return self.handoffs
-
-    def _handoff_record(self, principal: McpPrincipal, subchat_id: str) -> Any:
-        record = self._handoff_manager().get_record(subchat_id)
-        if record is None:
-            raise ControlPlaneError("handoff_not_found", f"Handoff '{subchat_id}' was not found.")
-        self._chat(principal, record.parent_chat_id)
-        return record
-
-    def handoffs_list(self, principal: McpPrincipal, chat_id: str = "") -> dict[str, Any]:
-        parent_id = self._chat_id(principal, chat_id)
-        return _ok([item.to_dict() for item in self._handoff_manager().list_records(parent_id)])
-
-    async def handoff_start(
-        self,
-        principal: McpPrincipal,
-        *,
-        provider: str,
-        model: str,
-        message: str,
-        chat_id: str = "",
-        model_bucket: str = "",
-        user_authorized: bool = False,
-    ) -> dict[str, Any]:
-        if principal.role == "handoff":
-            raise ControlPlaneError("nested_handoff_forbidden", "A handoff cannot start another handoff.")
-        parent = self._chat(principal, chat_id)
-        if not provider.strip() or not model.strip() or not message.strip():
-            raise ControlPlaneError("invalid_handoff", "provider, model, and message are required.")
-        from ciao.provider_subchats import ProviderRoute
-
-        owner = ProviderRoute(
-            provider=parent.provider,
-            model=parent.model,
-            model_bucket=parent.model_bucket,
-            label="owner",
-        )
-        participant = ProviderRoute(
-            provider=provider.strip(),
-            model=model.strip(),
-            model_bucket=model_bucket.strip(),
-            label="participant",
-        )
-        record = self._handoff_manager().create_subchat(
-            parent_chat_id=parent.chat_id,
-            parent_turn_index=max(0, int(parent.user_turn_count) - 1),
-            owner=owner,
-            participant=participant,
-        )
-        result = await self._handoff_manager().run_consultation_turn(
-            record.subchat_id,
-            message.strip(),
-            user_authorized=user_authorized,
-        )
-        return _ok({"record": record.to_dict(), "result": result})
-
-    async def handoff_send(
-        self,
-        principal: McpPrincipal,
-        subchat_id: str,
-        message: str,
-        *,
-        user_authorized: bool = False,
-    ) -> dict[str, Any]:
-        self._handoff_record(principal, subchat_id)
-        if not message.strip():
-            raise ControlPlaneError("empty_prompt", "message is required.")
-        return _ok(await self._handoff_manager().run_consultation_turn(
-            subchat_id, message.strip(), user_authorized=user_authorized
-        ))
-
-    def handoff_events(self, principal: McpPrincipal, subchat_id: str) -> dict[str, Any]:
-        self._handoff_record(principal, subchat_id)
-        return _ok(self._handoff_manager().get_events(subchat_id))
-
-    def handoff_close(self, principal: McpPrincipal, subchat_id: str) -> dict[str, Any]:
-        self._handoff_record(principal, subchat_id)
-        self._handoff_manager().close_subchat(subchat_id)
-        return _ok(self._handoff_manager().get_record(subchat_id).to_dict())
-
-    async def handoff_cancel(self, principal: McpPrincipal, subchat_id: str) -> dict[str, Any]:
-        self._handoff_record(principal, subchat_id)
-        await self._handoff_manager().cancel_subchat(subchat_id)
-        return _ok(self._handoff_manager().get_record(subchat_id).to_dict())
-
-    def handoff_extend(
-        self, principal: McpPrincipal, subchat_id: str, *, user_authorized: bool
-    ) -> dict[str, Any]:
-        self._handoff_record(principal, subchat_id)
-        self._handoff_manager().extend_subchat(subchat_id, user_authorized=user_authorized)
-        return _ok(self._handoff_manager().get_record(subchat_id).to_dict())
 
     # ---- delegates -----------------------------------------------------
 

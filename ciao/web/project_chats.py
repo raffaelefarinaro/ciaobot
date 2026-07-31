@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Iterator, Optio
 
 if TYPE_CHECKING:
     from ciao.mcp_server import CiaoMcpService
-    from ciao.provider_subchats import ProviderSubchatManager
     from ciao.web.push import PushManager
 
 RESTART_DRAIN_MESSAGE = (
@@ -848,7 +847,7 @@ class ChatInfo:
     # agent to do writable work (its own model, its own worktree, its own
     # session), whose result wakes the parent when it finishes — see
     # _wake_parent_for_delegates. Unlike a fork, the link is live: the parent is
-    # notified. Unlike a handoff, the child is a real resumable chat the user
+    # notified. The child is a real resumable chat the user
     # can open. Empty for chats the user created.
     spawned_from_chat_id: str = ""
     # Groups delegates dispatched as one batch so a wake can say "3 of 4 done".
@@ -1004,7 +1003,6 @@ class ProjectChatManager:
         # Tests and legacy-only instances intentionally leave it unset.
         self._mcp_service: Optional["CiaoMcpService"] = None
         # Bound by main.py; unset on tests and legacy-only instances.
-        self._provider_subchat_manager: Optional["ProviderSubchatManager"] = None
         self._push_manager: Optional["PushManager"] = None
         self._broker = ChatStreamBroker()
         self._events = EventsHub()
@@ -3226,11 +3224,6 @@ class ProjectChatManager:
             self._transcripts.delete_sdk_session_blob(
                 self._config.workspace_root, chat.session_id
             )
-        # Clean up associated provider sub-chats
-        manager = getattr(self, "_provider_subchat_manager", None)
-        if manager is not None:
-            manager.delete_parent_subchats(chat_id)
-
         # Explicit deletion is a tombstone, not merely a sidebar mutation.
         # Remove every recovery signal so startup repair cannot revive it.
         self._state.delete_context(ctx)
@@ -3305,13 +3298,6 @@ class ProjectChatManager:
             self._transcripts.delete_sdk_session_blob(
                 self._config.workspace_root, chat.session_id
             )
-        # Cancel any active provider sub-chats
-        manager = getattr(self, "_provider_subchat_manager", None)
-        if manager is not None:
-            subchats = manager.list_records(chat_id)
-            for sc in subchats:
-                if sc.status not in ("completed", "cancelled", "failed", "interrupted"):
-                    asyncio.ensure_future(manager.cancel_subchat(sc.subchat_id))
         self._unlink_chat_images(chat)
         chat.archived = True
         if result is not None:
@@ -3319,7 +3305,6 @@ class ProjectChatManager:
                 chat.archive_path = str(result.relative_to(self._config.workspace_root))
             except ValueError:
                 chat.archive_path = str(result)
-            self._append_subchats_to_transcript(result, chat_id)
         self._save()
         self._events.publish({
             "type": "chat_archived",
@@ -3335,49 +3320,6 @@ class ProjectChatManager:
             turn_count=turn_count,
             filtered_jsonl=filtered_jsonl,
         )
-
-    def _append_subchats_to_transcript(self, result: Path, chat_id: str) -> None:
-        manager = getattr(self, "_provider_subchat_manager", None)
-        if manager is None:
-            return
-        records = manager.list_records(chat_id)
-        if not records:
-            return
-
-        lines = ["", "## Agent handoffs", ""]
-        for r in records:
-            lines.append(f"### Handoff: {r.owner.label or r.owner.provider} ↔ {r.participant.label or r.participant.provider}")
-            lines.append(f"- **Participant Model**: {r.participant.model}")
-            lines.append(f"- **Status**: {r.status}")
-            lines.append(f"- **Duration**: {r.active_seconds:.1f}s")
-            lines.append(f"- **Messages**: {r.message_count}")
-            lines.append(f"- **Usage**: {r.input_tokens} in · {r.output_tokens} out")
-            lines.append("")
-            lines.append("**Transcript**:")
-            lines.append("")
-
-            events = manager.get_events(r.subchat_id)
-            for ev in events:
-                if ev.get("type") == "message":
-                    role = ev.get("role", "unknown").capitalize()
-                    content = ev.get("content", "")
-                    lines.append(f"**[{role}]**:")
-                    lines.append(content)
-                    lines.append("")
-                elif ev.get("type") == "tool_use":
-                    lines.append(f"*Called tool `{ev.get('tool_name')}`*")
-                    lines.append("")
-                elif ev.get("type") == "error":
-                    lines.append(f"*Error: {ev.get('message')}*")
-                    lines.append("")
-            lines.append("---")
-            lines.append("")
-
-        try:
-            with open(result, "a", encoding="utf-8") as f:
-                f.write("\n".join(lines))
-        except Exception:
-            logger.exception("Failed to append provider sub-chats to archived transcript %s", result)
 
     def run_archive_postprocess(
         self,
@@ -3579,20 +3521,6 @@ class ProjectChatManager:
         handover = self._format_handover_context(chat)
         if handover:
             parts.append(handover)
-
-        # Add a reminder about open agent handoffs
-        manager = getattr(self, "_provider_subchat_manager", None)
-        if manager is not None:
-            active_sc = [r for r in manager.list_records(chat.chat_id) if r.status == "waiting_owner"]
-            if active_sc:
-                reminder_lines = ["[REMINDER: Active agent handoffs waiting for owner input:"]
-                for sc in active_sc:
-                    reminder_lines.append(
-                        f"- Sub-chat ID: '{sc.subchat_id}'. "
-                        f"Participant: '{sc.participant.provider}' using model '{sc.participant.model}'."
-                    )
-                reminder_lines.append("Use handoff_send or handoff_close to send answers or close them.]")
-                parts.append("\n".join(reminder_lines))
 
         if unattended:
             # Without this the model reads a loop tick as a message the user
@@ -4236,7 +4164,7 @@ class ProjectChatManager:
                 )
                 resolved_surface = "legacy"
             else:
-                role = "handoff" if chat.chat_id.startswith("sub-") else "chat"
+                role = "chat"
                 mcp_url, mcp_token = service.credentials_for_chat(
                     chat, project, role=role
                 )
@@ -4653,11 +4581,6 @@ class ProjectChatManager:
             for chat_id, task in self._pending_subagent_watchers.items()
             if not task.done()
         )
-        manager = getattr(self, "_provider_subchat_manager", None)
-        if manager is not None:
-            for r in manager._records.values():
-                if r.status in ("created", "running"):
-                    ids.add(r.parent_chat_id)
         return sorted(ids)
 
     def begin_restart_drain(self) -> None:

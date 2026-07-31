@@ -104,7 +104,7 @@ def harness_skill_overrides() -> dict[str, str]:
 #
 # The cut is the ``_DESTRUCTIVE`` annotation in ``ciao/mcp_server.py``: deletes
 # and lifecycle actions (``chat_delete``, ``project_delete``, ``chat_stop``,
-# ``schedule_action``, ``loop_action``, ``handoff_cancel``, ``project_complete``)
+# ``schedule_action``, ``loop_action``, ``project_complete``)
 # are deliberately absent and still raise a card. ``tests/test_mcp_server.py``
 # cross-checks this tuple against the annotations declared on the tools, so a
 # new tool fails the suite until its policy is decided here.
@@ -133,12 +133,6 @@ AUTO_APPROVED_MCP_TOOLS: tuple[str, ...] = (
     "chat_archive",
     "delegate_spawn",
     "delegates_list",
-    "handoffs_list",
-    "handoff_start",
-    "handoff_send",
-    "handoff_events",
-    "handoff_close",
-    "handoff_extend",
     "schedules_list",
     "schedule_preview",
     "schedule_create",
