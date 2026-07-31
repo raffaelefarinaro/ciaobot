@@ -908,3 +908,88 @@ def test_auto_approved_policy_matches_tool_annotations() -> None:
     assert list(AUTO_APPROVED_MCP_TOOLS) == expected
     assert destructive.isdisjoint(AUTO_APPROVED_MCP_TOOLS)
     assert auto_approved_mcp_tool_names()[0] == f"mcp__ciaobot__{expected[0]}"
+
+
+class _StreamPcm:
+    """Fake pcm exposing only what `_file_surface_signal` reads."""
+
+    def __init__(self, stream: Any = None) -> None:
+        self._stream = stream
+
+    def get_active_stream(self, chat_id: str) -> Any:
+        return self._stream
+
+
+def _fake_ws(host: str) -> SimpleNamespace:
+    return SimpleNamespace(client=SimpleNamespace(host=host, port=1), headers={})
+
+
+def _file_surface_plane(
+    tmp_path: Path, *, stream: Any = None, connection_tracker: Any = None
+) -> CiaoControlPlane:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    config = SimpleNamespace(workspace_root=workspace)
+    return CiaoControlPlane(
+        config,
+        project_chat_manager=_StreamPcm(stream),
+        schedule_manager=SimpleNamespace(),
+        loop_manager=SimpleNamespace(),
+        connection_tracker=connection_tracker,
+    )
+
+
+def test_file_surface_signal_distinguishes_states(tmp_path: Path) -> None:
+    """The old bug collapsed "no stream", "stream with a stuck/absent
+    client", and "stream with a real client" into one int. The caller must
+    now be able to tell them apart."""
+    from ciao.web.connection_tracker import ConnectionTracker
+
+    tracker = ConnectionTracker()
+    conn_id = tracker.register(_fake_ws("10.0.0.5"), "chat", chat_id="chat-1")
+
+    # No active stream, empty chat_id: the plain zero case.
+    plane = _file_surface_plane(tmp_path, stream=None, connection_tracker=tracker)
+    assert plane._file_surface_signal("") == (0, "none")
+
+    # No active stream, but a real client socket for this chat.
+    assert plane._file_surface_signal("chat-1") == (1, "none")
+
+    # Active stream, but the tracker sees nobody for THIS chat_id: the
+    # orphaned-subscriber case that used to read as "viewers: 0" no matter
+    # which chat the real client was stuck watching.
+    plane = _file_surface_plane(tmp_path, stream=object(), connection_tracker=tracker)
+    assert plane._file_surface_signal("chat-2") == (0, "active")
+
+    # Active stream AND a real client for this chat: the healthy case.
+    assert plane._file_surface_signal("chat-1") == (1, "active")
+
+    tracker.unregister(conn_id)
+    assert plane._file_surface_signal("chat-1") == (0, "active")
+
+
+def test_file_surface_signal_without_connection_tracker(tmp_path: Path) -> None:
+    """A lifecycle path that never wired a tracker must degrade to 0
+    viewers, not raise."""
+    plane = _file_surface_plane(tmp_path, stream=object(), connection_tracker=None)
+    assert plane._file_surface_signal("chat-1") == (0, "active")
+
+
+def test_file_surface_returns_honest_signal_fields(tmp_path: Path) -> None:
+    from ciao.web.connection_tracker import ConnectionTracker
+
+    tracker = ConnectionTracker()
+    tracker.register(_fake_ws("10.0.0.5"), "chat", chat_id="chat-1")
+    plane = _file_surface_plane(tmp_path, stream=object(), connection_tracker=tracker)
+    (plane.config.workspace_root / "note.md").write_text("hi", encoding="utf-8")
+
+    principal = McpPrincipal(
+        token_id="t",
+        chat_id="chat-1",
+        project_id="p",
+        workspace="personal",
+        provider="codex",
+    )
+    result = plane.file_surface(principal, "note.md")
+    assert result["ok"] is True
+    assert result["data"] == {"path": "note.md", "viewers": 1, "stream_state": "active"}
