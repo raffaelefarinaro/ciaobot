@@ -153,7 +153,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/node/handover` | Handover active role to another node |
 | POST | `/api/node/peers` | Register or update node peer links |
 | POST | `/api/admin/snapshot` | Git add, commit, and push snapshot |
-| POST | `/api/admin/deploy` | Reinstall deps, rebuild frontend, and restart with latest code |
+| POST | `/api/admin/deploy` | Reinstall deps, rebuild frontend (plus the desktop app in dev mode), and restart with latest code |
 | GET | `/api/admin/status` | Read admin/deploy status |
 | GET | `/api/admin/skills` | List skills labelled as custom or GitHub/package |
 | POST | `/api/admin/skills/add` | Add an upstream skill from GitHub and synchronize it |
@@ -462,6 +462,10 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/loop
 
 # Deploy: snapshot, pull, build, restart. Don't call from inside the live PWA session
 # (CLAUDE.md "Never restart the ciao service yourself"); ask the operator to hit Deploy.
+# Steps run against CIAO_APP_REPO when set, else the directory holding the running
+# ciao package; a non-checkout returns 400 with a "locate checkout" step. With
+# CIAO_DEV_MODE and changed desktop/ sources it also rebuilds the Tauri app, then
+# quits and relaunches it just before the engine restart.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/admin/deploy"
 ```
 

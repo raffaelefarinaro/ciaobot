@@ -4712,7 +4712,13 @@ function restartAndReload(message: string) {
 }
 
 async function doDeploy(confirmWarnings = false) {
-  if (!confirmWarnings && !await askConfirm('Restart? This will pull latest, rebuild, and restart.', {
+  // In dev mode the restart also rebuilds the Tauri shell when desktop/ changed,
+  // which is a multi-minute Rust build that ends by quitting and relaunching the
+  // app. Worth warning about before the window disappears.
+  const devNote = localStatus.value?.dev_mode
+    ? '\n\nDev mode: if desktop/ changed, this also rebuilds the desktop app (several minutes) and relaunches it.'
+    : ''
+  if (!confirmWarnings && !await askConfirm(`Restart? This will pull latest, rebuild, and restart.${devNote}`, {
     title: 'Restart and redeploy',
     confirmLabel: 'Restart',
   })) return
