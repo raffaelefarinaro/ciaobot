@@ -12,7 +12,7 @@ license = "Apache-2.0"
 dependencies = [
   "claude-agent-sdk==0.2.128",
   # Agent-facing control plane shared by Claude Code and Codex.
-  "mcp==1.28.1",
+  "mcp>=1.29.0,<2.0",
   "openai==2.48.0",
   "starlette==0.52.1",
   "uvicorn[standard]==0.51.0",
