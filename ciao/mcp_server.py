@@ -1293,8 +1293,10 @@ class CiaoMcpService:
         async def delegates_list(chat_id: str = "") -> dict[str, Any]:
             """List delegates spawned by a chat and which are still running.
 
-            Read a delegate's own transcript with chat_get; stop a runaway one
-            with chat_stop.
+            To read a delegate's real transcript, take its session_id from
+            chat_get and read that provider session's JSONL — chat_get itself
+            returns metadata only, never messages. Stop a runaway delegate with
+            chat_stop.
             """
             return await self._invoke(
                 "delegates_list", lambda cp, p: cp.delegates_list(p, chat_id)

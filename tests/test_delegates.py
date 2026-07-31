@@ -137,6 +137,40 @@ def test_wake_prompt_reports_failure_and_names_the_child_chat(
     assert "chat_get" in prompt
 
 
+def test_wake_prompt_does_not_claim_chat_get_returns_a_transcript(
+    tmp_path: Path,
+) -> None:
+    """chat_get returns metadata only, and no MCP tool returns messages.
+
+    The first version of this prompt told the supervisor to "read the full
+    transcript with chat_get", which silently does nothing useful: it hands back
+    a ChatInfo. Caught on the first live delegate run.
+    """
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor")
+    child = _spawn_delegate(manager, parent, title="A")
+
+    prompt = manager._build_delegate_wake_prompt(
+        parent.chat_id,
+        [{
+            "chat_id": child.chat_id,
+            "title": "A",
+            "delegation_id": "",
+            "reply": "all clean",
+            "had_error": False,
+        }],
+    )
+
+    assert "transcript with chat_get" not in prompt
+    # It must point at the path that actually works, and say what chat_get is for.
+    assert "session_id" in prompt
+    assert "JSONL" in prompt
+    assert "metadata only" in prompt
+    # And it must still push the supervisor to verify rather than trust.
+    assert "verify the claimed work yourself" in prompt
+
+
 def test_wake_prompt_batches_and_notes_siblings_still_running(
     tmp_path: Path,
 ) -> None:

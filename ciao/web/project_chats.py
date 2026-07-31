@@ -6005,11 +6005,13 @@ class ProjectChatManager:
             lines.append(excerpt)
         lines.append("")
         lines.append(
-            "Review this against what you asked each delegate to do. Read a "
-            "delegate's full transcript with chat_get before trusting the "
-            "excerpt above, and verify claimed work yourself (diffs, tests) "
-            "rather than taking a delegate's word for it. Report to the user "
-            "only once you have checked."
+            "Review this against what you asked each delegate to do. The "
+            "excerpt above is truncated and is the delegate's own account, so "
+            "verify the claimed work yourself: re-run its commands, read the "
+            "diff, run the tests. To read a delegate's real transcript, take "
+            "its session_id from chat_get and read that provider session's "
+            "JSONL (chat_get returns metadata only, never messages). Report to "
+            "the user only once you have checked."
         )
         return "\n".join(lines)
 
