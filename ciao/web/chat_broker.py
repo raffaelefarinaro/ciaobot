@@ -704,10 +704,29 @@ class ChatStreamBroker:
         return stream
 
     def register(self, chat_id: str, stream: ChatStream) -> None:
+        """Replace this chat's stream without finishing whatever was there.
+
+        KNOWN HAZARD (not fixed here): if the previous entry was live
+        (`not previous.done`) and had a subscriber attached, this leaves
+        that subscriber stuck. `_attach_streams` (ciao/web/routes_chat.py)
+        only re-polls the broker after its current `_forward_stream` call
+        returns, and that call only returns once `subscribe()` yields the
+        `None` sentinel from `finish()`. A stream nobody ever finishes keeps
+        yielding keepalives (see `subscribe()` above) forever, so the client
+        looks alive but never re-attaches to the stream that replaced this
+        one. Both current call sites (`ProjectChatManager.start_stream` and
+        `_drain_between_turns`) route the old stream's `finish()` through an
+        `asyncio.Task.cancel()` that is fire-and-forget relative to this
+        call, so cleanup normally lands a tick later — a race window, not a
+        guarantee.
+        """
         self._streams[chat_id] = stream
 
     def clear(self, chat_id: str, stream: ChatStream | None = None) -> None:
-        """Drop the stream for this chat (only if it matches, to avoid racing)."""
+        """Drop the stream for this chat (only if it matches, to avoid racing).
+
+        Does not call `stream.finish()` — see the hazard note on `register`.
+        """
         current = self._streams.get(chat_id)
         if current is None:
             return

@@ -104,6 +104,20 @@ class ConnectionTracker:
         records.sort(key=lambda r: r.get("connected_at", ""))
         return records
 
+    def chat_client_count(self, chat_id: str) -> int:
+        """Count open `/ws/chat/{chat_id}` sockets for one chat.
+
+        Includes loopback sockets (unlike `list_clients`'s default UI use),
+        since a client on the same machine as the server is still a client.
+        """
+        if not chat_id:
+            return 0
+        return sum(
+            1
+            for record in self._connections.values()
+            if record.get("kind") == "chat" and record.get("chat_id") == chat_id
+        )
+
     def snapshot(self) -> dict[str, Any]:
         """Full summary for diagnostics."""
         return {

@@ -1861,6 +1861,20 @@ _DESKTOP_DROP_GRANT_TTL_SECONDS = 5 * 60
 _DESKTOP_DROP_MAX_FILES = 100
 
 
+def _looks_like_nsird_screenshot(path: Path) -> bool:
+    """True if ``path`` points into a macOS ``screencaptureui`` staging directory.
+
+    Files freshly captured to the clipboard by ``screencaptureui`` land under
+    ``.../TemporaryItems/NSIRD_screencaptureui_<id>/Screenshot *.png`` and the
+    kernel only lets the capturing process read them, so another process
+    reading them raises ``OSError`` (EPERM). Detect the case by path: match a
+    ``NSIRD_`` path component rather than the errno (EPERM and EACCES both map
+    to ``PermissionError``, so the subclass tells us nothing) or the literal
+    ``screencaptureui`` name, which the id suffix changes per capture.
+    """
+    return any(part.startswith("NSIRD_") for part in path.parts)
+
+
 def _desktop_drop_read_error(path: Path, exc: OSError) -> str:
     """User-facing text for a dropped file this process cannot read.
 
@@ -1869,7 +1883,18 @@ def _desktop_drop_read_error(path: Path, exc: OSError) -> str:
     first (`stage_dropped_file` in desktop/src-tauri/src/lib.rs). When there is
     no staged copy, because the shell is older than that fix or the drop was not
     an image, the raw errno tells the user nothing they can act on.
+
+    Three tiers, narrowest first. An NSIRD path gets screenshot-specific advice.
+    Any other permission denial still gets actionable text, just without naming
+    a screenshot, so a plain unreadable drop is not mislabelled and does not
+    regress to a raw errno. Anything else falls through to the errno, which is
+    all we know about it.
     """
+    if _looks_like_nsird_screenshot(path):
+        return (
+            "macOS won't let us read this screenshot directly. "
+            "Save it to disk first, then drag it in."
+        )
     if isinstance(exc, PermissionError):
         return (
             f"macOS would not let Ciaobot read {path.name}. Save the file to a "
