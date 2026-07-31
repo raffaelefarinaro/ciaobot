@@ -165,6 +165,35 @@ def test_static_proxy_target_mirrors_host_bundle(tmp_path: Path, monkeypatch):
     assert probe("/", method="POST") is None
 
 
+def test_unhashed_static_names_always_come_from_the_host(tmp_path: Path, monkeypatch):
+    """Only `/assets` is content-hashed, so only `/assets` is safe to serve locally.
+
+    Every other static name is stable across builds. Serving the local copy of
+    one would let a version-skewed client run its own service worker or manifest
+    against the host's bundle, which is exactly the skew client mode hides.
+    """
+    import ciao.web.app as web_app
+
+    static_dir = tmp_path / "static"
+    (static_dir / "assets").mkdir(parents=True)
+    for name in ("index.html", "sw.js", "manifest.json", "favicon.ico"):
+        (static_dir / name).write_text("local")
+    (static_dir / "assets" / "index-local.js").write_text("// local build")
+    monkeypatch.setattr(web_app, "STATIC_DIR", static_dir)
+
+    app, _mgr = _client_app(tmp_path / "state", static_dir)
+
+    def probe(path: str):
+        request = Request({"type": "http", "method": "GET", "path": path, "headers": []})
+        request.scope["app"] = app
+        return get_static_proxy_target(request)
+
+    for path in ("/index.html", "/sw.js", "/manifest.json", "/favicon.ico"):
+        assert probe(path) == "http://host.local:8443", path
+    # The hashed asset is still the local shortcut.
+    assert probe("/assets/index-local.js") is None
+
+
 def test_client_serves_host_index_and_local_device_page(tmp_path: Path, monkeypatch):
     import ciao.web.app as web_app
 

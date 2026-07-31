@@ -123,11 +123,17 @@ def local_static_file(path: str) -> Path | None:
     Hashed ``/assets`` names are content-derived, so a name the local build also
     has is byte-identical to the host's — serving it locally saves a hop without
     breaking the mirror. Names from a different host build are unknown here and
-    fall through to the proxy. ``index.html`` is always the host's: it is what
-    pins which asset hashes the browser asks for.
+    fall through to the proxy.
+
+    The hash is the whole argument, so only ``/assets`` qualifies. Every other
+    static name is stable across builds (``index.html``, ``sw.js``,
+    ``manifest.json``, the icons), meaning a version-skewed client would serve
+    its own older copy against the host's bundle and quietly stop being a
+    mirror. ``index.html`` in particular is what pins which asset hashes the
+    browser asks for.
     """
     rel = path.lstrip("/")
-    if not rel or rel == "index.html":
+    if not rel or not (rel == "assets" or rel.startswith("assets/")):
         return None
     root = _static_dir()
     try:
