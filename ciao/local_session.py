@@ -170,8 +170,76 @@ def sync_root(config) -> Path:
 # ── sync flow ────────────────────────────────────────────────────────────────
 
 
+_DIVERGED_BACKUP_MARKER = "[diverged-backup] "
+
+
+def is_diverged_backup(detail: str) -> bool:
+    """True when a ``push_branch`` *success* detail is a diverged-backup fallback.
+
+    Set when ``<branch>`` and ``origin/<branch>`` have diverged with a real
+    merge conflict: ``push_branch`` aborts the merge and pushes the current
+    commit to ``backup/<branch>-<sha>`` instead of returning a bare error
+    (issue #187). The branch-backup loop checks this to surface the backup
+    ref and back off, instead of retrying a merge that will conflict the
+    same way every 30 seconds.
+    """
+    return (detail or "").startswith(_DIVERGED_BACKUP_MARKER)
+
+
+def backup_ref_name(branch: str, short_sha: str) -> str:
+    """The remote ref name a diverged commit gets backed up to.
+
+    ``backup/<branch>-<short_sha>``: derived from the HEAD sha, so repeated
+    pushes of the same commit target an existing ref (a no-op) and new commits
+    get new refs. This keeps the backup-ref pile bounded by the number of
+    distinct commits, not by the number of ticks.
+    """
+    return f"backup/{branch}-{short_sha}"
+
+
+async def push_backup_ref(workspace: Path, *, branch: str) -> tuple[bool, str]:
+    """Push the current HEAD commit to a per-commit backup ref on origin.
+
+    Writes ``backup/<branch>-<short_sha>`` pointing at the current HEAD,
+    without touching the shared ``<branch>`` ref. This is the safe recovery
+    when ``<branch>`` and ``origin/<branch>`` have diverged non-linearly: it
+    preserves local state off-device with no rebase, no force-push, and no
+    merge. Idempotent: the ref name is derived from the HEAD sha, so repeated
+    ticks for the same commit hit an existing ref (a no-op push) and only new
+    commits create new refs.
+    """
+    rc_s, short_out, short_err = await _git(
+        workspace, "rev-parse", "--short=12", "HEAD"
+    )
+    short = (short_out or short_err).strip()
+    if rc_s != 0 or not short:
+        return False, f"could not resolve HEAD short sha for backup ref: {short_err or short_out}"
+    rc_f, full_out, full_err = await _git(workspace, "rev-parse", "HEAD")
+    full = (full_out or full_err).strip()
+    if rc_f != 0 or not full:
+        return False, f"could not resolve HEAD sha for backup ref: {full_err or full_out}"
+    ref = backup_ref_name(branch, short)
+    rc, out, err = await _git(
+        workspace, "push", "origin", f"{full}:refs/heads/{ref}", timeout=10.0
+    )
+    if rc != 0:
+        return False, err or out
+    return True, f"backed up to origin/{ref}"
+
+
 async def push_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
-    """Push the working branch for backup (sets upstream)."""
+    """Push the working branch for backup (sets upstream).
+
+    On a non-fast-forward rejection, fetches and merges ``origin/<branch>``
+    then retries. When that merge hits a real conflict, aborts it — verifying
+    the abort actually succeeded, so a mid-merge working tree is never left
+    behind — and falls back to pushing the current commit to a per-commit
+    ``backup/<branch>-<sha>`` ref rather than returning a bare error (see
+    :func:`is_diverged_backup`). This is deliberately not a rebase or a
+    force-push: the shared branch is left exactly as diverged as it was, and
+    a human resolves it later; the fallback only guarantees local state made
+    it off-device.
+    """
     rc, out, err = await _git(workspace, "push", "-u", "origin", branch, timeout=10.0)
     if rc != 0:
         detail = err or out
@@ -193,10 +261,37 @@ async def push_branch(workspace: Path, *, branch: str) -> tuple[bool, str]:
                 workspace, "merge", "--no-edit", f"origin/{branch}"
             )
             if rc_m != 0:
-                await _git(workspace, "merge", "--abort")
+                conflict_detail = err_m or out_m
+                rc_abort, out_abort, err_abort = await _git(workspace, "merge", "--abort")
+                if rc_abort != 0:
+                    # Can't confirm the working tree came back clean — don't
+                    # risk pushing anything from a repo that may still be
+                    # mid-merge.
+                    return (
+                        False,
+                        f"Push rejected (non-fast-forward) and auto-merge hit "
+                        f"conflict on origin/{branch}: {conflict_detail}; "
+                        f"merge --abort also failed ({err_abort or out_abort}) "
+                        f"— working tree may still be mid-merge",
+                    )
+                bok, bdetail = await push_backup_ref(workspace, branch=branch)
+                if bok:
+                    logger.warning(
+                        "Branch '%s' diverged from origin/%s with a real merge "
+                        "conflict; %s",
+                        branch, branch, bdetail,
+                    )
+                    return (
+                        True,
+                        f"{_DIVERGED_BACKUP_MARKER}branch '{branch}' diverged "
+                        f"from origin/{branch} (non-fast-forward merge "
+                        f"conflict): {conflict_detail}; {bdetail}",
+                    )
                 return (
                     False,
-                    f"Push rejected (non-fast-forward) and auto-merge hit conflict on origin/{branch}: {err_m or out_m}",
+                    f"Push rejected (non-fast-forward) and auto-merge hit "
+                    f"conflict on origin/{branch}: {conflict_detail}; "
+                    f"backup-ref fallback also failed: {bdetail}",
                 )
             rc2, out2, err2 = await _git(
                 workspace, "push", "-u", "origin", branch, timeout=10.0

@@ -684,6 +684,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     from ciao.local_session import (
         BACKUP_PUSH_INTERVAL,
         has_origin_remote,
+        is_diverged_backup,
         push_branch,
         workspace_branch,
     )
@@ -714,11 +715,19 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         last_failure_detail: str | None = None
         repeated_failures = 0
         auth_backoff = False
+        # Set once push_branch falls back to a per-commit backup ref because
+        # the shared branch has a real merge conflict with origin. Backs off
+        # the cadence the same way auth_backoff does: retrying a merge that
+        # will conflict the same way every 30s is pure waste, and the backup
+        # ref push is idempotent (its name is derived from the HEAD sha), so
+        # slower retries do not lose any coverage — only a fast-forwardable
+        # recovery (the shared push succeeding again) clears it.
+        diverged_backoff = False
         while True:
             try:
                 await asyncio.sleep(
                     BACKUP_PUSH_INTERVAL
-                    * (auth_backoff_multiplier if auth_backoff else 1)
+                    * (auth_backoff_multiplier if (auth_backoff or diverged_backoff) else 1)
                 )
                 async with job_runs.track(
                     "branch_backup", "Branch backup",
@@ -729,6 +738,27 @@ async def _run_server_locked(config: CiaoConfig) -> int:
                         continue
                     ok, detail = await push_branch(git_sync_root, branch=branch)
                     if ok:
+                        if is_diverged_backup(detail):
+                            if not diverged_backoff:
+                                diverged_backoff = True
+                                logger.warning(
+                                    "Branch backup: %s has a real merge "
+                                    "conflict with origin; backing off and "
+                                    "backing up to a per-commit ref instead "
+                                    "until a human resolves it. %s",
+                                    branch, detail,
+                                )
+                            run.extra["shared_branch_diverged"] = True
+                            run.extra["detail"] = detail
+                            last_failure_detail = None
+                            repeated_failures = 0
+                            continue
+                        if diverged_backoff:
+                            logger.info(
+                                "Branch backup: %s push to origin recovered; "
+                                "resuming normal cadence.", branch,
+                            )
+                            diverged_backoff = False
                         if last_failure_detail is not None:
                             logger.info("Branch backup push recovered.")
                         last_failure_detail = None

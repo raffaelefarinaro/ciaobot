@@ -367,6 +367,22 @@ async def test_manager_sync_skips_non_git_workspace(tmp_path: Path) -> None:
 # ── push_branch ──────────────────────────────────────────────────────────────
 
 
+def test_backup_ref_name_derived_from_branch_and_sha() -> None:
+    from ciao.local_session import backup_ref_name
+
+    assert backup_ref_name("develop", "20b76d38abc") == "backup/develop-20b76d38abc"
+
+
+def test_is_diverged_backup_only_matches_the_fallback_marker() -> None:
+    from ciao.local_session import is_diverged_backup
+
+    assert is_diverged_backup("[diverged-backup] branch 'main' diverged...") is True
+    assert is_diverged_backup("pushed") is False
+    assert is_diverged_backup("fatal: Authentication failed") is False
+    assert is_diverged_backup("") is False
+    assert is_diverged_backup(None) is False
+
+
 async def test_push_branch_recovers_from_non_fast_forward_via_automerge(tmp_path: Path) -> None:
     from ciao.local_session import push_branch
 
@@ -390,11 +406,9 @@ async def test_push_branch_recovers_from_non_fast_forward_via_automerge(tmp_path
     assert (check / "local-commit.md").exists()
 
 
-async def test_push_branch_non_fast_forward_conflict_aborts_cleanly(tmp_path: Path) -> None:
-    from ciao.local_session import push_branch
-
-    local, origin = _make_world(tmp_path, branch="main")
-    # Advance origin remotely on README.md
+def _make_conflicting_world(tmp_path: Path, *, branch: str = "main") -> tuple[Path, Path]:
+    """A world where origin and local diverge with a real content conflict."""
+    local, origin = _make_world(tmp_path, branch=branch)
     other = tmp_path / "other"
     _git(tmp_path, "clone", "-q", str(origin), str(other))
     _identify(other)
@@ -403,16 +417,128 @@ async def test_push_branch_non_fast_forward_conflict_aborts_cleanly(tmp_path: Pa
     _git(other, "commit", "-q", "-m", "remote readme")
     _git(other, "push", "-q")
 
-    # Conflicting edit on local
     _write(local / "README.md", "local version\n")
     _git(local, "add", "-A")
     _git(local, "commit", "-q", "-m", "local readme")
+    return local, origin
 
-    # push_branch should attempt auto-merge, detect conflict, abort cleanly, and return ok=False
+
+def _remote_refs(repo: Path, pattern: str) -> list[str]:
+    out = _git(repo, "ls-remote", "origin", pattern)
+    return [line for line in out.splitlines() if line.strip()]
+
+
+async def test_push_branch_merge_conflict_falls_back_to_backup_ref(tmp_path: Path) -> None:
+    from ciao.local_session import is_diverged_backup, push_branch
+
+    local, _ = _make_conflicting_world(tmp_path, branch="main")
+    local_sha = _git(local, "rev-parse", "HEAD")
+
+    # push_branch attempts auto-merge, hits a real conflict, aborts cleanly,
+    # and falls back to a per-commit backup ref instead of a bare error.
+    ok, detail = await push_branch(local, branch="main")
+    assert ok is True
+    assert is_diverged_backup(detail)
+    assert "conflict" in detail.lower()
+
+    # Merge was aborted: no conflict markers, no MERGE_HEAD, still on main,
+    # local's own commit (not a merge commit) is still HEAD.
+    assert "<<<<<<<" not in (local / "README.md").read_text()
+    assert "MERGE_HEAD" not in _git(local, "status")
+    assert workspace_branch(local) == "main"
+    assert _git(local, "rev-parse", "HEAD") == local_sha
+
+    # The commit landed on origin under a backup ref, not on main.
+    refs = _remote_refs(local, "refs/heads/backup/main-*")
+    assert len(refs) == 1
+    assert refs[0].split()[0] == local_sha
+
+
+async def test_push_branch_backup_ref_fallback_is_idempotent(tmp_path: Path) -> None:
+    """Repeated ticks against the same diverged HEAD must not pile up refs."""
+    from ciao.local_session import push_branch
+
+    local, _ = _make_conflicting_world(tmp_path, branch="main")
+
+    ok1, detail1 = await push_branch(local, branch="main")
+    ok2, detail2 = await push_branch(local, branch="main")
+    assert ok1 is True and ok2 is True
+    assert detail1 == detail2  # same HEAD, same backup ref, same message
+
+    refs = _remote_refs(local, "refs/heads/backup/main-*")
+    assert len(refs) == 1  # not two
+
+
+async def test_push_branch_conflict_and_backup_ref_push_both_fail(tmp_path: Path, monkeypatch) -> None:
+    from ciao.local_session import push_branch
+
+    local, _ = _make_conflicting_world(tmp_path, branch="main")
+
+    import ciao.local_session
+    orig_git = ciao.local_session._git
+
+    async def mock_git(workspace, *args, **kwargs):
+        if args[:1] == ("push",) and "refs/heads/backup/" in " ".join(args):
+            return 1, "", "fatal: could not read Username"
+        return await orig_git(workspace, *args, **kwargs)
+
+    monkeypatch.setattr(ciao.local_session, "_git", mock_git)
+
     ok, detail = await push_branch(local, branch="main")
     assert ok is False
     assert "conflict" in detail.lower()
-    # Confirm merge was aborted: no conflict markers in worktree, status clean
+    assert "backup-ref fallback also failed" in detail
+    # Merge was still aborted cleanly even though the fallback push failed.
     assert "<<<<<<<" not in (local / "README.md").read_text()
     assert "MERGE_HEAD" not in _git(local, "status")
+
+
+async def test_push_branch_skips_backup_ref_when_merge_abort_fails(tmp_path: Path, monkeypatch) -> None:
+    """If merge --abort can't be confirmed clean, never attempt the fallback push."""
+    from ciao.local_session import push_branch
+
+    local, _ = _make_conflicting_world(tmp_path, branch="main")
+
+    import ciao.local_session
+    orig_git = ciao.local_session._git
+    backup_push_calls = []
+
+    async def mock_git(workspace, *args, **kwargs):
+        if args[:2] == ("merge", "--abort"):
+            return 1, "", "fatal: There is no merge to abort"
+        if args[:1] == ("push",) and "refs/heads/backup/" in " ".join(args):
+            backup_push_calls.append(args)
+        return await orig_git(workspace, *args, **kwargs)
+
+    monkeypatch.setattr(ciao.local_session, "_git", mock_git)
+
+    ok, detail = await push_branch(local, branch="main")
+    assert ok is False
+    assert "may still be mid-merge" in detail
+    assert backup_push_calls == []  # never risked a push while abort was unconfirmed
+
+
+async def test_push_branch_auth_failure_unaffected_by_conflict_fallback(tmp_path: Path, monkeypatch) -> None:
+    """Auth failures never match the non-fast-forward markers, so push_branch
+    returns the raw error untouched — the branch-backup loop's existing
+    dedup + auth-backoff handling (main.py) is unaffected by this change."""
+    from ciao.local_session import is_diverged_backup, push_branch
+
+    local, _ = _make_world(tmp_path)
+    _write(local / "note.md", "x\n")
+
+    import ciao.local_session
+    orig_git = ciao.local_session._git
+
+    async def mock_git(workspace, *args, **kwargs):
+        if args[:2] == ("push", "-u"):
+            return 1, "", "fatal: Authentication failed for 'https://example/repo.git'"
+        return await orig_git(workspace, *args, **kwargs)
+
+    monkeypatch.setattr(ciao.local_session, "_git", mock_git)
+
+    ok, detail = await push_branch(local, branch="main")
+    assert ok is False
+    assert "authentication failed" in detail.lower()
+    assert is_diverged_backup(detail) is False
 
