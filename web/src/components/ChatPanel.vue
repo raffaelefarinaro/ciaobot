@@ -907,6 +907,7 @@ import {
   CODEX_FABLE_REAL_MODEL,
   isFableSelection,
   selectableThinkingLevels,
+  selectedModelEntry,
 } from '../lib/fableModel'
 import { renderMarkdown as renderSafeMarkdown } from '../lib/safeMarkdown'
 import { formatTime, formatDuration } from '../lib/time'
@@ -3233,7 +3234,16 @@ async function selectModel(value: string | string[], sectionKey = '') {
   // staying on a concrete provider, pick that provider's real model instead.
   const targetBucket = sectionBucket[sectionKey] || bucketForSelectedModel(model)
   const modelBucket = modelBucketForBucket(targetBucket)
-  const sameModelAndRoute = canonicalTier(model) === canonicalTier(chat.value.model) && targetBucket === activeBucket.value
+  // A fable chat stores the real model, so comparing raw ids would make
+  // "fable -> the plain model" look like re-picking what is already selected
+  // and return without doing anything.
+  const wasFablePseudo = isFableSelection(chat.value.model, chat.value.thinking_level)
+  const currentEntry = selectedModelEntry(
+    chat.value.model,
+    chat.value.thinking_level,
+    canonicalTier(chat.value.model),
+  )
+  const sameModelAndRoute = canonicalTier(model) === currentEntry && targetBucket === activeBucket.value
   if (sameModelAndRoute) {
     showModelPicker.value = false
     return
@@ -3254,6 +3264,11 @@ async function selectModel(value: string | string[], sectionKey = '') {
   }
   if (isFablePseudo) {
     updates.thinking_level = CODEX_FABLE_LEVEL
+  } else if (wasFablePseudo) {
+    // Leaving fable for a real entry: `ultra` was the pseudo-model's encoding,
+    // not a level the user chose, and the real model does support it, so the
+    // check below would keep it and land straight back on fable. Back to auto.
+    updates.thinking_level = ''
   } else {
     const targetLevels = modelsResponse.value?.model_reasoning_levels?.[model]
     if (

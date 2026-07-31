@@ -5,6 +5,7 @@ import {
   CODEX_FABLE_REAL_MODEL,
   isFableSelection,
   selectableThinkingLevels,
+  selectedModelEntry,
 } from './fableModel'
 
 const SOL_LEVELS = ['low', 'medium', 'high', CODEX_FABLE_LEVEL]
@@ -24,6 +25,34 @@ describe('isFableSelection', () => {
     expect(isFableSelection(CODEX_FABLE_REAL_MODEL, '')).toBe(false)
     expect(isFableSelection('gpt-5.6-terra', CODEX_FABLE_LEVEL)).toBe(false)
     expect(isFableSelection(undefined, undefined)).toBe(false)
+  })
+})
+
+describe('selectedModelEntry', () => {
+  it('reports fable when the chat is on the real model plus ultra', () => {
+    // Without this the picker compares gpt-5.6-sol against gpt-5.6-sol and
+    // treats "switch from fable to the plain model" as re-picking the current
+    // entry, so the click does nothing at all.
+    expect(
+      selectedModelEntry(CODEX_FABLE_REAL_MODEL, CODEX_FABLE_LEVEL, CODEX_FABLE_REAL_MODEL),
+    ).toBe(CODEX_FABLE_PSEUDO_MODEL)
+    expect(
+      selectedModelEntry(CODEX_FABLE_REAL_MODEL, CODEX_FABLE_LEVEL, CODEX_FABLE_REAL_MODEL),
+    ).not.toBe(CODEX_FABLE_REAL_MODEL)
+  })
+
+  it('passes the canonical tier through for everything else', () => {
+    expect(selectedModelEntry(CODEX_FABLE_REAL_MODEL, '', CODEX_FABLE_REAL_MODEL))
+      .toBe(CODEX_FABLE_REAL_MODEL)
+    expect(selectedModelEntry(CODEX_FABLE_REAL_MODEL, 'high', CODEX_FABLE_REAL_MODEL))
+      .toBe(CODEX_FABLE_REAL_MODEL)
+    expect(selectedModelEntry('claude-opus-5', null, 'opus')).toBe('opus')
+  })
+
+  it('distinguishes the two entries in both directions', () => {
+    const onFable = selectedModelEntry(CODEX_FABLE_REAL_MODEL, CODEX_FABLE_LEVEL, CODEX_FABLE_REAL_MODEL)
+    const onPlain = selectedModelEntry(CODEX_FABLE_REAL_MODEL, '', CODEX_FABLE_REAL_MODEL)
+    expect(onFable).not.toBe(onPlain)
   })
 })
 
