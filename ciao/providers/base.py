@@ -55,13 +55,24 @@ class ProviderCapabilities:
 
 
 def build_prompt(request: AgentRequest) -> str:
-    """Build the shared prompt text for a request."""
+    """Build the shared prompt text for a request.
+
+    Each entry carries the absolute on-disk path. `original_filename` is the
+    media-root ref (`web_<hash>.png`) for uploads replayed from a chat, which
+    looks like a relative path but resolves nowhere from the agent's cwd:
+    agents saw the image, tried to Read the bare name, got "file does not
+    exist", and concluded the attachment had failed. The path makes a Read
+    work, and the note says it is unnecessary.
+
+    Every line must stay in `N. text` form: `_IMAGE_MANIFEST_RE` in
+    ciao/web/routes_api.py strips this block from the replayed user bubble.
+    """
     if not request.images:
         return request.prompt
 
     lines = [request.prompt, "", "[INCOMING IMAGES]"]
     for index, image in enumerate(request.images, start=1):
-        summary = f"{index}. {image.original_filename}"
+        summary = f"{index}. {image.original_filename} (attached in this message; file: {image.path})"
         if image.caption:
             summary = f"{summary} - caption: {image.caption}"
         lines.append(summary)
