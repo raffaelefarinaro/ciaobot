@@ -56,6 +56,22 @@
           </div>
         </div>
 
+        <!-- Keyboard shortcuts (desktop app only) -->
+        <div v-if="inDesktopApp" class="card">
+          <div class="settings-card-header">
+            <p class="section-title">keyboard shortcuts</p>
+            <p class="hint">Global combos that work while a chat is open. Text fields keep their normal meaning: Cmd+A still selects all, and Esc inside the composer closes the slash-command picker instead of the chat.</p>
+          </div>
+          <ul class="shortcut-list">
+            <li><kbd>&#8984;T</kbd><span>Open a new chat in the default General project</span></li>
+            <li><kbd>&#8984;D</kbd><span>Toggle voice dictation (start / stop)</span></li>
+            <li><kbd>&#8984;A</kbd><span>Archive the open chat (asks to confirm)</span></li>
+            <li><kbd>Esc</kbd><span>Close the open chat (when not typing)</span></li>
+            <li><kbd>&#8593;&#8595;&#8592;&#8594;</kbd><span>On the home screen: move between recent chats</span></li>
+            <li><kbd>&#8629;</kbd><span>On the home screen: open the highlighted chat</span></li>
+          </ul>
+        </div>
+
         <!-- PWA password -->
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
@@ -5048,6 +5064,36 @@ async function doPackageUpdate() {
   height: 100%;
   min-width: 0;
   container-type: inline-size;
+}
+
+.shortcut-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.shortcut-list li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--fg2);
+}
+
+.shortcut-list kbd {
+  font-family: var(--font);
+  font-size: 12px;
+  min-width: 44px;
+  text-align: center;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg2);
+  color: var(--fg);
+  flex: 0 0 auto;
 }
 .pane-body {
   flex: 1;
