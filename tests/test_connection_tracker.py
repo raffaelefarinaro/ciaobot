@@ -106,6 +106,31 @@ def test_connected_clients_endpoint_returns_remote_only() -> None:
     assert payload["clients"][0]["client_host"] == "10.0.0.5"
 
 
+def test_chat_client_count_filters_by_chat_and_kind() -> None:
+    """`file_surface` relies on this being scoped to exactly one chat_id and
+    to `kind == "chat"` sockets, so a different chat's clients, or the
+    global `/ws/events` socket, must never inflate the count."""
+    tracker = ConnectionTracker()
+    a = tracker.register(_make_ws(host="10.0.0.1"), "chat", chat_id="chat-1")
+    b = tracker.register(_make_ws(host="10.0.0.2"), "chat", chat_id="chat-1")
+    c = tracker.register(_make_ws(host="10.0.0.3"), "chat", chat_id="chat-2")
+    events = tracker.register(_make_ws(host="10.0.0.4"), "events")
+
+    assert tracker.chat_client_count("chat-1") == 2
+    assert tracker.chat_client_count("chat-2") == 1
+    assert tracker.chat_client_count("chat-3") == 0
+    assert tracker.chat_client_count("") == 0
+
+    tracker.unregister(a)
+    assert tracker.chat_client_count("chat-1") == 1
+
+    tracker.unregister(b)
+    tracker.unregister(c)
+    tracker.unregister(events)
+    assert tracker.chat_client_count("chat-1") == 0
+    assert tracker.chat_client_count("chat-2") == 0
+
+
 def test_connected_clients_endpoint_no_tracker() -> None:
     app = Starlette(routes=[Route("/api/node/connected-clients", node_connected_clients_endpoint)])
     client = TestClient(app)

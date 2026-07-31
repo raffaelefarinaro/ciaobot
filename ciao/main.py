@@ -480,6 +480,11 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     app.state.transcript_store = transcripts
     app.state.project_chat_manager = pcm
 
+    from ciao.web.connection_tracker import ConnectionTracker
+
+    connection_tracker = ConnectionTracker()
+    app.state.connection_tracker = connection_tracker
+
     from ciao.provider_subchats import ProviderSubchatManager
     provider_subchat_manager = ProviderSubchatManager(
         config, pcm, config.state_path.parent / "provider_subchats.json"
@@ -513,6 +518,7 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             local_session_manager=app.state.local_session_manager,
             app_settings=app_settings,
             startup_tracker=tracker,
+            connection_tracker=connection_tracker,
         )
         mcp_service.bind(control_plane)
         pcm._mcp_service = mcp_service
@@ -525,9 +531,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         )
     app.state.push_manager = PushManager(config.state_path.parent, subject=push_subject)
     app.state.focused_chats = {}
-    from ciao.web.connection_tracker import ConnectionTracker
-
-    app.state.connection_tracker = ConnectionTracker()
     pcm._push_manager = app.state.push_manager
 
     # Google Workspace token health + server-managed re-login (issue #145).

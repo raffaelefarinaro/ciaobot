@@ -103,6 +103,7 @@ class CiaoControlPlane:
         app_settings: Any | None = None,
         startup_tracker: Any | None = None,
         lifecycle_callback: Callable[[int], Any] | None = None,
+        connection_tracker: Any | None = None,
     ) -> None:
         self.config = config
         self.pcm = project_chat_manager
@@ -114,6 +115,9 @@ class CiaoControlPlane:
         self.startup_tracker = startup_tracker
         self._lifecycle_callback = lifecycle_callback
         self._deferred_actions: dict[str, dict[str, Any]] = {}
+        # Optional: the app-wide ConnectionTracker, used by file_surface to
+        # report real connected clients instead of a per-turn stream proxy.
+        self.connection_tracker = connection_tracker
 
     def set_lifecycle_callback(self, callback: Callable[[int], Any]) -> None:
         """Attach the server restart callback after uvicorn is constructed."""
@@ -1138,33 +1142,59 @@ class CiaoControlPlane:
         """Validate a workspace file exists so the PWA can open it in the pinned
         preview panel. The actual surfacing happens client-side, keyed off this
         tool call showing up in the turn's trace — see extract_file_touches in
-        ciao/web/chat_broker.py.
+        ciao/web/chat_broker.py. Pin delivery does not read either field below;
+        neither one proves the panel opened or failed to open.
 
-        ``viewers`` is how many clients were subscribed to this chat's stream at
-        call time. Zero means the request was emitted into an empty room, which
-        is the one failure mode the server can see, so report it instead of
-        answering a bare ok that reads as "the panel is open".
+        ``viewers`` is how many `/ws/chat/{chat_id}` sockets are open for this
+        chat right now, from the connection tracker. It reflects real client
+        presence and is independent of whether a turn is streaming.
+
+        ``stream_state`` is ``"active"`` when a turn is currently streaming for
+        this chat, or ``"none"`` otherwise. It says nothing about whether a
+        client is attached to that turn.
         """
         root = Path(self.config.workspace_root).resolve()
         target = self._safe_relative(root, path, must_exist=True)
         if not target.is_file():
             raise ControlPlaneError("unsupported_file", "Only an existing file can be surfaced.")
+        viewers, stream_state = self._file_surface_signal(principal.chat_id)
         return _ok(
             {
                 "path": target.relative_to(root).as_posix(),
-                "viewers": self._chat_stream_viewers(principal.chat_id),
+                "viewers": viewers,
+                "stream_state": stream_state,
             }
         )
 
-    def _chat_stream_viewers(self, chat_id: str) -> int:
-        """Live subscriber count for a chat's in-flight stream (0 when none)."""
-        if not chat_id:
-            return 0
-        try:
-            stream = self.pcm.get_active_stream(chat_id)
-        except Exception:
-            return 0
-        return stream.subscriber_count if stream is not None else 0
+    def _file_surface_signal(self, chat_id: str) -> tuple[int, str]:
+        """Client-presence and stream-state signal for ``file_surface``.
+
+        ``viewers`` used to be ``ChatStream.subscriber_count``, which is 0
+        whenever there is no in-flight stream for the chat (the common case
+        between turns) and can also read 0 for a stream a client is genuinely
+        attached to: `_attach_streams` (ciao/web/routes_chat.py) only re-polls
+        the broker after its current stream forward finishes, so a client can
+        be stuck relaying a superseded `ChatStream` that was replaced in the
+        broker without `finish()` being called on it (see the orphaned-stream
+        note on `ChatStreamBroker.register`, ciao/web/chat_broker.py). That
+        stuck client shows up as 0 subscribers on the new stream, even though
+        its socket is open and its earlier `file_surface` calls did pin
+        successfully. Counting live `/ws/chat/{chat_id}` sockets via the
+        connection tracker instead reports client presence directly, so it is
+        not fooled by that broker-level state.
+        """
+        viewers = 0
+        if chat_id and self.connection_tracker is not None:
+            viewers = self.connection_tracker.chat_client_count(chat_id)
+        stream_state = "none"
+        if chat_id:
+            try:
+                stream = self.pcm.get_active_stream(chat_id)
+            except Exception:
+                stream = None
+            if stream is not None:
+                stream_state = "active"
+        return viewers, stream_state
 
     def file_history_list(
         self, principal: McpPrincipal, chat_id: str, file_path: str

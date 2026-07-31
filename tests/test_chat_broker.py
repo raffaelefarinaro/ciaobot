@@ -375,8 +375,15 @@ async def test_stream_replay_and_live_events() -> None:
 
 @pytest.mark.asyncio
 async def test_subscriber_count_tracks_attached_clients() -> None:
-    """`file_surface` reports this so a pin request into an empty room is
-    visible to the agent instead of reading as a successful surface."""
+    """Basic accounting: `subscribe()` adds a queue, `finish()` drains it.
+
+    `file_surface` no longer reads this to report client presence: it can
+    undercount a client stuck relaying a stream that was superseded in the
+    broker without `finish()` being called on it (see the orphaned-stream
+    note on `ChatStreamBroker.register` below). `control_plane.py` now
+    sources `viewers` from the connection tracker instead. This property
+    still needs to track attach/detach correctly for its own contract.
+    """
     stream = ChatStream("hi")
     assert stream.subscriber_count == 0
 

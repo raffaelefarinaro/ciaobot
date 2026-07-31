@@ -1600,10 +1600,15 @@ class CiaoMcpService:
             them to notice it. Ordinary Write/Edit calls no longer auto-open the
             panel; call this when a file is worth surfacing.
 
-            The pin happens in the browser, so this validates the path and reports
-            how many live clients were listening. ``viewers: 0`` means nobody had
-            the chat open and no panel opened: do not tell the user the file is in
-            their panel in that case."""
+            The pin happens in the browser: this call only validates the path and
+            reports two independent signals. ``viewers`` is how many open chat
+            sockets are watching this chat right now; it can be 0 right after a
+            successful pin, and nonzero even when the panel did not open.
+            ``stream_state`` is "active" or "none" and says whether a turn is
+            currently streaming for this chat, nothing about the panel. Never
+            read either field as proof the panel opened or failed to open: say
+            you called file_surface, and if the user reports nothing happened,
+            do not claim you already confirmed it failed."""
             return await self._invoke("file_surface", lambda cp, p: cp.file_surface(p, path))
 
         # File history/snapshot/restore are covered by the workspace git repo.
