@@ -776,10 +776,16 @@ class NotificationLogTail:
     come from the host over HTTP, not just from the local file. It starts unset:
     the first read only primes it, so a tray that launches before the server (or
     that just connected to a host with a full log) never replays a backlog.
+
+    ``primed`` tracks that first read separately from ``cursor``. An empty log at
+    tray start leaves the cursor unset, so keying "is this the priming read?" off
+    ``cursor is None`` would treat the *next* poll as priming too and swallow the
+    first real notification.
     """
 
     seen_entry_ids: set[str]
     cursor: float | None = None
+    primed: bool = False
 
     @classmethod
     def at_end(cls) -> "NotificationLogTail":
@@ -796,6 +802,8 @@ class NotificationLogTail:
         """Return entries appended since the last read and advance the tail."""
 
         since = self.cursor
+        priming = not self.primed
+        self.primed = True
         entries = fetch_notification_feed(port, since or 0.0)
         if entries is None:
             # Server down: fall back to this machine's own log, applying the
@@ -818,7 +826,7 @@ class NotificationLogTail:
                 for entry in entries
                 if _entry_ts(entry) >= newest
             }
-        return [] if since is None else fresh
+        return [] if priming else fresh
 
 
 def _load_web_state(workspace: Path) -> tuple[dict[str, dict], dict[str, dict]]:

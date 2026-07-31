@@ -812,6 +812,30 @@ def test_notification_log_tail_posts_every_entry_sharing_the_newest_stamp(
     assert tail.read_new(tmp_path, 8443) == []
 
 
+def test_notification_log_tail_posts_the_first_entry_after_an_empty_prime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tray started before any notification exists must not eat the first one.
+
+    The priming read returns nothing and leaves the cursor unset, so keying
+    "am I priming?" off the cursor swallowed the poll that carried entry one.
+    """
+    feed: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        menubar,
+        "fetch_notification_feed",
+        lambda _port, after, **_k: [e for e in feed if float(e["ts"]) >= after],
+    )
+
+    tail = menubar.NotificationLogTail.at_end()
+    assert tail.read_new(tmp_path, 8443) == []  # primes against an empty log
+
+    first = {"ts": 1.0, "title": "Ciaobot", "body": "first ever", "chat_id": "a"}
+    feed.append(first)
+    assert tail.read_new(tmp_path, 8443) == [first]
+    assert tail.read_new(tmp_path, 8443) == []
+
+
 def test_parse_inet_addresses_excludes_loopback_and_dupes() -> None:
     text = (
         "lo0: flags\n\tinet 127.0.0.1 netmask 0xff000000\n"

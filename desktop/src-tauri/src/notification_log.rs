@@ -12,10 +12,15 @@ use std::{collections::HashSet, fs, path::PathBuf};
 ///
 /// The cursor starts unset and the first poll only primes it, so launching the
 /// app (or connecting to a host with a full log) never replays a backlog.
+///
+/// `primed` records that first poll separately from `cursor`. An empty log at
+/// launch leaves the cursor unset, so deriving "is this the priming poll?" from
+/// `cursor.is_none()` would prime twice and swallow the first real entry.
 #[derive(Debug)]
 pub struct NotificationLogTail {
     path: PathBuf,
     cursor: Option<f64>,
+    primed: bool,
     seen: HashSet<String>,
 }
 
@@ -32,6 +37,7 @@ impl NotificationLogTail {
         Self {
             path: path.into(),
             cursor: None,
+            primed: false,
             seen: HashSet::new(),
         }
     }
@@ -46,7 +52,8 @@ impl NotificationLogTail {
     /// `fetched` is the engine's answer, or `None` when the call failed — the
     /// caller owns the HTTP so this stays testable without a server.
     pub fn poll(&mut self, fetched: Option<Vec<Value>>) -> Vec<Value> {
-        let priming = self.cursor.is_none();
+        let priming = !self.primed;
+        self.primed = true;
         let entries = match fetched {
             Some(entries) => entries,
             // Engine down: read this machine's own log, applying the cursor the
@@ -116,6 +123,20 @@ mod tests {
         let posted = tail.poll(Some(vec![entry(10.0, "old"), entry(11.0, "new")]));
         assert_eq!(posted.len(), 1);
         assert_eq!(posted[0]["title"], "new");
+    }
+
+    // A tray launched before any notification exists primes against an empty
+    // feed, which leaves the cursor unset. Deriving "am I priming?" from the
+    // cursor therefore primed twice and swallowed the first real entry.
+    #[test]
+    fn the_first_entry_after_an_empty_prime_is_posted() {
+        let mut tail = NotificationLogTail::at_end("/nonexistent");
+        assert!(tail.poll(Some(vec![])).is_empty(), "nothing to replay yet");
+
+        let posted = tail.poll(Some(vec![entry(1.0, "first ever")]));
+        assert_eq!(posted.len(), 1);
+        assert_eq!(posted[0]["title"], "first ever");
+        assert!(tail.poll(Some(vec![entry(1.0, "first ever")])).is_empty());
     }
 
     // The cursor is inclusive, so the boundary entry is re-sent every poll and
