@@ -1,7 +1,7 @@
 <template>
   <div v-if="store.activeChatsAll.length" class="home-recent">
     <div class="home-recent-label">jump back in</div>
-    <div class="home-recent-grid">
+    <div class="home-recent-grid" ref="gridEl">
       <button
         type="button"
         v-for="chat in store.activeChatsAll"
@@ -15,7 +15,10 @@
         :title="chat.local === false ? 'This chat lives on another instance' : chat.title"
         @click="chat.local !== false && store.switchChat(chat.chat_id)"
       >
-        <span class="home-recent-top">
+        <span
+          class="home-recent-top"
+          :data-workspace-color="colorOf(chat)"
+        >
           <span
             v-if="chat.title_status === 'pending'"
             class="title-shimmer"
@@ -51,7 +54,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
 import type { ChatInfo } from '../lib/types'
@@ -59,6 +62,54 @@ import { colorForWorkspace, type WorkspaceColorId } from '../lib/workspaceColors
 
 const store = useProjectStore()
 const taskStore = useTaskStore()
+
+// ── Keyboard navigation (desktop app) ────────────────────────────────
+// ChatLayout owns the global keydown; it calls onArrow() here. We move DOM
+// focus between the openable chat cards (grid-aware: Up/Down jump a row,
+// Left/Right a column). Remote chats are disabled buttons and skipped.
+// Enter is left to the browser: a focused card button activates on Enter,
+// which triggers its @click → switchChat, so no openFocused() is needed.
+const gridEl = ref<HTMLElement | null>(null)
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, v))
+}
+
+// Resolved column count of the responsive grid (auto-fit minmax(240px,1fr)).
+function columnCount(): number {
+  const grid = gridEl.value
+  if (!grid) return 1
+  const cols = getComputedStyle(grid).gridTemplateColumns.trim().split(/\s+/).filter(Boolean)
+  return Math.max(1, cols.length)
+}
+
+function openableCards(): HTMLButtonElement[] {
+  const grid = gridEl.value
+  if (!grid) return []
+  return Array.from(grid.querySelectorAll<HTMLButtonElement>('.home-recent-card:not([disabled])'))
+}
+
+// Returns true if the key was consumed (i.e. there were chats to navigate).
+function onArrow(key: string): boolean {
+  const cards = openableCards()
+  if (!cards.length) return false
+  const cols = columnCount()
+  const cur = cards.findIndex(c => c === document.activeElement)
+  let next: number
+  switch (key) {
+    case 'ArrowRight': next = cur < 0 ? 0 : clamp(cur + 1, 0, cards.length - 1); break
+    case 'ArrowLeft': next = cur < 0 ? 0 : clamp(cur - 1, 0, cards.length - 1); break
+    case 'ArrowDown': next = cur < 0 ? 0 : clamp(cur + cols, 0, cards.length - 1); break
+    case 'ArrowUp': next = cur < 0 ? 0 : clamp(cur - cols, 0, cards.length - 1); break
+    default: return false
+  }
+  if (next === cur && cur >= 0) return true // at the edge: still consume the key
+  cards[next].focus()
+  cards[next].scrollIntoView({ block: 'nearest' })
+  return true
+}
+
+defineExpose({ onArrow })
 
 // Loop marker, same semantics as the sidebar: a loop-driven chat produces new
 // turns on its own, which is worth knowing before you open it. ChatLayout
@@ -149,6 +200,11 @@ function colorOf(chat: ChatInfo): WorkspaceColorId {
 .home-recent-card:active {
   transform: translateY(1px);
 }
+.home-recent-card:focus-visible {
+  outline: none;
+  border-color: var(--accent, #f2555a);
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent, #f2555a);
+}
 .home-recent-card.remote {
   opacity: 0.6;
   cursor: default;
@@ -199,7 +255,10 @@ function colorOf(chat: ChatInfo): WorkspaceColorId {
 }
 .loop-mark {
   flex: 0 0 auto;
-  font-size: 11px;
+  /* Matches the sidebar's loop marker: 11px was too small for a thin outline
+     glyph, and a hardcoded px ignored the Appearance font scale. */
+  font-size: var(--text-lg);
+  font-weight: 700;
   line-height: 1;
   color: var(--accent);
 }
