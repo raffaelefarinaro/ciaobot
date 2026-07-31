@@ -141,6 +141,12 @@ export interface ChatInfo {
   fork_root_chat_id?: string
   fork_index?: number
   fork_base_title?: string
+  // Backlink to the schedule that created or drives this chat. Empty for
+  // interactive chats. Drives the "triggered by schedule X" banner in
+  // ChatPanel (mirrors the loop banner, but durable across schedule runs
+  // because a schedule spawns a new chat each time).
+  schedule_id?: string
+  schedule_title?: string
 }
 
 export interface ChatRetryInfo {

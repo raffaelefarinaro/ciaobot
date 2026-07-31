@@ -820,6 +820,14 @@ class ChatInfo:
     fork_root_chat_id: str = ""
     fork_index: int = 0
     fork_base_title: str = ""
+    # Backlink to the schedule that created or drives this chat. Stamped in
+    # prepare_schedule_chat for both branches (web_project_id spawns a new
+    # chat per run, web_chat_id reuses a fixed chat). Lets the PWA show a
+    # "triggered by schedule X" banner on the chat that survives later runs
+    # (a schedule is 1:many with chats, so unlike loops the link can't live
+    # only on the automation side). Empty for interactive chats.
+    schedule_id: str = ""
+    schedule_title: str = ""
 
     def to_dict(self, *, local: bool | None = None) -> dict:
         d = {
@@ -844,6 +852,8 @@ class ChatInfo:
             "fork_root_chat_id": self.fork_root_chat_id,
             "fork_index": self.fork_index,
             "fork_base_title": self.fork_base_title,
+            "schedule_id": self.schedule_id,
+            "schedule_title": self.schedule_title,
             "retry": {
                 "status": self.retry_status,
                 "next_at": self.retry_next_at,
@@ -1126,6 +1136,8 @@ class ProjectChatManager:
                 fork_root_chat_id=cd.get("fork_root_chat_id", ""),
                 fork_index=int(cd.get("fork_index", 0) or 0),
                 fork_base_title=cd.get("fork_base_title", ""),
+                schedule_id=cd.get("schedule_id", ""),
+                schedule_title=cd.get("schedule_title", ""),
             )
         logger.info(
             "Restored %d project(s) and %d chat(s)",
@@ -1210,6 +1222,8 @@ class ProjectChatManager:
                     "fork_root_chat_id": c.fork_root_chat_id,
                     "fork_index": c.fork_index,
                     "fork_base_title": c.fork_base_title,
+                    "schedule_id": c.schedule_id,
+                    "schedule_title": c.schedule_title,
                 }
                 for cid, c in self._chats.items()
             },
@@ -6490,6 +6504,14 @@ class ProjectChatManager:
 
         web_project_id = getattr(entry, "web_project_id", None)
         web_chat_id = getattr(entry, "web_chat_id", None)
+        sched_id = getattr(entry, "schedule_id", "") or ""
+        sched_title = (getattr(entry, "title", "") or "").strip()
+
+        def _stamp(chat: ChatInfo) -> None:
+            # Record the schedule backlink so the PWA can show a
+            # "triggered by schedule X" banner that survives later runs.
+            chat.schedule_id = sched_id
+            chat.schedule_title = sched_title
 
         if web_project_id:
             project = self._projects.get(web_project_id)
@@ -6517,6 +6539,8 @@ class ProjectChatManager:
                 mode=mode,
                 provider=provider or None,
             )
+            _stamp(chat)
+            self._save()
             return chat.chat_id
         elif web_chat_id:
             target_chat = self._chats.get(web_chat_id)
@@ -6525,6 +6549,8 @@ class ProjectChatManager:
                 return None
             target_chat.model = model
             target_chat.mode = mode
+            _stamp(target_chat)
+            self._save()
             return cast(str, web_chat_id)
         elif getattr(entry, "scope", "") == "system":
             project = self._resolve_schedule_project("", entry)
@@ -6550,6 +6576,8 @@ class ProjectChatManager:
                 mode=mode,
                 provider=provider or None,
             )
+            _stamp(chat)
+            self._save()
             return chat.chat_id
         else:
             logger.warning("Schedule has no web target, skipping")
