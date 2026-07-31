@@ -60,6 +60,7 @@ ciao/                          Python backend (Starlette).
   sync_skills.py               Install packaged stock skills and mirror workspace skills, commands, and agents into `.claude/`. CLI: `ciao sync-skills`.
   skills_sync.py               Change-detect upstream skills in skills-lock.json so `ciao sync-skills` updates only moved repos. CLI: `ciao skills-sync`.
   cleanup_sdk_blobs.py         Maintenance: drop archived Claude SDK JSONL blobs. CLI: `ciao cleanup-sdk-blobs`.
+  label_hygiene.py             Audit open GitHub issue labels against the title-prefix convention in `ciao/system_prompt.md` and add missing classification labels. Pure decision function (`plan_label_actions`) separated from the `gh`-shelling side-effecting layer; only ever adds a label, never removes one; idempotent. `[Agent]` and unrecognized/retired prefixes (e.g. `[Report]`) are reported for human decision, not auto-labeled. CLI: `ciao label-hygiene` (dry-run by default, `--apply` writes, `--json` for automation). Not yet wired to a schedule or loop.
   memory_injector.py           Read ~/.ciao/memory.md and ~/.ciao/user.md at session start, render as a system-prompt block; also injects the baseline Ciaobot system instructions into every chat.
   memory_tool.py               Bounded memory-file validation and CRUD used by CLI and the application control plane.
   memory_proposals.py          Scan archived `## Session insights` sections, propose memory entries to the vault's Workspace/Memory-Proposals.md.

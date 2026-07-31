@@ -1645,6 +1645,17 @@ def _cleanup_sdk_blobs_command(args: argparse.Namespace) -> int:
     return cleanup_sdk_blobs.main(module_args)
 
 
+def _label_hygiene_command(args: argparse.Namespace) -> int:
+    from ciao import label_hygiene
+
+    module_args = ["--repo", args.repo, "--limit", str(args.limit)]
+    if args.apply:
+        module_args.append("--apply")
+    if args.json:
+        module_args.append("--json")
+    return label_hygiene.main(module_args)
+
+
 def _skills_list_command(args: argparse.Namespace) -> int:
     from ciao.skills_inventory import build_skill_inventory
 
@@ -2428,6 +2439,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Actually delete matching blobs. Default is dry-run.",
     )
     cleanup_parser.set_defaults(func=_cleanup_sdk_blobs_command)
+
+    label_hygiene_parser = subparsers.add_parser(
+        "label-hygiene",
+        help="Audit open-issue labels against the title-prefix convention. Dry-run by default.",
+    )
+    label_hygiene_parser.add_argument(
+        "--repo",
+        default="raffaelefarinaro/ciaobot",
+        help="Target GitHub repo (owner/name).",
+    )
+    label_hygiene_parser.add_argument(
+        "--limit",
+        type=int,
+        default=100,
+        help="Maximum open issues to scan.",
+    )
+    label_hygiene_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually add missing labels via gh issue edit. Default is dry-run.",
+    )
+    label_hygiene_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the structured report as JSON instead of text.",
+    )
+    label_hygiene_parser.set_defaults(func=_label_hygiene_command)
 
     skills_sync_parser = subparsers.add_parser(
         "skills-sync",
