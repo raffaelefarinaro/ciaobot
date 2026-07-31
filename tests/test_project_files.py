@@ -534,7 +534,11 @@ def test_native_desktop_drop_keeps_generic_error_for_non_screenshot(tmp_path: Pa
     error = body["errors"][0]
     assert error["filename"] == dropped_image.name
     assert "Save it to disk first" not in error["error"]
-    assert "Errno" in error["error"]
+    # Not the screenshot message, but still not a raw errno: leaking the errno
+    # to the user is the very complaint issue #238 was filed about.
+    assert "Errno" not in error["error"]
+    assert dropped_image.name in error["error"]
+    assert "Save the file to a folder first" in error["error"]
 
 
 def test_native_desktop_drop_clears_staged_copies(tmp_path: Path) -> None:

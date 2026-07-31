@@ -1882,14 +1882,23 @@ def _desktop_drop_read_error(path: Path, exc: OSError) -> str:
     the app that received the drop may read, so the desktop shell stages a copy
     first (`stage_dropped_file` in desktop/src-tauri/src/lib.rs). When there is
     no staged copy, because the shell is older than that fix or the drop was not
-    an image, the raw errno tells the user nothing they can act on. Detect that
-    NSIRD case by path and return advice; any other read error stays generic so
-    an unrelated failure is not mislabelled as a screenshot problem.
+    an image, the raw errno tells the user nothing they can act on.
+
+    Three tiers, narrowest first. An NSIRD path gets screenshot-specific advice.
+    Any other permission denial still gets actionable text, just without naming
+    a screenshot, so a plain unreadable drop is not mislabelled and does not
+    regress to a raw errno. Anything else falls through to the errno, which is
+    all we know about it.
     """
     if _looks_like_nsird_screenshot(path):
         return (
             "macOS won't let us read this screenshot directly. "
             "Save it to disk first, then drag it in."
+        )
+    if isinstance(exc, PermissionError):
+        return (
+            f"macOS would not let Ciaobot read {path.name}. Save the file to a "
+            "folder first, then drag it in."
         )
     return str(exc)
 
