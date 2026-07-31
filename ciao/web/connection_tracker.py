@@ -17,19 +17,29 @@ from typing import Any
 from starlette.websockets import WebSocket
 
 
+def _peer_host(websocket: WebSocket) -> str:
+    """The TCP peer address, which no caller can forge."""
+    client = websocket.client
+    if client is not None:
+        host = getattr(client, "host", None)
+        if isinstance(host, str) and host:
+            return host
+    return "unknown"
+
+
 def _client_host(websocket: WebSocket) -> str:
-    """Best-guess client IP, preferring the last proxy hop when present."""
+    """Best-guess client IP for display, preferring the last proxy hop.
+
+    `X-Forwarded-For` is caller-supplied, so this is a label only. Never derive
+    a trust decision from it: see ``_connection_record``, which classifies
+    ``is_local`` from the TCP peer instead.
+    """
     forwarded = websocket.headers.get("x-forwarded-for")
     if forwarded:
         first = forwarded.split(",")[0].strip()
         if first:
             return first
-    client = websocket.client
-    if client is not None:
-        host = getattr(client, "host", None)
-        if isinstance(host, str):
-            return host
-    return "unknown"
+    return _peer_host(websocket)
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -61,7 +71,10 @@ def _connection_record(
         "client_port": port,
         "user_agent": websocket.headers.get("user-agent", ""),
         "connected_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-        "is_local": _is_loopback_host(host),
+        # From the TCP peer, never the displayed host: `is_local` hides a
+        # connection from the "connected clients" panel, and a remote caller
+        # sending `X-Forwarded-For: 127.0.0.1` must not be able to hide itself.
+        "is_local": _is_loopback_host(_peer_host(websocket)),
         **extra,
     }
 

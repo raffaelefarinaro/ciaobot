@@ -67,6 +67,28 @@ def test_tracker_prefers_x_forwarded_for() -> None:
     tracker.unregister(conn_id)
 
 
+def test_a_forged_forwarded_for_cannot_claim_to_be_local() -> None:
+    """`is_local` hides a connection from the host's panel, so it must not be
+    derivable from a header the caller writes."""
+    tracker = ConnectionTracker()
+    ws = _make_ws(host="203.0.113.9", forwarded="127.0.0.1")
+    tracker.register(ws, "events")
+
+    record = tracker.list_clients()[0]
+    # The header still labels the row, it just carries no authority.
+    assert record["client_host"] == "127.0.0.1"
+    assert record["is_local"] is False
+    assert [r["client_host"] for r in tracker.list_clients(remote_only=True)] == ["127.0.0.1"]
+
+
+def test_a_real_loopback_peer_is_still_local_behind_a_forwarded_header() -> None:
+    tracker = ConnectionTracker()
+    tracker.register(_make_ws(host="127.0.0.1", forwarded="203.0.113.9"), "events")
+
+    assert tracker.list_clients()[0]["is_local"] is True
+    assert tracker.list_clients(remote_only=True) == []
+
+
 def test_connected_clients_endpoint_returns_remote_only() -> None:
     app = Starlette(routes=[Route("/api/node/connected-clients", node_connected_clients_endpoint)])
     tracker = ConnectionTracker()
