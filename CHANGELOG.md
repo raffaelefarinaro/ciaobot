@@ -122,6 +122,7 @@
 - docs(release): correct two stale traps (`7659d67`)
 - docs(release): record the cargo prerequisite (`36b2385`)
 - docs: correct comments the v0.7.0 changes made wrong (`f8259ea`)
+- chore: drop the author's absolute paths from the repo (`3fc96bd`)
 
 ## v0.6.5 - 2026-07-30
 
