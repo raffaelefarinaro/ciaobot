@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 import yaml
 
@@ -23,6 +24,14 @@ _FRONTMATTER_RE = re.compile(
     re.DOTALL,
 )
 _FRONTMATTER_EXEMPT = {"index.md", "memory.md", "log.md"}
+
+_INLINE_MARKDOWN_LINK_RE = re.compile(
+    r"!?\[[^\]\n]*\]\(\s*(<[^>\n]+>|[^\s)]+)"
+    r"(?:\s+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^()\n]*\)))?\s*\)"
+)
+_REFERENCE_DESTINATION_RE = re.compile(
+    r"(?m)^[ \t]{0,3}\[[^\]\n]+\]:[ \t]*(<[^>\n]+>|[^\s]+)"
+)
 
 
 @dataclass(frozen=True)
@@ -67,7 +76,7 @@ def _links_in(text: str):
     """Yield wikilink targets in ``text``, skipping code spans/fences,
     backslash-escaped brackets, and ``<placeholder>`` template syntax — none
     of which are real links."""
-    stripped = _INLINE_CODE_RE.sub("", _FENCE_RE.sub("", text))
+    stripped = _without_code(text)
     for m in WIKILINK_RE.finditer(stripped):
         if m.start() > 0 and stripped[m.start() - 1] == "\\":
             continue  # escaped \[[...]] — documenting the syntax
@@ -120,6 +129,67 @@ def _frontmatter_error(file: _VaultFile) -> dict[str, str] | None:
     return None
 
 
+def _without_code(text: str) -> str:
+    return _INLINE_CODE_RE.sub("", _FENCE_RE.sub("", text))
+
+
+def _markdown_destinations_in(text: str):
+    stripped = _without_code(text)
+    matches = [
+        (match.start(), match.group(1), match)
+        for pattern in (_INLINE_MARKDOWN_LINK_RE, _REFERENCE_DESTINATION_RE)
+        for match in pattern.finditer(stripped)
+    ]
+    for _, raw, match in sorted(matches, key=lambda item: item[0]):
+        if match.start() > 0 and stripped[match.start() - 1] == "\\":
+            continue
+        target = raw.strip()
+        if target.startswith("<") and target.endswith(">"):
+            target = target[1:-1].strip()
+        yield target
+
+
+def _markdown_link_error(
+    *,
+    vault_root: Path,
+    file: _VaultFile,
+    target: str,
+    valid_paths: set[str],
+) -> dict[str, str] | None:
+    if not target or "<" in target or ">" in target:
+        return None
+    if target.startswith(("//", "/", "#")):
+        return None
+
+    parsed = urlsplit(target)
+    if parsed.scheme or parsed.netloc:
+        return None
+    decoded_path = unquote(parsed.path)
+    if not decoded_path:
+        return None
+
+    root = vault_root.resolve()
+    resolved = (file.path.parent / decoded_path).resolve(strict=False)
+    try:
+        relative = resolved.relative_to(root)
+    except ValueError:
+        return {
+            "source": file.relative.as_posix(),
+            "target": target,
+            "resolved": Path(decoded_path).as_posix(),
+            "kind": "outside_vault",
+        }
+
+    if relative.as_posix() in valid_paths:
+        return None
+    return {
+        "source": file.relative.as_posix(),
+        "target": target,
+        "resolved": relative.as_posix(),
+        "kind": "missing_target",
+    }
+
+
 def run_validation(vault_root: Path) -> dict:
     """Scan the vault directory for actionable health findings."""
     issues: dict[str, list[Any]] = {
@@ -130,16 +200,18 @@ def run_validation(vault_root: Path) -> dict:
         "broken_markdown_links": [],
     }
 
+    valid_paths = {Path(".").as_posix()}
     vault_files: list[_VaultFile] = []
     for path in sorted(vault_root.rglob("*")):
-        if path.suffix.lower() != ".md":
-            continue
         try:
             rel = path.relative_to(vault_root)
         except ValueError:
             continue
 
         if any(part in EXCLUDE_DIRS for part in rel.parts):
+            continue
+        valid_paths.add(rel.as_posix())
+        if path.suffix.lower() != ".md":
             continue
         try:
             content = path.read_text(encoding="utf-8")
@@ -236,5 +308,16 @@ def run_validation(vault_root: Path) -> dict:
 
         if not has_incoming:
             issues["orphans"].append(rel_str)
+
+    for file in vault_files:
+        for target in _markdown_destinations_in(file.content):
+            error = _markdown_link_error(
+                vault_root=vault_root,
+                file=file,
+                target=target,
+                valid_paths=valid_paths,
+            )
+            if error is not None:
+                issues["broken_markdown_links"].append(error)
 
     return issues

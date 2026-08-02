@@ -30,6 +30,13 @@ def _page(body: str = "", *, page_type: object = "note") -> str:
     return f"---\n{rendered_type}\n---\n{body}"
 
 
+def _single_page_vault(tmp_path: Path, body: str) -> Path:
+    vault = tmp_path / "memory-vault"
+    vault.mkdir()
+    (vault / "Page.md").write_text(_page(body), encoding="utf-8")
+    return vault
+
+
 @pytest.mark.parametrize(
     ("content", "kind"),
     [
@@ -93,6 +100,90 @@ def test_readme_still_requires_frontmatter(tmp_path: Path) -> None:
     errors = vault_lint.run_validation(vault)["frontmatter_errors"]
     assert [(item["source"], item["kind"]) for item in errors] == [
         ("README.md", "missing_frontmatter")
+    ]
+
+
+def test_relative_markdown_links_images_and_references(tmp_path: Path) -> None:
+    vault = _single_page_vault(
+        tmp_path,
+        "[ok](notes/ok.md)\n"
+        "![missing image](images/missing.png)\n"
+        "[ref]: notes/missing.md\n",
+    )
+    (vault / "notes").mkdir()
+    (vault / "notes" / "ok.md").write_text(_page("ok"), encoding="utf-8")
+
+    broken = vault_lint.run_validation(vault)["broken_markdown_links"]
+
+    assert [(item["target"], item["kind"]) for item in broken] == [
+        ("images/missing.png", "missing_target"),
+        ("notes/missing.md", "missing_target"),
+    ]
+
+
+def test_markdown_link_normalization(tmp_path: Path) -> None:
+    vault = _single_page_vault(
+        tmp_path,
+        '[title](notes/ok.md "Optional title")\n'
+        "[query](notes/ok.md?raw=1#section)\n"
+        "[encoded](notes/space%20name.md)\n",
+    )
+    notes = vault / "notes"
+    notes.mkdir()
+    (notes / "ok.md").write_text(_page(), encoding="utf-8")
+    (notes / "space name.md").write_text(_page(), encoding="utf-8")
+
+    assert vault_lint.run_validation(vault)["broken_markdown_links"] == []
+
+
+def test_markdown_link_ignores_non_local_and_documented_examples(
+    tmp_path: Path,
+) -> None:
+    vault = _single_page_vault(
+        tmp_path,
+        "[web](https://example.com/a)\n"
+        "[mail](mailto:test@example.com)\n"
+        "[protocol relative](//example.com/a)\n"
+        "[root](/docs/a.md)\n"
+        "[anchor](#status)\n"
+        "[empty]()\n"
+        "[placeholder](<path/<name>.md>)\n"
+        "`[inline](missing-inline.md)`\n"
+        "```md\n[fenced](missing-fenced.md)\n```\n",
+    )
+
+    assert vault_lint.run_validation(vault)["broken_markdown_links"] == []
+
+
+def test_escaped_markdown_link_is_ignored(tmp_path: Path) -> None:
+    vault = _single_page_vault(tmp_path, r"\[example](missing.md)")
+    assert vault_lint.run_validation(vault)["broken_markdown_links"] == []
+
+
+def test_reserved_file_markdown_links_are_still_validated(tmp_path: Path) -> None:
+    vault = tmp_path / "memory-vault"
+    vault.mkdir()
+    (vault / "INDEX.md").write_text("[missing](missing.md)\n", encoding="utf-8")
+
+    broken = vault_lint.run_validation(vault)["broken_markdown_links"]
+    assert [(item["source"], item["target"]) for item in broken] == [
+        ("INDEX.md", "missing.md")
+    ]
+
+
+def test_markdown_link_outside_vault_does_not_probe_target(tmp_path: Path) -> None:
+    vault = _single_page_vault(tmp_path, "[outside](../private.md)\n")
+    (tmp_path / "private.md").write_text("secret", encoding="utf-8")
+
+    broken = vault_lint.run_validation(vault)["broken_markdown_links"]
+
+    assert broken == [
+        {
+            "source": "Page.md",
+            "target": "../private.md",
+            "resolved": "../private.md",
+            "kind": "outside_vault",
+        }
     ]
 
 def test_broken_wikilinks(temp_vault):
