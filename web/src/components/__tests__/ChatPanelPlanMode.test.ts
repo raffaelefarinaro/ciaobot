@@ -155,7 +155,6 @@ async function mountPanel(options: { mode?: string; commandsFail?: boolean } = {
         ModelSelector: ChildStub,
         VoiceRecorder: ChildStub,
         SubagentPanel: ChildStub,
-        ProviderSubchatPanel: ChildStub,
         ChatCommentPopover: ChatCommentPopoverStub,
         CommentComposePopover: ChildStub,
         RouterLink: ChildStub,
