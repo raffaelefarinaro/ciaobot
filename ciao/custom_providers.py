@@ -111,6 +111,10 @@ def load_custom_providers(config) -> tuple[CustomProvider, ...]:
     entries = raw.get("providers") if isinstance(raw, dict) else raw
     if not isinstance(entries, list):
         return ()
+    try:
+        tokens = json.loads(provider_tokens_path(config).read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, ValueError):
+        tokens = {}
     result: list[CustomProvider] = []
     seen: set[str] = set()
     for entry in entries:
@@ -118,10 +122,6 @@ def load_custom_providers(config) -> tuple[CustomProvider, ...]:
             provider = _provider_from_mapping(entry)
         except (TypeError, ValueError):
             continue
-        try:
-            tokens = json.loads(provider_tokens_path(config).read_text(encoding="utf-8"))
-        except (FileNotFoundError, OSError, ValueError):
-            tokens = {}
         if isinstance(tokens, dict):
             provider = CustomProvider(
                 id=provider.id,
@@ -140,7 +140,8 @@ def load_custom_providers(config) -> tuple[CustomProvider, ...]:
 def save_custom_providers(config, entries: object) -> tuple[CustomProvider, ...]:
     if not isinstance(entries, list):
         raise ValueError("custom_providers must be an array")
-    existing = {item.id: item for item in load_custom_providers(config)}
+    stored = load_custom_providers(config)
+    existing = {item.id: item for item in stored}
     result: list[CustomProvider] = []
     seen: set[str] = set()
     for entry in entries:
@@ -149,9 +150,7 @@ def save_custom_providers(config, entries: object) -> tuple[CustomProvider, ...]
             raise ValueError(f"duplicate custom provider id '{provider.id}'")
         seen.add(provider.id)
         result.append(provider)
-    old_tokens = {
-        item.id: item.token for item in load_custom_providers(config) if item.token
-    }
+    old_tokens = {item.id: item.token for item in stored if item.token}
     path = providers_path(config)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -167,17 +166,22 @@ def save_custom_providers(config, entries: object) -> tuple[CustomProvider, ...]
     except OSError:
         pass
     token_path = provider_tokens_path(config)
+    # An entry submitted without a token keeps the one already on disk: the API
+    # never echoes tokens back, so a settings save that round-trips the public
+    # representation must not wipe them.
     tokens = {
-        item.id: item.token
+        item.id: item.token or old_tokens[item.id]
         for item in result
-        if item.token or old_tokens.get(item.id)
+        if item.token or item.id in old_tokens
     }
-    for item in result:
-        if not item.token and old_tokens.get(item.id):
-            tokens[item.id] = old_tokens[item.id]
     token_path.parent.mkdir(parents=True, exist_ok=True)
-    token_path.write_text(json.dumps(tokens, indent=2) + "\n", encoding="utf-8")
+    # Create at 0600 rather than write-then-chmod: these are credentials, and
+    # the latter leaves them briefly readable at the process umask.
+    descriptor = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(tokens, indent=2) + "\n")
     try:
+        # O_CREAT does not tighten a file that already existed.
         os.chmod(token_path, 0o600)
     except OSError:
         pass

@@ -78,6 +78,38 @@ def test_existing_token_is_preserved_when_settings_edit_omits_it(tmp_path):
     assert load_custom_providers(config)[0].token == "ollama-token"
 
 
+def test_token_file_is_never_group_or_world_readable(tmp_path):
+    config = _config(tmp_path)
+    token_path = tmp_path / ".runtime" / "custom_provider_tokens.json"
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    # A pre-existing loose file must be tightened, not just written through.
+    token_path.write_text("{}\n", encoding="utf-8")
+    token_path.chmod(0o644)
+
+    save_custom_providers(config, [{
+        "id": "vllm",
+        "name": "vLLM",
+        "url": "http://localhost:8000/v1",
+        "token": "secret",
+        "runner": "claude",
+        "models": ["mistral"],
+    }])
+
+    assert token_path.stat().st_mode & 0o077 == 0
+
+
+def test_dropping_a_provider_drops_its_stored_token(tmp_path):
+    config = _config(tmp_path)
+    save_custom_providers(config, [{
+        "id": "gone", "name": "Gone", "url": "http://localhost:1/v1",
+        "token": "stale", "runner": "claude", "models": [],
+    }])
+    save_custom_providers(config, [])
+
+    tokens = json.loads((tmp_path / ".runtime" / "custom_provider_tokens.json").read_text())
+    assert tokens == {}
+
+
 def test_custom_provider_model_discovery(monkeypatch):
     payload = {"data": [{"id": "model-a"}, {"id": "model-a"}, {"id": "model-b"}]}
 
