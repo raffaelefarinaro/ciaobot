@@ -237,7 +237,7 @@ class McpSessionRegistry:
     def __init__(self, ttl_seconds: int = 12 * 60 * 60) -> None:
         self._ttl_seconds = max(60, int(ttl_seconds))
         self._by_token: dict[str, _Session] = {}
-        self._by_key: dict[tuple[str, str, str], str] = {}
+        self._by_key: dict[tuple[str, str], str] = {}
         self._lock = threading.RLock()
 
     def issue(
@@ -247,9 +247,8 @@ class McpSessionRegistry:
         project_id: str,
         workspace: str,
         provider: str,
-        role: str = "chat",
     ) -> tuple[str, McpPrincipal]:
-        key = (chat_id, provider, role)
+        key = (chat_id, provider)
         now = int(time.time())
         with self._lock:
             existing_token = self._by_key.get(key)
@@ -273,7 +272,6 @@ class McpSessionRegistry:
                 project_id=project_id,
                 workspace=workspace,
                 provider=provider,
-                role=role,  # type: ignore[arg-type]
             )
             session = _Session(
                 principal=principal,
@@ -289,7 +287,7 @@ class McpSessionRegistry:
             doomed = [token for token, item in self._by_token.items() if item.principal.chat_id == chat_id]
             for token in doomed:
                 item = self._by_token.pop(token)
-                self._by_key.pop((item.principal.chat_id, item.principal.provider, item.principal.role), None)
+                self._by_key.pop((item.principal.chat_id, item.principal.provider), None)
             return len(doomed)
 
     def revoke(self, token: str) -> bool:
@@ -297,7 +295,7 @@ class McpSessionRegistry:
             item = self._by_token.pop(token, None)
             if item is None:
                 return False
-            self._by_key.pop((item.principal.chat_id, item.principal.provider, item.principal.role), None)
+            self._by_key.pop((item.principal.chat_id, item.principal.provider), None)
             return True
 
     async def verify_token(self, token: str) -> AccessToken | None:
@@ -371,13 +369,12 @@ class CiaoMcpService:
         # Starlette's Mount canonicalizes the inner root to a trailing slash.
         return f"http://127.0.0.1:{int(self.config.pwa_port)}/mcp/"
 
-    def credentials_for_chat(self, chat: Any, project: Any, *, role: str = "chat") -> tuple[str, str]:
+    def credentials_for_chat(self, chat: Any, project: Any) -> tuple[str, str]:
         token, _principal = self.registry.issue(
             chat_id=chat.chat_id,
             project_id=chat.project_id,
             workspace=project.workspace,
             provider=chat.provider,
-            role=role,
         )
         return self.url, token
 
