@@ -18,6 +18,7 @@ export function formatTime(iso?: string): string {
 
 export function formatDuration(ms?: number): string {
   if (ms == null || !isFinite(ms) || ms < 0) return ''
+  if (ms < 1) return '<1ms'
   if (ms < 1000) return `${Math.round(ms)}ms`
   const s = ms / 1000
   if (s < 10) return `${s.toFixed(1)}s`

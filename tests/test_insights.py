@@ -280,6 +280,9 @@ def test_extract_retries_once_then_skips(
     assert calls["count"] == 2
     text = archive.read_text(encoding="utf-8")
     assert "## Session insights" not in text
+    run = json.loads((tmp_path / "job_runs.jsonl").read_text().splitlines()[0])
+    assert run["status"] == "error"
+    assert run["error"] == "boom"
 
 
 def test_extract_succeeds_on_retry(
@@ -563,11 +566,23 @@ def test_backfill_insights_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
 
-    asyncio.run(insights.backfill_insights_task(
+    result = asyncio.run(insights.backfill_insights_task(
         config,
         mode="both",
         concurrency=1,
     ))
+
+    assert result == {
+        "total_discovered": 3,
+        "already_done": 1,
+        "eligible": 2,
+        "to_process": 2,
+        "processed": 2,
+        "success": 2,
+        "skipped": 0,
+        "errors": 0,
+    }
+    assert insights.format_backfill_summary(result) == "Processed 2/2: 2 succeeded, 0 skipped."
     
     # Check that already_done was skipped (no content change)
     assert done_archive.read_text(encoding="utf-8") == "# Archived chat\n\n## Session insights\n- old insights"
@@ -581,4 +596,3 @@ def test_backfill_insights_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     text_text = text_archive.read_text(encoding="utf-8")
     assert "## Session insights" in text_text
     assert "Text mode decisions" in text_text
-

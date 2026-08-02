@@ -250,7 +250,6 @@
               <div v-else class="trace-text" v-html="renderMarkdown(step.content)"></div>
             </template>
             <SubagentPanel v-if="item.subs?.length" :subagents="item.subs" />
-            <ProviderSubchatPanel v-if="item.subchats?.length" :subchats="item.subchats" />
             <div v-if="item.outputs?.length" class="trace-files">
               <button
                 v-for="(f, fi) in item.outputs"
@@ -394,7 +393,6 @@
               </button>
             </div>
           </div>
-          <ProviderSubchatPanel v-if="item.subchats?.length" :subchats="item.subchats" />
           <p v-if="speakError?.key === `assistant-${i}`" class="speak-error">{{ speakError.message }}</p>
           <div v-if="item.msg.is_error" class="error-actions">
             <button
@@ -865,7 +863,7 @@
         <div class="input-actions">
           <!-- Voice recording is allowed during streaming too: the user's
                transcript becomes a queued follow-up, same as typed text. -->
-          <VoiceRecorder v-if="!transcribing" ref="voiceRecorderRef" @recorded="handleVoice" />
+          <VoiceRecorder v-if="!transcribing" ref="voiceRecorderRef" @recorded="handleVoice" @error="handleVoiceError" />
           <span v-else class="voice-transcribing" title="Transcribing...">
             <span class="transcribe-spinner"></span>
           </span>
@@ -902,12 +900,11 @@ import VoiceRecorder from './VoiceRecorder.vue'
 // them, parsed server-side from the session JSONL), so each panel anchors
 // under the turn that spawned its agents.
 import SubagentPanel from './SubagentPanel.vue'
-import ProviderSubchatPanel from './ProviderSubchatPanel.vue'
 import { api } from '../lib/api'
 import { askConfirm } from '../lib/confirm'
 import { formatAttachedFilePath, nativeAbsoluteFilePath } from '../lib/chatAttachments'
 import { readChatDraft, writeChatDraft } from '../lib/chatDrafts'
-import type { Loop, Schedule, ModelsResponse, ChatMessage, SubagentTranscript, ProviderSubchatRecord } from '../lib/types'
+import type { Loop, Schedule, ModelsResponse, ChatMessage, SubagentTranscript } from '../lib/types'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
@@ -933,9 +930,9 @@ import CommentComposePopover from './CommentComposePopover.vue'
 
 type RenderItemInput =
   | { kind: 'user'; msg: ChatMessage; turnIndex?: number }
-  | { kind: 'assistant'; msg: ChatMessage; outputs?: TraceOutput[]; subchats?: ProviderSubchatRecord[]; turnIndex?: number }
+  | { kind: 'assistant'; msg: ChatMessage; outputs?: TraceOutput[]; turnIndex?: number }
   | { kind: 'system'; msg: ChatMessage }
-  | { kind: 'trace'; steps: ChatMessage[]; subs?: SubagentTranscript[]; outputs?: TraceOutput[]; subchats?: ProviderSubchatRecord[]; turnIndex?: number }
+  | { kind: 'trace'; steps: ChatMessage[]; subs?: SubagentTranscript[]; outputs?: TraceOutput[]; turnIndex?: number }
 
 type RenderItem = RenderItemInput & { key: string }
 
@@ -1429,9 +1426,9 @@ const touchedFiles = computed<TouchedFile[]>(() => {
 })
 
 type ProviderKey = 'claude' | 'codex'
-type BucketKey = 'claude_work' | 'claude_personal' | 'openrouter' | 'codex'
+type BucketKey = 'claude_work' | 'claude_personal' | 'openrouter' | 'codex' | `custom:${string}`
 type ModelBucketValue = 'work' | 'personal' | 'openrouter' | ''
-type RouteKind = 'anthropic' | 'ollama' | 'ollama-local' | 'openrouter' | 'codex'
+type RouteKind = 'anthropic' | 'ollama' | 'ollama-local' | 'openrouter' | 'codex' | 'custom'
 type TierAlias = 'haiku' | 'sonnet' | 'opus' | 'fable'
 
 const BUCKET_DEFS: { key: BucketKey; label: string; provider: ProviderKey }[] = [
@@ -1653,6 +1650,10 @@ const activeBucket = computed<BucketKey>(() => {
   const c = chat.value
   if (!c) return 'claude_work'
   if (c.provider === 'codex') return 'codex'
+  if (c.model.startsWith('custom:')) {
+    const parts = c.model.split(':', 3)
+    if (parts[1]) return `custom:${parts[1]}`
+  }
   // OpenRouter ids are owner/model (no ':' tag); Ollama ids carry ':'.
   if (c.model.includes('/') && !c.model.includes(':')) return 'openrouter'
   // The server records the explicit bucket choice. Legacy values are kept
@@ -2763,13 +2764,6 @@ const renderData = computed<{
       unanchoredSubs.push(sub)
     }
   }
-  const subchatsByTurn = new Map<number, ProviderSubchatRecord[]>()
-  for (const sc of store.providerSubchats[store.activeChatId || ''] || []) {
-    const list = subchatsByTurn.get(sc.parent_turn_index) || []
-    list.push(sc)
-    subchatsByTurn.set(sc.parent_turn_index, list)
-  }
-
   let currentTurnIndex: number | null = null
 
   const takeForegroundSubs = (turnIndex: number | null): SubagentTranscript[] => {
@@ -2801,7 +2795,6 @@ const renderData = computed<{
     // a normal assistant bubble; the trailing tools just join the trace.
 
     const trailingHasThinking = trailing.some(m => m.tool_name === '_thinking')
-    const turnSubchats = currentTurnIndex !== null ? subchatsByTurn.get(currentTurnIndex) || [] : []
     if (trailingHasThinking && finalMsg) {
       const traceSubs = takeForegroundSubs(currentTurnIndex)
       items.push(withKey({
@@ -2810,7 +2803,6 @@ const renderData = computed<{
         turnIndex: currentTurnIndex ?? undefined,
         ...(traceSubs.length ? { subs: traceSubs } : {}),
         ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
-        ...(turnSubchats.length ? { subchats: turnSubchats } : {}),
       }))
       buffer = []
       return
@@ -2827,28 +2819,23 @@ const renderData = computed<{
     }
 
     const traceSubs = takeForegroundSubs(currentTurnIndex)
-    // Handoffs attach to the final answer when there is one, so they read
-    // as an attribute of the reply. Only when the turn produced no answer bubble
-    // (still in progress / interrupted) do they fall back to the activity trace.
-    const traceSubchats = finalMsg ? [] : turnSubchats
     // Substantive assistant text that appears BEFORE the final answer used to
     // be swallowed into the Activity trace (rendered italic, indistinguishable
     // from reasoning). Split the turn so each such block renders as its own
     // bubble, interleaved with the tool/thinking groups that ran between them,
     // in the order the model produced them. The final answer is appended below
-    // with the turn's outputs/subchats attached.
+    // with the turn's outputs attached.
     const turnItems: RenderItem[] = buildTurnParts(buffer, finalIdx).map((part) =>
       part.kind === 'assistant'
         ? withKey({ kind: 'assistant', msg: part.msg, turnIndex: currentTurnIndex ?? undefined })
         : withKey({ kind: 'trace', steps: part.steps, turnIndex: currentTurnIndex ?? undefined }),
     )
-    // Foreground subagents / (when there's no answer bubble) file outputs and
-    // handoffs belong to the one Activity trace that sits right before the
-    // reply. Reuse the trailing trace if there is one; otherwise mint an empty
-    // one so those attachments still have a home adjacent to the answer.
+    // Foreground subagents and (when there's no answer bubble) file outputs
+    // belong to the one Activity trace that sits right before the reply. Reuse
+    // the trailing trace if there is one; otherwise mint an empty one so those
+    // attachments still have a home adjacent to the answer.
     const needsHost =
       traceSubs.length > 0
-      || traceSubchats.length > 0
       || (!finalMsg && turnOutputs.length > 0)
     const last = turnItems[turnItems.length - 1]
     let host = last && last.kind === 'trace' ? last : null
@@ -2859,7 +2846,6 @@ const renderData = computed<{
     if (host) {
       if (traceSubs.length) host.subs = traceSubs
       if (!finalMsg && turnOutputs.length) host.outputs = turnOutputs
-      if (traceSubchats.length) host.subchats = traceSubchats
     }
     for (const it of turnItems) items.push(it)
     if (finalMsg) {
@@ -2868,7 +2854,6 @@ const renderData = computed<{
         msg: finalMsg,
         turnIndex: currentTurnIndex ?? undefined,
         ...(turnOutputs.length ? { outputs: turnOutputs } : {}),
-        ...(turnSubchats.length ? { subchats: turnSubchats } : {}),
       }))
     }
     buffer = []
@@ -3218,16 +3203,26 @@ function canonicalTier(model: string): string {
 }
 
 function modelBucketForBucket(bucket: BucketKey): ModelBucketValue {
+  if (bucket.startsWith('custom:')) return ''
   if (bucket === 'codex') return ''
   if (bucket === 'openrouter') return 'openrouter'
   return bucket === 'claude_personal' ? 'personal' : 'work'
 }
 
 function bucketLabel(bucket: BucketKey): string {
+  if (bucket.startsWith('custom:')) {
+    const id = bucket.slice('custom:'.length)
+    const provider = modelsResponse.value?.custom_providers?.find(item => item.id === id)
+    return provider ? `${provider.name} via ${provider.runner === 'codex' ? 'Codex' : 'Claude Code'}` : id
+  }
   return BUCKET_DEFS.find((def) => def.key === bucket)?.label || 'Claude'
 }
 
 function bucketForSelectedModel(model: string): BucketKey {
+  if (model.startsWith('custom:')) {
+    const parts = model.split(':', 3)
+    if (parts[1]) return `custom:${parts[1]}`
+  }
   const response = modelsResponse.value
   if (response?.alias_tiers?.codex?.[model]) return 'codex'
   if ((response?.codex_models || []).includes(model)) return 'codex'
@@ -3257,6 +3252,7 @@ function effectiveModelForBucket(model: string, bucket: BucketKey): string {
 }
 
 function routeKindFor(model: string, bucket: BucketKey): RouteKind {
+  if (bucket.startsWith('custom:')) return 'custom'
   if (bucket === 'codex') return 'codex'
   const effective = effectiveModelForBucket(model, bucket)
   if (bucket === 'openrouter' || (effective.includes('/') && !effective.includes(':'))) {
@@ -3306,13 +3302,16 @@ async function selectModel(value: string | string[], sectionKey = '') {
   const realModel = isFablePseudo ? CODEX_FABLE_REAL_MODEL : model
   const targetRoute = routeKindFor(realModel, targetBucket)
   const currentRoute = routeKindFor(chat.value.model, activeBucket.value)
+  const customProvider = targetBucket.startsWith('custom:')
+    ? modelsResponse.value?.custom_providers?.find(item => item.id === targetBucket.slice('custom:'.length))
+    : undefined
   const updates: {
     provider: ProviderKey
     model: string
     model_bucket: ModelBucketValue
     thinking_level?: string
   } = {
-    provider: (BUCKET_DEFS.find(def => def.key === targetBucket)?.provider || 'claude') as ProviderKey,
+    provider: (customProvider?.runner || BUCKET_DEFS.find(def => def.key === targetBucket)?.provider || 'claude') as ProviderKey,
     model: realModel,
     model_bucket: modelBucket,
   }
@@ -3342,8 +3341,16 @@ async function selectModel(value: string | string[], sectionKey = '') {
       },
     )
     if (!ok) return
-    await store.handoverChat(chat.value.chat_id, updates)
+    // Picking a model from the pending-retry card's "Continue with..." is
+    // the whole point of switching model there: fire the retry immediately
+    // on the new provider instead of leaving it parked for a manual "Try now".
+    const hadPendingRetry = chat.value.retry?.status === 'pending'
+    const chatId = chat.value.chat_id
+    await store.handoverChat(chatId, updates)
     showModelPicker.value = false
+    if (hadPendingRetry) {
+      await store.tryChatRetryNow(chatId)
+    }
     return
   }
   await store.updateChat(chat.value.chat_id, updates)
@@ -3413,6 +3420,10 @@ async function handleVoice(blob: Blob) {
   } finally {
     transcribing.value = false
   }
+}
+
+function handleVoiceError(message: string) {
+  store.pushErrorToast('Voice dictation unavailable', message)
 }
 async function handleFileSelect(e: Event) { const input = e.target as HTMLInputElement; if (!input.files?.length) return; await store.uploadImages(chat.value.chat_id, Array.from(input.files)); input.value = '' }
 

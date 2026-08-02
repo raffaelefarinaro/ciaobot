@@ -85,7 +85,7 @@ RESPONSE_STRIP_HEADERS: set[str] = {"set-cookie"}
 _NO_CACHE = "no-cache, no-store, must-revalidate"
 
 
-from starlette.websockets import WebSocket
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 
 def _static_dir() -> Path:
@@ -440,8 +440,11 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
                     while True:
                         msg = await websocket.receive_text()
                         await remote_ws.send(msg)
-                except Exception:
-                    pass
+                except WebSocketDisconnect:
+                    # The local browser went away. Stop the paired host
+                    # forwarder without reporting a host failure to a client
+                    # that is no longer connected.
+                    return
 
             async def forward_remote_to_client():
                 try:
@@ -450,8 +453,11 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
                             await websocket.send_bytes(msg)
                         else:
                             await websocket.send_text(msg)
-                except Exception:
-                    pass
+                except WebSocketDisconnect:
+                    # The local browser disconnected while the host was still
+                    # healthy. As above, this is a normal teardown.
+                    return
+                raise OSError("host WebSocket closed")
 
             task1 = asyncio.create_task(forward_client_to_remote())
             task2 = asyncio.create_task(forward_remote_to_client())
@@ -462,6 +468,13 @@ async def proxy_websocket(websocket: WebSocket, active_peer_url: str) -> None:
             )
             for t in pending:
                 t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            # Do not swallow a one-way forwarding failure. If the browser can
+            # still receive host keepalives but its sends no longer reach the
+            # host, leaving this socket open makes the composer paint phantom
+            # optimistic messages with no visible connection error.
+            for t in done:
+                t.result()
     except Exception as exc:
         logger.warning("Client WebSocket proxy to host %s failed: %s", target_ws_url, exc)
         try:

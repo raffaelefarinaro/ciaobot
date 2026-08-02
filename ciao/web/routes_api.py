@@ -32,6 +32,15 @@ from ciao.config import (
     coerce_claude_ai_mcps,
     coerce_workspace_color,
 )
+from ciao.custom_providers import (
+    discover_models,
+    encode_model,
+    load_custom_providers,
+    parse_model,
+    public_provider,
+    provider_for_model,
+    save_custom_providers,
+)
 from ciao.loops import publish_loops_changed
 from ciao.models import THINKING_LEVELS, ChatContext
 from ciao.model_tiers import codex_tier_models
@@ -213,10 +222,18 @@ def _workspace_provider_options(config) -> list[dict[str, str]]:
     openrouter = getattr(config, "openrouter", None)
     if openrouter is not None and openrouter.available:
         values.append("openrouter")
-    return [
+    options = [
         {"value": value, "label": _WORKSPACE_PROVIDER_LABELS[value]}
         for value in values
     ]
+    for provider in load_custom_providers(config):
+        options.append({
+            "value": f"custom:{provider.id}",
+            "label": f"{provider.name} (via {provider.runner.title()})",
+            "runner": provider.runner,
+            "default_model": encode_model(provider.id, provider.models[0]) if provider.models else "",
+        })
+    return options
 
 
 def _workspace_provider_values(config) -> set[str]:
@@ -917,16 +934,37 @@ def _workspace_from_request(
                     f"workspace vault folder is already owned by "
                     f"'{configured_name}'"
                 )
-    provider = str(
+    requested_provider = str(
         data.get(
             "default_provider",
             existing.default_provider if existing else "claude",
         )
     ).strip() or "claude"
     available_providers = _workspace_provider_values(config)
-    if provider not in available_providers:
+    if requested_provider not in available_providers:
         allowed = ", ".join(sorted(available_providers))
         raise ValueError(f"default_provider must be one of: {allowed}")
+    provider = requested_provider
+    custom_workspace = None
+    if requested_provider.startswith("custom:"):
+        custom_id = requested_provider.split(":", 1)[1]
+        custom_workspace = next(
+            (item for item in load_custom_providers(config) if item.id == custom_id),
+            None,
+        )
+        if custom_workspace is None:
+            raise ValueError(f"unknown custom provider '{custom_id}'")
+        provider = custom_workspace.runner
+    default_model = str(
+        data.get("default_model", existing.default_model if existing else "")
+    ).strip()
+    if custom_workspace is not None:
+        if default_model and parse_model(default_model) is None:
+            default_model = encode_model(custom_workspace.id, default_model)
+        if not default_model:
+            if not custom_workspace.models:
+                raise ValueError("custom provider must have at least one model before it can be a workspace default")
+            default_model = encode_model(custom_workspace.id, custom_workspace.models[0])
     if "disallowed_tools" in data:
         disallowed_tools = _parse_disallowed_tools_value(data.get("disallowed_tools"))
     elif existing is not None:
@@ -962,15 +1000,14 @@ def _workspace_from_request(
             else config.stored_workspace_vault_root(name)
         ),
         default_provider=provider,
-        default_model=str(
-            data.get("default_model", existing.default_model if existing else "")
-        ).strip(),
+        default_model=default_model,
         disallowed_tools=disallowed_tools,
         claude_ai_mcps=claude_ai_mcps,
         gws_profile=str(data.get("gws_profile", existing.gws_profile if existing else "")).strip(),
-        model_bucket=str(
-            data.get("model_bucket", existing.model_bucket if existing else "")
-        ).strip(),
+        model_bucket=(
+            str(data.get("model_bucket", existing.model_bucket if existing else "")).strip()
+            or (f"custom:{custom_workspace.id}" if custom_workspace is not None else "")
+        ),
         color=color,
     )
 
@@ -1141,6 +1178,9 @@ def _provider_config_payload(config) -> dict:
             for key in ("claude", "codex")
             if key in providers
         },
+        "custom_providers": [
+            public_provider(provider) for provider in load_custom_providers(config)
+        ],
     }
 
 
@@ -1259,6 +1299,12 @@ async def provider_config_settings(request: Request) -> JSONResponse:
         updates["CIAO_AUTO_UPDATE_GITHUB_SKILLS"] = "true" if val else "false"
         config.auto_update_github_skills = val
 
+    if "custom_providers" in body:
+        try:
+            await asyncio.to_thread(save_custom_providers, config, body["custom_providers"])
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
     _write_env_values(_env_path(config), updates)
     provider_key_changes = {
         k: v for k, v in updates.items()
@@ -1276,6 +1322,26 @@ async def provider_config_settings(request: Request) -> JSONResponse:
                 raise RestartRequested(config.restart_exit_code)
         asyncio.create_task(_do_restart())
     return JSONResponse(await asyncio.to_thread(_provider_config_payload, config))
+
+
+async def custom_provider_probe(request: Request) -> JSONResponse:
+    """Probe an unsaved custom endpoint for OpenAI-compatible model ids."""
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("expected object")
+        from ciao.custom_providers import _provider_from_mapping
+
+        existing = next(
+            (item for item in load_custom_providers(request.app.state.config)
+             if item.id == str(body.get("id") or "").strip().lower()),
+            None,
+        )
+        provider = _provider_from_mapping(body, existing=existing)
+        models = await asyncio.to_thread(discover_models, provider)
+        return JSONResponse({"ok": bool(models), "models": list(models)})
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
 
 
 def _gws_profile_config_dir(config, profile: str) -> Path | None:
@@ -2455,189 +2521,6 @@ async def chat_prompt(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
     return JSONResponse({"ok": True, "chat_id": chat_id})
-
-
-async def chat_provider_subchats_list(request: Request) -> JSONResponse:
-    """List all provider sub-chats for a parent chat."""
-    pcm = request.app.state.project_chat_manager
-    manager = request.app.state.provider_subchat_manager
-    chat_id = request.path_params["chat_id"]
-    chat = pcm._chats.get(chat_id)
-    if chat is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    records = manager.list_records(chat_id)
-    return JSONResponse([r.to_dict() for r in records])
-
-
-async def chat_provider_subchats_create(request: Request) -> JSONResponse:
-    """Create and optionally start a provider sub-chat."""
-    pcm = request.app.state.project_chat_manager
-    manager = request.app.state.provider_subchat_manager
-    chat_id = request.path_params["chat_id"]
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-
-    parent_turn_index = body.get("parent_turn_index")
-    if not isinstance(parent_turn_index, int) or parent_turn_index < 0:
-        return JSONResponse({"error": "parent_turn_index must be a non-negative integer"}, status_code=400)
-
-    owner_data = body.get("owner")
-    participant_data = body.get("participant")
-    if not isinstance(owner_data, dict) or not isinstance(participant_data, dict):
-        return JSONResponse({"error": "owner and participant must be objects"}, status_code=400)
-
-    from ciao.provider_subchats import ProviderRoute
-    owner = ProviderRoute.from_dict(owner_data)
-    participant = ProviderRoute.from_dict(participant_data)
-
-    task_prompt = body.get("task_prompt", "")
-    user_authorized = bool(body.get("user_authorized", False))
-
-    try:
-        record = manager.create_subchat(
-            parent_chat_id=chat_id,
-            parent_turn_index=parent_turn_index,
-            owner=owner,
-            participant=participant,
-        )
-        if task_prompt:
-            res = await manager.run_consultation_turn(record.subchat_id, task_prompt, user_authorized=user_authorized)
-            return JSONResponse({
-                "record": record.to_dict(),
-                "result": res,
-            })
-    except KeyError:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
-
-    return JSONResponse({"record": record.to_dict()})
-
-
-async def provider_subchat_events(request: Request) -> JSONResponse:
-    """Read transcript events for a provider sub-chat."""
-    manager = request.app.state.provider_subchat_manager
-    subchat_id = request.path_params["subchat_id"]
-    record = manager.get_record(subchat_id)
-    if record is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    events = manager.get_events(subchat_id)
-    return JSONResponse(events)
-
-
-async def provider_subchat_message(request: Request) -> JSONResponse:
-    """Send a prompt (owner message) to the sub-chat."""
-    manager = request.app.state.provider_subchat_manager
-    subchat_id = request.path_params["subchat_id"]
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-    message = body.get("message")
-    if not message:
-        return JSONResponse({"error": "message is required"}, status_code=400)
-    user_authorized = bool(body.get("user_authorized", False))
-    try:
-        res = await manager.run_consultation_turn(subchat_id, message, user_authorized=user_authorized)
-        return JSONResponse(res)
-    except KeyError:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
-
-
-async def provider_subchat_close(request: Request) -> JSONResponse:
-    """Close a provider sub-chat, setting status to completed."""
-    manager = request.app.state.provider_subchat_manager
-    subchat_id = request.path_params["subchat_id"]
-    try:
-        manager.close_subchat(subchat_id)
-        record = manager.get_record(subchat_id)
-        if record is None:
-            return JSONResponse({"error": "not found"}, status_code=404)
-        return JSONResponse(record.to_dict())
-    except KeyError:
-        return JSONResponse({"error": "not found"}, status_code=404)
-
-
-async def provider_subchat_cancel(request: Request) -> JSONResponse:
-    """Cancel active provider sub-chat work."""
-    manager = request.app.state.provider_subchat_manager
-    subchat_id = request.path_params["subchat_id"]
-    try:
-        await manager.cancel_subchat(subchat_id)
-        record = manager.get_record(subchat_id)
-        if record is None:
-            return JSONResponse({"error": "not found"}, status_code=404)
-        return JSONResponse(record.to_dict())
-    except KeyError:
-        return JSONResponse({"error": "not found"}, status_code=404)
-
-
-async def provider_subchat_extend(request: Request) -> JSONResponse:
-    """Extend provider sub-chat limits."""
-    manager = request.app.state.provider_subchat_manager
-    subchat_id = request.path_params["subchat_id"]
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    user_authorized = bool(body.get("user_authorized", False))
-    try:
-        manager.extend_subchat(subchat_id, user_authorized=user_authorized)
-        record = manager.get_record(subchat_id)
-        if record is None:
-            return JSONResponse({"error": "not found"}, status_code=404)
-        return JSONResponse(record.to_dict())
-    except KeyError:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-
-
-async def provider_subchat_permission_response(request: Request) -> JSONResponse:
-    """Resolve a pending permission request in the sub-chat."""
-    manager = request.app.state.provider_subchat_manager
-    subchat_id = request.path_params["subchat_id"]
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-    request_id = body.get("request_id")
-    approved = body.get("approved")
-    if not request_id or approved is None:
-        return JSONResponse({"error": "request_id and approved are required"}, status_code=400)
-    reason = body.get("reason", "")
-
-    accepted = manager.respond_permission(subchat_id, request_id=request_id, approved=approved, reason=reason)
-    if not accepted:
-        return JSONResponse({"error": "stale response or not found"}, status_code=409)
-    return JSONResponse({"ok": True})
-
-
-async def provider_subchat_question_response(request: Request) -> JSONResponse:
-    """Resolve a pending structured question in the sub-chat."""
-    manager = request.app.state.provider_subchat_manager
-    subchat_id = request.path_params["subchat_id"]
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
-    request_id = body.get("request_id")
-    answers = body.get("answers")
-    if not request_id or not isinstance(answers, dict):
-        return JSONResponse({"error": "request_id and answers (dict) are required"}, status_code=400)
-
-    accepted = manager.respond_question(subchat_id, request_id=request_id, answers=answers)
-    if not accepted:
-        return JSONResponse({"error": "stale response or not found"}, status_code=409)
-    return JSONResponse({"ok": True})
 
 
 async def chat_mark_read(request: Request) -> JSONResponse:
@@ -4280,17 +4163,19 @@ async def trigger_backfill_insights(request: Request) -> JSONResponse:
     """Trigger the insights backfill process in the background."""
     import asyncio
     from ciao.job_runs import track
-    from ciao.insights import backfill_insights_task
+    from ciao.insights import backfill_insights_task, format_backfill_summary
 
     config = request.app.state.config
 
     async def _run_backfill():
-        # backfill_insights_task owns discovery, the concurrency semaphore, and
-        # per-archive logging; it raises only on a fatal error, which track()
-        # records and re-raises. (The old scripts.backfill_insights._worker /
-        # _discover_archives helpers were folded into this task in d2690d1.)
-        async with track("backfill_insights", "Insights backfill", category="system"):
-            await backfill_insights_task(config, mode="both")
+        async with track("backfill_insights", "Insights backfill", category="system") as handle:
+            result = await backfill_insights_task(config, mode="both")
+            handle.extra.update(result)
+            summary = format_backfill_summary(result)
+            handle.extra["summary"] = summary
+            if result["errors"]:
+                handle.status = "error"
+                handle.error = summary
 
     asyncio.create_task(_run_backfill())
     return JSONResponse({"status": "started"}, status_code=202)
@@ -4702,6 +4587,18 @@ async def list_models(request: Request) -> JSONResponse:
     } if or_settings.available else {}
     openrouter_default = or_settings.sonnet_model if or_settings.available else ""
 
+    custom_providers = load_custom_providers(config)
+    custom_payload = []
+    for provider in custom_providers:
+        models = provider.models
+        custom_payload.append({
+            **public_provider(provider),
+            "models": [encode_model(provider.id, model) for model in models],
+            "model_labels": {
+                encode_model(provider.id, model): model for model in models
+            },
+        })
+
     return JSONResponse({
         "models": config.claude_models,
         "default": config.claude_default_model,
@@ -4743,6 +4640,7 @@ async def list_models(request: Request) -> JSONResponse:
         "ollama_models": ollama,
         "ollama_local_models": list(config.ollama.local_models),
         "openrouter_models": openrouter_models,
+        "custom_providers": custom_payload,
         "codex_models": codex_models,
         "codex_model_metadata": codex_model_metadata,
         "model_reasoning_levels": model_reasoning_levels,
@@ -4794,6 +4692,7 @@ def _routines_payload(config, app_settings) -> dict:
         "codex_sonnet_model": s.codex_sonnet_model,
         "codex_opus_model": s.codex_opus_model,
         "codex_fable_model": s.codex_fable_model,
+        "custom_routing": s.custom_routing or {},
         # What actually runs right now, after defaults.
         "title_model_effective": title_effective,
         "insights_model_effective": insights_effective,
@@ -4813,6 +4712,17 @@ def _routines_payload(config, app_settings) -> dict:
                 "opus": config.openrouter.opus_model,
                 "fable": config.openrouter.fable_model,
             } if config.openrouter.available else {},
+            **{
+                f"custom:{provider.id}": {
+                    tier: (s.custom_routing or {}).get(provider.id, {}).get(tier, "")
+                    or (
+                        encode_model(provider.id, provider.models[0])
+                        if provider.models else ""
+                    )
+                    for tier in ("haiku", "sonnet", "opus", "fable")
+                }
+                for provider in load_custom_providers(config)
+            },
         },
         # The "apple"/apfel title option only works when the CLI is on PATH;
         # the Chat titles row warns instead of silently falling back.
@@ -4836,6 +4746,16 @@ def _routines_payload(config, app_settings) -> dict:
             "ollama_cloud": _ollama_cloud_model_options(config),
             "ollama_local": list(ollama.local_models),
             "openrouter": _openrouter_model_options(config),
+            "custom_providers": [
+                {
+                    **public_provider(provider),
+                    "models": [encode_model(provider.id, model) for model in provider.models],
+                    "model_labels": {
+                        encode_model(provider.id, model): model for model in provider.models
+                    },
+                }
+                for provider in load_custom_providers(config)
+            ],
         },
         "backends": {
             "ollama": _ollama_backend_available(config),
@@ -5346,7 +5266,7 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     if port < 1 or port > 65535:
         return JSONResponse({"error": "port must be between 1 and 65535"}, status_code=400)
     default_provider = str(body.get("provider") or "claude").strip().lower()
-    if default_provider not in _WORKSPACE_PROVIDER_LABELS:
+    if default_provider not in _workspace_provider_values(config):
         return JSONResponse(
             {"error": f"unknown provider '{default_provider}'"}, status_code=400
         )

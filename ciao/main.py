@@ -375,8 +375,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         async def _backfill_task():
             try:
                 from ciao.insights import backfill_insights_task
-                await backfill_insights_task(config)
-                tracker.done("backfill_insights")
+                from ciao.insights import format_backfill_summary
+                result = await backfill_insights_task(config)
+                tracker.done("backfill_insights", format_backfill_summary(result))
             except Exception:
                 tracker.fail("backfill_insights", "backfill failed")
                 logger.exception("Insights backfill failed")
@@ -485,13 +486,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     connection_tracker = ConnectionTracker()
     app.state.connection_tracker = connection_tracker
 
-    from ciao.provider_subchats import ProviderSubchatManager
-    provider_subchat_manager = ProviderSubchatManager(
-        config, pcm, config.state_path.parent / "provider_subchats.json"
-    )
-    app.state.provider_subchat_manager = provider_subchat_manager
-    pcm._provider_subchat_manager = provider_subchat_manager
-
     # Git sync operates on the repo containing the vault root: the workspace
     # root for the default vault-inside-workspace layout (and as fallback),
     # or the vault's own repo when it lives elsewhere. Every instance works
@@ -514,7 +508,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
             project_chat_manager=pcm,
             schedule_manager=schedule_manager,
             loop_manager=loop_manager,
-            provider_subchat_manager=provider_subchat_manager,
             local_session_manager=app.state.local_session_manager,
             app_settings=app_settings,
             startup_tracker=tracker,

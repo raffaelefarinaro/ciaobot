@@ -19,6 +19,8 @@ Useful local files:
 - `.runtime/ciao.stderr.log` and `.runtime/ciao.stdout.log`: macOS LaunchAgent service logs when present.
 - `.claude/agents/`, `.claude/commands/`, `.claude/skills/`: installed agent-facing assets.
 - `.agents/skills/`: Codex skill mirror and Ciaobot command/agent wrappers.
+- `.codex/config.toml`: generated Codex registrations, including project MCP
+  entries projected from `.mcp.json`; edit `.mcp.json` instead.
 - `memory-vault/`: durable markdown memory, projects, logs, and references.
 
 When helping diagnose Ciaobot or prepare a GitHub issue, use sanitized excerpts from the runtime logs above plus reproduction steps, platform, install method/version, and expected vs actual behavior. Ask before creating or posting a public issue.

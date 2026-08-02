@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Iterator, Optio
 
 if TYPE_CHECKING:
     from ciao.mcp_server import CiaoMcpService
-    from ciao.provider_subchats import ProviderSubchatManager
     from ciao.web.push import PushManager
 
 RESTART_DRAIN_MESSAGE = (
@@ -76,6 +75,12 @@ from ciao.providers.codex import (
     codex_collab_tree_counts,
 )
 from ciao.providers.routing import intended_backend, routing_env_for_model
+from ciao.custom_providers import (
+    env_for_model as custom_env_for_model,
+    load_custom_providers,
+    provider_for_model,
+    runtime_model,
+)
 from ciao.provider_service import ProviderService, supported_providers
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore, _claude_projects_dir
@@ -148,6 +153,17 @@ _HANDOVER_ROLES = {"user", "assistant", "system"}
 _HANDOVER_MAX_MESSAGES = 80
 _HANDOVER_MAX_CHARS = 60_000
 _LEGACY_MODEL_BUCKETS = {"work", "personal"}
+# How long a finished delegate waits for its siblings before waking the
+# supervisor. Long enough that a batch dispatched together reports as one turn,
+# short enough that a lone delegate is not left sitting on a finished result.
+_DELEGATE_WAKE_WINDOW_SECONDS = 5.0
+# Per-delegate excerpt budget in the wake prompt. The supervisor is told to read
+# the child's real transcript with chat_get, so this only has to be enough to
+# decide whether that is worth doing.
+_DELEGATE_WAKE_EXCERPT_CHARS = 600
+# Ceiling on live delegates per supervisor. A runaway fan-out spends real money
+# on provider turns, so the control plane refuses past this.
+_MAX_ACTIVE_DELEGATES = 6
 _ANTHROPIC_MODEL_BUCKETS = {"work", "anthropic"}
 _OLLAMA_MODEL_BUCKETS = {"personal", "ollama"}
 
@@ -833,6 +849,15 @@ class ChatInfo:
     # only on the automation side). Empty for interactive chats.
     schedule_id: str = ""
     schedule_title: str = ""
+    # Delegation lineage. A delegate is a normal chat spawned by another chat's
+    # agent to do writable work (its own model, its own worktree, its own
+    # session), whose result wakes the parent when it finishes — see
+    # _wake_parent_for_delegates. Unlike a fork, the link is live: the parent is
+    # notified. The child is a real resumable chat the user
+    # can open. Empty for chats the user created.
+    spawned_from_chat_id: str = ""
+    # Groups delegates dispatched as one batch so a wake can say "3 of 4 done".
+    delegation_id: str = ""
 
     def to_dict(self, *, local: bool | None = None) -> dict:
         d = {
@@ -859,6 +884,8 @@ class ChatInfo:
             "fork_base_title": self.fork_base_title,
             "schedule_id": self.schedule_id,
             "schedule_title": self.schedule_title,
+            "spawned_from_chat_id": self.spawned_from_chat_id,
+            "delegation_id": self.delegation_id,
             "retry": {
                 "status": self.retry_status,
                 "next_at": self.retry_next_at,
@@ -915,6 +942,21 @@ def _schedule_run_clean(outcome: ScheduleRunOutcome) -> bool:
         and not outcome.retry_pending
         and not outcome.subagents_pending
     )
+
+
+def _schedule_dispatch_status(outcome: ScheduleRunOutcome) -> tuple[str, str | None]:
+    """Classify a scheduled turn for job-run history.
+
+    A pending retry means the provider deferred the work, such as after a
+    quota rejection. It remains unclean and visible, but is not an app error.
+    """
+    if outcome.retry_pending:
+        return "skipped", None
+    if outcome.stream_error or outcome.is_error:
+        return "error", (outcome.final_text or "stream error")[:1000]
+    if outcome.permission_requested or outcome.question_requested:
+        return "skipped", None
+    return "ok", None
 
 
 @dataclass(slots=True)
@@ -982,7 +1024,6 @@ class ProjectChatManager:
         # Tests and legacy-only instances intentionally leave it unset.
         self._mcp_service: Optional["CiaoMcpService"] = None
         # Bound by main.py; unset on tests and legacy-only instances.
-        self._provider_subchat_manager: Optional["ProviderSubchatManager"] = None
         self._push_manager: Optional["PushManager"] = None
         self._broker = ChatStreamBroker()
         self._events = EventsHub()
@@ -1028,6 +1069,13 @@ class ProjectChatManager:
         # the /ws/events connect snapshot so a fresh client can paint the
         # "N agents running" indicator without waiting for the next change.
         self._background_agents_last: dict[str, int] = {}
+        # Delegate completions waiting to wake their supervisor, keyed by
+        # parent chat id. Held for _DELEGATE_WAKE_WINDOW seconds so a batch
+        # that finishes together produces one parent turn, not four.
+        self._delegate_wake_pending: dict[str, list[dict[str, Any]]] = {}
+        # At most one in-flight flush task per parent; later completions inside
+        # the window join the pending list the running task will drain.
+        self._delegate_wake_tasks: dict[str, asyncio.Task] = {}
         # A requested server restart drains existing chat work before uvicorn
         # shuts down. Once draining begins, ongoing streams (including their
         # already-queued follow-ups) may finish, but idle chats must not start
@@ -1143,6 +1191,8 @@ class ProjectChatManager:
                 fork_base_title=cd.get("fork_base_title", ""),
                 schedule_id=cd.get("schedule_id", ""),
                 schedule_title=cd.get("schedule_title", ""),
+                spawned_from_chat_id=cd.get("spawned_from_chat_id", ""),
+                delegation_id=cd.get("delegation_id", ""),
             )
         logger.info(
             "Restored %d project(s) and %d chat(s)",
@@ -1229,6 +1279,8 @@ class ProjectChatManager:
                     "fork_base_title": c.fork_base_title,
                     "schedule_id": c.schedule_id,
                     "schedule_title": c.schedule_title,
+                    "spawned_from_chat_id": c.spawned_from_chat_id,
+                    "delegation_id": c.delegation_id,
                 }
                 for cid, c in self._chats.items()
             },
@@ -2668,6 +2720,8 @@ class ProjectChatManager:
         provider: str | None = None,
         model_bucket: str | None = None,
         control_surface: str | None = None,
+        spawned_from_chat_id: str = "",
+        delegation_id: str = "",
     ) -> ChatInfo:
         if project_id not in self._projects:
             raise ValueError(f"Project '{project_id}' not found")
@@ -2691,6 +2745,7 @@ class ProjectChatManager:
         chat_provider = provider
         if not chat_provider:
             chat_provider = self._config.default_provider_for_workspace(workspace)
+        self._validate_custom_model_runner(chat_model, chat_provider)
         # Claude chats record the bucket explicitly: the workspace only
         # preselects (personal → "personal"), but an explicit picker choice
         # wins and survives project moves. Personal-bucket alias defaults
@@ -2713,6 +2768,8 @@ class ProjectChatManager:
             mode=cast(BridgeMode, mode or self._config.claude_mode),
             control_surface=control_surface or "",
             created_at=_now_iso(),
+            spawned_from_chat_id=spawned_from_chat_id,
+            delegation_id=delegation_id,
         )
         if chat_provider == "codex" and canonical_tier(chat_model) == "fable":
             chat.thinking_level = CODEX_FABLE_THINKING_LEVEL
@@ -2805,6 +2862,7 @@ class ProjectChatManager:
         )
         if provider is not None and provider not in supported_providers():
             raise ValueError(f"Unknown provider '{provider}'")
+        self._validate_custom_model_runner(model or chat.model, provider or chat.provider)
         if not self._model_bucket_allowed(model_bucket):
             raise ValueError(f"Unknown model bucket '{model_bucket}'")
         if thinking_level is not None:
@@ -3189,11 +3247,6 @@ class ProjectChatManager:
             self._transcripts.delete_sdk_session_blob(
                 self._config.workspace_root, chat.session_id
             )
-        # Clean up associated provider sub-chats
-        manager = getattr(self, "_provider_subchat_manager", None)
-        if manager is not None:
-            manager.delete_parent_subchats(chat_id)
-
         # Explicit deletion is a tombstone, not merely a sidebar mutation.
         # Remove every recovery signal so startup repair cannot revive it.
         self._state.delete_context(ctx)
@@ -3268,13 +3321,6 @@ class ProjectChatManager:
             self._transcripts.delete_sdk_session_blob(
                 self._config.workspace_root, chat.session_id
             )
-        # Cancel any active provider sub-chats
-        manager = getattr(self, "_provider_subchat_manager", None)
-        if manager is not None:
-            subchats = manager.list_records(chat_id)
-            for sc in subchats:
-                if sc.status not in ("completed", "cancelled", "failed", "interrupted"):
-                    asyncio.ensure_future(manager.cancel_subchat(sc.subchat_id))
         self._unlink_chat_images(chat)
         chat.archived = True
         if result is not None:
@@ -3282,7 +3328,6 @@ class ProjectChatManager:
                 chat.archive_path = str(result.relative_to(self._config.workspace_root))
             except ValueError:
                 chat.archive_path = str(result)
-            self._append_subchats_to_transcript(result, chat_id)
         self._save()
         self._events.publish({
             "type": "chat_archived",
@@ -3298,49 +3343,6 @@ class ProjectChatManager:
             turn_count=turn_count,
             filtered_jsonl=filtered_jsonl,
         )
-
-    def _append_subchats_to_transcript(self, result: Path, chat_id: str) -> None:
-        manager = getattr(self, "_provider_subchat_manager", None)
-        if manager is None:
-            return
-        records = manager.list_records(chat_id)
-        if not records:
-            return
-
-        lines = ["", "## Agent handoffs", ""]
-        for r in records:
-            lines.append(f"### Handoff: {r.owner.label or r.owner.provider} ↔ {r.participant.label or r.participant.provider}")
-            lines.append(f"- **Participant Model**: {r.participant.model}")
-            lines.append(f"- **Status**: {r.status}")
-            lines.append(f"- **Duration**: {r.active_seconds:.1f}s")
-            lines.append(f"- **Messages**: {r.message_count}")
-            lines.append(f"- **Usage**: {r.input_tokens} in · {r.output_tokens} out")
-            lines.append("")
-            lines.append("**Transcript**:")
-            lines.append("")
-
-            events = manager.get_events(r.subchat_id)
-            for ev in events:
-                if ev.get("type") == "message":
-                    role = ev.get("role", "unknown").capitalize()
-                    content = ev.get("content", "")
-                    lines.append(f"**[{role}]**:")
-                    lines.append(content)
-                    lines.append("")
-                elif ev.get("type") == "tool_use":
-                    lines.append(f"*Called tool `{ev.get('tool_name')}`*")
-                    lines.append("")
-                elif ev.get("type") == "error":
-                    lines.append(f"*Error: {ev.get('message')}*")
-                    lines.append("")
-            lines.append("---")
-            lines.append("")
-
-        try:
-            with open(result, "a", encoding="utf-8") as f:
-                f.write("\n".join(lines))
-        except Exception:
-            logger.exception("Failed to append provider sub-chats to archived transcript %s", result)
 
     def run_archive_postprocess(
         self,
@@ -3542,20 +3544,6 @@ class ProjectChatManager:
         handover = self._format_handover_context(chat)
         if handover:
             parts.append(handover)
-
-        # Add a reminder about open agent handoffs
-        manager = getattr(self, "_provider_subchat_manager", None)
-        if manager is not None:
-            active_sc = [r for r in manager.list_records(chat.chat_id) if r.status == "waiting_owner"]
-            if active_sc:
-                reminder_lines = ["[REMINDER: Active agent handoffs waiting for owner input:"]
-                for sc in active_sc:
-                    reminder_lines.append(
-                        f"- Sub-chat ID: '{sc.subchat_id}'. "
-                        f"Participant: '{sc.participant.provider}' using model '{sc.participant.model}'."
-                    )
-                reminder_lines.append("Use handoff_send or handoff_close to send answers or close them.]")
-                parts.append("\n".join(reminder_lines))
 
         if unattended:
             # Without this the model reads a loop tick as a message the user
@@ -3893,6 +3881,7 @@ class ProjectChatManager:
                 buckets.add("ollama")
             if workspace.default_provider == "claude":
                 buckets.add("work")
+        buckets.update(f"custom:{provider.id}" for provider in load_custom_providers(self._config))
         return buckets
 
     def _model_bucket_allowed(self, bucket: str | None) -> bool:
@@ -3928,6 +3917,13 @@ class ProjectChatManager:
                 return target
             return model
 
+        if effective.startswith("custom:"):
+            provider_id = effective.split(":", 1)[1]
+            target = getattr(self._config, "custom_routing", {}).get(provider_id, {}).get(
+                canonical_tier(model), model
+            )
+            return target or model
+
         if not self._bucket_routes_to_ollama(effective):
             return model
         target = tier_model(
@@ -3943,11 +3939,21 @@ class ProjectChatManager:
 
     def _runtime_model_for_chat(self, chat: ChatInfo) -> str:
         """Resolve the model the provider should actually run for a chat."""
+        custom = provider_for_model(self._config, chat.model)
+        if custom is not None:
+            return runtime_model(chat.model)
         if chat.provider != "claude":
             return chat.model
         return self._resolve_claude_model(
             chat.model, chat.model_bucket, chat.project_id
         )
+
+    def _validate_custom_model_runner(self, model: str, provider: str) -> None:
+        custom = provider_for_model(self._config, model)
+        if custom is not None and custom.runner != provider:
+            raise ValueError(
+                f"Custom provider '{custom.name}' must be used with {custom.runner}"
+            )
 
     def _thinking_level_for_chat(self, chat: ChatInfo) -> str:
         """Return the chat's thinking level, or "" when stale.
@@ -3987,7 +3993,21 @@ class ProjectChatManager:
             env.update(
                 routing_env_for_model(self._runtime_model_for_chat(chat), self._config)
             )
+        custom = provider_for_model(self._config, chat.model)
+        if custom is not None:
+            if custom.runner != chat.provider:
+                raise ValueError(
+                    f"Custom provider '{custom.name}' is configured for {custom.runner}, "
+                    f"not {chat.provider}"
+                )
+            env.update(custom_env_for_model(self._config, chat.model))
         env["CIAO_CHAT_ID"] = chat.chat_id
+        if chat.spawned_from_chat_id:
+            # Depth marker for the delegate recursion guard. Present means "you
+            # are a delegate", which delegate_spawn refuses to nest under; see
+            # CiaoControlPlane.delegate_spawn. Carrying the parent id (not just
+            # a flag) also lets a delegate's own tooling name its supervisor.
+            env["CIAO_DELEGATE_OF"] = chat.spawned_from_chat_id
         # Disable Claude Code's auto memory to avoid double memory layers
         env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
         # Artifacts publish to claude.ai; ciaobot has no use for that surface
@@ -4193,10 +4213,7 @@ class ProjectChatManager:
                 )
                 resolved_surface = "legacy"
             else:
-                role = "handoff" if chat.chat_id.startswith("sub-") else "chat"
-                mcp_url, mcp_token = service.credentials_for_chat(
-                    chat, project, role=role
-                )
+                mcp_url, mcp_token = service.credentials_for_chat(chat, project)
 
         return AgentRequest(
             prompt=full_prompt,
@@ -4610,11 +4627,6 @@ class ProjectChatManager:
             for chat_id, task in self._pending_subagent_watchers.items()
             if not task.done()
         )
-        manager = getattr(self, "_provider_subchat_manager", None)
-        if manager is not None:
-            for r in manager._records.values():
-                if r.status in ("created", "running"):
-                    ids.add(r.parent_chat_id)
         return sorted(ids)
 
     def begin_restart_drain(self) -> None:
@@ -5247,16 +5259,12 @@ class ProjectChatManager:
                                 if event.is_error:
                                     had_error = True
                                     result_text = event.result or ""
-                                    # Quota rejections only auto-retry when
-                                    # nothing streamed (retrying a partial turn
-                                    # would double-run work). Connection errors
-                                    # are safe to resume even mid-response —
-                                    # _arm_retry resumes the session with
-                                    # "continue" rather than replaying.
-                                    if _is_retryable_quota_error(result_text) and (
-                                        not had_provider_progress
-                                        or _is_billing_or_spend_limit_error(result_text)
-                                    ):
+                                    # Quota rejections always auto-retry, same
+                                    # as connection errors: _arm_retry resumes
+                                    # a session that already streamed with
+                                    # "continue" rather than replaying, so
+                                    # progress mid-turn never gets double-run.
+                                    if _is_retryable_quota_error(result_text):
                                         self._arm_retry(
                                             chat_id,
                                             stream,
@@ -5314,10 +5322,7 @@ class ProjectChatManager:
                                 error_msg = f"{error_msg}\n{stderr}"
                             stream.publish({"type": "error", "message": error_msg})
                             had_error = True
-                            if _is_retryable_quota_error(error_msg) and (
-                                not had_provider_progress
-                                or _is_billing_or_spend_limit_error(error_msg)
-                            ):
+                            if _is_retryable_quota_error(error_msg):
                                 self._arm_retry(
                                     chat_id,
                                     stream,
@@ -5525,6 +5530,22 @@ class ProjectChatManager:
                     # fires. New replies to the same chat cancel and restart
                     # the timer (see _schedule_push).
                     self._schedule_push(chat_id, title, snippet)
+
+                # A delegate that just went idle should wake its supervisor.
+                # Deliberately outside the `not had_error` gate above: a
+                # delegate that failed is exactly the news the parent needs,
+                # and staying silent would leave the supervisor waiting on a
+                # child that is never coming back.
+                delegate = self._chats.get(chat_id)
+                if delegate is not None and delegate.spawned_from_chat_id:
+                    self._queue_delegate_wake(
+                        delegate.spawned_from_chat_id,
+                        child_chat_id=chat_id,
+                        child_title=delegate.title,
+                        delegation_id=delegate.delegation_id,
+                        reply=last_assistant_text,
+                        had_error=had_error,
+                    )
 
         asyncio.create_task(_drive())
         return stream
@@ -5869,6 +5890,195 @@ class ProjectChatManager:
             )
             return False
 
+    # ── Delegate completion wakes ────────────────────────────────────────
+
+    def delegates_for_chat(self, parent_chat_id: str) -> list[ChatInfo]:
+        """Chats spawned as delegates of ``parent_chat_id``, oldest first."""
+        return sorted(
+            (
+                c
+                for c in self._chats.values()
+                if c.spawned_from_chat_id == parent_chat_id
+            ),
+            key=lambda c: c.created_at,
+        )
+
+    def active_delegate_count(self, parent_chat_id: str) -> int:
+        """Delegates of this chat with a turn currently in flight.
+
+        Counts concurrent spend, not outstanding review: a delegate that has
+        finished and reported no longer occupies a slot even if the supervisor
+        has not looked at it yet.
+        """
+        running = set(self.active_chat_ids())
+        return sum(
+            1
+            for c in self.delegates_for_chat(parent_chat_id)
+            if not c.archived and c.chat_id in running
+        )
+
+    def _queue_delegate_wake(
+        self,
+        parent_chat_id: str,
+        *,
+        child_chat_id: str,
+        child_title: str,
+        delegation_id: str,
+        reply: str,
+        had_error: bool,
+    ) -> None:
+        """Record a finished delegate and arm the coalescing window.
+
+        Called from a delegate's own turn teardown, so it must stay cheap and
+        never raise: the child's turn is already done and a failure here would
+        surface as an unrelated error in the wrong chat.
+        """
+        parent = self._chats.get(parent_chat_id)
+        if parent is None or parent.archived:
+            # Supervisor is gone or read-only. The delegate's own chat still
+            # holds the full result, so nothing is lost by not waking.
+            logger.info(
+                "Delegate %s finished but parent %s is missing or archived; no wake",
+                child_chat_id,
+                parent_chat_id,
+            )
+            return
+        self._delegate_wake_pending.setdefault(parent_chat_id, []).append({
+            "chat_id": child_chat_id,
+            "title": child_title,
+            "delegation_id": delegation_id,
+            "reply": reply or "",
+            "had_error": had_error,
+        })
+        existing = self._delegate_wake_tasks.get(parent_chat_id)
+        if existing is not None and not existing.done():
+            # A window is already open; this completion rides along with it.
+            return
+        self._delegate_wake_tasks[parent_chat_id] = asyncio.create_task(
+            self._flush_delegate_wake(parent_chat_id)
+        )
+
+    async def _flush_delegate_wake(self, parent_chat_id: str) -> None:
+        """Wait out the coalescing window, then deliver one wake turn."""
+        try:
+            await asyncio.sleep(_DELEGATE_WAKE_WINDOW_SECONDS)
+            finished = self._delegate_wake_pending.pop(parent_chat_id, [])
+            if not finished:
+                return
+            parent = self._chats.get(parent_chat_id)
+            if parent is None or parent.archived:
+                return
+            prompt = self._build_delegate_wake_prompt(parent_chat_id, finished)
+            # queue_message covers the two live cases in one call: it appends
+            # to the in-flight stream when the supervisor is mid-turn (so we
+            # never interrupt the user), and returns False when the chat is
+            # idle. start_stream then handles the idle case, including a cold
+            # parent whose provider session died in a restart — the reason the
+            # subagent synthesis nudge's steer-only approach is not enough
+            # here, since a delegate can finish hours later.
+            if self.queue_message(parent_chat_id, prompt):
+                delivery = "queued"
+            else:
+                # Deliberately NOT unattended: that flag forces bypass mode,
+                # and a supervisor waking up to merge branches should still
+                # raise approval cards. The user may well be watching.
+                self.start_stream(parent_chat_id, prompt)
+                delivery = "started"
+            self._events.publish({
+                "type": "chat_delegates_reported",
+                "chat_id": parent_chat_id,
+                "project_id": parent.project_id,
+                "count": len(finished),
+                "delivery": delivery,
+            })
+        except RestartDrainingError:
+            # Server is shutting down; the delegate results live on in their
+            # own chats and the supervisor can be re-prompted by hand.
+            logger.info(
+                "Delegate wake for %s dropped: server is draining for restart",
+                parent_chat_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a failed wake must not kill the app
+            logger.exception("Delegate wake failed for parent chat %s", parent_chat_id)
+        finally:
+            current = self._delegate_wake_tasks.get(parent_chat_id)
+            if current is asyncio.current_task():
+                self._delegate_wake_tasks.pop(parent_chat_id, None)
+
+    def _build_delegate_wake_prompt(
+        self, parent_chat_id: str, finished: list[dict[str, Any]]
+    ) -> str:
+        """Compose the supervisor's wake turn from finished delegates.
+
+        Each entry carries the child's chat id so the supervisor can read the
+        full transcript with chat_get rather than trusting the excerpt, which
+        is truncated and may have dropped the part that matters.
+        """
+        still_running = [
+            c.chat_id
+            for c in self._chats.values()
+            if c.spawned_from_chat_id == parent_chat_id
+            and not c.archived
+            and c.chat_id not in {e["chat_id"] for e in finished}
+            and c.chat_id in self.active_chat_ids()
+        ]
+        lines = [
+            f"[Ciaobot] {len(finished)} delegate"
+            f"{'s' if len(finished) != 1 else ''} finished."
+        ]
+        if still_running:
+            lines.append(
+                f"{len(still_running)} still running: {', '.join(still_running)}."
+            )
+        deferred = False
+        for entry in finished:
+            child = self._chats.get(entry["chat_id"])
+            # A provider quota rejection sets had_error AND arms a deferred
+            # retry, so reporting it as FAILED tells the supervisor the work is
+            # dead when it is actually going to resume on its own. A supervisor
+            # that believes "failed" re-dispatches and duplicates the work.
+            if child is not None and child.retry_status == "pending":
+                status = (
+                    f"DEFERRED, retrying at {child.retry_next_at}"
+                    if child.retry_next_at
+                    else "DEFERRED, retry pending"
+                )
+                deferred = True
+            elif entry["had_error"]:
+                status = "FAILED"
+            else:
+                status = "done"
+            lines.append("")
+            lines.append(
+                f"— {entry['title']} ({entry['chat_id']}, {status})"
+            )
+            excerpt = self._result_snippet(
+                entry["reply"], limit=_DELEGATE_WAKE_EXCERPT_CHARS
+            ) if entry["reply"].strip() else "(no final message)"
+            lines.append(excerpt)
+        lines.append("")
+        if deferred:
+            lines.append(
+                "A DEFERRED delegate hit a provider limit and will resume by "
+                "itself at the time shown — it is not dead. Do not re-dispatch "
+                "its work or report it as failed; you will be woken again when "
+                "it finishes. Use chat_retry to run it sooner, or chat_stop to "
+                "abandon it."
+            )
+            lines.append("")
+        lines.append(
+            "Review this against what you asked each delegate to do. The "
+            "excerpt above is truncated and is the delegate's own account, so "
+            "verify the claimed work yourself: re-run its commands, read the "
+            "diff, run the tests. To read a delegate's real transcript, take "
+            "its session_id from chat_get and read that provider session's "
+            "JSONL (chat_get returns metadata only, never messages). Report to "
+            "the user only once you have checked."
+        )
+        return "\n".join(lines)
+
     # ── Between-turns SDK drain ──────────────────────────────────────────
 
     def _cancel_between_turns_drain(self, chat_id: str) -> None:
@@ -6165,26 +6375,40 @@ class ProjectChatManager:
         workspace = project.workspace if project else None
         from ciao.providers.ollama import is_local_ollama_model
         from ciao.providers.routing import resolve_with_fallback
+        from ciao.custom_providers import (
+            env_for_model as custom_env_for_model,
+            provider_for_model,
+            runtime_model,
+        )
 
         requested = (
             chat.model if chat.provider == "codex"
             else resolve_title_model(self._config, workspace)
         )
+        custom_title_provider = provider_for_model(self._config, requested)
         # A "codex:<model>" override routes titles through the Codex CLI for
         # any chat, not just Codex chats (Settings -> Chat titles -> OpenAI).
         codex_override = chat.provider != "codex" and requested.startswith("codex:")
-        if chat.provider == "codex":
+        if custom_title_provider is not None:
+            title_provider = custom_title_provider.runner
+            title_model = runtime_model(requested)
+            title_env = custom_env_for_model(self._config, requested)
+        elif chat.provider == "codex":
+            title_provider = "codex"
             title_model = requested
             title_env = self._build_extra_env(chat)
         elif codex_override:
+            title_provider = "codex"
             title_model = requested[len("codex:"):] or "gpt-5.1"
             title_env = None
         elif self._config.title_model_override:
+            title_provider = "claude"
             title_model = requested
             from ciao.providers.routing import routing_routine_env_for_model
 
             title_env = routing_routine_env_for_model(requested, self._config)
         else:
+            title_provider = "claude"
             title_model, title_env, note = resolve_with_fallback(
                 requested,
                 self._config,
@@ -6214,8 +6438,8 @@ class ProjectChatManager:
             # Keep the established Claude/Ollama call signature intact for
             # integrations that wrap the title helper. Codex is the only
             # provider that needs an explicit dispatch hint here.
-            if chat.provider == "codex" or codex_override:
-                title_kwargs["provider"] = "codex"
+            if title_provider != "claude":
+                title_kwargs["provider"] = title_provider
             title, engine, detail = await _generate_chat_title_with_engine(
                 user_text,
                 assistant_text,
@@ -6472,7 +6696,7 @@ class ProjectChatManager:
                 return needs_user
             except Exception as exc:  # noqa: BLE001
                 run.status = "error"
-                run.error = str(exc)[:1000]
+                run.error = (str(exc).strip() or type(exc).__name__)[:1000]
                 logger.exception(
                     "Schedule attention classifier failed with model %s; keeping chat visible",
                     model,
@@ -6820,15 +7044,7 @@ class ProjectChatManager:
                     target_id,
                 )
 
-        if outcome.stream_error or outcome.is_error:
-            _sched_status = "error"
-            _sched_error = (outcome.final_text or "stream error")[:1000]
-        elif outcome.permission_requested or outcome.question_requested or outcome.retry_pending:
-            _sched_status = "skipped"
-            _sched_error = None
-        else:
-            _sched_status = "ok"
-            _sched_error = None
+        _sched_status, _sched_error = _schedule_dispatch_status(outcome)
         job_runs.record_run(job_runs.JobRun(
             job="schedule_dispatch",
             label="Scheduled dispatch",

@@ -128,7 +128,7 @@ What that looks like in practice:
 - **Files and automations** — create, preview, edit, and restore vault files from the UI; run recurring routines on a cron you choose (schedules) or re-run a prompt inside one chat every N minutes (loops).
 - **Voice, notifications, and updates** — transcription, push alerts, model settings, and in-app package updates. On macOS, `Ciaobot.app` owns the window, menu bar, native notifications, and desktop updates while the engine runs as a background service.
 - **Provider choice** — Claude Code or Codex with your existing login; Ollama, OpenRouter, and on-device models for lighter tasks (see [Providers](#providers)).
-- **Agent-safe control plane** — an authenticated, chat-scoped MCP surface lets managed Claude Code and Codex processes operate Ciaobot memory, vault, projects, chats, schedules, loops, agent handoffs, and file history without curl or direct runtime-JSON edits. MCP is the default transport, with the legacy CLI path retained as an automatic fallback. Reads and non-destructive writes on this surface run without an approval card (they are the twins of buttons in the UI); deletes and lifecycle actions still ask. See [docs/MCP.md](docs/MCP.md).
+- **Agent-safe control plane** — an authenticated, chat-scoped MCP surface lets managed Claude Code and Codex processes operate Ciaobot memory, vault, projects, chats, delegates, schedules, loops, and file history without curl or direct runtime-JSON edits. MCP is the default transport, with the legacy CLI path retained as an automatic fallback. Reads and non-destructive writes on this surface run without an approval card (they are the twins of buttons in the UI); deletes and lifecycle actions still ask. See [docs/MCP.md](docs/MCP.md).
 
 Pick a workspace folder, choose a provider, and work — Ciaobot is the interface on top; the vault is yours to keep.
 
@@ -151,7 +151,7 @@ When your message mentions a name that appears in the vault index, the agent get
 - Comment on any passage of a reply — select text, attach a note, and it rides along with your next prompt; queue follow-ups while the agent is still working.
 - Per-chat model picker with provider thinking levels on top of per-workspace defaults.
 - Fork conversation: create a new independent chat in the same project starting from any completed agent answer, preserving history.
-- Agent handoffs: spawn and communicate with a second provider route (the participant) as a read-only sub-chat attached to the originating turn.
+- Delegates: a chat's agent spawns writable delegate chats (own model, own resumable session, full tool access) to work in parallel, and is woken with a fresh turn when each finishes. Capped at 6 per chat; delegates cannot nest.
 
 **Voice — dictation and read-aloud**
 
@@ -187,6 +187,7 @@ When your message mentions a name that appears in the vault index, the agent get
 **Providers and models**
 
 - Claude Code or OpenAI Codex with the subscription login you already have; Ollama (cloud or local) and OpenRouter as API backends.
+- Claude shell commands stay attached to the active turn until they return a result. Background subagents remain asynchronous and visible in the chat while they run.
 - haiku/sonnet/opus tier routing mapped across providers; background tasks (titles, insights) routable to cheaper or on-device models ([apfel](https://github.com/Arthur-Ficial/apfel)).
 
 **Google Workspace**

@@ -31,6 +31,7 @@ from ciao.memory_tool import (
 )
 from ciao.loops import publish_loops_changed
 from ciao.models import ControlSurface
+from ciao.web.project_chats import _MAX_ACTIVE_DELEGATES
 from ciao.schedules import ScheduleEntry, compute_next_run
 
 logger = logging.getLogger(__name__)
@@ -45,22 +46,34 @@ class McpPrincipal:
     project_id: str
     workspace: str
     provider: str
-    role: Literal["chat", "automation", "handoff"] = "chat"
-    handoff_depth: int = 0
+    # Only ``chat`` is ever issued. The type used to also allow ``automation``,
+    # which nothing minted and nothing branched on, and a third value
+    # ``handoff`` was smuggled past this annotation by a cast so a gate could
+    # test for it. That gate never fired, because the sole issuing call site
+    # hardcodes ``chat``; the handoff primitive has since been deleted
+    # entirely. Keeping this a one-value Literal means any future restricted
+    # role has to change the issuing path to type-check, instead of adding a
+    # check that silently never runs.
+    role: Literal["chat"] = "chat"
 
     def to_claims(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_claims(cls, claims: dict[str, Any]) -> "McpPrincipal":
+        """Rebuild a principal from token claims.
+
+        Anything other than ``chat`` in the claim is normalised away rather
+        than trusted: a token is the one input here that does not come from
+        our own call sites, so an unrecognised role must not become a
+        privilege the rest of the code then reasons about.
+        """
         return cls(
             token_id=str(claims.get("token_id") or ""),
             chat_id=str(claims.get("chat_id") or ""),
             project_id=str(claims.get("project_id") or ""),
             workspace=str(claims.get("workspace") or ""),
             provider=str(claims.get("provider") or ""),
-            role=str(claims.get("role") or "chat"),  # type: ignore[arg-type]
-            handoff_depth=int(claims.get("handoff_depth") or 0),
         )
 
 
@@ -98,7 +111,6 @@ class CiaoControlPlane:
         project_chat_manager: Any,
         schedule_manager: Any,
         loop_manager: Any,
-        provider_subchat_manager: Any | None = None,
         local_session_manager: Any | None = None,
         app_settings: Any | None = None,
         startup_tracker: Any | None = None,
@@ -109,7 +121,6 @@ class CiaoControlPlane:
         self.pcm = project_chat_manager
         self.schedules = schedule_manager
         self.loops = loop_manager
-        self.handoffs = provider_subchat_manager
         self.local_sessions = local_session_manager
         self.app_settings = app_settings
         self.startup_tracker = startup_tracker
@@ -296,7 +307,6 @@ class CiaoControlPlane:
             "chat": chat.to_dict(local=self.pcm.is_session_local(chat)) if chat else None,
             "provider": principal.provider,
             "role": principal.role,
-            "handoff_depth": principal.handoff_depth,
             "control_surface": getattr(chat, "control_surface", "")
             or getattr(self.config, "control_surface", "legacy"),
         })
@@ -774,102 +784,92 @@ class CiaoControlPlane:
             )
         return _ok({"chat_id": chat_id, "stopped": await self.pcm.stop_chat(chat_id)})
 
-    # ---- agent handoffs -------------------------------------------------
+    # ---- delegates -----------------------------------------------------
 
-    def _handoff_manager(self) -> Any:
-        if self.handoffs is None:
-            raise ControlPlaneError("unavailable", "Agent handoff manager is unavailable.")
-        return self.handoffs
+    def _delegate_payload(self, chat: Any, *, streaming: bool) -> dict[str, Any]:
+        return {
+            "chat_id": chat.chat_id,
+            "title": chat.title,
+            "provider": chat.provider,
+            "model": chat.model,
+            "delegation_id": chat.delegation_id,
+            "archived": chat.archived,
+            "running": streaming,
+            "created_at": chat.created_at,
+            "last_activity_at": chat.last_activity_at,
+        }
 
-    def _handoff_record(self, principal: McpPrincipal, subchat_id: str) -> Any:
-        record = self._handoff_manager().get_record(subchat_id)
-        if record is None:
-            raise ControlPlaneError("handoff_not_found", f"Handoff '{subchat_id}' was not found.")
-        self._chat(principal, record.parent_chat_id)
-        return record
+    def delegate_spawn(
+        self,
+        principal: McpPrincipal,
+        *,
+        prompt: str,
+        title: str = "",
+        provider: str | None = None,
+        model: str | None = None,
+        model_bucket: str | None = None,
+        mode: str | None = None,
+        delegation_id: str = "",
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Spawn a writable delegate chat that wakes this chat when it finishes."""
+        parent = self._chat(principal, "")
+        # Server-side recursion guard. CIAO_DELEGATE_OF tells a delegate what it
+        # is, but a child could unset its own env, so the authoritative check is
+        # the calling chat's own lineage.
+        if parent.spawned_from_chat_id:
+            raise ControlPlaneError(
+                "nested_delegate_forbidden",
+                "A delegate cannot spawn delegates. Report back to your "
+                "supervisor instead.",
+            )
+        if not prompt.strip():
+            raise ControlPlaneError("empty_prompt", "prompt is required.")
+        active = self.pcm.active_delegate_count(parent.chat_id)
+        if active >= _MAX_ACTIVE_DELEGATES:
+            raise ControlPlaneError(
+                "delegate_limit_reached",
+                f"{active} delegates are already running (limit "
+                f"{_MAX_ACTIVE_DELEGATES}). Wait for one to report before "
+                f"spawning another.",
+            )
+        project = self._resolve_project(principal, project_id)
+        chat = self.pcm.create_chat(
+            project.project_id,
+            title=title.strip() or "Delegate",
+            provider=provider,
+            model=model,
+            model_bucket=model_bucket,
+            mode=mode,
+            spawned_from_chat_id=parent.chat_id,
+            delegation_id=delegation_id.strip(),
+        )
+        # Same start/queue split as chat_send: a brand-new chat is never
+        # streaming, so this normally starts immediately.
+        if self.pcm.queue_message(chat.chat_id, prompt.strip()):
+            send_status = "queued"
+        else:
+            self.pcm.start_stream(chat.chat_id, prompt.strip())
+            send_status = "started"
+        result = chat.to_dict(local=True)
+        result["send_status"] = send_status
+        result["active_delegates"] = active + 1
+        return _ok(result)
 
-    def handoffs_list(self, principal: McpPrincipal, chat_id: str = "") -> dict[str, Any]:
+    def delegates_list(self, principal: McpPrincipal, chat_id: str = "") -> dict[str, Any]:
+        """List delegates spawned by a chat, with which ones are still running."""
         parent_id = self._chat_id(principal, chat_id)
-        return _ok([item.to_dict() for item in self._handoff_manager().list_records(parent_id)])
-
-    async def handoff_start(
-        self,
-        principal: McpPrincipal,
-        *,
-        provider: str,
-        model: str,
-        message: str,
-        chat_id: str = "",
-        model_bucket: str = "",
-        user_authorized: bool = False,
-    ) -> dict[str, Any]:
-        if principal.role == "handoff":
-            raise ControlPlaneError("nested_handoff_forbidden", "A handoff cannot start another handoff.")
-        parent = self._chat(principal, chat_id)
-        if not provider.strip() or not model.strip() or not message.strip():
-            raise ControlPlaneError("invalid_handoff", "provider, model, and message are required.")
-        from ciao.provider_subchats import ProviderRoute
-
-        owner = ProviderRoute(
-            provider=parent.provider,
-            model=parent.model,
-            model_bucket=parent.model_bucket,
-            label="owner",
-        )
-        participant = ProviderRoute(
-            provider=provider.strip(),
-            model=model.strip(),
-            model_bucket=model_bucket.strip(),
-            label="participant",
-        )
-        record = self._handoff_manager().create_subchat(
-            parent_chat_id=parent.chat_id,
-            parent_turn_index=max(0, int(parent.user_turn_count) - 1),
-            owner=owner,
-            participant=participant,
-        )
-        result = await self._handoff_manager().run_consultation_turn(
-            record.subchat_id,
-            message.strip(),
-            user_authorized=user_authorized,
-        )
-        return _ok({"record": record.to_dict(), "result": result})
-
-    async def handoff_send(
-        self,
-        principal: McpPrincipal,
-        subchat_id: str,
-        message: str,
-        *,
-        user_authorized: bool = False,
-    ) -> dict[str, Any]:
-        self._handoff_record(principal, subchat_id)
-        if not message.strip():
-            raise ControlPlaneError("empty_prompt", "message is required.")
-        return _ok(await self._handoff_manager().run_consultation_turn(
-            subchat_id, message.strip(), user_authorized=user_authorized
-        ))
-
-    def handoff_events(self, principal: McpPrincipal, subchat_id: str) -> dict[str, Any]:
-        self._handoff_record(principal, subchat_id)
-        return _ok(self._handoff_manager().get_events(subchat_id))
-
-    def handoff_close(self, principal: McpPrincipal, subchat_id: str) -> dict[str, Any]:
-        self._handoff_record(principal, subchat_id)
-        self._handoff_manager().close_subchat(subchat_id)
-        return _ok(self._handoff_manager().get_record(subchat_id).to_dict())
-
-    async def handoff_cancel(self, principal: McpPrincipal, subchat_id: str) -> dict[str, Any]:
-        self._handoff_record(principal, subchat_id)
-        await self._handoff_manager().cancel_subchat(subchat_id)
-        return _ok(self._handoff_manager().get_record(subchat_id).to_dict())
-
-    def handoff_extend(
-        self, principal: McpPrincipal, subchat_id: str, *, user_authorized: bool
-    ) -> dict[str, Any]:
-        self._handoff_record(principal, subchat_id)
-        self._handoff_manager().extend_subchat(subchat_id, user_authorized=user_authorized)
-        return _ok(self._handoff_manager().get_record(subchat_id).to_dict())
+        running = set(self.pcm.active_chat_ids())
+        rows = [
+            self._delegate_payload(c, streaming=c.chat_id in running)
+            for c in self.pcm.delegates_for_chat(parent_id)
+        ]
+        return _ok({
+            "chat_id": parent_id,
+            "delegates": rows,
+            "active": sum(1 for r in rows if r["running"] and not r["archived"]),
+            "limit": _MAX_ACTIVE_DELEGATES,
+        })
 
     # ---- schedules/loops ----------------------------------------------
 

@@ -43,15 +43,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/chats/{chat_id}/new` | Start a new provider session |
 | POST | `/api/chats/{chat_id}/handover` | Continue chat on a fresh provider session |
 | POST | `/api/chats/{chat_id}/fork` | Fork chat continuing from a completed turn |
-| GET | `/api/chats/{chat_id}/provider-subchats` | List provider sub-chats |
-| POST | `/api/chats/{chat_id}/provider-subchats` | Create provider sub-chat |
-| GET | `/api/provider-subchats/{subchat_id}/events` | Read provider sub-chat events |
-| POST | `/api/provider-subchats/{subchat_id}/messages` | Send message to provider sub-chat |
-| POST | `/api/provider-subchats/{subchat_id}/close` | Close provider sub-chat |
-| POST | `/api/provider-subchats/{subchat_id}/cancel` | Cancel active provider sub-chat work |
-| POST | `/api/provider-subchats/{subchat_id}/extend` | Extend provider sub-chat limits |
-| POST | `/api/provider-subchats/{subchat_id}/permission-response` | Resolve permission request in provider sub-chat |
-| POST | `/api/provider-subchats/{subchat_id}/question-response` | Resolve structured question in provider sub-chat |
 | POST | `/api/chats/{chat_id}/archive` | Archive chat |
 | POST | `/api/chats/{chat_id}/continue` | Create a new active chat continuing from this archived one |
 | POST | `/api/chats/{chat_id}/read` | Mark chat read |
@@ -124,7 +115,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/workspaces` | List configured logical workspaces |
 | POST | `/api/workspaces/{name}` | Add or update a logical workspace config |
 | DELETE | `/api/workspaces/{name}` | Delete a logical workspace config |
-| GET, PATCH | `/api/settings/providers` | Read or update keys used directly by Ciaobot |
+| GET, PATCH | `/api/settings/providers` | Read or update direct keys and the tracked custom provider definitions (tokens are stored locally and redacted) |
+| POST | `/api/settings/providers/custom/probe` | Discover models from an unsaved OpenAI-compatible custom endpoint |
 | POST | `/api/settings/providers/{provider}/{action}` | Connect, verify, or log out through the Claude Code or Codex CLI |
 | GET | `/api/integrations/gws` | Read Google Workspace CLI install, profile auth, and workspace usage status |
 | POST | `/api/integrations/gws/install` | Install the `@googleworkspace/cli` (`gws`) binary globally via npm |
@@ -231,6 +223,20 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/agent
   -H 'content-type: application/json' \
   -d '{"description":"Turn notes into a decision record.","argument_hint":"<notes>","content":"# Decision Record: $ARGUMENTS\n\nConvert $ARGUMENTS into a concise decision record with context, decision, and consequences."}'
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/agent-assets/commands/decision-record"
+```
+
+**Custom compatible provider**
+
+```bash
+# Probe an unsaved compatible endpoint for model ids.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/settings/providers/custom/probe" \
+  -H 'content-type: application/json' \
+  -d '{"id":"lm-studio","name":"LM Studio","url":"http://localhost:1234/v1","runner":"claude","token":""}'
+
+# Save one or more endpoints. Omit `token` on an existing id to retain its stored token.
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/providers" \
+  -H 'content-type: application/json' \
+  -d '{"custom_providers":[{"id":"lm-studio","name":"LM Studio","url":"http://localhost:1234/v1","runner":"claude","models":"qwen2.5-coder"}]}'
 ```
 
 **Projects**
@@ -344,45 +350,34 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 # Delete.
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chats/$CID"
 
-# Provider Sub-chats — list all sub-chats for a parent chat.
-curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/provider-subchats"
-
 # Create Provider Sub-chat.
 # Body keys: parent_turn_index, owner (object with provider, model, label), participant (object), task_prompt (optional), user_authorized (optional).
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/provider-subchats" \
   -H 'content-type: application/json' \
   -d '{"parent_turn_index":0,"owner":{"provider":"claude","model":"opus","label":"Claude"},"participant":{"provider":"codex","model":"gpt-4","label":"Codex"},"task_prompt":"Analyze this issue"}'
 
 # Read Sub-chat Events.
-curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/provider-subchats/$SUBID/events"
 
 # Send Message/Prompt to Sub-chat.
 # Body keys: message, user_authorized (optional).
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/provider-subchats/$SUBID/messages" \
   -H 'content-type: application/json' \
   -d '{"message":"Next instruction"}'
 
 # Close Sub-chat.
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/provider-subchats/$SUBID/close"
 
 # Cancel Sub-chat.
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/provider-subchats/$SUBID/cancel"
 
 # Extend Sub-chat limits.
 # Body keys: user_authorized (required).
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/provider-subchats/$SUBID/extend" \
   -H 'content-type: application/json' \
   -d '{"user_authorized":true}'
 
 # Resolve Permission Request in Sub-chat.
 # Body keys: request_id, approved, reason (optional).
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/provider-subchats/$SUBID/permission-response" \
   -H 'content-type: application/json' \
   -d '{"request_id":"req-1","approved":true}'
 
 # Resolve Structured Question in Sub-chat.
 # Body keys: request_id, answers (dict).
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/provider-subchats/$SUBID/question-response" \
   -H 'content-type: application/json' \
   -d '{"request_id":"req-2","answers":{"choice":["option-a"]}}'
 ```
@@ -574,6 +569,7 @@ Global `/ws/events` payloads the PWA reacts to:
 
 - `chat_streaming_started` / `chat_streaming_done` / `chat_result_ready`: lifecycle of the main chat turn.
 - `chat_subagents_ready`: emitted when a background `Agent` (run_in_background) finishes or its count drops. Fields: `{chat_id, project_id, remaining}`.
+- `chat_delegates_reported`: emitted on the *supervisor* chat once finished delegates (chats carrying `spawned_from_chat_id`) have been reported back to it. Fields: `{chat_id, project_id, count, delivery}`, where `delivery` is `"queued"` (supervisor was mid-turn, so the wake was appended as a follow-up) or `"started"` (supervisor was idle, so a new turn began). Completions inside a 5s window coalesce into one event.
 - `chat_read`: another client/device marked the chat read.
 - `chat_title`: auto-title finished.
 - `chat_created`: a new chat was created (fresh or fork). Fields: `{chat: ChatInfo}`. The acting tab already pushes optimistically; this event is what makes other tabs/devices, or the acting tab after a racing `syncLatest` clobber, render the chat without waiting for the 15s poll. Without it a fork (which starts no streaming turn, so no `chat_result_ready` refetch) stayed invisible until a manual reload.

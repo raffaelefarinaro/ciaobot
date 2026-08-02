@@ -116,6 +116,8 @@ If a connector's tools don't show up, the fix is on the claude.ai side: toggle t
 
 `n8n_mcp` is not a claude.ai connector. It can be registered in `.mcp.json` as an HTTP MCP server and authenticated with a bearer token read from the `N8N_MCP_TOKEN` env var (never inline the token in `.mcp.json`). `scripts/run-ciao.sh` sources `.env` so ciao-spawned `claude` subprocesses inherit the token. Like the claude.ai connectors, n8n is usually workspace-scoped: add it to the denylist for workspaces where it should not be available.
 
+Project MCP servers in `.mcp.json` are automatically projected into the workspace `.codex/config.toml` by `ciao sync-skills`, so Claude and Codex chats share the same project MCP source. The projection excludes the dynamically injected `ciaobot` server, preserves user-owned Codex tables, and keeps credentials as `${ENV_VAR}` references.
+
 ## Environment Variables
 
 Copy `.env.example` to `.env` and fill in the app-level settings first:
@@ -155,11 +157,13 @@ Workspace-specific integrations can still be set in `.env`, but the public `.env
 
 **n8n MCP:** `N8N_MCP_TOKEN` (bearer token for the self-hosted `n8n_mcp` HTTP server in `.mcp.json`). Lives in `.env` only, value redacted. Settings → Assets → MCP servers shows the key status and can write it into `.env`.
 
-**Notion MCP:** `NOTION_TOKEN` (internal integration secret from https://www.notion.so/profile/integrations, used by the official `@notionhq/notion-mcp-server` stdio MCP registered in `.mcp.json`). Lives in `.env` only, value redacted. Settings → Assets → MCP servers shows the key status and can write it into `.env`. Workspace-scoped: add `mcp__notion` to a workspace's `disallowed_tools` to keep it out of that workspace — for example, to make Notion personal-only, set the **work** workspace's denylist to the harness defaults plus `mcp__notion`. Tools surface as `mcp__notion__*`.
+**Notion MCP:** `NOTION_TOKEN` (internal integration secret from https://www.notion.so/profile/integrations, used by the official `@notionhq/notion-mcp-server` stdio MCP registered in `.mcp.json`). Lives in `.env` only, value redacted. Settings → Assets → MCP servers shows the key status and can write it into `.env`. `ciao sync-skills` mirrors the project entry into Codex's `.codex/config.toml` automatically. Workspace-scoped: add `mcp__notion` to a workspace's `disallowed_tools` to keep it out of that workspace — for example, to make Notion personal-only, set the **work** workspace's denylist to the harness defaults plus `mcp__notion`. Tools surface as `mcp__notion__*`.
 
 **OpenRouter:** `OPENROUTER_API_KEY` (optional). When set, OpenRouter is available as a model backend: the Anthropic-compatible endpoint (`https://openrouter.ai/api`) is reached via `ANTHROPIC_BASE_URL` env injection, so chats and one-shot automations can route `owner/model` ids (e.g. `anthropic/claude-haiku-4.5`) through OpenRouter. The picker exposes the per-tier alias defaults plus dynamically discovered anthropic-family models. The `adversarial_review` MCP tool (`ciao.critique`) defaults to an OpenRouter panel when this key is set.
 
 **Provider connections and direct keys.** Settings → Providers launches, verifies, and logs out Claude Code and Codex through their own CLIs; Ciaobot does not store their credentials. Keys Ciaobot calls directly remain editable: Ollama Cloud and OpenRouter under Providers, and the OpenAI cloud voice key under Settings → Models. Saving a direct key patches `.env` and restarts the server.
+
+**Custom compatible providers.** Settings → Providers can register any local or hosted endpoint compatible with the selected CLI (for example Ollama, LM Studio, or an Unsloth server). Enter a name, base URL, optional bearer token, and choose `Claude Code` or `Codex` as the runner. Models are discovered when the endpoint supports the OpenAI-style `/v1/models` catalog, or can be entered manually. Claude Code endpoints must implement the Anthropic-compatible chat API; Codex endpoints must implement the OpenAI-compatible API. Provider definitions are tracked in `.ciao/custom_providers.json`, while bearer tokens remain in the gitignored `.runtime/custom_provider_tokens.json`. The resulting custom models are available in chat, workspace defaults, model routing, title generation, insights, schedules, and critique selectors. Claude Code receives `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`; Codex receives `OPENAI_BASE_URL`/`OPENAI_API_KEY`.
 
 ## Google Tasks Reference
 
@@ -230,7 +234,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_OLLAMA_WEBSEARCH_HOOK`: kill switch for the PostToolUse hook that backfills WebSearch on Ollama-cloud-routed chats. Ollama's Anthropic-compat layer doesn't execute the server-side `web_search` tool, so Claude Code's built-in WebSearch returns an empty boilerplate; the hook reruns the query against Ollama's standalone `POST /api/web_search` and injects the real results as `additionalContext`. Default `1` (enabled). Set `0` to disable. No-op on the Anthropic path (where WebSearch works natively) and on local-daemon routes. See `ciao/observability/hooks.py`.
 - `CIAO_OLLAMA_AUTO_CLASSIFIER`: **removed**. Auto mode is now always live for Ollama-routed chats because the bundled `claude` CLI's permission classifier resolves to an Ollama-served model. Previously this was an opt-in flag because the classifier targeted Anthropic's server-side gate, which ollama.com and local daemons do not expose; the tier-remap env now injected on Ollama routes (`ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS,FABLE}_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`, `CLAUDE_CODE_AUTO_MODE_MODEL`, `CLAUDE_CODE_BG_CLASSIFIER_MODEL`) fixes that. Delete `CIAO_OLLAMA_AUTO_CLASSIFIER` from your `.env` if it is still there.
 - `CIAO_INSIGHTS_DISABLED`: set to `true`/`yes`/`on` to disable post-archive session insights extraction. Default is enabled (false). When enabled, after a chat is archived, raw JSONL is filtered and run through a model to extract errors, dead ends, new entities, decisions, and reusable code, then appended as a `## Session insights` section to the archive markdown.
-- `CIAO_INSIGHTS_MIN_TURNS`: minimum number of turns in a session before insights extraction runs. Default `5`. Override with any positive integer. Short sessions are skipped.
+- `CIAO_INSIGHTS_MIN_TURNS`: minimum number of turns in a session before insights extraction runs. Default `2` (single-shot chats are skipped, multi-turn chats are included). Override with any positive integer; set to `1` to include single-shot chats too.
 - `CIAO_INSIGHTS_MODEL`: model ID for insights extraction, routed through the Ollama Anthropic-compatible API. Default `deepseek-v4-flash:cloud`. This model is fixed at the server level and bypasses the Ollama models allowlist. Uses existing `CIAO_OLLAMA_*` config (base URL, API key) through the Claude Agent SDK one-shot path.
 - `CIAO_INSIGHTS_BACKFILL_ON_STARTUP`: set to `true`/`yes`/`on` to asynchronously scan for and backfill missing session insights on server startup. Default is disabled (false). Helps regenerate missing insights if the model call failed during chat archive due to budget or network issues.
 - `CIAO_TRAJECTORIES_DISABLED`: set to `true`/`yes`/`on` to disable structured trajectory capture after a chat is archived (skills loaded, tools used, errors, decisions). Default enabled. Trajectories are written to `~/.ciao/trajectories/YYYY-MM/<session-id>.json` and mined by the weekly skill-evolution pass.
@@ -317,3 +321,8 @@ Ciaobot runs on macOS under launchd.
 Auto-skills update, auto-CLI update, and similar behaviors belong in server startup code (`ciao/main.py`), not in Claude Code's `settings.json` hooks.
 
 Enabled schedules also receive one startup catch-up check. If the latest expected occurrence was missed while the server was unavailable, it runs immediately once; older skipped intervals are not replayed, and the scheduled prompt receives the current run context rather than a backdated occurrence date.
+
+The Settings → Automations view receives per-job capability metadata from
+`GET /api/automation`: `uses_model` identifies model-backed work and
+`produces_outcome` identifies durable or user-visible results. These flags are
+static registry metadata and remain available before a job has run.

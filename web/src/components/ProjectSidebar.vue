@@ -361,7 +361,7 @@
               class="project-header"
               :class="{
                 'is-system': project.is_auto,
-                'drag-over': dragOverProjectId === project.project_id && dragProjectId !== project.project_id,
+                'drag-over': isDragOverProject(project),
                 'dragging': dragProjectId === project.project_id,
               }"
               :draggable="isDraggable(project)"
@@ -435,23 +435,34 @@
             <!-- Chats in project -->
             <div v-if="expandedProjects.has(project.project_id)" class="chat-list">
               <div
-                v-for="chat in store.projectChats(project.project_id)"
+                v-for="{ chat, isDelegate } in store.projectChatRows(project.project_id)"
                 :key="chat.chat_id"
                 class="chat-item"
                 :class="{
                   active: chat.chat_id === store.activeChatId,
                   remote: chat.local === false,
                   'needs-input': store.chatNeedsInput(chat.chat_id),
+                  delegate: isDelegate,
+                  dragging: dragChatId === chat.chat_id,
                 }"
+                :draggable="chat.local !== false"
                 @click="chat.local !== false && selectChat(chat.chat_id)"
                 @keydown.enter.self.prevent="chat.local !== false && selectChat(chat.chat_id)"
                 @keydown.space.self.prevent="chat.local !== false && selectChat(chat.chat_id)"
+                @dragstart="onChatDragStart(chat, $event)"
+                @dragend="onChatDragEnd"
                 @contextmenu.prevent="toggleChatMenu($event, chat.chat_id)"
                 role="link"
                 :tabindex="chat.local === false ? -1 : 0"
                 :aria-disabled="chat.local === false"
-                :title="chat.local === false ? 'This chat lives on another instance' : ''"
+                :title="chat.local === false ? 'This chat lives on another instance' : 'Drag to move to another project'"
               >
+                <span
+                  v-if="isDelegate"
+                  class="delegate-mark"
+                  title="Delegate: spawned by this chat's supervisor"
+                  aria-label="Delegate chat"
+                >&#8627;</span>
                 <span
                   v-if="chat.title_status === 'pending'"
                   class="title-shimmer"
@@ -813,8 +824,12 @@ async function doMoveChat(targetProjectId: string) {
   const cid = chatMenu.value
   closeChatMenus()
   if (!cid) return
+  await moveChatToProject(cid, targetProjectId)
+}
+
+async function moveChatToProject(chatId: string, targetProjectId: string) {
   try {
-    await store.moveChat(cid, targetProjectId)
+    await store.moveChat(chatId, targetProjectId)
     expandedProjects.add(targetProjectId)
   } catch (e) {
     store.pushErrorToast('Could not move chat', `${errorMessage(e)}`)
@@ -869,6 +884,8 @@ function selectChat(chatId: string) {
 // General is auto-managed and pinned to the top (order 0) by the server, so
 // it isn't draggable; everything else can be dragged into a new order.
 const dragProjectId = ref<string | null>(null)
+const dragChatId = ref<string | null>(null)
+const dragChatProjectId = ref<string | null>(null)
 const dragOverProjectId = ref<string | null>(null)
 
 function isDraggable(project: ProjectInfo): boolean {
@@ -877,6 +894,8 @@ function isDraggable(project: ProjectInfo): boolean {
 
 function onProjectDragStart(project: ProjectInfo, event: DragEvent) {
   if (!isDraggable(project)) return
+  dragChatId.value = null
+  dragChatProjectId.value = null
   dragProjectId.value = project.project_id
   if (event.dataTransfer) {
     event.dataTransfer.effectAllowed = 'move'
@@ -885,12 +904,42 @@ function onProjectDragStart(project: ProjectInfo, event: DragEvent) {
   }
 }
 
+function onChatDragStart(chat: ChatInfo, event: DragEvent) {
+  if (chat.local === false) return
+  dragProjectId.value = null
+  dragChatId.value = chat.chat_id
+  dragChatProjectId.value = chat.project_id
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('application/x-ciaobot-chat', chat.chat_id)
+    // Keep a text payload for browsers that do not expose custom MIME types.
+    event.dataTransfer.setData('text/plain', chat.chat_id)
+  }
+}
+
 function onProjectDragOver(project: ProjectInfo) {
-  if (!dragProjectId.value || dragProjectId.value === project.project_id) return
-  dragOverProjectId.value = project.project_id
+  if (dragChatId.value) {
+    if (dragChatProjectId.value === project.project_id) {
+      dragOverProjectId.value = null
+      return
+    }
+    dragOverProjectId.value = project.project_id
+    return
+  }
+  if (dragProjectId.value && dragProjectId.value !== project.project_id) {
+    dragOverProjectId.value = project.project_id
+  }
 }
 
 function onProjectDrop(target: ProjectInfo) {
+  const draggedChatId = dragChatId.value
+  const draggedChatProjectId = dragChatProjectId.value
+  if (draggedChatId) {
+    onChatDragEnd()
+    if (!draggedChatProjectId || draggedChatProjectId === target.project_id) return
+    void moveChatToProject(draggedChatId, target.project_id)
+    return
+  }
   const draggedId = dragProjectId.value
   onProjectDragEnd()
   if (!draggedId || draggedId === target.project_id) return
@@ -905,6 +954,17 @@ function onProjectDrop(target: ProjectInfo) {
 function onProjectDragEnd() {
   dragProjectId.value = null
   dragOverProjectId.value = null
+}
+
+function onChatDragEnd() {
+  dragChatId.value = null
+  dragChatProjectId.value = null
+  dragOverProjectId.value = null
+}
+
+function isDragOverProject(project: ProjectInfo): boolean {
+  if (dragOverProjectId.value !== project.project_id) return false
+  return dragProjectId.value !== project.project_id || dragChatProjectId.value !== project.project_id
 }
 
 function toggleProject(id: string) {
@@ -1657,6 +1717,21 @@ async function confirmDeleteChat(chatId: string) {
   border-bottom: none;
 }
 
+/* A delegate is a real chat, so it keeps the full row (streaming dot, unread
+   badge, actions menu) and only shifts right to read as owned by the chat
+   above it. Indent is on padding rather than margin so the hover/active
+   background still spans the full sidebar width. */
+.chat-item.delegate {
+  padding-left: 34px;
+}
+
+.delegate-mark {
+  flex: none;
+  color: var(--fg3, var(--fg2));
+  font-size: var(--text-sm, 0.85em);
+  line-height: 1;
+}
+
 /* Loop marker on a chat row. Accent while the cadence is live, muted when the
    loop exists but is stopped, so "this chat re-runs itself" reads at a glance
    without competing with the streaming dot next to it. */
@@ -1705,6 +1780,16 @@ async function confirmDeleteChat(chatId: string) {
 .chat-item:hover {
   background: var(--bg3);
   color: var(--fg);
+}
+
+/* Chat rows can be dragged onto any project header to move them. The context
+   menu remains available for keyboard and touch users. */
+.chat-item[draggable="true"] {
+  cursor: grab;
+}
+.chat-item.dragging {
+  opacity: 0.4;
+  cursor: grabbing;
 }
 
 .chat-item.active {
