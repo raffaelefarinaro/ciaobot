@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -54,31 +55,58 @@ EXCLUDE_DIRS = {
 }
 
 
+class VaultTraversalError(RuntimeError):
+    """Raised when the vault cannot be fully inspected."""
+
+    def __init__(self, errors: Sequence[Exception]) -> None:
+        self.errors = tuple(errors)
+        detail = "; ".join(str(error) for error in errors)
+        super().__init__(f"vault traversal failed: {detail}")
+
+
 def _is_excluded(relative: Path) -> bool:
     return any(part in EXCLUDE_DIRS for part in relative.parts)
 
 
 def _discover_paths(vault_root: Path) -> list[tuple[Path, Path]]:
-    try:
-        candidates = sorted(vault_root.rglob("*"))
-    except OSError:
-        return []
+    errors: list[OSError] = []
+
+    def onerror(error: OSError) -> None:
+        errors.append(error)
 
     discovered: list[tuple[Path, Path]] = []
-    for path in candidates:
-        try:
-            relative = path.relative_to(vault_root)
-        except ValueError:
-            continue
-        discovered.append((path, relative))
+    try:
+        for directory, directories, files in os.walk(
+            vault_root,
+            topdown=True,
+            onerror=onerror,
+            followlinks=False,
+        ):
+            directories.sort()
+            files.sort()
+            directory_path = Path(directory)
+            for name in [*directories, *files]:
+                path = directory_path / name
+                try:
+                    relative = path.relative_to(vault_root)
+                except ValueError:
+                    continue
+                discovered.append((path, relative))
+    except OSError as error:
+        errors.append(error)
+
+    if errors:
+        raise VaultTraversalError(errors)
     return discovered
 
 
 def _canonical_relative(path: Path, vault_root: Path) -> Path | None:
     try:
         return path.resolve(strict=False).relative_to(vault_root)
-    except (OSError, ValueError):
+    except ValueError:
         return None
+    except (OSError, RuntimeError) as error:
+        raise VaultTraversalError([error]) from error
 
 
 def _markdown_source_paths(
@@ -86,7 +114,10 @@ def _markdown_source_paths(
     *,
     discovered: list[tuple[Path, Path]] | None = None,
 ) -> list[tuple[Path, Path]]:
-    root = vault_root.resolve()
+    try:
+        root = vault_root.resolve()
+    except (OSError, RuntimeError) as error:
+        raise VaultTraversalError([error]) from error
     paths = discovered if discovered is not None else _discover_paths(vault_root)
     return [
         (path, relative)
@@ -389,8 +420,15 @@ def _markdown_link_error(
     if parsed.scheme or parsed.netloc:
         return None
     decoded_path = unquote(parsed.path)
-    if not decoded_path:
+    if not decoded_path or decoded_path.startswith(("//", "/", "#")):
         return None
+    if any(ord(character) < 32 for character in decoded_path):
+        return {
+            "source": file.relative.as_posix(),
+            "target": target,
+            "resolved": target,
+            "kind": "missing_target",
+        }
 
     lexical = Path(
         os.path.normpath((file.relative.parent / decoded_path).as_posix())
@@ -404,7 +442,15 @@ def _markdown_link_error(
         }
 
     root = vault_root.resolve()
-    resolved = (file.path.parent / decoded_path).resolve(strict=False)
+    try:
+        resolved = (file.path.parent / decoded_path).resolve(strict=False)
+    except (OSError, RuntimeError, ValueError):
+        return {
+            "source": file.relative.as_posix(),
+            "target": target,
+            "resolved": target,
+            "kind": "missing_target",
+        }
     try:
         relative = resolved.relative_to(root)
     except ValueError:

@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from ciao import memory_tool as mt
+from ciao import vault_lint
 from ciao.os_audit import (
     SKILL_MAX_BYTES,
     audit_job_runs,
@@ -584,6 +585,32 @@ def test_os_audit_source_discovery_matches_vault_lint_exclusions_and_suffixes(
     assert str(included) in unreadable_paths
     assert str(vault / "Logs" / "Unreadable.Md") not in unreadable_paths
     assert str(vault / "Templates" / "Unreadable.Md") not in unreadable_paths
+
+
+def test_os_audit_reports_vault_traversal_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+
+    def fail_walk(*args: object, **kwargs: object):
+        raise OSError("cannot inspect vault")
+
+    monkeypatch.setattr(vault_lint.os, "walk", fail_walk)
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        memory_dir=bounded,
+    )
+
+    assert report["status"] == "error"
+    assert any(
+        error["type"] == "vault_validation_failed"
+        and "cannot inspect vault" in error["message"]
+        for error in report["scan_errors"]
+    )
 
 
 def test_run_os_audit_preserves_distinct_errors_for_the_same_file(

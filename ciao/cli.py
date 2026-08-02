@@ -1518,7 +1518,7 @@ def _vault_search_command(args: argparse.Namespace) -> int:
 
 
 def _vault_lint_command(args: argparse.Namespace) -> int:
-    from ciao.vault_lint import run_validation
+    from ciao.vault_lint import VaultTraversalError, run_validation
 
     vault_root = _resolve_vault_root(args.vault_root)
     if not vault_root.is_dir():
@@ -1527,7 +1527,11 @@ def _vault_lint_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    issues = run_validation(vault_root)
+    try:
+        issues = run_validation(vault_root)
+    except VaultTraversalError as exc:
+        print(f"Vault inspection failed: {exc}", file=sys.stderr)
+        return 1
 
     has_issues = False
     if issues["broken_links"]:

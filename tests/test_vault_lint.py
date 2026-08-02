@@ -363,6 +363,100 @@ def test_run_validation_reads_each_included_markdown_once(
     })
 
 
+def test_run_validation_raises_on_full_traversal_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = tmp_path / "memory-vault"
+    vault.mkdir()
+
+    def fail_walk(*args: object, **kwargs: object):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(vault_lint.os, "walk", fail_walk)
+
+    with pytest.raises(vault_lint.VaultTraversalError, match="permission denied"):
+        vault_lint.run_validation(vault)
+
+
+def test_run_validation_raises_on_partial_traversal_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = tmp_path / "memory-vault"
+    vault.mkdir()
+
+    def partial_walk(
+        root: Path,
+        *,
+        topdown: bool,
+        onerror,
+        followlinks: bool,
+    ):
+        yield str(root), [], []
+        onerror(OSError("cannot read subtree"))
+
+    monkeypatch.setattr(vault_lint.os, "walk", partial_walk)
+
+    with pytest.raises(vault_lint.VaultTraversalError, match="cannot read subtree"):
+        vault_lint.run_validation(vault)
+
+
+def test_percent_decoded_non_local_targets_are_ignored_without_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _single_page_vault(
+        tmp_path,
+        "[absolute](%2Fetc/passwd)\n"
+        "[protocol](%2F%2Fexample.com/path)\n"
+        "[anchor](%23status)\n",
+    )
+    original_resolve = Path.resolve
+    rejected = {"/etc/passwd", "//example.com/path"}
+
+    def reject_non_local_probe(
+        path: Path,
+        *args: object,
+        **kwargs: object,
+    ) -> Path:
+        if os.path.normpath(path.as_posix()) in rejected:
+            raise AssertionError("decoded non-local target was resolved")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", reject_non_local_probe)
+
+    assert vault_lint.run_validation(vault)["broken_markdown_links"] == []
+
+
+def test_malformed_decoded_local_target_is_reported_without_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _single_page_vault(tmp_path, "[bad](bad%00name.md)\n")
+    original_resolve = Path.resolve
+
+    def reject_malformed_probe(
+        path: Path,
+        *args: object,
+        **kwargs: object,
+    ) -> Path:
+        if "\x00" in path.as_posix():
+            raise AssertionError("malformed local target was resolved")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", reject_malformed_probe)
+
+    assert vault_lint.run_validation(vault)["broken_markdown_links"] == [
+        {
+            "source": "Page.md",
+            "target": "bad%00name.md",
+            "resolved": "bad%00name.md",
+            "kind": "missing_target",
+        }
+    ]
+
+
 @pytest.mark.parametrize("root_kind", ["missing", "file"])
 def test_vault_lint_cli_rejects_missing_or_non_directory_root(
     tmp_path: Path,
@@ -378,6 +472,28 @@ def test_vault_lint_cli_rejects_missing_or_non_directory_root(
     captured = capsys.readouterr()
     assert result == 1
     assert "Vault root" in captured.err
+    assert "Vault is clean!" not in captured.out
+
+
+def test_vault_lint_cli_reports_traversal_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    vault = tmp_path / "memory-vault"
+    vault.mkdir()
+
+    def fail_walk(*args: object, **kwargs: object):
+        raise OSError("cannot inspect vault")
+
+    monkeypatch.setattr(vault_lint.os, "walk", fail_walk)
+
+    result = cli._vault_lint_command(argparse.Namespace(vault_root=vault))
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert "Vault inspection failed" in captured.err
+    assert "cannot inspect vault" in captured.err
     assert "Vault is clean!" not in captured.out
 
 
