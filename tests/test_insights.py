@@ -566,11 +566,23 @@ def test_backfill_insights_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
 
-    asyncio.run(insights.backfill_insights_task(
+    result = asyncio.run(insights.backfill_insights_task(
         config,
         mode="both",
         concurrency=1,
     ))
+
+    assert result == {
+        "total_discovered": 3,
+        "already_done": 1,
+        "eligible": 2,
+        "to_process": 2,
+        "processed": 2,
+        "success": 2,
+        "skipped": 0,
+        "errors": 0,
+    }
+    assert insights.format_backfill_summary(result) == "Processed 2/2: 2 succeeded, 0 skipped."
     
     # Check that already_done was skipped (no content change)
     assert done_archive.read_text(encoding="utf-8") == "# Archived chat\n\n## Session insights\n- old insights"

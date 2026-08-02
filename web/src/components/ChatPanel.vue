@@ -851,7 +851,7 @@
         <div class="input-actions">
           <!-- Voice recording is allowed during streaming too: the user's
                transcript becomes a queued follow-up, same as typed text. -->
-          <VoiceRecorder v-if="!transcribing" ref="voiceRecorderRef" @recorded="handleVoice" />
+          <VoiceRecorder v-if="!transcribing" ref="voiceRecorderRef" @recorded="handleVoice" @error="handleVoiceError" />
           <span v-else class="voice-transcribing" title="Transcribing...">
             <span class="transcribe-spinner"></span>
           </span>
@@ -3366,6 +3366,10 @@ async function handleVoice(blob: Blob) {
   } finally {
     transcribing.value = false
   }
+}
+
+function handleVoiceError(message: string) {
+  store.pushErrorToast('Voice dictation unavailable', message)
 }
 async function handleFileSelect(e: Event) { const input = e.target as HTMLInputElement; if (!input.files?.length) return; await store.uploadImages(chat.value.chat_id, Array.from(input.files)); input.value = '' }
 

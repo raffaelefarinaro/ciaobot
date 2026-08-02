@@ -57,7 +57,7 @@ ciao/                          Python backend (Starlette).
   skill_evolution.py           Weekly pass: mine trajectories, flag skills tied to non-success sessions, draft edit proposals to the vault's Workspace/Skill-Proposals/. 15KB skill cap, optional test gate, no auto-apply. `run_evolution_pass` builds a per-skill DAG (has_proposal → semantic → tests → write, with a write_stub fallback for over-cap skills) via `ciao/dag.py`.
   dependency_review.py         Weekly dependency-changelog review as a `ciao/dag.py` pipeline (read_baseline gate → installed-versions gate → research subagent fanning out release checks → write_baseline gate). PyPI/npm are authoritative for installable package versions; manifest updates are rolled back and the run fails if registry validation or dependency installation fails. Trigger: `python3 -m ciao.dependency_review [--model sonnet] [--dry-run]`. Merges and gates the write to `.runtime/dependency_baseline.json` so a flaky run can't corrupt it.
   skills_inventory.py          Build the Settings skill inventory from workspace skills and skills-lock.json, with installed Claude badges.
-  sync_skills.py               Install packaged stock skills and mirror workspace skills, commands, and agents into `.claude/`. CLI: `ciao sync-skills`.
+    sync_skills.py               Install packaged stock skills, mirror workspace assets into `.claude/`, and project `.mcp.json` servers into Codex config. CLI: `ciao sync-skills`.
   skills_sync.py               Change-detect upstream skills in skills-lock.json so `ciao sync-skills` updates only moved repos. CLI: `ciao skills-sync`.
   cleanup_sdk_blobs.py         Maintenance: drop archived Claude SDK JSONL blobs. CLI: `ciao cleanup-sdk-blobs`.
   label_hygiene.py             Audit open GitHub issue labels against the title-prefix convention in `ciao/system_prompt.md` and add missing classification labels. Pure decision function (`plan_label_actions`) separated from the `gh`-shelling side-effecting layer; only ever adds a label, never removes one; idempotent. `[Agent]` and unrecognized/retired prefixes (e.g. `[Report]`) are reported for human decision, not auto-labeled. CLI: `ciao label-hygiene` (dry-run by default, `--apply` writes, `--json` for automation). Not yet wired to a schedule or loop.
@@ -127,7 +127,7 @@ CIAO_CUSTOMIZATION.md          Local customization surface.
 skills/  subagents/  commands/ Canonical user-owned sources; `ciao sync-skills` mirrors them into .claude/.
 .claude/{skills,agents,commands}/  Generated Claude symlinks/copies (packaged stock assets + user sources). Do not edit by hand.
 .agents/skills/                   Codex skill catalog and command/role wrappers. Locked packages installed by the upstream `skills` CLI are canonical here; Ciaobot-owned skills are linked here from `.claude/skills/`.
-.codex/{config.toml,agents/}      Generated native Codex agent registrations and role instructions.
+.codex/{config.toml,agents/}      Generated native Codex agent registrations, role instructions, and project MCP registrations.
 memory-vault/<workspace>/      Standard per-workspace durable markdown memory: MEMORY.md, INDEX.md, entity folders, projects/{active,completed}/, Workspace/, Logs/Chats/.
   .runtime/                      Local state: schedules.json, web_projects.json, custom_provider_tokens.json, control_surface_decision.json, MCP/provider tool telemetry JSONL, server.lock, job runs/errors, snapshots/, transcripts/, state.json. Not committed.
   .ciao/custom_providers.json    Tracked custom endpoint definitions (URLs, runners, and model lists; never tokens).
@@ -179,10 +179,12 @@ telemetry. Each managed provider process receives a short-lived capability
 scoped to one chat/project/workspace/provider. Claude receives the server and
 Authorization header through `ClaudeAgentOptions.mcp_servers`; Codex receives
 per-process `mcp_servers.ciaobot.*` overrides and an environment token excluded
-from its shell policy. When the MCP server is unavailable a chat degrades
-gracefully to legacy with a logged WARNING instead of failing the turn.
-Self-disconnecting operations defer until their caller chat drains. See
-`docs/MCP.md`.
+from its shell policy. Project servers from `.mcp.json` are also projected
+into the workspace `.codex/config.toml` during `ciao sync-skills`; user-owned
+Codex tables remain authoritative and credentials stay as environment
+references. When the MCP server is unavailable a chat degrades gracefully to
+legacy with a logged WARNING instead of failing the turn. Self-disconnecting
+operations defer until their caller chat drains. See `docs/MCP.md`.
 
 MCP is the default control surface (`config.control_surface = "mcp"`) for both
 providers; `legacy` is a hidden fallback selectable via `CIAO_CONTROL_SURFACE`
@@ -218,7 +220,7 @@ Schedule dispatch (`ciao/schedules.py`) runs cron-shaped jobs that use the same 
 
 Loops (`ciao/loops.py`) are the sub-day sibling of schedules: a loop is bound to one existing PWA chat and re-dispatches its prompt every N minutes (floor: 1), keeping the conversation and its context going — e.g. "check my PRs for review changes every 10 minutes". Entries live in `.runtime/loops.json`; runtime start/stop state lives in the `LoopManager`, so a loop with `autostart: true` begins running at server boot while the rest stay stopped until started from the Automations page. Iterations always run with the target chat's own model and mode (loops never override them), overlap protection is skip-not-queue (an iteration due while the chat still has a turn in flight is skipped and retried on the next ~20s tick), and there is no downtime catch-up — cadence simply resumes. The PWA's Schedules page is titled "Automations" and hosts both schedules and loops (`GET/POST /api/loops`, `PATCH/DELETE /api/loops/{id}`, `POST /api/loop-run/{id}`).
 
-Background automations are instrumented through `ciao/job_runs.py`: title generation, schedule dispatch, session insights, memory proposals, trajectory capture, weekly skill evolution, weekly dependency review, and startup/system tasks (git sync, vault index refresh, PWA rebuild, skills update, device-branch backup) each record one run (status, duration, model/provider, error) to `.runtime/job_runs.jsonl`. `GET /api/automation` serves the grouped view that powers Settings → Automation.
+Background automations are instrumented through `ciao/job_runs.py`: title generation, schedule dispatch, session insights, memory proposals, trajectory capture, weekly skill evolution, weekly dependency review, and startup/system tasks (git sync, vault index refresh, PWA rebuild, skills update, device-branch backup) each record one run (status, duration, model/provider, error) to `.runtime/job_runs.jsonl`. `GET /api/automation` serves the grouped view that powers Settings → Automation; each registered job also exposes static `uses_model` and `produces_outcome` capabilities so the UI can classify never-run jobs.
 
 `GET /api/agent-assets/audit` exposes `ciao.os_audit.run_os_audit()` to Settings. A successful response is the full report object: `status` (`healthy`, `needs_attention`, or `error`), `total_issues`, `total_errors`, `timestamp`, section objects for `setup_audit`, `vault_hygiene`, `skill_audit`, `rule_audit`, `memory_hygiene`, and `job_runs_audit`, plus the flattened `scan_errors` list. `error` means the scan was not reliable, not merely that actionable findings exist. An unexpected handler failure returns HTTP 500 with `{"error":"failed to run AI OS audit"}`.
 

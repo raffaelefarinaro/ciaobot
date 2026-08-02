@@ -260,6 +260,22 @@ export const useProjectStore = defineStore('projects', () => {
       const parsed = JSON.parse(toolInput)
       if (!Array.isArray(parsed?.questions)) return []
       const resolvedRequestId = requestId || String(parsed?.request_id ?? '')
+      if (parsed.questions.length === 0) {
+        // Some Codex/Claude-compatible turns emit the AskUserQuestion tool
+        // with an empty questions array. Do not silently demote that event to
+        // a trace row: surface a free-form response so the user can unblock
+        // the turn and the provider still receives the native request id.
+        return [{
+          id: '__freeform__',
+          question: 'The model needs your input. Enter a response to continue.',
+          header: 'Response',
+          multiSelect: false,
+          allowOther: true,
+          isSecret: false,
+          requestId: resolvedRequestId,
+          options: [],
+        }]
+      }
       // Claude Code's documented AskUserQuestion shape uses
       // `question`/`header`/`multiSelect`. Some providers (seen with
       // MiniMax via the Claude path) emit an alternate shape with
@@ -1435,7 +1451,10 @@ export const useProjectStore = defineStore('projects', () => {
     creatingChatProjectIds.value[projectId] = true
     try {
       const c = await api.post<ChatInfo>(`/api/projects/${projectId}/chats`, { title })
-      chats.value.push(c)
+      // The server also broadcasts chat_created for this same chat. The
+      // broadcast can arrive before the POST response, so reconcile through
+      // the ID-aware helper instead of pushing a possible duplicate.
+      replaceChat(c)
       messages.value[c.chat_id] = []
       switchChat(c.chat_id)
       return c

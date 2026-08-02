@@ -23,7 +23,8 @@ Useful local files:
 - `.agents/skills/`: Codex workspace skills, including Ciaobot command and
   named-agent compatibility wrappers.
 - `.codex/agents/` and `.codex/config.toml`: generated native Codex agent
-  definitions and registrations; edit `subagents/` instead.
+  definitions, registrations, and project MCP entries; edit `subagents/` and
+  `.mcp.json` instead.
 - `.claude/agents/`, `.claude/commands/`, `.claude/skills/`: Claude Code assets.
 - `skills/`, `commands/`, and `subagents/`: canonical workspace-authored assets.
 - `memory-vault/`: durable markdown memory, projects, logs, and references.

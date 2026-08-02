@@ -197,6 +197,11 @@ cd web && npm test             # Frontend unit tests
 cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 ```
 
+The Settings → Automations list uses the registry-backed `uses_model` and
+`produces_outcome` fields from `GET /api/automation` for its capability badges;
+do not infer those labels from a job's latest run because never-run jobs are
+intentionally included in the response.
+
 For chat rendering changes, verify the compact `Activity` disclosure, `Outputs` placement, readable token labels, keyboard operation, and 44px touch targets at both desktop and narrow-phone widths. Markdown tables should shrink-wrap on desktop and keep readable first-column labels inside a horizontally scrollable table viewport on narrow screens.
 For composer drag-and-drop changes, test both local host and remote client roles:
 host paths must be absolute, while client files must upload into the active
@@ -232,7 +237,7 @@ The weekly `system-workspace-hygiene` schedule runs `ciao vault-index --write` b
 
 ## Skills, subagents, and slash commands
 
-Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `web-research`, `workspace-authoring`, …) and the upstream **`gws-*` skills** for Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories. Locked GitHub/package skills follow the upstream `skills` CLI layout: their canonical directories live under `.agents/skills/`, with provider links under `.claude/skills/`; synchronization preserves either that layout or older `.claude`-canonical installs. A workspace skill with the same name as a packaged one overrides it.
+Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `web-research`, `workspace-authoring`, …) and the upstream **`gws-*` skills** for Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories and projects `.mcp.json` MCP servers into `.codex/config.toml` for Codex chats. The generated MCP block preserves user-owned Codex server tables and copies only environment references, never literal credentials. Locked GitHub/package skills follow the upstream `skills` CLI layout: their canonical directories live under `.agents/skills/`, with provider links under `.claude/skills/`; synchronization preserves either that layout or older `.claude`-canonical installs. A workspace skill with the same name as a packaged one overrides it.
 
 The `gws-*` stock skills are regenerated from the installed `gws` CLI via `ciao/gws_skills.py` on release (`python -m ciao.release --apply`). The generator output is passed through Ciaobot curation: profile-wrapper command examples, integration auth notes in `gws-shared`, stripped upstream `openclaw` metadata and See Also boilerplate. Ciaobot-specific gws conventions also live in the system prompt (`ciao/system_prompt.md`).
 
