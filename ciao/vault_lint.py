@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -25,13 +26,10 @@ _FRONTMATTER_RE = re.compile(
 )
 _FRONTMATTER_EXEMPT = {"index.md", "memory.md", "log.md"}
 
-_INLINE_MARKDOWN_LINK_RE = re.compile(
-    r"!?\[[^\]\n]*\]\(\s*(<[^>\n]+>|[^\s)]+)"
-    r"(?:\s+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^()\n]*\)))?\s*\)"
-)
 _REFERENCE_DESTINATION_RE = re.compile(
     r"(?m)^[ \t]{0,3}\[[^\]\n]+\]:[ \t]*(<[^>\n]+>|[^\s]+)"
 )
+_URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 
 
 @dataclass(frozen=True)
@@ -54,6 +52,49 @@ EXCLUDE_DIRS = {
     ".venv", "venv", "node_modules", ".git",
     ".claude", ".agents", ".codex", "__pycache__",
 }
+
+
+def _is_excluded(relative: Path) -> bool:
+    return any(part in EXCLUDE_DIRS for part in relative.parts)
+
+
+def _discover_paths(vault_root: Path) -> list[tuple[Path, Path]]:
+    try:
+        candidates = sorted(vault_root.rglob("*"))
+    except OSError:
+        return []
+
+    discovered: list[tuple[Path, Path]] = []
+    for path in candidates:
+        try:
+            relative = path.relative_to(vault_root)
+        except ValueError:
+            continue
+        discovered.append((path, relative))
+    return discovered
+
+
+def _canonical_relative(path: Path, vault_root: Path) -> Path | None:
+    try:
+        return path.resolve(strict=False).relative_to(vault_root)
+    except (OSError, ValueError):
+        return None
+
+
+def _markdown_source_paths(
+    vault_root: Path,
+    *,
+    discovered: list[tuple[Path, Path]] | None = None,
+) -> list[tuple[Path, Path]]:
+    root = vault_root.resolve()
+    paths = discovered if discovered is not None else _discover_paths(vault_root)
+    return [
+        (path, relative)
+        for path, relative in paths
+        if relative.suffix.lower() == ".md"
+        and not _is_excluded(relative)
+        and _canonical_relative(path, root) is not None
+    ]
 
 
 def _workspace_dirs(vault_root: Path) -> list[Path]:
@@ -113,8 +154,14 @@ def _frontmatter_error(file: _VaultFile) -> dict[str, str] | None:
             "message": "frontmatter is malformed",
         }
 
-    page_type = metadata.get("type")
-    if page_type is None or (isinstance(page_type, str) and not page_type.strip()):
+    if "type" not in metadata:
+        return {
+            "source": file.relative.as_posix(),
+            "kind": "missing_type",
+            "message": "frontmatter type is missing or empty",
+        }
+    page_type = metadata["type"]
+    if isinstance(page_type, str) and not page_type.strip():
         return {
             "source": file.relative.as_posix(),
             "kind": "missing_type",
@@ -133,20 +180,192 @@ def _without_code(text: str) -> str:
     return _INLINE_CODE_RE.sub("", _FENCE_RE.sub("", text))
 
 
+def _is_escaped(text: str, index: int) -> bool:
+    backslashes = 0
+    index -= 1
+    while index >= 0 and text[index] == "\\":
+        backslashes += 1
+        index -= 1
+    return backslashes % 2 == 1
+
+
+def _matching_bracket(text: str, opening: int) -> int | None:
+    depth = 0
+    index = opening
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+            continue
+        if text[index] == "[":
+            depth += 1
+        elif text[index] == "]":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return None
+
+
+def _markdown_title_end(text: str, start: int) -> int | None:
+    if start >= len(text):
+        return None
+    opener = text[start]
+    if opener in {"\"", "'"}:
+        index = start + 1
+        while index < len(text):
+            if text[index] == "\\":
+                index += 2
+                continue
+            if text[index] == opener:
+                return index + 1
+            index += 1
+        return None
+    if opener != "(":
+        return None
+
+    depth = 1
+    index = start + 1
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+            continue
+        if text[index] == "(":
+            depth += 1
+        elif text[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return None
+
+
+def _inline_destination(text: str, opening: int) -> tuple[str, int] | None:
+    index = opening + 1
+    while index < len(text) and text[index].isspace():
+        index += 1
+    if index >= len(text):
+        return None
+
+    if text[index] == "<":
+        start = index + 1
+        index = start
+        while index < len(text):
+            if text[index] == "\\":
+                index += 2
+                continue
+            if text[index] == ">":
+                raw = text[start:index]
+                index += 1
+                break
+            index += 1
+        else:
+            return None
+    else:
+        start = index
+        depth = 0
+        while index < len(text):
+            if text[index] == "\\":
+                index += 2
+                continue
+            if text[index] == "(":
+                depth += 1
+            elif text[index] == ")":
+                if depth == 0:
+                    raw = text[start:index]
+                    break
+                depth -= 1
+            elif text[index].isspace() and depth == 0:
+                raw = text[start:index]
+                break
+            index += 1
+        else:
+            return None
+
+    while index < len(text) and text[index].isspace():
+        index += 1
+    if index < len(text) and text[index] == ")":
+        return raw, index + 1
+
+    title_end = _markdown_title_end(text, index)
+    if title_end is None:
+        return None
+    index = title_end
+    while index < len(text) and text[index].isspace():
+        index += 1
+    if index >= len(text) or text[index] != ")":
+        return None
+    return raw, index + 1
+
+
+def _inline_markdown_destinations(text: str):
+    destinations: list[tuple[int, str]] = []
+    index = 0
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+            continue
+        if text[index] == "!" and index + 1 < len(text) and text[index + 1] == "[":
+            label_opening = index + 1
+            source = index
+        elif text[index] == "[":
+            label_opening = index
+            source = index
+        else:
+            index += 1
+            continue
+        if _is_escaped(text, source):
+            index += 1
+            continue
+
+        label_close = _matching_bracket(text, label_opening)
+        if label_close is None:
+            index += 1
+            continue
+        after_label = label_close + 1
+        while after_label < len(text) and text[after_label].isspace():
+            after_label += 1
+        if after_label >= len(text) or text[after_label] != "(":
+            index = label_close + 1
+            continue
+        parsed = _inline_destination(text, after_label)
+        if parsed is None:
+            index = label_close + 1
+            continue
+        raw, end = parsed
+        destinations.append((source, raw))
+        index = end
+
+    return destinations
+
+
+def _unescape_markdown_destination(target: str) -> str:
+    result: list[str] = []
+    index = 0
+    while index < len(target):
+        if target[index] == "\\" and index + 1 < len(target):
+            result.append(target[index + 1])
+            index += 2
+            continue
+        result.append(target[index])
+        index += 1
+    return "".join(result)
+
+
 def _markdown_destinations_in(text: str):
     stripped = _without_code(text)
     matches = [
-        (match.start(), match.group(1), match)
-        for pattern in (_INLINE_MARKDOWN_LINK_RE, _REFERENCE_DESTINATION_RE)
-        for match in pattern.finditer(stripped)
+        *[(position, raw) for position, raw in _inline_markdown_destinations(stripped)],
+        *[
+            (match.start(), match.group(1))
+            for match in _REFERENCE_DESTINATION_RE.finditer(stripped)
+            if not _is_escaped(stripped, match.start())
+        ],
     ]
-    for _, raw, match in sorted(matches, key=lambda item: item[0]):
-        if match.start() > 0 and stripped[match.start() - 1] == "\\":
-            continue
+    for _, raw in sorted(matches, key=lambda item: item[0]):
         target = raw.strip()
         if target.startswith("<") and target.endswith(">"):
             target = target[1:-1].strip()
-        yield target
+        yield _unescape_markdown_destination(target)
 
 
 def _markdown_link_error(
@@ -160,13 +379,29 @@ def _markdown_link_error(
         return None
     if target.startswith(("//", "/", "#")):
         return None
+    if _URI_SCHEME_RE.match(target):
+        return None
 
-    parsed = urlsplit(target)
+    try:
+        parsed = urlsplit(target)
+    except ValueError:
+        return None
     if parsed.scheme or parsed.netloc:
         return None
     decoded_path = unquote(parsed.path)
     if not decoded_path:
         return None
+
+    lexical = Path(
+        os.path.normpath((file.relative.parent / decoded_path).as_posix())
+    )
+    if lexical == Path("..") or Path("..") in lexical.parents:
+        return {
+            "source": file.relative.as_posix(),
+            "target": target,
+            "resolved": lexical.as_posix(),
+            "kind": "outside_vault",
+        }
 
     root = vault_root.resolve()
     resolved = (file.path.parent / decoded_path).resolve(strict=False)
@@ -176,7 +411,7 @@ def _markdown_link_error(
         return {
             "source": file.relative.as_posix(),
             "target": target,
-            "resolved": Path(decoded_path).as_posix(),
+            "resolved": lexical.as_posix(),
             "kind": "outside_vault",
         }
 
@@ -191,7 +426,13 @@ def _markdown_link_error(
 
 
 def run_validation(vault_root: Path) -> dict:
-    """Scan the vault directory for actionable health findings."""
+    """Read-only scan for five vault health result lists.
+
+    The returned keys are ``broken_links``, ``orphans``, ``duplicates``,
+    ``frontmatter_errors``, and ``broken_markdown_links``. Unreadable or
+    non-UTF-8 Markdown sources are skipped here; ``os-audit`` reports those
+    files separately as scan errors.
+    """
     issues: dict[str, list[Any]] = {
         "broken_links": [],
         "orphans": [],
@@ -200,19 +441,11 @@ def run_validation(vault_root: Path) -> dict:
         "broken_markdown_links": [],
     }
 
-    valid_paths = {Path(".").as_posix()}
+    discovered = _discover_paths(vault_root)
+    valid_paths = {relative.as_posix() for _, relative in discovered}
+    valid_paths.add(Path(".").as_posix())
     vault_files: list[_VaultFile] = []
-    for path in sorted(vault_root.rglob("*")):
-        try:
-            rel = path.relative_to(vault_root)
-        except ValueError:
-            continue
-
-        if any(part in EXCLUDE_DIRS for part in rel.parts):
-            continue
-        valid_paths.add(rel.as_posix())
-        if path.suffix.lower() != ".md":
-            continue
+    for path, rel in _markdown_source_paths(vault_root, discovered=discovered):
         try:
             content = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -247,8 +480,8 @@ def run_validation(vault_root: Path) -> dict:
         valid_targets.add(target_stem)
         valid_targets.add(target_rel)
 
-        # Template files contain placeholder links by design; keep them as
-        # valid link targets but don't scan them as a source of broken links.
+        # Template-named files are excluded from wikilink and orphan source
+        # checks, but remain eligible for Markdown-link validation.
         incoming_links[target_stem] = []
         incoming_links[target_rel] = []
 

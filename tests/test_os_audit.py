@@ -510,6 +510,82 @@ def test_os_audit_counts_and_formats_new_vault_findings(tmp_path: Path) -> None:
     assert "Broken Markdown links: 1" in markdown
 
 
+def test_os_audit_counts_frontmatter_findings_without_markdown_findings(
+    tmp_path: Path,
+) -> None:
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+    page = vault / "Page.md"
+    page.write_text("# Missing metadata\n", encoding="utf-8")
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        memory_dir=bounded,
+    )
+
+    assert len(report["vault_hygiene"]["frontmatter_errors"]) == 1
+    assert len(report["vault_hygiene"]["broken_markdown_links"]) == 0
+    assert report["total_issues"] == 1
+    markdown = format_audit_markdown(report)
+    assert "Frontmatter errors: 1" in markdown
+    assert "Broken Markdown links: 0" in markdown
+
+
+def test_os_audit_counts_markdown_findings_without_frontmatter_findings(
+    tmp_path: Path,
+) -> None:
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+    page = vault / "Page.md"
+    page.write_text(
+        "---\ntype: note\n---\n[missing](missing.md)\n",
+        encoding="utf-8",
+    )
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        memory_dir=bounded,
+    )
+
+    assert len(report["vault_hygiene"]["frontmatter_errors"]) == 0
+    assert len(report["vault_hygiene"]["broken_markdown_links"]) == 1
+    assert report["total_issues"] == 1
+    markdown = format_audit_markdown(report)
+    assert "Frontmatter errors: 0" in markdown
+    assert "Broken Markdown links: 1" in markdown
+
+
+def test_os_audit_source_discovery_matches_vault_lint_exclusions_and_suffixes(
+    tmp_path: Path,
+) -> None:
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+    included = vault / "included" / "Unreadable.MD"
+    included.parent.mkdir(parents=True)
+    included.write_bytes(b"\xff\xfe")
+    for directory in ("Logs", "Templates"):
+        excluded = vault / directory / "Unreadable.Md"
+        excluded.parent.mkdir(parents=True)
+        excluded.write_bytes(b"\xff\xfe")
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        memory_dir=bounded,
+    )
+
+    unreadable_paths = {
+        error["path"]
+        for error in report["scan_errors"]
+        if error["type"] == "unreadable_vault_file"
+    }
+    assert str(included) in unreadable_paths
+    assert str(vault / "Logs" / "Unreadable.Md") not in unreadable_paths
+    assert str(vault / "Templates" / "Unreadable.Md") not in unreadable_paths
+
+
 def test_run_os_audit_preserves_distinct_errors_for_the_same_file(
     tmp_path: Path,
 ) -> None:

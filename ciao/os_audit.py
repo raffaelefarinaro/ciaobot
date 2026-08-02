@@ -19,7 +19,10 @@ from typing import Any
 from ciao.job_runs import JOB_RUNS_LATEST_NAME, JOB_RUNS_NAME
 from ciao.memory_injector import expiration_tag_error, is_entry_expired
 from ciao.memory_tool import default_memory_dir, memory_path, parse_entries, user_path
-from ciao.vault_lint import run_validation as run_vault_validation
+from ciao.vault_lint import (
+    _markdown_source_paths,
+    run_validation as run_vault_validation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -668,8 +671,7 @@ def _vault_audit(vault_root: Path) -> dict[str, Any]:
         }
     errors: list[dict[str, str]] = []
     try:
-        markdown_files = vault_root.rglob("*.md")
-        for path in markdown_files:
+        for path, _ in _markdown_source_paths(vault_root):
             try:
                 path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as exc:

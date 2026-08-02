@@ -1521,6 +1521,12 @@ def _vault_lint_command(args: argparse.Namespace) -> int:
     from ciao.vault_lint import run_validation
 
     vault_root = _resolve_vault_root(args.vault_root)
+    if not vault_root.is_dir():
+        print(
+            f"Vault root is missing or not a directory: `{vault_root}`",
+            file=sys.stderr,
+        )
+        return 1
     issues = run_validation(vault_root)
 
     has_issues = False
