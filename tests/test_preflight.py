@@ -142,6 +142,29 @@ async def test_preflight_env_example_and_test_files_ignored(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_preflight_skips_nested_git_checkouts(tmp_path: Path) -> None:
+    """Generated files inside a nested worktree are not workspace changes."""
+    repo = _init_repo(tmp_path)
+    mgr = LocalSessionManager(workspace=repo, runtime_root=tmp_path / "rt")
+
+    worktree = repo / ".worktrees" / "feature"
+    _write(worktree / ".git", "gitdir: /tmp/worktree-metadata\n")
+    _write(
+        worktree / ".venv" / "lib" / "python3.13" / "site-packages" / "cacert.pem",
+        "-----BEGIN PRIVATE KEY-----\nnot a workspace secret\n",
+    )
+    _write(
+        worktree / "ciao" / "__pycache__" / "local_session.cpython-313.pyc",
+        '{"type": "service_account", "private_key": "x", "client_email": "a@b.com"}',
+    )
+
+    result = await mgr.preflight()
+
+    assert result["blockers"] == []
+    assert not any(path.startswith(".worktrees/") for paths in result["changed_files"].values() for path in paths)
+
+
+@pytest.mark.asyncio
 async def test_preflight_suspicious_filename_boundaries(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     mgr = LocalSessionManager(workspace=repo, runtime_root=tmp_path / "rt")
@@ -208,5 +231,4 @@ async def test_preflight_scans_test_named_non_source_files(tmp_path: Path) -> No
     result = await mgr.preflight()
 
     assert any("test_config.pem" in b for b in result["blockers"])
-
 
