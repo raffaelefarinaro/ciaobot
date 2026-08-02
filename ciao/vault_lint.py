@@ -6,7 +6,7 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
@@ -126,22 +126,6 @@ def _markdown_source_paths(
         and not _is_excluded(relative)
         and _canonical_relative(path, root) is not None
     ]
-
-
-def _workspace_dirs(vault_root: Path) -> list[Path]:
-    """Vault subdirectories that look like a workspace (they hold a MEMORY.md).
-
-    Discovered from the layout rather than read from config: the linter runs as
-    a standalone script with no server config to consult.
-    """
-    try:
-        return [
-            entry
-            for entry in vault_root.iterdir()
-            if entry.is_dir() and (entry / "MEMORY.md").is_file()
-        ]
-    except OSError:
-        return []
 
 
 def _links_in(text: str):
@@ -420,7 +404,7 @@ def _markdown_link_error(
     if parsed.scheme or parsed.netloc:
         return None
     decoded_path = unquote(parsed.path)
-    if not decoded_path or decoded_path.startswith(("//", "/", "#")):
+    if not decoded_path or _is_non_local_decoded_path(decoded_path):
         return None
     if any(ord(character) < 32 for character in decoded_path):
         return {
@@ -469,6 +453,13 @@ def _markdown_link_error(
         "resolved": relative.as_posix(),
         "kind": "missing_target",
     }
+
+
+def _is_non_local_decoded_path(path: str) -> bool:
+    if path.startswith(("//", "/", "#")):
+        return True
+    windows_path = PureWindowsPath(path)
+    return windows_path.is_absolute() or bool(windows_path.root)
 
 
 def run_validation(vault_root: Path) -> dict:
@@ -552,21 +543,22 @@ def run_validation(vault_root: Path) -> dict:
                     "target": target
                 })
 
-    # Check for memory files links (roots). Every workspace subdirectory that
-    # has a MEMORY.md counts — hardcoding personal/work meant a differently
-    # named workspace's root links were never checked, so everything they
-    # referenced looked like an orphan.
+    # Check links from workspace memory roots. Any directly nested MEMORY.md in
+    # the already discovered/read records counts, so alternate workspace names
+    # retain the same behavior without a second fallible root traversal.
     memory_roots = sorted(
-        entry / "MEMORY.md"
-        for entry in _workspace_dirs(vault_root)
+        (
+            file
+            for file in vault_files
+            if len(file.relative.parts) == 2
+            and file.relative.name == "MEMORY.md"
+        ),
+        key=lambda file: file.relative.as_posix(),
     )
     memory_links = set()
-    records_by_path = {file.path: file for file in vault_files}
-    for mem_file in memory_roots:
-        record = records_by_path.get(mem_file)
-        if record is not None:
-            for target in _links_in(record.content):
-                memory_links.add(target)
+    for record in memory_roots:
+        for target in _links_in(record.content):
+            memory_links.add(target)
 
     orphan_candidate_dirs = {"People", "Projects", "Ideas", "Resources", "Places", "projects", "references"}
 

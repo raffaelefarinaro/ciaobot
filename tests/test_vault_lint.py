@@ -363,6 +363,62 @@ def test_run_validation_reads_each_included_markdown_once(
     })
 
 
+def test_memory_links_survive_post_walk_root_iterdir_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = tmp_path / "memory-vault"
+    vault.mkdir()
+    workspace = vault / "alternate"
+    workspace.mkdir()
+    (workspace / "MEMORY.md").write_text("[[Alice]]\n", encoding="utf-8")
+    people = vault / "People"
+    people.mkdir()
+    (people / "Alice.md").write_text(_page(), encoding="utf-8")
+    original_iterdir = Path.iterdir
+
+    def fail_root_iterdir(path: Path):
+        if path == vault:
+            raise OSError("workspace root listing unavailable")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", fail_root_iterdir)
+
+    issues = vault_lint.run_validation(vault)
+
+    assert issues["orphans"] == []
+
+
+@pytest.mark.parametrize(
+    ("target", "decoded"),
+    [
+        ("%43%3A%5Cprivate%5Cfile.md", r"C:\private\file.md"),
+        ("%5C%5Cserver%5Cshare%5Cfile.md", r"\\server\share\file.md"),
+    ],
+)
+def test_percent_decoded_windows_absolute_targets_are_ignored_without_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+    decoded: str,
+) -> None:
+    vault = _single_page_vault(tmp_path, f"[windows]({target})\n")
+    original_resolve = Path.resolve
+
+    def reject_windows_probe(
+        path: Path,
+        *args: object,
+        **kwargs: object,
+    ) -> Path:
+        if decoded in path.as_posix():
+            raise AssertionError("decoded Windows target was resolved")
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", reject_windows_probe)
+
+    assert vault_lint.run_validation(vault)["broken_markdown_links"] == []
+
+
 def test_run_validation_raises_on_full_traversal_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
