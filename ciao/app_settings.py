@@ -82,15 +82,18 @@ class AppSettingsStore:
         except (OSError, ValueError):
             logger.warning("Unreadable app settings at %s; using defaults", self._path)
             return AppSettings()
-        known = {f.name for f in fields(AppSettings)}
-        cleaned = {
-            k: v.strip()
-            for k, v in raw.items()
-            if k in known and isinstance(v, str)
+        string_fields = {
+            field.name
+            for field in fields(AppSettings)
+            if field.name != "custom_routing"
         }
+        settings = AppSettings()
+        for key, value in raw.items():
+            if key in string_fields and isinstance(value, str):
+                setattr(settings, key, value.strip())
         custom_routing = raw.get("custom_routing")
         if isinstance(custom_routing, dict):
-            cleaned["custom_routing"] = {
+            settings.custom_routing = {
                 str(provider_id): {
                     str(tier): str(model).strip()
                     for tier, model in routes.items()
@@ -100,7 +103,7 @@ class AppSettingsStore:
                 for provider_id, routes in custom_routing.items()
                 if isinstance(routes, dict)
             }
-        return AppSettings(**cleaned)
+        return settings
 
     def _save(self) -> None:
         payload = {k: v for k, v in asdict(self.settings).items() if v}
