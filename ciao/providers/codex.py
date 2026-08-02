@@ -1324,9 +1324,32 @@ class CodexProvider(BaseSDKProvider):
             for item_id in message_order
             if message_phases.get(item_id) != "commentary"
         ]
-        result_text = error_text if is_error else "\n\n".join(
-            part for part in final_parts if part
-        )
+        commentary_parts = [
+            "".join(message_parts[item_id]).strip()
+            for item_id in message_order
+            if message_phases.get(item_id) == "commentary"
+        ]
+        fallback_final = False
+        if is_error:
+            result_text = error_text
+        else:
+            result_text = "\n\n".join(part for part in final_parts if part)
+            if not result_text and terminal_status == "completed":
+                # Some app-server turns finish after emitting only a
+                # substantive progress update. Do not let that successful turn
+                # disappear from the chat: promote its last update as the
+                # visible answer and label it so the live UI avoids duplicating
+                # the same text in Activity and the final bubble.
+                for part in reversed(commentary_parts):
+                    if part:
+                        result_text = part
+                        fallback_final = True
+                        logger.warning(
+                            "Codex turn %s completed without a final_answer; "
+                            "promoting its last commentary as the final response",
+                            turn_id,
+                        )
+                        break
         if is_error and result_text:
             # Annotate connection/auth errors with the failing Codex endpoint
             # and a category, so a failed schedule identifies the host (the
@@ -1347,6 +1370,7 @@ class CodexProvider(BaseSDKProvider):
             usage=dict(self._usage),
             quota=dict(self._quota),
             cost_usd=None,
+            fallback_final=fallback_final,
         )
 
     async def disconnect(self) -> None:

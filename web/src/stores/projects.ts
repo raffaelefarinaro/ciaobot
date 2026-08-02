@@ -3561,7 +3561,7 @@ export const useProjectStore = defineStore('projects', () => {
         // A completed/interrupted Codex turn may legitimately end after a
         // commentary item with no final answer. Keep that text in the trace;
         // never promote it into the response bubble via the defensive merge.
-        if (streamingTextPhase.value[chatId] === 'commentary') {
+        if (!event.fallback_final && streamingTextPhase.value[chatId] === 'commentary') {
           _commitStreamingTextToTimeline(chatId)
         }
         // Flush accumulated timeline preserving order: tool runs → _activity

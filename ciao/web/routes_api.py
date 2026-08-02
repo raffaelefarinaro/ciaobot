@@ -2642,6 +2642,41 @@ def _render_codex_thread(thread: dict, chat) -> list[dict]:
         items = turn.get("items")
         if not isinstance(items, list):
             continue
+        agent_message_items = [
+            item
+            for item in items
+            if isinstance(item, dict)
+            and item.get("type") == "agentMessage"
+            and str(item.get("text") or "").strip()
+        ]
+        has_final_answer = any(
+            isinstance(item, dict)
+            and item.get("type") == "agentMessage"
+            and str(item.get("phase") or "") == "final_answer"
+            and str(item.get("text") or "").strip()
+            for item in items
+        )
+        fallback_agent_message_id = ""
+        commentary_only = bool(agent_message_items) and all(
+            str(item.get("phase") or "") == "commentary"
+            for item in agent_message_items
+        )
+        if (
+            str(turn.get("status") or "") == "completed"
+            and not has_final_answer
+            and commentary_only
+        ):
+            # A completed Codex turn can contain only a substantive commentary
+            # item. Match the live provider fallback so reopening the chat does
+            # not fold the completed response back into Activity.
+            for item in reversed(items):
+                if (
+                    isinstance(item, dict)
+                    and item.get("type") == "agentMessage"
+                    and str(item.get("text") or "").strip()
+                ):
+                    fallback_agent_message_id = str(item.get("id") or "")
+                    break
         pending_tools: list[str] = []
 
         def flush_tools() -> None:
@@ -2687,6 +2722,11 @@ def _render_codex_thread(thread: dict, chat) -> list[dict]:
                 if text:
                     entry = {"role": "assistant", "content": text}
                     phase = str(item.get("phase") or "")
+                    if (
+                        fallback_agent_message_id
+                        and str(item.get("id") or "") == fallback_agent_message_id
+                    ):
+                        phase = "final_answer"
                     if phase in {"commentary", "final_answer"}:
                         entry["phase"] = phase
                     result.append(entry)

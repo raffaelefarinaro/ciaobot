@@ -1153,6 +1153,38 @@ describe('Codex assistant message phases', () => {
       { content: 'Done.', phase: 'final_answer' },
     ])
   })
+
+  test('renders a commentary-only completed turn as its fallback final', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'codex-commentary-fallback'
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'text_delta',
+      text: 'The checks completed successfully.',
+      phase: 'commentary',
+    }) })
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'result',
+      text: 'The checks completed successfully.',
+      fallback_final: true,
+      is_error: false,
+      effective_model: 'gpt-test',
+      usage: {},
+      session_id: 'thread-fallback',
+    }) })
+
+    expect(store.messages[chatId].map(message => ({
+      content: message.content,
+      phase: message.phase,
+    }))).toEqual([{
+      content: 'The checks completed successfully.',
+      phase: 'final_answer',
+    }])
+    expect(store.streaming[chatId]).toBe(false)
+  })
 })
 
 describe('latest status sync', () => {
