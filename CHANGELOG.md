@@ -2,7 +2,39 @@
 
 ## v0.6.5 - 2026-07-30
 
+### Changed
+- A device connected as a client now looks exactly like opening the host's own
+  address in a browser: it serves the host's app build instead of its own, so a
+  newer host can no longer be driven by an older local screen without saying so.
+  The password in Settings is the host's, the one you typed to get in, and every
+  card on that page belongs to the host and now names it.
+- Everything about the computer in front of you moved to one page, **This
+  device** (`/device`), reachable from the client banner and from Settings: its
+  role, its connection to the host, disconnect, and its own version and update.
+  Nothing else in the app is about the local machine anymore, so it is always
+  clear whose data a screen is showing. That page keeps working when the host is
+  unreachable, since it is where you go to disconnect.
+
 ### Fixed
+- A device connected as a client gets notifications again. Its menu bar read a
+  queue that only the machine running the chats ever writes, so on a client it
+  stayed empty forever and the native banner never fired. The host's tray showed
+  your notifications while you were sitting at the other Mac, which left browser
+  push, the least reliable channel, as the only way to reach you. The tray now
+  reads that queue through the engine, so in client mode it shows the host's
+  notifications and both machines alert you at the same time.
+- Changing the host's password from a connected client no longer cuts that
+  client off.
+- A file the assistant surfaces now actually opens. Closing one pinned file used
+  to block every later surface request in that chat, silently, so deliverables
+  stopped appearing with no sign anything had been suppressed. Dismissals are
+  remembered per file instead of per chat: the file you closed stays closed
+  across reconnects, a new one still opens. An explicit surface also replaces
+  whatever is pinned, and on a phone it opens the file viewer instead of doing
+  nothing, since there is no side panel there.
+- The `file_surface` tool reports how many clients were listening, so the
+  assistant can no longer claim a file is in your panel when nobody had the chat
+  open.
 - The loop indicator in a chat's loop banner is now legible. It inherited body
   text size, so the heartbeat glyph was lost next to the loop title and the
   Start/Stop buttons.
@@ -16,6 +48,12 @@
   This never affected published releases — the engine, app, and Homebrew
   packages shipped normally each time — only the automated check that installs
   and launches them afterwards.
+- The "background agents running" indicator no longer sticks after the agents
+  have finished. Ciaobot waited on a completion record that the CLI sometimes
+  writes only at the start of the next turn, or never writes at all, so the
+  count could sit at one until you sent another message. It now reads each
+  agent's own transcript as well, and clears the count whenever it stops
+  watching instead of leaving a badge that nothing can take down.
 
 ### Maintenance
 - The desktop app records engine start-up failures to its log instead of

@@ -81,3 +81,33 @@ async def test_interrupted_marker_is_hidden_and_does_not_steal_queued_turn_image
     assert '"is_error":true' not in payload
     assert '"content":"queued follow-up"' in payload
     assert '"images":["queued.png"]' in payload
+
+
+@pytest.mark.asyncio
+async def test_interrupted_marker_for_tool_use_is_hidden(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI emits "[Request interrupted by user for tool use]" when steer or
+    queue interrupts a turn that has an in-flight tool call. Mirroring the SDK
+    regex shape (matches the bare form too) keeps that variant from rendering
+    as a fake user bubble on reload."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("Tool interrupt", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="tool-interrupt-test")
+    chat.session_id = "sess-tool-interrupt"
+
+    fake_sdk = SimpleNamespace(
+        get_session_messages=lambda session_id, directory: [
+            _Msg("user", "initial prompt"),
+            _Msg("user", "[Request interrupted by user for tool use]"),
+            _Msg("user", "queued follow-up"),
+        ]
+    )
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+
+    response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
+    payload = response.body.decode()
+
+    assert "[Request interrupted by user for tool use]" not in payload
+    assert '"content":"queued follow-up"' in payload

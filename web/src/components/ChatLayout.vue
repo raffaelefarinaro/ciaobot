@@ -37,7 +37,7 @@
             @close="closeProject"
             @open-sidebar="sidebarCollapsed = false"
           />
-          <ChatPanel v-else-if="store.activeChat" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+          <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
           <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
             <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
           </div>
@@ -69,7 +69,7 @@
                   />
                 </button>
               </div>
-              <HomeRecentChats />
+              <HomeRecentChats ref="homeRecentRef" />
               <div class="empty-actions">
                 <button
                   v-for="action in generalWorkspaceActions"
@@ -117,7 +117,7 @@
           @close="closeProject"
           @open-sidebar="sidebarCollapsed = false"
         />
-        <ChatPanel v-else-if="store.activeChat" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
+        <ChatPanel v-else-if="store.activeChat" ref="chatPanelRef" :key="store.activeChat.chat_id" @close="closeChat" @open-sidebar="sidebarCollapsed = false" />
         <div v-else-if="!store.bootstrapped" class="empty-shell home-boot" aria-busy="true">
           <PaneHeader title="ciaobot" @open-sidebar="sidebarCollapsed = false" />
         </div>
@@ -149,7 +149,7 @@
                 />
               </button>
             </div>
-            <HomeRecentChats />
+            <HomeRecentChats ref="homeRecentRef" />
             <div class="empty-actions">
               <button
                 v-for="action in generalWorkspaceActions"
@@ -162,13 +162,11 @@
                 {{ action.isCreating ? 'Creating...' : `+ ${action.label} chat` }}
               </button>
               </div>
-            <OnboardingCard variant="home" @open-sidebar="sidebarCollapsed = false" />
-          </div>
+                      </div>
         </div>
       </template>
     </div>
     <FileViewerModal />
-    <ProductTour />
   </div>
 </template>
 
@@ -177,7 +175,6 @@ import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
-import { useProductTourStore } from '../stores/productTour'
 import ProjectSidebar from './ProjectSidebar.vue'
 import ChatPanel from './ChatPanel.vue'
 import ProjectView from './ProjectView.vue'
@@ -186,14 +183,26 @@ import SettingsView from './SettingsView.vue'
 import FileViewerModal from './FileViewerModal.vue'
 import PinnedFilePanel from './PinnedFilePanel.vue'
 import PaneHeader from './PaneHeader.vue'
-import ProductTour from './ProductTour.vue'
-import OnboardingCard from './OnboardingCard.vue'
 import HomeRecentChats from './HomeRecentChats.vue'
 import { formatDocumentTitle, settingsTabTitle } from '../lib/appTitle'
 import { normalizeWorkspaceColor } from '../lib/workspaceColors'
+import { pendingConfirm } from '../lib/confirm'
+import { isDesktopApp } from '../lib/desktop'
 
 const store = useProjectStore()
-const tourStore = useProductTourStore()
+
+// Refs into the active ChatPanel, used by the global keyboard shortcuts to
+// reach composer-owned actions (dictation, archive).
+//
+// The template declares ChatPanel and HomeRecentChats twice, once under
+// `v-if="pinnedFilePath"` (split view) and once under the `v-else` (no pinned
+// file). Both copies must carry the ref: only one is ever mounted, so the ref
+// holds whichever that is, but tagging only the split-view copy left Cmd+D,
+// Cmd+A and the home arrow keys silently dead in the far more common
+// no-pinned-file layout.
+const chatPanelRef = ref<InstanceType<typeof ChatPanel> | null>(null)
+// Ref into HomeRecentChats for arrow-key navigation on the home screen.
+const homeRecentRef = ref<InstanceType<typeof HomeRecentChats> | null>(null)
 
 const DEFAULT_SIDEBAR_WIDTH = 280
 const MIN_SIDEBAR_WIDTH = 180
@@ -239,7 +248,6 @@ const sidebarStyle = computed(() => {
 
 let dragStartWidth = 0
 let dragStartX = 0
-let dragStartRatio = 0
 let dragContainerWidth = 0
 let dragContainerLeft = 0
 
@@ -280,7 +288,6 @@ function stopSidebarDrag() {
 function startSplitDrag(e: MouseEvent) {
   e.preventDefault()
   isDraggingSplit.value = true
-  dragStartRatio = chatSplitRatio.value
   dragStartX = e.clientX
   
   const splitContainer = document.querySelector('.chat-main')
@@ -479,38 +486,6 @@ function unpinCurrent(): void {
   if (activePinKey.value) store.unpinFile(activePinKey.value)
 }
 
-function openSidebarForTour() {
-  sidebarCollapsed.value = false
-}
-
-async function navigateToChatForTour() {
-  if (viewMode.value !== 'chat') {
-    await router.push('/')
-  }
-}
-
-async function ensureWelcomeChatForTour() {
-  if (store.activeChat) return
-  const welcome = store.chats.find(c => /welcome|connect existing vault/i.test(c.title))
-  const target = welcome
-    ?? (() => {
-      const general = store.projects.find(p => p.name === 'General')
-      if (!general) return store.chats[0]
-      return store.chats.find(c => c.project_id === general.project_id)
-    })()
-  if (!target) return
-  await store.switchChat(target.chat_id)
-  await router.push(`/chat/${target.chat_id}`)
-  if (isMobile.value) sidebarCollapsed.value = true
-}
-
-async function waitForStartupDismissed() {
-  for (let i = 0; i < 120; i++) {
-    if (!document.querySelector('.startup-overlay')) return
-    await new Promise<void>(resolve => setTimeout(resolve, 250))
-  }
-}
-
 function onResize() {
   const wasMobile = isMobile.value
   isMobile.value = window.innerWidth < 768
@@ -538,11 +513,6 @@ function stopLatestStatusSync() {
 }
 
 onMounted(async () => {
-  tourStore.registerHooks({
-    openSidebar: openSidebarForTour,
-    navigateToChat: navigateToChatForTour,
-    ensureWelcomeChat: ensureWelcomeChatForTour,
-  })
   await store.fetchAll()
   startLatestStatusSync()
   taskStore.fetchSchedules().catch(() => {})
@@ -555,8 +525,6 @@ onMounted(async () => {
   if (isMobile.value && store.activeChat) {
     sidebarCollapsed.value = true
   }
-  await waitForStartupDismissed()
-  void tourStore.maybeAutoStart()
 })
 
 watch(() => route.path, (p) => {
@@ -590,6 +558,64 @@ function onChatSelected() {
 
 function closeChat() {
   store.activeChatId = null
+}
+
+// ── Global keyboard shortcuts ───────────────────────────────────────
+// Desktop-only (the PWA in a browser would fight the OS for Cmd+T etc.).
+// These run inside the Tauri webview, where those combos are free.
+function isTypingTarget(el: EventTarget | null): boolean {
+  if (!(el instanceof HTMLElement)) return false
+  return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable
+}
+
+function onShortcutKeydown(e: KeyboardEvent) {
+  // Defer to full-screen views (settings, schedules) and the confirm dialog.
+  if (viewMode.value !== 'chat') return
+  if (pendingConfirm.value) return
+
+  // Home screen: arrow keys roam the recent-chat grid, Enter opens the
+  // focused card (handled natively by the focused button). Only when no
+  // chat is open and focus isn't in a text field, so typing is unaffected.
+  if (!store.activeChat && !isTypingTarget(e.target) && e.key.startsWith('Arrow')) {
+    if (homeRecentRef.value?.onArrow(e.key)) e.preventDefault()
+    return
+  }
+
+  const mod = e.metaKey || e.ctrlKey
+
+  // Cmd+T: new chat in the default General project.
+  if (mod && (e.key === 't' || e.key === 'T')) {
+    e.preventDefault()
+    void store.newChatInGeneral()
+    return
+  }
+
+  // Cmd+D: toggle dictation in the active chat's composer (start/stop).
+  if (mod && (e.key === 'd' || e.key === 'D')) {
+    if (!store.activeChat) return
+    e.preventDefault()
+    chatPanelRef.value?.toggleDictation()
+    return
+  }
+
+  // Cmd+A: archive the active chat. Skip while typing so Cmd+A keeps its
+  // select-all meaning inside text fields.
+  if (mod && (e.key === 'a' || e.key === 'A')) {
+    if (isTypingTarget(e.target) || !store.activeChat) return
+    e.preventDefault()
+    chatPanelRef.value?.archiveActiveChat()
+    return
+  }
+
+  // Esc: close the open chat. Input fields own their Esc (cancel edit, close
+  // the slash-command picker, clear the draft), so we only close when the
+  // focus is outside a text field.
+  if (e.key === 'Escape') {
+    if (!store.activeChat || isTypingTarget(e.target)) return
+    e.preventDefault()
+    closeChat()
+    return
+  }
 }
 
 function closeProject() {
@@ -650,6 +676,9 @@ onMounted(() => {
   window.addEventListener('touchstart', onTouchStart, { passive: true })
   window.addEventListener('touchend', onTouchEnd, { passive: true })
   window.addEventListener('touchcancel', onTouchEnd, { passive: true })
+  // Global keyboard shortcuts live in the desktop app only: in a browser tab
+  // Cmd+T/Cmd+A are owned by the browser and shouldn't be hijacked.
+  if (isDesktopApp()) window.addEventListener('keydown', onShortcutKeydown)
 })
 
 onBeforeUnmount(() => {
@@ -658,6 +687,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('touchstart', onTouchStart)
   window.removeEventListener('touchend', onTouchEnd)
   window.removeEventListener('touchcancel', onTouchEnd)
+  if (isDesktopApp()) window.removeEventListener('keydown', onShortcutKeydown)
   window.removeEventListener('mousemove', handleSidebarDrag)
   window.removeEventListener('mouseup', stopSidebarDrag)
   window.removeEventListener('mousemove', handleSplitDrag)

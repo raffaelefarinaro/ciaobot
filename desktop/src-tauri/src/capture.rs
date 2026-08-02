@@ -1,6 +1,7 @@
 use crate::runtime::RuntimeConfig;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{sync::OnceLock, time::Duration};
 
 // One pooled client for the whole process. Building a fresh `Client` per
@@ -120,6 +121,12 @@ struct ActiveChats {
     active_chat_ids: Vec<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct NotificationFeed {
+    #[serde(default)]
+    notifications: Vec<Value>,
+}
+
 pub async fn startup_status(runtime: &RuntimeConfig) -> Result<StartupStatus, String> {
     let url = runtime
         .server_url
@@ -151,6 +158,32 @@ async fn menubar_chats(runtime: &RuntimeConfig) -> Result<MenubarChats, String> 
         .map_err(|error| error.to_string())?
         .json::<MenubarChats>()
         .await
+        .map_err(|error| error.to_string())
+}
+
+/// Notification entries at or after `after`, oldest first.
+///
+/// In client mode the engine tunnels this to the host, so the tray posts the
+/// banners of the machine that actually ran the turn. Reading the local
+/// `notifications.jsonl` instead leaves a client permanently silent, because
+/// only the machine running the chats ever writes that file.
+pub async fn notifications(runtime: &RuntimeConfig, after: f64) -> Result<Vec<Value>, String> {
+    let mut url = runtime
+        .server_url
+        .join("api/menubar-notifications")
+        .map_err(|error| error.to_string())?;
+    url.query_pairs_mut()
+        .append_pair("after", &format!("{after:.6}"));
+    http()
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?
+        .error_for_status()
+        .map_err(|error| error.to_string())?
+        .json::<NotificationFeed>()
+        .await
+        .map(|feed| feed.notifications)
         .map_err(|error| error.to_string())
 }
 

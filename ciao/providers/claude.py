@@ -71,6 +71,7 @@ from ciao.models import (
 from ciao.execution_modes import auto_approved_mcp_tool_names, harness_skill_overrides
 from ciao.memory_injector import build_memory_block, system_prompt_payload
 from ciao.observability.hooks import (
+    build_foreground_bash_hook,
     build_user_prompt_submit_hook,
     build_web_search_post_tooluse_hook,
 )
@@ -558,6 +559,14 @@ class ClaudeProvider(BaseSDKProvider):
             # Per-turn runtime context + vault entity tags. Fires before
             # each user prompt reaches the model. See ciao/observability/hooks.py.
             hooks={
+                # Background Bash jobs are owned by the managed CLI process.
+                # Ending the turn kills them, and Claude does not report that
+                # stop until the next turn resumes the session. Keep Bash in
+                # the active turn so the UI receives a real terminal result.
+                "PreToolUse": [HookMatcher(
+                    matcher="Bash",
+                    hooks=[build_foreground_bash_hook()],
+                )],
                 "UserPromptSubmit": [HookMatcher(
                     hooks=[build_user_prompt_submit_hook(
                         self._vault_root,

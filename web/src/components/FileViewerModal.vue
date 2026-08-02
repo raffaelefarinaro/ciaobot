@@ -395,6 +395,7 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useFileViewerStore } from '../stores/fileViewer'
+import { errorMessage } from '../lib/errorMessage'
 import { useProjectStore } from '../stores/projects'
 import { api } from '../lib/api'
 import { parseFrontmatter } from '../lib/markdownFrontmatter'
@@ -403,6 +404,7 @@ import { buildMarkdownIndex, resolveWikilinkTarget } from '../lib/wikilinks'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { createTerminalDiffLines, terminalDiffPrefix, type TerminalDiffKind } from '../lib/terminalDiff'
 import { isCsvPath } from '../lib/csv'
+import { askConfirm } from '../lib/confirm'
 import { formatCommentLocation } from '../lib/commentContext'
 import CommentComposePopover from './CommentComposePopover.vue'
 const ExcalidrawViewer = defineAsyncComponent(() => import('./ExcalidrawViewer.vue'))
@@ -432,8 +434,8 @@ async function continueFromTranscript(): Promise<void> {
   try {
     await projectsStore.continueArchivedChat(chatId)
     store.close()
-  } catch (e: any) {
-    projectsStore.pushErrorToast('Could not continue chat', `${e?.message || e}`)
+  } catch (e) {
+    projectsStore.pushErrorToast('Could not continue chat', `${errorMessage(e)}`)
   } finally {
     isContinuing.value = false
   }
@@ -524,7 +526,11 @@ async function diffAgainstSeq(seq: number): Promise<void> {
 }
 
 async function restoreSeq(seq: number): Promise<void> {
-  if (!confirm(`Restore snapshot #${seq} to disk? This writes a new snapshot so it can be undone.`)) return
+  if (!await askConfirm(`Restore snapshot #${seq} to disk? This writes a new snapshot so it can be undone.`, {
+    title: 'Restore snapshot',
+    confirmLabel: 'Restore',
+    destructive: true,
+  })) return
   const ok = await store.restoreSnapshot(seq)
   if (!ok) projectsStore.pushErrorToast('Restore failed', `Could not restore snapshot #${seq}. See network console for details.`)
 }
@@ -541,8 +547,9 @@ const splitContent = computed(() => parseFrontmatter(store.content))
 const frontmatter = computed(() => splitContent.value.frontmatter)
 const bodyOnly = computed(() => splitContent.value.body)
 
-const fmTitle = computed(() => fmString('title'))
-const fmName = computed(() => fmString('name'))
+// `title` is the canonical human label in the vault schema; `name` is the
+// retired synonym still present on older pages. Prefer title, fall back.
+const fmName = computed(() => fmString('title') || fmString('name'))
 const fmType = computed(() => fmString('type'))
 const fmStatus = computed(() => fmString('status'))
 const fmTags = computed(() => fmList('tags'))
@@ -632,19 +639,12 @@ function fmList(key: string): string[] {
 function isUrl(value: string): boolean {
   return /^https?:\/\/\S+$/.test(value.trim())
 }
-// Keep `fmTitle` in scope (read by linters as referenced for completeness
-// even though the chip itself uses fmName / basename for the heading).
-void fmTitle
 
 // ── File comments (durable, shown in sidebar + highlights) ─────────
 const activeFileComments = computed(() =>
   projectsStore.fileCommentsFor(cleanPath(store.path))
 )
-const showSidebar = ref(false)
 
-function isPending(id: string): boolean {
-  return projectsStore.pendingComments.some(c => c.id === id)
-}
 
 function deleteFileComment(path: string, id: string): void {
   projectsStore.removeFileComment(path, id)
@@ -768,29 +768,6 @@ function layoutSidebarCards(): void {
 // Line-number ordering is more predictable than visual position when
 // text wraps or images shift the layout. Falls back to visual position
 // for comments without line info (e.g. legacy or cross-file selections).
-const sidebarCards = computed(() => {
-  const pos = commentPositions.value
-  const cards = activeFileComments.value.map(c => ({ ...c, top: pos[c.id] ?? null as number | null }))
-  cards.sort((a, b) => {
-    const aLine = a.lineStart ?? Number.MAX_SAFE_INTEGER
-    const bLine = b.lineStart ?? Number.MAX_SAFE_INTEGER
-    if (aLine !== bLine) return aLine - bLine
-    const ap = a.top ?? -1
-    const bp = b.top ?? -1
-    if (ap !== -1 && bp !== -1) return ap - bp
-    if (ap !== -1) return 1
-    if (bp !== -1) return -1
-    return a.id.localeCompare(b.id)
-  })
-  let fallback = 0
-  for (const c of cards) {
-    if (c.top == null) {
-      c.top = fallback
-      fallback += 8
-    }
-  }
-  return cards
-})
 
 let popupOpenTimestamp = 0
 
@@ -1069,7 +1046,9 @@ function highlightInMarkdown(root: HTMLElement, selection: string, commentId: st
     if (!slice.trim()) continue  // Skip whitespace-only gaps
 
     try {
-      const after = textNode.splitText(localEnd)
+      // splitText mutates the tree, which is the point; the tail node itself
+      // is not needed here.
+      textNode.splitText(localEnd)
       const mid = textNode.splitText(localStart)
       const span = document.createElement('span')
       span.className = 'comment-highlight'
@@ -1120,10 +1099,6 @@ function onPreClick(e: MouseEvent): void {
   if (id) openPopupComment(e, id)
 }
 
-function commentBasename(path: string): string {
-  const idx = path.lastIndexOf('/')
-  return idx === -1 ? path : path.slice(idx + 1)
-}
 function commentLineLabel(c: {
   lineStart?: number | null
   lineEnd?: number | null
@@ -1139,7 +1114,6 @@ const bodyEl = ref<HTMLElement>()
 const mdEl = ref<HTMLElement>()
 const preEl = ref<HTMLElement>()
 const preCodeEl = ref<HTMLElement>()
-const sidebarDraftInputEl = ref<HTMLTextAreaElement>()
 const copyState = ref<'' | 'ok'>('')
 const openExternalState = ref<'' | 'loading' | 'ok'>('')
 
@@ -1311,10 +1285,6 @@ watch(
 // the user can attach a note to the next message. The note rides along on
 // the next sendMessage as a structured <file-comment> block.
 
-function truncate(s: string, n: number): string {
-  if (!s) return ''
-  return s.length > n ? s.slice(0, n - 1) + '…' : s
-}
 
 // Strip the `:line` suffix that the viewer accepts on text files so the
 // comment carries a clean workspace path. The line number is preserved
@@ -1711,18 +1681,6 @@ function removeEditImage(index: number): void {
   editingCommentImages.value.splice(index, 1)
 }
 
-function onEditKeydown(e: KeyboardEvent): void {
-  if (e.key === 'Escape') {
-    e.preventDefault()
-    cancelEditComment()
-    return
-  }
-  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-    e.preventDefault()
-    const id = editingCommentId.value
-    if (id) saveEditComment(id)
-  }
-}
 
 if (typeof document !== 'undefined') {
   document.addEventListener('selectionchange', onSelectionChange)

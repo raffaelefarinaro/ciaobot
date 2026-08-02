@@ -90,21 +90,6 @@ const hasAnyModels = computed(
   () => filteredSections.value.length > 0
 )
 
-const singleSelectedModel = computed(() => {
-  if (props.multiple) return ''
-  const v = effectiveValue.value as string
-  return v
-})
-
-const multiSelectedModels = computed(() => {
-  if (!props.multiple) return []
-  return effectiveValue.value as string[]
-})
-
-const selectedCount = computed(() =>
-  props.multiple ? (effectiveValue.value as string[]).length : effectiveValue.value ? 1 : 0
-)
-
 function displayModelLabel(model: string): string {
   const section = normalizedSections.value.find((item) => item.models.includes(model))
   return section?.modelLabels?.[model] || model
@@ -134,7 +119,8 @@ const activeModelSet = computed(() => {
 
 function toggle() {
   if (props.disabled) return
-  open.value ? close() : openPopover()
+  if (open.value) close()
+  else openPopover()
 }
 
 function openPopover() {
@@ -384,6 +370,10 @@ onBeforeUnmount(() => {
 
       <div v-else class="model-selector__empty">
         No models match "{{ query }}"
+      </div>
+
+      <div v-if="$slots.footer" class="model-selector__footer">
+        <slot name="footer" />
       </div>
     </div>
   </div>
@@ -683,6 +673,14 @@ onBeforeUnmount(() => {
   text-align: center;
   font-size: 13px;
   color: var(--fg2);
+}
+
+.model-selector__footer {
+  flex: 0 0 auto;
+  padding: 8px 10px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  background: var(--bg2);
+  border-radius: 0 0 var(--radius) var(--radius);
 }
 
 @media (max-width: 768px) {

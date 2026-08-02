@@ -18,7 +18,9 @@ export function isRestartDrainMessage(message: string | undefined | null): boole
 export async function reloadWhenServerReady(timeoutMs = 120000): Promise<void> {
   const start = Date.now()
   let sawDown = false
-  while (true) {
+  // for(;;) rather than while(true): same loop, and no-constant-condition
+  // exempts it. The exits are the timeout check and the ready reload below.
+  for (;;) {
     try {
       const res = await fetch('/api/startup-status')
       if (res.ok) {

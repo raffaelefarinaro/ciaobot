@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from ciao.providers.ollama import ollama_env_for_model, routine_env_for_model as _ollama_routine
 from ciao.providers.openrouter import openrouter_env_for_model, routine_env_for_model as _or_routine
+from ciao.custom_providers import env_for_model as custom_env_for_model
 
 if TYPE_CHECKING:
     from ciao.config import CiaoConfig
@@ -25,6 +26,9 @@ if TYPE_CHECKING:
 
 def routing_env_for_model(model: str, config: "CiaoConfig") -> dict[str, str]:
     """Env overrides to route ``model`` through its configured upstream."""
+    env = custom_env_for_model(config, model)
+    if env:
+        return env
     env = ollama_env_for_model(model, config.ollama)
     if env:
         return env
@@ -33,6 +37,9 @@ def routing_env_for_model(model: str, config: "CiaoConfig") -> dict[str, str]:
 
 def routing_routine_env_for_model(model: str, config: "CiaoConfig") -> dict[str, str]:
     """Env overrides for routine one-shot calls (not gated on allowlists)."""
+    env = custom_env_for_model(config, model)
+    if env:
+        return env
     env = _ollama_routine(model, config.ollama)
     if env:
         return env

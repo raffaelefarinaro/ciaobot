@@ -264,6 +264,8 @@
 <script setup lang="ts">
 import { onMounted, ref, reactive, computed } from 'vue'
 import { useTaskStore } from '../stores/tasks'
+import type { ScheduleUpdate } from '../stores/tasks'
+import { askConfirm } from '../lib/confirm'
 import { useProjectStore } from '../stores/projects'
 import type { Schedule } from '../lib/types'
 import NewScheduleForm from './NewScheduleForm.vue'
@@ -390,7 +392,7 @@ function startEdit(s: Schedule) {
 
 async function saveEdit(id: string) {
   const d = editData[id]
-  const updates: Record<string, unknown> = {
+  const updates: ScheduleUpdate = {
     time: d.frequency === 'manual' ? '' : d.time,
     prompt: d.prompt,
     timezone: d.timezone,
@@ -419,7 +421,7 @@ async function saveEdit(id: string) {
     updates.thread_id = parts.length > 1 ? parseInt(parts[1], 10) : null
   }
 
-  await store.updateSchedule(id, updates as any)
+  await store.updateSchedule(id, updates)
   editing[id] = false
 }
 
@@ -428,8 +430,13 @@ async function runNow(id: string) {
   await refresh()
 }
 
-function confirmDelete(id: string) {
-  if (confirm('Delete this schedule?')) store.deleteSchedule(id)
+async function confirmDelete(id: string) {
+  if (!await askConfirm('Delete this schedule? It will stop running.', {
+    title: 'Delete schedule',
+    confirmLabel: 'Delete schedule',
+    destructive: true,
+  })) return
+  await store.deleteSchedule(id)
 }
 
 async function togglePause(schedule: Schedule) {

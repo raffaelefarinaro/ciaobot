@@ -44,6 +44,28 @@ async def push_status(request: Request) -> JSONResponse:
     return JSONResponse({"count": pm.count(), "public_key": pm.public_key})
 
 
+async def push_notification_feed(request: Request) -> JSONResponse:
+    """Recent notification entries for the macOS menu bar.
+
+    The tray used to read ``.runtime/notifications.jsonl`` off its own disk,
+    which only the machine that ran the chat ever writes. On a client node that
+    file stays empty forever, so the reliable native banner never fired there
+    and best-effort Web Push was the only channel left. Reading through the API
+    instead means the client proxy tunnels this to the host, and both machines
+    show the same banners.
+
+    Session-free but loopback-only (see ``_LOOPBACK_ONLY_API`` in
+    ``ciao.web.auth``): the bodies are message snippets, so like
+    ``/api/menubar-chats`` this must not be reachable from the network.
+    """
+    pm = request.app.state.push_manager
+    try:
+        after = float(request.query_params.get("after", "0") or 0.0)
+    except ValueError:
+        after = 0.0
+    return JSONResponse({"notifications": pm.read_log(after=after)})
+
+
 async def push_subscription_check(request: Request) -> JSONResponse:
     """Confirm whether a given endpoint is registered server-side.
 

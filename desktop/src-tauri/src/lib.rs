@@ -74,14 +74,73 @@ fn browser_event_script(name: &str, detail: &serde_json::Value) -> String {
     format!("window.dispatchEvent(new CustomEvent({name}, {{ detail: {detail} }}));")
 }
 
+// Chat image extensions, mirroring `_ALLOWED_IMAGE_EXTENSIONS` in
+// ciao/web/project_chats.py. Only these get staged: the server copies their
+// bytes into media_root, so a staged copy is safe to delete afterwards, while a
+// non-image drop is handed to the agent as a path it has to keep reading.
+const DROP_IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
+
+// Bounds how much a single dropped file pulls into memory. A screenshot is
+// never close; a promise-backed drag of something else can be.
+const DROP_STAGING_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// True for a promise-backed drag the Python server will not be able to read.
+///
+/// Dragging straight from the macOS screenshot thumbnail hands over a path in
+/// `.../TemporaryItems/NSIRD_screencaptureui_*/`. macOS grants that read to the
+/// app which received the drop, this process, and denies it to every other one,
+/// so the server's `read_bytes()` failed with `EPERM` and the screenshot was
+/// dropped on the floor (issue #238).
+fn needs_drop_staging(path: &std::path::Path) -> bool {
+    let is_image = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            DROP_IMAGE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+        });
+    is_image
+        && path.components().any(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .is_some_and(|name| name.starts_with("NSIRD_"))
+        })
+}
+
+/// Copy one dropped file into this grant's staging dir, returning the new path.
+///
+/// Reads and writes the bytes rather than calling `std::fs::copy`, which on
+/// macOS uses `fcopyfile` and carries the source's extended attributes across:
+/// the copy has to be an ordinary file any process can open. Returns None on
+/// failure so the caller keeps the original path and the server reports one
+/// per-file error instead of the whole drop failing. Each file gets its own
+/// numbered subdirectory, so two dropped files sharing a name do not collide.
+fn stage_dropped_file(
+    staging_dir: &std::path::Path,
+    index: usize,
+    path: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    if std::fs::metadata(path).ok()?.len() > DROP_STAGING_MAX_BYTES {
+        return None;
+    }
+    let name = path.file_name()?;
+    let target_dir = staging_dir.join(index.to_string());
+    std::fs::create_dir_all(&target_dir).ok()?;
+    let target = target_dir.join(name);
+    let data = std::fs::read(path).ok()?;
+    std::fs::write(&target, &data).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).ok()?;
+    }
+    Some(target)
+}
+
 fn create_desktop_drop_grant(
     runtime_root: &std::path::Path,
     paths: &[std::path::PathBuf],
 ) -> Result<(String, Vec<String>), String> {
-    let paths = paths
-        .iter()
-        .map(|path| path.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
     let grant_id = uuid::Uuid::new_v4().to_string();
     let grant_dir = runtime_root.join("desktop-drop-grants");
     std::fs::create_dir_all(&grant_dir).map_err(|error| error.to_string())?;
@@ -94,10 +153,31 @@ fn create_desktop_drop_grant(
                 .and_then(|modified| modified.elapsed().ok())
                 .is_some_and(|age| age > Duration::from_secs(10 * 60));
             if is_stale {
-                let _ = std::fs::remove_file(entry.path());
+                // `staged/` is a directory, so sweep both shapes. The server
+                // deletes a staged copy as soon as it holds the bytes; this is
+                // the backstop for a grant that was never consumed.
+                let stale_path = entry.path();
+                if stale_path.is_dir() {
+                    let _ = std::fs::remove_dir_all(&stale_path);
+                } else {
+                    let _ = std::fs::remove_file(&stale_path);
+                }
             }
         }
     }
+    let staging_dir = grant_dir.join("staged").join(&grant_id);
+    let paths = paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            if needs_drop_staging(path)
+                && let Some(staged) = stage_dropped_file(&staging_dir, index, path)
+            {
+                return staged.to_string_lossy().into_owned();
+            }
+            path.to_string_lossy().into_owned()
+        })
+        .collect::<Vec<_>>();
     let grant_path = grant_dir.join(format!("{grant_id}.json"));
     let temp_path = grant_dir.join(format!(".{grant_id}.tmp"));
     let created_at = std::time::SystemTime::now()
@@ -1048,9 +1128,7 @@ fn start_tray_icon_animation(app: AppHandle) {
 fn start_notification_tail(app: AppHandle, runtime: RuntimeConfig) {
     let path = runtime.runtime_root.join("notifications.jsonl");
     thread::spawn(move || {
-        let Ok(mut tail) = NotificationLogTail::at_end(path) else {
-            return;
-        };
+        let mut tail = NotificationLogTail::at_end(path);
         loop {
             thread::sleep(Duration::from_secs(1));
             let still_current = app
@@ -1062,6 +1140,12 @@ fn start_notification_tail(app: AppHandle, runtime: RuntimeConfig) {
             if !still_current {
                 return;
             }
+            // Poll even when the toggle is off, so the cursor keeps moving and
+            // turning notifications back on does not dump the whole backlog.
+            let fetched =
+                tauri::async_runtime::block_on(capture::notifications(&runtime, tail.cursor()))
+                    .ok();
+            let pending = tail.poll(fetched);
             let enabled = app
                 .state::<DesktopModel>()
                 .settings
@@ -1071,7 +1155,7 @@ fn start_notification_tail(app: AppHandle, runtime: RuntimeConfig) {
             if !enabled {
                 continue;
             }
-            for payload in tail.poll().unwrap_or_default() {
+            for payload in pending {
                 let notification = NativeNotification::from_value(&payload);
                 tauri::async_runtime::spawn(async move {
                     let _ = notification.post().await;
@@ -1183,7 +1267,7 @@ pub fn run() {
 mod tests {
     use super::{
         append_log, browser_event_script, create_desktop_drop_grant, engine_already_current,
-        is_external_link, is_trusted_main_navigation, requires_confirmation,
+        is_external_link, is_trusted_main_navigation, needs_drop_staging, requires_confirmation,
         should_show_main_window,
     };
     use crate::service::ServiceResult;
@@ -1274,6 +1358,54 @@ mod tests {
                 "{blocked} must not replace the trusted PWA"
             );
         }
+    }
+
+    // Only a promise-backed image drop gets copied. A screenshot outside an
+    // NSIRD dir, and a non-image inside one, both stay pass-through: the server
+    // can read the first, and the agent needs to keep reading the second.
+    #[test]
+    fn only_a_promise_backed_image_drop_needs_staging() {
+        let temporary =
+            std::path::Path::new("/var/folders/zj/x/T/TemporaryItems/NSIRD_screencaptureui_1Pr326");
+        assert!(needs_drop_staging(
+            &temporary.join("Screenshot 2026-07-31 at 09.54.13.png")
+        ));
+        assert!(needs_drop_staging(&temporary.join("SHOT.JPEG")));
+        assert!(!needs_drop_staging(&temporary.join("notes.pdf")));
+        assert!(!needs_drop_staging(std::path::Path::new(
+            "/Users/someone/Desktop/Screenshot.png"
+        )));
+    }
+
+    #[test]
+    fn a_staged_drop_hands_the_server_a_readable_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let source_dir = root
+            .path()
+            .join("TemporaryItems/NSIRD_screencaptureui_1Pr326");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("Screenshot.png");
+        std::fs::write(&source, b"\x89PNG\r\n\x1a\n").unwrap();
+        let plain = root.path().join("notes.md");
+        std::fs::write(&plain, b"notes").unwrap();
+
+        let (grant_id, paths) =
+            create_desktop_drop_grant(root.path(), &[source.clone(), plain.clone()]).unwrap();
+
+        // The screenshot now points at the staged copy, byte-identical and no
+        // longer inside the directory only this process may read.
+        let staged = std::path::PathBuf::from(&paths[0]);
+        assert_ne!(staged, source);
+        assert!(
+            staged.starts_with(
+                root.path()
+                    .join("desktop-drop-grants/staged")
+                    .join(&grant_id)
+            )
+        );
+        assert_eq!(std::fs::read(&staged).unwrap(), b"\x89PNG\r\n\x1a\n");
+        // The ordinary file is untouched.
+        assert_eq!(paths[1], plain.to_string_lossy());
     }
 
     #[test]

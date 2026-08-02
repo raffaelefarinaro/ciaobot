@@ -5,6 +5,7 @@ import { getPendingBucket, normalizePendingBuckets, setPendingBucket } from '../
 import { buildFixPrompt } from '../lib/fixError'
 import { formatChatComments, formatFileComments, type ChatCommentAnchor } from '../lib/commentContext'
 import { isPlausibleFilePath } from '../lib/filePaths'
+import { useFileViewerStore } from './fileViewer'
 import { isRateLimitTelemetry } from '../lib/rateLimit'
 import {
   DEFAULT_RESTART_MESSAGE,
@@ -14,9 +15,9 @@ import {
 import type {
   ProjectInfo,
   ChatInfo,
+  ChatRow,
   ChatMessage,
   SubagentTranscript,
-  ProviderSubchatRecord,
   WsEvent,
   EventsWsMessage,
   VoiceResult,
@@ -64,16 +65,12 @@ export const useProjectStore = defineStore('projects', () => {
   const activeWorkspace = ref<WorkspaceName>('personal')
   const activeChatId = ref<string | null>(null)
   // False until the first fetchAll() resolves. Gates the home empty state so
-  // a restored active chat does not flash the getting-started screen.
+  // a restored active chat does not flash a blank placeholder.
   const bootstrapped = ref(false)
   const messages = ref<Record<string, ChatMessage[]>>({})
   // Subagent transcripts keyed by chat_id. Loaded lazily on chat switch and
   // after each streaming turn (subagents can be spawned mid-turn).
   const subagents = ref<Record<string, SubagentTranscript[]>>({})
-  // Provider sub-chats keyed by parent chat_id.
-  const providerSubchats = ref<Record<string, ProviderSubchatRecord[]>>({})
-  // Provider sub-chat transcript events keyed by subchat_id.
-  const providerSubchatEvents = ref<Record<string, any[]>>({})
   const sockets = ref<Record<string, WebSocket>>({})
   const streaming = ref<Record<string, boolean>>({})
   const streamingText = ref<Record<string, string>>({})
@@ -146,11 +143,14 @@ export const useProjectStore = defineStore('projects', () => {
       persistPendingChatComments()
     },
   })
-  // Pinned file paths per chat/project. A separate dismissal flag remembers
-  // when the user closed the split panel so replayed file_surface events do
-  // not reopen it the next time that chat connects.
+  // Pinned file paths per chat/project. Dismissals are remembered per *path*,
+  // not per chat: a replayed `file_surface` event (WS reconnect replays the
+  // in-flight stream's buffer) must not reopen a file the user closed, but a
+  // later surface of a *different* file is a new deliverable and must still
+  // open. A chat-wide flag conflated the two and silently swallowed every
+  // subsequent surface request for the rest of the chat.
   const pinnedFilePaths = ref<Record<string, string>>({})
-  const dismissedAutoPins = ref<Record<string, true>>({})
+  const dismissedAutoPins = ref<Record<string, string[]>>({})
   // 'filecard' carries a file-write tool call (Write/Edit/MultiEdit/NotebookEdit).
   // It breaks contiguous 'tool' groups so the PWA can render a standalone
   // clickable card with a preview link instead of folding it into _activity.
@@ -443,6 +443,35 @@ export const useProjectStore = defineStore('projects', () => {
       .sort((a, b) => a.created_at.localeCompare(b.created_at))
   }
 
+  // Sidebar ordering: every supervisor immediately followed by its delegates,
+  // which render indented. Deliberately separate from projectChats, which stays
+  // the flat list the counts (unread, needs-input) are summed over — a
+  // delegate's unread still belongs to its project.
+  function projectChatRows(projectId: string): ChatRow[] {
+    const all = projectChats(projectId)
+    const visible = new Set(all.map(c => c.chat_id))
+    const byParent = new Map<string, ChatInfo[]>()
+    for (const chat of all) {
+      const parent = chat.spawned_from_chat_id
+      if (!parent || !visible.has(parent)) continue
+      const siblings = byParent.get(parent) || []
+      siblings.push(chat)
+      byParent.set(parent, siblings)
+    }
+    const rows: ChatRow[] = []
+    for (const chat of all) {
+      // A delegate nests only when its supervisor is visible in this same
+      // project. Orphans (supervisor archived, deleted, or moved elsewhere)
+      // stay top-level rather than vanishing from the sidebar entirely.
+      if (chat.spawned_from_chat_id && visible.has(chat.spawned_from_chat_id)) continue
+      rows.push({ chat, isDelegate: false })
+      for (const delegate of byParent.get(chat.chat_id) || []) {
+        rows.push({ chat: delegate, isDelegate: true })
+      }
+    }
+    return rows
+  }
+
   function chatActivity(chat: ChatInfo): string {
     return chat.last_activity_at || chat.created_at
   }
@@ -526,14 +555,22 @@ export const useProjectStore = defineStore('projects', () => {
   // Open a fresh chat in the active workspace's auto-managed General project,
   // pre-filled with a prompt asking the agent to diagnose and fix `errorText`
   // (falling back to a GitHub issue if the bug is in Ciaobot itself).
+  // The active workspace's auto-managed General project, or null if absent.
+  // Shared by fixError and the Cmd+T "new chat in General" shortcut.
+  function generalProject() {
+    return (
+      projects.value.find(
+        p => p.workspace === activeWorkspace.value && p.is_auto && p.name === 'General',
+      ) ?? null
+    )
+  }
+
   async function fixError(opts: {
     errorText: string
     context?: string
     title?: string
   }): Promise<ChatInfo | undefined> {
-    const general = projects.value.find(
-      p => p.workspace === activeWorkspace.value && p.is_auto && p.name === 'General',
-    )
+    const general = generalProject()
     if (!general) {
       pushErrorToast(
         'Cannot open fix chat',
@@ -545,6 +582,16 @@ export const useProjectStore = defineStore('projects', () => {
     const prompt = buildFixPrompt({ errorText: opts.errorText, context: opts.context })
     await sendMessage(chat.chat_id, prompt, 'queue')
     return chat
+  }
+
+  // Cmd+T: open a fresh, empty chat in the default General project.
+  async function newChatInGeneral(): Promise<ChatInfo | undefined> {
+    const general = generalProject()
+    if (!general) {
+      pushErrorToast('Cannot open a new chat', 'No General project found in this workspace.')
+      return
+    }
+    return createChat(general.project_id)
   }
 
   // ── Persistence ─────────────────────────────────────────────────────
@@ -622,16 +669,6 @@ export const useProjectStore = defineStore('projects', () => {
     }
     const legacy = stripImageManifest(stripLegacyContextPrefix(content))
     return legacy.trim() || content
-  }
-
-  function sanitizeCachedMessages() {
-    let changed = false
-    for (const [chatId, chatMessages] of Object.entries(messages.value)) {
-      const nextMessages = normalizeMessages(chatMessages)
-      if (JSON.stringify(nextMessages) !== JSON.stringify(chatMessages)) changed = true
-      messages.value[chatId] = nextMessages
-    }
-    if (changed) persistMessages()
   }
 
   function normalizeMessages(chatMessages: ChatMessage[]): ChatMessage[] {
@@ -803,7 +840,7 @@ export const useProjectStore = defineStore('projects', () => {
       const pf = localStorage.getItem('ciao-pinned-files')
       if (pf) pinnedFilePaths.value = JSON.parse(pf)
       const pd = localStorage.getItem('ciao-dismissed-auto-pins')
-      if (pd) dismissedAutoPins.value = JSON.parse(pd)
+      if (pd) dismissedAutoPins.value = normalizeDismissedAutoPins(JSON.parse(pd))
       const pi = localStorage.getItem('ciao-pending-images')
       if (pi) pendingImagesByChat.value = normalizePendingBuckets<string>(JSON.parse(pi), activeChatId.value)
       const pc = localStorage.getItem('ciao-pending-comments')
@@ -831,6 +868,21 @@ export const useProjectStore = defineStore('projects', () => {
     try {
       localStorage.setItem('ciao-pinned-files', JSON.stringify(pinnedFilePaths.value))
     } catch { /* ignore */ }
+  }
+
+  // Older builds stored `{ [chatId]: true }`, a chat-wide block. Drop those
+  // rather than translating them: the flag they encoded ("never surface here
+  // again") is the bug this shape replaces, and the file it referred to is not
+  // recoverable from it.
+  function normalizeDismissedAutoPins(raw: unknown): Record<string, string[]> {
+    if (!raw || typeof raw !== 'object') return {}
+    const out: Record<string, string[]> = {}
+    for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
+      if (!Array.isArray(value)) continue
+      const paths = value.filter((p): p is string => typeof p === 'string' && !!p)
+      if (paths.length) out[id] = paths
+    }
+    return out
   }
 
   function persistDismissedAutoPins() {
@@ -1712,25 +1764,6 @@ export const useProjectStore = defineStore('projects', () => {
     } catch {
       // No session locally / SDK error — leave any prior data in place.
     }
-    void loadProviderSubchats(chatId)
-  }
-
-  async function loadProviderSubchats(chatId: string): Promise<void> {
-    try {
-      const r = await api.get<ProviderSubchatRecord[]>(`/api/chats/${chatId}/provider-subchats`)
-      providerSubchats.value[chatId] = Array.isArray(r) ? r : []
-    } catch {
-      // ignore
-    }
-  }
-
-  async function loadProviderSubchatEvents(subchatId: string): Promise<void> {
-    try {
-      const r = await api.get<any[]>(`/api/provider-subchats/${subchatId}/events`)
-      providerSubchatEvents.value[subchatId] = Array.isArray(r) ? r : []
-    } catch {
-      // ignore
-    }
   }
 
   // ── Chat switching ──────────────────────────────────────────────────
@@ -1982,7 +2015,10 @@ export const useProjectStore = defineStore('projects', () => {
     // reconnect brings no events and the UI stays on the stale state.
     // Mirrors what switchChat does, so users don't have to re-tap the
     // chat in the sidebar.
-    async function resumeActiveChat() {
+    // A const arrow rather than a function declaration: no-inner-declarations
+    // objects to hoisting a declaration out of this block, and both callers
+    // below run from listeners, well after this line.
+    const resumeActiveChat = async () => {
       const chatId = activeChatId.value
       if (chatId) {
         await reloadAndReconnectChat(chatId)
@@ -2094,37 +2130,6 @@ export const useProjectStore = defineStore('projects', () => {
     delete liveUsage.value[chatId]
     delete streamStartedAt.value[chatId]
     persistStreamStartedAt()
-  }
-
-  // Manual recovery for Ollama-routed models that wrap their final answer in
-  // a thinking content block. The model is still streaming (or stalled), the
-  // text stream is empty, and the thinking buffer is long enough to be a
-  // real reply — promote it to a normal assistant bubble so the user can
-  // read it. The server is left alone: when its result event eventually
-  // fires, the normal commit path still adds the model-canonical text and
-  // the now-promoted bubble is re-rendered as part of the reconciled
-  // history. If that result text repeats the promoted content a second
-  // bubble can appear — an accepted edge, since this is a manual button the
-  // user only reaches when the reply is otherwise stuck in the trace.
-  function promoteStreamingThinkingToAnswer(chatId: string) {
-    const thinking = (streamingThinking.value[chatId] || '').trim()
-    if (!thinking) return
-    const msgs = messages.value[chatId] || []
-    msgs.push({
-      role: 'assistant',
-      content: thinking,
-      timestamp: new Date().toISOString(),
-      // phase === 'final_answer' keeps isAnswerBubble() true so the existing
-      // buildTurnParts path renders this as a real bubble, not as a trace
-      // step, even before the result event arrives.
-      phase: 'final_answer',
-      promoted_from_thinking: true,
-    })
-    messages.value[chatId] = normalizeMessages([...msgs])
-    // Clear the live buffers so the trace stops re-painting the same text
-    // and the "Show reply as text" affordance hides itself.
-    streamingThinking.value[chatId] = ''
-    persistMessages()
   }
 
   // Consecutive handshakes that closed without ever opening. A server that
@@ -2357,6 +2362,16 @@ export const useProjectStore = defineStore('projects', () => {
         } catch { /* ignore */ }
         break
       }
+      case 'chat_created': {
+        // A new chat (fresh or fork) was created on this instance. Other
+        // tabs/devices have no other real-time signal for this: create/fork
+        // emit no streaming event, so without this handler the sidebar only
+        // learns about the chat via the 15s syncLatest poll or a manual
+        // refresh. replaceChat is idempotent (update-in-place if we already
+        // pushed optimistically, push otherwise).
+        replaceChat(msg.chat)
+        break
+      }
       case 'chat_title': {
         const chat = chats.value.find(c => c.chat_id === msg.chat_id)
         if (chat) {
@@ -2409,13 +2424,6 @@ export const useProjectStore = defineStore('projects', () => {
         }
         if (messages.value[msg.chat_id]) delete messages.value[msg.chat_id]
         if (subagents.value[msg.chat_id]) delete subagents.value[msg.chat_id]
-        if (providerSubchats.value[msg.chat_id]) {
-          const list = providerSubchats.value[msg.chat_id] || []
-          for (const sc of list) {
-            delete providerSubchatEvents.value[sc.subchat_id]
-          }
-          delete providerSubchats.value[msg.chat_id]
-        }
         if (streaming.value[msg.chat_id]) delete streaming.value[msg.chat_id]
         if (streamingText.value[msg.chat_id]) delete streamingText.value[msg.chat_id]
         delete streamingTextPhase.value[msg.chat_id]
@@ -2424,44 +2432,6 @@ export const useProjectStore = defineStore('projects', () => {
           delete unread.value[msg.chat_id]
           persistUnread()
         }
-        break
-      }
-      case 'provider_subchat_created': {
-        const list = providerSubchats.value[msg.parent_chat_id] || []
-        if (!list.some(r => r.subchat_id === msg.subchat_id)) {
-          list.push(msg.record)
-          providerSubchats.value[msg.parent_chat_id] = list
-        }
-        break
-      }
-      case 'provider_subchat_status': {
-        const list = providerSubchats.value[msg.parent_chat_id] || []
-        const idx = list.findIndex(r => r.subchat_id === msg.subchat_id)
-        if (idx !== -1) {
-          list[idx] = msg.record
-        } else {
-          list.push(msg.record)
-        }
-        providerSubchats.value[msg.parent_chat_id] = [...list]
-        break
-      }
-      case 'provider_subchat_event': {
-        const events = providerSubchatEvents.value[msg.subchat_id] || []
-        events.push(msg.event)
-        providerSubchatEvents.value[msg.subchat_id] = [...events]
-        // Record metrics (status, token/message counts) arrive via
-        // `provider_subchat_status`; there is no need to re-fetch the whole
-        // list on every streamed event, which would flood the backend during
-        // active streaming.
-        break
-      }
-      case 'provider_subchat_deleted': {
-        if (providerSubchats.value[msg.parent_chat_id]) {
-          providerSubchats.value[msg.parent_chat_id] = providerSubchats.value[msg.parent_chat_id].filter(
-            r => r.subchat_id !== msg.subchat_id
-          )
-        }
-        delete providerSubchatEvents.value[msg.subchat_id]
         break
       }
       case 'open_chat':
@@ -2533,13 +2503,65 @@ export const useProjectStore = defineStore('projects', () => {
     return formatChatComments(comments)
   }
 
-  function sendMessage(chatId: string, text: string, mode: 'queue' | 'steer' = 'queue') {
-    const ws = sockets.value[chatId]
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      connectWs(chatId)
-      setTimeout(() => sendMessage(chatId, text, mode), 500)
-      return
+  type PreparedMessage = {
+    composed: string
+    imageRefs?: string[]
+    fileComments: PendingComment[]
+    chatComments: PendingChatComment[]
+  }
+
+  function prepareMessage(chatId: string, text: string): PreparedMessage {
+    const chatImages = getPendingBucket(pendingImagesByChat.value, chatId)
+    const fileComments = getPendingBucket(pendingCommentsByChat.value, chatId)
+    const chatComments = getPendingBucket(pendingChatCommentsByChat.value, chatId)
+    // Collect images from pendingImages plus any images attached to comments.
+    const allImages = new Set<string>(chatImages)
+    for (const c of fileComments) {
+      if (c.images) c.images.forEach(img => allImages.add(img))
     }
+    for (const c of chatComments) {
+      if (c.images) c.images.forEach(img => allImages.add(img))
+    }
+    const imageRefs = allImages.size > 0 ? Array.from(allImages) : undefined
+    const fileBlock = formatPendingComments(fileComments)
+    const chatBlock = formatPendingChatComments(chatComments)
+    const hasTyped = text.trim().length > 0
+    // Reference blocks (quoted text + note) go FIRST, then the typed prompt,
+    // so the model reads the material being discussed before the instruction
+    // (Anthropic: placing the query at the end of the input improves quality).
+    let composed = ''
+    if (fileBlock) composed += fileBlock
+    if (chatBlock) composed += (composed ? '\n' : '') + chatBlock
+    if (hasTyped) composed += (composed ? '\n\n' : '') + text.trim()
+    return { composed, imageRefs, fileComments, chatComments }
+  }
+
+  function consumePreparedAttachments(chatId: string, message: PreparedMessage) {
+    setPendingBucket<string>(pendingImagesByChat.value, chatId, [])
+    persistPendingImages()
+    // Remove sent file comments from the durable store so they don't linger
+    // in the viewer after the message has been dispatched.
+    for (const c of message.fileComments) {
+      const list = fileComments.value[c.path]
+      if (list) {
+        const next = list.filter(x => x.id !== c.id)
+        if (next.length) fileComments.value[c.path] = next
+        else delete fileComments.value[c.path]
+      }
+    }
+    persistFileComments()
+    setPendingBucket<PendingComment>(pendingCommentsByChat.value, chatId, [])
+    setPendingBucket<PendingChatComment>(pendingChatCommentsByChat.value, chatId, [])
+    persistPendingComments()
+    persistPendingChatComments()
+  }
+
+  function sendMessage(
+    chatId: string,
+    text: string,
+    mode: 'queue' | 'steer' = 'queue',
+    prepared?: PreparedMessage,
+  ) {
     // Any send implicitly answers (or dismisses) a pending AskUserQuestion
     // picker — the model already got an empty tool result and is reading
     // this turn for the actual answer. Clear the local chat's persisted
@@ -2551,31 +2573,18 @@ export const useProjectStore = defineStore('projects', () => {
     }
     const answeredChat = chats.value.find(c => c.chat_id === chatId)
     if (answeredChat?.pending_question) answeredChat.pending_question = ''
-    const chatImages = getPendingBucket(pendingImagesByChat.value, chatId)
-    const chatFileComments = getPendingBucket(pendingCommentsByChat.value, chatId)
-    const chatComments = getPendingBucket(pendingChatCommentsByChat.value, chatId)
-    // Collect images from pendingImages plus any images attached to comments.
-    const allImages = new Set<string>(chatImages)
-    for (const c of chatFileComments) {
-      if (c.images) c.images.forEach(img => allImages.add(img))
+    const message = prepared || prepareMessage(chatId, text)
+    // A reconnect can outlive the user's next edit. Freeze the complete
+    // attachment bundle now, before a retry callback can read another
+    // message's staged attachments from the shared composer bucket.
+    if (!prepared) consumePreparedAttachments(chatId, message)
+    const { composed, imageRefs } = message
+    const ws = sockets.value[chatId]
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      connectWs(chatId)
+      setTimeout(() => sendMessage(chatId, text, mode, message), 500)
+      return
     }
-    for (const c of chatComments) {
-      if (c.images) c.images.forEach(img => allImages.add(img))
-    }
-    const imageRefs = allImages.size > 0 ? Array.from(allImages) : undefined
-    const fileBlock = formatPendingComments(chatFileComments)
-    const chatBlock = formatPendingChatComments(chatComments)
-    const hasFile = fileBlock.length > 0
-    const hasChat = chatBlock.length > 0
-    const hasTyped = text.trim().length > 0
-    // Reference blocks (quoted text + note) go FIRST, then the typed prompt,
-    // so the model reads the material being discussed before the instruction
-    // (Anthropic: placing the query at the end of the input improves quality).
-    let reference = ''
-    if (hasFile) reference += fileBlock
-    if (hasChat) reference += (reference ? '\n' : '') + chatBlock
-    let composed = reference
-    if (hasTyped) composed += (composed ? '\n\n' : '') + text.trim()
     const alreadyStreaming = isChatStreaming(chatId)
 
     if (alreadyStreaming) {
@@ -2592,23 +2601,6 @@ export const useProjectStore = defineStore('projects', () => {
       if (imageRefs) payload.images = imageRefs
       if (queueId) payload.entry_id = queueId
       ws.send(JSON.stringify(payload))
-      setPendingBucket<string>(pendingImagesByChat.value, chatId, [])
-      persistPendingImages()
-      // Remove sent file comments from the durable store so they don't
-      // linger in the viewer after the message has been dispatched.
-      for (const c of chatFileComments) {
-        const list = fileComments.value[c.path]
-        if (list) {
-          const next = list.filter(x => x.id !== c.id)
-          if (next.length) fileComments.value[c.path] = next
-          else delete fileComments.value[c.path]
-        }
-      }
-      persistFileComments()
-      setPendingBucket<PendingComment>(pendingCommentsByChat.value, chatId, [])
-      setPendingBucket<PendingChatComment>(pendingChatCommentsByChat.value, chatId, [])
-      persistPendingComments()
-      persistPendingChatComments()
       return
     }
 
@@ -2634,23 +2626,6 @@ export const useProjectStore = defineStore('projects', () => {
     const payload: Record<string, unknown> = { type: 'message', text: composed }
     if (imageRefs) payload.images = imageRefs
     ws.send(JSON.stringify(payload))
-    setPendingBucket<string>(pendingImagesByChat.value, chatId, [])
-    persistPendingImages()
-    // Remove sent file comments from the durable store so they don't
-    // linger in the viewer after the message has been dispatched.
-    for (const c of chatFileComments) {
-      const list = fileComments.value[c.path]
-      if (list) {
-        const next = list.filter(x => x.id !== c.id)
-        if (next.length) fileComments.value[c.path] = next
-        else delete fileComments.value[c.path]
-      }
-    }
-    persistFileComments()
-    setPendingBucket<PendingComment>(pendingCommentsByChat.value, chatId, [])
-    setPendingBucket<PendingChatComment>(pendingChatCommentsByChat.value, chatId, [])
-    persistPendingComments()
-    persistPendingChatComments()
   }
 
   function removeQueued(chatId: string, index: number) {
@@ -2938,9 +2913,14 @@ export const useProjectStore = defineStore('projects', () => {
   // ── Pinned file viewer (per chat/project) ──────────────────────────
   function pinFile(id: string, path: string): void {
     pinnedFilePaths.value = { ...pinnedFilePaths.value, [id]: path }
-    if (dismissedAutoPins.value[id]) {
+    // Pinning a file the user had closed clears that path's dismissal, so a
+    // later surface of it is allowed to reopen it again.
+    const dismissed = dismissedAutoPins.value[id]
+    if (dismissed?.includes(path)) {
+      const remaining = dismissed.filter(p => p !== path)
       const nextDismissed = { ...dismissedAutoPins.value }
-      delete nextDismissed[id]
+      if (remaining.length) nextDismissed[id] = remaining
+      else delete nextDismissed[id]
       dismissedAutoPins.value = nextDismissed
       persistDismissedAutoPins()
     }
@@ -2948,12 +2928,18 @@ export const useProjectStore = defineStore('projects', () => {
   }
   function unpinFile(id: string): void {
     const next = { ...pinnedFilePaths.value }
-    const hadPinnedFile = Boolean(next[id])
+    const closedPath = next[id]
     delete next[id]
     pinnedFilePaths.value = next
-    if (hadPinnedFile) {
-      dismissedAutoPins.value = { ...dismissedAutoPins.value, [id]: true }
-      persistDismissedAutoPins()
+    if (closedPath) {
+      const dismissed = dismissedAutoPins.value[id] || []
+      if (!dismissed.includes(closedPath)) {
+        dismissedAutoPins.value = {
+          ...dismissedAutoPins.value,
+          [id]: [...dismissed, closedPath],
+        }
+        persistDismissedAutoPins()
+      }
     }
     persistPinnedFiles()
   }
@@ -3137,32 +3123,49 @@ export const useProjectStore = defineStore('projects', () => {
     })
   }
 
-  // Auto-surface a file in the pinned side panel, but only when the agent
-  // deliberately asked to via the `file_surface` MCP tool (action === 'surfaced')
-  // — not for every ordinary Write/Edit, which used to be guessed at by
-  // extension (.md/.csv) plus a bookkeeping-file skip-list. That heuristic
-  // both missed real deliverables (non-.md/.csv, or written by a subagent)
-  // and fired on noisy writes the agent never meant to highlight. An explicit
-  // tool call is a genuine signal; a file extension is not. Fills the empty
-  // state only — never yanks a file the user already pinned — and only on
-  // desktop, where the split layout exists (mirrors FileViewerModal's canPin
-  // gate). localStorage-backed like every other pin; no backend state.
-  function _maybeAutoPin(
+  // Show a file the agent deliberately surfaced via the `file_surface` MCP
+  // tool (action === 'surfaced'). Ordinary Write/Edit touches only ever get an
+  // inline card: this used to be guessed at by extension (.md/.csv) plus a
+  // bookkeeping skip-list, which both missed real deliverables and fired on
+  // noisy writes. An explicit tool call is a genuine signal; an extension is not.
+  //
+  // Because the call is explicit, it outranks whatever is currently pinned and
+  // replaces it. The only thing it respects is a dismissal of the *same* path
+  // (see dismissedAutoPins): the user closed that file, and a WS reconnect
+  // replaying the stream buffer must not shove it back. On a narrow viewport
+  // there is no split panel, so open the viewer modal instead of dropping the
+  // request on the floor. localStorage-backed like every other pin.
+  function _applySurfaceRequests(
     chatId: string,
     touches: Array<{ file_path?: string; action?: string }>,
   ): void {
-    if (typeof window === 'undefined' || window.innerWidth <= 768) return
-    if (dismissedAutoPins.value[chatId]) return
-    if (pinnedFileFor(chatId)) return
+    if (typeof window === 'undefined') return
     // Freshest surfaced artifact wins (last touch in the batch).
     for (let i = touches.length - 1; i >= 0; i--) {
       const touch = touches[i]
       if (touch?.action !== 'surfaced') continue
       const raw = touch.file_path
       if (!raw || !isPlausibleFilePath(raw)) continue
+      if (dismissedAutoPins.value[chatId]?.includes(raw)) return
+      if (pinnedFileFor(chatId) === raw) return
+      if (window.innerWidth <= 768) {
+        _openSurfacedInViewer(raw, chatId)
+        return
+      }
       pinFile(chatId, raw)
       return
     }
+  }
+
+  // Mobile fallback for an explicit surface. Never interrupts: an already-open
+  // viewer (the user may be mid-edit there) keeps whatever it is showing, and
+  // the inline file card stays as the way in.
+  function _openSurfacedInViewer(path: string, chatId: string): void {
+    try {
+      const viewer = useFileViewerStore()
+      if (viewer.isOpen) return
+      void viewer.open(path, null, chatId)
+    } catch { /* store unavailable outside an app context */ }
   }
 
   function _flushTimeline(chatId: string): StreamEntry[] {
@@ -3434,7 +3437,7 @@ export const useProjectStore = defineStore('projects', () => {
               tool_use_id: event.tool_use_id,
             })
           }
-          _maybeAutoPin(chatId, touches)
+          _applySurfaceRequests(chatId, touches)
           break
         }
 
@@ -3772,20 +3775,20 @@ export const useProjectStore = defineStore('projects', () => {
 
   return {
     // State
-    projects, chats, workspaces, workspaceProviderOptions, workspaceClaudeAiConnectors, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, subagents, providerSubchats, providerSubchatEvents, unread,
+    projects, chats, workspaces, workspaceProviderOptions, workspaceClaudeAiConnectors, workspaceAppDefaultModel, activeWorkspace, activeChatId, bootstrapped, messages, subagents, unread,
     streaming, streamingText, streamingThinking, pendingImages, pendingComments, pendingChatComments, fileComments, queuedMessages,
     projectStreaming, backgroundAgents, toasts, pendingPermissions, activeQuestions, creatingChatProjectIds,
     serverRestarting, serverRestartMessage, hostConnectionUnavailable,
     // Computed
     workspaceProjects, workspaceOptions, activeChat, activeProject, activeMessages, activeSubagents,
-    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats,
+    isStreaming, currentStreamingText, currentStreamingThinking, currentQueued, activeBackgroundAgents, currentActivity, currentTimeline, currentLiveUsage, currentStreamStartedAt, projectChats, projectChatRows,
     chatUnread, chatNeedsInput, projectNeedsInput, projectUnread, workspaceUnread, totalUnread, clearUnread, markRead, markAllRead,
     recentChats, activeChatsAll, projectIsStreaming, isChatStreaming, chatHasBackgroundAgents, workspaceIsStreaming, projectFor,
     // Actions
     fetchAll, fetchWorkspaces, createWorkspace, updateWorkspace, deleteWorkspace,
     createProject, updateProject, reorderProjects, deleteProject, completeProject,
     fetchCompletedProjects, restoreProject,
-    createChat, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, archiveChat, continueArchivedChat, newSession,
+    createChat, newChatInGeneral, renameChat, updateChat, handoverChat, forkChat, moveChat, deleteChat, archiveChat, continueArchivedChat, newSession,
     setChatRetry, stopChatRetry, tryChatRetryNow,
     switchChat, switchWorkspace, openChatFromDeepLink, ensureWorkspaceForChat,
     syncLatest,
@@ -3797,10 +3800,9 @@ export const useProjectStore = defineStore('projects', () => {
     fileCommentsFor, removeFileComment, updateFileComment,
     pinFile, unpinFile, pinnedFileFor,
     removeQueued, removeQueuedById, reorderQueued, editQueued, clearQueued,
-    loadMessages, loadSubagents, loadProviderSubchats, loadProviderSubchatEvents,
+    loadMessages, loadSubagents,
     connectWs, disconnectWs, connectEventsWs,
     beginServerRestart,
     pushToast, pushErrorToast, dismissToast, fixError,
-    promoteStreamingThinkingToAnswer,
   }
 })

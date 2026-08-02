@@ -355,6 +355,13 @@ class CiaoConfig:
     # on a handshake, so it's safe against cross-site WS hijacking).
     pwa_allowed_origins: tuple[str, ...] = ()
     dev_mode: bool = False
+    # Path to the ciaobot source checkout, for engines that do not run from one
+    # (Homebrew, wheel). Settings -> Restart pulls, reinstalls, and rebuilds
+    # from here. Without it those steps resolve relative to the running module,
+    # which for an installed engine is site-packages: no .git, no web/, so the
+    # git pull and npm build both fail on a directory that only looks wrong in
+    # hindsight. From CIAO_APP_REPO.
+    app_repo: Path | None = None
     vault_mode: str = "scratch"
     bootstrap_mode: bool = False
     vault_root: Path = Path("memory-vault")
@@ -423,6 +430,8 @@ class CiaoConfig:
     # Empty means automatic: tiers derive from the signed-in account's
     # model catalog (luna→haiku, terra→sonnet, sol→opus/fable).
     codex: CodexSettings = field(default_factory=CodexSettings)
+    # Runtime-selected custom-provider tier routes, keyed by provider id.
+    custom_routing: dict[str, dict[str, str]] = field(default_factory=dict)
     # Auto-discover models installed on the local Ollama daemon at startup
     # (GET /api/tags against ``ollama.local_url``) and surface them in the
     # model pickers. Disable with ``CIAO_OLLAMA_LOCAL_DISCOVERY=0``.
@@ -1086,6 +1095,9 @@ class CiaoConfig:
         dev_mode_raw = source.get("CIAO_DEV_MODE", "").strip().lower()
         dev_mode = dev_mode_raw in {"true", "1", "yes", "y"}
 
+        app_repo_raw = source.get("CIAO_APP_REPO", "").strip()
+        app_repo = Path(app_repo_raw).expanduser().resolve() if app_repo_raw else None
+
         vault_mode = source.get("CIAO_VAULT_MODE", "scratch").strip().lower()
         if vault_mode not in {"existing", "scratch"}:
             vault_mode = "scratch"
@@ -1098,6 +1110,7 @@ class CiaoConfig:
             pwa_auth_required=pwa_auth_required,
             pwa_allowed_origins=pwa_allowed_origins,
             dev_mode=dev_mode,
+            app_repo=app_repo,
             vault_mode=vault_mode,
             bootstrap_mode=bootstrap_mode,
             vault_root=vault_root,

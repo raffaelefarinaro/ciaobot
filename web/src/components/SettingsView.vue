@@ -5,12 +5,30 @@
 
       <!-- HOME TAB -->
       <template v-if="currentTab === 'home'">
+        <!-- Whose settings am I looking at? In client mode every card below is
+             the host's, because the API calls behind them are tunneled. Say so
+             once, at the top, and point at the one screen that is local. -->
+        <div v-if="isNodeClient" class="card scope-card">
+          <div class="settings-card-header">
+            <p class="section-title">you are viewing {{ hostScopeLabel }}</p>
+            <p class="hint">
+              This is the host's Settings, exactly as it looks on that machine. Changes here apply
+              there, including the password and restarts.
+              <router-link to="/device">This device</router-link>
+              has its own panel for role, host connection and its local app version.
+            </p>
+          </div>
+        </div>
+
         <!-- Actions -->
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
               <p class="section-title">app actions</p>
-              <p class="hint">Snapshot, sync, or restart this local Ciaobot instance.</p>
+              <p class="hint">
+                Snapshot, sync, or restart
+                {{ isNodeClient ? `the host (${hostScopeLabel})` : 'this local Ciaobot instance' }}.
+              </p>
             </div>
             <div class="settings-card-header-actions">
               <button class="btn-primary btn-small" @click="() => localStatus?.git_repo ? localHandback() : doSnapshot()" :disabled="!!actionPending">
@@ -38,13 +56,35 @@
           </div>
         </div>
 
+        <!-- Keyboard shortcuts (desktop app only) -->
+        <div v-if="inDesktopApp" class="card">
+          <div class="settings-card-header">
+            <p class="section-title">keyboard shortcuts</p>
+            <p class="hint">Global combos that work while a chat is open. Text fields keep their normal meaning: Cmd+A still selects all, and Esc inside the composer closes the slash-command picker instead of the chat.</p>
+          </div>
+          <ul class="shortcut-list">
+            <li><kbd>&#8984;T</kbd><span>Open a new chat in the default General project</span></li>
+            <li><kbd>&#8984;D</kbd><span>Toggle voice dictation (start / stop)</span></li>
+            <li><kbd>&#8984;A</kbd><span>Archive the open chat (asks to confirm)</span></li>
+            <li><kbd>Esc</kbd><span>Close the open chat (when not typing)</span></li>
+            <li><kbd>&#8593;&#8595;&#8592;&#8594;</kbd><span>On the home screen: move between recent chats</span></li>
+            <li><kbd>&#8629;</kbd><span>On the home screen: open the highlighted chat</span></li>
+          </ul>
+        </div>
+
         <!-- PWA password -->
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
               <p class="section-title">PWA password</p>
               <p class="hint">
-                Protect this Ciaobot with a password. Required before other devices can connect as clients.
+                <template v-if="isNodeClient">
+                  The password on {{ hostScopeLabel }} — the one you typed to open this client.
+                  Changing it here keeps this device connected; other clients have to log in again.
+                </template>
+                <template v-else>
+                  Protect this Ciaobot with a password. Required before other devices can connect as clients.
+                </template>
               </p>
             </div>
             <span
@@ -159,7 +199,15 @@
           <div class="settings-card-header settings-card-header--split">
             <div>
               <p class="section-title">package update</p>
-              <p class="hint">Check the installed package version and upgrade this local app.</p>
+              <p class="hint">
+                <template v-if="isNodeClient">
+                  The version installed on {{ hostScopeLabel }}. Updating restarts the host.
+                  To upgrade this computer, open <router-link to="/device">this device</router-link>.
+                </template>
+                <template v-else>
+                  Check the installed package version and upgrade this local app.
+                </template>
+              </p>
             </div>
             <div v-if="packageStatus" class="settings-card-header-actions">
               <button
@@ -326,8 +374,7 @@
           </div>
         </div>
 
-        <OnboardingCard variant="settings" @open-sidebar="emit('open-sidebar')" />
-
+        
         <!-- Debug (dev mode only) -->
         <div v-if="localStatus?.dev_mode" class="card">
           <div class="settings-card-header settings-card-header--split">
@@ -345,194 +392,27 @@
           <div v-if="debugSummary" class="action-result">{{ debugSummary }}</div>
         </div>
 
-        <!-- Node: host / client (niche multi-device feature) -->
+        <!-- This device (role, host connection, local app) lives on its own
+             route so nothing on this page is about the machine in front of you. -->
         <div class="card">
           <div class="settings-card-header settings-card-header--split">
             <div>
-              <div class="settings-label-row">
-                <span class="section-title">host</span>
-                <details class="field-info">
-                  <summary aria-label="About host mode" title="About host mode">i</summary>
-                  <div class="field-info-panel">
-                    <p>
-                      The host is the machine where Ciaobot runs schedules and background work.
-                      Keep it on an always-on computer (for example a Mini at home).
-                    </p>
-                    <p>
-                      Other devices connect to it as clients when you want to control that
-                      machine remotely.
-                    </p>
-                  </div>
-                </details>
-                <span class="section-title">&amp;</span>
-                <span class="section-title">client</span>
-                <details class="field-info">
-                  <summary aria-label="About client mode" title="About client mode">i</summary>
-                  <div class="field-info-panel">
-                    <p>
-                      Use client mode when Ciaobot is already running on another computer and
-                      you want a second device — for example a laptop — to control it remotely.
-                    </p>
-                    <p>
-                      For access across networks, set up a private VPN such as
-                      <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer">Tailscale</a>
-                      and connect with the host’s Tailscale URL
-                      (e.g. <code>http://100.x.x.x:8443</code>).
-                    </p>
-                  </div>
-                </details>
-              </div>
+              <p class="section-title">this device</p>
               <p class="hint">
-                <template v-if="!nodeStatus">Loading mode…</template>
-                <template v-else-if="isNodeClient">
-                  This device is a <strong>client</strong> — tray and PWA tunnel to the host below. Automations run on the host, not here.
+                <template v-if="isNodeClient">
+                  Client mode, host connection and the app installed on this computer.
+                  Everything else on this page belongs to {{ hostScopeLabel }}.
                 </template>
                 <template v-else>
-                  Connect this device to another Ciaobot when you want to control it remotely.
+                  Role, addresses other devices can reach, connected clients, and the app
+                  installed on this computer.
                 </template>
               </p>
             </div>
-            <div v-if="nodeStatus && isNodeClient" class="settings-card-header-actions">
-              <span class="badge badge--warn">{{ nodeRoleLabel }}</span>
+            <div class="settings-card-header-actions">
+              <router-link class="btn-secondary btn-small" to="/device">Open device settings</router-link>
             </div>
           </div>
-          <!-- Where this engine can be reached from another device. The native
-               app no longer lists these in the tray, so this is the only place
-               they surface. Hosts share them; clients tunnel to a host instead. -->
-          <NodeAddresses v-if="!isNodeClient" />
-          <div v-if="!nodeStatus" class="action-row"><span class="loading">Loading node status&hellip;</span></div>
-          <template v-else>
-            <!-- Client only: this device → host, with reachability on the link. -->
-            <div
-              v-if="isNodeClient"
-              class="node-path"
-              aria-label="Client connection"
-            >
-              <div class="node-path-endpoint">
-                <span class="node-path-label">this device</span>
-                <code class="node-path-value" :title="nodeStatus.node_id">{{ nodeStatus.node_id }}</code>
-              </div>
-              <div class="node-path-link">
-                <span class="node-path-arrow" aria-hidden="true">→</span>
-                <span
-                  v-if="nodeStatus.host_reachable != null"
-                  class="badge"
-                  :class="nodeStatus.host_reachable ? 'badge--success' : 'badge--warn'"
-                >
-                  {{ nodeStatus.host_reachable ? 'reachable' : 'unreachable' }}
-                </span>
-              </div>
-              <div class="node-path-endpoint node-path-endpoint--host">
-                <span class="node-path-label">host</span>
-                <code class="node-path-value" :title="connectedHostUrl || undefined">{{ connectedHostUrl || '—' }}</code>
-              </div>
-            </div>
-            <div v-if="nodeActionResult" class="action-result" :class="{ 'action-result--error': nodeActionError }">
-              {{ nodeActionResult }}
-            </div>
-
-            <!-- Client mode: disconnect only (no connect form) -->
-            <template v-if="isNodeClient">
-              <p class="hint hint--section-empty">
-                You are tunneling to the host below — chats and automations are that machine’s, not this one’s.
-                Disconnect asks the host to push, then this machine pulls and becomes host again.
-              </p>
-              <div v-if="!nodeStatus.has_host_session" class="action-result action-result--error">
-                Host password session missing. Enter the host password below to finish connecting.
-              </div>
-              <div v-if="!nodeStatus.has_host_session" class="settings-form-panel node-peer-form">
-                <label class="settings-field">
-                  <span class="ws-label">Host password</span>
-                  <input
-                    v-model="hostPasswordInput"
-                    type="password"
-                    class="routine-input"
-                    placeholder="Password set on the host"
-                    autocomplete="off"
-                    @keyup.enter="reconnectHostSession"
-                  />
-                </label>
-                <div class="action-row settings-actions">
-                  <button
-                    class="btn-primary btn-small"
-                    @click="reconnectHostSession"
-                    :disabled="!hostPasswordInput || nodePending !== null"
-                  >
-                    {{ nodePending === 'reconnect' ? 'Reconnecting…' : 'Reconnect' }}
-                  </button>
-                </div>
-              </div>
-              <div class="action-row settings-actions">
-                <button
-                  class="btn-primary btn-small"
-                  @click="() => doBecomeHost(false)"
-                  :disabled="nodePending !== null"
-                >
-                  {{ nodePending === 'handover' ? 'Disconnecting…' : 'Disconnect' }}
-                </button>
-                <button
-                  class="btn-caution btn-small"
-                  @click="() => doBecomeHost(true)"
-                  :disabled="nodePending !== null"
-                  title="Become host even if the remote is offline (skip remote push)"
-                >
-                  Force disconnect
-                </button>
-              </div>
-            </template>
-
-            <!-- Host mode: optional connect form, collapsed until asked -->
-            <template v-else>
-              <div class="action-row settings-actions">
-                <button
-                  class="btn-secondary btn-small"
-                  @click="showConnectForm = !showConnectForm"
-                  :disabled="nodePending !== null"
-                >
-                  {{ showConnectForm ? 'Cancel' : 'Connect as client…' }}
-                </button>
-              </div>
-              <template v-if="showConnectForm">
-                <p class="hint hint--section-empty">
-                  This pauses local automations and tunnels tray + PWA to another Ciaobot.
-                  That host must have a PWA password. Tailscale URLs work
-                  (e.g. http://100.x.x.x:8443).
-                </p>
-                <div class="settings-form-panel node-peer-form">
-                  <label class="settings-field">
-                    <span class="ws-label">Host URL</span>
-                    <input
-                      v-model="hostUrlInput"
-                      type="text"
-                      class="routine-input"
-                      placeholder="http://100.x.x.x:8443"
-                      @keyup.enter="connectAsClient"
-                    />
-                  </label>
-                  <label class="settings-field">
-                    <span class="ws-label">Host password</span>
-                    <input
-                      v-model="hostPasswordInput"
-                      type="password"
-                      class="routine-input"
-                      placeholder="Password set on the host"
-                      autocomplete="off"
-                      @keyup.enter="connectAsClient"
-                    />
-                  </label>
-                  <div class="action-row settings-actions">
-                    <button
-                      class="btn-primary btn-small"
-                      @click="connectAsClient"
-                      :disabled="!hostUrlInput.trim() || !hostPasswordInput || nodePending !== null"
-                    >
-                      {{ nodePending === 'connect' ? 'Connecting…' : 'Connect' }}
-                    </button>
-                  </div>
-                </div>
-              </template>
-            </template>
-          </template>
         </div>
 
         <!-- Open source -->
@@ -948,6 +828,56 @@
                 :placeholder="meta.configured ? '•••••••••••• (Leave blank to keep existing, or type empty space to clear)' : 'Enter API Key'"
                 :disabled="providerKeysSaving"
               />
+            </div>
+
+            <div class="custom-providers-block">
+              <div class="settings-card-header">
+                <div>
+                  <p class="section-title">custom compatible providers</p>
+                  <p class="hint">
+                    Add any endpoint compatible with the selected CLI, including local Ollama, LM Studio, or Unsloth. Choose Claude Code or Codex as the runner. Tokens stay on this machine.
+                  </p>
+                </div>
+                <button class="btn-small" type="button" @click="addCustomProvider">Add provider</button>
+              </div>
+              <div v-if="!customProviderDrafts.length" class="hint hint--compact">No custom endpoints configured.</div>
+              <div v-for="draft in customProviderDrafts" :key="draft.id" class="custom-provider-row">
+                <div class="settings-field-grid custom-provider-grid">
+                  <label class="settings-field">
+                    <span class="ws-label">Name</span>
+                    <input class="routine-input" v-model="draft.name" @input="customProvidersDirty = true" placeholder="LM Studio" />
+                  </label>
+                  <label class="settings-field">
+                    <span class="ws-label">Id</span>
+                    <input class="routine-input" v-model="draft.id" @input="customProvidersDirty = true" placeholder="lm-studio" />
+                  </label>
+                  <label class="settings-field custom-provider-url">
+                    <span class="ws-label">Base URL</span>
+                    <input class="routine-input" v-model="draft.url" @input="customProvidersDirty = true" placeholder="http://localhost:1234/v1" />
+                  </label>
+                  <label class="settings-field">
+                    <span class="ws-label">Use with</span>
+                    <select class="routine-select" v-model="draft.runner" @change="customProvidersDirty = true">
+                      <option value="claude">Claude Code</option>
+                      <option value="codex">Codex</option>
+                    </select>
+                  </label>
+                  <label class="settings-field custom-provider-token">
+                    <span class="ws-label">Token</span>
+                    <input class="routine-input" type="password" v-model="draft.token" @input="customProvidersDirty = true" :placeholder="draft.token_configured ? '•••••••• (leave blank to keep)' : 'Optional for local servers'" />
+                  </label>
+                  <label class="settings-field custom-provider-models">
+                    <span class="ws-label">Models (optional)</span>
+                    <input class="routine-input" v-model="draft.models" @input="customProvidersDirty = true" placeholder="model-id, another-model" />
+                  </label>
+                </div>
+                <div class="action-row provider-connection-actions">
+                  <button class="btn-small" type="button" :disabled="customProviderProbePending === draft.id" @click="probeCustomProvider(draft)">
+                    {{ customProviderProbePending === draft.id ? 'Discovering…' : 'Discover models' }}
+                  </button>
+                  <button class="btn-small btn-danger" type="button" @click="removeCustomProvider(draft.id)">Remove</button>
+                </div>
+              </div>
             </div>
 
 
@@ -2336,12 +2266,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../lib/api'
+import { errorMessage, apiErrorMessage, errorPayload, errorPayloadList } from '../lib/errorMessage'
 import { formatTime, formatDuration } from '../lib/time'
 import { isDesktopApp } from '../lib/desktop'
-import NodeAddresses from './NodeAddresses.vue'
 import type {
   AgentAssetsResponse,
   AutomationProcess,
@@ -2353,13 +2283,14 @@ import type {
   GwsIntegrationSettings,
   LocalStatus,
   ModelsResponse,
+  NodeStatus,
   McpStatus,
   McpUsage,
-  McpToolUsage,
   McpProjectServer,
   McpEnvKey,
   PromptAsset,
   ProviderConfigSettings,
+  CustomProviderSettings,
   RoutineSettings,
   SkillInventory,
   SlashCommand,
@@ -2367,16 +2298,20 @@ import type {
   WorkspaceInfo,
   WorkspaceHealthResponse,
   WorkspaceProvider,
+  PackageStatus,
+  PackageChangelog,
+  PackageUpdateResult,
+  ProviderActionResult,
+  LocalHandbackResult,
 } from '../lib/types'
 import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSupported } from '../lib/push'
-import { useAuthStore } from '../stores/auth'
+import { askConfirm } from '../lib/confirm'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
 import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
-import OnboardingCard from './OnboardingCard.vue'
-import { providerModelBadges, sectionsFromModelOptions, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
+import { providerModelBadges, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 
 // The tray owns package updates and native notifications in the desktop app.
 const inDesktopApp = isDesktopApp()
@@ -2560,9 +2495,9 @@ async function saveMcpEnvKeys(srv: McpProjectServer) {
     setTimeout(() => {
       if (mcpEnvResultServer.value === srv.name) mcpEnvResult.value = ''
     }, 3000)
-  } catch (e: any) {
+  } catch (e) {
     mcpEnvError.value = true
-    mcpEnvResult.value = e?.message || 'Failed to save MCP secrets.'
+    mcpEnvResult.value = errorMessage(e, 'Failed to save MCP secrets.')
   } finally {
     mcpEnvSaving.value = false
   }
@@ -2601,9 +2536,9 @@ async function saveMcpServer(srv: McpProjectServer) {
     setTimeout(() => {
       if (mcpServerResultName.value === srv.name) mcpServerResult.value = ''
     }, 3000)
-  } catch (e: any) {
+  } catch (e) {
     mcpServerError.value = true
-    mcpServerResult.value = e?.message || 'Failed to save MCP server.'
+    mcpServerResult.value = errorMessage(e, 'Failed to save MCP server.')
   } finally {
     mcpServerSaving.value = ''
   }
@@ -2633,8 +2568,8 @@ async function refreshMcpServerTools(srv: McpProjectServer) {
     if (!res.ok && res.error) {
       mcpToolsError.value[srv.name] = res.error
     }
-  } catch (e: any) {
-    const message = e?.message || 'Could not load tools.'
+  } catch (e) {
+    const message = errorMessage(e, 'Could not load tools.')
     mcpToolsError.value[srv.name] = /not available on the running server|Unexpected token|<!DOCTYPE|not valid JSON/i.test(message)
       ? 'MCP tools endpoint not available on the running server yet. Use Settings → Deploy, then restart Ciaobot.'
       : message
@@ -2669,8 +2604,8 @@ async function createMcpViaChat() {
         query: { initialPrompt: 'Help me set up and configure a new MCP server for this project.' }
       })
     }
-  } catch (e: any) {
-    alert(`Failed to create chat: ${e?.message || e}`)
+  } catch (e) {
+    alert(`Failed to create chat: ${errorMessage(e)}`)
   }
 }
 
@@ -2706,16 +2641,20 @@ async function addCustomMcpServer() {
       }
     }
     notifySaved(`Added MCP server ${name}.`)
-  } catch (e: any) {
+  } catch (e) {
     addMcpServerError.value = true
-    addMcpServerResult.value = e?.message || `Failed to add MCP server`
+    addMcpServerResult.value = errorMessage(e, `Failed to add MCP server`)
   } finally {
     addingMcpServer.value = false
   }
 }
 
 async function deleteCustomMcpServer(name: string) {
-  if (!confirm(`Are you sure you want to delete MCP server "${name}"?`)) return
+  if (!await askConfirm(`Are you sure you want to delete MCP server "${name}"?`, {
+    title: 'Delete MCP server',
+    confirmLabel: 'Delete server',
+    destructive: true,
+  })) return
   try {
     const res = await api.del<McpStatus>(`/api/mcp/servers/${encodeURIComponent(name)}`)
     mcpStatus.value = res
@@ -2723,8 +2662,8 @@ async function deleteCustomMcpServer(name: string) {
     delete mcpServerTools.value[name]
     delete mcpToolsError.value[name]
     notifySaved(`Removed MCP server ${name}.`)
-  } catch (e: any) {
-    alert(e?.message || `Failed to delete MCP server ${name}`)
+  } catch (e) {
+    alert(errorMessage(e, `Failed to delete MCP server ${name}`))
   }
 }
 
@@ -2745,7 +2684,7 @@ function loadAppearanceSettings() {
     if (savedScale) {
       fontScale.value = parseFloat(savedScale) || DEFAULT_FONT_SCALE
     }
-  } catch (e) {
+  } catch {
     // Ignore localStorage block
   }
 }
@@ -2754,7 +2693,7 @@ function setTheme(theme: 'dark' | 'light' | 'system') {
   activeTheme.value = theme
   try {
     localStorage.setItem('ciao-theme', theme)
-  } catch (e) {}
+  } catch { /* localStorage blocked */ }
 
   if (theme === 'light') {
     document.documentElement.classList.add('theme-light')
@@ -2785,7 +2724,7 @@ function setFontScale(next: number) {
   fontScale.value = next
   try {
     localStorage.setItem('ciao-font-scale', next.toString())
-  } catch (e) {}
+  } catch { /* localStorage blocked */ }
   document.documentElement.style.setProperty('--font-scale', next.toString())
 }
 function isSkillExpanded(name: string) {
@@ -2857,7 +2796,7 @@ const routinesError = ref('')
 const routinesSaving = ref(false)
 const routinesResult = ref('')
 
-type AliasProviderKey = 'claude' | 'codex' | 'ollama' | 'openrouter'
+type AliasProviderKey = 'claude' | 'codex' | 'ollama' | 'openrouter' | `custom:${string}`
 type TierProviderKey = Exclude<AliasProviderKey, 'claude'>
 type RoutingProviderKey = Exclude<AliasProviderKey, 'claude'>
 type TierKey = 'haiku' | 'sonnet' | 'opus' | 'fable'
@@ -2930,21 +2869,21 @@ const routineDefaultTiers: Record<RoutineModelKey, TierKey> = {
 async function fetchRoutines() {
   try {
     routines.value = await api.get<RoutineSettings>('/api/settings/routines')
-  } catch (e: any) {
-    routinesError.value = `Failed to load model settings: ${e?.message || e}`
+  } catch (e) {
+    routinesError.value = `Failed to load model settings: ${errorMessage(e)}`
   } finally {
     routinesLoaded.value = true
   }
 }
 
-async function saveRoutines(patch: Record<string, string>) {
+async function saveRoutines(patch: Record<string, unknown>) {
   routinesSaving.value = true
   routinesResult.value = ''
   try {
     routines.value = await api.patch<RoutineSettings>('/api/settings/routines', patch)
     notifySaved('Model settings saved.')
-  } catch (e: any) {
-    routinesResult.value = `Error: ${e?.message || e}`
+  } catch (e) {
+    routinesResult.value = `Error: ${errorMessage(e)}`
   } finally {
     routinesSaving.value = false
   }
@@ -3024,6 +2963,17 @@ const aliasProviderSections = computed<AliasProviderSection[]>(() => {
       available: true,
     })
   }
+  for (const provider of settings.model_options.custom_providers || []) {
+    const options = parseModelList((provider.models || []).join(','))
+    if (!options.length) continue
+    sections.push({
+      key: `custom:${provider.id}` as AliasProviderKey,
+      label: `${provider.name} (via ${provider.runner === 'codex' ? 'Codex' : 'Claude Code'})`,
+      options,
+      configurable: true,
+      available: true,
+    })
+  }
   return sections
 })
 
@@ -3070,6 +3020,13 @@ const tierProviderSections = computed<AliasProviderSection[]>(() => {
       configurable: true,
       available: openrouterAvailable,
     },
+    ...(settings.model_options.custom_providers || []).map((provider) => ({
+      key: `custom:${provider.id}` as AliasProviderKey,
+      label: `${provider.name} (via ${provider.runner === 'codex' ? 'Codex' : 'Claude Code'})`,
+      options: parseModelList((provider.models || []).join(',')),
+      configurable: true,
+      available: (provider.models || []).length > 0,
+    })),
   ]
 })
 
@@ -3120,6 +3077,10 @@ const tierProviderUnavailableHint = computed(() => {
 const DEFAULT_TIER_SELECTION = '__ciao_default__'
 
 function tierOverrideValue(provider: TierProviderKey, tier: TierKey): string {
+  if (provider.startsWith('custom:')) {
+    const id = provider.slice('custom:'.length)
+    return routines.value?.custom_routing?.[id]?.[tier] || ''
+  }
   const key = tierSettingKeys[provider][tier]
   return routines.value?.[key] || ''
 }
@@ -3165,8 +3126,19 @@ function tierModelSectionsFor(provider: TierProviderKey, tier: TierKey): ModelSe
 async function saveTierModel(provider: TierProviderKey, tier: TierKey, value: string | string[]) {
   const selected = Array.isArray(value) ? value[0] || '' : value
   const model = selected === DEFAULT_TIER_SELECTION ? '' : selected
-  const key = tierSettingKeys[provider][tier]
-  await saveRoutines({ [key]: model.trim() })
+  if (provider.startsWith('custom:')) {
+    const id = provider.slice('custom:'.length)
+    const routing = JSON.parse(JSON.stringify(routines.value?.custom_routing || {})) as Record<string, Record<string, string>>
+    const routes = { ...(routing[id] || {}) }
+    if (model.trim()) routes[tier] = model.trim()
+    else delete routes[tier]
+    if (Object.keys(routes).length) routing[id] = routes
+    else delete routing[id]
+    await saveRoutines({ custom_routing: routing })
+  } else {
+    const key = tierSettingKeys[provider][tier]
+    await saveRoutines({ [key]: model.trim() })
+  }
   // Codex effective tiers live in /api/models; refresh so the badges and
   // "Automatic (…)" labels reflect the new pin immediately.
   if (provider === 'codex') await fetchWorkspaceModels()
@@ -3175,6 +3147,7 @@ async function saveTierModel(provider: TierProviderKey, tier: TierKey, value: st
 function tierModelForProvider(provider: AliasProviderKey, tier: TierKey): string {
   if (provider === 'claude') return routines.value?.alias_tiers?.claude?.[tier] || tier
   if (provider === 'codex') return workspaceModels.value?.alias_tiers?.codex?.[tier] || 'Not available'
+  if (provider.startsWith('custom:')) return tierEffectiveValue(provider, tier) || ''
   return tierEffectiveValue(provider, tier) || ''
 }
 
@@ -3203,6 +3176,14 @@ function inferRoutineModel(model: string): { provider: RoutineProviderValue; tie
       }
     }
     return { provider: 'codex', tier: 'sonnet' }
+  }
+  if (raw.startsWith('custom:')) {
+    const provider = `custom:${raw.split(':', 2)[1]}` as AliasProviderKey
+    const tiers = routines.value?.alias_tiers?.[provider] || {}
+    for (const tier of modelTiers) {
+      if (tiers[tier.key] === raw) return { provider, tier: tier.key }
+    }
+    return { provider, tier: 'sonnet' }
   }
   const claudeTiers: Record<string, TierKey> = { haiku: 'haiku', sonnet: 'sonnet', opus: 'opus', fable: 'fable' }
   if (claudeTiers[raw]) {
@@ -3245,7 +3226,7 @@ function routineTierValue(key: RoutineModelKey): TierKey {
 function routineTierSelectable(key: RoutineModelKey): boolean {
   const provider = routineProviderValue(key)
   return provider === 'claude' || provider === 'ollama' || provider === 'openrouter'
-    || provider === 'codex'
+    || provider === 'codex' || provider.startsWith('custom:')
 }
 
 function routineCustomModel(key: RoutineModelKey): string {
@@ -3303,11 +3284,13 @@ const mcpStatus = ref<McpStatus | null>(null)
 const mcpUsage = ref<McpUsage | null>(null)
 const mcpUsageLoaded = ref(false)
 const mcpUsageError = ref('')
-const usageSortKey = ref<'calls' | 'errors' | 'avg_ms' | 'tool'>('calls')
-const usageSortDir = ref<'asc' | 'desc'>('desc')
 const providerKeyInputs = ref<Record<string, string>>({})
 const providerConnectionPending = ref('')
 const providerConnectionResult = ref('')
+type CustomProviderDraft = Omit<CustomProviderSettings, 'models'> & { token: string; models: string }
+const customProviderDrafts = ref<CustomProviderDraft[]>([])
+const customProvidersDirty = ref(false)
+const customProviderProbePending = ref('')
 const autoUpdateGithubSkills = ref(false)
 const autoUpdateSaving = ref(false)
 const autoUpdateResult = ref('')
@@ -3353,8 +3336,8 @@ async function fetchGwsIntegration() {
   gwsIntegrationError.value = ''
   try {
     gwsIntegration.value = await api.get<GwsIntegrationSettings>('/api/integrations/gws')
-  } catch (e: any) {
-    gwsIntegrationError.value = `Failed to load Google Workspace integration: ${e?.message || e}`
+  } catch (e) {
+    gwsIntegrationError.value = `Failed to load Google Workspace integration: ${errorMessage(e)}`
   } finally {
     gwsIntegrationLoaded.value = true
   }
@@ -3377,8 +3360,8 @@ async function installGws() {
     } else {
       gwsInstallResult.value = res.error || 'Installation failed.'
     }
-  } catch (e: any) {
-    gwsInstallResult.value = `Error installing gws: ${e?.message || e}`
+  } catch (e) {
+    gwsInstallResult.value = `Error installing gws: ${errorMessage(e)}`
   } finally {
     gwsInstalling.value = false
   }
@@ -3401,8 +3384,8 @@ async function handleClientSecretUpload(event: Event, profileName: string) {
       client_secret: content,
     })
     gwsIntegration.value = updated
-  } catch (e: any) {
-    alert(e?.message || 'Failed to upload client secret')
+  } catch (e) {
+    alert(errorMessage(e, 'Failed to upload client secret'))
   } finally {
     gwsSavingProfile.value = null
     target.value = ''
@@ -3418,8 +3401,8 @@ async function startGwsAuth(profileName: string) {
     gwsAuthUrls.value[profileName] = res.auth_url
     gwsRedirectUrls.value[profileName] = ''
     window.open(res.auth_url, '_blank')
-  } catch (e: any) {
-    alert(e?.message || 'Failed to generate authorization URL')
+  } catch (e) {
+    alert(errorMessage(e, 'Failed to generate authorization URL'))
   } finally {
     gwsSavingProfile.value = null
   }
@@ -3438,8 +3421,8 @@ async function exchangeGwsCode(profileName: string) {
     gwsIntegration.value = updated
     delete gwsAuthUrls.value[profileName]
     delete gwsRedirectUrls.value[profileName]
-  } catch (e: any) {
-    alert(e?.message || 'Failed to complete connection')
+  } catch (e) {
+    alert(errorMessage(e, 'Failed to complete connection'))
   } finally {
     gwsSavingProfile.value = null
   }
@@ -3455,7 +3438,11 @@ async function disconnectGwsProfile(profileName: string, deleteClientSecret: boo
     ? `Are you sure you want to delete the OAuth Client Secret for the ${profileName} profile?`
     : `Are you sure you want to disconnect/sign out the ${profileName} Google account?`
 
-  if (!confirm(message)) return
+  if (!await askConfirm(message, {
+    title: deleteClientSecret ? 'Delete OAuth Client Secret' : 'Disconnect Google account',
+    confirmLabel: deleteClientSecret ? 'Delete secret' : 'Disconnect',
+    destructive: true,
+  })) return
 
   gwsSavingProfile.value = profileName
   try {
@@ -3465,8 +3452,8 @@ async function disconnectGwsProfile(profileName: string, deleteClientSecret: boo
     })
     gwsIntegration.value = updated
     cancelGwsAuth(profileName)
-  } catch (e: any) {
-    alert(e?.message || 'Failed to update profile connection')
+  } catch (e) {
+    alert(errorMessage(e, 'Failed to update profile connection'))
   } finally {
     gwsSavingProfile.value = null
   }
@@ -3486,8 +3473,8 @@ async function saveAutoUpdateGithubSkills() {
       providerKeys.value = res
     }
     notifySaved('Saved.')
-  } catch (e: any) {
-    autoUpdateResult.value = `Error: ${e?.message || e}`
+  } catch (e) {
+    autoUpdateResult.value = `Error: ${errorMessage(e)}`
     autoUpdateGithubSkills.value = !autoUpdateGithubSkills.value
   } finally {
     autoUpdateSaving.value = false
@@ -3498,6 +3485,12 @@ async function fetchProviderKeys() {
   try {
     const res = await api.get<ProviderConfigSettings>('/api/settings/providers')
     providerKeys.value = res
+    customProviderDrafts.value = (res.custom_providers || []).map((provider) => ({
+      ...provider,
+      token: '',
+      models: provider.models.join(', '),
+    }))
+    customProvidersDirty.value = false
     for (const key in res.keys) {
       providerKeyInputs.value[key] = ''
     }
@@ -3507,10 +3500,52 @@ async function fetchProviderKeys() {
     if (res.auto_update_github_skills !== undefined) {
       autoUpdateGithubSkills.value = res.auto_update_github_skills
     }
-  } catch (e: any) {
-    providerKeysError.value = `Failed to load provider keys: ${e?.message || e}`
+  } catch (e) {
+    providerKeysError.value = `Failed to load provider keys: ${errorMessage(e)}`
   } finally {
     providerKeysLoaded.value = true
+  }
+}
+
+function addCustomProvider() {
+  const id = `custom-${Date.now().toString(36)}`
+  customProviderDrafts.value.push({
+    id,
+    name: 'Custom provider',
+    url: 'http://localhost:1234/v1',
+    runner: 'claude',
+    models: '',
+    token_configured: false,
+    token: '',
+  })
+  customProvidersDirty.value = true
+}
+
+function removeCustomProvider(id: string) {
+  customProviderDrafts.value = customProviderDrafts.value.filter((provider) => provider.id !== id)
+  customProvidersDirty.value = true
+}
+
+async function probeCustomProvider(draft: CustomProviderDraft) {
+  customProviderProbePending.value = draft.id
+  try {
+    const result = await api.post<{ ok: boolean; models: string[] }>('/api/settings/providers/custom/probe', {
+      id: draft.id,
+      name: draft.name,
+      url: draft.url,
+      runner: draft.runner,
+      token: draft.token || undefined,
+    })
+    if (result.models?.length) {
+      draft.models = result.models.join(', ')
+      customProvidersDirty.value = true
+    } else {
+      providerKeysResult.value = 'No models were discovered. You can enter model ids manually.'
+    }
+  } catch (e) {
+    providerKeysResult.value = `Could not discover models: ${errorMessage(e)}`
+  } finally {
+    customProviderProbePending.value = ''
   }
 }
 
@@ -3539,40 +3574,20 @@ async function fetchMcpUsage() {
   }
 }
 
-function sortUsageBy(key: 'calls' | 'errors' | 'avg_ms' | 'tool') {
-  if (usageSortKey.value === key) {
-    usageSortDir.value = usageSortDir.value === 'desc' ? 'asc' : 'desc'
-  } else {
-    usageSortKey.value = key
-    usageSortDir.value = key === 'tool' ? 'asc' : 'desc'
-  }
-}
 
-const sortedUsage = computed<McpToolUsage[]>(() => {
-  const rows = [...(mcpUsage.value?.tools ?? [])]
-  const key = usageSortKey.value
-  const factor = usageSortDir.value === 'desc' ? -1 : 1
-  rows.sort((a, b) => {
-    let cmp: number
-    if (key === 'tool') {
-      cmp = a.tool.localeCompare(b.tool)
-    } else {
-      cmp = (a[key] as number) - (b[key] as number)
-      if (cmp === 0) cmp = a.tool.localeCompare(b.tool) * -1
-    }
-    return cmp * factor
-  })
-  return rows
-})
 
 async function providerConnectionAction(provider: string, action: 'connect' | 'verify' | 'logout') {
-  if (action === 'logout' && !confirm(`Log out of ${provider === 'codex' ? 'OpenAI Codex' : 'Claude Code'} on this computer?`)) {
+  if (action === 'logout' && !await askConfirm(`Log out of ${provider === 'codex' ? 'OpenAI Codex' : 'Claude Code'} on this computer?`, {
+    title: 'Log out',
+    confirmLabel: 'Log out',
+    destructive: true,
+  })) {
     return
   }
   providerConnectionPending.value = provider
   providerConnectionResult.value = ''
   try {
-    const result = await api.post<any>(`/api/settings/providers/${provider}/${action}`)
+    const result = await api.post<ProviderActionResult>(`/api/settings/providers/${provider}/${action}`)
     if (action === 'connect') {
       providerConnectionResult.value = result.opened
         ? `Opened ${provider === 'codex' ? 'Codex' : 'Claude Code'} login in Terminal.`
@@ -3583,8 +3598,8 @@ async function providerConnectionAction(provider: string, action: 'connect' | 'v
       providerConnectionResult.value = result.ok ? `Connection verified (${result.auth}).` : result.detail || 'Not connected.'
     }
     await fetchProviderKeys()
-  } catch (e: any) {
-    providerConnectionResult.value = `Error: ${e?.message || e}`
+  } catch (e) {
+    providerConnectionResult.value = `Error: ${errorMessage(e)}`
   } finally {
     providerConnectionPending.value = ''
   }
@@ -3610,8 +3625,9 @@ async function saveProviderKeys() {
   }
   
   const hasKeyChanges = Object.keys(patchKeys).length > 0
+  const customProvidersChanged = customProvidersDirty.value
   
-  if (!hasKeyChanges) {
+  if (!hasKeyChanges && !customProvidersDirty.value) {
     providerKeysResult.value = 'No changes to save.'
     providerKeysSaving.value = false
     setTimeout(() => { providerKeysResult.value = '' }, 2000)
@@ -3619,10 +3635,26 @@ async function saveProviderKeys() {
   }
   
   try {
-    const payload: any = { keys: patchKeys }
+    const payload: { keys: Record<string, string>; custom_providers?: object[] } = { keys: patchKeys }
+    if (customProvidersDirty.value) {
+      payload.custom_providers = customProviderDrafts.value.map((draft) => ({
+        id: draft.id,
+        name: draft.name,
+        url: draft.url,
+        runner: draft.runner,
+        models: draft.models,
+        ...(draft.token ? { token: draft.token } : {}),
+      }))
+    }
     
     const res = await api.patch<ProviderConfigSettings>('/api/settings/providers', payload)
     providerKeys.value = res
+    customProviderDrafts.value = (res.custom_providers || []).map((provider) => ({
+      ...provider,
+      token: '',
+      models: provider.models.join(', '),
+    }))
+    customProvidersDirty.value = false
     for (const key in res.keys) {
       providerKeyInputs.value[key] = ''
     }
@@ -3633,9 +3665,18 @@ async function saveProviderKeys() {
       autoUpdateGithubSkills.value = res.auto_update_github_skills
     }
     providerKeysResult.value = ''
-    await restartAndReload('Configuration saved. Restarting Ciaobot to apply…')
-  } catch (e: any) {
-    providerKeysResult.value = `Error: ${e?.message || e}`
+    if (customProvidersChanged) {
+      // Provider selectors are mounted from separate payloads; refresh them
+      // immediately so a newly saved endpoint is usable without a page reload.
+      await Promise.all([fetchRoutines(), fetchWorkspaceModels(), fetchWorkspacesList()])
+    }
+    if (hasKeyChanges) {
+      await restartAndReload('Configuration saved. Restarting Ciaobot to apply…')
+    } else {
+      providerKeysResult.value = 'Custom providers saved.'
+    }
+  } catch (e) {
+    providerKeysResult.value = `Error: ${errorMessage(e)}`
   } finally {
     providerKeysSaving.value = false
   }
@@ -3655,8 +3696,8 @@ async function installLocalVoice() {
     } else {
       routinesResult.value = 'Installation failed.'
     }
-  } catch (e: any) {
-    routinesResult.value = `Error installing engine: ${e?.message || e}`
+  } catch (e) {
+    routinesResult.value = `Error installing engine: ${errorMessage(e)}`
   } finally {
     voiceInstalling.value = false
   }
@@ -3677,8 +3718,8 @@ async function installApfel() {
     } else {
       routinesResult.value = `apfel install failed: ${res.error || 'unknown error'}`
     }
-  } catch (e: any) {
-    routinesResult.value = `Error installing apfel: ${e?.message || e}`
+  } catch (e) {
+    routinesResult.value = `Error installing apfel: ${errorMessage(e)}`
   } finally {
     apfelInstalling.value = false
   }
@@ -3697,8 +3738,8 @@ async function installLocalTts() {
     } else {
       routinesResult.value = 'Installation failed.'
     }
-  } catch (e: any) {
-    routinesResult.value = `Error installing engine: ${e?.message || e}`
+  } catch (e) {
+    routinesResult.value = `Error installing engine: ${errorMessage(e)}`
   } finally {
     ttsInstalling.value = false
   }
@@ -3707,8 +3748,8 @@ async function installLocalTts() {
 async function fetchSkills() {
   try {
     skillsInventory.value = await api.get<SkillInventory>('/api/admin/skills')
-  } catch (e: any) {
-    skillsError.value = `Failed to load skills: ${e?.message || e}`
+  } catch (e) {
+    skillsError.value = `Failed to load skills: ${errorMessage(e)}`
   } finally {
     skillsLoaded.value = true
   }
@@ -3719,8 +3760,8 @@ async function fetchCommands() {
   try {
     const res = await api.get<CommandsResponse>('/api/commands')
     commands.value = Array.isArray(res.commands) ? res.commands : []
-  } catch (e: any) {
-    commandsError.value = `Failed to load commands: ${e?.message || e}`
+  } catch (e) {
+    commandsError.value = `Failed to load commands: ${errorMessage(e)}`
   } finally {
     commandsLoaded.value = true
   }
@@ -3730,8 +3771,8 @@ async function fetchAgentAssets() {
   agentAssetsError.value = ''
   try {
     agentAssets.value = await api.get<AgentAssetsResponse>('/api/agent-assets')
-  } catch (e: any) {
-    agentAssetsError.value = `Failed to load agent assets: ${e?.message || e}`
+  } catch (e) {
+    agentAssetsError.value = `Failed to load agent assets: ${errorMessage(e)}`
   } finally {
     agentAssetsLoaded.value = true
   }
@@ -3749,8 +3790,8 @@ async function fixWorkspaceHealth() {
     // the fresh report.
     await api.post('/api/workspace-health/fix', {})
     await fetchAgentAssets()
-  } catch (e: any) {
-    healthFixError.value = e?.message || 'fix failed'
+  } catch (e) {
+    healthFixError.value = errorMessage(e, 'fix failed')
   } finally {
     healthFixPending.value = false
   }
@@ -4031,9 +4072,9 @@ async function addSubagent() {
     resetSubagentForm(false)
     showAddSubagent.value = false
     await fetchAgentAssets()
-  } catch (e: any) {
+  } catch (e) {
     addSubagentError.value = true
-    addSubagentResult.value = `Error: ${e?.message || e}`
+    addSubagentResult.value = `Error: ${errorMessage(e)}`
   } finally {
     addingSubagent.value = false
   }
@@ -4056,9 +4097,9 @@ async function addCommand() {
     resetCommandForm(false)
     showAddCommand.value = false
     await Promise.all([fetchAgentAssets(), fetchCommands()])
-  } catch (e: any) {
+  } catch (e) {
     addCommandError.value = true
-    addCommandResult.value = `Error: ${e?.message || e}`
+    addCommandResult.value = `Error: ${errorMessage(e)}`
   } finally {
     addingCommand.value = false
   }
@@ -4093,9 +4134,9 @@ async function saveSubagent(agent: SubagentAsset) {
     notifySaved(`Saved ${agent.name}. Restart or sync Claude Code sessions to pick it up.`, 'Subagent')
     cancelEditSubagent()
     await fetchAgentAssets()
-  } catch (e: any) {
+  } catch (e) {
     assetLifecycleError.value = true
-    assetLifecycleResult.value = `Error: ${e?.message || e}`
+    assetLifecycleResult.value = `Error: ${errorMessage(e)}`
   } finally {
     savingSubagent.value = null
   }
@@ -4103,7 +4144,11 @@ async function saveSubagent(agent: SubagentAsset) {
 
 async function deleteSubagent(agent: SubagentAsset) {
   if (!agent.editable) return
-  if (!window.confirm(`Delete custom subagent "${agent.name}"?`)) return
+  if (!await askConfirm(`Delete custom subagent "${agent.name}"?`, {
+    title: 'Delete subagent',
+    confirmLabel: 'Delete subagent',
+    destructive: true,
+  })) return
   savingSubagent.value = agent.name
   assetLifecycleResult.value = 'Deleting subagent...'
   assetLifecycleError.value = false
@@ -4113,9 +4158,9 @@ async function deleteSubagent(agent: SubagentAsset) {
     notifySaved(`Deleted ${agent.name}. Restart or sync Claude Code sessions to pick it up.`, 'Subagent')
     if (editingSubagent.value === agent.name) cancelEditSubagent()
     await fetchAgentAssets()
-  } catch (e: any) {
+  } catch (e) {
     assetLifecycleError.value = true
-    assetLifecycleResult.value = `Error: ${e?.message || e}`
+    assetLifecycleResult.value = `Error: ${errorMessage(e)}`
   } finally {
     savingSubagent.value = null
   }
@@ -4153,9 +4198,9 @@ async function saveCommand(command: CommandAsset) {
     notifySaved(`Saved /${command.name}. Restart or sync Claude Code sessions to pick it up.`, 'Command')
     cancelEditCommand()
     await Promise.all([fetchAgentAssets(), fetchCommands()])
-  } catch (e: any) {
+  } catch (e) {
     assetLifecycleError.value = true
-    assetLifecycleResult.value = `Error: ${e?.message || e}`
+    assetLifecycleResult.value = `Error: ${errorMessage(e)}`
   } finally {
     savingCommand.value = null
   }
@@ -4163,7 +4208,11 @@ async function saveCommand(command: CommandAsset) {
 
 async function deleteCommand(command: CommandAsset) {
   if (!command.editable) return
-  if (!window.confirm(`Delete custom command "/${command.name}"?`)) return
+  if (!await askConfirm(`Delete custom command "/${command.name}"?`, {
+    title: 'Delete command',
+    confirmLabel: 'Delete command',
+    destructive: true,
+  })) return
   savingCommand.value = command.name
   assetLifecycleResult.value = 'Deleting command...'
   assetLifecycleError.value = false
@@ -4173,9 +4222,9 @@ async function deleteCommand(command: CommandAsset) {
     notifySaved(`Deleted /${command.name}. Restart or sync Claude Code sessions to pick it up.`, 'Command')
     if (editingCommand.value === command.name) cancelEditCommand()
     await Promise.all([fetchAgentAssets(), fetchCommands()])
-  } catch (e: any) {
+  } catch (e) {
     assetLifecycleError.value = true
-    assetLifecycleResult.value = `Error: ${e?.message || e}`
+    assetLifecycleResult.value = `Error: ${errorMessage(e)}`
   } finally {
     savingCommand.value = null
   }
@@ -4217,9 +4266,9 @@ async function addGithubSkill() {
       addGithubSkillError.value = true
       addGithubSkillResult.value = res.error || 'Failed to add skill.'
     }
-  } catch (e: any) {
+  } catch (e) {
     addGithubSkillError.value = true
-    addGithubSkillResult.value = `Error: ${e?.message || e}`
+    addGithubSkillResult.value = `Error: ${errorMessage(e)}`
   } finally {
     addingGithubSkill.value = false
   }
@@ -4245,8 +4294,8 @@ async function createSkillViaChat() {
       const prompt = 'I want to create a new custom skill. Please guide me through writing a new skill (creating the SKILL.md under the skills/ directory).'
       projectStore.sendMessage(chat.chat_id, prompt)
     }
-  } catch (e: any) {
-    alert(`Failed to start chat: ${e?.message || e}`)
+  } catch (e) {
+    alert(`Failed to start chat: ${errorMessage(e)}`)
   }
 }
 
@@ -4301,8 +4350,8 @@ async function fetchAutomation() {
   automationError.value = ''
   try {
     automationItems.value = await api.get<AutomationProcess[]>('/api/automation')
-  } catch (e: any) {
-    automationError.value = `Failed to load automation: ${e?.message || e}`
+  } catch (e) {
+    automationError.value = `Failed to load automation: ${errorMessage(e)}`
   } finally {
     automationLoaded.value = true
   }
@@ -4324,8 +4373,8 @@ async function triggerJob(jobId: string) {
     await taskStore.runScheduleNow(scheduleId)
     notifySaved(`Triggered automation job "${jobId}" via schedule "${scheduleId}".`, 'Automations')
     await fetchAutomation()
-  } catch (e: any) {
-    alert(`Failed to trigger job: ${e?.message || e}`)
+  } catch (e) {
+    alert(`Failed to trigger job: ${errorMessage(e)}`)
   } finally {
     triggeringJobs.value[jobId] = false
   }
@@ -4342,8 +4391,8 @@ async function triggerBackfill() {
     await api.post('/api/automation/backfill-insights', {})
     notifySaved('Insights backfill started in the background.', 'Automations')
     setTimeout(fetchAutomation, 2000)
-  } catch (e: any) {
-    alert(`Failed to start backfill: ${e?.message || e}`)
+  } catch (e) {
+    alert(`Failed to start backfill: ${errorMessage(e)}`)
   } finally {
     backfillRunning.value = false
   }
@@ -4366,7 +4415,7 @@ function isMacDesktop(): boolean {
 function isStandalone(): boolean {
   return (
     (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
-    (navigator as any).standalone === true
+    (navigator as Navigator & { standalone?: boolean }).standalone === true
   )
 }
 
@@ -4416,10 +4465,13 @@ function blankWorkspaceForm(): WorkspaceForm {
 
 function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
   const mcps = ws.claude_ai_mcps
+  const customProvider = ws.default_model.startsWith('custom:')
+    ? `custom:${ws.default_model.split(':', 3)[1]}` as WorkspaceProvider
+    : null
   return {
     name: ws.name,
     vault_root: ws.vault_root || '',
-    default_provider: ws.default_provider || 'claude',
+    default_provider: customProvider || ws.default_provider || 'claude',
     default_model: ws.default_model || '',
     gws_profile: ws.gws_profile || '',
     model_bucket: ws.model_bucket || '',
@@ -4435,26 +4487,17 @@ function claudeAiMcpsPayload(value: 'default' | 'on' | 'off'): boolean | null {
   return null
 }
 
-function workspaceCustomDefaultModel(model: string): boolean {
-  const value = model.trim()
-  return Boolean(value) && !modelTiers.some((tier) => tier.key === value)
-}
 
-function isCustomWorkspaceModel(model: string): boolean {
-  const value = model.trim()
-  if (!value) return false
-  if (modelTiers.some((tier) => tier.key === value)) return false
-  const options = routines.value?.model_options
-  if (!options) return true
-  const allKnown = [
-    ...(options.ollama_local || []),
-    ...(options.ollama_cloud || []),
-    ...(options.openrouter || []),
-  ]
-  return !allKnown.includes(value)
-}
 
 function workspaceModelSectionsForProvider(provider: WorkspaceProvider, currentModelValue: string): ModelSection[] {
+  if (provider.startsWith('custom:')) {
+    const section = sectionsFromModelsResponse(workspaceModels.value)
+      .find((item) => item.key === provider)
+    if (!section) return []
+    const models = [...section.models]
+    if (currentModelValue && !models.includes(currentModelValue)) models.push(currentModelValue)
+    return [{ ...section, models }]
+  }
   if (provider === 'codex') {
     const section = sectionsFromModelsResponse(workspaceModels.value).find((item) => item.key === 'codex')
     if (!section) return []
@@ -4544,15 +4587,7 @@ function formatConnectorLabel(name: string): string {
   return clean
 }
 
-const inspectorWorkspace = ref(projectStore.activeWorkspace || 'personal')
-const inspectorProvider = ref<WorkspaceProvider>('claude')
 
-const inspectorConnectorsActive = computed(() => {
-  if (inspectorProvider.value === 'codex') return false
-  const targetForm = workspaceForms.value.find((f) => f.name === inspectorWorkspace.value)
-  if (!targetForm) return true
-  return targetForm.claude_ai_mcps !== 'off'
-})
 
 const inspectorEmbeddedTools = computed(() => {
   if (mcpStatus.value?.tools && mcpStatus.value.tools.length) {
@@ -4564,7 +4599,7 @@ const inspectorEmbeddedTools = computed(() => {
     'chat_continue', 'chat_retry', 'chat_handover', 'chat_archive', 'chat_delete',
     'schedules_list', 'schedule_create', 'schedule_update', 'schedule_action',
     'loops_list', 'loop_create', 'loop_update', 'loop_action', 'file_surface',
-    'handoffs_list', 'handoff_start', 'handoff_send', 'handoff_close', 'adversarial_review',
+    'delegate_spawn', 'delegates_list', 'adversarial_review',
   ]
 })
 
@@ -4615,8 +4650,8 @@ async function fetchWorkspacesList() {
     if (!workspaceProviderOptions.value.some((provider) => provider.value === newWorkspaceForm.value.default_provider)) {
       newWorkspaceForm.value.default_provider = defaultWorkspaceProvider()
     }
-  } catch (e: any) {
-    workspacesError.value = `Failed to load workspaces: ${e?.message || e}`
+  } catch (e) {
+    workspacesError.value = `Failed to load workspaces: ${errorMessage(e)}`
   } finally {
     workspacesLoaded.value = true
   }
@@ -4651,8 +4686,8 @@ async function saveWorkspace(name: string) {
     })
     notifySaved(`Workspace "${name}" saved.`, 'Workspaces')
     await fetchWorkspacesList()
-  } catch (e: any) {
-    workspacesResult.value = `Error: ${e?.message || e}`
+  } catch (e) {
+    workspacesResult.value = `Error: ${errorMessage(e)}`
   } finally {
     workspacesSaving.value = null
   }
@@ -4683,23 +4718,27 @@ async function createNewWorkspace() {
     showNewWorkspace.value = false
     newWorkspaceForm.value = blankWorkspaceForm()
     await fetchWorkspacesList()
-  } catch (e: any) {
-    workspacesResult.value = `Error: ${e?.message || e}`
+  } catch (e) {
+    workspacesResult.value = `Error: ${errorMessage(e)}`
   } finally {
     workspacesSaving.value = null
   }
 }
 
 async function removeWorkspace(name: string) {
-  if (!window.confirm(`Delete workspace "${name}"? Chats keep their history but lose workspace routing.`)) return
+  if (!await askConfirm(`Delete workspace "${name}"? Chats keep their history but lose workspace routing.`, {
+    title: 'Delete workspace',
+    confirmLabel: 'Delete workspace',
+    destructive: true,
+  })) return
   workspacesSaving.value = name
   workspacesResult.value = ''
   try {
     await projectStore.deleteWorkspace(name)
     notifySaved(`Workspace "${name}" deleted.`, 'Workspaces')
     await fetchWorkspacesList()
-  } catch (e: any) {
-    workspacesResult.value = `Error: ${e?.message || e}`
+  } catch (e) {
+    workspacesResult.value = `Error: ${errorMessage(e)}`
   } finally {
     workspacesSaving.value = null
   }
@@ -4764,8 +4803,8 @@ async function togglePush() {
       await enablePush()
       pushEnabledFlag.value = true
     }
-  } catch (e: any) {
-    pushError.value = e?.message || String(e)
+  } catch (e) {
+    pushError.value = errorMessage(e)
   } finally {
     pushPending.value = false
   }
@@ -4778,19 +4817,23 @@ async function doSnapshot(confirmWarnings = false) {
   try {
     const r = await api.post<{ message: string }>('/api/admin/snapshot', { confirm_warnings: confirmWarnings })
     actionResult.value = r.message
-  } catch (e: any) {
-    const payload = e?.payload
-    if (payload?.blockers) {
-      alert(`Snapshot blocked by secrets:\n\n${payload.blockers.join('\n')}`)
+  } catch (e) {
+    const blockers = errorPayloadList(e, 'blockers')
+    const warnings = errorPayloadList(e, 'warnings')
+    if (blockers) {
+      alert(`Snapshot blocked by secrets:\n\n${blockers.join('\n')}`)
       actionResult.value = 'Blocked by secrets.'
-    } else if (payload?.warnings) {
-      if (confirm(`Warnings found:\n\n${payload.warnings.join('\n')}\n\nDo you want to proceed anyway?`)) {
+    } else if (warnings) {
+      if (await askConfirm(`Warnings found:\n\n${warnings.join('\n')}\n\nDo you want to proceed anyway?`, {
+        title: 'Snapshot warnings',
+        confirmLabel: 'Proceed anyway',
+      })) {
         actionPending.value = null
         return doSnapshot(true)
       }
       actionResult.value = 'Cancelled by user due to warnings.'
     } else {
-      actionResult.value = `Error: ${e.message}`
+      actionResult.value = `Error: ${errorMessage(e)}`
     }
   }
   actionPending.value = null
@@ -4805,7 +4848,16 @@ function restartAndReload(message: string) {
 }
 
 async function doDeploy(confirmWarnings = false) {
-  if (!confirmWarnings && !confirm('Restart? This will pull latest, rebuild, and restart.')) return
+  // In dev mode the restart also rebuilds the Tauri shell when desktop/ changed,
+  // which is a multi-minute Rust build that ends by quitting and relaunching the
+  // app. Worth warning about before the window disappears.
+  const devNote = localStatus.value?.dev_mode
+    ? '\n\nDev mode: if desktop/ changed, this also rebuilds the desktop app (several minutes) and relaunches it.'
+    : ''
+  if (!confirmWarnings && !await askConfirm(`Restart? This will pull latest, rebuild, and restart.${devNote}`, {
+    title: 'Restart and redeploy',
+    confirmLabel: 'Restart',
+  })) return
   actionPending.value = 'deploy'
   actionResult.value = ''
   deploySteps.value = []
@@ -4818,20 +4870,25 @@ async function doDeploy(confirmWarnings = false) {
     } else {
       actionResult.value = 'Restart failed. See steps above.'
     }
-  } catch (e: any) {
-    const payload = e?.payload
+  } catch (e) {
+    const payload = errorPayload(e)
+    const blockers = errorPayloadList(e, 'blockers')
+    const warnings = errorPayloadList(e, 'warnings')
     if (Array.isArray(payload?.steps)) deploySteps.value = payload.steps
-    if (payload?.blockers) {
-      alert(`Restart blocked by secrets:\n\n${payload.blockers.join('\n')}`)
+    if (blockers) {
+      alert(`Restart blocked by secrets:\n\n${blockers.join('\n')}`)
       actionResult.value = 'Blocked by secrets.'
-    } else if (payload?.warnings) {
-      if (confirm(`Warnings found:\n\n${payload.warnings.join('\n')}\n\nDo you want to proceed anyway?`)) {
+    } else if (warnings) {
+      if (await askConfirm(`Warnings found:\n\n${warnings.join('\n')}\n\nDo you want to proceed anyway?`, {
+        title: 'Deploy warnings',
+        confirmLabel: 'Proceed anyway',
+      })) {
         actionPending.value = null
         return doDeploy(true)
       }
       actionResult.value = 'Cancelled by user due to warnings.'
     } else {
-      actionResult.value = `Error: ${e.message || 'unknown error'}`
+      actionResult.value = `Error: ${errorMessage(e, 'unknown error')}`
     }
   }
   actionPending.value = null
@@ -4858,8 +4915,8 @@ async function fixDeployErrorInChat() {
   if (!project) {
     try {
       project = await projectStore.createProject('General')
-    } catch (e: any) {
-      alert(`Failed to create project: ${e?.message || e}`)
+    } catch (e) {
+      alert(`Failed to create project: ${errorMessage(e)}`)
       return
     }
   }
@@ -4872,8 +4929,8 @@ async function fixDeployErrorInChat() {
       const { router } = await import('../router')
       router.push(`/chat/${chat.chat_id}`)
     }
-  } catch (e: any) {
-    alert(`Failed to start chat: ${e?.message || e}`)
+  } catch (e) {
+    alert(`Failed to start chat: ${errorMessage(e)}`)
   }
 }
 
@@ -4917,28 +4974,13 @@ async function fixIssuesInChat() {
       const { router } = await import('../router')
       router.push(`/chat/${chat.chat_id}`)
     }
-  } catch (e: any) {
-    alert(`Failed to start issue-triage chat: ${e?.message || e}`)
+  } catch (e) {
+    alert(`Failed to start issue-triage chat: ${errorMessage(e)}`)
   } finally {
     debugPending.value = false
   }
 }
 
-async function doLogout() {
-  // Clears the HttpOnly session cookie via /api/auth/logout (which JS can't
-  // delete from document.cookie). After success the auth store routes back
-  // to /login and the next login re-issues the cookie with the wider
-  // Host-only cookie: no Domain attribute, scoped to the exact host.
-  if (!confirm('Log out of Ciaobot?')) return
-  actionPending.value = 'logout'
-  actionResult.value = ''
-  try {
-    await useAuthStore().logout()
-  } catch (e: any) {
-    actionResult.value = `Error: ${e.message || 'logout failed'}`
-  }
-  actionPending.value = null
-}
 
 // ── Workspace git sync (current branch) ──────────────────────────────────
 const localStatus = ref<LocalStatus | null>(null)
@@ -5007,170 +5049,54 @@ async function saveAuthSettings() {
     authSettingsResult.value = res.auth_required
       ? 'Password protection is on.'
       : 'Password protection is off.'
-  } catch (e: any) {
+  } catch (e) {
     authSettingsError.value = true
-    authSettingsResult.value = e?.payload?.error || e.message || 'Could not save password settings'
+    authSettingsResult.value = apiErrorMessage(e, 'Could not save password settings')
   }
   authSettingsSaving.value = false
 }
 
-// ── Host / client (multi-device tunnel) ────────────────────────────────
-interface NodePeer {
-  node_id: string
-  url: string
-  last_seen: string
-  is_active: boolean
-}
-
-interface NodeStatus {
-  node_id: string
-  role: 'host' | 'client' | 'active' | 'standby'
-  mode?: 'host' | 'client'
-  active_since: string | null
-  last_handover: string | null
-  host_url?: string | null
-  active_peer_url?: string | null
-  host_reachable?: boolean | null
-  active_peer_reachable?: boolean | null
-  has_host_session?: boolean
-  peers: NodePeer[]
-  git?: any
-}
-
+// ── Host / client: labeling only ──────────────────────────────────────────
+// The device-scoped controls live in DeviceView (/device). What is left here is
+// just enough to answer "whose settings am I editing": in client mode every
+// other card on this page is served by the host through the tunnel.
 const nodeStatus = ref<NodeStatus | null>(null)
-const nodePending = ref<string | null>(null)
-const nodeActionResult = ref('')
-const nodeActionError = ref(false)
-const hostUrlInput = ref('')
-const hostPasswordInput = ref('')
-const showConnectForm = ref(false)
 
 const isNodeClient = computed(() => {
   const role = nodeStatus.value?.role
   return role === 'client' || role === 'standby'
 })
 
-const nodeRoleLabel = computed(() => (isNodeClient.value ? 'client' : 'host'))
-
 const connectedHostUrl = computed(
   () => nodeStatus.value?.host_url || nodeStatus.value?.active_peer_url || '',
 )
 
+const hostScopeLabel = computed(() => {
+  const named = nodeStatus.value?.host_node_id
+  const url = connectedHostUrl.value
+  if (named && url) return `${named} (${url})`
+  return named || url || 'the host'
+})
+
 async function fetchNodeStatus() {
   try {
     nodeStatus.value = await api.get<NodeStatus>('/api/node/status')
-    if (isNodeClient.value) showConnectForm.value = false
   } catch {
-    /* leave null on failure */
+    /* leave null on failure: cards then read as host-mode, which is the default */
   }
-}
-
-async function connectAsClient() {
-  const hostUrl = hostUrlInput.value.trim()
-  const password = hostPasswordInput.value
-  if (!hostUrl) return
-  if (!password) {
-    nodeActionError.value = true
-    nodeActionResult.value =
-      'Enter the host password. If the host has none yet, enable PWA password protection on that machine first.'
-    return
-  }
-  if (!confirm(`Connect as client to ${hostUrl}? This machine will stop being host and tunnel to that Ciaobot.`)) return
-
-  nodePending.value = 'connect'
-  nodeActionResult.value = ''
-  nodeActionError.value = false
-  try {
-    const r = await api.post<any>('/api/node/connect', {
-      host_url: hostUrl,
-      password,
-    })
-    if (r?.ok) {
-      hostPasswordInput.value = ''
-      showConnectForm.value = false
-      // Full reload so stores/chats pick up the tunneled host and the client banner appears.
-      window.location.assign('/')
-      return
-    } else {
-      nodeActionError.value = true
-      nodeActionResult.value = r?.error || 'Connect failed'
-    }
-  } catch (e: any) {
-    nodeActionError.value = true
-    const detail = e?.payload?.error || e.message || 'Connect failed'
-    nodeActionResult.value = e?.payload?.password_required_on_host
-      ? detail
-      : `Error: ${detail}`
-  }
-  nodePending.value = null
-}
-
-async function reconnectHostSession() {
-  const password = hostPasswordInput.value
-  if (!password) return
-  nodePending.value = 'reconnect'
-  nodeActionResult.value = ''
-  nodeActionError.value = false
-  try {
-    await api.post('/api/auth', { token: password })
-    hostPasswordInput.value = ''
-    window.location.assign('/')
-    return
-  } catch (e: any) {
-    nodeActionError.value = true
-    nodeActionResult.value = `Error: ${e?.payload?.error || e.message || 'Reconnect failed'}`
-  }
-  nodePending.value = null
-}
-
-async function doBecomeHost(force = false) {
-  if (
-    !force &&
-    !confirm(
-      'Disconnect and become host here? The remote will push its changes, then this machine pulls and resumes automations.',
-    )
-  ) {
-    return
-  }
-
-  nodePending.value = 'handover'
-  nodeActionResult.value = ''
-  nodeActionError.value = false
-
-  try {
-    const targetUrl = connectedHostUrl.value
-    const r = await api.post<any>('/api/node/handover', { target_node_url: targetUrl, force })
-    if (r?.ok) {
-      nodeActionResult.value = force
-        ? 'Force disconnect complete. This device is now the host.'
-        : 'Disconnected. This device is now the host.'
-      await fetchNodeStatus()
-      await fetchLocalStatus()
-    } else {
-      nodeActionError.value = true
-      nodeActionResult.value = r?.error || 'Disconnect failed'
-    }
-  } catch (e: any) {
-    nodeActionError.value = true
-    if (e?.payload?.peer_unreachable) {
-      if (confirm('Host is unreachable. Force disconnect anyway (skip remote push)?')) {
-        nodePending.value = null
-        return doBecomeHost(true)
-      }
-    }
-    nodeActionResult.value = `Error: ${e?.payload?.error || e.message || 'Disconnect failed'}`
-  }
-  nodePending.value = null
 }
 
 async function localHandback(confirmWarnings = false) {
-  if (!confirmWarnings && !confirm('Sync changes with the remote repository?')) return
+  if (!confirmWarnings && !await askConfirm('Sync changes with the remote repository?', {
+    title: 'Sync with remote',
+    confirmLabel: 'Sync with remote',
+  })) return
 
   actionPending.value = 'snapshot'
   actionResult.value = ''
 
   try {
-    const r = await api.post<any>('/api/local/handback', { confirm_warnings: confirmWarnings })
+    const r = await api.post<LocalHandbackResult>('/api/local/handback', { confirm_warnings: confirmWarnings })
     if (r?.ok === false) {
       actionResult.value = `${r.step}: ${r.error}`
     } else if (r?.merged === true) {
@@ -5179,38 +5105,42 @@ async function localHandback(confirmWarnings = false) {
       actionResult.value = 'Sync conflict — opened a chat to resolve it. Answer it, then Sync again.'
     }
     await fetchLocalStatus()
-  } catch (e: any) {
-    const payload = e?.payload
-    if (payload?.blockers) {
-      alert(`Sync blocked by secrets:\n\n${payload.blockers.join('\n')}`)
+  } catch (e) {
+    const blockers = errorPayloadList(e, 'blockers')
+    const warnings = errorPayloadList(e, 'warnings')
+    if (blockers) {
+      alert(`Sync blocked by secrets:\n\n${blockers.join('\n')}`)
       actionResult.value = 'Blocked by secrets.'
-    } else if (payload?.warnings) {
-      if (confirm(`Warnings found:\n\n${payload.warnings.join('\n')}\n\nDo you want to proceed anyway?`)) {
+    } else if (warnings) {
+      if (await askConfirm(`Warnings found:\n\n${warnings.join('\n')}\n\nDo you want to proceed anyway?`, {
+        title: 'Sync warnings',
+        confirmLabel: 'Proceed anyway',
+      })) {
         actionPending.value = null
         return localHandback(true)
       }
       actionResult.value = 'Cancelled by user due to warnings.'
     } else {
-      actionResult.value = `Error: ${e.message || 'sync failed'}`
+      actionResult.value = `Error: ${errorMessage(e, 'sync failed')}`
     }
   }
   actionPending.value = null
 }
 
 // ── Package update ────────────────────────────────────────────────────────
-const packageStatus = ref<any>(null)
+const packageStatus = ref<PackageStatus | null>(null)
 const packageLoading = ref(false)
 const packageUpdating = ref(false)
 const packageResult = ref('')
 const showUpdatePanel = ref(false)
 const changelogLoading = ref(false)
-const changelog = ref<any>({ commits: [], compare_url: '', error: '' })
+const changelog = ref<PackageChangelog>({ commits: [], compare_url: '', error: '' })
 
 async function fetchPackageStatus() {
   packageLoading.value = true
   try {
-    packageStatus.value = await api.get<any>('/api/package/status')
-  } catch (e: any) {
+    packageStatus.value = await api.get<PackageStatus>('/api/package/status')
+  } catch {
     // best-effort
   } finally {
     packageLoading.value = false
@@ -5222,9 +5152,9 @@ async function openUpdatePanel() {
   changelogLoading.value = true
   changelog.value = { commits: [], compare_url: '', error: '' }
   try {
-    changelog.value = await api.get<any>('/api/package/changelog')
-  } catch (e: any) {
-    changelog.value = { commits: [], compare_url: '', error: e?.message || 'unknown error' }
+    changelog.value = await api.get<PackageChangelog>('/api/package/changelog')
+  } catch (e) {
+    changelog.value = { commits: [], compare_url: '', error: errorMessage(e, 'unknown error') }
   } finally {
     changelogLoading.value = false
   }
@@ -5234,7 +5164,7 @@ async function doPackageUpdate() {
   packageUpdating.value = true
   packageResult.value = 'Updating Ciaobot and restarting...'
   try {
-    const res = await api.post<any>('/api/package/update')
+    const res = await api.post<PackageUpdateResult>('/api/package/update')
     if (res.ok) {
       showUpdatePanel.value = false
       packageResult.value = ''
@@ -5243,8 +5173,8 @@ async function doPackageUpdate() {
       packageResult.value = `Update failed: ${res.error || 'unknown error'}`
       await fetchPackageStatus()
     }
-  } catch (e: any) {
-    packageResult.value = `Update failed: ${e.message || 'unknown error'}`
+  } catch (e) {
+    packageResult.value = `Update failed: ${errorMessage(e, 'unknown error')}`
     await fetchPackageStatus()
   } finally {
     packageUpdating.value = false
@@ -5260,6 +5190,36 @@ async function doPackageUpdate() {
   height: 100%;
   min-width: 0;
   container-type: inline-size;
+}
+
+.shortcut-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.shortcut-list li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--fg2);
+}
+
+.shortcut-list kbd {
+  font-family: var(--font);
+  font-size: 12px;
+  min-width: 44px;
+  text-align: center;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg2);
+  color: var(--fg);
+  flex: 0 0 auto;
 }
 .pane-body {
   flex: 1;
@@ -5421,6 +5381,18 @@ async function doPackageUpdate() {
 .settings-actions {
   justify-content: flex-end;
   margin-top: var(--space-2);
+}
+
+/* Router links used as buttons in card headers (e.g. "Open device settings"). */
+a.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+/* Client mode: names the machine whose settings the rest of the page edits. */
+.scope-card {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg2));
 }
 .settings-actions > button {
   flex: 0 0 auto;
@@ -5604,6 +5576,15 @@ async function doPackageUpdate() {
 .node-peer-form {
   margin-top: 0;
   margin-bottom: 0;
+}
+
+.connected-clients-panel {
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.connected-clients-panel .section-title {
+  margin-bottom: var(--space-2);
 }
 
 .deploy-steps {
@@ -5887,6 +5868,28 @@ async function doPackageUpdate() {
   content: '·';
   margin-right: 10px;
   color: var(--fg3);
+}
+.custom-providers-block {
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
+}
+.custom-provider-row {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+}
+.custom-provider-grid {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+.custom-provider-url,
+.custom-provider-models {
+  grid-column: span 2;
+}
+.custom-provider-token {
+  grid-column: span 2;
 }
 .settings-control {
   width: min(100%, 430px);

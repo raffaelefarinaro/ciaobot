@@ -58,6 +58,7 @@
 // amount of scrolling reaches it.
 import { computed, nextTick, ref, watch } from 'vue'
 
+import { useViewportHeight } from '../composables/useViewportHeight'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
 
 export type ComposeAnchor = { top: number; left: number }
@@ -90,10 +91,17 @@ const rootEl = ref<HTMLElement>()
 // COMPOSE_H estimate rather than jumping.
 const measuredH = ref<number | null>(null)
 
+// Reactive on purpose. Opening this popover focuses the textarea, so on a phone
+// the keyboard comes up a moment later and shrinks the viewport under a box that
+// has already been placed. Without re-clamping, a popover anchored low sits
+// behind the keyboard with no way to reach it, since `position: fixed` means
+// scrolling does nothing.
+const viewportH = useViewportHeight()
+
 const placed = computed<ComposeAnchor>(() => {
   const a = props.anchor ?? { top: 0, left: 0 }
   return {
-    top: clampAnchorTop(a.top, measuredH.value ?? COMPOSE_H),
+    top: clampAnchorTop(a.top, measuredH.value ?? COMPOSE_H, viewportH.value),
     left: clampAnchorLeft(a.left, COMPOSE_W),
   }
 })

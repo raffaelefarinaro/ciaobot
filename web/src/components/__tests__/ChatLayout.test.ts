@@ -7,7 +7,6 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { defineComponent, h, nextTick } from 'vue'
 import { useProjectStore } from '../../stores/projects'
 import { useTaskStore } from '../../stores/tasks'
-import { useProductTourStore } from '../../stores/productTour'
 
 const ChatPanelStub = defineComponent({
   name: 'ChatPanel',
@@ -53,12 +52,12 @@ describe('ChatLayout', () => {
       project_id: 'project-1',
       name: 'General',
       workspace: 'personal',
-    }] as any
+    }] as unknown as typeof store.projects
     store.chats = [{
       chat_id: 'chat-1',
       project_id: 'project-1',
       title: 'Test chat',
-    }] as any
+    }] as unknown as typeof store.chats
     store.activeChatId = 'chat-1'
     store.bootstrapped = true
     vi.spyOn(store, 'fetchAll').mockResolvedValue()
@@ -66,7 +65,6 @@ describe('ChatLayout', () => {
     const taskStore = useTaskStore()
     vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
     vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
-    vi.spyOn(useProductTourStore(), 'maybeAutoStart').mockResolvedValue()
 
     const { default: ChatLayout } = await import('../ChatLayout.vue')
     const wrapper = mount(ChatLayout, {
@@ -81,8 +79,6 @@ describe('ChatLayout', () => {
           FileViewerModal: EmptyStub,
           PinnedFilePanel: EmptyStub,
           PaneHeader: EmptyStub,
-          ProductTour: EmptyStub,
-          OnboardingCard: EmptyStub,
           HomeRecentChats: EmptyStub,
         },
       },

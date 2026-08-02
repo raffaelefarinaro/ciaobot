@@ -42,9 +42,9 @@ flowchart LR
   of an already-live MCP session surfaces through the CLI/tool-call error path
   and server logs rather than a strict-config launch failure (see the note on
   `strict_mcp_config` below).
-- Plan-mode chats cannot call mutating tools. Agent-handoff participants
-  are read-only. Tool results use stable `{ok,data}` / `{ok:false,error}`
-  envelopes, and inputs are validated again by the domain manager.
+- Plan-mode chats cannot call mutating tools. Tool results use stable
+  `{ok,data}` / `{ok:false,error}` envelopes, and inputs are validated again by
+  the domain manager.
 - A tool cannot stop its own active turn. Operations that would disconnect the
   caller—current-chat session reset/handover/archive/delete, restart, or package
   update—are queued until that chat is idle.
@@ -150,7 +150,7 @@ an in-place new session, `schedule_action`, `loop_action`).
 | Vault | `vault_search` |
 | Projects | `projects_list`, `project_get`, `project_create`, `project_update`, `project_complete`, `project_restore`, `project_delete`, `project_files_list` |
 | Chats | `chats_list`, `chat_get`, `chat_create`, `chat_update`, `chat_send`, `chat_continue`, `chat_retry`, `chat_handover`, `chat_fork`, `chat_archive`, `chat_delete`, `chat_stop` |
-| Agent handoffs | `handoffs_list`, `handoff_start`, `handoff_send`, `handoff_events`, `handoff_close`, `handoff_cancel`, `handoff_extend` |
+| Delegates | `delegate_spawn`, `delegates_list` |
 | Adversarial review | `adversarial_review` |
 | Schedules | `schedules_list`, `schedule_preview`, `schedule_create`, `schedule_update`, `schedule_action` |
 | Loops | `loops_list`, `loop_create`, `loop_update`, `loop_action` |
@@ -168,7 +168,7 @@ SDK's `allowed_tools` (see `AUTO_APPROVED_MCP_TOOLS` in
 app's own control plane: these are the programmatic twins of PWA buttons, scoped
 by bearer token, and visible/reversible in the UI. The `_DESTRUCTIVE` tools
 (`project_complete`, `project_delete`, `chat_delete`, `chat_stop`,
-`handoff_cancel`, `schedule_action`, `loop_action`) are deliberately excluded and
+`schedule_action`, `loop_action`) are deliberately excluded and
 still prompt. Plan mode gets no allowlist at all. `tests/test_mcp_server.py`
 fails if a new tool is added without placing it on one side of that line.
 

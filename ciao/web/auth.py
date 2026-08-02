@@ -32,12 +32,14 @@ _PUBLIC_API = {
 }
 
 # Endpoints usable without a session, but only from a process on this machine.
-# `/api/menubar-chats` is how the tray reads chat titles (it holds no cookie),
-# and `/api/node/handover` is the client-mode escape hatch offered on the login
-# screen, which by definition runs before any session exists. Both are gated on
-# the peer address rather than the Host header, which a caller controls.
+# `/api/menubar-chats` and `/api/menubar-notifications` are how the tray reads
+# chat titles and pending banners (it holds no cookie), and `/api/node/handover`
+# is the client-mode escape hatch offered on the login screen, which by
+# definition runs before any session exists. All are gated on the peer address
+# rather than the Host header, which a caller controls.
 _LOOPBACK_ONLY_API = {
     "/api/menubar-chats",
+    "/api/menubar-notifications",
     "/api/node/handover",
 }
 

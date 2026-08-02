@@ -20,9 +20,20 @@ Installing the fully qualified formula first grants Homebrew trust only to the
 Ciaobot engine; installing the fully qualified cask grants trust only to the
 desktop app. The cask then places `Ciaobot.app` in `/Applications`.
 
-The app is ad-hoc signed and not notarized. If macOS blocks the first launch,
-Control-click `Ciaobot.app`, choose **Open**, and confirm once. Do not disable
-Gatekeeper. First launch opens the setup wizard when no server is configured.
+The app is ad-hoc signed and not notarized, so macOS blocks the first launch
+with *"Apple could not verify Ciaobot is free of malware"*. Open `Ciaobot.app`
+once to trigger the block, then go to **System Settings → Privacy & Security**
+and scroll to **Security**:
+
+<img src="docs/gatekeeper-open-anyway.png" alt="System Settings, Privacy &amp; Security, Security section, with the Open Anyway button highlighted" width="620">
+
+Click **Open Anyway**, authenticate, then launch the app again and confirm
+**Open**. Two things worth knowing: Control-clicking the app and choosing
+**Open** does *not* clear this dialog — Apple removed that bypass in macOS 15 —
+and the **Open Anyway** button only appears for about an hour after a blocked
+launch, so re-trigger the block if you don't see it. You may need to repeat this
+after an app update or a macOS upgrade. Do not disable Gatekeeper. First launch
+opens the setup wizard when no server is configured.
 
 Already using the Homebrew engine from an earlier release? Move to the app
 without recreating your workspace:
@@ -34,6 +45,21 @@ brew upgrade ciaobot
 brew install --cask raffaelefarinaro/ciaobot/ciaobot-desktop
 open -a Ciaobot
 ```
+
+If a copy of `Ciaobot.app` is already in `/Applications` that Homebrew did not
+install — from the 0.6.0 DMG, say — the cask stops with `It seems there is
+already an App at '/Applications/Ciaobot.app'`. Quit Ciaobot and add `--force`
+so the cask adopts and replaces it; the bundle holds no user data, so your
+workspace, config, and desktop preferences survive:
+
+```bash
+brew install --cask --force raffaelefarinaro/ciaobot/ciaobot-desktop
+```
+
+Upgrade the engine in the same sitting. The engine and app ship from one tag and
+are meant to report the same version; a split between them surfaces as an opaque
+`Invalid desktop-service response`, because the app resolves the `ciao`
+executable from fixed Homebrew paths.
 
 The first app launch reuses the existing workspace and server LaunchAgent,
 disables the legacy menu-bar helper, and moves the old `Ciaobot Server.app` to
@@ -102,7 +128,7 @@ What that looks like in practice:
 - **Files and automations** — create, preview, edit, and restore vault files from the UI; run recurring routines on a cron you choose (schedules) or re-run a prompt inside one chat every N minutes (loops).
 - **Voice, notifications, and updates** — transcription, push alerts, model settings, and in-app package updates. On macOS, `Ciaobot.app` owns the window, menu bar, native notifications, and desktop updates while the engine runs as a background service.
 - **Provider choice** — Claude Code or Codex with your existing login; Ollama, OpenRouter, and on-device models for lighter tasks (see [Providers](#providers)).
-- **Agent-safe control plane** — an authenticated, chat-scoped MCP surface lets managed Claude Code and Codex processes operate Ciaobot memory, vault, projects, chats, schedules, loops, agent handoffs, and file history without curl or direct runtime-JSON edits. MCP is the default transport, with the legacy CLI path retained as an automatic fallback. Reads and non-destructive writes on this surface run without an approval card (they are the twins of buttons in the UI); deletes and lifecycle actions still ask. See [docs/MCP.md](docs/MCP.md).
+- **Agent-safe control plane** — an authenticated, chat-scoped MCP surface lets managed Claude Code and Codex processes operate Ciaobot memory, vault, projects, chats, delegates, schedules, loops, and file history without curl or direct runtime-JSON edits. MCP is the default transport, with the legacy CLI path retained as an automatic fallback. Reads and non-destructive writes on this surface run without an approval card (they are the twins of buttons in the UI); deletes and lifecycle actions still ask. See [docs/MCP.md](docs/MCP.md).
 
 Pick a workspace folder, choose a provider, and work — Ciaobot is the interface on top; the vault is yours to keep.
 
@@ -125,7 +151,7 @@ When your message mentions a name that appears in the vault index, the agent get
 - Comment on any passage of a reply — select text, attach a note, and it rides along with your next prompt; queue follow-ups while the agent is still working.
 - Per-chat model picker with provider thinking levels on top of per-workspace defaults.
 - Fork conversation: create a new independent chat in the same project starting from any completed agent answer, preserving history.
-- Agent handoffs: spawn and communicate with a second provider route (the participant) as a read-only sub-chat attached to the originating turn.
+- Delegates: a chat's agent spawns writable delegate chats (own model, own resumable session, full tool access) to work in parallel, and is woken with a fresh turn when each finishes. Capped at 6 per chat; delegates cannot nest.
 
 **Voice — dictation and read-aloud**
 
@@ -148,7 +174,7 @@ When your message mentions a name that appears in the vault index, the agent get
 
 **Automations**
 
-- Schedules: recurring or one-off cron routines that dispatch fresh prompts into a project or chat.
+- Schedules: recurring or one-off cron routines that dispatch fresh prompts into a project or chat. A schedule-triggered chat carries a banner with Run now / Manage controls, mirroring the loop banner; because a project schedule spawns a new chat each run, the chat holds a durable `schedule_id` backlink (stamped when the schedule creates it) so the banner survives later runs instead of only marking the latest chat.
 - Loops: re-run a prompt inside one chat every N minutes, keeping the conversation's context between iterations. A loop-driven chat is marked with `↻` in the sidebar and on the home grid, and carries a banner with start/stop controls; the harness's own `/schedule` and `/loop` skills are removed from the model's context and denied, so automations land in Ciaobot instead of a cloud routine it cannot see.
 - System routines ship enabled (memory curation, workspace hygiene, skill evolution); every background run is visible under **Settings → Automation**.
 
@@ -161,6 +187,7 @@ When your message mentions a name that appears in the vault index, the agent get
 **Providers and models**
 
 - Claude Code or OpenAI Codex with the subscription login you already have; Ollama (cloud or local) and OpenRouter as API backends.
+- Claude shell commands stay attached to the active turn until they return a result. Background subagents remain asynchronous and visible in the chat while they run.
 - haiku/sonnet/opus tier routing mapped across providers; background tasks (titles, insights) routable to cheaper or on-device models ([apfel](https://github.com/Arthur-Ficial/apfel)).
 
 **Google Workspace**
@@ -171,10 +198,7 @@ When your message mentions a name that appears in the vault index, the agent get
 
 - Installable PWA with web-push notifications and in-app package updates.
 - macOS desktop app: one Dock window and menu-bar companion with native notifications, updates, and a launchd-managed engine.
-- First-run product tour plus a getting-started checklist whose steps deep-link into the real pages.
 - A local HTTP API an in-chat agent can drive (create chats, subagents, commands — see [PWA_API.md](PWA_API.md)).
-
-On first launch, an in-app product tour walks through the core flows. Replay it anytime from **Settings → Home → Product tour**.
 
 ## What ships by default
 

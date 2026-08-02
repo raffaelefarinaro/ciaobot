@@ -171,7 +171,7 @@
                 class="btn-small"
                 type="button"
                 :disabled="loading"
-                @click="copyCommand(setupStatus.providers[provider].command)"
+                @click="copyCommand(setupStatus.providers[provider].command || '')"
               >
                 {{ copyStatus || 'Copy' }}
               </button>
@@ -377,7 +377,10 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useAuthStore } from '../stores/auth'
+import type { SetupStatus } from '../lib/types'
+import { errorMessage } from '../lib/errorMessage'
 import { api } from '../lib/api'
+import { askConfirm } from '../lib/confirm'
 
 const auth = useAuthStore()
 const token = ref('')
@@ -404,11 +407,13 @@ const loginTokenPlaceholder = computed(() =>
 
 async function switchBackToHost() {
   if (switchingToHost.value) return
-  if (
-    !confirm(
-      'Stop client mode and become host on this machine? Skips asking the remote to push (use this when the host is unreachable or you do not have the password).',
-    )
-  ) {
+  if (!await askConfirm(
+    'Stop client mode and become host on this machine? Skips asking the remote to push (use this when the host is unreachable or you do not have the password).',
+    {
+      title: 'Become host on this device?',
+      confirmLabel: 'Disconnect and become host',
+    },
+  )) {
     return
   }
   switchingToHost.value = true
@@ -419,8 +424,8 @@ async function switchBackToHost() {
       force: true,
     })
     window.location.assign('/')
-  } catch (e: any) {
-    error.value = e?.message || 'Failed to switch back to host'
+  } catch (e) {
+    error.value = errorMessage(e, 'Failed to switch back to host')
     switchingToHost.value = false
   }
 }
@@ -428,7 +433,7 @@ async function switchBackToHost() {
 // Setup Wizard states
 const isBootstrap = ref(false)
 const bootstrapLoading = ref(true)
-const setupStatus = ref<any>(null)
+const setupStatus = ref<SetupStatus | null>(null)
 const workspace = ref('~/ciaobot')
 const port = ref(8443)
 const python = ref('')
@@ -526,8 +531,8 @@ async function openPicker() {
       listing = await fetchListing()
     }
     applyPickerListing(listing)
-  } catch (e: any) {
-    pickerError.value = e.message || 'failed to list folder'
+  } catch (e) {
+    pickerError.value = errorMessage(e, 'failed to list folder')
   } finally {
     pickerLoading.value = false
   }
@@ -538,8 +543,8 @@ async function loadPickerDirs(path?: string) {
   pickerError.value = ''
   try {
     applyPickerListing(await fetchListing(path))
-  } catch (e: any) {
-    pickerError.value = e.message || 'failed to list folder'
+  } catch (e) {
+    pickerError.value = errorMessage(e, 'failed to list folder')
   } finally {
     pickerLoading.value = false
   }
@@ -557,8 +562,8 @@ async function createPickerFolder() {
     })
     applyPickerListing(listing)
     newFolderName.value = ''
-  } catch (e: any) {
-    pickerError.value = e.message || 'failed to create folder'
+  } catch (e) {
+    pickerError.value = errorMessage(e, 'failed to create folder')
   } finally {
     pickerLoading.value = false
   }
@@ -589,8 +594,8 @@ async function doLogin() {
   error.value = ''
   try {
     await auth.login(token.value)
-  } catch (e: any) {
-    error.value = e.message || 'login failed'
+  } catch (e) {
+    error.value = errorMessage(e, 'login failed')
   } finally {
     loading.value = false
   }
@@ -598,10 +603,10 @@ async function doLogin() {
 
 async function fetchSetupStatus() {
   try {
-    const status = await api.get<any>('/api/setup-status')
+    const status = await api.get<SetupStatus>('/api/setup-status')
     setupStatus.value = status
     isBootstrap.value = !!status.bootstrap
-  } catch (e) {
+  } catch {
     isBootstrap.value = false
   }
 }
@@ -661,24 +666,24 @@ async function doFinish() {
       clearInterval(pollInterval)
       pollInterval = null
     }
-  } catch (e: any) {
-    error.value = e.message || 'setup finish failed'
+  } catch (e) {
+    error.value = errorMessage(e, 'setup finish failed')
   } finally {
     loading.value = false
   }
 }
 
-let pollInterval: any = null
+let pollInterval: ReturnType<typeof setInterval> | null = null
 
 watch(isBootstrap, (newVal) => {
   if (newVal) {
     if (!pollInterval) {
       pollInterval = setInterval(async () => {
         try {
-          const status = await api.get<any>('/api/setup-status')
+          const status = await api.get<SetupStatus>('/api/setup-status')
           setupStatus.value = status
           isBootstrap.value = !!status.bootstrap
-        } catch (e) {
+        } catch {
           // ignore transient poll errors
         }
       }, 2000)

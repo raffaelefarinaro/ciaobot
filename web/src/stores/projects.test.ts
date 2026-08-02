@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
-import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { beforeEach, describe, expect, test, vi, type Mock } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
+import type { ProjectInfo, ChatInfo } from '../lib/types'
 import {
   shouldReconnectActiveChatOnStreamingStarted,
   chatWsReconnectDelayMs,
@@ -252,6 +253,26 @@ describe('per-chat WS auto-reconnect', () => {
   })
 })
 
+describe('deferred message sends', () => {
+  test('does not attach a deferred message image to a later send', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-deferred-attachment'
+    store.activeChatId = chatId
+    store.pendingImages = ['original-image.png']
+
+    // With no socket yet, the first send is deferred while connectWs opens one.
+    store.sendMessage(chatId, 'first message')
+    store.sendMessage(chatId, 'continue')
+
+    const sent = (fakeSockets[0].send as Mock).mock.calls
+      .map(([raw]) => JSON.parse(String(raw)))
+      .find(payload => payload.type === 'message' && payload.text === 'continue')
+
+    expect(sent).toMatchObject({ type: 'message', text: 'continue' })
+    expect(sent.images).toBeUndefined()
+  })
+})
+
 describe('client host connection failures', () => {
   test('recognizes the legacy proxy error', () => {
     expect(isHostConnectionUnavailableMessage(
@@ -402,6 +423,15 @@ describe('pinned file dismissal', () => {
     },
   }
 
+  const otherSurfacedEvent = {
+    ...surfacedEvent,
+    tool_use_id: 'surface-2',
+    file_touch: {
+      file_path: '/workspace/plan.md',
+      action: 'surfaced',
+    },
+  }
+
   test('keeps a user-closed pinned file closed when chat events replay', () => {
     Object.defineProperty(window, 'innerWidth', {
       value: 1200,
@@ -420,6 +450,39 @@ describe('pinned file dismissal', () => {
 
     fakeSockets[0].onmessage?.({ data: JSON.stringify(surfacedEvent) })
     expect(store.pinnedFileFor(chatId)).toBeUndefined()
+  })
+
+  test('surfaces a different file after one was dismissed', () => {
+    Object.defineProperty(window, 'innerWidth', {
+      value: 1200,
+      configurable: true,
+    })
+    const chatId = 'chat-pinned-next-artifact'
+    const store = useProjectStore()
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+
+    fakeSockets[0].onmessage?.({ data: JSON.stringify(surfacedEvent) })
+    store.unpinFile(chatId)
+
+    // A new deliverable is not the file the user closed, so it must open.
+    fakeSockets[0].onmessage?.({ data: JSON.stringify(otherSurfacedEvent) })
+    expect(store.pinnedFileFor(chatId)).toBe('/workspace/plan.md')
+  })
+
+  test('an explicit surface replaces whatever is already pinned', () => {
+    Object.defineProperty(window, 'innerWidth', {
+      value: 1200,
+      configurable: true,
+    })
+    const chatId = 'chat-pinned-replace'
+    const store = useProjectStore()
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+
+    store.pinFile(chatId, '/workspace/report.md')
+    fakeSockets[0].onmessage?.({ data: JSON.stringify(otherSurfacedEvent) })
+    expect(store.pinnedFileFor(chatId)).toBe('/workspace/plan.md')
   })
 
   test('persists the dismissal across store recreation until the user pins a file', () => {
@@ -443,6 +506,24 @@ describe('pinned file dismissal', () => {
 
     reopenedStore.pinFile(chatId, '/workspace/report.md')
     expect(reopenedStore.pinnedFileFor(chatId)).toBe('/workspace/report.md')
+  })
+
+  test('drops a legacy chat-wide dismissal so later surfaces still open', () => {
+    Object.defineProperty(window, 'innerWidth', {
+      value: 1200,
+      configurable: true,
+    })
+    const chatId = 'chat-pinned-legacy'
+    // Written before the store is created: restoreState() runs on setup.
+    localStorage.setItem('ciao-dismissed-auto-pins', JSON.stringify({ [chatId]: true }))
+
+    setActivePinia(createPinia())
+    const store = useProjectStore()
+    store.activeChatId = chatId
+    store.connectWs(chatId)
+
+    fakeSockets[fakeSockets.length - 1].onmessage?.({ data: JSON.stringify(surfacedEvent) })
+    expect(store.pinnedFileFor(chatId)).toBe('/workspace/report.md')
   })
 })
 
@@ -1683,7 +1764,7 @@ describe('workspace and chat transitions', () => {
     expect(apiPost).toHaveBeenCalledWith('/api/projects/pg/chats', { title: 'Fix error' })
 
     // The fix prompt (with the error log + approval-gated GitHub-issue fallback) was sent over the WS.
-    const sent = fakeSockets.flatMap(s => (s.send as any).mock.calls.map((c: any[]) => String(c[0])))
+    const sent = fakeSockets.flatMap(s => (s.send as Mock).mock.calls.map((c: unknown[]) => String(c[0])))
     const fixMsg = sent.find(m => m.includes('Error: boom'))
     expect(fixMsg).toBeTruthy()
     expect(fixMsg).toContain('ask for my approval')
@@ -1757,96 +1838,6 @@ describe('conversation forks', () => {
   })
 })
 
-describe('provider sub-chats', () => {
-  test('loads provider sub-chats and events', async () => {
-    const store = useProjectStore()
-    const chatId = 'parent-chat-1'
-    const subchatId = 'sub-chat-1'
-
-    const records = [{ subchat_id: subchatId, parent_chat_id: chatId, status: 'created' }]
-    const events = [{ type: 'message', role: 'owner', content: 'test' }]
-
-    apiGet.mockImplementation((path: string) => {
-      if (path === `/api/chats/${chatId}/provider-subchats`) {
-        return Promise.resolve(records)
-      }
-      if (path === `/api/provider-subchats/${subchatId}/events`) {
-        return Promise.resolve(events)
-      }
-      return Promise.resolve([])
-    })
-
-    await store.loadProviderSubchats(chatId)
-    expect(store.providerSubchats[chatId]).toEqual(records)
-
-    await store.loadProviderSubchatEvents(subchatId)
-    expect(store.providerSubchatEvents[subchatId]).toEqual(events)
-  })
-})
-
-describe('promoteStreamingThinkingToAnswer', () => {
-  // Recovery path for Ollama-routed models (glm-5.2, minimax-m3, kimi-k2.7)
-  // that wrap their final answer in a thinking content block. The text
-  // stream stays empty, so the live trace keeps showing "Thinking..." and
-  // the reply is buried in the reasoning buffer. The PWA exposes a
-  // "Show reply as text" affordance that promotes the thinking buffer
-  // into a real assistant bubble.
-
-  test('promotes non-empty thinking buffer to an assistant bubble with final_answer phase', () => {
-    apiGet.mockResolvedValue([])
-    const store = useProjectStore()
-    const chatId = 'c-thinking-promote'
-    store.activeChatId = chatId
-    store.messages[chatId] = [
-      { role: 'user', content: 'why is the deploy live?', timestamp: '2026-07-21T08:00:00Z' },
-    ]
-    // Simulate the live trace state: thinking buffer has the model's
-    // actual reply, text stream is empty (because the upstream wrapped it
-    // in a thinking block).
-    store.streaming[chatId] = true
-    // The store doesn't expose the raw streamingThinking map publicly, so
-    // reach the same internal state via the public API: dispatch a thinking
-    // event over WS so the store populates the buffer for us.
-    store.connectWs(chatId)
-    fakeSockets[0].onmessage?.({
-      data: JSON.stringify({ type: 'thinking', text: 'Good news: the server restarted at 08:00 UTC today, so the deploy is live.' }),
-    })
-    fakeSockets[0].onmessage?.({
-      data: JSON.stringify({ type: 'thinking', text: ' You can verify with `/context` in a new chat.' }),
-    })
-
-    expect(store.currentStreamingThinking).toContain('Good news: the server restarted')
-
-    store.promoteStreamingThinkingToAnswer(chatId)
-
-    const msgs = store.messages[chatId] || []
-    const promoted = msgs.find(m => m.role === 'assistant' && m.phase === 'final_answer')
-    expect(promoted).toBeDefined()
-    expect(promoted?.content).toContain('Good news: the server restarted')
-    expect(promoted?.content).toContain('/context')
-    expect(promoted?.promoted_from_thinking).toBe(true)
-
-    // The live buffer must clear so the affordance hides itself and the
-    // thinking text doesn't get re-painted under the new bubble.
-    expect(store.currentStreamingThinking).toBe('')
-  })
-
-  test('is a no-op when the thinking buffer is empty', () => {
-    apiGet.mockResolvedValue([])
-    const store = useProjectStore()
-    const chatId = 'c-thinking-empty'
-    store.activeChatId = chatId
-    store.messages[chatId] = [
-      { role: 'user', content: 'hi', timestamp: '2026-07-21T08:00:00Z' },
-    ]
-
-    store.promoteStreamingThinkingToAnswer(chatId)
-
-    const msgs = store.messages[chatId] || []
-    expect(msgs.some(m => m.role === 'assistant')).toBe(false)
-  })
-})
-
 describe('switchChat workspace alignment', () => {
   test('automatically switches activeWorkspace to match target chat workspace', async () => {
     apiGet.mockImplementation((url: string) => {
@@ -1857,17 +1848,88 @@ describe('switchChat workspace alignment', () => {
     const store = useProjectStore()
     store.activeWorkspace = 'personal'
     store.projects = [
-      { project_id: 'p-personal', name: 'Personal Proj', workspace: 'personal' } as any,
-      { project_id: 'p-work', name: 'Work Proj', workspace: 'work' } as any,
+      { project_id: 'p-personal', name: 'Personal Proj', workspace: 'personal' } as unknown as ProjectInfo,
+      { project_id: 'p-work', name: 'Work Proj', workspace: 'work' } as unknown as ProjectInfo,
     ]
     store.chats = [
-      { chat_id: 'c-personal', project_id: 'p-personal', title: 'Personal Chat' } as any,
-      { chat_id: 'c-work', project_id: 'p-work', title: 'Work Chat' } as any,
+      { chat_id: 'c-personal', project_id: 'p-personal', title: 'Personal Chat' } as unknown as ChatInfo,
+      { chat_id: 'c-work', project_id: 'p-work', title: 'Work Chat' } as unknown as ChatInfo,
     ]
 
     await store.switchChat('c-work')
 
     expect(store.activeWorkspace).toBe('work')
     expect(store.activeChatId).toBe('c-work')
+  })
+})
+
+describe('projectChatRows (delegate grouping)', () => {
+  function seed(store: ReturnType<typeof useProjectStore>, chats: Partial<ChatInfo>[]) {
+    store.projects = [
+      { project_id: 'p1', name: 'Proj', workspace: 'personal' } as unknown as ProjectInfo,
+    ]
+    store.chats = chats.map((c, i) => ({
+      project_id: 'p1',
+      title: c.chat_id,
+      archived: false,
+      created_at: `2026-07-31T00:0${i}:00Z`,
+      ...c,
+    })) as unknown as ChatInfo[]
+  }
+
+  test('delegates follow their supervisor and are marked', () => {
+    const store = useProjectStore()
+    seed(store, [
+      { chat_id: 'boss' },
+      { chat_id: 'other' },
+      { chat_id: 'd1', spawned_from_chat_id: 'boss' },
+      { chat_id: 'd2', spawned_from_chat_id: 'boss' },
+    ])
+
+    const rows = store.projectChatRows('p1')
+
+    expect(rows.map(r => r.chat.chat_id)).toEqual(['boss', 'd1', 'd2', 'other'])
+    expect(rows.map(r => r.isDelegate)).toEqual([false, true, true, false])
+  })
+
+  test('an orphaned delegate stays top-level instead of disappearing', () => {
+    const store = useProjectStore()
+    // Supervisor archived, so it is not in the visible list at all.
+    seed(store, [
+      { chat_id: 'boss', archived: true },
+      { chat_id: 'orphan', spawned_from_chat_id: 'boss' },
+    ])
+
+    const rows = store.projectChatRows('p1')
+
+    expect(rows.map(r => r.chat.chat_id)).toEqual(['orphan'])
+    expect(rows[0].isDelegate).toBe(false)
+  })
+
+  test('a delegate whose supervisor lives in another project is not hidden', () => {
+    const store = useProjectStore()
+    seed(store, [{ chat_id: 'orphan', spawned_from_chat_id: 'boss-elsewhere' }])
+    store.chats = [
+      ...store.chats,
+      {
+        chat_id: 'boss-elsewhere',
+        project_id: 'p2',
+        title: 'Boss',
+        archived: false,
+        created_at: '2026-07-31T00:00:00Z',
+      } as unknown as ChatInfo,
+    ]
+
+    expect(store.projectChatRows('p1').map(r => r.chat.chat_id)).toEqual(['orphan'])
+  })
+
+  test('chats with no delegates produce a plain flat list', () => {
+    const store = useProjectStore()
+    seed(store, [{ chat_id: 'a' }, { chat_id: 'b' }])
+
+    const rows = store.projectChatRows('p1')
+
+    expect(rows.map(r => r.chat.chat_id)).toEqual(['a', 'b'])
+    expect(rows.every(r => !r.isDelegate)).toBe(true)
   })
 })

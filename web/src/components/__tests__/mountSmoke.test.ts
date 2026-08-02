@@ -447,23 +447,6 @@ describe('component mount smoke', () => {
     expect(errors).toEqual([])
   })
 
-  it('ProductTour mounts without throwing', async () => {
-    const router = makeRouter()
-    await router.push('/')
-    await router.isReady()
-    const pinia = createPinia()
-    setActivePinia(pinia)
-    const mod = await import('../ProductTour.vue')
-    const wrapper = mount(mod.default as never, {
-      global: {
-        plugins: [pinia, router],
-        stubs: { Teleport: true },
-      },
-    })
-    await flushPromises()
-    wrapper.unmount()
-  })
-
   it('ChatLayout empty chat view still renders the pane header controls', async () => {
     const router = makeRouter()
     await router.push('/')
@@ -576,21 +559,6 @@ describe('component mount smoke', () => {
     expect(runtimeRow!.text()).toContain('Project document:')
     expect(runtimeRow!.text()).toContain('README.md or canonical document')
     expect(runtimeRow!.text()).not.toContain('<ciao-runtime>')
-    wrapper.unmount()
-  })
-
-  it('OnboardingCard mounts and lists open items', async () => {
-    const router = makeRouter()
-    await router.push('/')
-    await router.isReady()
-    const mod = await import('../OnboardingCard.vue')
-    const wrapper = mount(mod.default as never, {
-      global: { plugins: [router] },
-    })
-    await flushPromises()
-    // Fresh mocked state: nothing completed, checklist visible with all items.
-    expect(wrapper.text()).toContain('getting started')
-    expect(wrapper.findAll('.onboarding-row').length).toBeGreaterThanOrEqual(5)
     wrapper.unmount()
   })
 

@@ -59,6 +59,9 @@ class AppSettings:
     codex_sonnet_model: str = ""
     codex_opus_model: str = ""
     codex_fable_model: str = ""
+    # Per-custom-provider tier routes. Keys are provider ids and values map
+    # haiku/sonnet/opus/fable to concrete ``custom:<id>:<model>`` ids.
+    custom_routing: dict[str, dict[str, str]] | None = None
 
 
 class AppSettingsStore:
@@ -85,6 +88,18 @@ class AppSettingsStore:
             for k, v in raw.items()
             if k in known and isinstance(v, str)
         }
+        custom_routing = raw.get("custom_routing")
+        if isinstance(custom_routing, dict):
+            cleaned["custom_routing"] = {
+                str(provider_id): {
+                    str(tier): str(model).strip()
+                    for tier, model in routes.items()
+                    if str(tier) in {"haiku", "sonnet", "opus", "fable"}
+                    and isinstance(model, str) and model.strip()
+                }
+                for provider_id, routes in custom_routing.items()
+                if isinstance(routes, dict)
+            }
         return AppSettings(**cleaned)
 
     def _save(self) -> None:
@@ -94,7 +109,7 @@ class AppSettingsStore:
             json.dumps(payload, indent=2) + "\n", encoding="utf-8"
         )
 
-    def update(self, changes: dict[str, str]) -> AppSettings:
+    def update(self, changes: dict[str, object]) -> AppSettings:
         """Validate and persist a partial update; returns the new settings.
 
         Unknown keys are ignored. Raises ``ValueError`` on a bad engine
@@ -103,6 +118,21 @@ class AppSettingsStore:
         known = {f.name for f in fields(AppSettings)}
         for key, value in changes.items():
             if key not in known:
+                continue
+            if key == "custom_routing":
+                if not isinstance(value, dict):
+                    raise ValueError("custom_routing must be an object")
+                cleaned_routes: dict[str, dict[str, str]] = {}
+                for provider_id, routes in value.items():
+                    if not isinstance(routes, dict):
+                        raise ValueError("custom_routing entries must be objects")
+                    cleaned_routes[str(provider_id)] = {
+                        str(tier): str(model).strip()
+                        for tier, model in routes.items()
+                        if str(tier) in {"haiku", "sonnet", "opus", "fable"}
+                        and isinstance(model, str) and model.strip()
+                    }
+                setattr(self.settings, key, cleaned_routes)
                 continue
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
@@ -191,3 +221,4 @@ class AppSettingsStore:
             opus_model=s.codex_opus_model or d["codex_opus_model"],
             fable_model=s.codex_fable_model or d["codex_fable_model"],
         )
+        config.custom_routing = s.custom_routing or {}

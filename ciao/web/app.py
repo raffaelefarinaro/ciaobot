@@ -51,15 +51,6 @@ from ciao.web.routes_api import (
     chat_detail,
     chat_fork,
     chat_handover,
-    chat_provider_subchats_list,
-    chat_provider_subchats_create,
-    provider_subchat_events,
-    provider_subchat_message,
-    provider_subchat_close,
-    provider_subchat_cancel,
-    provider_subchat_extend,
-    provider_subchat_permission_response,
-    provider_subchat_question_response,
     chat_images,
     chat_mark_read,
     chat_messages,
@@ -85,6 +76,7 @@ from ciao.web.routes_api import (
     local_preflight,
     local_resync,
     local_status,
+    node_connected_clients_endpoint,
     node_demote_endpoint,
     node_handover_endpoint,
     node_connect_endpoint,
@@ -104,6 +96,7 @@ from ciao.web.routes_api import (
     gws_relogin_cancel,
     provider_connection_action,
     provider_config_settings,
+    custom_provider_probe,
     settings_routines,
     setup_finish_endpoint,
     setup_inspect_folder_endpoint,
@@ -154,6 +147,7 @@ from ciao.web.routes_api import (
 )
 from ciao.web.routes_chat import ws_chat, ws_events
 from ciao.web.routes_push import (
+    push_notification_feed,
     push_public_key,
     push_status,
     push_subscribe,
@@ -237,15 +231,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/chats/{chat_id}/new", chat_new_session, methods=["POST"]),
         Route("/api/chats/{chat_id}/handover", chat_handover, methods=["POST"]),
         Route("/api/chats/{chat_id}/fork", chat_fork, methods=["POST"]),
-        Route("/api/chats/{chat_id}/provider-subchats", chat_provider_subchats_list, methods=["GET"]),
-        Route("/api/chats/{chat_id}/provider-subchats", chat_provider_subchats_create, methods=["POST"]),
-        Route("/api/provider-subchats/{subchat_id}/events", provider_subchat_events, methods=["GET"]),
-        Route("/api/provider-subchats/{subchat_id}/messages", provider_subchat_message, methods=["POST"]),
-        Route("/api/provider-subchats/{subchat_id}/close", provider_subchat_close, methods=["POST"]),
-        Route("/api/provider-subchats/{subchat_id}/cancel", provider_subchat_cancel, methods=["POST"]),
-        Route("/api/provider-subchats/{subchat_id}/extend", provider_subchat_extend, methods=["POST"]),
-        Route("/api/provider-subchats/{subchat_id}/permission-response", provider_subchat_permission_response, methods=["POST"]),
-        Route("/api/provider-subchats/{subchat_id}/question-response", provider_subchat_question_response, methods=["POST"]),
         Route("/api/chats/{chat_id}/archive", chat_archive, methods=["POST"]),
         Route("/api/chats/{chat_id}/continue", chat_continue, methods=["POST"]),
         Route("/api/chats/{chat_id}/read", chat_mark_read, methods=["POST"]),
@@ -307,6 +292,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/models", list_models, methods=["GET"]),
         Route("/api/settings/routines", settings_routines, methods=["GET", "PATCH"]),
         Route("/api/settings/providers", provider_config_settings, methods=["GET", "PATCH"]),
+        Route("/api/settings/providers/custom/probe", custom_provider_probe, methods=["POST"]),
         Route(
             "/api/settings/providers/{provider}/{action}",
             provider_connection_action,
@@ -331,6 +317,12 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/package/status", package_status_endpoint, methods=["GET"]),
         Route("/api/package/changelog", package_changelog_endpoint, methods=["GET"]),
         Route("/api/package/update", package_update_endpoint, methods=["POST"]),
+        # Device-scoped copies of the package routes. In client mode /api/package/*
+        # is tunneled (it reports and updates the host), so the Device panel needs
+        # its own never-proxied path to see and update *this* machine's install.
+        Route("/api/device/package-status", package_status_endpoint, methods=["GET"]),
+        Route("/api/device/changelog", package_changelog_endpoint, methods=["GET"]),
+        Route("/api/device/update", package_update_endpoint, methods=["POST"]),
         Route("/api/voice/install-local", voice_install_local_endpoint, methods=["POST"]),
         Route("/api/tts/install-local", tts_install_local_endpoint, methods=["POST"]),
         # Node & Handover (Multi-device Active-Standby)
@@ -339,6 +331,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/node/handover", node_handover_endpoint, methods=["POST"]),
         Route("/api/node/demote", node_demote_endpoint, methods=["POST"]),
         Route("/api/node/peers", node_peers_endpoint, methods=["POST"]),
+        Route("/api/node/connected-clients", node_connected_clients_endpoint, methods=["GET"]),
         Route("/api/setup/finish", setup_finish_endpoint, methods=["POST"]),
         Route("/api/setup/list-dirs", setup_list_dirs_endpoint, methods=["GET"]),
         Route("/api/setup/inspect-folder", setup_inspect_folder_endpoint, methods=["GET"]),
@@ -356,6 +349,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/push/unsubscribe", push_unsubscribe, methods=["POST"]),
         Route("/api/push/status", push_status, methods=["GET"]),
         Route("/api/push/subscription", push_subscription_check, methods=["GET"]),
+        Route("/api/menubar-notifications", push_notification_feed, methods=["GET"]),
         # Per-device working-branch flow: commit-to-main + agent-merged handover
         Route("/api/local/status", local_status, methods=["GET"]),
         Route("/api/local/preflight", local_preflight, methods=["GET"]),

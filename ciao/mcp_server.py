@@ -237,7 +237,7 @@ class McpSessionRegistry:
     def __init__(self, ttl_seconds: int = 12 * 60 * 60) -> None:
         self._ttl_seconds = max(60, int(ttl_seconds))
         self._by_token: dict[str, _Session] = {}
-        self._by_key: dict[tuple[str, str, str], str] = {}
+        self._by_key: dict[tuple[str, str], str] = {}
         self._lock = threading.RLock()
 
     def issue(
@@ -247,10 +247,8 @@ class McpSessionRegistry:
         project_id: str,
         workspace: str,
         provider: str,
-        role: str = "chat",
-        handoff_depth: int = 0,
     ) -> tuple[str, McpPrincipal]:
-        key = (chat_id, provider, role)
+        key = (chat_id, provider)
         now = int(time.time())
         with self._lock:
             existing_token = self._by_key.get(key)
@@ -262,7 +260,6 @@ class McpSessionRegistry:
                 if (
                     prior.project_id == project_id
                     and prior.workspace == workspace
-                    and prior.handoff_depth == handoff_depth
                 ):
                     return existing.token, existing.principal
                 # revoke() owns the _by_token/_by_key pairing; the lock is an
@@ -275,8 +272,6 @@ class McpSessionRegistry:
                 project_id=project_id,
                 workspace=workspace,
                 provider=provider,
-                role=role,  # type: ignore[arg-type]
-                handoff_depth=handoff_depth,
             )
             session = _Session(
                 principal=principal,
@@ -292,7 +287,7 @@ class McpSessionRegistry:
             doomed = [token for token, item in self._by_token.items() if item.principal.chat_id == chat_id]
             for token in doomed:
                 item = self._by_token.pop(token)
-                self._by_key.pop((item.principal.chat_id, item.principal.provider, item.principal.role), None)
+                self._by_key.pop((item.principal.chat_id, item.principal.provider), None)
             return len(doomed)
 
     def revoke(self, token: str) -> bool:
@@ -300,7 +295,7 @@ class McpSessionRegistry:
             item = self._by_token.pop(token, None)
             if item is None:
                 return False
-            self._by_key.pop((item.principal.chat_id, item.principal.provider, item.principal.role), None)
+            self._by_key.pop((item.principal.chat_id, item.principal.provider), None)
             return True
 
     async def verify_token(self, token: str) -> AccessToken | None:
@@ -374,14 +369,12 @@ class CiaoMcpService:
         # Starlette's Mount canonicalizes the inner root to a trailing slash.
         return f"http://127.0.0.1:{int(self.config.pwa_port)}/mcp/"
 
-    def credentials_for_chat(self, chat: Any, project: Any, *, role: str = "chat") -> tuple[str, str]:
+    def credentials_for_chat(self, chat: Any, project: Any) -> tuple[str, str]:
         token, _principal = self.registry.issue(
             chat_id=chat.chat_id,
             project_id=chat.project_id,
             workspace=project.workspace,
             provider=chat.provider,
-            role=role,
-            handoff_depth=1 if role == "handoff" else 0,
         )
         return self.url, token
 
@@ -887,11 +880,6 @@ class CiaoMcpService:
             if self.control_plane is None:
                 raise ControlPlaneError("unavailable", "Ciaobot control plane is not ready.", retryable=True)
             principal = self._principal()
-            if mutating and principal.role == "handoff":
-                raise ControlPlaneError(
-                    "handoff_read_only",
-                    "Agent handoff participants have read-only Ciaobot access.",
-                )
             if mutating and self.control_plane.chat_mode(principal) == "plan":
                 raise ControlPlaneError("plan_mode_read_only", "Mutating Ciaobot tools are disabled in plan mode.")
             value = operation(self.control_plane, principal)
@@ -1243,100 +1231,72 @@ class CiaoMcpService:
                 "chat_stop", lambda cp, p: cp.chat_stop(p, chat_id), mutating=True
             )
 
-        @tool(name="handoffs_list", annotations=_READ, structured_output=True)
-        async def handoffs_list(chat_id: str = "") -> dict[str, Any]:
-            """List agent handoffs (cross-provider sub-chats) attached to a chat."""
-            return await self._invoke(
-                "handoffs_list", lambda cp, p: cp.handoffs_list(p, chat_id)
-            )
-
-        @tool(name="handoff_start", annotations=_WRITE, structured_output=True)
-        async def handoff_start(
-            provider: str,
-            model: str,
-            message: str,
-            chat_id: str = "",
-            model_bucket: str = "",
-            user_authorized: bool = False,
+        @tool(name="delegate_spawn", annotations=_WRITE, structured_output=True)
+        async def delegate_spawn(
+            prompt: str,
+            title: str = "",
+            provider: str | None = None,
+            model: str | None = None,
+            model_bucket: str | None = None,
+            mode: str | None = None,
+            delegation_id: str = "",
+            project_id: str | None = None,
         ) -> dict[str, Any]:
-            """Start a bounded handoff to another provider/model and return its first reply.
+            """Spawn a delegate chat to do real work, and get woken when it finishes.
 
-            Spawns a read-only sub-chat (the participant) attached to this turn.
-            Start one only after the user explicitly asks to consult, hand off to,
-            delegate to, or route work to another model or provider — never
-            unsolicited. You are the sole conduit: the user cannot write directly
-            into the participant, and a participant cannot itself start a nested
-            handoff. Never search for or invoke a provider binary (like `codex` or
-            `ollama`) directly — this tool is the only supported path for
-            cross-provider delegation. If the participant asks a clarifying
-            question that needs the user's input, relay it through this chat,
-            then send the answer back via handoff_send.
+            A delegate is a normal Ciaobot chat with full tool access (edit,
+            bash, git) running on the model you pick. This call does NOT block:
+            it returns as soon as the delegate starts. End your turn after
+            spawning — say what you dispatched and that you will report back.
+            Do not poll. When the delegate finishes, Ciaobot sends you a fresh
+            turn summarizing it, and you review then.
+
+            Use this for work that takes a while and produces artifacts: fixing
+            issues, migrations, parallel investigations. For a quick second
+            opinion inside the current turn, use adversarial_review instead,
+            which returns inline.
+
+            When several delegates will touch the same repo, give each one an
+            isolated git worktree and state that path in its prompt, or they
+            will fight over the same checkout.
+
+            Args:
+                prompt: The delegate's full brief. It cannot see this chat, so
+                    include everything: goal, repo path, constraints, and what
+                    "done" means.
+                title: Short sidebar label, e.g. "Fix #238 NSIRD drop".
+                model: Model for the delegate, e.g. a cheaper or specialized
+                    one. Omit to inherit the workspace default.
+                delegation_id: Shared tag for delegates dispatched as one
+                    batch, so their completion reports group together.
             """
             return await self._invoke(
-                "handoff_start",
-                lambda cp, p: cp.handoff_start(
+                "delegate_spawn",
+                lambda cp, p: cp.delegate_spawn(
                     p,
+                    prompt=prompt,
+                    title=title,
                     provider=provider,
                     model=model,
-                    message=message,
-                    chat_id=chat_id,
                     model_bucket=model_bucket,
-                    user_authorized=user_authorized,
+                    mode=mode,
+                    delegation_id=delegation_id,
+                    project_id=project_id,
                 ),
                 mutating=True,
             )
 
-        @tool(name="handoff_send", annotations=_WRITE, structured_output=True)
-        async def handoff_send(
-            subchat_id: str,
-            message: str,
-            user_authorized: bool = False,
-        ) -> dict[str, Any]:
-            """Send a follow-up message to an active handoff."""
-            return await self._invoke(
-                "handoff_send",
-                lambda cp, p: cp.handoff_send(
-                    p, subchat_id, message, user_authorized=user_authorized
-                ),
-                mutating=True,
-            )
+        @tool(name="delegates_list", annotations=_READ, structured_output=True)
+        async def delegates_list(chat_id: str = "") -> dict[str, Any]:
+            """List delegates spawned by a chat and which are still running.
 
-        @tool(name="handoff_events", annotations=_READ, structured_output=True)
-        async def handoff_events(subchat_id: str) -> dict[str, Any]:
-            """Read the event transcript for a handoff."""
+            To read a delegate's real transcript, take its session_id from
+            chat_get and read that provider session's JSONL — chat_get itself
+            returns metadata only, never messages. Stop a runaway delegate with
+            chat_stop.
+            """
             return await self._invoke(
-                "handoff_events", lambda cp, p: cp.handoff_events(p, subchat_id)
-            )
-
-        @tool(name="handoff_close", annotations=_WRITE, structured_output=True)
-        async def handoff_close(subchat_id: str) -> dict[str, Any]:
-            """Close a handoff once it has successfully finished and you have
-            enough information — don't leave it open once you're done with it."""
-            return await self._invoke(
-                "handoff_close", lambda cp, p: cp.handoff_close(p, subchat_id), mutating=True
-            )
-
-        @tool(name="handoff_cancel", annotations=_DESTRUCTIVE, structured_output=True)
-        async def handoff_cancel(subchat_id: str) -> dict[str, Any]:
-            """Abort active work in a handoff."""
-            return await self._invoke(
-                "handoff_cancel", lambda cp, p: cp.handoff_cancel(p, subchat_id), mutating=True
-            )
-
-        @tool(name="handoff_extend", annotations=_WRITE, structured_output=True)
-        async def handoff_extend(
-            subchat_id: str,
-            user_authorized: bool = False,
-        ) -> dict[str, Any]:
-            """Extend a handoff past its message/time limit (12 messages / 30
-            minutes) — call this only after explicitly asking the user for
-            authorization; never pass user_authorized=True on your own judgment."""
-            return await self._invoke(
-                "handoff_extend",
-                lambda cp, p: cp.handoff_extend(
-                    p, subchat_id, user_authorized=user_authorized
-                ),
-                mutating=True,
+                "delegates_list", lambda cp, p: cp.delegates_list(p, chat_id)
             )
 
         @tool(name="schedules_list", annotations=_READ, structured_output=True)
@@ -1595,10 +1555,20 @@ class CiaoMcpService:
         async def file_surface(path: str) -> dict[str, Any]:
             """Deliberately open a workspace file in the user's pinned preview panel.
 
-            Use this to show the user a file you produced or want to highlight —
-            even one you only read, or one a subagent wrote — instead of relying on
+            Use this to show the user a file you produced or want to highlight,
+            even one you only read, or one a subagent wrote, instead of relying on
             them to notice it. Ordinary Write/Edit calls no longer auto-open the
-            panel; call this when a file is worth surfacing."""
+            panel; call this when a file is worth surfacing.
+
+            The pin happens in the browser: this call only validates the path and
+            reports two independent signals. ``viewers`` is how many open chat
+            sockets are watching this chat right now; it can be 0 right after a
+            successful pin, and nonzero even when the panel did not open.
+            ``stream_state`` is "active" or "none" and says whether a turn is
+            currently streaming for this chat, nothing about the panel. Never
+            read either field as proof the panel opened or failed to open: say
+            you called file_surface, and if the user reports nothing happened,
+            do not claim you already confirmed it failed."""
             return await self._invoke("file_surface", lambda cp, p: cp.file_surface(p, path))
 
         # File history/snapshot/restore are covered by the workspace git repo.

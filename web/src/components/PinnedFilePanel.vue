@@ -278,7 +278,7 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useProjectStore } from '../stores/projects'
-import { parseFrontmatter, type FrontmatterValue } from '../lib/markdownFrontmatter'
+import { parseFrontmatter } from '../lib/markdownFrontmatter'
 import { renderFileMarkdown } from '../lib/safeMarkdown'
 import { buildMarkdownIndex, resolveWikilinkTarget } from '../lib/wikilinks'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
@@ -418,8 +418,9 @@ const renderedMarkdown = computed(() => {
 // ── Metadata card (parsed frontmatter) ───────────────────────────────
 // Surface the most useful fields as pills; prose fields (description, etc.)
 // read as a summary; list fields (aliases, related) as compact chips.
-const fmTitle = computed(() => fmString('title'))
-const fmName = computed(() => fmString('name'))
+// `title` is the canonical human label in the vault schema; `name` is the
+// retired synonym still present on older pages. Prefer title, fall back.
+const fmName = computed(() => fmString('title') || fmString('name'))
 const fmType = computed(() => fmString('type'))
 const fmStatus = computed(() => fmString('status'))
 const fmTags = computed(() => fmList('tags'))
@@ -507,9 +508,6 @@ function fmList(key: string): string[] {
   return Array.isArray(v) ? v : [String(v)]
 }
 
-// Suppress unused-symbol warning when this file is imported in environments
-// where FrontmatterValue isn't referenced as a runtime type.
-type _Frontmatter = FrontmatterValue
 
 const contentLines = computed(() => {
   const text = bodyOnly.value
@@ -784,10 +782,6 @@ function commentLineLabel(c: {
   return formatCommentLocation(c)
 }
 
-function truncate(s: string, n: number): string {
-  if (!s) return ''
-  return s.length > n ? s.slice(0, n - 1) + '…' : s
-}
 
 // Highlight rendering inside the rendered markdown body. We strip-and-
 // reapply on every comment list change so deleting a comment removes the
@@ -852,7 +846,9 @@ function highlightInMarkdown(root: HTMLElement, selection: string, commentId: st
     if (!slice.trim()) continue  // Skip whitespace-only gaps
 
     try {
-      const after = textNode.splitText(localEnd)
+      // splitText mutates the tree, which is the point; the tail node itself
+      // is not needed here.
+      textNode.splitText(localEnd)
       const mid = textNode.splitText(localStart)
       const span = document.createElement('span')
       span.className = 'comment-highlight'
@@ -1359,18 +1355,6 @@ function removeEditImage(index: number): void {
   editingCommentImages.value.splice(index, 1)
 }
 
-function onEditKeydown(e: KeyboardEvent): void {
-  if (e.key === 'Escape') {
-    e.preventDefault()
-    cancelEditComment()
-    return
-  }
-  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-    e.preventDefault()
-    const id = editingCommentId.value
-    if (id) saveEditComment(id)
-  }
-}
 
 function onJumpPinnedCommentEvent(e: Event): void {
   const customEv = e as CustomEvent<{ id?: string; line?: number | null }>

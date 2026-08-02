@@ -323,7 +323,15 @@ async def extract_and_append(
             return
 
         env: dict[str, str]
-        if provider == "codex":
+        from ciao.custom_providers import env_for_model as custom_env_for_model
+        from ciao.custom_providers import provider_for_model, runtime_model
+        custom = provider_for_model(config, model)
+        if custom is not None:
+            provider = custom.runner
+            effective_model = runtime_model(model)
+            env = custom_env_for_model(config, model)
+            note = None
+        elif provider == "codex":
             effective_model, env, note = model, {}, None
         else:
             from ciao.providers.routing import resolve_with_fallback
@@ -338,7 +346,7 @@ async def extract_and_append(
             if note:
                 run.extra["fallback"] = note
                 logger.info("Insights %s", note)
-            output = await _run_model_with_retry(
+            output, model_error = await _run_model_with_retry(
                 filtered_jsonl=filtered_jsonl,
                 model=effective_model,
                 env=env,
@@ -350,7 +358,7 @@ async def extract_and_append(
                 logger.info("Appended session insights to %s", archive_path)
             else:
                 run.status = "error"
-                run.error = "insights model returned no output (failed twice)"
+                run.error = model_error or "insights model returned no output"
 
         # Canonical project doc: fold Decisions/Open loops into the chat's
         # project doc while the insights are fresh. The nightly curation
@@ -485,7 +493,7 @@ async def _run_model_with_retry(
     env: dict[str, str],
     provider: str = "claude",
     cwd: Path | None = None,
-) -> str:
+) -> tuple[str, str]:
     """Call the model; on failure, wait 30s and retry once."""
     async def call() -> str:
         if provider == "claude":
@@ -495,16 +503,16 @@ async def _run_model_with_retry(
         )
 
     try:
-        return await call()
+        return await call(), ""
     except Exception as exc:  # noqa: BLE001
         logger.info("Insights model call failed (%s); retrying in %ds", exc, _RETRY_DELAY_S)
 
     await asyncio.sleep(_RETRY_DELAY_S)
     try:
-        return await call()
-    except Exception:
+        return await call(), ""
+    except Exception as exc:  # noqa: BLE001
         logger.exception("Insights model call failed twice; skipping")
-        return ""
+        return "", str(exc).strip() or type(exc).__name__
 
 
 async def _call_model(
@@ -674,6 +682,13 @@ async def backfill_insights_task(
                     effective_model, env, note = resolve_with_fallback(
                         insights_model, config, default_model=config.insights_model
                     )
+                    from ciao.custom_providers import env_for_model as custom_env_for_model
+                    from ciao.custom_providers import provider_for_model, runtime_model
+                    custom = provider_for_model(config, insights_model)
+                    text_provider = custom.runner if custom is not None else "claude"
+                    if custom is not None:
+                        effective_model = runtime_model(insights_model)
+                        env = custom_env_for_model(config, insights_model)
 
                     async def run_text_extract():
                         from ciao.providers.oneshot import run_oneshot
@@ -684,6 +699,7 @@ async def backfill_insights_task(
                             env=env,
                             timeout_s=120.0,
                             cwd=config.workspace_root,
+                            provider=text_provider,
                         )
 
                     output = ""

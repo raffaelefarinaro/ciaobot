@@ -1,6 +1,6 @@
 """Programmatic Claude Agent SDK hooks wired by ClaudeProvider.
 
-Two hooks are wired today:
+Three hooks are wired today:
 
 1. ``UserPromptSubmit`` injects two things into the model's context
    before it sees a user turn.
@@ -15,6 +15,10 @@ Two hooks are wired today:
    Ollama-cloud- and OpenRouter-routed chats, where the Anthropic-compat
    layer doesn't execute the server-side ``web_search`` tool. See
    :func:`build_web_search_post_tooluse_hook`.
+3. ``PreToolUse`` on ``Bash`` forces background shell commands to run in the
+   foreground. A background process belongs to the Claude SDK subprocess and
+   is stopped when the turn ends, while its terminal notification is not
+   emitted until a later turn resumes the session.
 
 Kept small and fail-open: any exception becomes a DEBUG log and the
 original prompt/tool output reaches the model untouched.
@@ -41,6 +45,48 @@ logger = logging.getLogger(__name__)
 # it makes entity detection trigger on injected file paths and boilerplate
 # instead of what the user actually typed, so strip it before matching.
 _CIAO_CONTEXT_RE = re.compile(r"(?s)^\[CIAO_CONTEXT_BEGIN\].*?\[CIAO_CONTEXT_END\]\s*")
+
+
+def build_foreground_bash_hook():
+    """Return a PreToolUse callback that keeps Bash inside the active turn.
+
+    Claude Code's background Bash process is owned by the managed CLI
+    subprocess. If the model ends the turn after dispatch, the process is
+    stopped and its ``<task-notification>`` is only written when a later turn
+    resumes the session. Rewriting the call keeps the provider stream open
+    until Bash returns a real result that the model can report.
+
+    Background ``Agent`` calls are intentionally untouched. Ciaobot has a
+    separate durable watcher and UI state for those.
+    """
+
+    async def on_pre_tool_use(
+        input_data: dict[str, Any],
+        tool_use_id: str | None,
+        context: Any,  # HookContext; untyped here to avoid an import cycle
+    ) -> dict[str, Any]:
+        del tool_use_id, context  # unused
+        if input_data.get("tool_name") != "Bash":
+            return {}
+        tool_input = input_data.get("tool_input")
+        if (
+            not isinstance(tool_input, dict)
+            or tool_input.get("run_in_background") is not True
+        ):
+            return {}
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "updatedInput": {**tool_input, "run_in_background": False},
+                "additionalContext": (
+                    "Ciaobot kept this Bash command in the foreground because "
+                    "background shell processes stop when the SDK turn ends. "
+                    "Wait for the tool result before replying."
+                ),
+            }
+        }
+
+    return on_pre_tool_use
 
 
 def _legacy_workspace_context(raw: str | None) -> str:

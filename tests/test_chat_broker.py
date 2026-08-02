@@ -373,6 +373,33 @@ async def test_stream_replay_and_live_events() -> None:
     ]
 
 
+@pytest.mark.asyncio
+async def test_subscriber_count_tracks_attached_clients() -> None:
+    """Basic accounting: `subscribe()` adds a queue, `finish()` drains it.
+
+    `file_surface` no longer reads this to report client presence: it can
+    undercount a client stuck relaying a stream that was superseded in the
+    broker without `finish()` being called on it (see the orphaned-stream
+    note on `ChatStreamBroker.register` below). `control_plane.py` now
+    sources `viewers` from the connection tracker instead. This property
+    still needs to track attach/detach correctly for its own contract.
+    """
+    stream = ChatStream("hi")
+    assert stream.subscriber_count == 0
+
+    async def consume() -> None:
+        async for _ in stream.subscribe():
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0)  # let the subscriber register
+    assert stream.subscriber_count == 1
+
+    stream.finish()
+    await task
+    assert stream.subscriber_count == 0
+
+
 def test_broker_get_returns_none_when_stream_done() -> None:
     broker = ChatStreamBroker()
     stream = ChatStream("hi")

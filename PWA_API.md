@@ -37,20 +37,12 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/desktop-drop` | Consume a native app's single-use Finder-drop grant (local node only) |
 | GET | `/api/chats` | List all chats |
 | GET | `/api/menubar-chats` | Compact chat list for the macOS tray / menubar |
+| GET | `/api/menubar-notifications` | Notification feed for the macOS tray (`?after=<epoch>`, inclusive; proxied to the host in client mode) |
 | POST | `/api/chats/read-all` | Mark all chats read |
 | PATCH, DELETE | `/api/chats/{chat_id}` | Update or delete chat |
 | POST | `/api/chats/{chat_id}/new` | Start a new provider session |
 | POST | `/api/chats/{chat_id}/handover` | Continue chat on a fresh provider session |
 | POST | `/api/chats/{chat_id}/fork` | Fork chat continuing from a completed turn |
-| GET | `/api/chats/{chat_id}/provider-subchats` | List provider sub-chats |
-| POST | `/api/chats/{chat_id}/provider-subchats` | Create provider sub-chat |
-| GET | `/api/provider-subchats/{subchat_id}/events` | Read provider sub-chat events |
-| POST | `/api/provider-subchats/{subchat_id}/messages` | Send message to provider sub-chat |
-| POST | `/api/provider-subchats/{subchat_id}/close` | Close provider sub-chat |
-| POST | `/api/provider-subchats/{subchat_id}/cancel` | Cancel active provider sub-chat work |
-| POST | `/api/provider-subchats/{subchat_id}/extend` | Extend provider sub-chat limits |
-| POST | `/api/provider-subchats/{subchat_id}/permission-response` | Resolve permission request in provider sub-chat |
-| POST | `/api/provider-subchats/{subchat_id}/question-response` | Resolve structured question in provider sub-chat |
 | POST | `/api/chats/{chat_id}/archive` | Archive chat |
 | POST | `/api/chats/{chat_id}/continue` | Create a new active chat continuing from this archived one |
 | POST | `/api/chats/{chat_id}/read` | Mark chat read |
@@ -110,6 +102,9 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/package/status` | Read installed package version and best-effort latest GitHub release version |
 | GET | `/api/package/changelog` | List commits between the installed and latest release for the update prompt |
 | POST | `/api/package/update` | Upgrade ciaobot (`brew upgrade ciaobot` or latest release wheel) and restart |
+| GET | `/api/device/package-status` | Same as `/api/package/status`, but never proxied: in client mode this reports *this* machine's install while `/api/package/status` reports the host's |
+| GET | `/api/device/changelog` | Commits between this machine's installed version and the latest release (never proxied) |
+| POST | `/api/device/update` | Upgrade and restart *this* machine, not the host it mirrors (never proxied) |
 | POST | `/api/voice/install-local` | Install local voice transcription dependencies and restart |
 | POST | `/api/tts/install-local` | Install local speech synthesis dependencies (kokoro-onnx) and restart |
 | POST | `/api/setup/finish` | Finish first-run setup from bootstrap mode |
@@ -120,7 +115,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/workspaces` | List configured logical workspaces |
 | POST | `/api/workspaces/{name}` | Add or update a logical workspace config |
 | DELETE | `/api/workspaces/{name}` | Delete a logical workspace config |
-| GET, PATCH | `/api/settings/providers` | Read or update keys used directly by Ciaobot |
+| GET, PATCH | `/api/settings/providers` | Read or update direct keys and the tracked custom provider definitions (tokens are stored locally and redacted) |
+| POST | `/api/settings/providers/custom/probe` | Discover models from an unsaved OpenAI-compatible custom endpoint |
 | POST | `/api/settings/providers/{provider}/{action}` | Connect, verify, or log out through the Claude Code or Codex CLI |
 | GET | `/api/integrations/gws` | Read Google Workspace CLI install, profile auth, and workspace usage status |
 | POST | `/api/integrations/gws/install` | Install the `@googleworkspace/cli` (`gws`) binary globally via npm |
@@ -143,12 +139,13 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/handover/merge` | Open an interactive chat that resolves sync conflicts on a branch |
 | GET | `/api/node/addresses` | URLs this engine is reachable at (localhost, Bonjour `.local`, each LAN/VPN IPv4), each flagged `loopback` so the PWA can mark the ones a phone cannot use. Session-protected, unlike the loopback-public tray endpoints, because it enumerates LAN interfaces |
 | GET | `/api/node/status` | Read multi-device node failover status and role |
+| GET | `/api/node/connected-clients` | Live remote WebSocket clients connected to this host (excludes loopback) |
 | POST | `/api/node/connect` | Connect this node as a client tunnel to a remote host |
 | POST | `/api/node/demote` | Demote active node to standby |
 | POST | `/api/node/handover` | Handover active role to another node |
 | POST | `/api/node/peers` | Register or update node peer links |
 | POST | `/api/admin/snapshot` | Git add, commit, and push snapshot |
-| POST | `/api/admin/deploy` | Reinstall deps, rebuild frontend, and restart with latest code |
+| POST | `/api/admin/deploy` | Reinstall deps, rebuild frontend (plus the desktop app in dev mode), and restart with latest code |
 | GET | `/api/admin/status` | Read admin/deploy status |
 | GET | `/api/admin/skills` | List skills labelled as custom or GitHub/package |
 | POST | `/api/admin/skills/add` | Add an upstream skill from GitHub and synchronize it |
@@ -226,6 +223,20 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/agent
   -H 'content-type: application/json' \
   -d '{"description":"Turn notes into a decision record.","argument_hint":"<notes>","content":"# Decision Record: $ARGUMENTS\n\nConvert $ARGUMENTS into a concise decision record with context, decision, and consequences."}'
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/agent-assets/commands/decision-record"
+```
+
+**Custom compatible provider**
+
+```bash
+# Probe an unsaved compatible endpoint for model ids.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/settings/providers/custom/probe" \
+  -H 'content-type: application/json' \
+  -d '{"id":"lm-studio","name":"LM Studio","url":"http://localhost:1234/v1","runner":"claude","token":""}'
+
+# Save one or more endpoints. Omit `token` on an existing id to retain its stored token.
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/providers" \
+  -H 'content-type: application/json' \
+  -d '{"custom_providers":[{"id":"lm-studio","name":"LM Studio","url":"http://localhost:1234/v1","runner":"claude","models":"qwen2.5-coder"}]}'
 ```
 
 **Projects**
@@ -339,45 +350,34 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/
 # Delete.
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/chats/$CID"
 
-# Provider Sub-chats — list all sub-chats for a parent chat.
-curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/provider-subchats"
-
 # Create Provider Sub-chat.
 # Body keys: parent_turn_index, owner (object with provider, model, label), participant (object), task_prompt (optional), user_authorized (optional).
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/chats/$CID/provider-subchats" \
   -H 'content-type: application/json' \
   -d '{"parent_turn_index":0,"owner":{"provider":"claude","model":"opus","label":"Claude"},"participant":{"provider":"codex","model":"gpt-4","label":"Codex"},"task_prompt":"Analyze this issue"}'
 
 # Read Sub-chat Events.
-curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/provider-subchats/$SUBID/events"
 
 # Send Message/Prompt to Sub-chat.
 # Body keys: message, user_authorized (optional).
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/provider-subchats/$SUBID/messages" \
   -H 'content-type: application/json' \
   -d '{"message":"Next instruction"}'
 
 # Close Sub-chat.
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/provider-subchats/$SUBID/close"
 
 # Cancel Sub-chat.
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/provider-subchats/$SUBID/cancel"
 
 # Extend Sub-chat limits.
 # Body keys: user_authorized (required).
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/provider-subchats/$SUBID/extend" \
   -H 'content-type: application/json' \
   -d '{"user_authorized":true}'
 
 # Resolve Permission Request in Sub-chat.
 # Body keys: request_id, approved, reason (optional).
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/provider-subchats/$SUBID/permission-response" \
   -H 'content-type: application/json' \
   -d '{"request_id":"req-1","approved":true}'
 
 # Resolve Structured Question in Sub-chat.
 # Body keys: request_id, answers (dict).
-curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/provider-subchats/$SUBID/question-response" \
   -H 'content-type: application/json' \
   -d '{"request_id":"req-2","answers":{"choice":["option-a"]}}'
 ```
@@ -457,6 +457,10 @@ curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/loop
 
 # Deploy: snapshot, pull, build, restart. Don't call from inside the live PWA session
 # (CLAUDE.md "Never restart the ciao service yourself"); ask the operator to hit Deploy.
+# Steps run against CIAO_APP_REPO when set, else the directory holding the running
+# ciao package; a non-checkout returns 400 with a "locate checkout" step. With
+# CIAO_DEV_MODE and changed desktop/ sources it also rebuilds the Tauri app, then
+# quits and relaunches it just before the engine restart.
 curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/admin/deploy"
 ```
 
@@ -565,8 +569,10 @@ Global `/ws/events` payloads the PWA reacts to:
 
 - `chat_streaming_started` / `chat_streaming_done` / `chat_result_ready`: lifecycle of the main chat turn.
 - `chat_subagents_ready`: emitted when a background `Agent` (run_in_background) finishes or its count drops. Fields: `{chat_id, project_id, remaining}`.
+- `chat_delegates_reported`: emitted on the *supervisor* chat once finished delegates (chats carrying `spawned_from_chat_id`) have been reported back to it. Fields: `{chat_id, project_id, count, delivery}`, where `delivery` is `"queued"` (supervisor was mid-turn, so the wake was appended as a follow-up) or `"started"` (supervisor was idle, so a new turn began). Completions inside a 5s window coalesce into one event.
 - `chat_read`: another client/device marked the chat read.
 - `chat_title`: auto-title finished.
+- `chat_created`: a new chat was created (fresh or fork). Fields: `{chat: ChatInfo}`. The acting tab already pushes optimistically; this event is what makes other tabs/devices, or the acting tab after a racing `syncLatest` clobber, render the chat without waiting for the 15s poll. Without it a fork (which starts no streaming turn, so no `chat_result_ready` refetch) stayed invisible until a manual reload.
 - `chat_moved` / `chat_archived` / `chat_deleted`: project changes.
 - `loops_changed`: a loop was created, edited, started, stopped, or deleted (REST route, Schedules page, or the `loop_*` MCP tools mid-turn). No payload; the client refetches `GET /api/loops`, which is where the computed `running` / `next_run` fields are assembled. Without it a loop created by the model stayed invisible (no chat banner, no sidebar `↻` marker) until a manual reload.
 - `server_restarting`: restart drain began (`{message}`). The connect `snapshot` also carries `restarting: true` when drain is already in progress so late clients show the overlay without waiting for a turn rejection.
@@ -594,6 +600,10 @@ A loop or schedule fires its prompt as an ordinary user turn, so without a marke
 - The model gets a matching line inside the injected-context block (stripped from rendered history) telling it the turn is unattended, that nobody is watching, and not to ask questions or wait for approvals.
 - Permission mode for these turns is `bypass`: an escalation would be auto-denied ("Scheduled runs cannot wait for interactive approval"), which silently broke any automation needing network access or a first-time write. Deny rules still apply.
 
+**Loop / schedule banner**
+
+The PWA shows a banner at the top of a chat when an automation is bound to it. Loops are 1:1 with one fixed chat, so the banner is driven by filtering `GET /api/loops` where `loop.web_chat_id === chat.chat_id`. Schedules are 1:many (a `web_project_id` schedule spawns a new chat each run), so the chat carries a durable backlink instead: `ChatInfo.schedule_id` and `ChatInfo.schedule_title`, stamped in `prepare_schedule_chat` for both the project-schedule (new chat) and fixed-chat (`web_chat_id`) branches and included in every chat object via `to_dict()`. The banner filters `GET /api/schedules` where `s.schedule_id === chat.schedule_id` OR `s.web_chat_id === chat.chat_id` (the second arm covers fixed-chat schedules). Each row links to `/schedules/<id>` (Manage) and offers Run now (`POST /api/schedule-run/{schedule_id}`). Existing chats predating the field stay empty-string and render no banner.
+
 **File-touch cards**
 
 Write/Edit/MultiEdit/NotebookEdit tool calls flow through both transports tagged with `file_touch`. The PWA renders each card chronologically inside expanded `Activity`, plus a deduplicated `Outputs` chip below the final answer. If a turn is interrupted before producing a final answer, the chip remains inside `Activity` so the touched file is not hidden.
@@ -616,6 +626,7 @@ Every file-touch tool call also triggers a debounced (1.5s) content snapshot via
 
 - Project and chat state: `.runtime/web_projects.json`. `.runtime/server.lock` prevents two backend processes from owning this registry, and `.runtime/web_projects.audit.jsonl` records append-only mutation IDs/revisions for repair without storing chat content. On-disk shape mirrors the `ProjectInfo` and `ChatInfo` dataclasses in `ciao/web/project_chats.py`; `to_dict()` on each defines the JSON fields. `ChatInfo.user_turn_timings` holds per-turn `{sent_at, completed_at, duration_ms}` keyed by user-turn index (as str); the matching `_turn_perf_started` map on `ProjectChatManager` is in-memory only.
 - `ChatInfo.pending_question` (string, in `to_dict()` so it rides every chat list / chat object): raw AskUserQuestion JSON (`{"questions": [...]}`) set when the model paused the chat on a question. When the headless CLI fires AskUserQuestion the server interrupts the live turn so the CLI cannot auto-answer it, persists this field, and clears it on the next user send. The PWA reads it on chat open to rebuild the interactive question picker after a reload. Empty string when no question is pending.
+- `ChatInfo.schedule_id` / `ChatInfo.schedule_title` (strings, in `to_dict()`): backlink to the schedule that created or drives the chat. Stamped in `prepare_schedule_chat` for both schedule branches (project-schedule new chat, fixed-chat reuse). Drives the schedule banner in ChatPanel. Empty for interactive chats and for chats created before the field existed. See "Loop / schedule banner" above.
 - Schedule state: `.runtime/schedules.json`. Shape and field semantics in `ciao/schedules.py` (`ScheduleEntry`); the `schedule_create`/`schedule_update` MCP tools carry the field semantics in their own docstrings.
 - Loop state: `.runtime/loops.json` (`ciao/loops.py`, `LoopEntry`). Running/stopped is runtime-only state in the `LoopManager`: `autostart` decides what runs after boot, so prefer the API over direct file writes for loops.
 - Uploaded media: under the configured runtime/media directory

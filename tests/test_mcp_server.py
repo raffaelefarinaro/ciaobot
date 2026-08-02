@@ -908,3 +908,170 @@ def test_auto_approved_policy_matches_tool_annotations() -> None:
     assert list(AUTO_APPROVED_MCP_TOOLS) == expected
     assert destructive.isdisjoint(AUTO_APPROVED_MCP_TOOLS)
     assert auto_approved_mcp_tool_names()[0] == f"mcp__ciaobot__{expected[0]}"
+
+
+class _StreamPcm:
+    """Fake pcm exposing only what `_file_surface_signal` reads."""
+
+    def __init__(self, stream: Any = None) -> None:
+        self._stream = stream
+
+    def get_active_stream(self, chat_id: str) -> Any:
+        return self._stream
+
+
+def _fake_ws(host: str) -> SimpleNamespace:
+    return SimpleNamespace(client=SimpleNamespace(host=host, port=1), headers={})
+
+
+def _file_surface_plane(
+    tmp_path: Path, *, stream: Any = None, connection_tracker: Any = None
+) -> CiaoControlPlane:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    config = SimpleNamespace(workspace_root=workspace)
+    return CiaoControlPlane(
+        config,
+        project_chat_manager=_StreamPcm(stream),
+        schedule_manager=SimpleNamespace(),
+        loop_manager=SimpleNamespace(),
+        connection_tracker=connection_tracker,
+    )
+
+
+def test_file_surface_signal_distinguishes_states(tmp_path: Path) -> None:
+    """The old bug collapsed "no stream", "stream with a stuck/absent
+    client", and "stream with a real client" into one int. The caller must
+    now be able to tell them apart."""
+    from ciao.web.connection_tracker import ConnectionTracker
+
+    tracker = ConnectionTracker()
+    conn_id = tracker.register(_fake_ws("10.0.0.5"), "chat", chat_id="chat-1")
+
+    # No active stream, empty chat_id: the plain zero case.
+    plane = _file_surface_plane(tmp_path, stream=None, connection_tracker=tracker)
+    assert plane._file_surface_signal("") == (0, "none")
+
+    # No active stream, but a real client socket for this chat.
+    assert plane._file_surface_signal("chat-1") == (1, "none")
+
+    # Active stream, but the tracker sees nobody for THIS chat_id: the
+    # orphaned-subscriber case that used to read as "viewers: 0" no matter
+    # which chat the real client was stuck watching.
+    plane = _file_surface_plane(tmp_path, stream=object(), connection_tracker=tracker)
+    assert plane._file_surface_signal("chat-2") == (0, "active")
+
+    # Active stream AND a real client for this chat: the healthy case.
+    assert plane._file_surface_signal("chat-1") == (1, "active")
+
+    tracker.unregister(conn_id)
+    assert plane._file_surface_signal("chat-1") == (0, "active")
+
+
+def test_file_surface_signal_without_connection_tracker(tmp_path: Path) -> None:
+    """A lifecycle path that never wired a tracker must degrade to 0
+    viewers, not raise."""
+    plane = _file_surface_plane(tmp_path, stream=object(), connection_tracker=None)
+    assert plane._file_surface_signal("chat-1") == (0, "active")
+
+
+def test_file_surface_returns_honest_signal_fields(tmp_path: Path) -> None:
+    from ciao.web.connection_tracker import ConnectionTracker
+
+    tracker = ConnectionTracker()
+    tracker.register(_fake_ws("10.0.0.5"), "chat", chat_id="chat-1")
+    plane = _file_surface_plane(tmp_path, stream=object(), connection_tracker=tracker)
+    (plane.config.workspace_root / "note.md").write_text("hi", encoding="utf-8")
+
+    principal = McpPrincipal(
+        token_id="t",
+        chat_id="chat-1",
+        project_id="p",
+        workspace="personal",
+        provider="codex",
+    )
+    result = plane.file_surface(principal, "note.md")
+    assert result["ok"] is True
+    assert result["data"] == {"path": "note.md", "viewers": 1, "stream_state": "active"}
+
+
+def test_forged_role_claim_is_normalised_to_chat() -> None:
+    """A token claim cannot smuggle in a privileged-looking role.
+
+    Claims are the one input to `McpPrincipal` that does not come from our own
+    call sites, so an unrecognised role must be dropped rather than carried
+    around as something later code might branch on. `handoff` is the concrete
+    regression: a gate once tested for exactly that value.
+    """
+    principal = McpPrincipal.from_claims(
+        {
+            "token_id": "t",
+            "chat_id": "chat-1",
+            "project_id": "p",
+            "workspace": "personal",
+            "provider": "claude",
+            "role": "handoff",
+        }
+    )
+
+    assert principal.role == "chat"
+    assert principal.to_claims()["role"] == "chat"
+
+
+def test_issued_principals_are_always_the_chat_role(tmp_path: Path) -> None:
+    """`issue()` has no role knob, so every principal it mints is `chat`.
+
+    Guards the invariant the type annotation now states: adding a restricted
+    role has to change this issuing path, instead of only adding a check that
+    silently never fires.
+    """
+    registry = McpSessionRegistry(ttl_seconds=300)
+
+    _token, principal = registry.issue(
+        chat_id="chat-1", project_id="p", workspace="personal", provider="claude"
+    )
+
+    assert principal.role == "chat"
+
+
+def test_revoke_clears_the_reuse_key_so_the_next_issue_mints_a_fresh_token(
+    tmp_path: Path,
+) -> None:
+    """Revoking must drop the `(chat_id, provider)` reuse entry, not leak it.
+
+    The reuse key used to be a 3-tuple including the role. If a cleanup path
+    still popped a differently-shaped key, the entry would survive revocation
+    and hand a revoked token back to the next caller.
+    """
+    registry = McpSessionRegistry(ttl_seconds=300)
+    token, _ = registry.issue(
+        chat_id="chat-1", project_id="p", workspace="personal", provider="claude"
+    )
+
+    assert registry.revoke(token) is True
+
+    reissued, _ = registry.issue(
+        chat_id="chat-1", project_id="p", workspace="personal", provider="claude"
+    )
+    assert reissued != token
+
+    # revoke_chat() pops the same key shape; it must clear it too.
+    assert registry.revoke_chat("chat-1") == 1
+    again, _ = registry.issue(
+        chat_id="chat-1", project_id="p", workspace="personal", provider="claude"
+    )
+    assert again != reissued
+
+
+def test_same_chat_and_provider_still_reuses_one_token(tmp_path: Path) -> None:
+    """Dropping role from the key must not break token reuse."""
+    registry = McpSessionRegistry(ttl_seconds=300)
+
+    first, _ = registry.issue(
+        chat_id="chat-1", project_id="p", workspace="personal", provider="claude"
+    )
+    second, _ = registry.issue(
+        chat_id="chat-1", project_id="p", workspace="personal", provider="claude"
+    )
+
+    assert first == second

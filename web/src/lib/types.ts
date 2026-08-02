@@ -1,9 +1,11 @@
 export type WorkspaceName = string
-export type WorkspaceProvider = 'claude' | 'codex' | 'ollama' | 'openrouter'
+export type WorkspaceProvider = 'claude' | 'codex' | 'ollama' | 'openrouter' | `custom:${string}`
 
 export interface WorkspaceProviderOption {
   value: WorkspaceProvider
   label: string
+  runner?: 'claude' | 'codex'
+  default_model?: string
 }
 
 export interface WorkspaceInfo {
@@ -141,6 +143,25 @@ export interface ChatInfo {
   fork_root_chat_id?: string
   fork_index?: number
   fork_base_title?: string
+  // Backlink to the schedule that created or drives this chat. Empty for
+  // interactive chats. Drives the "triggered by schedule X" banner in
+  // ChatPanel (mirrors the loop banner, but durable across schedule runs
+  // because a schedule spawns a new chat each time).
+  schedule_id?: string
+  schedule_title?: string
+  // Set when this chat was spawned as a delegate by another chat's agent. The
+  // sidebar nests delegates under their supervisor; the engine wakes the
+  // supervisor with a fresh turn when a delegate finishes.
+  spawned_from_chat_id?: string
+  // Shared tag across delegates dispatched as one batch.
+  delegation_id?: string
+}
+
+// One sidebar chat row. Delegates follow their supervisor and render indented,
+// so the list stays a single flat v-for instead of a nested one.
+export interface ChatRow {
+  chat: ChatInfo
+  isDelegate: boolean
 }
 
 export interface ChatRetryInfo {
@@ -182,13 +203,6 @@ export interface ChatMessage {
   // trace; only final_answer is eligible for the terminal response bubble.
   // Undefined keeps the legacy last-assistant-message inference.
   phase?: 'commentary' | 'final_answer'
-  // True when this assistant bubble was promoted from a live streaming
-  // thinking buffer via the PWA's "Show reply as text" affordance. Marks the
-  // bubble for any UI that wants to label promoted replies differently; it is
-  // not itself a dedup key. If the model's eventual result event repeats the
-  // same text a second bubble can appear — an accepted edge for this manual
-  // recovery path.
-  promoted_from_thinking?: boolean
 }
 
 // Subagent transcripts from /api/chats/{id}/subagents. One entry per subagent
@@ -208,38 +222,6 @@ export interface SubagentTranscript {
   is_async?: boolean
   status?: 'running' | 'completed' | 'failed' | ''
   turn_index?: number
-}
-
-export interface ProviderRoute {
-  provider: string
-  model: string
-  model_bucket: string
-  label: string
-}
-
-export interface ProviderSubchatRecord {
-  subchat_id: string
-  parent_chat_id: string
-  parent_turn_index: number
-  workspace: string
-  project_id: string
-  owner: ProviderRoute
-  participant: ProviderRoute
-  participant_session_id: string
-  status: 'created' | 'running' | 'waiting_owner' | 'completed' | 'cancelled' | 'failed' | 'interrupted'
-  created_at: string
-  started_at: string
-  updated_at: string
-  completed_at: string
-  active_seconds: number
-  message_count: number
-  input_tokens: number
-  output_tokens: number
-  quota_limit_hit: boolean
-  last_error: string
-  limit_extended_at: string
-  limit_messages_extended: number
-  limit_seconds_extended: number
 }
 
 // ── WebSocket events ────────────────────────────────────────────────────
@@ -305,6 +287,7 @@ export type WsEvent =
 export type EventsWsMessage =
   | { type: 'keepalive' }
   | { type: 'snapshot'; active_streams: { chat_id: string; project_id: string }[]; background_agents?: Record<string, number>; restarting?: boolean }
+  | { type: 'chat_created'; chat: ChatInfo }
   | { type: 'chat_streaming_started'; chat_id: string; project_id: string }
   | { type: 'chat_streaming_done'; chat_id: string; project_id: string; is_error: boolean }
   | { type: 'chat_result_ready'; chat_id: string; project_id: string; title: string; snippet: string }
@@ -325,10 +308,6 @@ export type EventsWsMessage =
   | { type: 'loops_changed' }
   | { type: 'open_chat'; chat_id: string }
   | { type: 'server_restarting'; message?: string }
-  | { type: 'provider_subchat_created'; subchat_id: string; parent_chat_id: string; record: ProviderSubchatRecord }
-  | { type: 'provider_subchat_status'; subchat_id: string; parent_chat_id: string; status: string; record: ProviderSubchatRecord }
-  | { type: 'provider_subchat_event'; subchat_id: string; parent_chat_id: string; event: any }
-  | { type: 'provider_subchat_deleted'; subchat_id: string; parent_chat_id: string }
   | { type: 'gws_health'; profile: string; token_valid: boolean; token_error: string; title: string; body: string }
 
 export interface InAppToast {
@@ -445,6 +424,9 @@ export interface ModelsResponse {
   openrouter_models?: string[]
   // Account-visible Codex models and their app-server metadata.
   codex_models?: string[]
+  custom_providers?: Array<CustomProviderSettings & {
+    model_labels?: Record<string, string>
+  }>
   codex_model_metadata?: Record<string, {
     display_name: string
     description: string
@@ -486,6 +468,7 @@ export interface RoutineSettings {
   codex_sonnet_model: string
   codex_opus_model: string
   codex_fable_model: string
+  custom_routing?: Record<string, Record<string, string>>
   // What actually runs right now, after defaults.
   title_model_effective: string
   insights_model_effective: string
@@ -514,6 +497,7 @@ export interface RoutineSettings {
     ollama_cloud: string[]
     ollama_local: string[]
     openrouter?: string[]
+    custom_providers?: Array<CustomProviderSettings & { model_labels?: Record<string, string> }>
   }
   backends?: Record<string, boolean>
   workspace_context?: {
@@ -535,6 +519,15 @@ export interface ProviderConnection {
   skills?: string[]
 }
 
+export interface CustomProviderSettings {
+  id: string
+  name: string
+  url: string
+  runner: 'claude' | 'codex'
+  models: string[]
+  token_configured: boolean
+}
+
 export interface ProviderConfigSettings {
   keys: Record<string, {
     label: string
@@ -549,6 +542,7 @@ export interface ProviderConfigSettings {
     auth_method?: string
   }>
   connections?: Record<string, ProviderConnection>
+  custom_providers?: CustomProviderSettings[]
   auto_update_github_skills?: boolean
   requires_restart: boolean
   env_path: string
@@ -779,4 +773,132 @@ export interface AutomationProcess {
   last_run: JobRun | null
   recent: JobRun[]
   stats: AutomationStats
+}
+
+// ── Multi-device (host / client) ───────────────────────────────────────────
+export interface NodePeer {
+  node_id: string
+  url: string
+  last_seen: string
+  is_active: boolean
+}
+
+export interface NodeStatus {
+  node_id: string
+  role: 'host' | 'client' | 'active' | 'standby'
+  mode?: 'host' | 'client'
+  active_since: string | null
+  last_handover: string | null
+  host_url?: string | null
+  active_peer_url?: string | null
+  host_reachable?: boolean | null
+  active_peer_reachable?: boolean | null
+  // Name and version of the machine a client is mirroring. Only present when
+  // the host answered the reachability ping.
+  host_node_id?: string
+  host_version?: string
+  has_host_session?: boolean
+  peers: NodePeer[]
+  // From LocalSessionManager.status() on the host (ciao/local_session.py).
+  git?: LocalGitStatus
+}
+
+/** Workspace git state, as `/api/node/status` reports it under `git`. */
+export interface LocalGitStatus {
+  git_repo?: boolean
+  branch?: string
+  dirty?: boolean
+  dev_mode?: boolean
+}
+
+/**
+ * What the small action endpoints answer with: `/api/device/update`,
+ * `/api/node/connect`, `/api/node/handover`. Callers only branch on `ok` and
+ * show `error`; the rest of the body is diagnostic, hence the index signature.
+ */
+export interface ActionResult {
+  ok?: boolean
+  error?: string
+  [key: string]: unknown
+}
+
+/** One commit row in the update modal, from ciao/package_version.py. */
+export interface ChangelogCommit {
+  sha: string
+  subject: string
+}
+
+/** `/api/package/changelog` and `/api/device/changelog`. */
+export interface PackageChangelog {
+  commits: ChangelogCommit[]
+  compare_url: string
+  repo?: string
+  error: string
+  current_version?: string
+  latest_version?: string
+  update_available?: boolean
+}
+
+/** `/api/package/update` and `/api/device/update`. */
+export interface PackageUpdateResult {
+  ok?: boolean
+  mode?: string
+  output?: string
+  command?: string
+  error?: string
+}
+
+/** One provider row inside {@link SetupStatus}. */
+export interface SetupProviderStatus {
+  ok: boolean
+  auth?: string
+  command?: string
+  detail?: string
+}
+
+/** One requirement row inside {@link SetupStatus}. */
+export interface SetupCheck {
+  ok: boolean
+  required?: boolean
+  detail?: string
+  command?: string
+  [key: string]: unknown
+}
+
+/** `/api/setup-status`, from ciao/setup_status.py::setup_status. */
+export interface SetupStatus {
+  configured: boolean
+  bootstrap: boolean
+  mode: string
+  workspace_root: string
+  vault_root: string
+  checks: SetupCheck[]
+  providers: Record<string, SetupProviderStatus>
+  provider_ready: boolean
+}
+
+/** `/api/settings/providers/{provider}/{connect|logout|check}`. */
+export interface ProviderActionResult {
+  ok?: boolean
+  opened?: boolean
+  command?: string
+  auth?: string
+  detail?: string
+}
+
+/** `/api/local/handback`. */
+export interface LocalHandbackResult {
+  ok?: boolean
+  step?: string
+  error?: string
+  merged?: boolean
+  conflict?: boolean
+}
+
+export interface PackageStatus {
+  current_version?: string
+  latest_version?: string
+  update_available?: boolean
+  mode?: string
+  error?: string
 }

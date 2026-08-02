@@ -1,91 +1,191 @@
 use serde_json::Value;
-use std::{
-    fs::File,
-    io::{self, Read, Seek, SeekFrom},
-    path::PathBuf,
-};
+use std::{collections::HashSet, fs, path::PathBuf};
 
+/// Tracks which notification entries this process has already posted.
+///
+/// The cursor is a timestamp rather than a byte offset because the entries
+/// normally arrive from the engine over HTTP, not from the local file. In
+/// client mode `notifications.jsonl` on this machine is never written — the
+/// host runs the chats — so a plain file tail stays silent forever and the
+/// native banner, the only reliable channel, never fires on a client. The file
+/// remains the fallback for when the engine is unreachable.
+///
+/// The cursor starts unset and the first poll only primes it, so launching the
+/// app (or connecting to a host with a full log) never replays a backlog.
+///
+/// `primed` records that first poll separately from `cursor`. An empty log at
+/// launch leaves the cursor unset, so deriving "is this the priming poll?" from
+/// `cursor.is_none()` would prime twice and swallow the first real entry.
 #[derive(Debug)]
 pub struct NotificationLogTail {
     path: PathBuf,
-    position: u64,
-    partial: String,
+    cursor: Option<f64>,
+    primed: bool,
+    seen: HashSet<String>,
+}
+
+fn entry_ts(entry: &Value) -> f64 {
+    entry.get("ts").and_then(Value::as_f64).unwrap_or(0.0)
+}
+
+fn entry_id(entry: &Value) -> String {
+    entry.to_string()
 }
 
 impl NotificationLogTail {
-    pub fn at_end(path: impl Into<PathBuf>) -> io::Result<Self> {
-        let path = path.into();
-        let position = path.metadata().map(|metadata| metadata.len()).unwrap_or(0);
-        Ok(Self {
-            path,
-            position,
-            partial: String::new(),
-        })
+    pub fn at_end(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            cursor: None,
+            primed: false,
+            seen: HashSet::new(),
+        }
     }
 
-    pub fn poll(&mut self) -> io::Result<Vec<Value>> {
-        let Ok(mut file) = File::open(&self.path) else {
-            self.position = 0;
-            self.partial.clear();
-            return Ok(Vec::new());
-        };
-        let length = file.metadata()?.len();
-        if length < self.position {
-            self.position = 0;
-            self.partial.clear();
-        }
-        file.seek(SeekFrom::Start(self.position))?;
-        let mut appended = String::new();
-        file.read_to_string(&mut appended)?;
-        self.position = file.stream_position()?;
-        self.partial.push_str(&appended);
+    /// Timestamp to ask the engine for, inclusive of the newest entry seen.
+    pub fn cursor(&self) -> f64 {
+        self.cursor.unwrap_or(0.0)
+    }
 
-        let mut values = Vec::new();
-        while let Some(newline) = self.partial.find('\n') {
-            let line = self.partial[..newline].trim().to_string();
-            self.partial.drain(..=newline);
-            if line.is_empty() {
-                continue;
-            }
-            if let Ok(value) = serde_json::from_str(&line) {
-                values.push(value);
-            }
+    /// Entries appended since the last poll, oldest first.
+    ///
+    /// `fetched` is the engine's answer, or `None` when the call failed — the
+    /// caller owns the HTTP so this stays testable without a server.
+    pub fn poll(&mut self, fetched: Option<Vec<Value>>) -> Vec<Value> {
+        let priming = !self.primed;
+        self.primed = true;
+        let entries = match fetched {
+            Some(entries) => entries,
+            // Engine down: read this machine's own log, applying the cursor the
+            // engine would have applied.
+            None => self.read_file(),
+        };
+
+        let newest = entries
+            .iter()
+            .map(entry_ts)
+            .fold(None::<f64>, |acc, ts| Some(acc.map_or(ts, |a| a.max(ts))));
+        let fresh: Vec<Value> = entries
+            .iter()
+            .filter(|entry| !self.seen.contains(&entry_id(entry)))
+            .cloned()
+            .collect();
+
+        if let Some(newest) = newest {
+            // The cursor is inclusive, so entries sharing the newest timestamp
+            // come back on the next poll too. Remembering only those IDs
+            // dedupes them while keeping the set bounded.
+            self.cursor = Some(newest);
+            self.seen = entries
+                .iter()
+                .filter(|entry| entry_ts(entry) >= newest)
+                .map(entry_id)
+                .collect();
         }
-        Ok(values)
+
+        if priming { Vec::new() } else { fresh }
+    }
+
+    /// Local log entries at or after the cursor. A malformed or partially
+    /// written line is skipped; the next poll sees it whole.
+    fn read_file(&self) -> Vec<Value> {
+        let Ok(text) = fs::read_to_string(&self.path) else {
+            return Vec::new();
+        };
+        let since = self.cursor.unwrap_or(f64::NEG_INFINITY);
+        text.lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+            .filter(|entry| entry.is_object() && entry_ts(entry) >= since)
+            .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, io::Write};
+    use serde_json::json;
+    use std::fs;
     use tempfile::tempdir;
 
-    #[test]
-    fn starts_at_end_and_processes_partial_lines_once() {
-        let temp = tempdir().unwrap();
-        let path = temp.path().join("notifications.jsonl");
-        fs::write(&path, "{\"title\":\"old\"}\n").unwrap();
-        let mut tail = NotificationLogTail::at_end(&path).unwrap();
-        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        write!(file, "{{\"title\":\"new\"}}").unwrap();
-        assert!(tail.poll().unwrap().is_empty());
-        writeln!(file).unwrap();
-        let values = tail.poll().unwrap();
-        assert_eq!(values.len(), 1);
-        assert_eq!(values[0]["title"], "new");
-        assert!(tail.poll().unwrap().is_empty());
+    fn entry(ts: f64, title: &str) -> Value {
+        json!({"ts": ts, "title": title})
     }
 
     #[test]
-    fn handles_truncation_and_malformed_rows() {
+    fn the_first_poll_primes_the_cursor_without_replaying() {
+        let mut tail = NotificationLogTail::at_end("/nonexistent");
+        assert!(
+            tail.poll(Some(vec![entry(10.0, "old")])).is_empty(),
+            "launching must not replay the backlog"
+        );
+        assert_eq!(tail.cursor(), 10.0);
+
+        let posted = tail.poll(Some(vec![entry(10.0, "old"), entry(11.0, "new")]));
+        assert_eq!(posted.len(), 1);
+        assert_eq!(posted[0]["title"], "new");
+    }
+
+    // A tray launched before any notification exists primes against an empty
+    // feed, which leaves the cursor unset. Deriving "am I priming?" from the
+    // cursor therefore primed twice and swallowed the first real entry.
+    #[test]
+    fn the_first_entry_after_an_empty_prime_is_posted() {
+        let mut tail = NotificationLogTail::at_end("/nonexistent");
+        assert!(tail.poll(Some(vec![])).is_empty(), "nothing to replay yet");
+
+        let posted = tail.poll(Some(vec![entry(1.0, "first ever")]));
+        assert_eq!(posted.len(), 1);
+        assert_eq!(posted[0]["title"], "first ever");
+        assert!(tail.poll(Some(vec![entry(1.0, "first ever")])).is_empty());
+    }
+
+    // The cursor is inclusive, so the boundary entry is re-sent every poll and
+    // only the seen-ID set stops it from being posted twice.
+    #[test]
+    fn an_entry_on_the_cursor_is_posted_once() {
+        let mut tail = NotificationLogTail::at_end("/nonexistent");
+        tail.poll(Some(vec![entry(10.0, "old")]));
+        assert_eq!(tail.poll(Some(vec![entry(11.0, "new")])).len(), 1);
+        assert!(tail.poll(Some(vec![entry(11.0, "new")])).is_empty());
+    }
+
+    // Two notifications can share a timestamp; an exclusive cursor would drop
+    // one of them silently.
+    #[test]
+    fn entries_sharing_the_newest_timestamp_all_arrive() {
+        let mut tail = NotificationLogTail::at_end("/nonexistent");
+        tail.poll(Some(vec![entry(10.0, "old")]));
+        let posted = tail.poll(Some(vec![entry(11.0, "a"), entry(11.0, "b")]));
+        assert_eq!(posted.len(), 2);
+        assert!(
+            tail.poll(Some(vec![entry(11.0, "a"), entry(11.0, "b")]))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn falls_back_to_the_local_log_when_the_engine_is_unreachable() {
         let temp = tempdir().unwrap();
         let path = temp.path().join("notifications.jsonl");
-        fs::write(&path, "old bytes that make the initial offset long").unwrap();
-        let mut tail = NotificationLogTail::at_end(&path).unwrap();
-        fs::write(&path, "bad\n{\"title\":\"after rotate\"}\n").unwrap();
-        let values = tail.poll().unwrap();
-        assert_eq!(values.len(), 1);
-        assert_eq!(values[0]["title"], "after rotate");
+        fs::write(&path, "{\"ts\":1.0,\"title\":\"old\"}\n").unwrap();
+        let mut tail = NotificationLogTail::at_end(&path);
+        assert!(tail.poll(None).is_empty());
+
+        fs::write(
+            &path,
+            "{\"ts\":1.0,\"title\":\"old\"}\nbad\n{\"ts\":2.0,\"title\":\"new\"}\n",
+        )
+        .unwrap();
+        let posted = tail.poll(None);
+        assert_eq!(posted.len(), 1);
+        assert_eq!(posted[0]["title"], "new");
+        assert!(tail.poll(None).is_empty());
+    }
+
+    #[test]
+    fn a_missing_log_is_not_an_error() {
+        let mut tail = NotificationLogTail::at_end("/nonexistent/notifications.jsonl");
+        assert!(tail.poll(None).is_empty());
+        assert!(tail.poll(None).is_empty());
     }
 }

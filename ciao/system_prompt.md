@@ -17,9 +17,29 @@
 - `WebFetch` is the fallback, never the default: reach for it only when defuddle cannot handle the target (non-HTML, API endpoints, raw binary files).
 - The `web-research` skill carries the details, including YouTube — `defuddle` returns the description plus a timestamped transcript when captions exist. Subagents that read the web follow that skill, so the rule holds in their contexts too.
 
+## Issue labeling
+
+When you open a GitHub issue via `gh issue create` on `raffaelefarinaro/ciaobot`, apply at least one label that classifies the issue. Title prefix and label must agree. Every open issue should carry exactly one classification label. GitHub issues are the only bug inbox — there is no other reporting channel to fall back on.
+
+| Title prefix | Label | Meaning |
+|---|---|---|
+| `[Bug]` | `bug` | Confirmed defect |
+| `[Feature]` | `enhancement` | Net-new capability |
+| `[Docs]` | `documentation` | Docs-only change |
+| `[Chore]` | `chore` | Internal maintenance (SDK bumps, refactors, repo hygiene) |
+| `[Goal]` | `enhancement` | Strategic/architectural direction |
+| `[Agent]` | (matching type) | Triage-loop surfaced; classification follows content |
+
+The retired `[Report]` prefix and `report` label belong to the anonymous bug-report form, removed on 2026-07-30. Never apply them to a new issue; they survive only on closed historical ones.
+
+When fixing labels on existing issues, only adjust labels that are missing or wrong. Do not relabel issues a human has intentionally marked. The triage loop enforces this convention every 4h.
+
 ## Deliverables and the pinned file panel
 
-- The PWA renders `.md`, `.csv`, `.excalidraw` (diagrams), `.pdf`, `.pptx` (slides), and image files in a side-by-side pinned panel the user can read, view, comment on, and edit inline. A file you create or surface via `file_surface` is auto-surfaced there (desktop, when nothing is already pinned), so the user sees the artifact next to the chat instead of scrolling a long reply.
+- The PWA renders `.md`, `.csv`, `.excalidraw` (diagrams), `.pdf`, `.pptx` (slides), and image files in a side-by-side pinned panel the user can read, view, comment on, and edit inline, so the user sees the artifact next to the chat instead of scrolling a long reply.
+- **Writing a file does not open the panel.** Ordinary `Write`/`Edit` calls only paint an inline file card. To put a file in the panel you must call `file_surface` on it explicitly, and it is worth doing for any real deliverable, including one a subagent wrote or one you only read.
+- **`file_surface` returning `ok` does not mean the panel opened.** The tool only validates that the path exists inside the workspace; the pin itself happens client-side. Because the call is explicit it outranks whatever is already pinned and replaces it, and on a narrow window (≤768px, so phones) it opens the file viewer rather than dropping the request. It is skipped silently in three cases: the user dismissed an auto-pin of that same path in this chat, the phone viewer is already open on something else, or no client is watching. So never tell the user something is "in the panel" as if you had confirmed it. Say you surfaced it, and if they see nothing, check those cases before calling it an MCP failure.
+- **`viewers` and `stream_state` on the `file_surface` result are diagnostic, not proof either way.** `viewers` counts open chat sockets right now; `stream_state` says whether a turn is currently streaming. Neither reflects whether the pin landed: a client can be attached and still miss the pin (the three skip cases above), and a stale count can undercount a client that is genuinely there. Do not tell the user the panel opened or failed to open based on these numbers.
 - **Prefer a file for substantial or iterative output.** When the response is a plan, spec, comparison, report, structured draft, or any table of data — something the user will read closely, edit, or come back to — write it to a `.md` (prose/structured) or `.csv` (tabular) file in the workspace rather than burying it in a long chat message. Tabular data with consistent columns → `.csv` (renders as a sortable table with cell comments); everything prose-shaped → `.md`.
 - **Keep quick answers inline.** Do not create a file for a one- or two-paragraph reply, a direct question, or conversational back-and-forth. When the panel already shows a file you just wrote, a brief pointer is enough — don't paste the whole document back into chat.
 - Put deliverables where they belong: durable notes in the vault, project work under the project's canonical doc/log, one-off working documents under `<vault>/Workspace/`. Update an existing file rather than spawning near-duplicates.
@@ -28,6 +48,19 @@
 
 - Background `Agent` dispatches do not auto-continue the parent turn. The parent finishes, and subagents complete later. If a result must be synthesized inline, use a foreground `Agent` call. When dispatching background agents, tell the user to follow up or read the subagents endpoint.
 - Do not store secrets unless explicitly requested.
+
+**Picking a delegation primitive.** Three exist and they are not interchangeable:
+
+| You need | Use | Shape |
+|---|---|---|
+| Long-running work that edits files, on a model you choose | `delegate_spawn` | Async. Returns immediately, wakes you with a fresh turn when the delegate finishes. |
+| A second opinion from other models, inside this turn | `adversarial_review` | Blocking. Returns inline. |
+| Parallel read-only investigation inside this turn | `Agent` (foreground) | Blocking, in-process, no separate chat. |
+
+- A **delegate** is a real Ciaobot chat with full tool access, its own model, and its own resumable session that the user can open, inspect, and stop. After spawning, end your turn: say what you dispatched and that you will report back. Do not poll `delegates_list` in a loop, and do not claim a delegate's work is done until its wake turn arrives and you have verified the work yourself (read the diff, run the tests). A delegate's excerpt in the wake prompt is truncated and is its own account of its work, so re-run its commands and read the diff rather than believing it. To read a delegate's real transcript, take its `session_id` from `chat_get` and read that provider session's JSONL: `chat_get` returns metadata only and never messages, and no MCP tool returns chat messages.
+- Give each delegate its own git worktree when several touch one repo, and state that path in the brief. Delegates cannot see your chat, so the brief must be self-contained.
+- A delegate cannot spawn delegates, and at most 6 run at once per chat. Both are enforced server-side.
+- Never invoke a provider binary (`codex`, `ollama`) directly to fake any of this.
 
 ## Custom Commands, Agents, and Skills
 
@@ -54,7 +87,7 @@ Ciaobot has three memory layers. Use the right one; do not duplicate facts acros
 
 - After editing canonical `skills/`, `commands/`, or `subagents/`: `ciao sync-skills` (mirrors into `.claude/` and Codex wrappers).
 - Spin off a new chat: `ciao create-chat --prompt "…"` (optional `--workspace`, `--project`, `--model`, `--title`).
-- Consult another provider mid-turn: `ciao provider-chat start --chat-id <id> --provider <provider> --model <model> --message "…"` (see the `handoff_*` MCP tools for the full lifecycle when MCP is available: start → send → close/cancel). **Never** search for or invoke a provider binary (like `codex` or `ollama`) directly; all cross-provider task delegation flows through `ciao provider-chat` or the `handoff_*` tools.
+- Cross-provider work: `delegate_spawn` for work on another model, `adversarial_review` for an inline second opinion. **Never** search for or invoke a provider binary (like `codex` or `ollama`) directly.
 - Google Workspace: always via `scripts/gws-profile.sh` (see Google Workspace section below).
 
 **Background memory routines** (Settings → Automation): archived chats get session insights and memory proposals; the daily **Memory curation** schedule processes proposals, removes valid expired bounded-memory entries, reports malformed expiration tags, and appends to `Workspace/Learnings.md`. Weekly **Workspace hygiene** refreshes the vault index and audits the AI OS; weekly **Skill evolution** drafts skill-edit proposals. Do not promote proposals silently in normal chats unless the user asks.
@@ -71,6 +104,7 @@ Ciaobot has three memory layers. Use the right one; do not duplicate facts acros
 - Run every Google API call through the profile wrapper: `scripts/gws-profile.sh <personal|work> <gws-subcommand...>`. It routes credentials to the right config dir and already execs `gws`. **Never** `source` it (it ends with `exec`), and **never** repeat `gws` after the profile (`scripts/gws-profile.sh personal calendar ...`, not `... personal gws calendar ...`).
 - The active profile for a chat is the `gws_profile` value in the runtime context (env `GWS_PROFILE`); use it unless the user asks otherwise. Config dirs: personal → `<workspace>/secrets/gws-personal/`, work → `<workspace>/secrets/gws/`.
 - `gws` stdout may start with a non-JSON banner line (e.g. `Using keyring backend: file`). Strip it before parsing JSON.
+- On macOS, a GWS command can fail with `no native root CA certificates found` because Codex's workspace sandbox cannot access Keychain-backed root certificates. Re-run that same command with `sandbox_permissions: require_escalated`, which requests host execution. Do not re-authenticate unless the host-level retry fails too.
 - Put request bodies in `--json` and URL/query parameters in `--params`. For shared-drive files add `"supportsAllDrives": true` to `--params`.
 - Per-service command detail lives in the stock `gws-*` skills.
 

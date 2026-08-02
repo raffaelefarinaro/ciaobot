@@ -56,7 +56,7 @@ describe('modelSections', () => {
     }
 
     const codex = sectionsFromModelsResponse(response).find((section) => section.key === 'codex')
-    expect(codex?.models).toEqual(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'fable', 'gpt-5.5'])
+    expect(codex?.models).toEqual(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-5.6-sol-ultra', 'gpt-5.5'])
   })
 
 

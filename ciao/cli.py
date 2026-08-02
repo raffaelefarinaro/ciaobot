@@ -299,11 +299,24 @@ _LEGACY_APP_BUNDLE_NAMES = (
     "Ciaobot.app",
     "Ciaobot Menu Bar.app",
 )
+# Executable inside the Tauri desktop app (the Homebrew cask's Ciaobot.app).
+_DESKTOP_EXECUTABLE_NAME = "ciaobot-desktop"
 
 
 def _is_our_app_bundle(app_root: Path) -> bool:
-    """Whether ``app_root`` is a launcher bundle created by Ciaobot."""
+    """Whether ``app_root`` is a launcher bundle created by Ciaobot.
 
+    The Tauri desktop app ships as ``Ciaobot.app`` under the same
+    ``local.ciaobot.app`` identifier our pre-rename launcher used, so the
+    bundle id cannot tell them apart. Misidentifying it is destructive rather
+    than merely wasteful: the launcher we write is named ``Ciaobot Server.app``,
+    so ``_remove_legacy_app_shortcuts`` deletes the cask's app and never puts
+    anything back in its place, leaving a running process on a bundle that no
+    longer exists on disk. The executable name is the discriminator.
+    """
+
+    if (app_root / "Contents" / "MacOS" / _DESKTOP_EXECUTABLE_NAME).is_file():
+        return False
     plist = app_root / "Contents" / "Info.plist"
     try:
         text = plist.read_text(encoding="utf-8")
@@ -509,11 +522,21 @@ def _write_app_bundle_marker(workspace: Path) -> None:
         pass
 
 
+def _app_search_roots() -> tuple[Path, ...]:
+    """Directories macOS installs app bundles into, per-user first.
+
+    A single definition so the launcher search and the desktop-app check can
+    never disagree about where to look; tests point it at a temporary tree.
+    """
+
+    return (Path.home() / "Applications", Path("/Applications"))
+
+
 def _installed_app_dir() -> Path | None:
     """Directory holding our current or legacy native launcher bundle."""
 
     for name in (_APP_BUNDLE_NAME, *_LEGACY_APP_BUNDLE_NAMES):
-        for base in (Path.home() / "Applications", Path("/Applications")):
+        for base in _app_search_roots():
             candidate = base / name
             if candidate.is_dir() and _is_our_app_bundle(candidate):
                 return base
@@ -521,15 +544,19 @@ def _installed_app_dir() -> Path | None:
 
 
 def _desktop_app_installed(app_dir: Path | None = None) -> bool:
-    """Whether the authoritative Tauri ``Ciaobot.app`` is installed."""
+    """Whether the authoritative Tauri ``Ciaobot.app`` is installed.
+
+    ``app_dir`` narrows the check to one directory. The default scans every
+    standard root, because the desktop app and a leftover launcher need not
+    share one: a non-admin account keeps the launcher in ``~/Applications``
+    while the cask installs into ``/Applications``.
+    """
 
     roots = (
-        (Path(app_dir).expanduser(),)
-        if app_dir is not None
-        else (Path("/Applications"), Path.home() / "Applications")
+        (Path(app_dir).expanduser(),) if app_dir is not None else _app_search_roots()
     )
     return any(
-        (root / "Ciaobot.app" / "Contents" / "MacOS" / "ciaobot-desktop").is_file()
+        (root / "Ciaobot.app" / "Contents" / "MacOS" / _DESKTOP_EXECUTABLE_NAME).is_file()
         for root in roots
     )
 
@@ -556,6 +583,15 @@ def refresh_app_bundle_if_stale(
     app_dir = _installed_app_dir()
     if app_dir is None:
         return None  # setup never created a bundle; nothing to refresh
+    if _desktop_app_installed(app_dir) or _desktop_app_installed():
+        # A leftover Ciaobot Server.app while the Tauri app is installed: setup
+        # deliberately skips the Python launcher when the desktop app is
+        # present, so refreshing would rewrite a bundle the desktop app
+        # replaced -- and delete the desktop app on the way through
+        # _remove_legacy_app_shortcuts. The second check covers the split
+        # layout, where the launcher and the desktop app sit in different
+        # roots and the scoped check alone would resurrect the launcher.
+        return None
     try:
         last = _app_bundle_marker_path(workspace).read_text(encoding="utf-8").strip()
     except OSError:
@@ -1137,7 +1173,13 @@ def setup_workspace(
     launch_dir = Path(launch_agents_dir) if launch_agents_dir is not None else Path.home() / "Library" / "LaunchAgents"
     app_root_dir = Path(app_dir) if app_dir is not None else _default_app_dir()
     resolved_python = python_path or sys.executable
-    desktop_installed = _desktop_app_installed(app_root_dir)
+    # An explicit --app-dir means "operate on this directory only" (CI, tests,
+    # headless installs). A default install is the real machine, so look in
+    # every standard root: a non-admin account writes the launcher into
+    # ~/Applications, where the /Applications cask would go unnoticed.
+    desktop_installed = _desktop_app_installed(app_root_dir) or (
+        app_dir is None and _desktop_app_installed()
+    )
     app_root: Path | None = None
     menubar_executable = ""
     plist_names = ["com.ciao.server.plist"]
@@ -1603,6 +1645,17 @@ def _cleanup_sdk_blobs_command(args: argparse.Namespace) -> int:
     return cleanup_sdk_blobs.main(module_args)
 
 
+def _label_hygiene_command(args: argparse.Namespace) -> int:
+    from ciao import label_hygiene
+
+    module_args = ["--repo", args.repo, "--limit", str(args.limit)]
+    if args.apply:
+        module_args.append("--apply")
+    if args.json:
+        module_args.append("--json")
+    return label_hygiene.main(module_args)
+
+
 def _skills_list_command(args: argparse.Namespace) -> int:
     from ciao.skills_inventory import build_skill_inventory
 
@@ -1743,28 +1796,6 @@ def _resolve_project(
     return cast(str, projects[0]["project_id"])
 
 
-def _report_bug_command(args: argparse.Namespace) -> int:
-    """Submit an anonymous bug report to the central Ciaobot inbox (Google Form).
-
-    Used by startup triage when ``gh`` is unavailable/unauthenticated so a real
-    app bug still reaches the maintainer without requiring the user to open
-    GitHub by hand.
-    """
-    from ciao.bug_report import gather_system_info, submit_bug_report
-
-    system = args.system or gather_system_info()
-    if submit_bug_report(args.title, args.details, system):
-        print("Bug report submitted anonymously. Thank you!")
-        return 0
-    print(
-        "Could not submit the bug report automatically. Paste this into a new "
-        "issue at https://github.com/raffaelefarinaro/ciaobot/issues :\n\n"
-        f"Title: {args.title}\n\n{args.details}\n\n---\nSystem: {system}",
-        file=sys.stderr,
-    )
-    return 1
-
-
 def _create_chat_command(args: argparse.Namespace) -> int:
     workspace_root = Path(args.workspace_root).expanduser().resolve()
     _load_env_file(workspace_root / ".env")
@@ -1832,158 +1863,6 @@ def _create_chat_command(args: argparse.Namespace) -> int:
     print(f"Model: {chat_info.get('model')} ({chat_info.get('provider')})")
     print(f"PWA URL: {base_url}/chat/{chat_id}")
     return 0
-
-
-def _provider_chat_command(args: argparse.Namespace) -> int:
-    env_root = os.environ.get("CIAO_WORKSPACE") or "."
-    workspace_root = Path(env_root).expanduser().resolve()
-    _load_env_file(workspace_root / ".env")
-
-    host = os.environ.get("PWA_HOST", "localhost")
-    if host in ("0.0.0.0", "127.0.0.1", "::", "::1", ""):
-        host = "localhost"
-    port = os.environ.get("PWA_PORT", "8443")
-    base_url = getattr(args, "base_url", None) or f"http://{host}:{port}"
-    auth_token = os.environ.get("PWA_AUTH_TOKEN", "")
-    if not auth_token:
-        print("Error: PWA_AUTH_TOKEN not found in environment or .env file.", file=sys.stderr)
-        return 1
-
-    cookie_jar = http.cookiejar.CookieJar()
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
-
-    auth = _make_json_request(
-        opener, f"{base_url}/api/auth", data={"token": auth_token}, method="POST"
-    )
-    if isinstance(auth, dict) and auth.get("_error"):
-        return 1
-
-    if args.subcommand == "start":
-        if os.environ.get("CIAO_PROVIDER_SUBCHAT_ID"):
-            print("Error: Nested provider sub-chats are not allowed.", file=sys.stderr)
-            return 1
-        chat_id = args.chat_id or os.environ.get("CIAO_CHAT_ID")
-        if not chat_id:
-            print("Error: --chat-id or CIAO_CHAT_ID env var required.", file=sys.stderr)
-            return 1
-        provider = args.provider or os.environ.get("CIAO_PROVIDER")
-        if not provider:
-            print("Error: --provider or CIAO_PROVIDER env var required.", file=sys.stderr)
-            return 1
-        model = args.model or os.environ.get("CIAO_MODEL")
-        if not model:
-            print("Error: --model or CIAO_MODEL env var required.", file=sys.stderr)
-            return 1
-
-        chat_detail = cast(dict, _make_json_request(opener, f"{base_url}/api/chats/{chat_id}"))
-        if isinstance(chat_detail, dict) and chat_detail.get("_error"):
-            print(f"Error: Chat '{chat_id}' not found.", file=sys.stderr)
-            return 1
-
-        parent_turn_index = chat_detail.get("user_turn_count", 0)
-        owner = {
-            "provider": chat_detail.get("provider", "claude"),
-            "model": chat_detail.get("model", ""),
-            "label": chat_detail.get("provider", "claude").capitalize(),
-        }
-        participant = {
-            "provider": provider,
-            "model": model,
-            "label": provider.capitalize(),
-        }
-
-        payload = {
-            "parent_turn_index": parent_turn_index,
-            "owner": owner,
-            "participant": participant,
-            "task_prompt": args.message,
-            "user_authorized": True,
-        }
-
-        res = cast(dict, _make_json_request(
-            opener,
-            f"{base_url}/api/chats/{chat_id}/provider-subchats",
-            data=payload,
-            method="POST",
-        ))
-        if isinstance(res, dict) and res.get("_error"):
-            return 1
-
-        record = res.get("record", {})
-        result = res.get("result", {})
-        output = {
-            "subchat_id": record.get("subchat_id", ""),
-            "status": result.get("status", record.get("status", "")),
-            "reply": result.get("reply", ""),
-            "usage": result.get("usage", {"input_tokens": 0, "output_tokens": 0}),
-            "error": result.get("error", record.get("last_error", "")),
-        }
-        print(json.dumps(output, indent=2))
-        return 0
-
-    elif args.subcommand == "send":
-        subchat_id = args.subchat_id or os.environ.get("CIAO_PROVIDER_SUBCHAT_ID")
-        if not subchat_id:
-            print("Error: --subchat-id or CIAO_PROVIDER_SUBCHAT_ID env var required.", file=sys.stderr)
-            return 1
-
-        payload = {
-            "message": args.message,
-            "user_authorized": True,
-        }
-        res = cast(dict, _make_json_request(
-            opener,
-            f"{base_url}/api/provider-subchats/{subchat_id}/messages",
-            data=payload,
-            method="POST",
-        ))
-        if isinstance(res, dict) and res.get("_error"):
-            return 1
-
-        output = {
-            "subchat_id": subchat_id,
-            "status": res.get("status", ""),
-            "reply": res.get("reply", ""),
-            "usage": res.get("usage", {"input_tokens": 0, "output_tokens": 0}),
-            "error": res.get("error", ""),
-        }
-        print(json.dumps(output, indent=2))
-        return 0
-
-    elif args.subcommand in ("close", "cancel", "extend"):
-        subchat_id = args.subchat_id or os.environ.get("CIAO_PROVIDER_SUBCHAT_ID")
-        if not subchat_id:
-            print("Error: --subchat-id or CIAO_PROVIDER_SUBCHAT_ID env var required.", file=sys.stderr)
-            return 1
-
-        payload = {}
-        if args.subcommand == "extend":
-            payload["user_authorized"] = True
-
-        res = cast(dict, _make_json_request(
-            opener,
-            f"{base_url}/api/provider-subchats/{subchat_id}/{args.subcommand}",
-            data=payload,
-            method="POST",
-        ))
-        if isinstance(res, dict) and res.get("_error"):
-            return 1
-
-        output = {
-            "subchat_id": subchat_id,
-            "status": res.get("status", ""),
-            "reply": "",
-            "usage": {
-                "input_tokens": res.get("input_tokens", 0),
-                "output_tokens": res.get("output_tokens", 0),
-            },
-            "error": res.get("last_error", ""),
-        }
-        print(json.dumps(output, indent=2))
-        return 0
-
-    print(f"Error: Unknown subcommand {args.subcommand}", file=sys.stderr)
-    return 1
 
 
 def _desktop_service_command(args: argparse.Namespace) -> int:
@@ -2392,23 +2271,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     chat_parser.set_defaults(func=_create_chat_command)
 
-    report_bug_parser = subparsers.add_parser(
-        "report-bug",
-        help="Submit an anonymous bug report to the central Ciaobot inbox.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    report_bug_parser.add_argument("--title", required=True, help="Short bug title.")
-    report_bug_parser.add_argument(
-        "--details",
-        required=True,
-        help="Traceback, logs, and what triggered the bug.",
-    )
-    report_bug_parser.add_argument(
-        "--system",
-        help="System/version info. Auto-detected (OS, Python, Ciaobot version) when omitted.",
-    )
-    report_bug_parser.set_defaults(func=_report_bug_command)
-
     cleanup_parser = subparsers.add_parser(
         "cleanup-sdk-blobs",
         help="Dry-run or delete archived Claude SDK JSONL blobs.",
@@ -2425,6 +2287,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Actually delete matching blobs. Default is dry-run.",
     )
     cleanup_parser.set_defaults(func=_cleanup_sdk_blobs_command)
+
+    label_hygiene_parser = subparsers.add_parser(
+        "label-hygiene",
+        help="Audit open-issue labels against the title-prefix convention. Dry-run by default.",
+    )
+    label_hygiene_parser.add_argument(
+        "--repo",
+        default="raffaelefarinaro/ciaobot",
+        help="Target GitHub repo (owner/name).",
+    )
+    label_hygiene_parser.add_argument(
+        "--limit",
+        type=int,
+        default=100,
+        help="Maximum open issues to scan.",
+    )
+    label_hygiene_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually add missing labels via gh issue edit. Default is dry-run.",
+    )
+    label_hygiene_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the structured report as JSON instead of text.",
+    )
+    label_hygiene_parser.set_defaults(func=_label_hygiene_command)
 
     skills_sync_parser = subparsers.add_parser(
         "skills-sync",
@@ -2480,40 +2369,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sync_skills_parser.add_argument("--verbose", action="store_true")
     sync_skills_parser.set_defaults(func=_sync_skills_command)
-
-    provider_chat_parser = subparsers.add_parser(
-        "provider-chat",
-        help="Manage provider sub-chats.",
-    )
-    provider_chat_parser.add_argument(
-        "--base-url",
-        help="Ciaobot server URL. Defaults to PWA_HOST/PWA_PORT.",
-    )
-    p_subparsers = provider_chat_parser.add_subparsers(dest="subcommand", required=True)
-
-    start_p = p_subparsers.add_parser("start", help="Start a provider sub-chat.")
-    start_p.add_argument("--chat-id", help="Parent chat ID. Defaults to CIAO_CHAT_ID.")
-    start_p.add_argument("--provider", help="Participant provider.")
-    start_p.add_argument("--model", help="Participant model.")
-    start_p.add_argument("--message", required=True, help="Task message prompt.")
-    start_p.set_defaults(func=_provider_chat_command)
-
-    send_p = p_subparsers.add_parser("send", help="Send a message to a provider sub-chat.")
-    send_p.add_argument("--subchat-id", help="Sub-chat ID. Defaults to CIAO_PROVIDER_SUBCHAT_ID.")
-    send_p.add_argument("--message", required=True, help="Message prompt.")
-    send_p.set_defaults(func=_provider_chat_command)
-
-    close_p = p_subparsers.add_parser("close", help="Close a provider sub-chat.")
-    close_p.add_argument("--subchat-id", help="Sub-chat ID. Defaults to CIAO_PROVIDER_SUBCHAT_ID.")
-    close_p.set_defaults(func=_provider_chat_command)
-
-    cancel_p = p_subparsers.add_parser("cancel", help="Cancel active provider sub-chat work.")
-    cancel_p.add_argument("--subchat-id", help="Sub-chat ID. Defaults to CIAO_PROVIDER_SUBCHAT_ID.")
-    cancel_p.set_defaults(func=_provider_chat_command)
-
-    extend_p = p_subparsers.add_parser("extend", help="Extend provider sub-chat limits.")
-    extend_p.add_argument("--subchat-id", help="Sub-chat ID. Defaults to CIAO_PROVIDER_SUBCHAT_ID.")
-    extend_p.set_defaults(func=_provider_chat_command)
 
     eval_parser = subparsers.add_parser(
         "eval",

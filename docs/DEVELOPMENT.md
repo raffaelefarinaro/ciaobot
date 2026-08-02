@@ -14,6 +14,8 @@ ciao run
 
 `ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies the editable `CLAUDE.md` workspace guide, links `AGENTS.md` to that same guide for Codex, copies `CIAO_CUSTOMIZATION.md`, and renders the server plist under `~/Library/LaunchAgents/`. When the real Tauri `Ciaobot.app` is installed, setup does not generate or load the legacy rumps agent or `Ciaobot Server.app`; package-only installs retain those assets for the migration/rollback window. Existing custom `AGENTS.md` files are preserved. By default setup does not load launchd; add `--load-launchd` when you want it to run `launchctl`.
 
+Provider settings for custom compatible endpoints are persisted in the tracked workspace file `.ciao/custom_providers.json`; bearer tokens are kept separately in the gitignored `.runtime/custom_provider_tokens.json` and are never committed or returned by the API. Focused provider tests belong in `tests/test_custom_providers.py`.
+
 A fresh first logical workspace and workspaces added later in Settings live at
 `<CIAO_VAULT_ROOT>/<workspace-name>/`. Their registry path is read-only in the
 PWA. Existing-folder setup preserves the selected notes in place so the
@@ -31,6 +33,7 @@ ciao vault-lint --vault-root memory-vault
 ciao os-audit --json
 ciao create-chat --prompt "Start here" --workspace default
 ciao cleanup-sdk-blobs --workspace .       # dry-run by default
+ciao label-hygiene --json                  # audit issue labels, dry-run by default
 ciao dev                                   # backend :8543 + Vite :5173
 ciao public-preflight export . /tmp/ciao-public-export
 ciao public-preflight scan /tmp/ciao-public-export --private-patterns /tmp/private-patterns.txt
@@ -133,6 +136,33 @@ root; the local `/api/desktop-drop` route consumes it and either returns host
 paths or transfers client files to the host project. Verify both a host
 Finder-to-chat drop and a client-to-host transfer after changing this bridge.
 
+### Rebuilding the shell from Settings → Restart
+
+With `CIAO_DEV_MODE=true`, Settings → Restart also rebuilds this bundle, but only
+when a watched source under `desktop/` is newer than
+`src-tauri/target/release/bundle/macos/Ciaobot.app` (see `WATCHED_SOURCES` in
+`ciao/desktop_build.py`). Everything else keeps the restart fast: a release Rust
+build costs minutes, so an engine-only or PWA-only change must not pay for it.
+
+The step builds the native arch with `--bundles app` and no updater artifacts (a
+dev machine has no signing key), stages the result at
+`/Applications/.Ciaobot.app.deploy`, then quits the running app, swaps it into
+`/Applications/Ciaobot.app`, and opens it again just before the engine restart.
+Two things are load-bearing:
+
+- The quit has to happen first. `tauri-plugin-single-instance` makes `open` focus
+  the running instance instead of launching the new binary.
+- The swap is staged, not in place. Deleting a bundle under a live process leaves
+  it reading pages from a removed inode. If the app refuses to quit within 20s,
+  the bundle stays staged and is swapped in on the next restart.
+
+The quit goes through AppleScript, not the tray's Quit item: the tray item also
+stops the engine, which is not what a rebuild wants.
+
+Engines that were installed rather than checked out (Homebrew cask, wheel) need
+`CIAO_APP_REPO` pointing at the checkout. Without it every deploy step resolves
+relative to the running module, which is `site-packages`.
+
 After PWA changes, rebuild and either restart the service or use the **Deploy** button in PWA Settings. **Never restart the ciao service from inside a PWA chat** (you'd sever your own session); ask the operator to deploy.
 
 Restart requests made through the running server enter a drain phase: existing chats and background agents finish before shutdown, and new turns are not admitted during that window. Directly killing the process bypasses this protection.
@@ -220,7 +250,7 @@ Canonical example: `ciao/skill_evolution.py:_process_skill_dag`. Use a DAG when 
 
 `ScheduleManager.catch_up()` runs once at server startup. It dispatches only the latest missed occurrence for each enabled schedule, leaves the prompt unchanged, and records the missed occurrence's local date so a later slot on the startup day can still fire normally. Cover changes to this behavior in `tests/test_schedules.py`.
 
-`ProviderSubchatManager` handles routing, limits, and executing participant turns. Cover changes to this behavior in `tests/test_provider_subchats.py` (for manager logic/limit tracking) and `tests/test_provider_subchat_routes.py` (for Starlette HTTP handlers).
+Delegates are normal chats carrying `spawned_from_chat_id`; the wake-on-completion path lives in `ProjectChatManager` (`_queue_delegate_wake` / `_flush_delegate_wake`). Cover changes in `tests/test_delegates.py`.
 
 ## MCP control plane
 

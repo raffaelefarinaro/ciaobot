@@ -135,6 +135,8 @@ Copy `.env.example` to `.env` and fill in the app-level settings first:
 
 The endpoint is mounted at `http://127.0.0.1:<PWA_PORT>/mcp/`. Do not place a static token in `.mcp.json` or Codex config: Ciaobot generates a scoped short-lived token and configures its managed Claude Code/Codex child process. See [docs/MCP.md](docs/MCP.md).
 
+The embedded server pins the Python MCP SDK at `mcp>=1.29.0,<2.0`, bumped for the MCP spec release `2026-07-28`. v1.29.0 is a compatibility release that speaks both the prior wire format and `2026-07-28`; Ciaobot stays on the v1 SDK line and does not migrate to the `2.0.0` rewrite. The `2026-07-28` spec opens a 12-month deprecation window for Roots, Sampling, Logging, and the legacy HTTP+SSE transport. `ciao/mcp_server.py` already runs `stateless_http=True`, `json_response=True`, with no session id and no Roots/Sampling/Elicitation usage, so none of that deprecated surface is in play here.
+
 **Internal command markers:** `CIAO_COMMAND_BEGIN`, `CIAO_COMMAND_INSTRUCTIONS`, and `CIAO_COMMAND_END` are reserved transcript markers used when Ciaobot expands a Claude-style slash command for Codex. They are not environment variables and should not be configured.
 
 **Optional direct-service keys:** `OPENAI_API_KEY` for Ciaobot cloud voice features and `CIAO_OLLAMA_API_KEY` for Ollama Cloud. Claude Code and Codex own their authentication through their respective CLIs.
@@ -159,6 +161,8 @@ Workspace-specific integrations can still be set in `.env`, but the public `.env
 
 **Provider connections and direct keys.** Settings → Providers launches, verifies, and logs out Claude Code and Codex through their own CLIs; Ciaobot does not store their credentials. Keys Ciaobot calls directly remain editable: Ollama Cloud and OpenRouter under Providers, and the OpenAI cloud voice key under Settings → Models. Saving a direct key patches `.env` and restarts the server.
 
+**Custom compatible providers.** Settings → Providers can register any local or hosted endpoint compatible with the selected CLI (for example Ollama, LM Studio, or an Unsloth server). Enter a name, base URL, optional bearer token, and choose `Claude Code` or `Codex` as the runner. Models are discovered when the endpoint supports the OpenAI-style `/v1/models` catalog, or can be entered manually. Claude Code endpoints must implement the Anthropic-compatible chat API; Codex endpoints must implement the OpenAI-compatible API. Provider definitions are tracked in `.ciao/custom_providers.json`, while bearer tokens remain in the gitignored `.runtime/custom_provider_tokens.json`. The resulting custom models are available in chat, workspace defaults, model routing, title generation, insights, schedules, and critique selectors. Claude Code receives `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`; Codex receives `OPENAI_BASE_URL`/`OPENAI_API_KEY`.
+
 ## Google Tasks Reference
 
 | List | ID |
@@ -178,7 +182,11 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 
 ### Required env vars
 
-- `PWA_AUTH_TOKEN` (required): pre-shared token for PWA auth.
+- `PWA_AUTH_TOKEN` (required): pre-shared token for PWA auth. On a node in client
+  mode this local token is not what you log in with: the login screen
+  authenticates against the *host's* token, and Settings → PWA password edits the
+  host's too (that card is proxied). The local token still guards this machine's
+  own never-proxied routes, `/api/node/*` and `/api/device/*`.
 - `CIAO_PUSH_CONTACT` (optional): push notification contact string for the Web Push VAPID subject, for example `mailto:you@example.com`. Empty disables Web Push delivery until set (in `.env` or Settings), but the macOS menu-bar companion still posts local alerts from the runtime notification log.
 - `PWA_PORT` (default `8443`), `PWA_HOST` (default `0.0.0.0`).
 - `CIAO_RUNTIME_ROOT` (optional): runtime-state directory. `Ciaobot.app` reads
@@ -194,7 +202,8 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CLAUDE_EXECUTION_MODE`: `normal`, `plan`, `auto`, `bypass`. Legacy `CLAUDE_PERMISSION_MODE` still accepted.
 - `PWA_AUTH_REQUIRED`: set to `true` to require password protection for the PWA dashboard. Disabled by default.
 - `CIAO_ALLOWED_ORIGINS`: comma-separated extra hostnames/origins accepted for state-changing HTTP and WebSocket handshakes when the app is reached under a host it doesn't bind to (reverse proxy, tunnel, or host alias). Without it, such setups get their `/ws/*` upgrades rejected (403) and live updates stall. A proxy-supplied `X-Forwarded-Host` is honored automatically. Example: `app.example.com,ciao.tailnet.ts.net`.
-- `CIAO_DEV_MODE`: set to `true` to enable developer mode controls in the PWA dashboard (like the Deploy button).
+- `CIAO_DEV_MODE`: set to `true` to enable developer mode controls in the PWA dashboard (like the Deploy button), the `/api/debug/issues` report, and the desktop-app rebuild step in Settings → Restart.
+- `CIAO_APP_REPO`: absolute path to the ciaobot source checkout. Required when the engine itself was installed rather than checked out (Homebrew cask, wheel): Settings → Restart otherwise resolves its git pull, `pip install -e .`, and `npm run build` relative to the running module, which lands in `site-packages`. The restart now fails fast with this hint instead of reporting a confusing "not a git repository". Note that `pip install -e .` points the installed engine at the checkout, and a later `brew upgrade` overwrites that, so this is a developer setting.
 - `CIAO_VAULT_MODE`: onboarding mode for memory-vault folders. Either `scratch` (create folders and documentation from scratch) or `existing` (connect and adapt existing markdown folders).
 - `CIAO_BOOTSTRAP_WORKSPACE`: temp workspace root used when `PWA_AUTH_TOKEN` is absent. Defaults to `~/.ciao/bootstrap`; Ciaobot persists the generated bootstrap auth token under its `.runtime/` so first-run setup survives a restart.
 - `CIAO_NO_BROWSER`: set to any value to stop a first-run `ciao run` from auto-opening the setup wizard in the default browser (the wizard URL is still printed). Auto-open already only happens on interactive terminals, never under launchd or CI.
@@ -208,7 +217,6 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_AUTO_SYNC_ON_START=false` disables the automatic `git pull --rebase` on server startup (enabled by default).
 - `CIAO_RESTART_EXIT_CODE=75`: the exit code `ciao.main` returns to signal `scripts/run-ciao.sh` to restart in place (used by the Deploy button). The restart loop picks up a new `.env` on every iteration, so Deploy doesn't need a full launchd reload. Legacy `TELEGRAM_BRIDGE_RESTART_EXIT_CODE` is also accepted.
 - `CIAO_CLAUDE_MAX_BUFFER_BYTES`: max bytes the Claude Agent SDK buffers for a single JSON message from the `claude` CLI subprocess stdout. Raises the SDK's 1 MiB default (Ciaobot default 32 MiB) so one large tool result or content block doesn't abort the turn. If even this is exceeded the turn ends with a recoverable error instead of a crash. Set higher only for unusually large payloads.
-- `CIAO_BUG_REPORT_FORM_URL` / `CIAO_BUG_REPORT_ENTRY_TITLE` / `CIAO_BUG_REPORT_ENTRY_DETAILS` / `CIAO_BUG_REPORT_ENTRY_SYSTEM`: public Google Form endpoint (`…/formResponse`) and the three field entry ids used by `ciao report-bug` to file an anonymous bug report when `gh` is unavailable. These override the baked-in defaults (the form is public, not a secret); useful for forks or a relocated form. When unset/empty, `ciao report-bug` prints a paste-ready report instead of submitting.
 - File viewer path policy: the file/binary/image viewers and the in-PWA editor have **no workspace sandbox**. They read (and, for the editor and snapshot-restore, write) any path on disk. Relative paths still anchor to the workspace root. The extension allowlist (no `.env`, no key files) and the size caps are the only remaining guards, so secrets in allowlisted files elsewhere on the machine are reachable from an authenticated PWA session.
 - `CIAO_GWS_HEALTH_INTERVAL`: seconds between Google Workspace token-health checks (default `900`). Each cycle runs a cheap `scripts/gws-profile.sh <profile> auth status` per configured profile; when a refresh token is revoked/expired it fires one PWA notification plus an in-app status event (debounced until the token recovers). Set to `0` to disable the periodic check.
 - `GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND`: optional override for `gws`; the server defaults it to `file` at startup for headless auth.
