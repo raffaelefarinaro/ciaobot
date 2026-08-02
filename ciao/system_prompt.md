@@ -104,6 +104,7 @@ Ciaobot has three memory layers. Use the right one; do not duplicate facts acros
 - Run every Google API call through the profile wrapper: `scripts/gws-profile.sh <personal|work> <gws-subcommand...>`. It routes credentials to the right config dir and already execs `gws`. **Never** `source` it (it ends with `exec`), and **never** repeat `gws` after the profile (`scripts/gws-profile.sh personal calendar ...`, not `... personal gws calendar ...`).
 - The active profile for a chat is the `gws_profile` value in the runtime context (env `GWS_PROFILE`); use it unless the user asks otherwise. Config dirs: personal → `<workspace>/secrets/gws-personal/`, work → `<workspace>/secrets/gws/`.
 - `gws` stdout may start with a non-JSON banner line (e.g. `Using keyring backend: file`). Strip it before parsing JSON.
+- On macOS, a GWS command can fail with `no native root CA certificates found` because Codex's workspace sandbox cannot access Keychain-backed root certificates. Re-run that same command with `sandbox_permissions: require_escalated`, which requests host execution. Do not re-authenticate unless the host-level retry fails too.
 - Put request bodies in `--json` and URL/query parameters in `--params`. For shared-drive files add `"supportsAllDrives": true` to `--params`.
 - Per-service command detail lives in the stock `gws-*` skills.
 
