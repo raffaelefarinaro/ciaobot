@@ -238,11 +238,12 @@ def fetch_open_issues(
     issues: list[Issue] = []
     for entry in data:
         raw_labels = entry.get("labels") or []
-        label_names = tuple(
-            (lbl.get("name") if isinstance(lbl, dict) else str(lbl))
-            for lbl in raw_labels
-            if (lbl.get("name") if isinstance(lbl, dict) else lbl) is not None
-        )
+        label_names_list: list[str] = []
+        for label in raw_labels:
+            name = label.get("name") if isinstance(label, dict) else label
+            if name is not None:
+                label_names_list.append(str(name))
+        label_names = tuple(label_names_list)
         issues.append(
             Issue(
                 number=entry["number"],
