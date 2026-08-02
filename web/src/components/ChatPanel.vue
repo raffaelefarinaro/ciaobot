@@ -992,6 +992,7 @@ const store = useProjectStore()
 const fileViewer = useFileViewerStore()
 const draftChatId = store.activeChatId
 const inputText = ref(readChatDraft(draftChatId))
+const inputRevision = ref(0)
 const inputEl = ref<HTMLTextAreaElement>()
 const isContinuing = ref(false)
 const becomingHost = ref(false)
@@ -1001,6 +1002,7 @@ const hostHandoverError = ref('')
 // Persist synchronously to avoid losing the last keystroke when switching
 // chats immediately after typing.
 watch(inputText, (text) => {
+  inputRevision.value += 1
   writeChatDraft(draftChatId, text)
 }, { flush: 'sync' })
 
@@ -1108,11 +1110,11 @@ const dragOver = ref(false)
 const chat = computed(() => store.activeChat!)
 const planModeSaving = ref(false)
 
-async function togglePlanMode(targetMode: 'plan' | 'normal'): Promise<boolean> {
+async function togglePlanMode(targetMode: 'plan' | 'normal', originChatId = chat.value.chat_id): Promise<boolean> {
   if (planModeSaving.value || chat.value.archived) return false
   planModeSaving.value = true
   try {
-    await store.updateChat(chat.value.chat_id, { mode: targetMode })
+    await store.updateChat(originChatId, { mode: targetMode })
     return true
   } catch (e) {
     store.pushErrorToast('Could not change plan mode', errorMessage(e, 'Could not change plan mode'))
@@ -1122,13 +1124,24 @@ async function togglePlanMode(targetMode: 'plan' | 'normal'): Promise<boolean> {
   }
 }
 
-async function handlePlanCommand(targetMode: 'plan' | 'normal'): Promise<void> {
-  const changed = await togglePlanMode(targetMode)
+async function handlePlanCommand(
+  targetMode: 'plan' | 'normal',
+  originChatId: string,
+  submittedText: string,
+  submittedRevision: number,
+): Promise<void> {
+  const changed = await togglePlanMode(targetMode, originChatId)
   if (!changed) return
+  const composerUnchanged =
+    inputRevision.value === submittedRevision
+    && inputText.value === submittedText
+  if (!composerUnchanged) return
+
   // The command itself is consumed, but pending images/comments belong to the
-  // next user turn and must remain staged.
+  // next user turn and must remain staged. Persist against the originating
+  // chat even if the active chat changed while the PATCH was in flight.
+  writeChatDraft(originChatId, '')
   inputText.value = ''
-  writeChatDraft(chat.value.chat_id, '')
   await nextTick()
   autoResize()
 }
@@ -3076,7 +3089,10 @@ function send() {
   if (!text && !hasAttachments) return
   const planTargetMode = planCommandTargetMode(text, chat.value.mode)
   if (planTargetMode) {
-    void handlePlanCommand(planTargetMode)
+    const originChatId = chat.value.chat_id
+    const submittedText = inputText.value
+    const submittedRevision = inputRevision.value
+    void handlePlanCommand(planTargetMode, originChatId, submittedText, submittedRevision)
     return
   }
   // Always "queue": when a response is in flight the backend buffers and
@@ -4667,9 +4683,9 @@ details[open] > .activity-summary::before {
   min-height: 30px;
   padding: 7px 10px;
   margin: -7px;
-  border: 1px solid var(--accent);
+  border: none;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  background: transparent;
   color: var(--accent);
   font: inherit;
   font-size: 11px;
@@ -4679,7 +4695,15 @@ details[open] > .activity-summary::before {
   transition: background 120ms var(--ease), color 120ms var(--ease), transform 120ms var(--ease);
 }
 
-.plan-mode-chip:hover { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+.plan-mode-chip::before {
+  inset: 7px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.plan-mode-chip:hover { background: transparent; }
+.plan-mode-chip:hover::before { background: color-mix(in srgb, var(--accent) 28%, transparent); }
 .plan-mode-chip:active { transform: scale(0.96); }
 .plan-mode-chip:disabled { opacity: 0.55; cursor: wait; transform: none; }
 
