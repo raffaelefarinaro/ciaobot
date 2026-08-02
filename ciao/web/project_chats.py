@@ -4164,10 +4164,7 @@ class ProjectChatManager:
                 )
                 resolved_surface = "legacy"
             else:
-                role = "chat"
-                mcp_url, mcp_token = service.credentials_for_chat(
-                    chat, project, role=role
-                )
+                mcp_url, mcp_token = service.credentials_for_chat(chat, project)
 
         return AgentRequest(
             prompt=full_prompt,

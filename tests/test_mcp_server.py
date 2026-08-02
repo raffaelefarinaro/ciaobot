@@ -993,3 +993,85 @@ def test_file_surface_returns_honest_signal_fields(tmp_path: Path) -> None:
     result = plane.file_surface(principal, "note.md")
     assert result["ok"] is True
     assert result["data"] == {"path": "note.md", "viewers": 1, "stream_state": "active"}
+
+
+def test_forged_role_claim_is_normalised_to_chat() -> None:
+    """A token claim cannot smuggle in a privileged-looking role.
+
+    Claims are the one input to `McpPrincipal` that does not come from our own
+    call sites, so an unrecognised role must be dropped rather than carried
+    around as something later code might branch on. `handoff` is the concrete
+    regression: a gate once tested for exactly that value.
+    """
+    principal = McpPrincipal.from_claims(
+        {
+            "token_id": "t",
+            "chat_id": "chat-1",
+            "project_id": "p",
+            "workspace": "personal",
+            "provider": "claude",
+            "role": "handoff",
+        }
+    )
+
+    assert principal.role == "chat"
+    assert principal.to_claims()["role"] == "chat"
+
+
+def test_issued_principals_are_always_the_chat_role(tmp_path: Path) -> None:
+    """`issue()` has no role knob, so every principal it mints is `chat`.
+
+    Guards the invariant the type annotation now states: adding a restricted
+    role has to change this issuing path, instead of only adding a check that
+    silently never fires.
+    """
+    registry = McpSessionRegistry(ttl_seconds=300)
+
+    _token, principal = registry.issue(
+        chat_id="chat-1", project_id="p", workspace="personal", provider="claude"
+    )
+
+    assert principal.role == "chat"
+
+
+def test_revoke_clears_the_reuse_key_so_the_next_issue_mints_a_fresh_token(
+    tmp_path: Path,
+) -> None:
+    """Revoking must drop the `(chat_id, provider)` reuse entry, not leak it.
+
+    The reuse key used to be a 3-tuple including the role. If a cleanup path
+    still popped a differently-shaped key, the entry would survive revocation
+    and hand a revoked token back to the next caller.
+    """
+    registry = McpSessionRegistry(ttl_seconds=300)
+    token, _ = registry.issue(
+        chat_id="chat-1", project_id="p", workspace="personal", provider="claude"
+    )
+
+    assert registry.revoke(token) is True
+
+    reissued, _ = registry.issue(
+        chat_id="chat-1", project_id="p", workspace="personal", provider="claude"
+    )
+    assert reissued != token
+
+    # revoke_chat() pops the same key shape; it must clear it too.
+    assert registry.revoke_chat("chat-1") == 1
+    again, _ = registry.issue(
+        chat_id="chat-1", project_id="p", workspace="personal", provider="claude"
+    )
+    assert again != reissued
+
+
+def test_same_chat_and_provider_still_reuses_one_token(tmp_path: Path) -> None:
+    """Dropping role from the key must not break token reuse."""
+    registry = McpSessionRegistry(ttl_seconds=300)
+
+    first, _ = registry.issue(
+        chat_id="chat-1", project_id="p", workspace="personal", provider="claude"
+    )
+    second, _ = registry.issue(
+        chat_id="chat-1", project_id="p", workspace="personal", provider="claude"
+    )
+
+    assert first == second

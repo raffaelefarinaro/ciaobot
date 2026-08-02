@@ -46,20 +46,34 @@ class McpPrincipal:
     project_id: str
     workspace: str
     provider: str
-    role: Literal["chat", "automation"] = "chat"
+    # Only ``chat`` is ever issued. The type used to also allow ``automation``,
+    # which nothing minted and nothing branched on, and a third value
+    # ``handoff`` was smuggled past this annotation by a cast so a gate could
+    # test for it. That gate never fired, because the sole issuing call site
+    # hardcodes ``chat``; the handoff primitive has since been deleted
+    # entirely. Keeping this a one-value Literal means any future restricted
+    # role has to change the issuing path to type-check, instead of adding a
+    # check that silently never runs.
+    role: Literal["chat"] = "chat"
 
     def to_claims(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_claims(cls, claims: dict[str, Any]) -> "McpPrincipal":
+        """Rebuild a principal from token claims.
+
+        Anything other than ``chat`` in the claim is normalised away rather
+        than trusted: a token is the one input here that does not come from
+        our own call sites, so an unrecognised role must not become a
+        privilege the rest of the code then reasons about.
+        """
         return cls(
             token_id=str(claims.get("token_id") or ""),
             chat_id=str(claims.get("chat_id") or ""),
             project_id=str(claims.get("project_id") or ""),
             workspace=str(claims.get("workspace") or ""),
             provider=str(claims.get("provider") or ""),
-            role=str(claims.get("role") or "chat"),  # type: ignore[arg-type]
         )
 
 
