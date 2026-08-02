@@ -664,7 +664,7 @@ export interface SlashCommand {
   name: string
   description: string
   argument_hint: string
-  source: 'project' | 'user'
+  source: 'project' | 'user' | 'builtin'
   path: string
 }
 

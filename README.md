@@ -223,6 +223,7 @@ Type these in any chat ([ciao/stock/commands/](ciao/stock/commands/)):
 | [/remember](ciao/stock/commands/remember.md) | Saves a durable fact or learning to the right memory layer (agent memory, user profile, or a vault page). |
 | [/interrogation](ciao/stock/commands/interrogation.md) | Asks a few targeted questions to turn a vague project, person, or idea into a useful canonical vault note. |
 | [/critique](ciao/stock/commands/critique.md) | Multi-model adversarial review of a plan or draft, via the `adversarial_review` MCP tool. |
+| `/plan` | Enters read-only plan mode, then returns to the chat's previous mode (or auto if unavailable). |
 
 ### System routines
 

@@ -91,6 +91,18 @@
           <span class="bg-agents-dot" aria-hidden="true"></span>
           {{ store.activeBackgroundAgents }} agent{{ store.activeBackgroundAgents === 1 ? '' : 's' }}
         </span>
+        <button
+          v-if="chat.mode === 'plan'"
+          type="button"
+          class="plan-mode-chip touch-hit"
+          :disabled="planModeSaving"
+          title="Leave plan mode"
+          aria-label="Leave plan mode"
+          aria-pressed="true"
+          @click.stop="leavePlanMode"
+        >
+          plan
+        </button>
         <div class="model-picker-wrap" ref="modelPickerRef">
           <button
             class="model-picker-btn touch-hit"
@@ -912,6 +924,14 @@ import { buildTurnParts, collectTraceOutputs, findFinalAnswerIndex, formatTokenU
 import { buildForkSnapshot } from '../lib/chatFork'
 import { formatCommentLocation, type ChatCommentAnchor } from '../lib/commentContext'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
+import {
+  clearPlanReturnMode,
+  includeBuiltinPlanCommand,
+  planCommandTargetMode,
+  rememberPlanReturnMode,
+  restorePlanReturnMode,
+  type SlashCommand,
+} from '../lib/planCommand'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 
@@ -976,6 +996,7 @@ const store = useProjectStore()
 const fileViewer = useFileViewerStore()
 const draftChatId = store.activeChatId
 const inputText = ref(readChatDraft(draftChatId))
+const inputRevision = ref(0)
 const inputEl = ref<HTMLTextAreaElement>()
 const isContinuing = ref(false)
 const becomingHost = ref(false)
@@ -985,6 +1006,7 @@ const hostHandoverError = ref('')
 // Persist synchronously to avoid losing the last keystroke when switching
 // chats immediately after typing.
 watch(inputText, (text) => {
+  inputRevision.value += 1
   writeChatDraft(draftChatId, text)
 }, { flush: 'sync' })
 
@@ -1052,15 +1074,9 @@ function primaryAction() {
   send()
 }
 
-// Slash-command picker: populated once on mount from /api/commands.
-type SlashCommand = {
-  name: string
-  description: string
-  argument_hint: string
-  source: 'project' | 'user'
-  path: string
-}
-const slashCommands = ref<SlashCommand[]>([])
+// Slash-command picker: populated once on mount from /api/commands, with
+// UI-owned commands added even when they have no disk-backed asset.
+const slashCommands = ref<SlashCommand[]>(includeBuiltinPlanCommand([]))
 const commandHighlightIdx = ref(0)
 
 const filteredCommands = computed<SlashCommand[]>(() => {
@@ -1096,6 +1112,56 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const dragOver = ref(false)
 const chat = computed(() => store.activeChat!)
+const planModeSaving = ref(false)
+
+async function togglePlanMode(
+  action: 'enter' | 'exit',
+  originChatId = chat.value.chat_id,
+  returnMode = chat.value.mode,
+): Promise<boolean> {
+  if (planModeSaving.value || chat.value.archived) return false
+  const targetMode = action === 'enter' ? 'plan' : restorePlanReturnMode(originChatId)
+  if (action === 'enter') rememberPlanReturnMode(originChatId, returnMode)
+  planModeSaving.value = true
+  try {
+    await store.updateChat(originChatId, { mode: targetMode })
+    if (action === 'exit') clearPlanReturnMode(originChatId)
+    return true
+  } catch (e) {
+    if (action === 'enter') clearPlanReturnMode(originChatId)
+    store.pushErrorToast('Could not change plan mode', errorMessage(e, 'Could not change plan mode'))
+    return false
+  } finally {
+    planModeSaving.value = false
+  }
+}
+
+function leavePlanMode(): void {
+  void togglePlanMode('exit')
+}
+
+async function handlePlanCommand(
+  action: 'enter' | 'exit',
+  originChatId: string,
+  returnMode: string,
+  submittedText: string,
+  submittedRevision: number,
+): Promise<void> {
+  const changed = await togglePlanMode(action, originChatId, returnMode)
+  if (!changed) return
+  const composerUnchanged =
+    inputRevision.value === submittedRevision
+    && inputText.value === submittedText
+  if (!composerUnchanged) return
+
+  // The command itself is consumed, but pending images/comments belong to the
+  // next user turn and must remain staged. Persist against the originating
+  // chat even if the active chat changed while the PATCH was in flight.
+  writeChatDraft(originChatId, '')
+  inputText.value = ''
+  await nextTick()
+  autoResize()
+}
 
 // Inline editing state for queued messages. Keyed by queue entry id.
 const editingQueueId = ref<string | null>(null)
@@ -2361,8 +2427,8 @@ onMounted(async () => {
   } catch { /* use defaults */ }
   try {
     const r = await api.get<{ commands: SlashCommand[] }>('/api/commands')
-    slashCommands.value = r.commands ?? []
-  } catch { /* leave empty; picker just won't show */ }
+    slashCommands.value = includeBuiltinPlanCommand(r.commands ?? [])
+  } catch { /* keep the built-in /plan entry available */ }
   notifyChatFocused(chat.value?.chat_id)
   messagesEl.value?.addEventListener('scroll', checkScroll, { passive: true })
   if (messagesEl.value && typeof ResizeObserver !== 'undefined') {
@@ -3026,6 +3092,16 @@ function send() {
   const text = inputText.value.trim()
   const hasAttachments = store.pendingImages.length > 0 || store.pendingComments.length > 0 || store.pendingChatComments.length > 0
   if (!text && !hasAttachments) return
+  const planTargetMode = planCommandTargetMode(text, chat.value.mode)
+  if (planTargetMode) {
+    const originChatId = chat.value.chat_id
+    const returnMode = chat.value.mode
+    const submittedText = inputText.value
+    const submittedRevision = inputRevision.value
+    const action = planTargetMode === 'plan' ? 'enter' : 'exit'
+    void handlePlanCommand(action, originChatId, returnMode, submittedText, submittedRevision)
+    return
+  }
   // Always "queue": when a response is in flight the backend buffers and
   // flushes on turn end; for a fresh turn this starts it.
   let sendText = text
@@ -4630,6 +4706,39 @@ details[open] > .activity-summary::before {
   background: var(--accent2);
   animation: bg-agents-pulse 1.6s ease-in-out infinite;
 }
+
+.plan-mode-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: content-box;
+  min-width: 30px;
+  min-height: 30px;
+  padding: 7px 10px;
+  margin: -7px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 120ms var(--ease), color 120ms var(--ease), transform 120ms var(--ease);
+}
+
+.plan-mode-chip::before {
+  inset: 7px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.plan-mode-chip:hover { background: transparent; }
+.plan-mode-chip:hover::before { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+.plan-mode-chip:active { transform: scale(0.96); }
+.plan-mode-chip:disabled { opacity: 0.55; cursor: wait; transform: none; }
 
 @keyframes bg-agents-pulse {
   0%, 100% { opacity: 1; }
