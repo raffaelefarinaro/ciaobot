@@ -1518,10 +1518,20 @@ def _vault_search_command(args: argparse.Namespace) -> int:
 
 
 def _vault_lint_command(args: argparse.Namespace) -> int:
-    from ciao.vault_lint import run_validation
+    from ciao.vault_lint import VaultTraversalError, run_validation
 
     vault_root = _resolve_vault_root(args.vault_root)
-    issues = run_validation(vault_root)
+    if not vault_root.is_dir():
+        print(
+            f"Vault root is missing or not a directory: `{vault_root}`",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        issues = run_validation(vault_root)
+    except VaultTraversalError as exc:
+        print(f"Vault inspection failed: {exc}", file=sys.stderr)
+        return 1
 
     has_issues = False
     if issues["broken_links"]:
@@ -1529,6 +1539,26 @@ def _vault_lint_command(args: argparse.Namespace) -> int:
         print("### Dead Wikilinks\n")
         for item in issues["broken_links"]:
             print(f"- `{item['source']}` links to missing `[[{item['target']}]]`")
+        print()
+
+    if issues["frontmatter_errors"]:
+        has_issues = True
+        print("### Frontmatter Errors\n")
+        for item in issues["frontmatter_errors"]:
+            print(
+                f"- `{item['source']}`: {item['message']} "
+                f"(`{item['kind']}`)"
+            )
+        print()
+
+    if issues["broken_markdown_links"]:
+        has_issues = True
+        print("### Broken Markdown Links\n")
+        for item in issues["broken_markdown_links"]:
+            print(
+                f"- `{item['source']}` links to `{item['target']}`: "
+                f"`{item['kind']}` (resolved: `{item['resolved']}`)"
+            )
         print()
 
     if issues["orphans"]:

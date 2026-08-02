@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from ciao import memory_tool as mt
+from ciao import vault_lint
 from ciao.os_audit import (
     SKILL_MAX_BYTES,
     audit_job_runs,
@@ -431,11 +432,18 @@ def test_run_os_audit_counts_every_actionable_finding(tmp_path: Path) -> None:
     resources = vault / "personal" / "Resources"
     ideas.mkdir(parents=True)
     resources.mkdir(parents=True)
-    (ideas / "same.md").write_text("# One\n\n[[missing-target]]\n", encoding="utf-8")
-    (resources / "same.md").write_text("# Two\n", encoding="utf-8")
+    (ideas / "same.md").write_text(
+        "---\ntype: idea\n---\n# One\n\n[[missing-target]]\n",
+        encoding="utf-8",
+    )
+    (resources / "same.md").write_text(
+        "---\ntype: resource\n---\n# Two\n",
+        encoding="utf-8",
+    )
     proposals = vault / "personal" / "Workspace" / "Memory-Proposals.md"
     proposals.parent.mkdir(parents=True)
     proposals.write_text(
+        "---\ntype: note\n---\n"
         "- [memory] pending fact  _(from: Decisions)_\n",
         encoding="utf-8",
     )
@@ -479,6 +487,130 @@ def test_run_os_audit_counts_every_actionable_finding(tmp_path: Path) -> None:
     md_summary = format_audit_markdown(report)
     assert "# AI OS Audit Report" in md_summary
     assert "NEEDS_ATTENTION" in md_summary
+
+
+def test_os_audit_counts_and_formats_new_vault_findings(tmp_path: Path) -> None:
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+    page = vault / "personal" / "Page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("[missing](missing.md)\n", encoding="utf-8")
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        memory_dir=bounded,
+    )
+
+    assert len(report["vault_hygiene"]["frontmatter_errors"]) == 1
+    assert len(report["vault_hygiene"]["broken_markdown_links"]) == 1
+    assert report["total_issues"] == 2
+    assert report["status"] == "needs_attention"
+    markdown = format_audit_markdown(report)
+    assert "Frontmatter errors: 1" in markdown
+    assert "Broken Markdown links: 1" in markdown
+
+
+def test_os_audit_counts_frontmatter_findings_without_markdown_findings(
+    tmp_path: Path,
+) -> None:
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+    page = vault / "Page.md"
+    page.write_text("# Missing metadata\n", encoding="utf-8")
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        memory_dir=bounded,
+    )
+
+    assert len(report["vault_hygiene"]["frontmatter_errors"]) == 1
+    assert len(report["vault_hygiene"]["broken_markdown_links"]) == 0
+    assert report["total_issues"] == 1
+    markdown = format_audit_markdown(report)
+    assert "Frontmatter errors: 1" in markdown
+    assert "Broken Markdown links: 0" in markdown
+
+
+def test_os_audit_counts_markdown_findings_without_frontmatter_findings(
+    tmp_path: Path,
+) -> None:
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+    page = vault / "Page.md"
+    page.write_text(
+        "---\ntype: note\n---\n[missing](missing.md)\n",
+        encoding="utf-8",
+    )
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        memory_dir=bounded,
+    )
+
+    assert len(report["vault_hygiene"]["frontmatter_errors"]) == 0
+    assert len(report["vault_hygiene"]["broken_markdown_links"]) == 1
+    assert report["total_issues"] == 1
+    markdown = format_audit_markdown(report)
+    assert "Frontmatter errors: 0" in markdown
+    assert "Broken Markdown links: 1" in markdown
+
+
+def test_os_audit_source_discovery_matches_vault_lint_exclusions_and_suffixes(
+    tmp_path: Path,
+) -> None:
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+    included = vault / "included" / "Unreadable.MD"
+    included.parent.mkdir(parents=True)
+    included.write_bytes(b"\xff\xfe")
+    for directory in ("Logs", "Templates"):
+        excluded = vault / directory / "Unreadable.Md"
+        excluded.parent.mkdir(parents=True)
+        excluded.write_bytes(b"\xff\xfe")
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        memory_dir=bounded,
+    )
+
+    unreadable_paths = {
+        error["path"]
+        for error in report["scan_errors"]
+        if error["type"] == "unreadable_vault_file"
+    }
+    assert str(included) in unreadable_paths
+    assert str(vault / "Logs" / "Unreadable.Md") not in unreadable_paths
+    assert str(vault / "Templates" / "Unreadable.Md") not in unreadable_paths
+
+
+def test_os_audit_reports_vault_traversal_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace, vault, runtime, bounded = _healthy_roots(tmp_path)
+
+    def fail_walk(*args: object, **kwargs: object):
+        raise OSError("cannot inspect vault")
+
+    monkeypatch.setattr(vault_lint.os, "walk", fail_walk)
+
+    report = run_os_audit(
+        workspace_dir=workspace,
+        vault_root=vault,
+        runtime_dir=runtime,
+        memory_dir=bounded,
+    )
+
+    assert report["status"] == "error"
+    assert any(
+        error["type"] == "vault_validation_failed"
+        and "cannot inspect vault" in error["message"]
+        for error in report["scan_errors"]
+    )
 
 
 def test_run_os_audit_preserves_distinct_errors_for_the_same_file(
