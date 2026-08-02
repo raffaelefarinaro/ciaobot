@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
-import { defineComponent, h } from 'vue'
+import { defineComponent, h, nextTick } from 'vue'
 import { flushPromises, shallowMount, type VueWrapper } from '@vue/test-utils'
 import { api } from '../../lib/api'
 import { readChatDraft, writeChatDraft } from '../../lib/chatDrafts'
@@ -231,12 +231,25 @@ describe('ChatPanel /plan interactions', () => {
 
   it('uses the originating chat when the plan chip leaves plan mode', async () => {
     const { wrapper, updateChat } = await mountPanel({ mode: 'plan' })
-    updateChat.mockResolvedValue()
+    const pending = deferred<void>()
+    updateChat.mockReturnValue(pending.promise)
+    const chip = wrapper.get('button.plan-mode-chip')
 
-    await wrapper.get('button.plan-mode-chip').trigger('click')
-    await flushPromises()
+    expect(chip.attributes('aria-label')).toBe('Leave plan mode')
+    expect(chip.attributes('aria-pressed')).toBe('true')
+    expect(chip.classes()).toContain('touch-hit')
+    expect(chip.attributes('disabled')).toBeUndefined()
+
+    await chip.trigger('click')
+    await nextTick()
 
     expect(updateChat).toHaveBeenCalledWith('chat-1', { mode: 'normal' })
+    expect(wrapper.get('button.plan-mode-chip').attributes('disabled')).toBeDefined()
+
+    pending.resolve()
+    await flushPromises()
+
+    expect(wrapper.get('button.plan-mode-chip').attributes('disabled')).toBeUndefined()
     wrapper.unmount()
   })
 
