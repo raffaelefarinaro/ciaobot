@@ -56,6 +56,7 @@ The release tool runs `pytest`, `npm run test`/`npm run build` (in `web/`), and 
 
 - Use the repo `.venv` (Python 3.12+, `ciaobot` editable-installed) or a dedicated `python3.13 -m venv .venv-rel && .venv-rel/bin/pip install -e ".[test]"`.
 - `cd web && npm ci` at least once so `vitest` exists.
+- **A Rust toolchain, or plan to use `--skip-frontend`.** `_run_checks` puts `cd desktop && npm run test` (which is `cargo test`) and `cd desktop && npm run build` in the *same* group as the web checks, so there is no way to run the web checks locally without also needing `cargo`. Without Rust installed the run dies with `ReleaseError: command failed (127): npm run test` — a 127 from the desktop step, not a broken web suite. CI covers `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, the macOS bundle build, and a cold-start smoke (`ci.yml:81-134`), so cutting with `--skip-frontend` and letting the PR gate it is sound; run `npm run test`, `npm run build`, and `npm run lint` in `web/` by hand first so the skip only covers the desktop half.
 - `gh` authenticated (for `--create-pr`).
 - Start from a **clean** tree on `develop` (see the dirty-tree trap below).
 

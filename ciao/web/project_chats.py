@@ -3901,7 +3901,7 @@ class ProjectChatManager:
         return self._workspace_model_bucket(project.workspace if project else None)
 
     def _resolve_claude_model(self, model: str, bucket: str, project_id: str) -> str:
-        """Resolve picker aliases to Ollama or OpenRouter tier models."""
+        """Resolve picker aliases to Ollama, OpenRouter, or custom-provider models."""
         from ciao.model_tiers import tier_model
 
         effective = self._effective_bucket(bucket, project_id)

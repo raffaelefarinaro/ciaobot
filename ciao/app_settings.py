@@ -23,7 +23,11 @@ _VALID_ENGINES = {"", "cloud", "local"}
 
 @dataclass(slots=True)
 class AppSettings:
-    """One value per overridable knob; empty string = use config default."""
+    """One value per overridable knob; empty string = use config default.
+
+    ``custom_routing`` is the exception: user-defined providers are dynamic, so
+    it nests a per-provider tier map rather than a single scalar.
+    """
 
     # Model used by the chat title generator. Overrides both the Ollama
     # free-tier title model and the Anthropic fallback when set.
