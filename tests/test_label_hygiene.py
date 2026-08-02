@@ -230,6 +230,28 @@ def test_fetch_open_issues_calls_gh_once_and_parses_labels() -> None:
     ]
 
 
+def test_fetch_open_issues_normalizes_non_string_label_values() -> None:
+    def fake_runner(cmd, **kwargs):
+        payload = [
+            {
+                "number": 1,
+                "title": "[Bug] x",
+                "labels": [
+                    {"name": "bug"},
+                    {"name": 7},
+                    {"name": None},
+                    42,
+                    None,
+                ],
+            }
+        ]
+        return _FakeResult(stdout=json.dumps(payload))
+
+    assert fetch_open_issues(runner=fake_runner) == [
+        Issue(1, "[Bug] x", ("bug", "7", "42"))
+    ]
+
+
 def test_apply_additions_only_ever_uses_add_label() -> None:
     calls = []
 

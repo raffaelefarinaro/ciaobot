@@ -64,6 +64,18 @@ def test_load_ignores_unknown_keys_and_non_strings(tmp_path):
     assert store.settings.insights_model == ""
 
 
+def test_load_ignores_non_object_custom_routing(tmp_path):
+    path = tmp_path / "app_settings.json"
+    path.write_text(
+        json.dumps({"title_model": " gemma4:12b-it-qat ", "custom_routing": "bad"})
+    )
+
+    settings = AppSettingsStore(path).settings
+
+    assert settings.title_model == "gemma4:12b-it-qat"
+    assert settings.custom_routing is None
+
+
 def test_load_corrupt_file_gives_defaults(tmp_path):
     path = tmp_path / "app_settings.json"
     path.write_text("{not json")
