@@ -51,7 +51,7 @@ ciao/                          Python backend (Starlette).
   critique.py                  Multi-model adversarial review. Runs each reviewer through ciao/providers/oneshot.py with per-model routing (OpenRouter / Ollama / Anthropic). CLI: `python -m ciao.critique`. Used by the adversarial-review skill.
   fts_search.py                SQLite FTS5 full-text indexing and search for vault and transcripts.
   vault_index.py               Build/query memory-vault/INDEX.md from frontmatter and wikilinks. CLI: `ciao vault-index`.
-  vault_lint.py                Read-only vault health validation for frontmatter, Markdown links, wikilinks, orphans, and duplicate stems. CLI: `ciao vault-lint`.
+  vault_lint.py                Read-only vault health validation for frontmatter, relative Markdown links, wikilinks, orphans, and duplicate stems. CLI: `ciao vault-lint`.
   os_audit.py                  Strict AI OS health audit covering required roots, vault hygiene, skill budgets, rule clashes, bounded memory, proposals, and failed jobs. CLI: `ciao os-audit`.
   trajectory_builder.py        Parse filtered session JSONL into a structured trajectory (turns, tools, skills, errors) and persist to ~/.ciao/trajectories/YYYY-MM/<session-id>.json. CLI: `python3 -m ciao.trajectory_builder --list [...]`.
   skill_evolution.py           Weekly pass: mine trajectories, flag skills tied to non-success sessions, draft edit proposals to the vault's Workspace/Skill-Proposals/. 15KB skill cap, optional test gate, no auto-apply. `run_evolution_pass` builds a per-skill DAG (has_proposal → semantic → tests → write, with a write_stub fallback for over-cap skills) via `ciao/dag.py`.

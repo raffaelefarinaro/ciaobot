@@ -214,9 +214,28 @@ scripts/dev-commands.sh all         # everything above
 
 `mypy ciao` is a blocking CI step — keep it green (config in `pyproject.toml` under `[tool.mypy]`). The frontend lint and both dependency audits are advisory (`|| true`) so a fresh upstream advisory can't block a release; review their output rather than ignoring it. Install `pip install -e '.[test]'` (Python) and `cd web && npm ci` (frontend) to get the tools. A `.pre-commit-config.yaml` wires trailing-whitespace/ruff/mypy/eslint hooks for `pre-commit install`.
 
+### Vault lint
+
+`ciao vault-lint` is a read-only, deterministic check for the Markdown vault.
+It validates the frontmatter on each page, including a non-empty string
+`type`, and reports broken relative Markdown links, broken wikilinks, orphan
+pages, and duplicate stems. `INDEX.md`, `MEMORY.md`, and `log.md` are exempt
+from the frontmatter requirement. External URLs, absolute paths, and anchors
+are not treated as vault links.
+
+Use `--vault-root` to choose a vault. Otherwise it uses `CIAO_VAULT_ROOT` or
+`./memory-vault`. A clean scan exits 0. Findings, a missing vault root, or an
+incomplete traversal exit 1. It never reports a clean vault when it could not
+inspect every path.
+
 ### AI OS audit
 
-`ciao os-audit` checks required workspace roots, vault links and duplicates, skill budgets, instruction clashes, bounded-memory hygiene, pending memory proposals, and failed background jobs. Human-readable Markdown is the default; use `--json` for automation.
+`ciao os-audit` checks required workspace roots, vault frontmatter, relative
+Markdown links, wikilinks, orphans and duplicate stems, skill budgets,
+instruction clashes, bounded-memory hygiene, pending memory proposals, and
+failed background jobs. Human-readable Markdown is the default; use `--json`
+for automation. A vault scan that cannot inspect all paths is reported as an
+audit error, not as a healthy result.
 
 The status and process exit code are a stable contract:
 
