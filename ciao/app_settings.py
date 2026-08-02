@@ -23,7 +23,11 @@ _VALID_ENGINES = {"", "cloud", "local"}
 
 @dataclass(slots=True)
 class AppSettings:
-    """One value per overridable knob; empty string = use config default."""
+    """One value per overridable knob; empty string = use config default.
+
+    ``custom_routing`` is the exception: user-defined providers are dynamic, so
+    it nests a per-provider tier map rather than a single scalar.
+    """
 
     # Model used by the chat title generator. Overrides both the Ollama
     # free-tier title model and the Anthropic fallback when set.
@@ -59,6 +63,9 @@ class AppSettings:
     codex_sonnet_model: str = ""
     codex_opus_model: str = ""
     codex_fable_model: str = ""
+    # Per-custom-provider tier routes. Keys are provider ids and values map
+    # haiku/sonnet/opus/fable to concrete ``custom:<id>:<model>`` ids.
+    custom_routing: dict[str, dict[str, str]] | None = None
 
 
 class AppSettingsStore:
@@ -79,13 +86,28 @@ class AppSettingsStore:
         except (OSError, ValueError):
             logger.warning("Unreadable app settings at %s; using defaults", self._path)
             return AppSettings()
-        known = {f.name for f in fields(AppSettings)}
-        cleaned = {
-            k: v.strip()
-            for k, v in raw.items()
-            if k in known and isinstance(v, str)
+        string_fields = {
+            field.name
+            for field in fields(AppSettings)
+            if field.name != "custom_routing"
         }
-        return AppSettings(**cleaned)
+        settings = AppSettings()
+        for key, value in raw.items():
+            if key in string_fields and isinstance(value, str):
+                setattr(settings, key, value.strip())
+        custom_routing = raw.get("custom_routing")
+        if isinstance(custom_routing, dict):
+            settings.custom_routing = {
+                str(provider_id): {
+                    str(tier): str(model).strip()
+                    for tier, model in routes.items()
+                    if str(tier) in {"haiku", "sonnet", "opus", "fable"}
+                    and isinstance(model, str) and model.strip()
+                }
+                for provider_id, routes in custom_routing.items()
+                if isinstance(routes, dict)
+            }
+        return settings
 
     def _save(self) -> None:
         payload = {k: v for k, v in asdict(self.settings).items() if v}
@@ -94,7 +116,7 @@ class AppSettingsStore:
             json.dumps(payload, indent=2) + "\n", encoding="utf-8"
         )
 
-    def update(self, changes: dict[str, str]) -> AppSettings:
+    def update(self, changes: dict[str, object]) -> AppSettings:
         """Validate and persist a partial update; returns the new settings.
 
         Unknown keys are ignored. Raises ``ValueError`` on a bad engine
@@ -103,6 +125,21 @@ class AppSettingsStore:
         known = {f.name for f in fields(AppSettings)}
         for key, value in changes.items():
             if key not in known:
+                continue
+            if key == "custom_routing":
+                if not isinstance(value, dict):
+                    raise ValueError("custom_routing must be an object")
+                cleaned_routes: dict[str, dict[str, str]] = {}
+                for provider_id, routes in value.items():
+                    if not isinstance(routes, dict):
+                        raise ValueError("custom_routing entries must be objects")
+                    cleaned_routes[str(provider_id)] = {
+                        str(tier): str(model).strip()
+                        for tier, model in routes.items()
+                        if str(tier) in {"haiku", "sonnet", "opus", "fable"}
+                        and isinstance(model, str) and model.strip()
+                    }
+                setattr(self.settings, key, cleaned_routes)
                 continue
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
@@ -191,3 +228,4 @@ class AppSettingsStore:
             opus_model=s.codex_opus_model or d["codex_opus_model"],
             fable_model=s.codex_fable_model or d["codex_fable_model"],
         )
+        config.custom_routing = s.custom_routing or {}

@@ -775,7 +775,7 @@
                       </span>
                     </template>
                     <template v-else-if="connKey === 'codex'">
-                      <span v-for="skill in ['superpowers', 'build-web-apps', 'stripe', 'supabase', 'browser']" :key="skill" class="connector-pill connector-pill--enabled">
+                      <span v-for="skill in ['build-web-apps', 'stripe', 'supabase', 'browser']" :key="skill" class="connector-pill connector-pill--enabled">
                         <span class="pill-dot"></span> {{ skill }}
                       </span>
                     </template>
@@ -828,6 +828,56 @@
                 :placeholder="meta.configured ? '•••••••••••• (Leave blank to keep existing, or type empty space to clear)' : 'Enter API Key'"
                 :disabled="providerKeysSaving"
               />
+            </div>
+
+            <div class="custom-providers-block">
+              <div class="settings-card-header">
+                <div>
+                  <p class="section-title">custom compatible providers</p>
+                  <p class="hint">
+                    Add any endpoint compatible with the selected CLI, including local Ollama, LM Studio, or Unsloth. Choose Claude Code or Codex as the runner. Tokens stay on this machine.
+                  </p>
+                </div>
+                <button class="btn-small" type="button" @click="addCustomProvider">Add provider</button>
+              </div>
+              <div v-if="!customProviderDrafts.length" class="hint hint--compact">No custom endpoints configured.</div>
+              <div v-for="draft in customProviderDrafts" :key="draft.id" class="custom-provider-row">
+                <div class="settings-field-grid custom-provider-grid">
+                  <label class="settings-field">
+                    <span class="ws-label">Name</span>
+                    <input class="routine-input" v-model="draft.name" @input="customProvidersDirty = true" placeholder="LM Studio" />
+                  </label>
+                  <label class="settings-field">
+                    <span class="ws-label">Id</span>
+                    <input class="routine-input" v-model="draft.id" @input="customProvidersDirty = true" placeholder="lm-studio" />
+                  </label>
+                  <label class="settings-field custom-provider-url">
+                    <span class="ws-label">Base URL</span>
+                    <input class="routine-input" v-model="draft.url" @input="customProvidersDirty = true" placeholder="http://localhost:1234/v1" />
+                  </label>
+                  <label class="settings-field">
+                    <span class="ws-label">Use with</span>
+                    <select class="routine-select" v-model="draft.runner" @change="customProvidersDirty = true">
+                      <option value="claude">Claude Code</option>
+                      <option value="codex">Codex</option>
+                    </select>
+                  </label>
+                  <label class="settings-field custom-provider-token">
+                    <span class="ws-label">Token</span>
+                    <input class="routine-input" type="password" v-model="draft.token" @input="customProvidersDirty = true" :placeholder="draft.token_configured ? '•••••••• (leave blank to keep)' : 'Optional for local servers'" />
+                  </label>
+                  <label class="settings-field custom-provider-models">
+                    <span class="ws-label">Models (optional)</span>
+                    <input class="routine-input" v-model="draft.models" @input="customProvidersDirty = true" placeholder="model-id, another-model" />
+                  </label>
+                </div>
+                <div class="action-row provider-connection-actions">
+                  <button class="btn-small" type="button" :disabled="customProviderProbePending === draft.id" @click="probeCustomProvider(draft)">
+                    {{ customProviderProbePending === draft.id ? 'Discovering…' : 'Discover models' }}
+                  </button>
+                  <button class="btn-small btn-danger" type="button" @click="removeCustomProvider(draft.id)">Remove</button>
+                </div>
+              </div>
             </div>
 
 
@@ -907,6 +957,20 @@
                 Status and logs of background tasks (git sync, memory curation, skills update, title generation).
                 Tasks wrapped in telemetry are recorded here.
               </p>
+              <div class="automation-legend" aria-label="Automation capability legend">
+                <span class="automation-legend-item">
+                  <span class="automation-capability automation-capability--model">MODEL</span>
+                  invokes a language model
+                </span>
+                <span class="automation-legend-item">
+                  <span class="automation-capability automation-capability--outcome">OUTCOME</span>
+                  creates a durable or user-visible result
+                </span>
+                <span class="automation-legend-item">
+                  <span class="automation-capability automation-capability--muted">STATUS ONLY</span>
+                  records operational health
+                </span>
+              </div>
             </div>
           </div>
 
@@ -917,13 +981,26 @@
               No automation runs recorded yet.
             </p>
             <div v-else class="automation-list">
-              <div v-for="item in automationItems" :key="item.job" class="automation-row-container">
+              <div v-for="item in visibleAutomationItems" :key="item.job" class="automation-row-container">
                 <!-- Header of job run -->
                 <div class="automation-job-header" @click="expandedAutomations[item.job] = !expandedAutomations[item.job]">
                   <div class="job-meta-left">
                     <span class="expand-icon">{{ expandedAutomations[item.job] ? '▼' : '▶' }}</span>
                     <span class="job-title">{{ item.label }}</span>
-                    <span class="job-desc" :title="item.description">{{ item.description }}</span>
+                    <span
+                      class="automation-capability"
+                      :class="jobUsesModel(item) ? 'automation-capability--model' : 'automation-capability--muted'"
+                      :title="jobUsesModel(item) ? 'This automation invokes a language model.' : 'This automation does not invoke a language model.'"
+                    >
+                      {{ jobUsesModel(item) ? 'MODEL' : 'NO MODEL' }}
+                    </span>
+                    <span
+                      class="automation-capability"
+                      :class="jobProducesOutcome(item) ? 'automation-capability--outcome' : 'automation-capability--muted'"
+                      :title="jobProducesOutcome(item) ? 'This automation creates a durable or user-visible result.' : 'This automation records operational health only.'"
+                    >
+                      {{ jobProducesOutcome(item) ? 'OUTCOME' : 'STATUS ONLY' }}
+                    </span>
                   </div>
                   <div class="job-meta-right">
                     <!-- Stats summary -->
@@ -944,21 +1021,23 @@
                       {{ triggeringJobs[item.job] ? 'Running...' : 'Run now' }}
                     </button>
                     <button
-                      v-else-if="item.job === 'insights' || item.job === 'backfill_insights'"
+                      v-else-if="item.job === 'backfill_insights' || item.job === 'insights_backfill'"
                       class="btn-small btn-run"
                       :disabled="backfillRunning"
                       @click.stop="triggerBackfill"
                     >
                       {{ backfillRunning ? 'Backfilling...' : 'Backfill insights' }}
                     </button>
-                    <span v-else class="job-trigger-context" title="Event-driven or periodic backend task">
-                      Auto
-                    </span>
                   </div>
                 </div>
 
                 <!-- Expanded details (Runs log) -->
                 <div v-if="expandedAutomations[item.job]" class="automation-job-detail">
+                  <div class="automation-job-description">
+                    <p class="automation-job-description-label">What it does</p>
+                    <p>{{ item.description || 'No description available.' }}</p>
+                  </div>
+
                   <!-- Last run meta -->
                   <div v-if="item.last_run" class="last-run-info">
                     <div class="detail-row">
@@ -1000,13 +1079,16 @@
                               {{ run.status }}
                             </span>
                           </td>
-                          <td class="td-dur">{{ formatDuration(run.duration_ms) || '0ms' }}</td>
+                          <td class="td-dur">{{ formatDuration(run.duration_ms) || 'unknown' }}</td>
                           <td class="td-details">
                             <span v-if="run.model" class="run-model-info">{{ run.provider }}/{{ run.model }}</span>
+                            <span v-if="run.extra?.summary || run.extra?.message" class="run-summary-info">
+                              {{ run.extra?.summary || run.extra?.message }}
+                            </span>
                             <span v-if="run.status === 'skipped' && run.extra?.skip_reason" class="run-skip-info">
                               Skipped: {{ run.extra.skip_reason }}
                             </span>
-                            <div v-if="run.error" class="run-error-details" :title="run.error">
+                            <div v-if="run.error && run.error !== run.extra?.summary" class="run-error-details" :title="run.error">
                               {{ run.error }}
                             </div>
                           </td>
@@ -2240,6 +2322,7 @@ import type {
   McpEnvKey,
   PromptAsset,
   ProviderConfigSettings,
+  CustomProviderSettings,
   RoutineSettings,
   SkillInventory,
   SlashCommand,
@@ -2745,7 +2828,7 @@ const routinesError = ref('')
 const routinesSaving = ref(false)
 const routinesResult = ref('')
 
-type AliasProviderKey = 'claude' | 'codex' | 'ollama' | 'openrouter'
+type AliasProviderKey = 'claude' | 'codex' | 'ollama' | 'openrouter' | `custom:${string}`
 type TierProviderKey = Exclude<AliasProviderKey, 'claude'>
 type RoutingProviderKey = Exclude<AliasProviderKey, 'claude'>
 type TierKey = 'haiku' | 'sonnet' | 'opus' | 'fable'
@@ -2825,7 +2908,7 @@ async function fetchRoutines() {
   }
 }
 
-async function saveRoutines(patch: Record<string, string>) {
+async function saveRoutines(patch: Record<string, unknown>) {
   routinesSaving.value = true
   routinesResult.value = ''
   try {
@@ -2912,6 +2995,17 @@ const aliasProviderSections = computed<AliasProviderSection[]>(() => {
       available: true,
     })
   }
+  for (const provider of settings.model_options.custom_providers || []) {
+    const options = parseModelList((provider.models || []).join(','))
+    if (!options.length) continue
+    sections.push({
+      key: `custom:${provider.id}` as AliasProviderKey,
+      label: `${provider.name} (via ${provider.runner === 'codex' ? 'Codex' : 'Claude Code'})`,
+      options,
+      configurable: true,
+      available: true,
+    })
+  }
   return sections
 })
 
@@ -2958,6 +3052,13 @@ const tierProviderSections = computed<AliasProviderSection[]>(() => {
       configurable: true,
       available: openrouterAvailable,
     },
+    ...(settings.model_options.custom_providers || []).map((provider) => ({
+      key: `custom:${provider.id}` as AliasProviderKey,
+      label: `${provider.name} (via ${provider.runner === 'codex' ? 'Codex' : 'Claude Code'})`,
+      options: parseModelList((provider.models || []).join(',')),
+      configurable: true,
+      available: (provider.models || []).length > 0,
+    })),
   ]
 })
 
@@ -3008,6 +3109,10 @@ const tierProviderUnavailableHint = computed(() => {
 const DEFAULT_TIER_SELECTION = '__ciao_default__'
 
 function tierOverrideValue(provider: TierProviderKey, tier: TierKey): string {
+  if (provider.startsWith('custom:')) {
+    const id = provider.slice('custom:'.length)
+    return routines.value?.custom_routing?.[id]?.[tier] || ''
+  }
   const key = tierSettingKeys[provider][tier]
   return routines.value?.[key] || ''
 }
@@ -3053,8 +3158,19 @@ function tierModelSectionsFor(provider: TierProviderKey, tier: TierKey): ModelSe
 async function saveTierModel(provider: TierProviderKey, tier: TierKey, value: string | string[]) {
   const selected = Array.isArray(value) ? value[0] || '' : value
   const model = selected === DEFAULT_TIER_SELECTION ? '' : selected
-  const key = tierSettingKeys[provider][tier]
-  await saveRoutines({ [key]: model.trim() })
+  if (provider.startsWith('custom:')) {
+    const id = provider.slice('custom:'.length)
+    const routing = JSON.parse(JSON.stringify(routines.value?.custom_routing || {})) as Record<string, Record<string, string>>
+    const routes = { ...(routing[id] || {}) }
+    if (model.trim()) routes[tier] = model.trim()
+    else delete routes[tier]
+    if (Object.keys(routes).length) routing[id] = routes
+    else delete routing[id]
+    await saveRoutines({ custom_routing: routing })
+  } else {
+    const key = tierSettingKeys[provider][tier]
+    await saveRoutines({ [key]: model.trim() })
+  }
   // Codex effective tiers live in /api/models; refresh so the badges and
   // "Automatic (…)" labels reflect the new pin immediately.
   if (provider === 'codex') await fetchWorkspaceModels()
@@ -3063,6 +3179,7 @@ async function saveTierModel(provider: TierProviderKey, tier: TierKey, value: st
 function tierModelForProvider(provider: AliasProviderKey, tier: TierKey): string {
   if (provider === 'claude') return routines.value?.alias_tiers?.claude?.[tier] || tier
   if (provider === 'codex') return workspaceModels.value?.alias_tiers?.codex?.[tier] || 'Not available'
+  if (provider.startsWith('custom:')) return tierEffectiveValue(provider, tier) || ''
   return tierEffectiveValue(provider, tier) || ''
 }
 
@@ -3091,6 +3208,14 @@ function inferRoutineModel(model: string): { provider: RoutineProviderValue; tie
       }
     }
     return { provider: 'codex', tier: 'sonnet' }
+  }
+  if (raw.startsWith('custom:')) {
+    const provider = `custom:${raw.split(':', 2)[1]}` as AliasProviderKey
+    const tiers = routines.value?.alias_tiers?.[provider] || {}
+    for (const tier of modelTiers) {
+      if (tiers[tier.key] === raw) return { provider, tier: tier.key }
+    }
+    return { provider, tier: 'sonnet' }
   }
   const claudeTiers: Record<string, TierKey> = { haiku: 'haiku', sonnet: 'sonnet', opus: 'opus', fable: 'fable' }
   if (claudeTiers[raw]) {
@@ -3133,7 +3258,7 @@ function routineTierValue(key: RoutineModelKey): TierKey {
 function routineTierSelectable(key: RoutineModelKey): boolean {
   const provider = routineProviderValue(key)
   return provider === 'claude' || provider === 'ollama' || provider === 'openrouter'
-    || provider === 'codex'
+    || provider === 'codex' || provider.startsWith('custom:')
 }
 
 function routineCustomModel(key: RoutineModelKey): string {
@@ -3194,6 +3319,10 @@ const mcpUsageError = ref('')
 const providerKeyInputs = ref<Record<string, string>>({})
 const providerConnectionPending = ref('')
 const providerConnectionResult = ref('')
+type CustomProviderDraft = Omit<CustomProviderSettings, 'models'> & { token: string; models: string }
+const customProviderDrafts = ref<CustomProviderDraft[]>([])
+const customProvidersDirty = ref(false)
+const customProviderProbePending = ref('')
 const autoUpdateGithubSkills = ref(false)
 const autoUpdateSaving = ref(false)
 const autoUpdateResult = ref('')
@@ -3388,6 +3517,12 @@ async function fetchProviderKeys() {
   try {
     const res = await api.get<ProviderConfigSettings>('/api/settings/providers')
     providerKeys.value = res
+    customProviderDrafts.value = (res.custom_providers || []).map((provider) => ({
+      ...provider,
+      token: '',
+      models: provider.models.join(', '),
+    }))
+    customProvidersDirty.value = false
     for (const key in res.keys) {
       providerKeyInputs.value[key] = ''
     }
@@ -3401,6 +3536,48 @@ async function fetchProviderKeys() {
     providerKeysError.value = `Failed to load provider keys: ${errorMessage(e)}`
   } finally {
     providerKeysLoaded.value = true
+  }
+}
+
+function addCustomProvider() {
+  const id = `custom-${Date.now().toString(36)}`
+  customProviderDrafts.value.push({
+    id,
+    name: 'Custom provider',
+    url: 'http://localhost:1234/v1',
+    runner: 'claude',
+    models: '',
+    token_configured: false,
+    token: '',
+  })
+  customProvidersDirty.value = true
+}
+
+function removeCustomProvider(id: string) {
+  customProviderDrafts.value = customProviderDrafts.value.filter((provider) => provider.id !== id)
+  customProvidersDirty.value = true
+}
+
+async function probeCustomProvider(draft: CustomProviderDraft) {
+  customProviderProbePending.value = draft.id
+  try {
+    const result = await api.post<{ ok: boolean; models: string[] }>('/api/settings/providers/custom/probe', {
+      id: draft.id,
+      name: draft.name,
+      url: draft.url,
+      runner: draft.runner,
+      token: draft.token || undefined,
+    })
+    if (result.models?.length) {
+      draft.models = result.models.join(', ')
+      customProvidersDirty.value = true
+    } else {
+      providerKeysResult.value = 'No models were discovered. You can enter model ids manually.'
+    }
+  } catch (e) {
+    providerKeysResult.value = `Could not discover models: ${errorMessage(e)}`
+  } finally {
+    customProviderProbePending.value = ''
   }
 }
 
@@ -3480,8 +3657,9 @@ async function saveProviderKeys() {
   }
   
   const hasKeyChanges = Object.keys(patchKeys).length > 0
+  const customProvidersChanged = customProvidersDirty.value
   
-  if (!hasKeyChanges) {
+  if (!hasKeyChanges && !customProvidersDirty.value) {
     providerKeysResult.value = 'No changes to save.'
     providerKeysSaving.value = false
     setTimeout(() => { providerKeysResult.value = '' }, 2000)
@@ -3489,10 +3667,26 @@ async function saveProviderKeys() {
   }
   
   try {
-    const payload: { keys: Record<string, string> } = { keys: patchKeys }
+    const payload: { keys: Record<string, string>; custom_providers?: object[] } = { keys: patchKeys }
+    if (customProvidersDirty.value) {
+      payload.custom_providers = customProviderDrafts.value.map((draft) => ({
+        id: draft.id,
+        name: draft.name,
+        url: draft.url,
+        runner: draft.runner,
+        models: draft.models,
+        ...(draft.token ? { token: draft.token } : {}),
+      }))
+    }
     
     const res = await api.patch<ProviderConfigSettings>('/api/settings/providers', payload)
     providerKeys.value = res
+    customProviderDrafts.value = (res.custom_providers || []).map((provider) => ({
+      ...provider,
+      token: '',
+      models: provider.models.join(', '),
+    }))
+    customProvidersDirty.value = false
     for (const key in res.keys) {
       providerKeyInputs.value[key] = ''
     }
@@ -3503,7 +3697,16 @@ async function saveProviderKeys() {
       autoUpdateGithubSkills.value = res.auto_update_github_skills
     }
     providerKeysResult.value = ''
-    await restartAndReload('Configuration saved. Restarting Ciaobot to apply…')
+    if (customProvidersChanged) {
+      // Provider selectors are mounted from separate payloads; refresh them
+      // immediately so a newly saved endpoint is usable without a page reload.
+      await Promise.all([fetchRoutines(), fetchWorkspaceModels(), fetchWorkspacesList()])
+    }
+    if (hasKeyChanges) {
+      await restartAndReload('Configuration saved. Restarting Ciaobot to apply…')
+    } else {
+      providerKeysResult.value = 'Custom providers saved.'
+    }
   } catch (e) {
     providerKeysResult.value = `Error: ${errorMessage(e)}`
   } finally {
@@ -4133,6 +4336,51 @@ const automationItems = ref<AutomationProcess[]>([])
 const automationLoaded = ref(false)
 const automationError = ref('')
 
+const visibleAutomationItems = computed(() => {
+  // Older runtimes used `insights_backfill`; current runtimes use
+  // `backfill_insights`. If both are present in the retained run log, show
+  // the canonical job once rather than presenting duplicate backfills.
+  const hasCanonicalBackfill = automationItems.value.some(
+    (item) => item.job === 'backfill_insights',
+  )
+  if (!hasCanonicalBackfill) return automationItems.value
+  return automationItems.value.filter((item) => item.job !== 'insights_backfill')
+})
+
+// Keep the capability badges correct while a desktop engine is still serving
+// an older API response. Newer servers provide these flags explicitly.
+const modelBackedAutomationJobs = new Set([
+  'title',
+  'insights',
+  'skill_evolution',
+  'dependency_review',
+  'schedule_dispatch',
+  'schedule_attention_classifier',
+  'backfill_insights',
+])
+const outcomeAutomationJobs = new Set([
+  'title',
+  'insights',
+  'memory_proposals',
+  'trajectory',
+  'skill_evolution',
+  'dependency_review',
+  'schedule_dispatch',
+  'backfill_insights',
+])
+
+function jobUsesModel(item: AutomationProcess): boolean {
+  if (typeof item.uses_model === 'boolean') return item.uses_model
+  return modelBackedAutomationJobs.has(item.job)
+    || !!item.last_run?.model
+    || item.recent.some((run) => !!run.model)
+}
+
+function jobProducesOutcome(item: AutomationProcess): boolean {
+  if (typeof item.produces_outcome === 'boolean') return item.produces_outcome
+  return outcomeAutomationJobs.has(item.job)
+}
+
 function getJobTelemetry(job: string): AutomationProcess | undefined {
   return automationItems.value.find((i) => i.job === job)
 }
@@ -4153,7 +4401,7 @@ function getJobBadgeClass(job: string): string {
 }
 function getJobDuration(job: string): string {
   const dur = getJobTelemetry(job)?.last_run?.duration_ms
-  return formatDuration(dur) || '0ms'
+  return formatDuration(dur) || 'unknown'
 }
 function getJobLastRunLabel(job: string): string {
   const item = getJobTelemetry(job)
@@ -4294,10 +4542,13 @@ function blankWorkspaceForm(): WorkspaceForm {
 
 function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
   const mcps = ws.claude_ai_mcps
+  const customProvider = ws.default_model.startsWith('custom:')
+    ? `custom:${ws.default_model.split(':', 3)[1]}` as WorkspaceProvider
+    : null
   return {
     name: ws.name,
     vault_root: ws.vault_root || '',
-    default_provider: ws.default_provider || 'claude',
+    default_provider: customProvider || ws.default_provider || 'claude',
     default_model: ws.default_model || '',
     gws_profile: ws.gws_profile || '',
     model_bucket: ws.model_bucket || '',
@@ -4316,6 +4567,14 @@ function claudeAiMcpsPayload(value: 'default' | 'on' | 'off'): boolean | null {
 
 
 function workspaceModelSectionsForProvider(provider: WorkspaceProvider, currentModelValue: string): ModelSection[] {
+  if (provider.startsWith('custom:')) {
+    const section = sectionsFromModelsResponse(workspaceModels.value)
+      .find((item) => item.key === provider)
+    if (!section) return []
+    const models = [...section.models]
+    if (currentModelValue && !models.includes(currentModelValue)) models.push(currentModelValue)
+    return [{ ...section, models }]
+  }
   if (provider === 'codex') {
     const section = sectionsFromModelsResponse(workspaceModels.value).find((item) => item.key === 'codex')
     if (!section) return []
@@ -4417,7 +4676,7 @@ const inspectorEmbeddedTools = computed(() => {
     'chat_continue', 'chat_retry', 'chat_handover', 'chat_archive', 'chat_delete',
     'schedules_list', 'schedule_create', 'schedule_update', 'schedule_action',
     'loops_list', 'loop_create', 'loop_update', 'loop_action', 'file_surface',
-    'handoffs_list', 'handoff_start', 'handoff_send', 'handoff_close', 'adversarial_review',
+    'delegate_spawn', 'delegates_list', 'adversarial_review',
   ]
 })
 
@@ -5687,6 +5946,28 @@ a.btn-secondary {
   margin-right: 10px;
   color: var(--fg3);
 }
+.custom-providers-block {
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
+}
+.custom-provider-row {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+}
+.custom-provider-grid {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+.custom-provider-url,
+.custom-provider-models {
+  grid-column: span 2;
+}
+.custom-provider-token {
+  grid-column: span 2;
+}
 .settings-control {
   width: min(100%, 430px);
   min-width: 320px;
@@ -6939,6 +7220,53 @@ a.btn-secondary {
 }
 
 /* Background Automations Tab */
+.automation-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  margin-top: var(--space-3);
+  color: var(--fg3);
+  font-size: var(--text-xs);
+}
+
+.automation-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.automation-capability {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.automation-capability--model {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.automation-capability--outcome {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 55%, var(--border));
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+}
+
+.automation-capability--muted {
+  color: var(--fg3);
+  background: var(--bg3);
+}
+
 .automation-list {
   display: flex;
   flex-direction: column;
@@ -6971,6 +7299,7 @@ a.btn-secondary {
 .job-meta-left {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-3);
   flex: 1 1 auto;
   min-width: 0;
@@ -6989,19 +7318,29 @@ a.btn-secondary {
   white-space: nowrap;
 }
 
-.job-desc {
-  font-size: var(--text-xs);
-  color: var(--fg3);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .job-meta-right {
   display: flex;
   align-items: center;
   gap: var(--space-3);
   flex: 0 0 auto;
+}
+
+@media (max-width: 768px) {
+  .automation-job-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .job-meta-left,
+  .job-meta-right {
+    width: 100%;
+  }
+
+  .job-meta-right {
+    justify-content: flex-end;
+  }
+
 }
 
 .job-stat-summary {
@@ -7021,17 +7360,6 @@ a.btn-secondary {
   background: var(--accent-strong);
 }
 
-.job-trigger-context {
-  font-size: var(--text-xs);
-  color: var(--fg3);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  background: var(--bg3);
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-}
-
 .automation-job-detail {
   padding: var(--space-4);
   background: var(--bg);
@@ -7039,6 +7367,27 @@ a.btn-secondary {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+}
+
+.automation-job-description {
+  max-width: 70ch;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.automation-job-description p {
+  margin: 0;
+}
+
+.automation-job-description-label {
+  margin-bottom: var(--space-1) !important;
+  color: var(--fg3);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .last-run-info {
@@ -7152,6 +7501,10 @@ a.btn-secondary {
   color: var(--fg2);
   font-size: 10px;
   margin-right: var(--space-2);
+}
+
+.run-summary-info {
+  color: var(--fg2);
 }
 
 .run-skip-info {

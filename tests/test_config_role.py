@@ -50,6 +50,16 @@ def test_vault_root_relative_override_is_workspace_relative(tmp_path: Path) -> N
     assert config.vault_root == (tmp_path / "notes").resolve()
 
 
+def test_insights_min_turns_defaults_to_multiturn(tmp_path: Path) -> None:
+    config = _config(CIAO_WORKSPACE=str(tmp_path))
+    assert config.insights_size_gate_turns == 2
+
+    overridden = _config(
+        CIAO_WORKSPACE=str(tmp_path), CIAO_INSIGHTS_MIN_TURNS="4"
+    )
+    assert overridden.insights_size_gate_turns == 4
+
+
 def test_legacy_workspaces_are_exposed_as_workspace_configs(tmp_path: Path) -> None:
     config = _config(
         CIAO_WORKSPACE=str(tmp_path),

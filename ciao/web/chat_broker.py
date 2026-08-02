@@ -474,6 +474,8 @@ def event_to_json(event: StreamEvent) -> dict | None:
             "usage": event.usage,
             "session_id": event.session_id or "",
         }
+        if event.fallback_final:
+            payload["fallback_final"] = True
         if event.quota:
             payload["quota"] = event.quota
         return payload

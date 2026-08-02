@@ -55,6 +55,22 @@ def test_retry_pending_stays_visible() -> None:
     assert _should_auto_archive_schedule_run(_entry(), outcome) is False
 
 
+def test_quota_retry_is_recorded_as_skipped_not_error() -> None:
+    from ciao.web.project_chats import _schedule_dispatch_status
+
+    status, error = _schedule_dispatch_status(
+        ScheduleRunOutcome(
+            completed=True,
+            is_error=True,
+            retry_pending=True,
+            final_text="API Error: Request rejected (429) weekly usage limit",
+        )
+    )
+
+    assert status == "skipped"
+    assert error is None
+
+
 def test_manual_policy_stays_visible_after_clean_success() -> None:
     outcome = ScheduleRunOutcome(completed=True, is_error=False)
     assert _should_auto_archive_schedule_run(_entry(archive="manual"), outcome) is False
@@ -180,3 +196,21 @@ async def test_schedule_attention_classifier_tracks_failure(
     assert row["status"] == "error"
     assert row["model"] == "haiku"
     assert row["error"] == "model unavailable"
+
+
+async def test_schedule_attention_classifier_records_bare_timeout_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_oneshot(*args, **kwargs):
+        raise TimeoutError
+
+    monkeypatch.setattr("ciao.providers.oneshot.run_oneshot", fake_oneshot)
+
+    needs_user = await _manager_for_classifier()._schedule_run_needs_user(
+        _entry(), ScheduleRunOutcome(completed=True, final_text="done")
+    )
+
+    assert needs_user is True
+    row = _job_rows(tmp_path)[0]
+    assert row["status"] == "error"
+    assert row["error"] == "TimeoutError"

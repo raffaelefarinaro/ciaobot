@@ -239,6 +239,56 @@ def test_codex_chat_messages_preserve_commentary_and_final_phases(
     }
 
 
+def test_codex_chat_messages_promote_completed_commentary_only_turn(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    pcm = _manager(tmp_path)
+    project = pcm.create_project("codex-fallback", workspace="personal")
+    chat = pcm.create_chat(
+        project.project_id, model="gpt-test", provider="codex"
+    )
+    chat.session_id = "thread-fallback"
+    pcm._save()
+    thread = {
+        "id": "thread-fallback",
+        "turns": [{
+            "id": "turn-1",
+            "status": "completed",
+            "items": [
+                {"type": "userMessage", "id": "u1", "content": [
+                    {"type": "text", "text": "check it"},
+                ]},
+                {
+                    "type": "agentMessage",
+                    "id": "a1",
+                    "text": "The checks completed successfully.",
+                    "phase": "commentary",
+                },
+            ],
+        }],
+    }
+    monkeypatch.setattr(
+        CodexProvider, "read_thread", AsyncMock(return_value=thread)
+    )
+    app = SimpleNamespace(state=SimpleNamespace(
+        config=pcm._config,
+        project_chat_manager=pcm,
+    ))
+
+    response = asyncio.run(chat_messages(_request(
+        f"/api/chats/{chat.chat_id}/messages",
+        app,
+        chat_id=chat.chat_id,
+    )))
+    rows = json.loads(response.body)
+
+    assert rows[-1] == {
+        "role": "assistant",
+        "content": "The checks completed successfully.",
+        "phase": "final_answer",
+    }
+
+
 def test_codex_subagents_read_receiver_threads(
     tmp_path: Path, monkeypatch,
 ) -> None:

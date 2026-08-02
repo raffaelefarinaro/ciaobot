@@ -59,6 +59,18 @@ def _is_test_fixture(rel_path: str) -> bool:
     )
 
 
+def _is_nested_git_checkout(path: Path, workspace: Path) -> bool:
+    """Whether ``path`` is a nested checkout that the workspace does not own.
+
+    A workspace can contain agent/developer worktrees. Git reports a changed
+    worktree as one directory entry, so expanding it here would scan its
+    virtualenvs, caches, and generated files as if they were workspace files.
+    Those files are governed by the nested checkout's own Git metadata and
+    must not participate in the workspace secret preflight.
+    """
+    return path != workspace and (path / ".git").exists()
+
+
 # The prompt dispatched into a chat when an automatic pull/merge conflicts.
 # Filled with the branch via str.replace.
 MERGE_PROMPT = """\
@@ -463,9 +475,17 @@ class LocalSessionManager:
         for f in raw_files:
             p = self.workspace / f
             if p.is_dir():
-                for dirpath, _, filenames in os.walk(p):
+                if _is_nested_git_checkout(p, self.workspace):
+                    continue
+                for dirpath, dirnames, filenames in os.walk(p):
+                    current = Path(dirpath)
+                    dirnames[:] = [
+                        dirname
+                        for dirname in dirnames
+                        if not _is_nested_git_checkout(current / dirname, self.workspace)
+                    ]
                     for fname in filenames:
-                        changed_paths.append(Path(dirpath) / fname)
+                        changed_paths.append(current / fname)
             elif p.is_file():
                 changed_paths.append(p)
 

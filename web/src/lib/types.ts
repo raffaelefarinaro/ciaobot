@@ -1,9 +1,11 @@
 export type WorkspaceName = string
-export type WorkspaceProvider = 'claude' | 'codex' | 'ollama' | 'openrouter'
+export type WorkspaceProvider = 'claude' | 'codex' | 'ollama' | 'openrouter' | `custom:${string}`
 
 export interface WorkspaceProviderOption {
   value: WorkspaceProvider
   label: string
+  runner?: 'claude' | 'codex'
+  default_model?: string
 }
 
 export interface WorkspaceInfo {
@@ -147,6 +149,19 @@ export interface ChatInfo {
   // because a schedule spawns a new chat each time).
   schedule_id?: string
   schedule_title?: string
+  // Set when this chat was spawned as a delegate by another chat's agent. The
+  // sidebar nests delegates under their supervisor; the engine wakes the
+  // supervisor with a fresh turn when a delegate finishes.
+  spawned_from_chat_id?: string
+  // Shared tag across delegates dispatched as one batch.
+  delegation_id?: string
+}
+
+// One sidebar chat row. Delegates follow their supervisor and render indented,
+// so the list stays a single flat v-for instead of a nested one.
+export interface ChatRow {
+  chat: ChatInfo
+  isDelegate: boolean
 }
 
 export interface ChatRetryInfo {
@@ -209,38 +224,6 @@ export interface SubagentTranscript {
   turn_index?: number
 }
 
-export interface ProviderRoute {
-  provider: string
-  model: string
-  model_bucket: string
-  label: string
-}
-
-export interface ProviderSubchatRecord {
-  subchat_id: string
-  parent_chat_id: string
-  parent_turn_index: number
-  workspace: string
-  project_id: string
-  owner: ProviderRoute
-  participant: ProviderRoute
-  participant_session_id: string
-  status: 'created' | 'running' | 'waiting_owner' | 'completed' | 'cancelled' | 'failed' | 'interrupted'
-  created_at: string
-  started_at: string
-  updated_at: string
-  completed_at: string
-  active_seconds: number
-  message_count: number
-  input_tokens: number
-  output_tokens: number
-  quota_limit_hit: boolean
-  last_error: string
-  limit_extended_at: string
-  limit_messages_extended: number
-  limit_seconds_extended: number
-}
-
 // ── WebSocket events ────────────────────────────────────────────────────
 
 export type WsEvent =
@@ -276,7 +259,7 @@ export type WsEvent =
   // Emitted from partial stream events so the live trace can show a token
   // count as the model works; the authoritative totals still land on `result`.
   | { type: 'token_usage'; input_tokens: number; output_tokens: number }
-  | { type: 'result'; text: string; is_error: boolean; effective_model: string; usage: Record<string, string>; quota?: Record<string, unknown>; session_id: string; sent_at?: string; completed_at?: string; duration_ms?: number }
+  | { type: 'result'; text: string; is_error: boolean; effective_model: string; usage: Record<string, string>; quota?: Record<string, unknown>; session_id: string; fallback_final?: boolean; sent_at?: string; completed_at?: string; duration_ms?: number }
   | { type: 'permission_request'; tool_name: string; tool_input?: string; message: string; request_id: string }
   | { type: 'chat_title'; chat_id: string; title: string }
   | { type: 'user_echo'; text: string; images?: string[]; turn_index?: number; sent_at?: string; unattended?: boolean; entry_id?: string }
@@ -325,10 +308,6 @@ export type EventsWsMessage =
   | { type: 'loops_changed' }
   | { type: 'open_chat'; chat_id: string }
   | { type: 'server_restarting'; message?: string }
-  | { type: 'provider_subchat_created'; subchat_id: string; parent_chat_id: string; record: ProviderSubchatRecord }
-  | { type: 'provider_subchat_status'; subchat_id: string; parent_chat_id: string; status: string; record: ProviderSubchatRecord }
-  | { type: 'provider_subchat_event'; subchat_id: string; parent_chat_id: string; event: ProviderSubchatEvent }
-  | { type: 'provider_subchat_deleted'; subchat_id: string; parent_chat_id: string }
   | { type: 'gws_health'; profile: string; token_valid: boolean; token_error: string; title: string; body: string }
 
 export interface InAppToast {
@@ -445,6 +424,9 @@ export interface ModelsResponse {
   openrouter_models?: string[]
   // Account-visible Codex models and their app-server metadata.
   codex_models?: string[]
+  custom_providers?: Array<CustomProviderSettings & {
+    model_labels?: Record<string, string>
+  }>
   codex_model_metadata?: Record<string, {
     display_name: string
     description: string
@@ -486,6 +468,7 @@ export interface RoutineSettings {
   codex_sonnet_model: string
   codex_opus_model: string
   codex_fable_model: string
+  custom_routing?: Record<string, Record<string, string>>
   // What actually runs right now, after defaults.
   title_model_effective: string
   insights_model_effective: string
@@ -514,6 +497,7 @@ export interface RoutineSettings {
     ollama_cloud: string[]
     ollama_local: string[]
     openrouter?: string[]
+    custom_providers?: Array<CustomProviderSettings & { model_labels?: Record<string, string> }>
   }
   backends?: Record<string, boolean>
   workspace_context?: {
@@ -535,6 +519,15 @@ export interface ProviderConnection {
   skills?: string[]
 }
 
+export interface CustomProviderSettings {
+  id: string
+  name: string
+  url: string
+  runner: 'claude' | 'codex'
+  models: string[]
+  token_configured: boolean
+}
+
 export interface ProviderConfigSettings {
   keys: Record<string, {
     label: string
@@ -549,6 +542,7 @@ export interface ProviderConfigSettings {
     auth_method?: string
   }>
   connections?: Record<string, ProviderConnection>
+  custom_providers?: CustomProviderSettings[]
   auto_update_github_skills?: boolean
   requires_restart: boolean
   env_path: string
@@ -670,7 +664,7 @@ export interface SlashCommand {
   name: string
   description: string
   argument_hint: string
-  source: 'project' | 'user'
+  source: 'project' | 'user' | 'builtin'
   path: string
 }
 
@@ -776,6 +770,10 @@ export interface AutomationProcess {
   label: string
   category: 'content' | 'system'
   description: string
+  // Optional for compatibility with servers upgraded before capability
+  // metadata was added to GET /api/automation.
+  uses_model?: boolean
+  produces_outcome?: boolean
   last_run: JobRun | null
   recent: JobRun[]
   stats: AutomationStats
@@ -899,32 +897,6 @@ export interface LocalHandbackResult {
   error?: string
   merged?: boolean
   conflict?: boolean
-}
-
-/**
- * A choice offered by a subchat `question` event.
- *
- * Providers send either a bare string or a `{value, label}` pair, which is why
- * the template always fell back with `opt.value || opt`.
- */
-export type ProviderSubchatQuestionOption = string | { value?: string; label?: string }
-
-/**
- * One entry in a provider subchat transcript
- * (`/api/provider-subchats/{id}/events`). Kept open with an index signature
- * because the renderer switches on `type` and ignores what it does not know.
- */
-export interface ProviderSubchatEvent {
-  type: string
-  role?: string
-  content?: string
-  text?: string
-  message?: string
-  question?: string
-  options?: ProviderSubchatQuestionOption[]
-  request_id?: string
-  tool_name?: string
-  [key: string]: unknown
 }
 
 export interface PackageStatus {

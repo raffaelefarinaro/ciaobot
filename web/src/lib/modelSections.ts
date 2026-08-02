@@ -171,6 +171,17 @@ export function sectionsFromModelsResponse(response: ModelsResponse | null): Mod
     })
   }
 
+  for (const provider of response.custom_providers || []) {
+    const models = orderedUnique(provider.models || [])
+    if (!models.length) continue
+    sections.push({
+      key: `custom:${provider.id}`,
+      label: `${provider.name} (via ${provider.runner === 'codex' ? 'Codex' : 'Claude Code'})`,
+      models,
+      modelLabels: provider.model_labels,
+    })
+  }
+
   return sections
 }
 
@@ -215,6 +226,17 @@ export function sectionsFromModelOptions(
       modelBadges,
       disabled: !openrouterAvailable,
       hint: openrouterAvailable ? undefined : 'Set OPENROUTER_API_KEY to enable OpenRouter models.',
+    })
+  }
+
+  for (const provider of options.custom_providers || []) {
+    const models = orderedUnique(provider.models || [])
+    if (!models.length) continue
+    sections.push({
+      key: `custom:${provider.id}`,
+      label: `${provider.name} (via ${provider.runner === 'codex' ? 'Codex' : 'Claude Code'})`,
+      models,
+      modelLabels: provider.model_labels,
     })
   }
 

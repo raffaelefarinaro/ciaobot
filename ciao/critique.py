@@ -218,25 +218,36 @@ def extract_json(text: str) -> dict | None:
     return None
 
 
-def _split_provider(model: str) -> tuple[str, str]:
+def _split_provider(model: str, config: CiaoConfig) -> tuple[str, str]:
     """Map a panel entry to its ``(provider, model_id)`` dispatch pair.
 
-    A ``codex:`` prefix selects the Codex (OpenAI / ChatGPT) app-server; every
-    other id runs through the Anthropic-compatible one-shot path with per-model
-    routing env (Anthropic passthrough / OpenRouter / Ollama).
+    A ``codex:`` prefix selects the Codex (OpenAI / ChatGPT) app-server, as
+    does a ``custom:`` id whose provider is configured with the Codex runner.
+    Every other id runs through the Anthropic-compatible one-shot path with
+    per-model routing env (Anthropic passthrough / OpenRouter / Ollama /
+    custom Anthropic-compatible endpoints).
     """
     if model.startswith(CODEX_PREFIX):
         return "codex", model[len(CODEX_PREFIX):].strip()
+    from ciao.custom_providers import provider_for_model, runtime_model
+    custom = provider_for_model(config, model)
+    if custom is not None:
+        return custom.runner, runtime_model(model)
     return "claude", model
 
 
 async def _review_one(
     model: str, artifact: str, user_prompt: str, config: CiaoConfig, timeout: float
 ) -> ModelResult:
-    provider, model_id = _split_provider(model)
+    provider, model_id = _split_provider(model, config)
     # Codex routes by provider, not by env injection; the Anthropic-compatible
     # path picks its upstream from the model id shape.
-    env = {} if provider == "codex" else routing_routine_env_for_model(model_id, config)
+    from ciao.custom_providers import provider_for_model, env_for_model as custom_env_for_model
+    custom = provider_for_model(config, model)
+    if custom is not None:
+        env = custom_env_for_model(config, model)
+    else:
+        env = {} if provider == "codex" else routing_routine_env_for_model(model_id, config)
     t0 = time.monotonic()
     try:
         raw = await run_oneshot(

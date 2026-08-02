@@ -244,6 +244,9 @@ class ResultEvent(StreamEvent):
     usage: dict[str, str] = field(default_factory=dict)
     quota: dict[str, str] = field(default_factory=dict)
     cost_usd: float | None = None
+    # True when the provider completed without a separate final-answer item
+    # and the last substantive commentary was promoted as a visible fallback.
+    fallback_final: bool = False
 
 
 @dataclass(slots=True)

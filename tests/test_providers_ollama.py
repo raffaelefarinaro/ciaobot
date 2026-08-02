@@ -141,8 +141,13 @@ def test_ollama_settings_disabled_when_no_cloud_key() -> None:
     assert ollama_env_for_model("kimi-k2.7-code:cloud", settings) == {}
 
 
-def test_ciao_config_parses_ollama_env(monkeypatch) -> None:
+def test_ciao_config_parses_ollama_env(monkeypatch, tmp_path) -> None:
     """CIAO_OLLAMA_MODELS / CIAO_OLLAMA_URL feed an OllamaSettings on config."""
+    # CiaoConfig.from_env() resolves CIAO_WORKSPACE and load_dotenv()s that
+    # workspace's .env, which repopulates os.environ *after* the delenv calls
+    # below. Point it at an empty dir so this test reads only what it sets;
+    # otherwise it fails for anyone running pytest inside a real workspace.
+    monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
     monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
     monkeypatch.setenv("CIAO_OLLAMA_MODELS", "kimi-k2.7-code:cloud, deepseek-v4-pro:cloud")
     monkeypatch.setenv("CIAO_OLLAMA_URL", "http://ollama.box:11434")
@@ -197,7 +202,12 @@ def test_ciao_config_explicit_url_wins_over_api_key_default(monkeypatch) -> None
     assert config.ollama.base_url == "http://my-relay:11434"
 
 
-def test_ciao_config_ollama_disabled_by_default(monkeypatch) -> None:
+def test_ciao_config_ollama_disabled_by_default(monkeypatch, tmp_path) -> None:
+    # CiaoConfig.from_env() resolves CIAO_WORKSPACE and load_dotenv()s that
+    # workspace's .env, which repopulates os.environ *after* the delenv calls
+    # below. Point it at an empty dir so this test reads only what it sets;
+    # otherwise it fails for anyone running pytest inside a real workspace.
+    monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
     monkeypatch.setenv("PWA_AUTH_TOKEN", "test-token")
     monkeypatch.delenv("CIAO_OLLAMA_MODELS", raising=False)
     monkeypatch.delenv("CIAO_OLLAMA_URL", raising=False)

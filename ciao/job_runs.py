@@ -77,39 +77,41 @@ class JobSpec:
     label: str
     category: str  # "content" | "system"
     description: str = ""
+    # Capabilities are static so the Automation page can explain a never-run
+    # job too; they are not inferred from the most recent telemetry record.
+    uses_model: bool = False
+    produces_outcome: bool = False
 
 
 REGISTRY: tuple[JobSpec, ...] = (
     JobSpec("title", "Title generation", "content",
-            "Names a chat from its first message."),
+            "Names a chat from its first message.", True, True),
     JobSpec("insights", "Session insights", "content",
-            "Extracts durable insights from an archived session transcript."),
-    JobSpec("insights_backfill", "Insights backfill", "system",
-            "Backfills Session Insights sections into older archived chats."),
+            "Extracts durable insights from an archived session transcript.", True, True),
     JobSpec("memory_proposals", "Memory proposals", "content",
-            "Proposes durable facts from a session's insights."),
+            "Proposes durable facts from a session's insights.", False, True),
     JobSpec("trajectory", "Trajectory capture", "content",
-            "Records a structured trajectory of the session for skill mining."),
+            "Records a structured trajectory of the session for skill mining.", False, True),
     JobSpec("skill_evolution", "Skill evolution", "content",
-            "Weekly: proposes skill edits from underperforming trajectories."),
+            "Weekly: proposes skill edits from underperforming trajectories.", True, True),
     JobSpec("dependency_review", "Dependency review", "content",
-            "Weekly: reviews tracked dependency releases against the baseline."),
+            "Weekly: reviews tracked dependency releases against the baseline.", True, True),
     JobSpec("schedule_dispatch", "Scheduled dispatch", "content",
-            "Fires scheduled chat turns and evaluates auto-archival."),
+            "Fires scheduled chat turns and evaluates auto-archival.", True, True),
     JobSpec("schedule_attention_classifier", "Schedule attention classifier", "content",
-            "Decides whether an auto-archive schedule result needs user attention."),
+            "Decides whether an auto-archive schedule result needs user attention.", True, False),
     JobSpec("startup_sync", "Startup git sync", "system",
-            "Commits and pulls the workspace on server startup."),
+            "Commits and pulls the workspace on server startup.", False, False),
     JobSpec("vault_index", "Vault index refresh", "system",
-            "Regenerates memory-vault/INDEX.md from frontmatter."),
+            "Regenerates memory-vault/INDEX.md from frontmatter.", False, False),
     JobSpec("skills_update", "Skills update", "system",
-            "Updates installed agent skills."),
+            "Updates installed agent skills.", False, False),
     JobSpec("branch_backup", "Device-branch backup", "system",
-            "Pushes the per-device working branch for backup."),
+            "Pushes the per-device working branch for backup.", False, False),
     JobSpec("gws_health", "Google Workspace token health", "system",
-            "Pings each configured Google profile's token and alerts on revocation."),
+            "Pings each configured Google profile's token and alerts on revocation.", False, False),
     JobSpec("backfill_insights", "Insights backfill", "system",
-            "Backfills missing session insights on server startup."),
+            "Backfills missing session insights on server startup.", True, True),
 )
 
 # StartupTracker phase name -> registry job id (phases not listed are skipped,
@@ -331,7 +333,11 @@ def record_startup_phase(phase: Any) -> None:
             duration_ms=_duration_ms(started, ended),
             status=status,
             error=message if status == "error" else None,
-            extra={"message": message} if message and status == "ok" else {},
+            extra=(
+                {"message": message, "summary": message}
+                if message and status == "ok"
+                else {}
+            ),
         ))
     except Exception:  # noqa: BLE001
         logger.debug("Failed to record startup phase", exc_info=True)
@@ -462,6 +468,8 @@ def automation_summary(limit_per_job: int = 10) -> list[dict]:
             "label": spec.label,
             "category": spec.category,
             "description": spec.description,
+            "uses_model": spec.uses_model,
+            "produces_outcome": spec.produces_outcome,
             "last_run": g["last_run"] if g else None,
             "recent": g["recent"] if g else [],
             "stats": g["stats"] if g else dict(empty_stats),
@@ -472,11 +480,18 @@ def automation_summary(limit_per_job: int = 10) -> list[dict]:
         category = "content"
         if g["recent"]:
             category = g["recent"][0].get("category") or "content"
+        # Unknown jobs are kept visible for forward compatibility. Infer only
+        # their observed capabilities because no static JobSpec exists yet.
         out.append({
             "job": job,
             "label": job.replace("_", " ").title(),
             "category": category,
             "description": "",
+            "uses_model": any(bool(run.get("model")) for run in g["recent"]),
+            "produces_outcome": any(
+                bool(run.get("extra")) or bool(run.get("error"))
+                for run in g["recent"]
+            ),
             "last_run": g["last_run"],
             "recent": g["recent"],
             "stats": g["stats"],

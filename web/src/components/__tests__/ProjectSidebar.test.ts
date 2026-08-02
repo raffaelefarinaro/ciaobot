@@ -88,4 +88,57 @@ describe('ProjectSidebar chat actions', () => {
 
     wrapper.unmount()
   })
+
+  it('moves a chat when it is dropped onto another project', async () => {
+    const store = useProjectStore()
+    store.projects.push({
+      project_id: 'project-2',
+      name: 'Second project',
+      workspace: 'personal',
+      context: '',
+      created_at: '2026-07-29T00:00:00Z',
+      order: 1,
+      vault_folder: '',
+      is_auto: false,
+    })
+    const moveChat = vi.spyOn(store, 'moveChat').mockResolvedValue({
+      ...store.chats[0],
+      project_id: 'project-2',
+    })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: { template: '<div />' } }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const wrapper = mount(ProjectSidebar, {
+      attachTo: document.body,
+      props: { collapsed: false, mode: 'chat' },
+      global: {
+        plugins: [router],
+        stubs: { NotificationBell: true },
+      },
+    })
+
+    const chat = wrapper.get('.chat-item')
+    const dataTransfer = {
+      effectAllowed: '',
+      setData: vi.fn(),
+    }
+    const dragStart = new Event('dragstart', { bubbles: true })
+    Object.defineProperty(dragStart, 'dataTransfer', { value: dataTransfer })
+    chat.element.dispatchEvent(dragStart)
+
+    const target = wrapper.findAll('.project-header')[1]
+    await target.trigger('dragover')
+    expect(target.classes()).toContain('drag-over')
+    await target.trigger('drop')
+    await flushPromises()
+
+    expect(dataTransfer.setData).toHaveBeenCalledWith('application/x-ciaobot-chat', chatId)
+    expect(moveChat).toHaveBeenCalledWith(chatId, 'project-2')
+
+    wrapper.unmount()
+  })
 })

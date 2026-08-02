@@ -14,6 +14,8 @@ ciao run
 
 `ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies the editable `CLAUDE.md` workspace guide, links `AGENTS.md` to that same guide for Codex, copies `CIAO_CUSTOMIZATION.md`, and renders the server plist under `~/Library/LaunchAgents/`. When the real Tauri `Ciaobot.app` is installed, setup does not generate or load the legacy rumps agent or `Ciaobot Server.app`; package-only installs retain those assets for the migration/rollback window. Existing custom `AGENTS.md` files are preserved. By default setup does not load launchd; add `--load-launchd` when you want it to run `launchctl`.
 
+Provider settings for custom compatible endpoints are persisted in the tracked workspace file `.ciao/custom_providers.json`; bearer tokens are kept separately in the gitignored `.runtime/custom_provider_tokens.json` and are never committed or returned by the API. Focused provider tests belong in `tests/test_custom_providers.py`.
+
 A fresh first logical workspace and workspaces added later in Settings live at
 `<CIAO_VAULT_ROOT>/<workspace-name>/`. Their registry path is read-only in the
 PWA. Existing-folder setup preserves the selected notes in place so the
@@ -195,6 +197,11 @@ cd web && npm test             # Frontend unit tests
 cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 ```
 
+The Settings → Automations list uses the registry-backed `uses_model` and
+`produces_outcome` fields from `GET /api/automation` for its capability badges;
+do not infer those labels from a job's latest run because never-run jobs are
+intentionally included in the response.
+
 For chat rendering changes, verify the compact `Activity` disclosure, `Outputs` placement, readable token labels, keyboard operation, and 44px touch targets at both desktop and narrow-phone widths. Markdown tables should shrink-wrap on desktop and keep readable first-column labels inside a horizontally scrollable table viewport on narrow screens.
 For composer drag-and-drop changes, test both local host and remote client roles:
 host paths must be absolute, while client files must upload into the active
@@ -214,9 +221,28 @@ scripts/dev-commands.sh all         # everything above
 
 `mypy ciao` is a blocking CI step — keep it green (config in `pyproject.toml` under `[tool.mypy]`). The frontend lint and both dependency audits are advisory (`|| true`) so a fresh upstream advisory can't block a release; review their output rather than ignoring it. Install `pip install -e '.[test]'` (Python) and `cd web && npm ci` (frontend) to get the tools. A `.pre-commit-config.yaml` wires trailing-whitespace/ruff/mypy/eslint hooks for `pre-commit install`.
 
+### Vault lint
+
+`ciao vault-lint` is a read-only, deterministic check for the Markdown vault.
+It validates the frontmatter on each page, including a non-empty string
+`type`, and reports broken relative Markdown links, broken wikilinks, orphan
+pages, and duplicate stems. `INDEX.md`, `MEMORY.md`, and `log.md` are exempt
+from the frontmatter requirement. External URLs, absolute paths, and anchors
+are not treated as vault links.
+
+Use `--vault-root` to choose a vault. Otherwise it uses `CIAO_VAULT_ROOT` or
+`./memory-vault`. A clean scan exits 0. Findings, a missing vault root, or an
+incomplete traversal exit 1. It never reports a clean vault when it could not
+inspect every path.
+
 ### AI OS audit
 
-`ciao os-audit` checks required workspace roots, vault links and duplicates, skill budgets, instruction clashes, bounded-memory hygiene, pending memory proposals, and failed background jobs. Human-readable Markdown is the default; use `--json` for automation.
+`ciao os-audit` checks required workspace roots, vault frontmatter, relative
+Markdown links, wikilinks, orphans and duplicate stems, skill budgets,
+instruction clashes, bounded-memory hygiene, pending memory proposals, and
+failed background jobs. Human-readable Markdown is the default; use `--json`
+for automation. A vault scan that cannot inspect all paths is reported as an
+audit error, not as a healthy result.
 
 The status and process exit code are a stable contract:
 
@@ -230,7 +256,7 @@ The weekly `system-workspace-hygiene` schedule runs `ciao vault-index --write` b
 
 ## Skills, subagents, and slash commands
 
-Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `web-research`, `workspace-authoring`, …) and the upstream **`gws-*` skills** for Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories. Locked GitHub/package skills follow the upstream `skills` CLI layout: their canonical directories live under `.agents/skills/`, with provider links under `.claude/skills/`; synchronization preserves either that layout or older `.claude`-canonical installs. A workspace skill with the same name as a packaged one overrides it.
+Packaged generic skills live in `ciao/stock/skills/` and are installed into every workspace's `.claude/skills/` by `ciao sync-skills` on startup. This includes Ciaobot-specific skills (`ciao-capabilities`, `web-research`, `workspace-authoring`, …) and the upstream **`gws-*` skills** for Google Workspace (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Forms). In a **workspace**, user-owned skills live in `skills/`, project agents in `subagents/`, and slash commands in `commands/`; `ciao sync-skills` mirrors them into the generated `.claude/` directories and projects `.mcp.json` MCP servers into `.codex/config.toml` for Codex chats. The generated MCP block preserves user-owned Codex server tables and copies only environment references, never literal credentials. Locked GitHub/package skills follow the upstream `skills` CLI layout: their canonical directories live under `.agents/skills/`, with provider links under `.claude/skills/`; synchronization preserves either that layout or older `.claude`-canonical installs. A workspace skill with the same name as a packaged one overrides it.
 
 The `gws-*` stock skills are regenerated from the installed `gws` CLI via `ciao/gws_skills.py` on release (`python -m ciao.release --apply`). The generator output is passed through Ciaobot curation: profile-wrapper command examples, integration auth notes in `gws-shared`, stripped upstream `openclaw` metadata and See Also boilerplate. Ciaobot-specific gws conventions also live in the system prompt (`ciao/system_prompt.md`).
 
@@ -248,7 +274,7 @@ Canonical example: `ciao/skill_evolution.py:_process_skill_dag`. Use a DAG when 
 
 `ScheduleManager.catch_up()` runs once at server startup. It dispatches only the latest missed occurrence for each enabled schedule, leaves the prompt unchanged, and records the missed occurrence's local date so a later slot on the startup day can still fire normally. Cover changes to this behavior in `tests/test_schedules.py`.
 
-`ProviderSubchatManager` handles routing, limits, and executing participant turns. Cover changes to this behavior in `tests/test_provider_subchats.py` (for manager logic/limit tracking) and `tests/test_provider_subchat_routes.py` (for Starlette HTTP handlers).
+Delegates are normal chats carrying `spawned_from_chat_id`; the wake-on-completion path lives in `ProjectChatManager` (`_queue_delegate_wake` / `_flush_delegate_wake`). Cover changes in `tests/test_delegates.py`.
 
 ## MCP control plane
 

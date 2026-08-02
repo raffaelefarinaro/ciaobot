@@ -175,6 +175,11 @@ for raw in sys.stdin:
             send({"method": "item/completed", "params": {"item": {
                 "type": "agentMessage", "id": "note-1", "text": "I'll check that now.", "phase": "commentary",
             }}})
+        if os.environ.get("FAKE_CODEX_COMMENTARY_ONLY"):
+            send({"method": "turn/completed", "params": {"threadId": "thread-1", "turn": {
+                "id": turn_id, "status": "completed", "items": [],
+            }}})
+            continue
         send({"method": "item/reasoning/summaryTextDelta", "params": {"delta": "checking"}})
         send({"method": "item/started", "params": {"item": {
             "type": "commandExecution", "id": "cmd-1", "command": "pwd",
@@ -404,6 +409,34 @@ async def test_codex_provider_excludes_commentary_from_final_result(
     ]
     result = next(event for event in events if isinstance(event, ResultEvent))
     assert result.result == "done"
+    await provider.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_promotes_commentary_only_completion(
+    tmp_path: Path,
+) -> None:
+    command, _log = _fake_command(tmp_path)
+    provider = CodexProvider(tmp_path, command=command)
+    request = AgentRequest(
+        prompt="Inspect this",
+        model="gpt-test",
+        mode="auto",
+        provider="codex",
+        extra_env={
+            "FAKE_CODEX_COMMENTARY": "1",
+            "FAKE_CODEX_COMMENTARY_ONLY": "1",
+        },
+    )
+
+    events = [
+        event
+        async for event in provider.run_streaming(request, lambda _handle: None)
+    ]
+
+    result = next(event for event in events if isinstance(event, ResultEvent))
+    assert result.result == "I'll check that now."
+    assert result.fallback_final is True
     await provider.disconnect()
 
 

@@ -253,6 +253,26 @@ describe('per-chat WS auto-reconnect', () => {
   })
 })
 
+describe('deferred message sends', () => {
+  test('does not attach a deferred message image to a later send', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-deferred-attachment'
+    store.activeChatId = chatId
+    store.pendingImages = ['original-image.png']
+
+    // With no socket yet, the first send is deferred while connectWs opens one.
+    store.sendMessage(chatId, 'first message')
+    store.sendMessage(chatId, 'continue')
+
+    const sent = (fakeSockets[0].send as Mock).mock.calls
+      .map(([raw]) => JSON.parse(String(raw)))
+      .find(payload => payload.type === 'message' && payload.text === 'continue')
+
+    expect(sent).toMatchObject({ type: 'message', text: 'continue' })
+    expect(sent.images).toBeUndefined()
+  })
+})
+
 describe('client host connection failures', () => {
   test('recognizes the legacy proxy error', () => {
     expect(isHostConnectionUnavailableMessage(
@@ -1004,6 +1024,40 @@ describe('Codex structured questions', () => {
     })
   })
 
+  test('surfaces an empty AskUserQuestion as a free-form fallback', () => {
+    const store = useProjectStore()
+    const chatId = 'empty-question-chat'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Empty question',
+      model: 'gpt-test',
+      provider: 'codex',
+      mode: 'auto',
+      session_id: 'thread-1',
+      created_at: '',
+      archived: false,
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[fakeSockets.length - 1]
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'tool_use',
+        tool_name: 'AskUserQuestion',
+        request_id: 'codex-empty-1',
+        tool_input: JSON.stringify({ questions: [] }),
+      }),
+    })
+
+    expect(store.activeQuestions[chatId]).toHaveLength(1)
+    expect(store.activeQuestions[chatId][0]).toMatchObject({
+      id: '__freeform__',
+      allowOther: true,
+      requestId: 'codex-empty-1',
+    })
+    expect(store.activeQuestions[chatId][0].question).toContain('needs your input')
+  })
+
   test('surfaces approval requests and preserves Codex quota metadata', () => {
     const store = useProjectStore()
     const chatId = 'codex-gates'
@@ -1098,6 +1152,38 @@ describe('Codex assistant message phases', () => {
       { content: "I'll check that now.", phase: 'commentary' },
       { content: 'Done.', phase: 'final_answer' },
     ])
+  })
+
+  test('renders a commentary-only completed turn as its fallback final', () => {
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'codex-commentary-fallback'
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'text_delta',
+      text: 'The checks completed successfully.',
+      phase: 'commentary',
+    }) })
+    socket.onmessage?.({ data: JSON.stringify({
+      type: 'result',
+      text: 'The checks completed successfully.',
+      fallback_final: true,
+      is_error: false,
+      effective_model: 'gpt-test',
+      usage: {},
+      session_id: 'thread-fallback',
+    }) })
+
+    expect(store.messages[chatId].map(message => ({
+      content: message.content,
+      phase: message.phase,
+    }))).toEqual([{
+      content: 'The checks completed successfully.',
+      phase: 'final_answer',
+    }])
+    expect(store.streaming[chatId]).toBe(false)
   })
 })
 
@@ -1441,6 +1527,35 @@ describe('deep-link chat navigation', () => {
     expect(store.chats[0].archived).toBe(true)
     expect(store.chats[0].archive_path).toBe('archive/c1.md')
     expect(store.activeChatId).toBeNull()
+  })
+})
+
+describe('chat creation', () => {
+  test('does not duplicate a chat when its event arrives before the POST response', async () => {
+    const store = useProjectStore()
+    const chat: ChatInfo = {
+      chat_id: 'c-new',
+      project_id: 'p1',
+      title: 'New Chat',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: 'default',
+      session_id: '',
+      created_at: '2026-08-02T10:00:00Z',
+      archived: false,
+    }
+    let resolvePost!: (value: ChatInfo) => void
+    apiPost.mockReturnValue(new Promise<ChatInfo>(resolve => { resolvePost = resolve }))
+
+    const creating = store.createChat('p1')
+    store.connectEventsWs()
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'chat_created', chat }),
+    })
+    resolvePost(chat)
+    await creating
+
+    expect(store.chats.filter(c => c.chat_id === chat.chat_id)).toHaveLength(1)
   })
 })
 
@@ -1818,33 +1933,6 @@ describe('conversation forks', () => {
   })
 })
 
-describe('provider sub-chats', () => {
-  test('loads provider sub-chats and events', async () => {
-    const store = useProjectStore()
-    const chatId = 'parent-chat-1'
-    const subchatId = 'sub-chat-1'
-
-    const records = [{ subchat_id: subchatId, parent_chat_id: chatId, status: 'created' }]
-    const events = [{ type: 'message', role: 'owner', content: 'test' }]
-
-    apiGet.mockImplementation((path: string) => {
-      if (path === `/api/chats/${chatId}/provider-subchats`) {
-        return Promise.resolve(records)
-      }
-      if (path === `/api/provider-subchats/${subchatId}/events`) {
-        return Promise.resolve(events)
-      }
-      return Promise.resolve([])
-    })
-
-    await store.loadProviderSubchats(chatId)
-    expect(store.providerSubchats[chatId]).toEqual(records)
-
-    await store.loadProviderSubchatEvents(subchatId)
-    expect(store.providerSubchatEvents[subchatId]).toEqual(events)
-  })
-})
-
 describe('switchChat workspace alignment', () => {
   test('automatically switches activeWorkspace to match target chat workspace', async () => {
     apiGet.mockImplementation((url: string) => {
@@ -1867,5 +1955,76 @@ describe('switchChat workspace alignment', () => {
 
     expect(store.activeWorkspace).toBe('work')
     expect(store.activeChatId).toBe('c-work')
+  })
+})
+
+describe('projectChatRows (delegate grouping)', () => {
+  function seed(store: ReturnType<typeof useProjectStore>, chats: Partial<ChatInfo>[]) {
+    store.projects = [
+      { project_id: 'p1', name: 'Proj', workspace: 'personal' } as unknown as ProjectInfo,
+    ]
+    store.chats = chats.map((c, i) => ({
+      project_id: 'p1',
+      title: c.chat_id,
+      archived: false,
+      created_at: `2026-07-31T00:0${i}:00Z`,
+      ...c,
+    })) as unknown as ChatInfo[]
+  }
+
+  test('delegates follow their supervisor and are marked', () => {
+    const store = useProjectStore()
+    seed(store, [
+      { chat_id: 'boss' },
+      { chat_id: 'other' },
+      { chat_id: 'd1', spawned_from_chat_id: 'boss' },
+      { chat_id: 'd2', spawned_from_chat_id: 'boss' },
+    ])
+
+    const rows = store.projectChatRows('p1')
+
+    expect(rows.map(r => r.chat.chat_id)).toEqual(['boss', 'd1', 'd2', 'other'])
+    expect(rows.map(r => r.isDelegate)).toEqual([false, true, true, false])
+  })
+
+  test('an orphaned delegate stays top-level instead of disappearing', () => {
+    const store = useProjectStore()
+    // Supervisor archived, so it is not in the visible list at all.
+    seed(store, [
+      { chat_id: 'boss', archived: true },
+      { chat_id: 'orphan', spawned_from_chat_id: 'boss' },
+    ])
+
+    const rows = store.projectChatRows('p1')
+
+    expect(rows.map(r => r.chat.chat_id)).toEqual(['orphan'])
+    expect(rows[0].isDelegate).toBe(false)
+  })
+
+  test('a delegate whose supervisor lives in another project is not hidden', () => {
+    const store = useProjectStore()
+    seed(store, [{ chat_id: 'orphan', spawned_from_chat_id: 'boss-elsewhere' }])
+    store.chats = [
+      ...store.chats,
+      {
+        chat_id: 'boss-elsewhere',
+        project_id: 'p2',
+        title: 'Boss',
+        archived: false,
+        created_at: '2026-07-31T00:00:00Z',
+      } as unknown as ChatInfo,
+    ]
+
+    expect(store.projectChatRows('p1').map(r => r.chat.chat_id)).toEqual(['orphan'])
+  })
+
+  test('chats with no delegates produce a plain flat list', () => {
+    const store = useProjectStore()
+    seed(store, [{ chat_id: 'a' }, { chat_id: 'b' }])
+
+    const rows = store.projectChatRows('p1')
+
+    expect(rows.map(r => r.chat.chat_id)).toEqual(['a', 'b'])
+    expect(rows.every(r => !r.isDelegate)).toBe(true)
   })
 })

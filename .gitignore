@@ -33,6 +33,8 @@ dist/
 .DS_Store
 # Private memory vault data must never be committed to the app repo
 memory-vault/
+# Operator credentials and provider token caches (e.g. secrets/gws-personal/)
+secrets/
 
 # Claude Code session tooling (worktrees, local permission grants)
 .claude/

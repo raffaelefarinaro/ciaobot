@@ -116,7 +116,7 @@ Tool names follow Claude SDK naming:
 - `mcp__server_name__tool_name`: block one MCP tool.
 - `Bash`: block the Bash tool.
 
-Canonical assets live in `skills/`, `commands/`, and `subagents/`. `ciao sync-skills` mirrors them into Claude's `.claude/` catalogs, Codex's `.agents/skills/` catalog, and native Codex agent definitions under `.codex/`. Ciaobot commands remain available through the same `/command` syntax in chats; Codex also receives skill wrappers for commands and named agent roles.
+Canonical assets live in `skills/`, `commands/`, and `subagents/`. Project MCPs live in `.mcp.json`. `ciao sync-skills` mirrors canonical assets into Claude's `.claude/` catalogs, Codex's `.agents/skills/` catalog, native Codex agent definitions under `.codex/`, and projects `.mcp.json` servers into `.codex/config.toml`. Ciaobot commands remain available through the same `/command` syntax in chats; Codex also receives skill wrappers for commands and named agent roles.
 
 Use workspace-level tool deny lists for access control. Use skills and agents for behavior and workflow guidance.
 

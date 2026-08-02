@@ -13,12 +13,19 @@ Flow:
 5. Removes stale encrypted files so gws uses the new credentials
 """
 
+import os
 import sys
 
 if sys.version_info < (3, 12):
+    # Derived rather than hardcoded: this runs before REPO_ROOT is defined
+    # below, and the hint is useless if it names someone else's checkout.
+    _venv_python = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        ".venv", "bin", "python",
+    )
     sys.exit(
         f"This script needs Python 3.12+ (running {sys.version.split()[0]}). "
-        f"Try the ciaobot venv: /Users/raffaelefarinaro/repos/ciaobot/.venv/bin/python {sys.argv[0] if sys.argv else __file__}"
+        f"Try the ciaobot venv: {_venv_python} {sys.argv[0] if sys.argv else __file__}"
     )
 
 import argparse
