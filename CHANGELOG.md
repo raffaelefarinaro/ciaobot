@@ -120,6 +120,8 @@
 - docs(capabilities): catalog custom providers and plan mode (`f8152a2`)
 - test(web): drop the stub for the deleted ProviderSubchatPanel (`7cb80ad`)
 - docs(release): correct two stale traps (`7659d67`)
+- docs(release): record the cargo prerequisite (`36b2385`)
+- docs: correct comments the v0.7.0 changes made wrong (`f8259ea`)
 
 ## v0.6.5 - 2026-07-30
 
