@@ -430,6 +430,8 @@ class CiaoConfig:
     # Empty means automatic: tiers derive from the signed-in account's
     # model catalog (luna→haiku, terra→sonnet, sol→opus/fable).
     codex: CodexSettings = field(default_factory=CodexSettings)
+    # Runtime-selected custom-provider tier routes, keyed by provider id.
+    custom_routing: dict[str, dict[str, str]] = field(default_factory=dict)
     # Auto-discover models installed on the local Ollama daemon at startup
     # (GET /api/tags against ``ollama.local_url``) and surface them in the
     # model pickers. Disable with ``CIAO_OLLAMA_LOCAL_DISCOVERY=0``.

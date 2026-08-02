@@ -830,6 +830,56 @@
               />
             </div>
 
+            <div class="custom-providers-block">
+              <div class="settings-card-header">
+                <div>
+                  <p class="section-title">custom compatible providers</p>
+                  <p class="hint">
+                    Add any endpoint compatible with the selected CLI, including local Ollama, LM Studio, or Unsloth. Choose Claude Code or Codex as the runner. Tokens stay on this machine.
+                  </p>
+                </div>
+                <button class="btn-small" type="button" @click="addCustomProvider">Add provider</button>
+              </div>
+              <div v-if="!customProviderDrafts.length" class="hint hint--compact">No custom endpoints configured.</div>
+              <div v-for="draft in customProviderDrafts" :key="draft.id" class="custom-provider-row">
+                <div class="settings-field-grid custom-provider-grid">
+                  <label class="settings-field">
+                    <span class="ws-label">Name</span>
+                    <input class="routine-input" v-model="draft.name" @input="customProvidersDirty = true" placeholder="LM Studio" />
+                  </label>
+                  <label class="settings-field">
+                    <span class="ws-label">Id</span>
+                    <input class="routine-input" v-model="draft.id" @input="customProvidersDirty = true" placeholder="lm-studio" />
+                  </label>
+                  <label class="settings-field custom-provider-url">
+                    <span class="ws-label">Base URL</span>
+                    <input class="routine-input" v-model="draft.url" @input="customProvidersDirty = true" placeholder="http://localhost:1234/v1" />
+                  </label>
+                  <label class="settings-field">
+                    <span class="ws-label">Use with</span>
+                    <select class="routine-select" v-model="draft.runner" @change="customProvidersDirty = true">
+                      <option value="claude">Claude Code</option>
+                      <option value="codex">Codex</option>
+                    </select>
+                  </label>
+                  <label class="settings-field custom-provider-token">
+                    <span class="ws-label">Token</span>
+                    <input class="routine-input" type="password" v-model="draft.token" @input="customProvidersDirty = true" :placeholder="draft.token_configured ? '•••••••• (leave blank to keep)' : 'Optional for local servers'" />
+                  </label>
+                  <label class="settings-field custom-provider-models">
+                    <span class="ws-label">Models (optional)</span>
+                    <input class="routine-input" v-model="draft.models" @input="customProvidersDirty = true" placeholder="model-id, another-model" />
+                  </label>
+                </div>
+                <div class="action-row provider-connection-actions">
+                  <button class="btn-small" type="button" :disabled="customProviderProbePending === draft.id" @click="probeCustomProvider(draft)">
+                    {{ customProviderProbePending === draft.id ? 'Discovering…' : 'Discover models' }}
+                  </button>
+                  <button class="btn-small btn-danger" type="button" @click="removeCustomProvider(draft.id)">Remove</button>
+                </div>
+              </div>
+            </div>
+
 
             <div class="action-row settings-actions">
               <button class="btn-primary" @click="saveProviderKeys" :disabled="providerKeysSaving">
@@ -2240,6 +2290,7 @@ import type {
   McpEnvKey,
   PromptAsset,
   ProviderConfigSettings,
+  CustomProviderSettings,
   RoutineSettings,
   SkillInventory,
   SlashCommand,
@@ -2745,7 +2796,7 @@ const routinesError = ref('')
 const routinesSaving = ref(false)
 const routinesResult = ref('')
 
-type AliasProviderKey = 'claude' | 'codex' | 'ollama' | 'openrouter'
+type AliasProviderKey = 'claude' | 'codex' | 'ollama' | 'openrouter' | `custom:${string}`
 type TierProviderKey = Exclude<AliasProviderKey, 'claude'>
 type RoutingProviderKey = Exclude<AliasProviderKey, 'claude'>
 type TierKey = 'haiku' | 'sonnet' | 'opus' | 'fable'
@@ -2825,7 +2876,7 @@ async function fetchRoutines() {
   }
 }
 
-async function saveRoutines(patch: Record<string, string>) {
+async function saveRoutines(patch: Record<string, unknown>) {
   routinesSaving.value = true
   routinesResult.value = ''
   try {
@@ -2912,6 +2963,17 @@ const aliasProviderSections = computed<AliasProviderSection[]>(() => {
       available: true,
     })
   }
+  for (const provider of settings.model_options.custom_providers || []) {
+    const options = parseModelList((provider.models || []).join(','))
+    if (!options.length) continue
+    sections.push({
+      key: `custom:${provider.id}` as AliasProviderKey,
+      label: `${provider.name} (via ${provider.runner === 'codex' ? 'Codex' : 'Claude Code'})`,
+      options,
+      configurable: true,
+      available: true,
+    })
+  }
   return sections
 })
 
@@ -2958,6 +3020,13 @@ const tierProviderSections = computed<AliasProviderSection[]>(() => {
       configurable: true,
       available: openrouterAvailable,
     },
+    ...(settings.model_options.custom_providers || []).map((provider) => ({
+      key: `custom:${provider.id}` as AliasProviderKey,
+      label: `${provider.name} (via ${provider.runner === 'codex' ? 'Codex' : 'Claude Code'})`,
+      options: parseModelList((provider.models || []).join(',')),
+      configurable: true,
+      available: (provider.models || []).length > 0,
+    })),
   ]
 })
 
@@ -3008,6 +3077,10 @@ const tierProviderUnavailableHint = computed(() => {
 const DEFAULT_TIER_SELECTION = '__ciao_default__'
 
 function tierOverrideValue(provider: TierProviderKey, tier: TierKey): string {
+  if (provider.startsWith('custom:')) {
+    const id = provider.slice('custom:'.length)
+    return routines.value?.custom_routing?.[id]?.[tier] || ''
+  }
   const key = tierSettingKeys[provider][tier]
   return routines.value?.[key] || ''
 }
@@ -3053,8 +3126,19 @@ function tierModelSectionsFor(provider: TierProviderKey, tier: TierKey): ModelSe
 async function saveTierModel(provider: TierProviderKey, tier: TierKey, value: string | string[]) {
   const selected = Array.isArray(value) ? value[0] || '' : value
   const model = selected === DEFAULT_TIER_SELECTION ? '' : selected
-  const key = tierSettingKeys[provider][tier]
-  await saveRoutines({ [key]: model.trim() })
+  if (provider.startsWith('custom:')) {
+    const id = provider.slice('custom:'.length)
+    const routing = JSON.parse(JSON.stringify(routines.value?.custom_routing || {})) as Record<string, Record<string, string>>
+    const routes = { ...(routing[id] || {}) }
+    if (model.trim()) routes[tier] = model.trim()
+    else delete routes[tier]
+    if (Object.keys(routes).length) routing[id] = routes
+    else delete routing[id]
+    await saveRoutines({ custom_routing: routing })
+  } else {
+    const key = tierSettingKeys[provider][tier]
+    await saveRoutines({ [key]: model.trim() })
+  }
   // Codex effective tiers live in /api/models; refresh so the badges and
   // "Automatic (…)" labels reflect the new pin immediately.
   if (provider === 'codex') await fetchWorkspaceModels()
@@ -3063,6 +3147,7 @@ async function saveTierModel(provider: TierProviderKey, tier: TierKey, value: st
 function tierModelForProvider(provider: AliasProviderKey, tier: TierKey): string {
   if (provider === 'claude') return routines.value?.alias_tiers?.claude?.[tier] || tier
   if (provider === 'codex') return workspaceModels.value?.alias_tiers?.codex?.[tier] || 'Not available'
+  if (provider.startsWith('custom:')) return tierEffectiveValue(provider, tier) || ''
   return tierEffectiveValue(provider, tier) || ''
 }
 
@@ -3091,6 +3176,14 @@ function inferRoutineModel(model: string): { provider: RoutineProviderValue; tie
       }
     }
     return { provider: 'codex', tier: 'sonnet' }
+  }
+  if (raw.startsWith('custom:')) {
+    const provider = `custom:${raw.split(':', 2)[1]}` as AliasProviderKey
+    const tiers = routines.value?.alias_tiers?.[provider] || {}
+    for (const tier of modelTiers) {
+      if (tiers[tier.key] === raw) return { provider, tier: tier.key }
+    }
+    return { provider, tier: 'sonnet' }
   }
   const claudeTiers: Record<string, TierKey> = { haiku: 'haiku', sonnet: 'sonnet', opus: 'opus', fable: 'fable' }
   if (claudeTiers[raw]) {
@@ -3133,7 +3226,7 @@ function routineTierValue(key: RoutineModelKey): TierKey {
 function routineTierSelectable(key: RoutineModelKey): boolean {
   const provider = routineProviderValue(key)
   return provider === 'claude' || provider === 'ollama' || provider === 'openrouter'
-    || provider === 'codex'
+    || provider === 'codex' || provider.startsWith('custom:')
 }
 
 function routineCustomModel(key: RoutineModelKey): string {
@@ -3194,6 +3287,10 @@ const mcpUsageError = ref('')
 const providerKeyInputs = ref<Record<string, string>>({})
 const providerConnectionPending = ref('')
 const providerConnectionResult = ref('')
+type CustomProviderDraft = Omit<CustomProviderSettings, 'models'> & { token: string; models: string }
+const customProviderDrafts = ref<CustomProviderDraft[]>([])
+const customProvidersDirty = ref(false)
+const customProviderProbePending = ref('')
 const autoUpdateGithubSkills = ref(false)
 const autoUpdateSaving = ref(false)
 const autoUpdateResult = ref('')
@@ -3388,6 +3485,12 @@ async function fetchProviderKeys() {
   try {
     const res = await api.get<ProviderConfigSettings>('/api/settings/providers')
     providerKeys.value = res
+    customProviderDrafts.value = (res.custom_providers || []).map((provider) => ({
+      ...provider,
+      token: '',
+      models: provider.models.join(', '),
+    }))
+    customProvidersDirty.value = false
     for (const key in res.keys) {
       providerKeyInputs.value[key] = ''
     }
@@ -3401,6 +3504,48 @@ async function fetchProviderKeys() {
     providerKeysError.value = `Failed to load provider keys: ${errorMessage(e)}`
   } finally {
     providerKeysLoaded.value = true
+  }
+}
+
+function addCustomProvider() {
+  const id = `custom-${Date.now().toString(36)}`
+  customProviderDrafts.value.push({
+    id,
+    name: 'Custom provider',
+    url: 'http://localhost:1234/v1',
+    runner: 'claude',
+    models: '',
+    token_configured: false,
+    token: '',
+  })
+  customProvidersDirty.value = true
+}
+
+function removeCustomProvider(id: string) {
+  customProviderDrafts.value = customProviderDrafts.value.filter((provider) => provider.id !== id)
+  customProvidersDirty.value = true
+}
+
+async function probeCustomProvider(draft: CustomProviderDraft) {
+  customProviderProbePending.value = draft.id
+  try {
+    const result = await api.post<{ ok: boolean; models: string[] }>('/api/settings/providers/custom/probe', {
+      id: draft.id,
+      name: draft.name,
+      url: draft.url,
+      runner: draft.runner,
+      token: draft.token || undefined,
+    })
+    if (result.models?.length) {
+      draft.models = result.models.join(', ')
+      customProvidersDirty.value = true
+    } else {
+      providerKeysResult.value = 'No models were discovered. You can enter model ids manually.'
+    }
+  } catch (e) {
+    providerKeysResult.value = `Could not discover models: ${errorMessage(e)}`
+  } finally {
+    customProviderProbePending.value = ''
   }
 }
 
@@ -3480,8 +3625,9 @@ async function saveProviderKeys() {
   }
   
   const hasKeyChanges = Object.keys(patchKeys).length > 0
+  const customProvidersChanged = customProvidersDirty.value
   
-  if (!hasKeyChanges) {
+  if (!hasKeyChanges && !customProvidersDirty.value) {
     providerKeysResult.value = 'No changes to save.'
     providerKeysSaving.value = false
     setTimeout(() => { providerKeysResult.value = '' }, 2000)
@@ -3489,10 +3635,26 @@ async function saveProviderKeys() {
   }
   
   try {
-    const payload: { keys: Record<string, string> } = { keys: patchKeys }
+    const payload: { keys: Record<string, string>; custom_providers?: object[] } = { keys: patchKeys }
+    if (customProvidersDirty.value) {
+      payload.custom_providers = customProviderDrafts.value.map((draft) => ({
+        id: draft.id,
+        name: draft.name,
+        url: draft.url,
+        runner: draft.runner,
+        models: draft.models,
+        ...(draft.token ? { token: draft.token } : {}),
+      }))
+    }
     
     const res = await api.patch<ProviderConfigSettings>('/api/settings/providers', payload)
     providerKeys.value = res
+    customProviderDrafts.value = (res.custom_providers || []).map((provider) => ({
+      ...provider,
+      token: '',
+      models: provider.models.join(', '),
+    }))
+    customProvidersDirty.value = false
     for (const key in res.keys) {
       providerKeyInputs.value[key] = ''
     }
@@ -3503,7 +3665,16 @@ async function saveProviderKeys() {
       autoUpdateGithubSkills.value = res.auto_update_github_skills
     }
     providerKeysResult.value = ''
-    await restartAndReload('Configuration saved. Restarting Ciaobot to apply…')
+    if (customProvidersChanged) {
+      // Provider selectors are mounted from separate payloads; refresh them
+      // immediately so a newly saved endpoint is usable without a page reload.
+      await Promise.all([fetchRoutines(), fetchWorkspaceModels(), fetchWorkspacesList()])
+    }
+    if (hasKeyChanges) {
+      await restartAndReload('Configuration saved. Restarting Ciaobot to apply…')
+    } else {
+      providerKeysResult.value = 'Custom providers saved.'
+    }
   } catch (e) {
     providerKeysResult.value = `Error: ${errorMessage(e)}`
   } finally {
@@ -4294,10 +4465,13 @@ function blankWorkspaceForm(): WorkspaceForm {
 
 function workspaceToForm(ws: WorkspaceInfo): WorkspaceForm {
   const mcps = ws.claude_ai_mcps
+  const customProvider = ws.default_model.startsWith('custom:')
+    ? `custom:${ws.default_model.split(':', 3)[1]}` as WorkspaceProvider
+    : null
   return {
     name: ws.name,
     vault_root: ws.vault_root || '',
-    default_provider: ws.default_provider || 'claude',
+    default_provider: customProvider || ws.default_provider || 'claude',
     default_model: ws.default_model || '',
     gws_profile: ws.gws_profile || '',
     model_bucket: ws.model_bucket || '',
@@ -4316,6 +4490,14 @@ function claudeAiMcpsPayload(value: 'default' | 'on' | 'off'): boolean | null {
 
 
 function workspaceModelSectionsForProvider(provider: WorkspaceProvider, currentModelValue: string): ModelSection[] {
+  if (provider.startsWith('custom:')) {
+    const section = sectionsFromModelsResponse(workspaceModels.value)
+      .find((item) => item.key === provider)
+    if (!section) return []
+    const models = [...section.models]
+    if (currentModelValue && !models.includes(currentModelValue)) models.push(currentModelValue)
+    return [{ ...section, models }]
+  }
   if (provider === 'codex') {
     const section = sectionsFromModelsResponse(workspaceModels.value).find((item) => item.key === 'codex')
     if (!section) return []
@@ -5686,6 +5868,28 @@ a.btn-secondary {
   content: '·';
   margin-right: 10px;
   color: var(--fg3);
+}
+.custom-providers-block {
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
+}
+.custom-provider-row {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+}
+.custom-provider-grid {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+.custom-provider-url,
+.custom-provider-models {
+  grid-column: span 2;
+}
+.custom-provider-token {
+  grid-column: span 2;
 }
 .settings-control {
   width: min(100%, 430px);

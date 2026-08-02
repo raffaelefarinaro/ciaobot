@@ -37,6 +37,7 @@ from ciao.providers.base import (
     build_prompt,
 )
 from ciao.providers.connect_errors import annotate_connection_host
+from ciao.custom_providers import runtime_model
 from ciao.providers.stdio_rpc import RpcError, RpcProcessError, StdioJsonRpcPeer
 from ciao.tool_path import resolve_tool
 
@@ -852,7 +853,7 @@ class CodexProvider(BaseSDKProvider):
         return self._peer
 
     async def _ensure_thread(self, request: AgentRequest) -> str:
-        requested_model = request.model
+        requested_model = runtime_model(request.model)
         if is_tier(requested_model):
             catalog = await self.model_catalog(self.workspace_root)
             requested_model = codex_tier_models(

@@ -1380,9 +1380,9 @@ const touchedFiles = computed<TouchedFile[]>(() => {
 })
 
 type ProviderKey = 'claude' | 'codex'
-type BucketKey = 'claude_work' | 'claude_personal' | 'openrouter' | 'codex'
+type BucketKey = 'claude_work' | 'claude_personal' | 'openrouter' | 'codex' | `custom:${string}`
 type ModelBucketValue = 'work' | 'personal' | 'openrouter' | ''
-type RouteKind = 'anthropic' | 'ollama' | 'ollama-local' | 'openrouter' | 'codex'
+type RouteKind = 'anthropic' | 'ollama' | 'ollama-local' | 'openrouter' | 'codex' | 'custom'
 type TierAlias = 'haiku' | 'sonnet' | 'opus' | 'fable'
 
 const BUCKET_DEFS: { key: BucketKey; label: string; provider: ProviderKey }[] = [
@@ -1604,6 +1604,10 @@ const activeBucket = computed<BucketKey>(() => {
   const c = chat.value
   if (!c) return 'claude_work'
   if (c.provider === 'codex') return 'codex'
+  if (c.model.startsWith('custom:')) {
+    const parts = c.model.split(':', 3)
+    if (parts[1]) return `custom:${parts[1]}`
+  }
   // OpenRouter ids are owner/model (no ':' tag); Ollama ids carry ':'.
   if (c.model.includes('/') && !c.model.includes(':')) return 'openrouter'
   // The server records the explicit bucket choice. Legacy values are kept
@@ -3145,16 +3149,26 @@ function canonicalTier(model: string): string {
 }
 
 function modelBucketForBucket(bucket: BucketKey): ModelBucketValue {
+  if (bucket.startsWith('custom:')) return ''
   if (bucket === 'codex') return ''
   if (bucket === 'openrouter') return 'openrouter'
   return bucket === 'claude_personal' ? 'personal' : 'work'
 }
 
 function bucketLabel(bucket: BucketKey): string {
+  if (bucket.startsWith('custom:')) {
+    const id = bucket.slice('custom:'.length)
+    const provider = modelsResponse.value?.custom_providers?.find(item => item.id === id)
+    return provider ? `${provider.name} via ${provider.runner === 'codex' ? 'Codex' : 'Claude Code'}` : id
+  }
   return BUCKET_DEFS.find((def) => def.key === bucket)?.label || 'Claude'
 }
 
 function bucketForSelectedModel(model: string): BucketKey {
+  if (model.startsWith('custom:')) {
+    const parts = model.split(':', 3)
+    if (parts[1]) return `custom:${parts[1]}`
+  }
   const response = modelsResponse.value
   if (response?.alias_tiers?.codex?.[model]) return 'codex'
   if ((response?.codex_models || []).includes(model)) return 'codex'
@@ -3184,6 +3198,7 @@ function effectiveModelForBucket(model: string, bucket: BucketKey): string {
 }
 
 function routeKindFor(model: string, bucket: BucketKey): RouteKind {
+  if (bucket.startsWith('custom:')) return 'custom'
   if (bucket === 'codex') return 'codex'
   const effective = effectiveModelForBucket(model, bucket)
   if (bucket === 'openrouter' || (effective.includes('/') && !effective.includes(':'))) {
@@ -3233,13 +3248,16 @@ async function selectModel(value: string | string[], sectionKey = '') {
   const realModel = isFablePseudo ? CODEX_FABLE_REAL_MODEL : model
   const targetRoute = routeKindFor(realModel, targetBucket)
   const currentRoute = routeKindFor(chat.value.model, activeBucket.value)
+  const customProvider = targetBucket.startsWith('custom:')
+    ? modelsResponse.value?.custom_providers?.find(item => item.id === targetBucket.slice('custom:'.length))
+    : undefined
   const updates: {
     provider: ProviderKey
     model: string
     model_bucket: ModelBucketValue
     thinking_level?: string
   } = {
-    provider: (BUCKET_DEFS.find(def => def.key === targetBucket)?.provider || 'claude') as ProviderKey,
+    provider: (customProvider?.runner || BUCKET_DEFS.find(def => def.key === targetBucket)?.provider || 'claude') as ProviderKey,
     model: realModel,
     model_bucket: modelBucket,
   }

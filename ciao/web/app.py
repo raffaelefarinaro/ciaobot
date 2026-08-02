@@ -96,6 +96,7 @@ from ciao.web.routes_api import (
     gws_relogin_cancel,
     provider_connection_action,
     provider_config_settings,
+    custom_provider_probe,
     settings_routines,
     setup_finish_endpoint,
     setup_inspect_folder_endpoint,
@@ -291,6 +292,7 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/models", list_models, methods=["GET"]),
         Route("/api/settings/routines", settings_routines, methods=["GET", "PATCH"]),
         Route("/api/settings/providers", provider_config_settings, methods=["GET", "PATCH"]),
+        Route("/api/settings/providers/custom/probe", custom_provider_probe, methods=["POST"]),
         Route(
             "/api/settings/providers/{provider}/{action}",
             provider_connection_action,

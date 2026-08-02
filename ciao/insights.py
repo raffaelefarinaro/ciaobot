@@ -323,7 +323,15 @@ async def extract_and_append(
             return
 
         env: dict[str, str]
-        if provider == "codex":
+        from ciao.custom_providers import env_for_model as custom_env_for_model
+        from ciao.custom_providers import provider_for_model, runtime_model
+        custom = provider_for_model(config, model)
+        if custom is not None:
+            provider = custom.runner
+            effective_model = runtime_model(model)
+            env = custom_env_for_model(config, model)
+            note = None
+        elif provider == "codex":
             effective_model, env, note = model, {}, None
         else:
             from ciao.providers.routing import resolve_with_fallback
@@ -674,6 +682,13 @@ async def backfill_insights_task(
                     effective_model, env, note = resolve_with_fallback(
                         insights_model, config, default_model=config.insights_model
                     )
+                    from ciao.custom_providers import env_for_model as custom_env_for_model
+                    from ciao.custom_providers import provider_for_model, runtime_model
+                    custom = provider_for_model(config, insights_model)
+                    text_provider = custom.runner if custom is not None else "claude"
+                    if custom is not None:
+                        effective_model = runtime_model(insights_model)
+                        env = custom_env_for_model(config, insights_model)
 
                     async def run_text_extract():
                         from ciao.providers.oneshot import run_oneshot
@@ -684,6 +699,7 @@ async def backfill_insights_task(
                             env=env,
                             timeout_s=120.0,
                             cwd=config.workspace_root,
+                            provider=text_provider,
                         )
 
                     output = ""

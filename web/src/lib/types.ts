@@ -1,9 +1,11 @@
 export type WorkspaceName = string
-export type WorkspaceProvider = 'claude' | 'codex' | 'ollama' | 'openrouter'
+export type WorkspaceProvider = 'claude' | 'codex' | 'ollama' | 'openrouter' | `custom:${string}`
 
 export interface WorkspaceProviderOption {
   value: WorkspaceProvider
   label: string
+  runner?: 'claude' | 'codex'
+  default_model?: string
 }
 
 export interface WorkspaceInfo {
@@ -422,6 +424,9 @@ export interface ModelsResponse {
   openrouter_models?: string[]
   // Account-visible Codex models and their app-server metadata.
   codex_models?: string[]
+  custom_providers?: Array<CustomProviderSettings & {
+    model_labels?: Record<string, string>
+  }>
   codex_model_metadata?: Record<string, {
     display_name: string
     description: string
@@ -463,6 +468,7 @@ export interface RoutineSettings {
   codex_sonnet_model: string
   codex_opus_model: string
   codex_fable_model: string
+  custom_routing?: Record<string, Record<string, string>>
   // What actually runs right now, after defaults.
   title_model_effective: string
   insights_model_effective: string
@@ -491,6 +497,7 @@ export interface RoutineSettings {
     ollama_cloud: string[]
     ollama_local: string[]
     openrouter?: string[]
+    custom_providers?: Array<CustomProviderSettings & { model_labels?: Record<string, string> }>
   }
   backends?: Record<string, boolean>
   workspace_context?: {
@@ -512,6 +519,15 @@ export interface ProviderConnection {
   skills?: string[]
 }
 
+export interface CustomProviderSettings {
+  id: string
+  name: string
+  url: string
+  runner: 'claude' | 'codex'
+  models: string[]
+  token_configured: boolean
+}
+
 export interface ProviderConfigSettings {
   keys: Record<string, {
     label: string
@@ -526,6 +542,7 @@ export interface ProviderConfigSettings {
     auth_method?: string
   }>
   connections?: Record<string, ProviderConnection>
+  custom_providers?: CustomProviderSettings[]
   auto_update_github_skills?: boolean
   requires_restart: boolean
   env_path: string

@@ -14,6 +14,8 @@ ciao run
 
 `ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies the editable `CLAUDE.md` workspace guide, links `AGENTS.md` to that same guide for Codex, copies `CIAO_CUSTOMIZATION.md`, and renders the server plist under `~/Library/LaunchAgents/`. When the real Tauri `Ciaobot.app` is installed, setup does not generate or load the legacy rumps agent or `Ciaobot Server.app`; package-only installs retain those assets for the migration/rollback window. Existing custom `AGENTS.md` files are preserved. By default setup does not load launchd; add `--load-launchd` when you want it to run `launchctl`.
 
+Provider settings for custom compatible endpoints are persisted in the tracked workspace file `.ciao/custom_providers.json`; bearer tokens are kept separately in the gitignored `.runtime/custom_provider_tokens.json` and are never committed or returned by the API. Focused provider tests belong in `tests/test_custom_providers.py`.
+
 A fresh first logical workspace and workspaces added later in Settings live at
 `<CIAO_VAULT_ROOT>/<workspace-name>/`. Their registry path is read-only in the
 PWA. Existing-folder setup preserves the selected notes in place so the

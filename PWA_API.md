@@ -115,7 +115,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/workspaces` | List configured logical workspaces |
 | POST | `/api/workspaces/{name}` | Add or update a logical workspace config |
 | DELETE | `/api/workspaces/{name}` | Delete a logical workspace config |
-| GET, PATCH | `/api/settings/providers` | Read or update keys used directly by Ciaobot |
+| GET, PATCH | `/api/settings/providers` | Read or update direct keys and the tracked custom provider definitions (tokens are stored locally and redacted) |
+| POST | `/api/settings/providers/custom/probe` | Discover models from an unsaved OpenAI-compatible custom endpoint |
 | POST | `/api/settings/providers/{provider}/{action}` | Connect, verify, or log out through the Claude Code or Codex CLI |
 | GET | `/api/integrations/gws` | Read Google Workspace CLI install, profile auth, and workspace usage status |
 | POST | `/api/integrations/gws/install` | Install the `@googleworkspace/cli` (`gws`) binary globally via npm |
@@ -222,6 +223,20 @@ curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/agent
   -H 'content-type: application/json' \
   -d '{"description":"Turn notes into a decision record.","argument_hint":"<notes>","content":"# Decision Record: $ARGUMENTS\n\nConvert $ARGUMENTS into a concise decision record with context, decision, and consequences."}'
 curl -sS -b /tmp/ciao.jar -X DELETE "http://localhost:${PWA_PORT:-8443}/api/agent-assets/commands/decision-record"
+```
+
+**Custom compatible provider**
+
+```bash
+# Probe an unsaved compatible endpoint for model ids.
+curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/settings/providers/custom/probe" \
+  -H 'content-type: application/json' \
+  -d '{"id":"lm-studio","name":"LM Studio","url":"http://localhost:1234/v1","runner":"claude","token":""}'
+
+# Save one or more endpoints. Omit `token` on an existing id to retain its stored token.
+curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/providers" \
+  -H 'content-type: application/json' \
+  -d '{"custom_providers":[{"id":"lm-studio","name":"LM Studio","url":"http://localhost:1234/v1","runner":"claude","models":"qwen2.5-coder"}]}'
 ```
 
 **Projects**

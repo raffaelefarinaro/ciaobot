@@ -161,6 +161,8 @@ Workspace-specific integrations can still be set in `.env`, but the public `.env
 
 **Provider connections and direct keys.** Settings → Providers launches, verifies, and logs out Claude Code and Codex through their own CLIs; Ciaobot does not store their credentials. Keys Ciaobot calls directly remain editable: Ollama Cloud and OpenRouter under Providers, and the OpenAI cloud voice key under Settings → Models. Saving a direct key patches `.env` and restarts the server.
 
+**Custom compatible providers.** Settings → Providers can register any local or hosted endpoint compatible with the selected CLI (for example Ollama, LM Studio, or an Unsloth server). Enter a name, base URL, optional bearer token, and choose `Claude Code` or `Codex` as the runner. Models are discovered when the endpoint supports the OpenAI-style `/v1/models` catalog, or can be entered manually. Claude Code endpoints must implement the Anthropic-compatible chat API; Codex endpoints must implement the OpenAI-compatible API. Provider definitions are tracked in `.ciao/custom_providers.json`, while bearer tokens remain in the gitignored `.runtime/custom_provider_tokens.json`. The resulting custom models are available in chat, workspace defaults, model routing, title generation, insights, schedules, and critique selectors. Claude Code receives `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`; Codex receives `OPENAI_BASE_URL`/`OPENAI_API_KEY`.
+
 ## Google Tasks Reference
 
 | List | ID |

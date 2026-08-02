@@ -75,6 +75,12 @@ from ciao.providers.codex import (
     codex_collab_tree_counts,
 )
 from ciao.providers.routing import intended_backend, routing_env_for_model
+from ciao.custom_providers import (
+    env_for_model as custom_env_for_model,
+    load_custom_providers,
+    provider_for_model,
+    runtime_model,
+)
 from ciao.provider_service import ProviderService, supported_providers
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore, _claude_projects_dir
@@ -2739,6 +2745,7 @@ class ProjectChatManager:
         chat_provider = provider
         if not chat_provider:
             chat_provider = self._config.default_provider_for_workspace(workspace)
+        self._validate_custom_model_runner(chat_model, chat_provider)
         # Claude chats record the bucket explicitly: the workspace only
         # preselects (personal → "personal"), but an explicit picker choice
         # wins and survives project moves. Personal-bucket alias defaults
@@ -2855,6 +2862,7 @@ class ProjectChatManager:
         )
         if provider is not None and provider not in supported_providers():
             raise ValueError(f"Unknown provider '{provider}'")
+        self._validate_custom_model_runner(model or chat.model, provider or chat.provider)
         if not self._model_bucket_allowed(model_bucket):
             raise ValueError(f"Unknown model bucket '{model_bucket}'")
         if thinking_level is not None:
@@ -3873,6 +3881,7 @@ class ProjectChatManager:
                 buckets.add("ollama")
             if workspace.default_provider == "claude":
                 buckets.add("work")
+        buckets.update(f"custom:{provider.id}" for provider in load_custom_providers(self._config))
         return buckets
 
     def _model_bucket_allowed(self, bucket: str | None) -> bool:
@@ -3908,6 +3917,13 @@ class ProjectChatManager:
                 return target
             return model
 
+        if effective.startswith("custom:"):
+            provider_id = effective.split(":", 1)[1]
+            target = getattr(self._config, "custom_routing", {}).get(provider_id, {}).get(
+                canonical_tier(model), model
+            )
+            return target or model
+
         if not self._bucket_routes_to_ollama(effective):
             return model
         target = tier_model(
@@ -3923,11 +3939,21 @@ class ProjectChatManager:
 
     def _runtime_model_for_chat(self, chat: ChatInfo) -> str:
         """Resolve the model the provider should actually run for a chat."""
+        custom = provider_for_model(self._config, chat.model)
+        if custom is not None:
+            return runtime_model(chat.model)
         if chat.provider != "claude":
             return chat.model
         return self._resolve_claude_model(
             chat.model, chat.model_bucket, chat.project_id
         )
+
+    def _validate_custom_model_runner(self, model: str, provider: str) -> None:
+        custom = provider_for_model(self._config, model)
+        if custom is not None and custom.runner != provider:
+            raise ValueError(
+                f"Custom provider '{custom.name}' must be used with {custom.runner}"
+            )
 
     def _thinking_level_for_chat(self, chat: ChatInfo) -> str:
         """Return the chat's thinking level, or "" when stale.
@@ -3967,6 +3993,14 @@ class ProjectChatManager:
             env.update(
                 routing_env_for_model(self._runtime_model_for_chat(chat), self._config)
             )
+        custom = provider_for_model(self._config, chat.model)
+        if custom is not None:
+            if custom.runner != chat.provider:
+                raise ValueError(
+                    f"Custom provider '{custom.name}' is configured for {custom.runner}, "
+                    f"not {chat.provider}"
+                )
+            env.update(custom_env_for_model(self._config, chat.model))
         env["CIAO_CHAT_ID"] = chat.chat_id
         if chat.spawned_from_chat_id:
             # Depth marker for the delegate recursion guard. Present means "you
@@ -6341,26 +6375,40 @@ class ProjectChatManager:
         workspace = project.workspace if project else None
         from ciao.providers.ollama import is_local_ollama_model
         from ciao.providers.routing import resolve_with_fallback
+        from ciao.custom_providers import (
+            env_for_model as custom_env_for_model,
+            provider_for_model,
+            runtime_model,
+        )
 
         requested = (
             chat.model if chat.provider == "codex"
             else resolve_title_model(self._config, workspace)
         )
+        custom_title_provider = provider_for_model(self._config, requested)
         # A "codex:<model>" override routes titles through the Codex CLI for
         # any chat, not just Codex chats (Settings -> Chat titles -> OpenAI).
         codex_override = chat.provider != "codex" and requested.startswith("codex:")
-        if chat.provider == "codex":
+        if custom_title_provider is not None:
+            title_provider = custom_title_provider.runner
+            title_model = runtime_model(requested)
+            title_env = custom_env_for_model(self._config, requested)
+        elif chat.provider == "codex":
+            title_provider = "codex"
             title_model = requested
             title_env = self._build_extra_env(chat)
         elif codex_override:
+            title_provider = "codex"
             title_model = requested[len("codex:"):] or "gpt-5.1"
             title_env = None
         elif self._config.title_model_override:
+            title_provider = "claude"
             title_model = requested
             from ciao.providers.routing import routing_routine_env_for_model
 
             title_env = routing_routine_env_for_model(requested, self._config)
         else:
+            title_provider = "claude"
             title_model, title_env, note = resolve_with_fallback(
                 requested,
                 self._config,
@@ -6390,8 +6438,8 @@ class ProjectChatManager:
             # Keep the established Claude/Ollama call signature intact for
             # integrations that wrap the title helper. Codex is the only
             # provider that needs an explicit dispatch hint here.
-            if chat.provider == "codex" or codex_override:
-                title_kwargs["provider"] = "codex"
+            if title_provider != "claude":
+                title_kwargs["provider"] = title_provider
             title, engine, detail = await _generate_chat_title_with_engine(
                 user_text,
                 assistant_text,

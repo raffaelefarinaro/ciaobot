@@ -18,7 +18,7 @@ ciao/                          Python backend (Starlette).
   setup_status.py              Bootstrap/setup readiness API and wizard finish handler.
   dev.py                       Local dev runner: backend on :8543 plus Vite frontend on :5173. CLI: `ciao dev`.
   config.py                    Env var loading, workspace config.
-  providers/                   Claude Agent SDK and Codex app-server providers plus routing helpers.
+  providers/                   Claude Agent SDK, Codex app-server, custom endpoint providers, and routing helpers.
     stdio_rpc.py               Async JSON-lines RPC process transport used by CLI app-server adapters.
     codex.py                   Persistent Codex app-server adapter, model/account discovery, approvals, questions, history.
     routing.py                 Resolve intended backend (Anthropic / Ollama / OpenRouter) from a model ID and build per-turn env injection. Used by chats and one-shot automations.
@@ -129,7 +129,8 @@ skills/  subagents/  commands/ Canonical user-owned sources; `ciao sync-skills` 
 .agents/skills/                   Codex skill catalog and command/role wrappers. Locked packages installed by the upstream `skills` CLI are canonical here; Ciaobot-owned skills are linked here from `.claude/skills/`.
 .codex/{config.toml,agents/}      Generated native Codex agent registrations and role instructions.
 memory-vault/<workspace>/      Standard per-workspace durable markdown memory: MEMORY.md, INDEX.md, entity folders, projects/{active,completed}/, Workspace/, Logs/Chats/.
-.runtime/                      Local state: schedules.json, web_projects.json, control_surface_decision.json, MCP/provider tool telemetry JSONL, server.lock, job runs/errors, snapshots/, transcripts/, state.json. Not committed.
+  .runtime/                      Local state: schedules.json, web_projects.json, custom_provider_tokens.json, control_surface_decision.json, MCP/provider tool telemetry JSONL, server.lock, job runs/errors, snapshots/, transcripts/, state.json. Not committed.
+  .ciao/custom_providers.json    Tracked custom endpoint definitions (URLs, runners, and model lists; never tokens).
 secrets/                       OAuth credentials (gitignored).
 ```
 
