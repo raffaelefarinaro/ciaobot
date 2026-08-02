@@ -367,6 +367,25 @@ describe('ChatPanel /plan interactions', () => {
     second.wrapper.unmount()
   })
 
+  it('restores normal after /plan enters, reloads, and exits plan mode', async () => {
+    const first = await mountPanel({ mode: 'normal' })
+    first.updateChat.mockResolvedValue()
+
+    await first.wrapper.get('textarea.chat-input').setValue('/plan')
+    await first.wrapper.get('button.send-btn').trigger('click')
+    await flushPromises()
+    first.wrapper.unmount()
+
+    const second = await mountPanel({ mode: 'plan' })
+    second.updateChat.mockResolvedValue()
+    await second.wrapper.get('textarea.chat-input').setValue('/plan')
+    await second.wrapper.get('button.send-btn').trigger('click')
+    await flushPromises()
+
+    expect(second.updateChat).toHaveBeenCalledWith('chat-1', { mode: 'normal' })
+    second.wrapper.unmount()
+  })
+
   it('falls back to auto when the persisted return mode is corrupt', async () => {
     localStorage.setItem(planReturnModeStorageKey('chat-1'), 'turbo')
     const { wrapper, updateChat } = await mountPanel({ mode: 'plan' })
