@@ -221,9 +221,11 @@ def extract_json(text: str) -> dict | None:
 def _split_provider(model: str, config: CiaoConfig) -> tuple[str, str]:
     """Map a panel entry to its ``(provider, model_id)`` dispatch pair.
 
-    A ``codex:`` prefix selects the Codex (OpenAI / ChatGPT) app-server; every
-    other id runs through the Anthropic-compatible one-shot path with per-model
-    routing env (Anthropic passthrough / OpenRouter / Ollama).
+    A ``codex:`` prefix selects the Codex (OpenAI / ChatGPT) app-server, as
+    does a ``custom:`` id whose provider is configured with the Codex runner.
+    Every other id runs through the Anthropic-compatible one-shot path with
+    per-model routing env (Anthropic passthrough / OpenRouter / Ollama /
+    custom Anthropic-compatible endpoints).
     """
     if model.startswith(CODEX_PREFIX):
         return "codex", model[len(CODEX_PREFIX):].strip()
