@@ -297,3 +297,37 @@ async def test_websocket_proxy_reports_host_connection_state() -> None:
     websocket.accept.assert_awaited_once()
     websocket.send_json.assert_awaited_once_with({"type": "host_unreachable"})
     websocket.close.assert_awaited_once_with(code=4004)
+
+
+@pytest.mark.asyncio
+async def test_websocket_proxy_reports_a_client_to_host_forwarding_failure() -> None:
+    import asyncio
+
+    class BrokenRemote:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def send(self, message: str) -> None:
+            raise OSError("host connection dropped")
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.Event().wait()
+            raise StopAsyncIteration
+
+    websocket = AsyncMock()
+    websocket.url.path = "/ws/chat/chat-1"
+    websocket.url.query = ""
+    websocket.app.state.node_state_manager = None
+    websocket.receive_text.return_value = '{"type":"message","text":"continue"}'
+
+    with patch("websockets.connect", return_value=BrokenRemote()):
+        await proxy_websocket(websocket, "http://10.0.0.5:8443")
+
+    websocket.send_json.assert_awaited_once_with({"type": "host_unreachable"})
+    websocket.close.assert_awaited_once_with(code=4004)

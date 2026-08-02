@@ -71,6 +71,15 @@ def test_system_prompt_includes_gws_operational_notes() -> None:
     assert "supportsAllDrives" in append
 
 
+def test_system_prompt_retries_gws_keychain_failures_outside_codex_sandbox() -> None:
+    """A Codex sandbox cannot always read macOS Keychain CA roots."""
+    payload = mi.system_prompt_payload("")
+    assert payload is not None
+    append = payload["append"]
+    assert "no native root CA certificates found" in append
+    assert "sandbox_permissions: require_escalated" in append
+
+
 def test_system_prompt_includes_url_reading_notes() -> None:
     """PWA turns get their instructions from system_prompt.md, not the repo's
     CLAUDE.md, so the defuddle-first rule has to live here or it never fires."""
@@ -140,7 +149,7 @@ def test_system_prompt_includes_memory_and_vault_notes() -> None:
     assert "ciao vault-lint" in append
     assert "ciao sync-skills" in append
     assert "ciao create-chat" in append
-    assert "ciao provider-chat" in append
+    assert "delegate_spawn" in append
     assert "Memory-Proposals.md" in append
 
 

@@ -103,6 +103,12 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
     assert settings["skillOverrides"] == harness_skill_overrides()
     assert settings["skillOverrides"]["schedule"] == "off"
     assert settings["skillOverrides"]["loop"] == "off"
+    # A background Bash process dies when the SDK turn ends and Claude only
+    # reports that stop after the next user message. The managed provider
+    # must install the hook that forces those calls to stay in the turn.
+    bash_hooks = options.hooks["PreToolUse"]
+    assert len(bash_hooks) == 1
+    assert bash_hooks[0].matcher == "Bash"
 
 
 @pytest.mark.asyncio

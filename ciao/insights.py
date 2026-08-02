@@ -323,7 +323,15 @@ async def extract_and_append(
             return
 
         env: dict[str, str]
-        if provider == "codex":
+        from ciao.custom_providers import env_for_model as custom_env_for_model
+        from ciao.custom_providers import provider_for_model, runtime_model
+        custom = provider_for_model(config, model)
+        if custom is not None:
+            provider = custom.runner
+            effective_model = runtime_model(model)
+            env = custom_env_for_model(config, model)
+            note = None
+        elif provider == "codex":
             effective_model, env, note = model, {}, None
         else:
             from ciao.providers.routing import resolve_with_fallback
@@ -338,7 +346,7 @@ async def extract_and_append(
             if note:
                 run.extra["fallback"] = note
                 logger.info("Insights %s", note)
-            output = await _run_model_with_retry(
+            output, model_error = await _run_model_with_retry(
                 filtered_jsonl=filtered_jsonl,
                 model=effective_model,
                 env=env,
@@ -350,7 +358,7 @@ async def extract_and_append(
                 logger.info("Appended session insights to %s", archive_path)
             else:
                 run.status = "error"
-                run.error = "insights model returned no output (failed twice)"
+                run.error = model_error or "insights model returned no output"
 
         # Canonical project doc: fold Decisions/Open loops into the chat's
         # project doc while the insights are fresh. The nightly curation
@@ -485,7 +493,7 @@ async def _run_model_with_retry(
     env: dict[str, str],
     provider: str = "claude",
     cwd: Path | None = None,
-) -> str:
+) -> tuple[str, str]:
     """Call the model; on failure, wait 30s and retry once."""
     async def call() -> str:
         if provider == "claude":
@@ -495,16 +503,16 @@ async def _run_model_with_retry(
         )
 
     try:
-        return await call()
+        return await call(), ""
     except Exception as exc:  # noqa: BLE001
         logger.info("Insights model call failed (%s); retrying in %ds", exc, _RETRY_DELAY_S)
 
     await asyncio.sleep(_RETRY_DELAY_S)
     try:
-        return await call()
-    except Exception:
+        return await call(), ""
+    except Exception as exc:  # noqa: BLE001
         logger.exception("Insights model call failed twice; skipping")
-        return ""
+        return "", str(exc).strip() or type(exc).__name__
 
 
 async def _call_model(
@@ -538,6 +546,39 @@ async def _call_model(
 UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 )
+
+
+def _empty_backfill_stats() -> dict[str, int]:
+    return {
+        "total_discovered": 0,
+        "already_done": 0,
+        "eligible": 0,
+        "to_process": 0,
+        "processed": 0,
+        "success": 0,
+        "skipped": 0,
+        "errors": 0,
+    }
+
+
+def format_backfill_summary(stats: dict[str, int]) -> str:
+    """Return a short operator-facing summary for an insights backfill run."""
+    total = stats.get("total_discovered", 0)
+    selected = stats.get("to_process", 0)
+    processed = stats.get("processed", 0)
+    success = stats.get("success", 0)
+    skipped = stats.get("skipped", 0)
+    errors = stats.get("errors", 0)
+
+    if selected == 0:
+        if total == 0:
+            return "No archived chats found."
+        return f"No archives needed backfill ({stats.get('already_done', 0)} already complete)."
+
+    summary = f"Processed {processed}/{selected}: {success} succeeded, {skipped} skipped"
+    if errors:
+        summary += f", {errors} errors"
+    return summary + "."
 
 _TEXT_MODE_SYSTEM_PROMPT = """\
 You are extracting durable signal from a Claude Code chat transcript.
@@ -585,20 +626,24 @@ async def backfill_insights_task(
     dry_run: bool = False,
     concurrency: int = 2,
     workspace: str = "",
-) -> None:
-    """Scan the vault's archived transcripts and extract/append missing insights."""
+) -> dict[str, int]:
+    """Scan archived transcripts and return counts for the completed run."""
+    stats = _empty_backfill_stats()
     vault_root = config.vault_root
     base = vault_root / "memory-vault" / "Logs" / "Chats"
     if not base.exists():
         logger.info("Vault directory %s does not exist, skipping backfill", base)
-        return
+        return stats
 
     project_dir = _claude_projects_dir(config.workspace_root)
 
     todo = []
     # Loop over sorted files to ensure deterministic order (oldest first or alphabetic)
-    for md in sorted(base.glob("*/claude/*.md")):
+    archives = sorted(base.glob("*/claude/*.md"))
+    stats["total_discovered"] = len(archives)
+    for md in archives:
         if _has_insights_section(md):
+            stats["already_done"] += 1
             continue
 
         # Filter by workspace/context if requested
@@ -619,12 +664,14 @@ async def backfill_insights_task(
         elif (not has_jsonl) and mode in {"both", "text"}:
             todo.append((md, session_id, False))
 
+    stats["eligible"] = len(todo)
     if limit > 0:
         todo = todo[:limit]
+    stats["to_process"] = len(todo)
 
     if not todo:
         logger.info("No archives matching limit=%d, mode=%s, workspace=%s require backfill.", limit, mode, workspace)
-        return
+        return stats
 
     logger.info("Starting backfill for %d archives (dry_run=%s, mode=%s)...", len(todo), dry_run, mode)
     if dry_run:
@@ -633,11 +680,11 @@ async def backfill_insights_task(
             logger.info("  [%s] %s", m, md.relative_to(vault_root))
         if len(todo) > 20:
             logger.info("  ... and %d more", len(todo) - 20)
-        return
+        return stats
 
     sem = asyncio.Semaphore(concurrency)
 
-    async def worker(archive_path: Path, session_id: str, has_jsonl: bool):
+    async def worker(archive_path: Path, session_id: str, has_jsonl: bool) -> str:
         async with sem:
             try:
                 insights_model = resolve_insights_model(config)
@@ -645,7 +692,7 @@ async def backfill_insights_task(
                     filtered = filter_session_jsonl(config.workspace_root, session_id)
                     if not filtered:
                         logger.warning("Session JSONL empty or filtered to nothing for %s", archive_path)
-                        return
+                        return "skipped"
                     await extract_and_append(
                         archive_path=archive_path,
                         filtered_jsonl=filtered,
@@ -661,7 +708,10 @@ async def backfill_insights_task(
                         ),
                         trajectories_enabled=getattr(config, "trajectories_enabled", True),
                     )
+                    if not _has_insights_section(archive_path):
+                        return "error"
                     logger.info("Backfilled [full] insights for %s", archive_path.name)
+                    return "success"
                 else:
                     body = archive_path.read_text(encoding="utf-8")
                     user_prompt = (
@@ -674,6 +724,13 @@ async def backfill_insights_task(
                     effective_model, env, note = resolve_with_fallback(
                         insights_model, config, default_model=config.insights_model
                     )
+                    from ciao.custom_providers import env_for_model as custom_env_for_model
+                    from ciao.custom_providers import provider_for_model, runtime_model
+                    custom = provider_for_model(config, insights_model)
+                    text_provider = custom.runner if custom is not None else "claude"
+                    if custom is not None:
+                        effective_model = runtime_model(insights_model)
+                        env = custom_env_for_model(config, insights_model)
 
                     async def run_text_extract():
                         from ciao.providers.oneshot import run_oneshot
@@ -684,6 +741,7 @@ async def backfill_insights_task(
                             env=env,
                             timeout_s=120.0,
                             cwd=config.workspace_root,
+                            provider=text_provider,
                         )
 
                     output = ""
@@ -697,12 +755,24 @@ async def backfill_insights_task(
                         except Exception:
                             logger.exception("Text fallback insights call failed twice; skipping %s", archive_path)
 
-                    if output:
+                    if output and output.strip():
                         _append_section(archive_path, output)
                         logger.info("Backfilled [text] insights for %s", archive_path.name)
+                        return "success"
+                    return "error"
             except Exception:
                 logger.exception("Failed backfilling insights for %s", archive_path)
+                return "error"
 
     tasks = [worker(md, sid, hj) for md, sid, hj in todo]
-    await asyncio.gather(*tasks, return_exceptions=True)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    stats["processed"] = len(results)
+    for result in results:
+        if result == "success":
+            stats["success"] += 1
+        elif result == "skipped":
+            stats["skipped"] += 1
+        else:
+            stats["errors"] += 1
     logger.info("Backfill task completed.")
+    return stats

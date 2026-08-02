@@ -39,7 +39,7 @@ def test_build_skill_inventory_labels_custom_and_github_sources(tmp_path: Path) 
                 "version": 1,
                 "skills": {
                     "brainstorming": {
-                        "source": "obra/superpowers",
+                        "source": "example-org/skill-pack",
                         "sourceType": "github",
                         "skillPath": "skills/brainstorming/SKILL.md",
                     }
@@ -65,7 +65,7 @@ def test_build_skill_inventory_labels_custom_and_github_sources(tmp_path: Path) 
         {
             "name": "brainstorming",
             "label": "github",
-            "source": "obra/superpowers",
+            "source": "example-org/skill-pack",
             "source_type": "github",
             "description": "Installed GitHub",
             "content": "---\nname: brainstorming\ndescription: Installed GitHub\n---\n\n# brainstorming\n",

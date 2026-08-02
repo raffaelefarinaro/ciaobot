@@ -200,6 +200,101 @@ def test_codex_native_agent_sync_does_not_override_user_agent_name(
     assert not (workspace / ".codex" / "agents" / "research.toml").exists()
 
 
+def test_sync_projects_mcp_json_into_codex_config_without_copying_secrets(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    _write(
+        workspace / ".mcp.json",
+        json.dumps(
+            {
+                "mcpServers": {
+                    "n8n_mcp": {
+                        "type": "http",
+                        "url": "https://example.test/mcp",
+                        "headers": {"Authorization": "Bearer ${N8N_MCP_TOKEN}"},
+                    },
+                    "notion": {
+                        "command": "npx",
+                        "args": ["-y", "@notionhq/notion-mcp-server"],
+                        "env": {"NOTION_TOKEN": "${NOTION_TOKEN}"},
+                    },
+                    "ciaobot": {"url": "http://127.0.0.1:8443/mcp/"},
+                }
+            }
+        ),
+    )
+    _write(workspace / ".codex" / "config.toml", 'model = "account-default"\n')
+
+    result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    config_path = workspace / ".codex" / "config.toml"
+    parsed = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    servers = parsed["mcp_servers"]
+    assert parsed["model"] == "account-default"
+    assert servers["n8n_mcp"]["url"] == "https://example.test/mcp"
+    assert servers["n8n_mcp"]["bearer_token_env_var"] == "N8N_MCP_TOKEN"
+    assert servers["notion"]["command"] == "npx"
+    assert servers["notion"]["env"]["NOTION_TOKEN"] == "${NOTION_TOKEN}"
+    assert "ciaobot" not in servers
+    assert "notion-secret-value" not in config_path.read_text(encoding="utf-8")
+    assert result.codex_mcps_installed == 2
+
+    first = config_path.read_text(encoding="utf-8")
+    second_result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+    assert config_path.read_text(encoding="utf-8") == first
+    assert second_result.codex_mcps_installed == 2
+
+
+def test_sync_mcp_preserves_user_owned_codex_server(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    _write(
+        workspace / ".mcp.json",
+        json.dumps(
+            {
+                "mcpServers": {
+                    "notion": {
+                        "command": "npx",
+                        "args": ["-y", "@notionhq/notion-mcp-server"],
+                    }
+                }
+            }
+        ),
+    )
+    _write(
+        workspace / ".codex" / "config.toml",
+        '[mcp_servers.notion]\ncommand = "user-owned-server"\n',
+    )
+
+    result = sync_skills.sync_workspace_skills(workspace, refresh_upstream=False)
+
+    parsed = tomllib.loads(
+        (workspace / ".codex" / "config.toml").read_text(encoding="utf-8")
+    )
+    assert parsed["mcp_servers"]["notion"]["command"] == "user-owned-server"
+    assert result.codex_mcps_installed == 0
+
+
+def test_sync_mcp_leaves_generated_config_untouched_on_invalid_source(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    _write(workspace / ".mcp.json", "{not valid json\n")
+    original = (
+        "model = \"account-default\"\n\n"
+        f"{sync_skills.CODEX_MCP_CONFIG_BEGIN}\n"
+        "[mcp_servers.\"notion\"]\n"
+        "command = \"npx\"\n"
+        f"{sync_skills.CODEX_MCP_CONFIG_END}\n"
+    )
+    _write(workspace / ".codex" / "config.toml", original)
+
+    result = sync_skills._install_codex_mcps(workspace)
+
+    assert (workspace / ".codex" / "config.toml").read_text(encoding="utf-8") == original
+    assert result == (0, 0)
+
+
 def test_sync_workspace_skills_seeds_stock_commands_into_canonical_dir(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

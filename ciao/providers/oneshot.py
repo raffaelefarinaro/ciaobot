@@ -64,6 +64,8 @@ _NON_TRANSIENT_MARKERS = (
     "credit balance",
     "insufficient",
     "quota",
+    "usage limit",
+    "rate limit",
     "permission",
     "forbidden",
     "not found",

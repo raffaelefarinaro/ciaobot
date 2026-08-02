@@ -377,7 +377,12 @@ def test_workspace_color_defaults_persists_and_validates(tmp_path):
     assert "color" in bad.json()["error"]
 
 
-def test_provider_config_status_and_write_only_patch(tmp_path):
+def test_provider_config_status_and_write_only_patch(tmp_path, monkeypatch):
+    # This asserts CIAO_OLLAMA_API_KEY reads as unconfigured, so a real one in
+    # the ambient environment (any Ciaobot-spawned shell has it) must not leak
+    # in, and from_env() must not load a real workspace .env over the top.
+    monkeypatch.delenv("CIAO_OLLAMA_API_KEY", raising=False)
+    monkeypatch.setenv("CIAO_WORKSPACE", str(tmp_path))
     env_path = tmp_path / ".env"
     env_path.write_text(
         "PWA_AUTH_TOKEN=t\nCIAO_PUSH_CONTACT=mailto:owner@example.com\nANTHROPIC_API_KEY=sk-anthropic\nOPENAI_API_KEY=old\n",

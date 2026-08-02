@@ -49,6 +49,19 @@ When fixing labels on existing issues, only adjust labels that are missing or wr
 - Background `Agent` dispatches do not auto-continue the parent turn. The parent finishes, and subagents complete later. If a result must be synthesized inline, use a foreground `Agent` call. When dispatching background agents, tell the user to follow up or read the subagents endpoint.
 - Do not store secrets unless explicitly requested.
 
+**Picking a delegation primitive.** Three exist and they are not interchangeable:
+
+| You need | Use | Shape |
+|---|---|---|
+| Long-running work that edits files, on a model you choose | `delegate_spawn` | Async. Returns immediately, wakes you with a fresh turn when the delegate finishes. |
+| A second opinion from other models, inside this turn | `adversarial_review` | Blocking. Returns inline. |
+| Parallel read-only investigation inside this turn | `Agent` (foreground) | Blocking, in-process, no separate chat. |
+
+- A **delegate** is a real Ciaobot chat with full tool access, its own model, and its own resumable session that the user can open, inspect, and stop. After spawning, end your turn: say what you dispatched and that you will report back. Do not poll `delegates_list` in a loop, and do not claim a delegate's work is done until its wake turn arrives and you have verified the work yourself (read the diff, run the tests). A delegate's excerpt in the wake prompt is truncated and is its own account of its work, so re-run its commands and read the diff rather than believing it. To read a delegate's real transcript, take its `session_id` from `chat_get` and read that provider session's JSONL: `chat_get` returns metadata only and never messages, and no MCP tool returns chat messages.
+- Give each delegate its own git worktree when several touch one repo, and state that path in the brief. Delegates cannot see your chat, so the brief must be self-contained.
+- A delegate cannot spawn delegates, and at most 6 run at once per chat. Both are enforced server-side.
+- Never invoke a provider binary (`codex`, `ollama`) directly to fake any of this.
+
 ## Custom Commands, Agents, and Skills
 
 - Custom commands live in `commands/`, subagents in `subagents/`, and skills in `skills/`. Edit these source folders; do not hand-edit generated `.claude/` or execution-environment directories.
@@ -74,7 +87,7 @@ Ciaobot has three memory layers. Use the right one; do not duplicate facts acros
 
 - After editing canonical `skills/`, `commands/`, or `subagents/`: `ciao sync-skills` (mirrors into `.claude/` and Codex wrappers).
 - Spin off a new chat: `ciao create-chat --prompt "…"` (optional `--workspace`, `--project`, `--model`, `--title`).
-- Consult another provider mid-turn: `ciao provider-chat start --chat-id <id> --provider <provider> --model <model> --message "…"` (see the `handoff_*` MCP tools for the full lifecycle when MCP is available: start → send → close/cancel). **Never** search for or invoke a provider binary (like `codex` or `ollama`) directly; all cross-provider task delegation flows through `ciao provider-chat` or the `handoff_*` tools.
+- Cross-provider work: `delegate_spawn` for work on another model, `adversarial_review` for an inline second opinion. **Never** search for or invoke a provider binary (like `codex` or `ollama`) directly.
 - Google Workspace: always via `scripts/gws-profile.sh` (see Google Workspace section below).
 
 **Background memory routines** (Settings → Automation): archived chats get session insights and memory proposals; the daily **Memory curation** schedule processes proposals, removes valid expired bounded-memory entries, reports malformed expiration tags, and appends to `Workspace/Learnings.md`. Weekly **Workspace hygiene** refreshes the vault index and audits the AI OS; weekly **Skill evolution** drafts skill-edit proposals. Do not promote proposals silently in normal chats unless the user asks.
@@ -91,6 +104,7 @@ Ciaobot has three memory layers. Use the right one; do not duplicate facts acros
 - Run every Google API call through the profile wrapper: `scripts/gws-profile.sh <personal|work> <gws-subcommand...>`. It routes credentials to the right config dir and already execs `gws`. **Never** `source` it (it ends with `exec`), and **never** repeat `gws` after the profile (`scripts/gws-profile.sh personal calendar ...`, not `... personal gws calendar ...`).
 - The active profile for a chat is the `gws_profile` value in the runtime context (env `GWS_PROFILE`); use it unless the user asks otherwise. Config dirs: personal → `<workspace>/secrets/gws-personal/`, work → `<workspace>/secrets/gws/`.
 - `gws` stdout may start with a non-JSON banner line (e.g. `Using keyring backend: file`). Strip it before parsing JSON.
+- On macOS, a GWS command can fail with `no native root CA certificates found` because Codex's workspace sandbox cannot access Keychain-backed root certificates. Re-run that same command with `sandbox_permissions: require_escalated`, which requests host execution. Do not re-authenticate unless the host-level retry fails too.
 - Put request bodies in `--json` and URL/query parameters in `--params`. For shared-drive files add `"supportsAllDrives": true` to `--params`.
 - Per-service command detail lives in the stock `gws-*` skills.
 

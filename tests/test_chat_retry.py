@@ -648,6 +648,47 @@ async def test_quota_error_with_progress_resumes_continue(tmp_path: Path) -> Non
     pcm.stop_chat_retry(chat.chat_id)
 
 
+async def test_non_billing_rate_limit_with_progress_resumes_continue(tmp_path: Path) -> None:
+    """A plain (non-billing) rate-limit 429, e.g. a provider's weekly usage
+    limit, landing mid-turn with a live session must also resume with
+    "continue" rather than being dropped without any retry armed."""
+    from ciao.models import AssistantTextDelta
+
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("retry", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="retry-test")
+    chat.session_id = "sess-live"
+    pcm._save()
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        yield AssistantTextDelta(type="assistant", text="editing files… ")
+        yield ResultEvent(
+            type="result",
+            result=(
+                "API Error: Request rejected (429) · you have reached your "
+                "weekly usage limit, upgrade for higher limits"
+            ),
+            session_id="sess-live",
+            is_error=True,
+            effective_model=chat.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    pcm.stream_chat = fake_stream_chat  # type: ignore[assignment]
+
+    stream = pcm.start_stream(chat.chat_id, "fix the bug and run the tests")
+    await asyncio.wait_for(_consume(stream), timeout=2.0)
+
+    updated = pcm.get_chat(chat.chat_id)
+    assert updated is not None
+    assert updated.retry_status == "pending"
+    assert updated.retry_prompt == "continue"
+    assert updated.retry_interval_seconds == 3600
+    pcm.stop_chat_retry(chat.chat_id)
+
+
 async def test_midresponse_drop_without_session_falls_back_to_replay(tmp_path: Path) -> None:
     """With progress but no session to resume, replay the prompt, not "continue"."""
     from ciao.models import AssistantTextDelta
@@ -759,8 +800,13 @@ async def test_billing_spend_limit_error_with_progress_arms_retry(tmp_path: Path
     pcm.stop_chat_retry(chat.chat_id)
 
 
-async def test_rate_limit_error_with_progress_does_not_arm_retry(tmp_path: Path) -> None:
-    """Rate limit errors must NOT trigger auto-retry after provider progress."""
+async def test_rate_limit_error_with_progress_arms_retry(tmp_path: Path) -> None:
+    """A plain rate-limit 429 must auto-retry after progress too, same as a
+    billing/spend-limit error — the earlier carve-out that skipped arming
+    for non-billing quota errors once anything had streamed left users with
+    a bare error and no retry affordance for the common "usage limit" case.
+    Without a session to resume it falls back to replaying the prompt, same
+    as the no-session connection-drop case."""
     from ciao.models import AssistantTextDelta
 
     pcm = _make_manager(tmp_path)
@@ -787,8 +833,10 @@ async def test_rate_limit_error_with_progress_does_not_arm_retry(tmp_path: Path)
 
     updated = pcm.get_chat(chat.chat_id)
     assert updated is not None
-    assert updated.retry_status != "pending"
-    assert not any(
+    assert updated.retry_status == "pending"
+    assert updated.retry_prompt == "do the thing"
+    assert any(
         e.get("type") == "chat_retry" and e.get("status") == "pending" for e in events
     )
+    pcm.stop_chat_retry(chat.chat_id)
 
