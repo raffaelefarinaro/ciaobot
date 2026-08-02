@@ -1,7 +1,10 @@
 import subprocess
 import sys
 from pathlib import Path
+
 import pytest
+import yaml
+
 from ciao import vault_lint
 
 def test_cli_help():
@@ -17,6 +20,80 @@ def temp_vault(tmp_path):
     people.mkdir()
     (people / "Alice.md").write_text("Hello [[Bob]]", encoding="utf-8")
     return vault
+
+
+def _page(body: str = "", *, page_type: object = "note") -> str:
+    rendered_type = yaml.safe_dump(
+        {"type": page_type},
+        sort_keys=False,
+    ).strip()
+    return f"---\n{rendered_type}\n---\n{body}"
+
+
+@pytest.mark.parametrize(
+    ("content", "kind"),
+    [
+        ("# No frontmatter\n", "missing_frontmatter"),
+        ("---\ntype: [\n---\n", "malformed_frontmatter"),
+        ("---\n- note\n---\n", "malformed_frontmatter"),
+        ("---\ntitle: Missing type\n---\n", "missing_type"),
+        ("---\ntype: '   '\n---\n", "missing_type"),
+        ("---\ntype: 42\n---\n", "invalid_type"),
+    ],
+)
+def test_frontmatter_validation_reports_one_error_per_page(
+    tmp_path: Path,
+    content: str,
+    kind: str,
+) -> None:
+    vault = tmp_path / "memory-vault"
+    vault.mkdir()
+    (vault / "Page.md").write_text(content, encoding="utf-8")
+
+    issues = vault_lint.run_validation(vault)
+
+    assert issues["frontmatter_errors"] == [
+        {
+            "source": "Page.md",
+            "kind": kind,
+            "message": {
+                "missing_frontmatter": "frontmatter is missing",
+                "malformed_frontmatter": "frontmatter is malformed",
+                "missing_type": "frontmatter type is missing or empty",
+                "invalid_type": "frontmatter type must be a string",
+            }[kind],
+        }
+    ]
+
+
+def test_valid_frontmatter_has_no_error(tmp_path: Path) -> None:
+    vault = tmp_path / "memory-vault"
+    vault.mkdir()
+    (vault / "Page.md").write_text(_page("# Page\n"), encoding="utf-8")
+
+    assert vault_lint.run_validation(vault)["frontmatter_errors"] == []
+
+
+def test_reserved_frontmatter_exemptions_are_case_insensitive(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "memory-vault"
+    vault.mkdir()
+    for name in ("INDEX.md", "memory.md", "LoG.Md"):
+        (vault / name).write_text("No frontmatter\n", encoding="utf-8")
+
+    assert vault_lint.run_validation(vault)["frontmatter_errors"] == []
+
+
+def test_readme_still_requires_frontmatter(tmp_path: Path) -> None:
+    vault = tmp_path / "memory-vault"
+    vault.mkdir()
+    (vault / "README.md").write_text("# Project\n", encoding="utf-8")
+
+    errors = vault_lint.run_validation(vault)["frontmatter_errors"]
+    assert [(item["source"], item["kind"]) for item in errors] == [
+        ("README.md", "missing_frontmatter")
+    ]
 
 def test_broken_wikilinks(temp_vault):
     issues = vault_lint.run_validation(temp_vault)

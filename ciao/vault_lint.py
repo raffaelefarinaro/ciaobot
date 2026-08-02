@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 # Match [[Target]], ignoring optional #anchors and |labels
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
@@ -14,6 +17,19 @@ WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
 # Strip them before extracting links so documented syntax isn't flagged.
 _FENCE_RE = re.compile(r"(?ms)^[ \t]*(`{3,}|~{3,}).*?^[ \t]*\1[ \t]*$")
 _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+
+_FRONTMATTER_RE = re.compile(
+    r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)",
+    re.DOTALL,
+)
+_FRONTMATTER_EXEMPT = {"index.md", "memory.md", "log.md"}
+
+
+@dataclass(frozen=True)
+class _VaultFile:
+    path: Path
+    relative: Path
+    content: str
 
 # Common structural filenames that legitimately recur across folders (one
 # README/log/etc. per project). Same stem across folders is not a duplicate.
@@ -65,45 +81,102 @@ def _is_template(stem: str) -> bool:
     return "template" in stem.lower()
 
 
+def _frontmatter_error(file: _VaultFile) -> dict[str, str] | None:
+    if file.relative.name.lower() in _FRONTMATTER_EXEMPT:
+        return None
+
+    match = _FRONTMATTER_RE.match(file.content)
+    if match is None:
+        return {
+            "source": file.relative.as_posix(),
+            "kind": "missing_frontmatter",
+            "message": "frontmatter is missing",
+        }
+
+    try:
+        metadata = yaml.safe_load(match.group(1))
+    except yaml.YAMLError:
+        metadata = None
+    if not isinstance(metadata, dict):
+        return {
+            "source": file.relative.as_posix(),
+            "kind": "malformed_frontmatter",
+            "message": "frontmatter is malformed",
+        }
+
+    page_type = metadata.get("type")
+    if page_type is None or (isinstance(page_type, str) and not page_type.strip()):
+        return {
+            "source": file.relative.as_posix(),
+            "kind": "missing_type",
+            "message": "frontmatter type is missing or empty",
+        }
+    if not isinstance(page_type, str):
+        return {
+            "source": file.relative.as_posix(),
+            "kind": "invalid_type",
+            "message": "frontmatter type must be a string",
+        }
+    return None
+
+
 def run_validation(vault_root: Path) -> dict:
-    """Scan the vault directory and find broken wikilinks, orphans, and duplicates."""
+    """Scan the vault directory for actionable health findings."""
     issues: dict[str, list[Any]] = {
         "broken_links": [],
         "orphans": [],
-        "duplicates": []
+        "duplicates": [],
+        "frontmatter_errors": [],
+        "broken_markdown_links": [],
     }
 
-    valid_targets = set()
-    files_to_scan = []
-    incoming_links: dict[str, list[str]] = {}
-
-    # Exclude directories that aren't vault content (see EXCLUDE_DIRS / #129).
-    exclude_dirs = EXCLUDE_DIRS
-    exclude_files = {"INDEX.md", "MEMORY.md"}
-
-    normalized_names: dict[str, list[str]] = {}
-
-    for path in vault_root.rglob("*.md"):
+    vault_files: list[_VaultFile] = []
+    for path in sorted(vault_root.rglob("*")):
+        if path.suffix.lower() != ".md":
+            continue
         try:
             rel = path.relative_to(vault_root)
         except ValueError:
             continue
 
-        if any(p in exclude_dirs for p in rel.parts):
+        if any(part in EXCLUDE_DIRS for part in rel.parts):
             continue
-        if rel.name in exclude_files:
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
             continue
+        vault_files.append(_VaultFile(path=path, relative=rel, content=content))
 
-        target_stem = path.stem
-        target_rel = str(rel.with_suffix(""))
+    for file in vault_files:
+        error = _frontmatter_error(file)
+        if error is not None:
+            issues["frontmatter_errors"].append(error)
+
+    valid_targets = set()
+    files_to_scan: list[_VaultFile] = []
+    incoming_links: dict[str, list[str]] = {}
+
+    link_target_files = [
+        file
+        for file in vault_files
+        if file.relative.name not in {"INDEX.md", "MEMORY.md"}
+    ]
+    files_to_scan = [
+        file
+        for file in link_target_files
+        if not _is_template(file.path.stem)
+    ]
+
+    normalized_names: dict[str, list[str]] = {}
+
+    for file in link_target_files:
+        target_stem = file.path.stem
+        target_rel = file.relative.with_suffix("").as_posix()
         valid_targets.add(target_stem)
         valid_targets.add(target_rel)
 
         # Template files contain placeholder links by design; keep them as
         # valid link targets but don't scan them as a source of broken links.
-        if not _is_template(target_stem):
-            files_to_scan.append((path, str(rel)))
-
         incoming_links[target_stem] = []
         incoming_links[target_rel] = []
 
@@ -111,19 +184,15 @@ def run_validation(vault_root: Path) -> dict:
         # that legitimately repeat per folder, and template files.
         if target_stem.lower() not in _COMMON_STEMS and not _is_template(target_stem):
             norm = target_stem.lower().replace("-", "").replace("_", "")
-            normalized_names.setdefault(norm, []).append(str(rel))
+            normalized_names.setdefault(norm, []).append(file.relative.as_posix())
 
     for norm, paths in normalized_names.items():
         if len(paths) > 1:
             issues["duplicates"].append(paths)
 
-    for path, rel_str in files_to_scan:
-        try:
-            content = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-
-        for target in _links_in(content):
+    for file in files_to_scan:
+        rel_str = file.relative.as_posix()
+        for target in _links_in(file.content):
             if target in valid_targets:
                 incoming_links.setdefault(target, []).append(rel_str)
             else:
@@ -141,21 +210,20 @@ def run_validation(vault_root: Path) -> dict:
         for entry in _workspace_dirs(vault_root)
     )
     memory_links = set()
+    records_by_path = {file.path: file for file in vault_files}
     for mem_file in memory_roots:
-        if mem_file.exists():
-            try:
-                mem_content = mem_file.read_text(encoding="utf-8")
-                for target in _links_in(mem_content):
-                    memory_links.add(target)
-            except OSError:
-                pass
+        record = records_by_path.get(mem_file)
+        if record is not None:
+            for target in _links_in(record.content):
+                memory_links.add(target)
 
     orphan_candidate_dirs = {"People", "Projects", "Ideas", "Resources", "Places", "projects", "references"}
 
-    for path, rel_str in files_to_scan:
-        stem = path.stem
-        rel_path = Path(rel_str)
-        rel_no_sfx = str(rel_path.with_suffix(""))
+    for file in files_to_scan:
+        stem = file.path.stem
+        rel_path = file.relative
+        rel_no_sfx = rel_path.with_suffix("").as_posix()
+        rel_str = file.relative.as_posix()
 
         if not any(part in orphan_candidate_dirs for part in rel_path.parts):
             continue
