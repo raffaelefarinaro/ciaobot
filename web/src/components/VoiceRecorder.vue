@@ -16,7 +16,10 @@
 <script setup lang="ts">
 import { ref, onUnmounted } from 'vue'
 
-const emit = defineEmits<{ recorded: [blob: Blob] }>()
+const emit = defineEmits<{
+  recorded: [blob: Blob]
+  error: [message: string]
+}>()
 
 const state = ref<'idle' | 'recording'>('idle')
 const duration = ref(0)
@@ -60,7 +63,14 @@ async function startRecording() {
     formattedTime.value = '0:00'
     timer = setInterval(updateTime, 1000)
   } catch (e) {
-    console.error('Microphone access denied:', e)
+    console.error('Could not start voice recording:', e)
+    const denied = e instanceof DOMException && e.name === 'NotAllowedError'
+    emit(
+      'error',
+      denied
+        ? 'Microphone access was denied. Allow microphone access for Ciaobot in System Settings, then try again.'
+        : 'Could not start voice recording. Check that a microphone is available, then try again.',
+    )
   }
 }
 

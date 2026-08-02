@@ -11,7 +11,7 @@ import pytest
 from ciao.config import CiaoConfig
 from ciao.sessions import StateStore
 from ciao.transcripts import TranscriptStore
-from ciao.web.project_chats import ProjectChatManager
+from ciao.web.project_chats import ArchiveOutcome, ProjectChatManager
 
 
 def _make_manager(tmp_path: Path) -> ProjectChatManager:
@@ -213,6 +213,40 @@ def test_delete_project_allows_manual_project_without_vault_folder(tmp_path: Pat
     ok = pcm.delete_project(p.project_id)
     assert ok is True
     assert p.project_id not in pcm._projects
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("turn_count", "expected"), [(1, False), (2, True)])
+async def test_archive_postprocess_runs_insights_for_multiturn_chats(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    turn_count: int,
+    expected: bool,
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("insights-project", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="insights chat")
+    calls: list[dict] = []
+
+    async def fake_extract_and_append(**kwargs: object) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr("ciao.insights.extract_and_append", fake_extract_and_append)
+
+    pcm.run_archive_postprocess(
+        chat.chat_id,
+        ArchiveOutcome(
+            path=tmp_path / "archive.md",
+            session_id="session-1",
+            turn_count=turn_count,
+            filtered_jsonl="filtered transcript",
+        ),
+        chat,
+        project,
+    )
+    await asyncio.sleep(0)
+
+    assert bool(calls) is expected
 
 
 # ── Empty-chat cleanup ──────────────────────────────────────────────────

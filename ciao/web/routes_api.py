@@ -4163,17 +4163,19 @@ async def trigger_backfill_insights(request: Request) -> JSONResponse:
     """Trigger the insights backfill process in the background."""
     import asyncio
     from ciao.job_runs import track
-    from ciao.insights import backfill_insights_task
+    from ciao.insights import backfill_insights_task, format_backfill_summary
 
     config = request.app.state.config
 
     async def _run_backfill():
-        # backfill_insights_task owns discovery, the concurrency semaphore, and
-        # per-archive logging; it raises only on a fatal error, which track()
-        # records and re-raises. (The old scripts.backfill_insights._worker /
-        # _discover_archives helpers were folded into this task in d2690d1.)
-        async with track("backfill_insights", "Insights backfill", category="system"):
-            await backfill_insights_task(config, mode="both")
+        async with track("backfill_insights", "Insights backfill", category="system") as handle:
+            result = await backfill_insights_task(config, mode="both")
+            handle.extra.update(result)
+            summary = format_backfill_summary(result)
+            handle.extra["summary"] = summary
+            if result["errors"]:
+                handle.status = "error"
+                handle.error = summary
 
     asyncio.create_task(_run_backfill())
     return JSONResponse({"status": "started"}, status_code=202)

@@ -143,7 +143,7 @@ vi.mock('../../lib/api', () => {
         {
           name: 'brainstorming',
           label: 'github',
-          source: 'obra/superpowers',
+          source: 'example-org/skill-pack',
           source_type: 'github',
           description: 'Explore design before implementation',
           content: '# brainstorming\ngithub skill content',

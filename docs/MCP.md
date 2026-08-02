@@ -109,6 +109,12 @@ codex \
 Only that child process receives `CIAO_MCP_SESSION_TOKEN`. A model-created
 shell command does not. The app-server is restarted when the token changes.
 
+Project-scoped servers declared in the workspace `.mcp.json` are projected
+automatically into the workspace `.codex/config.toml` by `ciao sync-skills`.
+The projection preserves user-owned Codex server tables, excludes the
+dynamically injected `ciaobot` server, and copies credentials only as
+environment-variable references.
+
 Static configuration in an unrelated terminal is intentionally unsupported:
 the token is a live chat capability, not an operator credential. Use Ciaobot's
 Claude Code or Codex process so scope, revocation, deferred self-actions, and

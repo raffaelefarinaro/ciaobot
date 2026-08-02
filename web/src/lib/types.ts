@@ -770,6 +770,10 @@ export interface AutomationProcess {
   label: string
   category: 'content' | 'system'
   description: string
+  // Optional for compatibility with servers upgraded before capability
+  // metadata was added to GET /api/automation.
+  uses_model?: boolean
+  produces_outcome?: boolean
   last_run: JobRun | null
   recent: JobRun[]
   stats: AutomationStats

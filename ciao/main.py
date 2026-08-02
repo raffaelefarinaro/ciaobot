@@ -375,8 +375,9 @@ async def _run_server_locked(config: CiaoConfig) -> int:
         async def _backfill_task():
             try:
                 from ciao.insights import backfill_insights_task
-                await backfill_insights_task(config)
-                tracker.done("backfill_insights")
+                from ciao.insights import format_backfill_summary
+                result = await backfill_insights_task(config)
+                tracker.done("backfill_insights", format_backfill_summary(result))
             except Exception:
                 tracker.fail("backfill_insights", "backfill failed")
                 logger.exception("Insights backfill failed")

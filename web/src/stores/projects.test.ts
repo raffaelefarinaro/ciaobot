@@ -1024,6 +1024,40 @@ describe('Codex structured questions', () => {
     })
   })
 
+  test('surfaces an empty AskUserQuestion as a free-form fallback', () => {
+    const store = useProjectStore()
+    const chatId = 'empty-question-chat'
+    store.chats = [{
+      chat_id: chatId,
+      project_id: 'p1',
+      title: 'Empty question',
+      model: 'gpt-test',
+      provider: 'codex',
+      mode: 'auto',
+      session_id: 'thread-1',
+      created_at: '',
+      archived: false,
+    }]
+    store.connectWs(chatId)
+    const socket = fakeSockets[fakeSockets.length - 1]
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'tool_use',
+        tool_name: 'AskUserQuestion',
+        request_id: 'codex-empty-1',
+        tool_input: JSON.stringify({ questions: [] }),
+      }),
+    })
+
+    expect(store.activeQuestions[chatId]).toHaveLength(1)
+    expect(store.activeQuestions[chatId][0]).toMatchObject({
+      id: '__freeform__',
+      allowOther: true,
+      requestId: 'codex-empty-1',
+    })
+    expect(store.activeQuestions[chatId][0].question).toContain('needs your input')
+  })
+
   test('surfaces approval requests and preserves Codex quota metadata', () => {
     const store = useProjectStore()
     const chatId = 'codex-gates'
@@ -1461,6 +1495,35 @@ describe('deep-link chat navigation', () => {
     expect(store.chats[0].archived).toBe(true)
     expect(store.chats[0].archive_path).toBe('archive/c1.md')
     expect(store.activeChatId).toBeNull()
+  })
+})
+
+describe('chat creation', () => {
+  test('does not duplicate a chat when its event arrives before the POST response', async () => {
+    const store = useProjectStore()
+    const chat: ChatInfo = {
+      chat_id: 'c-new',
+      project_id: 'p1',
+      title: 'New Chat',
+      model: 'sonnet',
+      provider: 'claude',
+      mode: 'default',
+      session_id: '',
+      created_at: '2026-08-02T10:00:00Z',
+      archived: false,
+    }
+    let resolvePost!: (value: ChatInfo) => void
+    apiPost.mockReturnValue(new Promise<ChatInfo>(resolve => { resolvePost = resolve }))
+
+    const creating = store.createChat('p1')
+    store.connectEventsWs()
+    fakeSockets[0].onmessage?.({
+      data: JSON.stringify({ type: 'chat_created', chat }),
+    })
+    resolvePost(chat)
+    await creating
+
+    expect(store.chats.filter(c => c.chat_id === chat.chat_id)).toHaveLength(1)
   })
 })
 

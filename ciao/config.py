@@ -440,7 +440,9 @@ class CiaoConfig:
     # Claude Code session JSONL through a fast cheap model and append a
     # `## Session insights` section to the archived markdown.
     insights_enabled: bool = True
-    insights_size_gate_turns: int = 5
+    # Skip only single-shot chats by default; multi-turn chats have enough
+    # context to be useful for durable insight extraction.
+    insights_size_gate_turns: int = 2
     # Fallback when session insights run without workspace context (e.g.
     # ``scripts/backfill_insights.py``). Live archives use
     # :func:`ciao.insights.resolve_insights_model` instead.
@@ -1180,7 +1182,7 @@ class CiaoConfig:
             insights_enabled=source.get("CIAO_INSIGHTS_DISABLED", "").strip().lower()
             in {"", "0", "false", "no", "off"},
             insights_size_gate_turns=int(
-                source.get("CIAO_INSIGHTS_MIN_TURNS", "5") or "5"
+                source.get("CIAO_INSIGHTS_MIN_TURNS", "2") or "2"
             ),
             insights_model_override=source.get("CIAO_INSIGHTS_MODEL", "").strip(),
             insights_backfill_on_startup=source.get(

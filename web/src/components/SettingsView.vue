@@ -775,7 +775,7 @@
                       </span>
                     </template>
                     <template v-else-if="connKey === 'codex'">
-                      <span v-for="skill in ['superpowers', 'build-web-apps', 'stripe', 'supabase', 'browser']" :key="skill" class="connector-pill connector-pill--enabled">
+                      <span v-for="skill in ['build-web-apps', 'stripe', 'supabase', 'browser']" :key="skill" class="connector-pill connector-pill--enabled">
                         <span class="pill-dot"></span> {{ skill }}
                       </span>
                     </template>
@@ -957,6 +957,20 @@
                 Status and logs of background tasks (git sync, memory curation, skills update, title generation).
                 Tasks wrapped in telemetry are recorded here.
               </p>
+              <div class="automation-legend" aria-label="Automation capability legend">
+                <span class="automation-legend-item">
+                  <span class="automation-capability automation-capability--model">MODEL</span>
+                  invokes a language model
+                </span>
+                <span class="automation-legend-item">
+                  <span class="automation-capability automation-capability--outcome">OUTCOME</span>
+                  creates a durable or user-visible result
+                </span>
+                <span class="automation-legend-item">
+                  <span class="automation-capability automation-capability--muted">STATUS ONLY</span>
+                  records operational health
+                </span>
+              </div>
             </div>
           </div>
 
@@ -967,13 +981,26 @@
               No automation runs recorded yet.
             </p>
             <div v-else class="automation-list">
-              <div v-for="item in automationItems" :key="item.job" class="automation-row-container">
+              <div v-for="item in visibleAutomationItems" :key="item.job" class="automation-row-container">
                 <!-- Header of job run -->
                 <div class="automation-job-header" @click="expandedAutomations[item.job] = !expandedAutomations[item.job]">
                   <div class="job-meta-left">
                     <span class="expand-icon">{{ expandedAutomations[item.job] ? '▼' : '▶' }}</span>
                     <span class="job-title">{{ item.label }}</span>
-                    <span class="job-desc" :title="item.description">{{ item.description }}</span>
+                    <span
+                      class="automation-capability"
+                      :class="jobUsesModel(item) ? 'automation-capability--model' : 'automation-capability--muted'"
+                      :title="jobUsesModel(item) ? 'This automation invokes a language model.' : 'This automation does not invoke a language model.'"
+                    >
+                      {{ jobUsesModel(item) ? 'MODEL' : 'NO MODEL' }}
+                    </span>
+                    <span
+                      class="automation-capability"
+                      :class="jobProducesOutcome(item) ? 'automation-capability--outcome' : 'automation-capability--muted'"
+                      :title="jobProducesOutcome(item) ? 'This automation creates a durable or user-visible result.' : 'This automation records operational health only.'"
+                    >
+                      {{ jobProducesOutcome(item) ? 'OUTCOME' : 'STATUS ONLY' }}
+                    </span>
                   </div>
                   <div class="job-meta-right">
                     <!-- Stats summary -->
@@ -994,21 +1021,23 @@
                       {{ triggeringJobs[item.job] ? 'Running...' : 'Run now' }}
                     </button>
                     <button
-                      v-else-if="item.job === 'insights' || item.job === 'backfill_insights'"
+                      v-else-if="item.job === 'backfill_insights' || item.job === 'insights_backfill'"
                       class="btn-small btn-run"
                       :disabled="backfillRunning"
                       @click.stop="triggerBackfill"
                     >
                       {{ backfillRunning ? 'Backfilling...' : 'Backfill insights' }}
                     </button>
-                    <span v-else class="job-trigger-context" title="Event-driven or periodic backend task">
-                      Auto
-                    </span>
                   </div>
                 </div>
 
                 <!-- Expanded details (Runs log) -->
                 <div v-if="expandedAutomations[item.job]" class="automation-job-detail">
+                  <div class="automation-job-description">
+                    <p class="automation-job-description-label">What it does</p>
+                    <p>{{ item.description || 'No description available.' }}</p>
+                  </div>
+
                   <!-- Last run meta -->
                   <div v-if="item.last_run" class="last-run-info">
                     <div class="detail-row">
@@ -1050,13 +1079,16 @@
                               {{ run.status }}
                             </span>
                           </td>
-                          <td class="td-dur">{{ formatDuration(run.duration_ms) || '0ms' }}</td>
+                          <td class="td-dur">{{ formatDuration(run.duration_ms) || 'unknown' }}</td>
                           <td class="td-details">
                             <span v-if="run.model" class="run-model-info">{{ run.provider }}/{{ run.model }}</span>
+                            <span v-if="run.extra?.summary || run.extra?.message" class="run-summary-info">
+                              {{ run.extra?.summary || run.extra?.message }}
+                            </span>
                             <span v-if="run.status === 'skipped' && run.extra?.skip_reason" class="run-skip-info">
                               Skipped: {{ run.extra.skip_reason }}
                             </span>
-                            <div v-if="run.error" class="run-error-details" :title="run.error">
+                            <div v-if="run.error && run.error !== run.extra?.summary" class="run-error-details" :title="run.error">
                               {{ run.error }}
                             </div>
                           </td>
@@ -4304,6 +4336,51 @@ const automationItems = ref<AutomationProcess[]>([])
 const automationLoaded = ref(false)
 const automationError = ref('')
 
+const visibleAutomationItems = computed(() => {
+  // Older runtimes used `insights_backfill`; current runtimes use
+  // `backfill_insights`. If both are present in the retained run log, show
+  // the canonical job once rather than presenting duplicate backfills.
+  const hasCanonicalBackfill = automationItems.value.some(
+    (item) => item.job === 'backfill_insights',
+  )
+  if (!hasCanonicalBackfill) return automationItems.value
+  return automationItems.value.filter((item) => item.job !== 'insights_backfill')
+})
+
+// Keep the capability badges correct while a desktop engine is still serving
+// an older API response. Newer servers provide these flags explicitly.
+const modelBackedAutomationJobs = new Set([
+  'title',
+  'insights',
+  'skill_evolution',
+  'dependency_review',
+  'schedule_dispatch',
+  'schedule_attention_classifier',
+  'backfill_insights',
+])
+const outcomeAutomationJobs = new Set([
+  'title',
+  'insights',
+  'memory_proposals',
+  'trajectory',
+  'skill_evolution',
+  'dependency_review',
+  'schedule_dispatch',
+  'backfill_insights',
+])
+
+function jobUsesModel(item: AutomationProcess): boolean {
+  if (typeof item.uses_model === 'boolean') return item.uses_model
+  return modelBackedAutomationJobs.has(item.job)
+    || !!item.last_run?.model
+    || item.recent.some((run) => !!run.model)
+}
+
+function jobProducesOutcome(item: AutomationProcess): boolean {
+  if (typeof item.produces_outcome === 'boolean') return item.produces_outcome
+  return outcomeAutomationJobs.has(item.job)
+}
+
 function getJobTelemetry(job: string): AutomationProcess | undefined {
   return automationItems.value.find((i) => i.job === job)
 }
@@ -4324,7 +4401,7 @@ function getJobBadgeClass(job: string): string {
 }
 function getJobDuration(job: string): string {
   const dur = getJobTelemetry(job)?.last_run?.duration_ms
-  return formatDuration(dur) || '0ms'
+  return formatDuration(dur) || 'unknown'
 }
 function getJobLastRunLabel(job: string): string {
   const item = getJobTelemetry(job)
@@ -7143,6 +7220,53 @@ a.btn-secondary {
 }
 
 /* Background Automations Tab */
+.automation-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  margin-top: var(--space-3);
+  color: var(--fg3);
+  font-size: var(--text-xs);
+}
+
+.automation-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.automation-capability {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.automation-capability--model {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.automation-capability--outcome {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 55%, var(--border));
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+}
+
+.automation-capability--muted {
+  color: var(--fg3);
+  background: var(--bg3);
+}
+
 .automation-list {
   display: flex;
   flex-direction: column;
@@ -7175,6 +7299,7 @@ a.btn-secondary {
 .job-meta-left {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-3);
   flex: 1 1 auto;
   min-width: 0;
@@ -7193,19 +7318,29 @@ a.btn-secondary {
   white-space: nowrap;
 }
 
-.job-desc {
-  font-size: var(--text-xs);
-  color: var(--fg3);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .job-meta-right {
   display: flex;
   align-items: center;
   gap: var(--space-3);
   flex: 0 0 auto;
+}
+
+@media (max-width: 768px) {
+  .automation-job-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .job-meta-left,
+  .job-meta-right {
+    width: 100%;
+  }
+
+  .job-meta-right {
+    justify-content: flex-end;
+  }
+
 }
 
 .job-stat-summary {
@@ -7225,17 +7360,6 @@ a.btn-secondary {
   background: var(--accent-strong);
 }
 
-.job-trigger-context {
-  font-size: var(--text-xs);
-  color: var(--fg3);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  background: var(--bg3);
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-}
-
 .automation-job-detail {
   padding: var(--space-4);
   background: var(--bg);
@@ -7243,6 +7367,27 @@ a.btn-secondary {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+}
+
+.automation-job-description {
+  max-width: 70ch;
+  color: var(--fg2);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.automation-job-description p {
+  margin: 0;
+}
+
+.automation-job-description-label {
+  margin-bottom: var(--space-1) !important;
+  color: var(--fg3);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .last-run-info {
@@ -7356,6 +7501,10 @@ a.btn-secondary {
   color: var(--fg2);
   font-size: 10px;
   margin-right: var(--space-2);
+}
+
+.run-summary-info {
+  color: var(--fg2);
 }
 
 .run-skip-info {
