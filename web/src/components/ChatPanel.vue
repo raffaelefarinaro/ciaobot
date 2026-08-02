@@ -91,6 +91,18 @@
           <span class="bg-agents-dot" aria-hidden="true"></span>
           {{ store.activeBackgroundAgents }} agent{{ store.activeBackgroundAgents === 1 ? '' : 's' }}
         </span>
+        <button
+          v-if="chat.mode === 'plan'"
+          type="button"
+          class="plan-mode-chip touch-hit"
+          :disabled="planModeSaving"
+          title="Leave plan mode"
+          aria-label="Leave plan mode"
+          aria-pressed="true"
+          @click.stop="togglePlanMode('normal')"
+        >
+          plan
+        </button>
         <div class="model-picker-wrap" ref="modelPickerRef">
           <button
             class="model-picker-btn touch-hit"
@@ -915,6 +927,7 @@ import { buildTurnParts, collectTraceOutputs, findFinalAnswerIndex, formatTokenU
 import { buildForkSnapshot } from '../lib/chatFork'
 import { formatCommentLocation, type ChatCommentAnchor } from '../lib/commentContext'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
+import { includeBuiltinPlanCommand, planCommandTargetMode, type SlashCommand } from '../lib/planCommand'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 
@@ -1055,15 +1068,9 @@ function primaryAction() {
   send()
 }
 
-// Slash-command picker: populated once on mount from /api/commands.
-type SlashCommand = {
-  name: string
-  description: string
-  argument_hint: string
-  source: 'project' | 'user'
-  path: string
-}
-const slashCommands = ref<SlashCommand[]>([])
+// Slash-command picker: populated once on mount from /api/commands, with
+// UI-owned commands added even when they have no disk-backed asset.
+const slashCommands = ref<SlashCommand[]>(includeBuiltinPlanCommand([]))
 const commandHighlightIdx = ref(0)
 
 const filteredCommands = computed<SlashCommand[]>(() => {
@@ -1099,6 +1106,32 @@ const editingTitle = ref(false)
 const titleValue = ref('')
 const dragOver = ref(false)
 const chat = computed(() => store.activeChat!)
+const planModeSaving = ref(false)
+
+async function togglePlanMode(targetMode: 'plan' | 'normal'): Promise<boolean> {
+  if (planModeSaving.value || chat.value.archived) return false
+  planModeSaving.value = true
+  try {
+    await store.updateChat(chat.value.chat_id, { mode: targetMode })
+    return true
+  } catch (e) {
+    store.pushErrorToast('Could not change plan mode', errorMessage(e, 'Could not change plan mode'))
+    return false
+  } finally {
+    planModeSaving.value = false
+  }
+}
+
+async function handlePlanCommand(targetMode: 'plan' | 'normal'): Promise<void> {
+  const changed = await togglePlanMode(targetMode)
+  if (!changed) return
+  // The command itself is consumed, but pending images/comments belong to the
+  // next user turn and must remain staged.
+  inputText.value = ''
+  writeChatDraft(chat.value.chat_id, '')
+  await nextTick()
+  autoResize()
+}
 
 // Inline editing state for queued messages. Keyed by queue entry id.
 const editingQueueId = ref<string | null>(null)
@@ -2360,8 +2393,8 @@ onMounted(async () => {
   } catch { /* use defaults */ }
   try {
     const r = await api.get<{ commands: SlashCommand[] }>('/api/commands')
-    slashCommands.value = r.commands ?? []
-  } catch { /* leave empty; picker just won't show */ }
+    slashCommands.value = includeBuiltinPlanCommand(r.commands ?? [])
+  } catch { /* keep the built-in /plan entry available */ }
   notifyChatFocused(chat.value?.chat_id)
   messagesEl.value?.addEventListener('scroll', checkScroll, { passive: true })
   if (messagesEl.value && typeof ResizeObserver !== 'undefined') {
@@ -3041,6 +3074,11 @@ function send() {
   const text = inputText.value.trim()
   const hasAttachments = store.pendingImages.length > 0 || store.pendingComments.length > 0 || store.pendingChatComments.length > 0
   if (!text && !hasAttachments) return
+  const planTargetMode = planCommandTargetMode(text, chat.value.mode)
+  if (planTargetMode) {
+    void handlePlanCommand(planTargetMode)
+    return
+  }
   // Always "queue": when a response is in flight the backend buffers and
   // flushes on turn end; for a fresh turn this starts it.
   let sendText = text
@@ -4619,6 +4657,31 @@ details[open] > .activity-summary::before {
   background: var(--accent2);
   animation: bg-agents-pulse 1.6s ease-in-out infinite;
 }
+
+.plan-mode-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: content-box;
+  min-width: 30px;
+  min-height: 30px;
+  padding: 7px 10px;
+  margin: -7px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 120ms var(--ease), color 120ms var(--ease), transform 120ms var(--ease);
+}
+
+.plan-mode-chip:hover { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+.plan-mode-chip:active { transform: scale(0.96); }
+.plan-mode-chip:disabled { opacity: 0.55; cursor: wait; transform: none; }
 
 @keyframes bg-agents-pulse {
   0%, 100% { opacity: 1; }
