@@ -938,6 +938,21 @@ def _schedule_run_clean(outcome: ScheduleRunOutcome) -> bool:
     )
 
 
+def _schedule_dispatch_status(outcome: ScheduleRunOutcome) -> tuple[str, str | None]:
+    """Classify a scheduled turn for job-run history.
+
+    A pending retry means the provider deferred the work, such as after a
+    quota rejection. It remains unclean and visible, but is not an app error.
+    """
+    if outcome.retry_pending:
+        return "skipped", None
+    if outcome.stream_error or outcome.is_error:
+        return "error", (outcome.final_text or "stream error")[:1000]
+    if outcome.permission_requested or outcome.question_requested:
+        return "skipped", None
+    return "ok", None
+
+
 @dataclass(slots=True)
 class _StreamOutcome:
     """Terminal result of a single ``provider.execute_streaming`` pass.
@@ -5213,16 +5228,12 @@ class ProjectChatManager:
                                 if event.is_error:
                                     had_error = True
                                     result_text = event.result or ""
-                                    # Quota rejections only auto-retry when
-                                    # nothing streamed (retrying a partial turn
-                                    # would double-run work). Connection errors
-                                    # are safe to resume even mid-response —
-                                    # _arm_retry resumes the session with
-                                    # "continue" rather than replaying.
-                                    if _is_retryable_quota_error(result_text) and (
-                                        not had_provider_progress
-                                        or _is_billing_or_spend_limit_error(result_text)
-                                    ):
+                                    # Quota rejections always auto-retry, same
+                                    # as connection errors: _arm_retry resumes
+                                    # a session that already streamed with
+                                    # "continue" rather than replaying, so
+                                    # progress mid-turn never gets double-run.
+                                    if _is_retryable_quota_error(result_text):
                                         self._arm_retry(
                                             chat_id,
                                             stream,
@@ -5280,10 +5291,7 @@ class ProjectChatManager:
                                 error_msg = f"{error_msg}\n{stderr}"
                             stream.publish({"type": "error", "message": error_msg})
                             had_error = True
-                            if _is_retryable_quota_error(error_msg) and (
-                                not had_provider_progress
-                                or _is_billing_or_spend_limit_error(error_msg)
-                            ):
+                            if _is_retryable_quota_error(error_msg):
                                 self._arm_retry(
                                     chat_id,
                                     stream,
@@ -6643,7 +6651,7 @@ class ProjectChatManager:
                 return needs_user
             except Exception as exc:  # noqa: BLE001
                 run.status = "error"
-                run.error = str(exc)[:1000]
+                run.error = (str(exc).strip() or type(exc).__name__)[:1000]
                 logger.exception(
                     "Schedule attention classifier failed with model %s; keeping chat visible",
                     model,
@@ -6991,15 +6999,7 @@ class ProjectChatManager:
                     target_id,
                 )
 
-        if outcome.stream_error or outcome.is_error:
-            _sched_status = "error"
-            _sched_error = (outcome.final_text or "stream error")[:1000]
-        elif outcome.permission_requested or outcome.question_requested or outcome.retry_pending:
-            _sched_status = "skipped"
-            _sched_error = None
-        else:
-            _sched_status = "ok"
-            _sched_error = None
+        _sched_status, _sched_error = _schedule_dispatch_status(outcome)
         job_runs.record_run(job_runs.JobRun(
             job="schedule_dispatch",
             label="Scheduled dispatch",

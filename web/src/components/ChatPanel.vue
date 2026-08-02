@@ -3269,8 +3269,16 @@ async function selectModel(value: string | string[], sectionKey = '') {
       },
     )
     if (!ok) return
-    await store.handoverChat(chat.value.chat_id, updates)
+    // Picking a model from the pending-retry card's "Continue with..." is
+    // the whole point of switching model there: fire the retry immediately
+    // on the new provider instead of leaving it parked for a manual "Try now".
+    const hadPendingRetry = chat.value.retry?.status === 'pending'
+    const chatId = chat.value.chat_id
+    await store.handoverChat(chatId, updates)
     showModelPicker.value = false
+    if (hadPendingRetry) {
+      await store.tryChatRetryNow(chatId)
+    }
     return
   }
   await store.updateChat(chat.value.chat_id, updates)

@@ -253,6 +253,26 @@ describe('per-chat WS auto-reconnect', () => {
   })
 })
 
+describe('deferred message sends', () => {
+  test('does not attach a deferred message image to a later send', () => {
+    const store = useProjectStore()
+    const chatId = 'chat-deferred-attachment'
+    store.activeChatId = chatId
+    store.pendingImages = ['original-image.png']
+
+    // With no socket yet, the first send is deferred while connectWs opens one.
+    store.sendMessage(chatId, 'first message')
+    store.sendMessage(chatId, 'continue')
+
+    const sent = (fakeSockets[0].send as Mock).mock.calls
+      .map(([raw]) => JSON.parse(String(raw)))
+      .find(payload => payload.type === 'message' && payload.text === 'continue')
+
+    expect(sent).toMatchObject({ type: 'message', text: 'continue' })
+    expect(sent.images).toBeUndefined()
+  })
+})
+
 describe('client host connection failures', () => {
   test('recognizes the legacy proxy error', () => {
     expect(isHostConnectionUnavailableMessage(

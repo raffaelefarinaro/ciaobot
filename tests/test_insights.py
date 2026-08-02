@@ -280,6 +280,9 @@ def test_extract_retries_once_then_skips(
     assert calls["count"] == 2
     text = archive.read_text(encoding="utf-8")
     assert "## Session insights" not in text
+    run = json.loads((tmp_path / "job_runs.jsonl").read_text().splitlines()[0])
+    assert run["status"] == "error"
+    assert run["error"] == "boom"
 
 
 def test_extract_succeeds_on_retry(
@@ -581,4 +584,3 @@ def test_backfill_insights_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     text_text = text_archive.read_text(encoding="utf-8")
     assert "## Session insights" in text_text
     assert "Text mode decisions" in text_text
-

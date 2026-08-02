@@ -2503,13 +2503,65 @@ export const useProjectStore = defineStore('projects', () => {
     return formatChatComments(comments)
   }
 
-  function sendMessage(chatId: string, text: string, mode: 'queue' | 'steer' = 'queue') {
-    const ws = sockets.value[chatId]
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      connectWs(chatId)
-      setTimeout(() => sendMessage(chatId, text, mode), 500)
-      return
+  type PreparedMessage = {
+    composed: string
+    imageRefs?: string[]
+    fileComments: PendingComment[]
+    chatComments: PendingChatComment[]
+  }
+
+  function prepareMessage(chatId: string, text: string): PreparedMessage {
+    const chatImages = getPendingBucket(pendingImagesByChat.value, chatId)
+    const fileComments = getPendingBucket(pendingCommentsByChat.value, chatId)
+    const chatComments = getPendingBucket(pendingChatCommentsByChat.value, chatId)
+    // Collect images from pendingImages plus any images attached to comments.
+    const allImages = new Set<string>(chatImages)
+    for (const c of fileComments) {
+      if (c.images) c.images.forEach(img => allImages.add(img))
     }
+    for (const c of chatComments) {
+      if (c.images) c.images.forEach(img => allImages.add(img))
+    }
+    const imageRefs = allImages.size > 0 ? Array.from(allImages) : undefined
+    const fileBlock = formatPendingComments(fileComments)
+    const chatBlock = formatPendingChatComments(chatComments)
+    const hasTyped = text.trim().length > 0
+    // Reference blocks (quoted text + note) go FIRST, then the typed prompt,
+    // so the model reads the material being discussed before the instruction
+    // (Anthropic: placing the query at the end of the input improves quality).
+    let composed = ''
+    if (fileBlock) composed += fileBlock
+    if (chatBlock) composed += (composed ? '\n' : '') + chatBlock
+    if (hasTyped) composed += (composed ? '\n\n' : '') + text.trim()
+    return { composed, imageRefs, fileComments, chatComments }
+  }
+
+  function consumePreparedAttachments(chatId: string, message: PreparedMessage) {
+    setPendingBucket<string>(pendingImagesByChat.value, chatId, [])
+    persistPendingImages()
+    // Remove sent file comments from the durable store so they don't linger
+    // in the viewer after the message has been dispatched.
+    for (const c of message.fileComments) {
+      const list = fileComments.value[c.path]
+      if (list) {
+        const next = list.filter(x => x.id !== c.id)
+        if (next.length) fileComments.value[c.path] = next
+        else delete fileComments.value[c.path]
+      }
+    }
+    persistFileComments()
+    setPendingBucket<PendingComment>(pendingCommentsByChat.value, chatId, [])
+    setPendingBucket<PendingChatComment>(pendingChatCommentsByChat.value, chatId, [])
+    persistPendingComments()
+    persistPendingChatComments()
+  }
+
+  function sendMessage(
+    chatId: string,
+    text: string,
+    mode: 'queue' | 'steer' = 'queue',
+    prepared?: PreparedMessage,
+  ) {
     // Any send implicitly answers (or dismisses) a pending AskUserQuestion
     // picker — the model already got an empty tool result and is reading
     // this turn for the actual answer. Clear the local chat's persisted
@@ -2521,31 +2573,18 @@ export const useProjectStore = defineStore('projects', () => {
     }
     const answeredChat = chats.value.find(c => c.chat_id === chatId)
     if (answeredChat?.pending_question) answeredChat.pending_question = ''
-    const chatImages = getPendingBucket(pendingImagesByChat.value, chatId)
-    const chatFileComments = getPendingBucket(pendingCommentsByChat.value, chatId)
-    const chatComments = getPendingBucket(pendingChatCommentsByChat.value, chatId)
-    // Collect images from pendingImages plus any images attached to comments.
-    const allImages = new Set<string>(chatImages)
-    for (const c of chatFileComments) {
-      if (c.images) c.images.forEach(img => allImages.add(img))
+    const message = prepared || prepareMessage(chatId, text)
+    // A reconnect can outlive the user's next edit. Freeze the complete
+    // attachment bundle now, before a retry callback can read another
+    // message's staged attachments from the shared composer bucket.
+    if (!prepared) consumePreparedAttachments(chatId, message)
+    const { composed, imageRefs } = message
+    const ws = sockets.value[chatId]
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      connectWs(chatId)
+      setTimeout(() => sendMessage(chatId, text, mode, message), 500)
+      return
     }
-    for (const c of chatComments) {
-      if (c.images) c.images.forEach(img => allImages.add(img))
-    }
-    const imageRefs = allImages.size > 0 ? Array.from(allImages) : undefined
-    const fileBlock = formatPendingComments(chatFileComments)
-    const chatBlock = formatPendingChatComments(chatComments)
-    const hasFile = fileBlock.length > 0
-    const hasChat = chatBlock.length > 0
-    const hasTyped = text.trim().length > 0
-    // Reference blocks (quoted text + note) go FIRST, then the typed prompt,
-    // so the model reads the material being discussed before the instruction
-    // (Anthropic: placing the query at the end of the input improves quality).
-    let reference = ''
-    if (hasFile) reference += fileBlock
-    if (hasChat) reference += (reference ? '\n' : '') + chatBlock
-    let composed = reference
-    if (hasTyped) composed += (composed ? '\n\n' : '') + text.trim()
     const alreadyStreaming = isChatStreaming(chatId)
 
     if (alreadyStreaming) {
@@ -2562,23 +2601,6 @@ export const useProjectStore = defineStore('projects', () => {
       if (imageRefs) payload.images = imageRefs
       if (queueId) payload.entry_id = queueId
       ws.send(JSON.stringify(payload))
-      setPendingBucket<string>(pendingImagesByChat.value, chatId, [])
-      persistPendingImages()
-      // Remove sent file comments from the durable store so they don't
-      // linger in the viewer after the message has been dispatched.
-      for (const c of chatFileComments) {
-        const list = fileComments.value[c.path]
-        if (list) {
-          const next = list.filter(x => x.id !== c.id)
-          if (next.length) fileComments.value[c.path] = next
-          else delete fileComments.value[c.path]
-        }
-      }
-      persistFileComments()
-      setPendingBucket<PendingComment>(pendingCommentsByChat.value, chatId, [])
-      setPendingBucket<PendingChatComment>(pendingChatCommentsByChat.value, chatId, [])
-      persistPendingComments()
-      persistPendingChatComments()
       return
     }
 
@@ -2604,23 +2626,6 @@ export const useProjectStore = defineStore('projects', () => {
     const payload: Record<string, unknown> = { type: 'message', text: composed }
     if (imageRefs) payload.images = imageRefs
     ws.send(JSON.stringify(payload))
-    setPendingBucket<string>(pendingImagesByChat.value, chatId, [])
-    persistPendingImages()
-    // Remove sent file comments from the durable store so they don't
-    // linger in the viewer after the message has been dispatched.
-    for (const c of chatFileComments) {
-      const list = fileComments.value[c.path]
-      if (list) {
-        const next = list.filter(x => x.id !== c.id)
-        if (next.length) fileComments.value[c.path] = next
-        else delete fileComments.value[c.path]
-      }
-    }
-    persistFileComments()
-    setPendingBucket<PendingComment>(pendingCommentsByChat.value, chatId, [])
-    setPendingBucket<PendingChatComment>(pendingChatCommentsByChat.value, chatId, [])
-    persistPendingComments()
-    persistPendingChatComments()
   }
 
   function removeQueued(chatId: string, index: number) {
