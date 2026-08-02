@@ -118,6 +118,10 @@ class MemoryStorage {
   }
 }
 
+function planReturnModeStorageKey(chatId: string): string {
+  return `ciao-plan-return-mode:${chatId}`
+}
+
 async function mountPanel(options: { mode?: string; commandsFail?: boolean } = {}): Promise<Harness> {
   const pinia = createPinia()
   setActivePinia(pinia)
@@ -229,7 +233,7 @@ describe('ChatPanel /plan interactions', () => {
     wrapper.unmount()
   })
 
-  it('uses the originating chat when the plan chip leaves plan mode', async () => {
+  it('falls back to auto when the plan chip leaves externally-entered plan mode', async () => {
     const { wrapper, updateChat } = await mountPanel({ mode: 'plan' })
     const pending = deferred<void>()
     updateChat.mockReturnValue(pending.promise)
@@ -243,7 +247,7 @@ describe('ChatPanel /plan interactions', () => {
     await chip.trigger('click')
     await nextTick()
 
-    expect(updateChat).toHaveBeenCalledWith('chat-1', { mode: 'normal' })
+    expect(updateChat).toHaveBeenCalledWith('chat-1', { mode: 'auto' })
     expect(wrapper.get('button.plan-mode-chip').attributes('disabled')).toBeDefined()
 
     pending.resolve()
@@ -339,6 +343,104 @@ describe('ChatPanel /plan interactions', () => {
     await wrapper.get('textarea.chat-input').setValue('/')
 
     expect(wrapper.find('.commands-picker-name').text()).toBe('/plan')
+    wrapper.unmount()
+  })
+
+  it('restores auto after /plan enters and exits plan mode', async () => {
+    const first = await mountPanel({ mode: 'auto' })
+    first.updateChat.mockResolvedValue()
+
+    await first.wrapper.get('textarea.chat-input').setValue('/plan')
+    await first.wrapper.get('button.send-btn').trigger('click')
+    await flushPromises()
+
+    expect(first.updateChat).toHaveBeenCalledWith('chat-1', { mode: 'plan' })
+    first.wrapper.unmount()
+
+    const second = await mountPanel({ mode: 'plan' })
+    second.updateChat.mockResolvedValue()
+    await second.wrapper.get('textarea.chat-input').setValue('/plan')
+    await second.wrapper.get('button.send-btn').trigger('click')
+    await flushPromises()
+
+    expect(second.updateChat).toHaveBeenCalledWith('chat-1', { mode: 'auto' })
+    second.wrapper.unmount()
+  })
+
+  it('falls back to auto when the persisted return mode is corrupt', async () => {
+    localStorage.setItem(planReturnModeStorageKey('chat-1'), 'turbo')
+    const { wrapper, updateChat } = await mountPanel({ mode: 'plan' })
+    updateChat.mockResolvedValue()
+
+    await wrapper.get('textarea.chat-input').setValue('/plan')
+    await wrapper.get('button.send-btn').trigger('click')
+    await flushPromises()
+
+    expect(updateChat).toHaveBeenCalledWith('chat-1', { mode: 'auto' })
+    wrapper.unmount()
+  })
+
+  it('restores bypass after the panel is remounted in plan mode', async () => {
+    const first = await mountPanel({ mode: 'bypass' })
+    first.updateChat.mockResolvedValue()
+
+    await first.wrapper.get('textarea.chat-input').setValue('/plan')
+    await first.wrapper.get('button.send-btn').trigger('click')
+    await flushPromises()
+    first.wrapper.unmount()
+
+    const second = await mountPanel({ mode: 'plan' })
+    second.updateChat.mockResolvedValue()
+    await second.wrapper.get('textarea.chat-input').setValue('/plan')
+    await second.wrapper.get('button.send-btn').trigger('click')
+    await flushPromises()
+
+    expect(second.updateChat).toHaveBeenCalledWith('chat-1', { mode: 'bypass' })
+    second.wrapper.unmount()
+  })
+
+  it('restores the remembered mode when the plan chip exits plan mode', async () => {
+    localStorage.setItem(planReturnModeStorageKey('chat-1'), 'normal')
+    const { wrapper, updateChat } = await mountPanel({ mode: 'plan' })
+    updateChat.mockResolvedValue()
+
+    await wrapper.get('button.plan-mode-chip').trigger('click')
+    await flushPromises()
+
+    expect(updateChat).toHaveBeenCalledWith('chat-1', { mode: 'normal' })
+    wrapper.unmount()
+  })
+
+  it('removes any return marker when entering plan mode fails', async () => {
+    localStorage.setItem(planReturnModeStorageKey('chat-1'), 'bypass')
+    const { wrapper, updateChat } = await mountPanel({ mode: 'auto' })
+    updateChat.mockRejectedValue(new Error('PATCH failed'))
+
+    await wrapper.get('textarea.chat-input').setValue('/plan')
+    await wrapper.get('button.send-btn').trigger('click')
+    await flushPromises()
+
+    expect(localStorage.getItem(planReturnModeStorageKey('chat-1'))).toBeNull()
+    wrapper.unmount()
+  })
+
+  it('retains the return marker after a failed exit so a retry restores the same mode', async () => {
+    localStorage.setItem(planReturnModeStorageKey('chat-1'), 'bypass')
+    const { wrapper, updateChat } = await mountPanel({ mode: 'plan' })
+    updateChat.mockRejectedValueOnce(new Error('PATCH failed')).mockResolvedValueOnce()
+
+    await wrapper.get('textarea.chat-input').setValue('/plan')
+    await wrapper.get('button.send-btn').trigger('click')
+    await flushPromises()
+
+    expect(localStorage.getItem(planReturnModeStorageKey('chat-1'))).toBe('bypass')
+    expect(textareaValue(wrapper)).toBe('/plan')
+
+    await wrapper.get('button.send-btn').trigger('click')
+    await flushPromises()
+
+    expect(updateChat).toHaveBeenNthCalledWith(2, 'chat-1', { mode: 'bypass' })
+    expect(localStorage.getItem(planReturnModeStorageKey('chat-1'))).toBeNull()
     wrapper.unmount()
   })
 })

@@ -99,7 +99,7 @@
           title="Leave plan mode"
           aria-label="Leave plan mode"
           aria-pressed="true"
-          @click.stop="togglePlanMode('normal')"
+          @click.stop="leavePlanMode"
         >
           plan
         </button>
@@ -924,7 +924,14 @@ import { buildTurnParts, collectTraceOutputs, findFinalAnswerIndex, formatTokenU
 import { buildForkSnapshot } from '../lib/chatFork'
 import { formatCommentLocation, type ChatCommentAnchor } from '../lib/commentContext'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
-import { includeBuiltinPlanCommand, planCommandTargetMode, type SlashCommand } from '../lib/planCommand'
+import {
+  clearPlanReturnMode,
+  includeBuiltinPlanCommand,
+  planCommandTargetMode,
+  rememberPlanReturnMode,
+  restorePlanReturnMode,
+  type SlashCommand,
+} from '../lib/planCommand'
 import ChatCommentPopover from './ChatCommentPopover.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 
@@ -1107,13 +1114,21 @@ const dragOver = ref(false)
 const chat = computed(() => store.activeChat!)
 const planModeSaving = ref(false)
 
-async function togglePlanMode(targetMode: 'plan' | 'normal', originChatId = chat.value.chat_id): Promise<boolean> {
+async function togglePlanMode(
+  action: 'enter' | 'exit',
+  originChatId = chat.value.chat_id,
+  returnMode = chat.value.mode,
+): Promise<boolean> {
   if (planModeSaving.value || chat.value.archived) return false
+  const targetMode = action === 'enter' ? 'plan' : restorePlanReturnMode(originChatId)
+  if (action === 'enter') rememberPlanReturnMode(originChatId, returnMode)
   planModeSaving.value = true
   try {
     await store.updateChat(originChatId, { mode: targetMode })
+    if (action === 'exit') clearPlanReturnMode(originChatId)
     return true
   } catch (e) {
+    if (action === 'enter') clearPlanReturnMode(originChatId)
     store.pushErrorToast('Could not change plan mode', errorMessage(e, 'Could not change plan mode'))
     return false
   } finally {
@@ -1121,13 +1136,18 @@ async function togglePlanMode(targetMode: 'plan' | 'normal', originChatId = chat
   }
 }
 
+function leavePlanMode(): void {
+  void togglePlanMode('exit')
+}
+
 async function handlePlanCommand(
-  targetMode: 'plan' | 'normal',
+  action: 'enter' | 'exit',
   originChatId: string,
+  returnMode: string,
   submittedText: string,
   submittedRevision: number,
 ): Promise<void> {
-  const changed = await togglePlanMode(targetMode, originChatId)
+  const changed = await togglePlanMode(action, originChatId, returnMode)
   if (!changed) return
   const composerUnchanged =
     inputRevision.value === submittedRevision
@@ -3075,9 +3095,11 @@ function send() {
   const planTargetMode = planCommandTargetMode(text, chat.value.mode)
   if (planTargetMode) {
     const originChatId = chat.value.chat_id
+    const returnMode = chat.value.mode
     const submittedText = inputText.value
     const submittedRevision = inputRevision.value
-    void handlePlanCommand(planTargetMode, originChatId, submittedText, submittedRevision)
+    const action = planTargetMode === 'plan' ? 'enter' : 'exit'
+    void handlePlanCommand(action, originChatId, returnMode, submittedText, submittedRevision)
     return
   }
   // Always "queue": when a response is in flight the backend buffers and
