@@ -1,3 +1,4 @@
+import argparse
 import subprocess
 import sys
 from pathlib import Path
@@ -5,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from ciao import vault_lint
+from ciao import cli, vault_lint
 
 def test_cli_help():
     res = subprocess.run([sys.executable, "scripts/vault-lint.py", "--help"], capture_output=True, text=True)
@@ -185,6 +186,40 @@ def test_markdown_link_outside_vault_does_not_probe_target(tmp_path: Path) -> No
             "kind": "outside_vault",
         }
     ]
+
+
+def test_vault_lint_cli_reports_new_findings(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    vault = tmp_path / "memory-vault"
+    vault.mkdir()
+    (vault / "Page.md").write_text("[missing](missing.md)\n", encoding="utf-8")
+
+    result = cli._vault_lint_command(argparse.Namespace(vault_root=vault))
+
+    output = capsys.readouterr().out
+    assert result == 1
+    assert "### Frontmatter Errors" in output
+    assert "Page.md" in output
+    assert "missing_frontmatter" in output
+    assert "### Broken Markdown Links" in output
+    assert "missing.md" in output
+    assert "missing_target" in output
+
+
+def test_vault_lint_cli_clean_exit(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    vault = tmp_path / "memory-vault"
+    vault.mkdir()
+    (vault / "Page.md").write_text(_page(), encoding="utf-8")
+
+    result = cli._vault_lint_command(argparse.Namespace(vault_root=vault))
+
+    assert result == 0
+    assert capsys.readouterr().out.strip() == "Vault is clean!"
 
 def test_broken_wikilinks(temp_vault):
     issues = vault_lint.run_validation(temp_vault)

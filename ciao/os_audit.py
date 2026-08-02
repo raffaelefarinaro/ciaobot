@@ -662,6 +662,8 @@ def _vault_audit(vault_root: Path) -> dict[str, Any]:
             "broken_links": [],
             "orphans": [],
             "duplicates": [],
+            "frontmatter_errors": [],
+            "broken_markdown_links": [],
             "errors": [],
         }
     errors: list[dict[str, str]] = []
@@ -685,6 +687,8 @@ def _vault_audit(vault_root: Path) -> dict[str, Any]:
             "broken_links": [],
             "orphans": [],
             "duplicates": [],
+            "frontmatter_errors": [],
+            "broken_markdown_links": [],
             "errors": [
                 _diagnostic(
                     "vault_validation_failed",
@@ -831,6 +835,8 @@ def run_os_audit(
         + len(vault_result.get("broken_links", []))
         + len(vault_result.get("orphans", []))
         + len(vault_result.get("duplicates", []))
+        + len(vault_result.get("frontmatter_errors", []))
+        + len(vault_result.get("broken_markdown_links", []))
         + len(skill_result["issues"])
         + rule_result["rule_clashes_found"]
         + memory_result["expired_memory_entries"]
@@ -889,6 +895,8 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
         "",
         "## 2. Vault & Knowledge Hygiene",
         f"- Broken wikilinks: {len(report['vault_hygiene'].get('broken_links', []))}",
+        f"- Frontmatter errors: {len(report['vault_hygiene'].get('frontmatter_errors', []))}",
+        f"- Broken Markdown links: {len(report['vault_hygiene'].get('broken_markdown_links', []))}",
         f"- Orphaned notes: {len(report['vault_hygiene'].get('orphans', []))}",
         f"- Duplicate stems: {len(report['vault_hygiene'].get('duplicates', []))}",
         "",

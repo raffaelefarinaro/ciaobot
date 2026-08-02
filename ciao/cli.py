@@ -1531,6 +1531,26 @@ def _vault_lint_command(args: argparse.Namespace) -> int:
             print(f"- `{item['source']}` links to missing `[[{item['target']}]]`")
         print()
 
+    if issues["frontmatter_errors"]:
+        has_issues = True
+        print("### Frontmatter Errors\n")
+        for item in issues["frontmatter_errors"]:
+            print(
+                f"- `{item['source']}`: {item['message']} "
+                f"(`{item['kind']}`)"
+            )
+        print()
+
+    if issues["broken_markdown_links"]:
+        has_issues = True
+        print("### Broken Markdown Links\n")
+        for item in issues["broken_markdown_links"]:
+            print(
+                f"- `{item['source']}` links to `{item['target']}`: "
+                f"`{item['kind']}` (resolved: `{item['resolved']}`)"
+            )
+        print()
+
     if issues["orphans"]:
         has_issues = True
         print("### Orphan Pages\n")
