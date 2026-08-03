@@ -23,6 +23,7 @@
 
 ### Maintenance
 - chore: bump openai to 2.52.0 (`12a65e3`)
+- Remove the dead control-surface A/B benchmark: `ciao/control_surface_benchmark.py`, its test, and the `benchmark-control-surfaces` CLI subcommand. `control_surface` now accepts `legacy` and `mcp`; an `auto` value falls back to `mcp`, which is what the pre-decided evaluation already resolved to (`04deda3`)
 
 ## v0.7.0 - 2026-08-02
 
