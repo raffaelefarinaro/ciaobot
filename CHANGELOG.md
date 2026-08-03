@@ -18,6 +18,7 @@
 - Architecture review cleanup (#247): split the `node_*`/package handlers into `ciao/web/routes_node.py` and the MCP HTTP endpoints into `ciao/web/routes_mcp.py`, extract `SettingsAutomation.vue` and a shared `useFileComments` composable, and delete 11 dead control-plane methods. `docs/ARCHITECTURE.md` now indexes every top-level `ciao/` module, enforced by `tests/test_architecture_doc.py` (`07a7626`)
 
 ### Fixed
+- Stop session insights and the schedule attention classifier failing on slow or large-context sessions (#248): the per-call timeout is now `CIAO_INSIGHTS_TIMEOUT_S` (default 600s, was a flat 120s against a path measured at 214–253s), transcripts are trimmed to `CIAO_INSIGHTS_MAX_INPUT_CHARS` oldest-first so they fit the model's context window, and an oversized-input 400 is no longer retried with the identical payload
 - fix(web): keep pinned-file edits when a model turn ends (`c64ba6f`)
 - fix: restore VoiceTranscriber config for cloud gpt-transcribe (`183a1e4`)
 
