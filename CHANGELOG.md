@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.7.1 - 2026-08-03
+
+### Added
+- feat(ollama): default ollama haiku + insights to deepseek-v4-flash:0731-cloud (`9dfbae9`)
+- feat(voice): switch cloud transcription to gpt-transcribe and surface model in Settings (`2e2e4b6`)
+
+### Changed
+- Merge pull request #245 from raffaelefarinaro/chore/sync-develop-v0.7.0 (`95298a0`)
+- Surface delegate parent/child links and hide nested subchats from home. (`7976647`)
+- Reclaim Codex threads on archive, delete, and new session. (`01f08e6`)
+- Merge branch 'feat/ollama-haiku-0731-default' into develop (`290381d`)
+- Skip result-ready toasts and pushes for delegate chats. (`166e3a1`)
+- refactor(memory): collapse bounded memory into CLAUDE.md regions (`6952d67`)
+
+### Fixed
+- fix(web): keep pinned-file edits when a model turn ends (`c64ba6f`)
+- fix: restore cloud transcription config and memory opt-out (`183a1e4`)
+
+### Maintenance
+- chore: bump openai to 2.52.0 (`12a65e3`)
+
 ## v0.7.0 - 2026-08-02
 
 ### Added

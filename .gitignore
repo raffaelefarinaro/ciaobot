@@ -28,6 +28,7 @@ dist/
 # Local runtime / package-smoke artifacts (the live runtime lives in the
 # operator repo, not here)
 .runtime/
+.tmp-pytest/
 
 # OS noise
 .DS_Store
