@@ -1348,8 +1348,8 @@ class CiaoMcpService:
                     schedule_not_removable instead.
             """
             dispatch = {
-                "pause": lambda cp, p: cp.schedule_pause(p, schedule_id),
-                "resume": lambda cp, p: cp.schedule_resume(p, schedule_id),
+                "pause": lambda cp, p: cp.schedule_update(p, schedule_id, enabled=False),
+                "resume": lambda cp, p: cp.schedule_update(p, schedule_id, enabled=True),
                 "run": lambda cp, p: cp.schedule_run(p, schedule_id),
                 "delete": lambda cp, p: cp.schedule_delete(p, schedule_id),
             }
