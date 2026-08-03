@@ -112,6 +112,12 @@
           >
             <span aria-hidden="true">🧠</span>
           </button>
+          <span
+            v-if="chat.provider"
+            class="model-picker-summary desktop-only"
+            :title="`${routingBucketLabel(chat.model_bucket, chat.provider)} · ${chat.model}${chat.thinking_level ? ' · ' + chat.thinking_level : ''}`"
+            aria-hidden="true"
+          >{{ routingBucketLabel(chat.model_bucket, chat.provider) }} · {{ canonicalTier(chat.model) }}{{ chat.thinking_level ? ' · ' + chat.thinking_level : '' }}</span>
           <ModelSelector
             v-if="showModelPicker"
             triggerless
@@ -3276,6 +3282,18 @@ function canonicalTier(model: string): string {
   return resolvedAlias || model
 }
 
+// Render the routing backend (Ollama / Anthropic / OpenRouter / Codex / custom)
+// as the operator in the brain chip. Falls back to the CLI provider when no
+// bucket is set, so chats in the legacy / auto state still show something
+// sensible ('claude' or 'codex') instead of going blank.
+function routingBucketLabel(bucket: string | undefined, provider: string): string {
+  if (!bucket) return provider
+  if (bucket === 'claude_personal') return 'ollama'
+  if (bucket === 'claude_work') return 'anthropic'
+  if (bucket.startsWith('custom:')) return 'custom'
+  return bucket
+}
+
 function modelBucketForBucket(bucket: BucketKey): ModelBucketValue {
   if (bucket.startsWith('custom:')) return ''
   if (bucket === 'codex') return ''
@@ -5774,6 +5792,24 @@ details[open] > .activity-summary::before {
   cursor: pointer;
 }
 .model-picker-btn:active { transform: scale(0.96); }
+
+.model-picker-summary {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elev);
+  color: var(--fg2);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
 
 .thinking-levels {
   display: flex;
