@@ -380,6 +380,9 @@ class CiaoConfig:
     # Runtime-overridable from the PWA Settings → Models tab.
     transcription_engine: str = "cloud"
     transcription_local_model: str = "mlx-community/whisper-large-v3-turbo"
+    # Cloud transcription model (OpenAI ``gpt-transcribe``). Overridable
+    # via ``CIAO_TRANSCRIPTION_MODEL`` (e.g. ``gpt-4o-mini-transcribe``).
+    transcription_model: str = "gpt-transcribe"
     # Speech synthesis (read a message aloud): ``cloud`` (OpenAI
     # ``gpt-4o-mini-tts``, needs OPENAI_API_KEY) or ``local`` (Kokoro via
     # kokoro-onnx, free/offline). Runtime-overridable from the PWA
@@ -1138,6 +1141,10 @@ class CiaoConfig:
                 "CIAO_TRANSCRIPTION_LOCAL_MODEL", ""
             ).strip()
             or "mlx-community/whisper-large-v3-turbo",
+            transcription_model=source.get(
+                "CIAO_TRANSCRIPTION_MODEL", ""
+            ).strip()
+            or "gpt-transcribe",
             tts_engine=(
                 source.get("CIAO_TTS_ENGINE", "").strip().lower()
                 if source.get("CIAO_TTS_ENGINE", "").strip().lower()

@@ -629,7 +629,8 @@
                     The first transcription downloads the model.
                   </template>
                   <template v-else>
-                    Dictation uses the OpenAI transcription API (needs <code>OPENAI_API_KEY</code>, ~$0.003/min).
+                    Dictation uses OpenAI <code>{{ routines.transcription.cloud_model }}</code> (needs <code>OPENAI_API_KEY</code>, ~$0.0045/min).
+                    <a href="https://developers.openai.com/api/docs/pricing" target="_blank" rel="noopener">Check current pricing</a>.
                   </template>
                 </span>
               </div>

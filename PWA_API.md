@@ -490,14 +490,16 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
 
 ```bash
 # Read internal-routine settings: title, insights, and critique model overrides
-# (plus the effective models after defaults), transcription engine, and grouped
-# model options (anthropic / ollama_cloud / ollama_local).
+# (plus the effective models after defaults), transcription engine + cloud
+# model, and grouped model options (anthropic / ollama_cloud / ollama_local).
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routines"
 
 # Update any subset. Persisted in .runtime/app_settings.json, applied to the
 # live config immediately (no restart). Empty string clears an override back
 # to the env default. transcription_engine ∈ {cloud, local}; "local" uses
-# mlx-whisper on-device (free).
+# mlx-whisper on-device (free). Cloud transcription model (default
+# gpt-transcribe) can be overridden via transcription_model or the
+# CIAO_TRANSCRIPTION_MODEL env var; it is surfaced as transcription.cloud_model.
 curl -sS -b /tmp/ciao.jar -X PATCH "http://localhost:${PWA_PORT:-8443}/api/settings/routines" \
   -H 'content-type: application/json' \
   -d '{"title_model":"gemma4:12b-it-qat","critique_models":"anthropic/claude-sonnet-4.5","transcription_engine":"local"}'

@@ -153,7 +153,7 @@ Workspace-specific integrations can still be set in `.env`, but the public `.env
 
 **BigQuery:** `GOOGLE_APPLICATION_CREDENTIALS`
 
-**OpenAI:** `OPENAI_API_KEY` (used by voice transcription and other OpenAI-integrated features).
+**OpenAI:** `OPENAI_API_KEY` (used by cloud voice transcription and read-aloud, and other OpenAI-integrated features). Cloud transcription defaults to `gpt-transcribe`; override the model with `CIAO_TRANSCRIPTION_MODEL` (e.g. `gpt-4o-mini-transcribe`).
 
 **n8n MCP:** `N8N_MCP_TOKEN` (bearer token for the self-hosted `n8n_mcp` HTTP server in `.mcp.json`). Lives in `.env` only, value redacted. Settings → Assets → MCP servers shows the key status and can write it into `.env`.
 

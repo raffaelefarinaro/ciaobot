@@ -22,6 +22,7 @@ class FakeConfig:
 
         self.transcription_engine = "cloud"
         self.transcription_local_model = "mlx-community/whisper-large-v3-turbo"
+        self.transcription_model = "gpt-transcribe"
         self.tts_engine = "cloud"
         self.tts_cloud_voice = "nova"
         self.tts_local_voice = "af_heart"

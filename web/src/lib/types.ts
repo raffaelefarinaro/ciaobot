@@ -481,6 +481,7 @@ export interface RoutineSettings {
   apfel_available?: boolean
   transcription: {
     engine: 'cloud' | 'local'
+    cloud_model: string
     local_model: string
     local_available: boolean
     cloud_available: boolean

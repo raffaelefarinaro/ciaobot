@@ -4788,6 +4788,7 @@ def _routines_payload(config, app_settings) -> dict:
         "apfel_available": shutil.which("apfel") is not None,
         "transcription": {
             "engine": config.transcription_engine,
+            "cloud_model": config.transcription_model,
             "local_model": config.transcription_local_model,
             "local_available": mlx_whisper_available(),
             "cloud_available": bool(config.openai_api_key),

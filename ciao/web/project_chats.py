@@ -7177,7 +7177,8 @@ class ProjectChatManager:
             duration_sec = max(size / 16000, 1.0)
         except OSError:
             duration_sec = 1.0
-        cost = duration_sec / 60 * 0.003
+        # gpt-transcribe is $0.0045/min of audio (per OpenAI pricing).
+        cost = duration_sec / 60 * 0.0045
         return text, cost
 
     async def synthesize_speech(self, text: str) -> tuple[bytes, str, float]:

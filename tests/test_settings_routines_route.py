@@ -82,6 +82,7 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
         "vault_root": str(config.vault_root),
     }
     assert data["transcription"]["engine"] == "cloud"
+    assert data["transcription"]["cloud_model"] == "gpt-transcribe"
     assert data["transcription"]["cloud_available"] is True
     assert data["speech"]["engine"] == "cloud"
     assert data["speech"]["cloud_available"] is True

@@ -155,7 +155,7 @@ When your message mentions a name that appears in the vault index, the agent get
 
 **Voice — dictation and read-aloud**
 
-- Speech-to-text dictation in any chat: cloud transcription or free on-device via [mlx-whisper](https://pypi.org/project/mlx-whisper/) (Apple Silicon).
+- Speech-to-text dictation in any chat: cloud transcription (OpenAI `gpt-transcribe`, overridable via `CIAO_TRANSCRIPTION_MODEL`) or free on-device via [mlx-whisper](https://pypi.org/project/mlx-whisper/) (Apple Silicon).
 - Text-to-speech read-aloud of replies: cloud voices or free on-device via [Kokoro](https://pypi.org/project/kokoro-onnx/); local models download on first use and are re-installed automatically after app upgrades.
 
 **Files and documents**

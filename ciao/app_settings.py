@@ -39,6 +39,8 @@ class AppSettings:
     transcription_engine: str = ""
     # Whisper checkpoint for the local engine (HF repo id).
     transcription_local_model: str = ""
+    # OpenAI model for the cloud engine (default "gpt-transcribe").
+    transcription_model: str = ""
     # Speech synthesis engine: "cloud" (OpenAI) or "local" (Kokoro).
     tts_engine: str = ""
     # Voice preset per engine (OpenAI voice name / Kokoro voice id).
@@ -175,6 +177,7 @@ class AppSettingsStore:
 
                 "transcription_engine": config.transcription_engine,
                 "transcription_local_model": config.transcription_local_model,
+                "transcription_model": config.transcription_model,
                 "tts_engine": config.tts_engine,
                 "tts_cloud_voice": config.tts_cloud_voice,
                 "tts_local_voice": config.tts_local_voice,
@@ -202,6 +205,9 @@ class AppSettingsStore:
         )
         config.transcription_local_model = (
             s.transcription_local_model or d["transcription_local_model"]
+        )
+        config.transcription_model = (
+            s.transcription_model or d["transcription_model"]
         )
         config.tts_engine = s.tts_engine or d["tts_engine"]
         config.tts_cloud_voice = s.tts_cloud_voice or d["tts_cloud_voice"]
