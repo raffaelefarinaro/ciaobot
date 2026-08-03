@@ -49,6 +49,45 @@ def test_cloud_model_env_override(tmp_path):
     assert config.transcription_model == "gpt-4o-mini-transcribe"
 
 
+@pytest.mark.asyncio
+async def test_voice_transcriber_uses_config_model(tmp_path, monkeypatch):
+    """Regression: VoiceTranscriber must keep config so model isn't AttributeError."""
+    from types import SimpleNamespace
+    from pathlib import Path
+
+    captured: dict = {}
+
+    class FakeResponse:
+        text = "hello from cloud"
+
+    class FakeTranscriptions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return FakeResponse()
+
+    class FakeAudio:
+        transcriptions = FakeTranscriptions()
+
+    class FakeClient:
+        audio = FakeAudio()
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(voice, "AsyncOpenAI", FakeClient)
+    config = SimpleNamespace(
+        openai_api_key="sk-test",
+        transcription_model="gpt-transcribe",
+    )
+    transcriber = voice.VoiceTranscriber(config)
+    audio_path = Path(tmp_path) / "clip.webm"
+    audio_path.write_bytes(b"fake-audio")
+    text = await transcriber.transcribe(audio_path)
+    assert text == "hello from cloud"
+    assert captured["model"] == "gpt-transcribe"
+    assert captured["response_format"] == "json"
+
+
 def test_mlx_transcriber_requires_package(monkeypatch):
     monkeypatch.setattr(voice, "mlx_whisper_available", lambda: False)
     with pytest.raises(ValueError, match="mlx-whisper is not installed"):

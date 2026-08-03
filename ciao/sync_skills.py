@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from ciao.jsonio import read_json_dict
 import os
 import re
@@ -16,6 +17,8 @@ from pathlib import Path
 from typing import Sequence
 
 from ciao import skills_sync
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -1024,7 +1027,10 @@ def sync_workspace_skills(
         except ImportError:
             migrate_legacy_files(root / "CLAUDE.md")
     except Exception:  # noqa: BLE001 — never block skill sync on memory regions
-        pass
+        logger.exception(
+            "memory region ensure/migrate failed for %s; continuing skill sync",
+            root,
+        )
 
     upstream_updated = 0
     upstream_pruned = 0

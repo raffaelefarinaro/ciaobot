@@ -51,6 +51,7 @@ class VoiceTranscriber:
     def __init__(self, config: BridgeConfig) -> None:
         if not config.openai_api_key:
             raise ValueError("OPENAI_API_KEY is required for voice transcription")
+        self._config = config
         self._client = AsyncOpenAI(api_key=config.openai_api_key)
 
     async def transcribe(self, path: Path) -> str:

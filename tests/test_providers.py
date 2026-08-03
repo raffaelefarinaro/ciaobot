@@ -51,6 +51,7 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
             captured["options"] = options
 
     config = SimpleNamespace(
+        memory_enabled=False,
         memory_char_limit=2200,
         user_char_limit=1375,
         vault_root=tmp_path / "memory-vault",
@@ -122,6 +123,7 @@ async def test_plan_mode_gets_no_control_plane_allowlist(tmp_path: Path, monkeyp
             captured["options"] = options
 
     config = SimpleNamespace(
+        memory_enabled=False,
         memory_char_limit=2200,
         user_char_limit=1375,
         vault_root=tmp_path / "memory-vault",

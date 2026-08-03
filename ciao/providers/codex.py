@@ -773,15 +773,16 @@ class CodexProvider(BaseSDKProvider):
             return self._developer_instructions
         cfg = self.config
         memory = ""
-        try:
-            memory = build_memory_block(
-                guide_path=self.workspace_root / "CLAUDE.md",
-                memory_char_limit=int(getattr(cfg, "memory_char_limit", 2200)),
-                user_char_limit=int(getattr(cfg, "user_char_limit", 1375)),
-            )
-        except Exception:  # noqa: BLE001 — never block a chat on memory wiring
-            logger.exception("memory block failed; continuing without it")
-            memory = ""
+        if bool(getattr(cfg, "memory_enabled", True)):
+            try:
+                memory = build_memory_block(
+                    guide_path=self.workspace_root / "CLAUDE.md",
+                    memory_char_limit=int(getattr(cfg, "memory_char_limit", 2200)),
+                    user_char_limit=int(getattr(cfg, "user_char_limit", 1375)),
+                )
+            except Exception:  # noqa: BLE001 — never block a chat on memory wiring
+                logger.exception("memory block failed; continuing without it")
+                memory = ""
         payload = system_prompt_payload(
             memory,
             control_surface=request.control_surface if request is not None else "legacy",
