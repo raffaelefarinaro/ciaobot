@@ -15,6 +15,11 @@
 
 <script setup lang="ts">
 import { ref, onUnmounted } from 'vue'
+import {
+  isDesktopApp,
+  queryDesktopPermission,
+  requestDesktopPermission,
+} from '../lib/desktop'
 
 const emit = defineEmits<{
   recorded: [blob: Blob]
@@ -37,6 +42,28 @@ function updateTime() {
 
 async function startRecording() {
   if (state.value !== 'idle') return
+
+  if (isDesktopApp()) {
+    const current = await queryDesktopPermission('microphone')
+    if (current === 'denied' || current === 'restricted') {
+      emit(
+        'error',
+        'Microphone access is blocked. Open System Settings > Microphone, allow Ciaobot, then try again.',
+      )
+      return
+    }
+    if (current === 'not_determined') {
+      const requested = await requestDesktopPermission('microphone')
+      if (requested !== 'authorized') {
+        emit(
+          'error',
+          'Microphone access was denied. Open System Settings > Microphone, allow Ciaobot, then try again.',
+        )
+        return
+      }
+    }
+  }
+
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
     const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
@@ -65,12 +92,17 @@ async function startRecording() {
   } catch (e) {
     console.error('Could not start voice recording:', e)
     const denied = e instanceof DOMException && e.name === 'NotAllowedError'
-    emit(
-      'error',
-      denied
-        ? 'Microphone access was denied. Allow microphone access for Ciaobot in System Settings, then try again.'
-        : 'Could not start voice recording. Check that a microphone is available, then try again.',
-    )
+    if (denied) {
+      const desktop = isDesktopApp()
+      emit(
+        'error',
+        desktop
+          ? 'Microphone access was denied. Open System Settings > Microphone, allow Ciaobot, then try again. If Ciaobot is not listed, quit it, run "tccutil reset Microphone local.ciaobot.app" in Terminal, reopen Ciaobot, and click Allow when prompted.'
+          : 'Microphone access was denied. Ciaobot is running in a browser, so the block is in the browser, not in System Settings. Click the lock icon next to the address bar, open Site settings, set Microphone to Allow, then try again. If Ciaobot is installed as a browser app, open Chrome Settings > Privacy and security > Site settings > Microphone, find this site, and allow it. If your browser itself is denied at the OS level, allow the browser in System Settings first.',
+      )
+    } else {
+      emit('error', 'Could not start voice recording. Check that a microphone is available, then try again.')
+    }
   }
 }
 

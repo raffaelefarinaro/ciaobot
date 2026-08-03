@@ -11,8 +11,10 @@
   },
   "app": {
     "windows": [],
-    "security": {},
-    "withGlobalTauri": false
+    "security": {
+      "capabilities": ["main"]
+    },
+    "withGlobalTauri": true
   },
   "bundle": {
     "active": true,
