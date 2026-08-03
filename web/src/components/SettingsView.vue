@@ -358,18 +358,6 @@
                 <button class="btn-small" @click="adjustFontScale(0.05)" :disabled="fontScale >= 1.5">Increase</button>
                 <button class="btn-small font-reset" @click="resetFontScale" :disabled="fontScale === DEFAULT_FONT_SCALE">Reset</button>
               </div>
-              <div class="font-scale-presets">
-                <button
-                  class="btn-small"
-                  :class="{ active: fontScale === DEFAULT_FONT_SCALE }"
-                  @click="setFontScale(DEFAULT_FONT_SCALE)"
-                >100%</button>
-                <button
-                  class="btn-small"
-                  :class="{ active: Math.abs(fontScale - LARGE_FONT_SCALE) < 0.001 }"
-                  @click="setFontScale(LARGE_FONT_SCALE)"
-                >120%</button>
-              </div>
             </div>
           </div>
         </div>
@@ -2559,10 +2547,9 @@ async function deleteCustomMcpServer(name: string) {
 // ── Appearance settings ────────────────────────────────────────────────────
 const activeTheme = ref('system')
 // The font scale is anchored to the pre-rescale UI: DEFAULT_FONT_SCALE (1.2)
-// displays as "100%" and LARGE_FONT_SCALE (1.44) as "120%". The raw multiplier
-// still drives --font-scale; only the displayed percentage is rescaled.
+// displays as "100%". The raw multiplier still drives --font-scale; only the
+// displayed percentage is rescaled.
 const DEFAULT_FONT_SCALE = 1.2
-const LARGE_FONT_SCALE = 1.44
 const fontScale = ref(DEFAULT_FONT_SCALE)
 const fontScalePercent = computed(() => Math.round((fontScale.value / DEFAULT_FONT_SCALE) * 100))
 
@@ -6758,21 +6745,6 @@ a.btn-secondary {
   color: var(--fg);
   flex: 0 0 56px;
   text-align: center;
-}
-.font-scale-presets {
-  display: flex;
-  gap: var(--space-2);
-  margin-top: var(--space-2);
-  width: 100%;
-}
-.font-scale-presets .btn-small {
-  flex: 1 1 0;
-  min-width: 0;
-}
-.font-scale-presets .btn-small.active {
-  background: var(--accent);
-  color: #fff;
-  border-color: var(--accent);
 }
 .ws-label {
   font-size: var(--text-sm);
