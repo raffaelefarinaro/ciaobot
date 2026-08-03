@@ -51,8 +51,8 @@ MAX_ENTRY_CHARS = 600
 """Advisory per-entry length threshold reported by ``os_audit``."""
 
 
-REGIONS = ("memory", "profile")
 MemoryRegion = Literal["memory", "profile"]
+REGIONS: tuple[MemoryRegion, ...] = ("memory", "profile")
 
 _REGION_ALIASES: dict[str, MemoryRegion] = {
     "memory": "memory",
