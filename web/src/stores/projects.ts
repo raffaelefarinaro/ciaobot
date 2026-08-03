@@ -492,11 +492,23 @@ export const useProjectStore = defineStore('projects', () => {
     return chat.last_activity_at || chat.created_at
   }
 
+  // True when this chat is a nested delegate whose supervisor is still a
+  // visible (non-archived, local) chat. Used to hide subchats from home /
+  // recent surfaces so you jump back into the supervisor and reach children
+  // from there. Orphans (supervisor archived/missing) stay listed.
+  function isNestedDelegate(chat: ChatInfo): boolean {
+    const parentId = chat.spawned_from_chat_id
+    if (!parentId) return false
+    const parent = chats.value.find(c => c.chat_id === parentId)
+    return Boolean(parent && !parent.archived && parent.local !== false)
+  }
+
   // Most recent (max 5) non-archived chats in the active workspace.
   const recentChats = computed<ChatInfo[]>(() => {
     const wsProjectIds = new Set(workspaceProjects.value.map(p => p.project_id))
     return chats.value
       .filter(c => !c.archived && c.local !== false && wsProjectIds.has(c.project_id))
+      .filter(c => !isNestedDelegate(c))
       .filter(c => Boolean(chatActivity(c)))
       .sort((a, b) => chatActivity(b).localeCompare(chatActivity(a)))
       .slice(0, 5)
@@ -506,9 +518,11 @@ export const useProjectStore = defineStore('projects', () => {
   // chat with activity, across ALL workspaces, newest first (uncapped). The
   // home surface is a global hub, so unlike recentChats it isn't scoped to
   // the active workspace — each chat carries its own workspace/project tag.
+  // Nested delegates are omitted; open the supervisor to reach them.
   const activeChatsAll = computed<ChatInfo[]>(() => {
     return chats.value
       .filter(c => !c.archived && c.local !== false)
+      .filter(c => !isNestedDelegate(c))
       .filter(c => Boolean(chatActivity(c)))
       .sort((a, b) => chatActivity(b).localeCompare(chatActivity(a)))
   })

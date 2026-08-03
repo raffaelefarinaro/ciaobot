@@ -157,6 +157,42 @@
       </template>
     </PaneHeader>
 
+    <!-- Delegate parent banner: this chat was spawned from a supervisor chat -->
+    <div v-if="delegateParent" class="loop-banner">
+      <div class="loop-banner-row">
+        <span class="loop-banner-ico" aria-hidden="true">&#8627;</span>
+        <span class="loop-banner-text">
+          Delegate of <strong>{{ delegateParent.title || 'parent chat' }}</strong>
+        </span>
+        <router-link
+          :to="`/chat/${delegateParent.chat_id}`"
+          class="btn-small loop-banner-manage"
+        >Open parent</router-link>
+      </div>
+    </div>
+
+    <!-- Delegate children banner: this chat spawned one or more subchats -->
+    <div v-if="delegateChildren.length" class="loop-banner">
+      <div
+        v-for="child in delegateChildren"
+        :key="child.chat_id"
+        class="loop-banner-row"
+      >
+        <span class="loop-banner-ico" aria-hidden="true">&#8627;</span>
+        <span class="loop-banner-text">
+          Subchat <strong>{{ child.title || 'untitled' }}</strong>
+          <template v-if="store.isChatStreaming(child.chat_id)"> · working</template>
+          <template v-else-if="store.chatHasBackgroundAgents(child.chat_id)"> · agents running</template>
+          <template v-else-if="store.chatNeedsInput(child.chat_id)"> · needs input</template>
+          <template v-else-if="store.chatUnread(child.chat_id) > 0"> · unread</template>
+        </span>
+        <router-link
+          :to="`/chat/${child.chat_id}`"
+          class="btn-small loop-banner-manage"
+        >Open</router-link>
+      </div>
+    </div>
+
     <!-- Loop banner: this chat is driven by one or more loops -->
     <div v-if="chatLoops.length" class="loop-banner">
       <div v-for="l in chatLoops" :key="l.loop_id" class="loop-banner-row">
@@ -1203,6 +1239,22 @@ const chatSchedules = computed(() => {
   const sid = chat.value?.schedule_id
   return taskStore.schedules.filter(s =>
     (sid && s.schedule_id === sid) || (cid && s.web_chat_id === cid),
+  )
+})
+
+// Delegate lineage banners (same visual language as loop/schedule banners).
+// Parent link when this chat was spawned; children list when this chat is a
+// supervisor. Archived children stay out of the strip.
+const delegateParent = computed(() => {
+  const parentId = chat.value?.spawned_from_chat_id
+  if (!parentId) return null
+  return store.chats.find(c => c.chat_id === parentId) || null
+})
+const delegateChildren = computed(() => {
+  const cid = chat.value?.chat_id
+  if (!cid) return []
+  return store.chats.filter(
+    c => c.spawned_from_chat_id === cid && !c.archived && c.local !== false,
   )
 })
 onMounted(() => {

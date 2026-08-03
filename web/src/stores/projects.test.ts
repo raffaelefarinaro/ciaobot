@@ -2028,3 +2028,42 @@ describe('projectChatRows (delegate grouping)', () => {
     expect(rows.every(r => !r.isDelegate)).toBe(true)
   })
 })
+
+describe('activeChatsAll (hide nested delegates)', () => {
+  function seed(store: ReturnType<typeof useProjectStore>, chats: Partial<ChatInfo>[]) {
+    store.projects = [
+      { project_id: 'p1', name: 'Proj', workspace: 'personal' } as unknown as ProjectInfo,
+    ]
+    store.chats = chats.map((c, i) => ({
+      project_id: 'p1',
+      title: c.title || c.chat_id,
+      archived: false,
+      local: true,
+      created_at: `2026-07-31T00:0${i}:00Z`,
+      last_activity_at: `2026-07-31T01:0${i}:00Z`,
+      ...c,
+    })) as unknown as ChatInfo[]
+  }
+
+  test('nested delegates are omitted from jump-back-in', () => {
+    const store = useProjectStore()
+    seed(store, [
+      { chat_id: 'boss', title: 'Architecture Review' },
+      { chat_id: 'other', title: 'Other' },
+      { chat_id: 'd1', title: 'Arch review: a', spawned_from_chat_id: 'boss' },
+      { chat_id: 'd2', title: 'Arch review: b', spawned_from_chat_id: 'boss' },
+    ])
+
+    expect(store.activeChatsAll.map(c => c.chat_id)).toEqual(['other', 'boss'])
+  })
+
+  test('orphaned delegates remain listed when the supervisor is gone', () => {
+    const store = useProjectStore()
+    seed(store, [
+      { chat_id: 'boss', archived: true },
+      { chat_id: 'orphan', spawned_from_chat_id: 'boss' },
+    ])
+
+    expect(store.activeChatsAll.map(c => c.chat_id)).toEqual(['orphan'])
+  })
+})
