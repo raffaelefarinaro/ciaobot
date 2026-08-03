@@ -568,6 +568,20 @@ function isTypingTarget(el: EventTarget | null): boolean {
   return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable
 }
 
+// Home screen: arrow keys roam the recent-chat grid, Enter opens the focused
+// card (handled natively by the focused button). Only when no chat is open and
+// focus isn't in a text field, so typing is unaffected. Bound unconditionally:
+// unlike Cmd+T/Cmd+A, arrow keys aren't browser-reserved, and on the PWA users
+// expect to navigate the homepage with the keyboard.
+function onHomeArrowKeydown(e: KeyboardEvent) {
+  if (viewMode.value !== 'chat') return
+  if (pendingConfirm.value) return
+  if (store.activeChat) return
+  if (!e.key.startsWith('Arrow')) return
+  if (isTypingTarget(e.target)) return
+  if (homeRecentRef.value?.onArrow(e.key)) e.preventDefault()
+}
+
 function onShortcutKeydown(e: KeyboardEvent) {
   // Defer to full-screen views (settings, schedules) and the confirm dialog.
   if (viewMode.value !== 'chat') return
@@ -676,8 +690,11 @@ onMounted(() => {
   window.addEventListener('touchstart', onTouchStart, { passive: true })
   window.addEventListener('touchend', onTouchEnd, { passive: true })
   window.addEventListener('touchcancel', onTouchEnd, { passive: true })
-  // Global keyboard shortcuts live in the desktop app only: in a browser tab
-  // Cmd+T/Cmd+A are owned by the browser and shouldn't be hijacked.
+  // Home-screen arrow navigation works in both the PWA and the desktop app;
+  // arrow keys aren't browser-reserved, so the PWA can bind them safely.
+  window.addEventListener('keydown', onHomeArrowKeydown)
+  // Global keyboard shortcuts (Cmd+T, Cmd+A, Cmd+D) live in the desktop app
+  // only: in a browser tab those combos are owned by the browser.
   if (isDesktopApp()) window.addEventListener('keydown', onShortcutKeydown)
 })
 
@@ -687,6 +704,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('touchstart', onTouchStart)
   window.removeEventListener('touchend', onTouchEnd)
   window.removeEventListener('touchcancel', onTouchEnd)
+  window.removeEventListener('keydown', onHomeArrowKeydown)
   if (isDesktopApp()) window.removeEventListener('keydown', onShortcutKeydown)
   window.removeEventListener('mousemove', handleSidebarDrag)
   window.removeEventListener('mouseup', stopSidebarDrag)
