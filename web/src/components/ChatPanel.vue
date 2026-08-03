@@ -105,19 +105,20 @@
         </button>
         <div class="model-picker-wrap" ref="modelPickerRef">
           <button
-            class="model-picker-btn touch-hit"
+            class="model-picker-btn touch-hit mobile-only"
             :title="chat.model + (chat.thinking_level ? ' · ' + chat.thinking_level : '')"
             @click.stop="toggleModelPicker"
             aria-label="Model"
           >
             <span aria-hidden="true">🧠</span>
           </button>
-          <span
+          <button
             v-if="chat.provider"
+            type="button"
             class="model-picker-summary desktop-only"
-            :title="`${routingBucketLabel(chat.model_bucket, chat.provider)} · ${chat.model}${chat.thinking_level ? ' · ' + chat.thinking_level : ''}`"
-            aria-hidden="true"
-          >{{ routingBucketLabel(chat.model_bucket, chat.provider) }} · {{ canonicalTier(chat.model) }}{{ chat.thinking_level ? ' · ' + chat.thinking_level : '' }}</span>
+            :title="`${routingProviderLabel(chat.model_bucket, chat.provider)} · ${activeModelId}${chat.thinking_level ? ' · ' + chat.thinking_level : ''}`"
+            @click.stop="toggleModelPicker"
+          >{{ routingProviderLabel(chat.model_bucket, chat.provider) }} · {{ activeModelId }}<template v-if="chat.thinking_level"> · {{ chat.thinking_level }}</template></button>
           <ModelSelector
             v-if="showModelPicker"
             triggerless
@@ -256,7 +257,7 @@
             </span>
             <span class="sr-only">, {{ openTraces[i] ? 'expanded' : 'collapsed' }}</span>
           </button>
-          <div v-if="openTraces[i]" class="trace-body">
+          <div v-if="openTraces[i]" class="trace-body" @click="onTraceBodyClick(i, $event)">
             <template v-for="(step, j) in item.steps" :key="j">
               <div v-if="step.tool_name === '_activity'" class="trace-tools">
                 <div
@@ -540,6 +541,7 @@
         <div
           v-if="liveTraceOpen && (store.currentTimeline.length || store.currentStreamingText || store.currentStreamingThinking || liveSubagents.length)"
           class="trace-body"
+          @click="onLiveTraceBodyClick"
         >
           <template v-for="(entry, j) in store.currentTimeline" :key="j">
             <div v-if="entry.kind === 'tool'" class="trace-tools">
@@ -1525,6 +1527,37 @@ function toggleLiveTrace() {
   liveTraceOpen.value = !liveTraceOpen.value
 }
 
+// Click on an expanded activity/thinking bubble body collapses it, unless the
+// click landed on an interactive descendant (a link, file card/chip, subagent
+// panel, inline code, copy button, or anything stopPropagation-bearing).
+// Selection drags that happen to end inside the body are ignored so users
+// can highlight text without accidentally closing the bubble.
+function isInteractiveTraceChild(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false
+  if (target.closest('a')) return true
+  if (target.closest('button, [role="button"]')) return true
+  if (target.closest('.file-card, .file-chip')) return true
+  if (target.closest('.subagent-panel')) return true
+  if (target.closest('code, pre, kbd')) return true
+  return false
+}
+
+function onTraceBodyClick(i: number, e: MouseEvent): void {
+  if (e.defaultPrevented) return
+  if (isInteractiveTraceChild(e.target)) return
+  if (window.getSelection()?.toString()) return
+  if (!openTraces.value[i]) return
+  openTraces.value = { ...openTraces.value, [i]: false }
+}
+
+function onLiveTraceBodyClick(e: MouseEvent): void {
+  if (e.defaultPrevented) return
+  if (isInteractiveTraceChild(e.target)) return
+  if (window.getSelection()?.toString()) return
+  if (!liveTraceOpen.value) return
+  liveTraceOpen.value = false
+}
+
 function checkScroll() {
   const el = messagesEl.value
   if (!el) return
@@ -1758,6 +1791,17 @@ const chatModelSections = computed(() => {
     }
     return section
   })
+})
+
+// The exact model id the chat is running on. When the chat is on a tier alias
+// (e.g. "sonnet") it would otherwise render as that bare alias in the header
+// chip; resolve it through the active bucket so the user sees the actual
+// provider-native model (e.g. "minimax-m3:cloud") instead of the alias.
+const activeModelId = computed(() => {
+  const c = chat.value
+  if (!c) return ''
+  const resolved = effectiveModelForBucket(c.model, activeBucket.value)
+  return resolved || c.model
 })
 
 const activeModelHighlights = computed(() => {
@@ -3111,6 +3155,9 @@ function handleKeydown(e: KeyboardEvent) {
     }
     if (e.key === 'Escape') {
       e.preventDefault()
+      // Claim the key: Esc now closes the chat even while typing, so without
+      // this the same press would dismiss the picker AND close the chat.
+      e.stopPropagation()
       inputText.value = ''
       return
     }
@@ -3292,6 +3339,28 @@ function routingBucketLabel(bucket: string | undefined, provider: string): strin
   if (bucket === 'claude_work') return 'anthropic'
   if (bucket.startsWith('custom:')) return 'custom'
   return bucket
+}
+
+// Capitalize the provider for the header chip (Ollama / Anthropic / OpenRouter /
+// Codex / custom name). Falls back to the bucket label when the bucket is not
+// one of the known routes.
+function routingProviderLabel(bucket: string | undefined, provider: string): string {
+  const lower = routingBucketLabel(bucket, provider)
+  if (!lower) return ''
+  if (lower === 'ollama') return 'Ollama'
+  if (lower === 'anthropic') return 'Anthropic'
+  if (lower === 'openrouter') return 'OpenRouter'
+  if (lower === 'codex') return 'Codex'
+  if (lower === 'claude') return 'Claude'
+  if (lower === 'custom') {
+    if (bucket?.startsWith('custom:')) {
+      const id = bucket.slice('custom:'.length)
+      const cp = modelsResponse.value?.custom_providers?.find((item) => item.id === id)
+      return cp?.name || 'Custom'
+    }
+    return 'Custom'
+  }
+  return lower.charAt(0).toUpperCase() + lower.slice(1)
 }
 
 function modelBucketForBucket(bucket: BucketKey): ModelBucketValue {
@@ -3810,7 +3879,11 @@ defineExpose({ toggleDictation, archiveActiveChat })
 
 /* Header */
 .desktop-only { display: inline-flex; }
-@media (max-width: 768px) { .desktop-only { display: none; } }
+.mobile-only { display: none; }
+@media (max-width: 768px) {
+  .desktop-only { display: none; }
+  .mobile-only { display: inline-flex; }
+}
 
 .header-left {
   display: flex;
@@ -5797,19 +5870,27 @@ details[open] > .activity-summary::before {
   display: inline-flex;
   align-items: center;
   margin-left: 4px;
-  padding: 2px 8px;
+  padding: 4px 10px;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--bg-elev);
   color: var(--fg2);
   font-size: 11px;
   line-height: 1.4;
+  font-family: var(--font);
   white-space: nowrap;
-  max-width: 220px;
+  max-width: min(220px, calc(100vw - 200px));
   overflow: hidden;
   text-overflow: ellipsis;
-  pointer-events: none;
+  cursor: pointer;
+  transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
 }
+.model-picker-summary:hover {
+  background: var(--bg3);
+  color: var(--fg);
+  border-color: var(--border-strong);
+}
+.model-picker-summary:active { transform: scale(0.97); }
 
 .thinking-levels {
   display: flex;
@@ -5987,6 +6068,7 @@ details[open] > .activity-summary::before {
     flex-shrink: 0;
     gap: 6px;
   }
+  .model-picker-wrap { min-width: 0; }
   .model-picker-dropdown {
     right: 0;
     min-width: auto;

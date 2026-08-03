@@ -568,18 +568,38 @@ function isTypingTarget(el: EventTarget | null): boolean {
   return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable
 }
 
-// Home screen: arrow keys roam the recent-chat grid, Enter opens the focused
-// card (handled natively by the focused button). Only when no chat is open and
-// focus isn't in a text field, so typing is unaffected. Bound unconditionally:
-// unlike Cmd+T/Cmd+A, arrow keys aren't browser-reserved, and on the PWA users
-// expect to navigate the homepage with the keyboard.
-function onHomeArrowKeydown(e: KeyboardEvent) {
+// Keys the browser does not reserve, so they can be bound in the PWA as well
+// as the desktop app: arrow keys roam the home recent-chat grid (Enter opens
+// the focused card natively) and Esc closes the open chat. Anything with a
+// modifier stays in onShortcutKeydown, which is desktop-only because a browser
+// tab owns Cmd+T / Cmd+A.
+//
+// These must live in exactly ONE listener. They were previously handled here
+// AND again in onShortcutKeydown; in the desktop app both listeners are bound,
+// so a single arrow press ran onArrow twice and focus jumped two cards at a
+// time. The PWA, with only this listener, behaved correctly -- which is why the
+// breakage looked desktop-specific.
+function onUnreservedKeydown(e: KeyboardEvent) {
   if (viewMode.value !== 'chat') return
   if (pendingConfirm.value) return
-  if (store.activeChat) return
-  if (!e.key.startsWith('Arrow')) return
-  if (isTypingTarget(e.target)) return
-  if (homeRecentRef.value?.onArrow(e.key)) e.preventDefault()
+
+  if (e.key.startsWith('Arrow')) {
+    // Arrows keep deferring to text fields, or they would break caret movement.
+    if (store.activeChat || isTypingTarget(e.target)) return
+    if (homeRecentRef.value?.onArrow(e.key)) e.preventDefault()
+    return
+  }
+
+  // Esc closes the open chat even while typing in the composer: escaping a
+  // chat is the more useful meaning of the key, and requiring a click-out
+  // first was the common complaint. Widgets that genuinely own Esc claim it
+  // with stopPropagation (see the slash-command picker in ChatPanel), so this
+  // never steals the key from them.
+  if (e.key === 'Escape') {
+    if (!store.activeChat) return
+    e.preventDefault()
+    closeChat()
+  }
 }
 
 function onShortcutKeydown(e: KeyboardEvent) {
@@ -587,14 +607,9 @@ function onShortcutKeydown(e: KeyboardEvent) {
   if (viewMode.value !== 'chat') return
   if (pendingConfirm.value) return
 
-  // Home screen: arrow keys roam the recent-chat grid, Enter opens the
-  // focused card (handled natively by the focused button). Only when no
-  // chat is open and focus isn't in a text field, so typing is unaffected.
-  if (!store.activeChat && !isTypingTarget(e.target) && e.key.startsWith('Arrow')) {
-    if (homeRecentRef.value?.onArrow(e.key)) e.preventDefault()
-    return
-  }
-
+  // Arrow keys and Esc are handled by onUnreservedKeydown, which is bound in
+  // both the PWA and the desktop app. Handling them here too made the desktop
+  // app run them twice.
   const mod = e.metaKey || e.ctrlKey
 
   // Cmd+T: new chat in the default General project.
@@ -621,15 +636,6 @@ function onShortcutKeydown(e: KeyboardEvent) {
     return
   }
 
-  // Esc: close the open chat. Input fields own their Esc (cancel edit, close
-  // the slash-command picker, clear the draft), so we only close when the
-  // focus is outside a text field.
-  if (e.key === 'Escape') {
-    if (!store.activeChat || isTypingTarget(e.target)) return
-    e.preventDefault()
-    closeChat()
-    return
-  }
 }
 
 function closeProject() {
@@ -690,9 +696,8 @@ onMounted(() => {
   window.addEventListener('touchstart', onTouchStart, { passive: true })
   window.addEventListener('touchend', onTouchEnd, { passive: true })
   window.addEventListener('touchcancel', onTouchEnd, { passive: true })
-  // Home-screen arrow navigation works in both the PWA and the desktop app;
-  // arrow keys aren't browser-reserved, so the PWA can bind them safely.
-  window.addEventListener('keydown', onHomeArrowKeydown)
+  // Arrow keys and Esc are not browser-reserved, so they bind in the PWA too.
+  window.addEventListener('keydown', onUnreservedKeydown)
   // Global keyboard shortcuts (Cmd+T, Cmd+A, Cmd+D) live in the desktop app
   // only: in a browser tab those combos are owned by the browser.
   if (isDesktopApp()) window.addEventListener('keydown', onShortcutKeydown)
@@ -704,7 +709,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('touchstart', onTouchStart)
   window.removeEventListener('touchend', onTouchEnd)
   window.removeEventListener('touchcancel', onTouchEnd)
-  window.removeEventListener('keydown', onHomeArrowKeydown)
+  window.removeEventListener('keydown', onUnreservedKeydown)
   if (isDesktopApp()) window.removeEventListener('keydown', onShortcutKeydown)
   window.removeEventListener('mousemove', handleSidebarDrag)
   window.removeEventListener('mouseup', stopSidebarDrag)

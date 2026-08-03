@@ -265,4 +265,64 @@ describe('ChatLayout home arrow navigation', () => {
     expect(document.activeElement).toBe(cards[0].element)
     wrapper.unmount()
   })
+
+  it('closes the open chat on Esc, including while typing in the composer', async () => {
+    // Requested behaviour: escaping a chat should not require clicking out of
+    // the composer first. Widgets that own Esc claim it with stopPropagation.
+    window.__CIAOBOT_DESKTOP__ = undefined
+    const wrapper = await mountHome()
+    const store = useProjectStore()
+    store.activeChatId = 'chat-1'
+    await nextTick()
+
+    const textarea = document.createElement('textarea')
+    document.body.appendChild(textarea)
+    textarea.focus()
+    textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await nextTick()
+
+    expect(store.activeChatId).toBeNull()
+    textarea.remove()
+    wrapper.unmount()
+  })
+
+  it('leaves Esc alone when a widget claims it with stopPropagation', async () => {
+    window.__CIAOBOT_DESKTOP__ = undefined
+    const wrapper = await mountHome()
+    const store = useProjectStore()
+    store.activeChatId = 'chat-1'
+    await nextTick()
+
+    const textarea = document.createElement('textarea')
+    document.body.appendChild(textarea)
+    textarea.addEventListener('keydown', (e) => {
+      if ((e as KeyboardEvent).key === 'Escape') e.stopPropagation()
+    })
+    textarea.focus()
+    textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await nextTick()
+
+    expect(store.activeChatId).toBe('chat-1')
+    textarea.remove()
+    wrapper.unmount()
+  })
+
+  it('advances exactly one card per press in the desktop app', async () => {
+    // The desktop app binds a second keydown listener (onShortcutKeydown) on
+    // top of the unconditional one. When both handled arrows, one press ran
+    // onArrow twice and focus skipped a card -- and only in the desktop app,
+    // so the PWA looked fine. Mode must not change how far an arrow moves.
+    window.__CIAOBOT_DESKTOP__ = true
+    const wrapper = await mountHome()
+    const cards = wrapper.findAll('.home-recent-card')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+    await nextTick()
+    expect(document.activeElement).toBe(cards[0].element)
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+    await nextTick()
+    expect(document.activeElement).toBe(cards[1].element)
+    wrapper.unmount()
+  })
 })
