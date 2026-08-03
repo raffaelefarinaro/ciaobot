@@ -4,17 +4,6 @@ import re
 from pathlib import Path
 
 
-# Modules being deleted by the parallel legacy-control-surface removal (arch
-# review finding 7). ARCHITECTURE.md no longer describes legacy as a supported
-# surface, so these have no index entry while they still exist on disk. Remove
-# them from this set (and re-add their lines to the doc) only if the deletion
-# is abandoned.
-_RETIRED_MODULES = {
-    "control_surfaces.py",
-    "control_surface_benchmark.py",
-}
-
-
 # Every top-level ciao/*.py module must be indexed in the "App repo layout"
 # block of docs/ARCHITECTURE.md, which the doc opens with ("Read this before
 # making any change in ciao/"). The same one-line-per-module rule applies to
@@ -49,10 +38,7 @@ def test_architecture_doc_indexes_every_ciao_module() -> None:
         (repo / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
     )
 
-    missing = [
-        m for m in _expected_modules(repo)
-        if m not in layout and m not in _RETIRED_MODULES
-    ]
+    missing = [m for m in _expected_modules(repo) if m not in layout]
 
     assert missing == [], (
         "Modules absent from the 'App repo layout' block in "

@@ -758,8 +758,8 @@ class ChatInfo:
     # Empty = provider default. Reset on handover: levels aren't portable
     # across providers.
     thinking_level: str = ""
-    # Empty inherits the application default. Persisted so experimental MCP
-    # and legacy chats can coexist without process-global configuration.
+    # Empty inherits the server default. MCP-only since the legacy/auto A/B
+    # surface was removed.
     control_surface: str = ""
     session_id: str = ""
     # SDK session ids this chat rotated through earlier in the SAME

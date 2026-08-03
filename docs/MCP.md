@@ -207,66 +207,6 @@ MCP replaces transport recipes, not behavioral knowledge.
   identity, memory semantics, project context, and cross-provider behavior are
   application policy rather than tool descriptions.
 
-## Paired release evaluation
-
-Run the smoke suite first:
-
-```bash
-ciao benchmark-control-surfaces --smoke
-```
-
-The release-grade run is:
-
-```bash
-ciao benchmark-control-surfaces \
-  --provider claude --provider codex \
-  --repeats 5 \
-  --output benchmark-results/full
-```
-
-This runs 8 scenarios × 5 repeats × 2 arms × 2 providers = **160 live
-turns**. Each legacy/MCP pair starts concurrently against isolated full-stack
-servers and identical fixtures. The suite covers vault read/search/write,
-workspace file round-trip, PWA project/chat creation, schedule list/create,
-and loop creation. Bounded memory is no longer a separate control-surface
-scenario: it's a plain `CLAUDE.md` region edited with `Edit`, not a control-plane
-write path.
-
-Every run records:
-
-- orchestrator wall time and provider duration;
-- raw provider usage plus a provider-correct token total;
-- provider tool names, MCP tool names, and MCP errors;
-- durable state or required output correctness;
-- surface compliance (zero MCP calls for legacy; at least one authenticated MCP
-  call for MCP).
-
-Hard account/provider blocks such as exhausted workspace credits or an
-organization spend limit are classified separately. The affected pair is
-excluded from efficiency metrics, the provider run stops early, and promotion
-is refused until the missing pairs can be rerun; a quota failure is neither a
-legacy win nor an MCP failure.
-
-An arm is eligible at 95% correctness and 95% surface compliance. Eligible
-arms score 60 points for correctness, 10 for compliance, 15 for median latency,
-10 for token efficiency, and 5 for provider-tool efficiency. A lead below
-three points is a tie. `REPORT.md`, `results.json`, isolated workspaces, server
-logs, and telemetry remain under the output directory.
-
-Promotion is explicit and refuses smoke/partial/tied results:
-
-```bash
-ciao benchmark-control-surfaces \
-  --provider claude --provider codex \
-  --repeats 5 \
-  --output benchmark-results/full \
-  --apply-to-workspace /path/to/ciaobot-workspace
-```
-
-This writes `.runtime/control_surface_decision.json`. Set
-`CIAO_CONTROL_SURFACE=auto` (or choose Auto per chat) to consume the promoted
-provider-specific winner.
-
 ## Validation status
 
 ### Default cutover (2026-07-19)

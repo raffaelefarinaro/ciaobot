@@ -45,8 +45,7 @@ ciao/                          Python backend (Starlette).
   custom_providers.py          User-managed OpenAI/Anthropic-compatible endpoint registry (`.ciao/custom_providers.json`; tokens stay in the runtime dir).
   control_plane.py             Provider-neutral, scope-enforcing application operations shared by MCP and PWA-owned managers.
   mcp_server.py                Embedded authenticated Streamable HTTP MCP adapter, scoped token registry, and project `.mcp.json` discovery (env-key status + observed/probed tools for Settings). HTTP endpoints live in ciao/web/routes_mcp.py.
-  control_surfaces.py          Persist/read promoted per-provider legacy-vs-MCP decisions for Auto chats.
-  control_surface_benchmark.py Paired live 8-scenario evaluator (latency, correctness, tools, tokens) and guarded winner promotion.
+  control_surfaces.py          Read previously promoted per-provider legacy-vs-MCP decisions for per-chat Auto.
   signals.py                   Restart / deploy signals.
   instance_lock.py             Process-lifetime lock for one backend per runtime directory (`.runtime/server.lock`).
   execution_modes.py           Claude permission mode normalization.
@@ -225,15 +224,20 @@ runtime fallback (`resolved_surface = "legacy"` on the agent request), not a
 user-facing surface. Self-disconnecting operations defer until their caller
 chat drains. See `docs/MCP.md`.
 
-MCP is the default control surface (`config.control_surface = "mcp"`) for both
-providers; `legacy` is a hidden fallback selectable via `CIAO_CONTROL_SURFACE`
-or the per-chat `ChatInfo.control_surface` escape hatch (the PWA no longer
-exposes a selector). `ChatInfo.control_surface` still permits legacy and MCP
-chats to coexist. `auto` reads a guarded, provider-specific decision from
-`.runtime/control_surface_decision.json`; missing, partial, tied, or malformed
-decisions resolve to legacy. `ciao benchmark-control-surfaces` produces the
-decision evidence from paired isolated full-stack runs and only promotes a
-complete 8-scenario, five-repeat result.
+MCP is the control surface (`config.control_surface = "mcp"`) for both
+providers; `legacy` survives as a hidden fallback selectable via
+`CIAO_CONTROL_SURFACE` or the per-chat `ChatInfo.control_surface` escape hatch
+(the PWA never exposed a selector), and as the automatic degrade when the MCP
+server is unavailable at request time. `ChatInfo.control_surface` still permits
+legacy and MCP chats to coexist. Accepted config/env values are `legacy` and
+`mcp` only: the `auto` A/B option and the paired `ciao
+benchmark-control-surfaces` evaluator that produced its evidence were removed
+once the evaluation had settled on MCP. The per-chat `auto` path in
+`ProjectChatManager` still resolves through `control_surfaces.resolve_auto_surface`,
+which reads `.runtime/control_surface_decision.json` and falls back to legacy
+for missing, partial, tied, or malformed decisions — but nothing writes that
+file any more, so an existing chat pinned to `auto` resolves from a stale
+decision or degrades to legacy.
 
 Server restart requests drain chat work before shutting down: active broker streams, already-queued follow-up turns, and background-subagent watchers are allowed to settle, while brand-new turns are rejected once draining begins. When drain starts, `ProjectChatManager.begin_restart_drain` publishes `server_restarting` on `/ws/events` (and the connect snapshot carries `restarting: true`) so every open PWA shows the full-screen restart overlay instead of treating turn rejection as a chat error. Shutdown starts only after several consecutive idle observations so the handoff from a completed parent turn to its background-agent watcher or synthesis stream cannot create a false-idle race. The macOS menu-bar action uses `/api/active-chats` as a guard before its direct launchd restart and asks the operator to retry once active chats finish.
 

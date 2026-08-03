@@ -23,8 +23,10 @@ def test_control_surface_defaults_to_mcp(tmp_path: Path) -> None:
 def test_control_surface_env_override(tmp_path: Path) -> None:
     config = _config(CIAO_WORKSPACE=str(tmp_path), CIAO_CONTROL_SURFACE="legacy")
     assert config.control_surface == "legacy"
+    # "auto" was the user-facing A/B benchmark option; removed with the
+    # benchmark, so the env value now falls back to the mcp default.
     config = _config(CIAO_WORKSPACE=str(tmp_path), CIAO_CONTROL_SURFACE="auto")
-    assert config.control_surface == "auto"
+    assert config.control_surface == "mcp"
 
 
 def test_control_surface_invalid_falls_back_to_mcp(tmp_path: Path) -> None:

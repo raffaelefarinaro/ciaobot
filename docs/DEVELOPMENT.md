@@ -40,7 +40,6 @@ ciao package-smoke --skip-frontend
 ciao auth claude --print-only              # show terminal OAuth command
 ciao auth codex --print-only               # show Codex / ChatGPT login command
 ciao auth ollama                           # run provider login helper
-ciao benchmark-control-surfaces --smoke   # 3 paired live MCP/legacy scenarios
 ```
 
 ### macOS venv workarounds
@@ -191,7 +190,6 @@ ciao vault-index --workspace default --format json  # Query the vault index
 ciao vault-search "keyword" --limit 5 # FTS search over the configured vault
 ciao vault-lint --vault-root memory-vault # Vault hygiene lint
 ciao os-audit --json # Strict AI OS setup and context-hygiene audit
-ciao benchmark-control-surfaces --provider claude --provider codex --repeats 5 # 240-turn release evaluation
 cd web && npm test             # Frontend unit tests
 cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 ```
