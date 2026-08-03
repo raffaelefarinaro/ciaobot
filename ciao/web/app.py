@@ -13,7 +13,7 @@ from starlette.responses import FileResponse, Response
 
 from ciao.node_proxy import StandbyProxyMiddleware
 from ciao.package_version import make_cached_package_status
-from ciao.mcp_server import (
+from ciao.web.routes_mcp import (
     mcp_env_keys_endpoint,
     mcp_server_item_endpoint,
     mcp_server_tools_endpoint,
