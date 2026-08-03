@@ -3229,6 +3229,35 @@ class ProjectChatManager:
         chat.handover_context_pending = False
         self._save()
 
+    def _reclaim_provider_sessions(
+        self,
+        chat: ChatInfo,
+        session_ids: list[str] | None = None,
+    ) -> None:
+        """Drop provider-side session blobs/threads for abandoned chats.
+
+        Claude deletes the SDK JSONL blob. Codex calls ``thread/delete`` so
+        rollouts under ``~/.codex/sessions`` are reclaimed the same way. Failures
+        are logged inside the provider helpers and never block archive/delete.
+        """
+        ids = (
+            list(session_ids)
+            if session_ids is not None
+            else ([chat.session_id] if chat.session_id else [])
+        )
+        workspace = self._config.workspace_root
+        if chat.provider == "claude":
+            for sid in ids:
+                if sid:
+                    self._transcripts.delete_sdk_session_blob(workspace, sid)
+            return
+        if chat.provider == "codex":
+            for sid in ids:
+                if sid:
+                    asyncio.ensure_future(
+                        CodexProvider.delete_thread(workspace, sid)
+                    )
+
     def delete_chat(self, chat_id: str) -> bool:
         chat = self._chats.pop(chat_id, None)
         if chat is None:
@@ -3243,10 +3272,7 @@ class ProjectChatManager:
         provider = self._providers.pop(chat_id, None)
         if provider:
             asyncio.ensure_future(provider.disconnect())
-        if chat.session_id and chat.provider == "claude":
-            self._transcripts.delete_sdk_session_blob(
-                self._config.workspace_root, chat.session_id
-            )
+        self._reclaim_provider_sessions(chat)
         # Explicit deletion is a tombstone, not merely a sidebar mutation.
         # Remove every recovery signal so startup repair cannot revive it.
         self._state.delete_context(ctx)
@@ -3270,9 +3296,9 @@ class ProjectChatManager:
     def archive_chat(self, chat_id: str) -> ArchiveOutcome | None:
         """Archive a chat's transcript and mark it as archived.
 
-        Also disconnects any live SDK provider and deletes the Claude Code
-        session JSONL blob to reclaim disk space. The markdown transcript in
-        the vault is the durable record.
+        Also disconnects any live provider and reclaims provider-side session
+        storage (Claude SDK JSONL blob, Codex ``thread/delete``). The markdown
+        transcript in the vault is the durable record.
 
         Returns an ArchiveOutcome carrying the archive path plus a
         pre-filtered JSONL string captured before blob deletion, so the
@@ -3317,10 +3343,7 @@ class ProjectChatManager:
         provider = self._providers.pop(chat_id, None)
         if provider:
             asyncio.ensure_future(provider.disconnect())
-        if chat.session_id and chat.provider == "claude":
-            self._transcripts.delete_sdk_session_blob(
-                self._config.workspace_root, chat.session_id
-            )
+        self._reclaim_provider_sessions(chat)
         self._unlink_chat_images(chat)
         chat.archived = True
         if result is not None:
@@ -3462,15 +3485,12 @@ class ProjectChatManager:
             session_id=chat.session_id,
             provider=chat.provider,
         )
-        # Delete the SDK session blob for the now-archived session, plus any
+        # Reclaim provider sessions for the archived transcript, plus any
         # earlier ones this chat rotated through (autocompact/resume-fallback)
         # before this reset — they're all being abandoned together.
-        if chat.provider == "claude":
-            for sid in [*chat.previous_session_ids, chat.session_id]:
-                if sid:
-                    self._transcripts.delete_sdk_session_blob(
-                        self._config.workspace_root, sid
-                    )
+        self._reclaim_provider_sessions(
+            chat, [*chat.previous_session_ids, chat.session_id]
+        )
         # Drop attached images: they belong to the archived transcript.
         self._unlink_chat_images(chat)
         # Reset session

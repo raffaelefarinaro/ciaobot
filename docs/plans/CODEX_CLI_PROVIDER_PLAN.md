@@ -235,7 +235,7 @@ Provider history:
 - Make Ciaobot's own turn transcript the stable UI history across handovers.
 - Use `thread/read(includeTurns=true)` to restore provider messages where needed, but do not assume every command interaction is persisted; the generated app-server schema explicitly describes stored thread items as lossy for some interactions.
 - Archive under `Logs/Chats/<chat-id>/codex/` and never copy Codex global credentials or unrelated global thread files into a workspace.
-- New session archives the visible transcript, interrupts/disconnects the process, and clears the thread ID. Provider-side deletion is optional and must be an explicit cleanup operation, not required to reset Ciaobot.
+- New session archives the visible transcript, interrupts/disconnects the process, and clears the thread ID. Provider-side cleanup calls Codex ``thread/delete`` (same reclaim path as archive/delete) so rollouts under ``~/.codex/sessions`` do not outlive the Ciaobot chat; failures are fail-open.
 
 Subagents:
 

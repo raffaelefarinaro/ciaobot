@@ -168,7 +168,7 @@ when a surviving provider session or a non-deleted audit record proves they
 were active. Explicit deletion clears provider state, normalized transcripts,
 and session state so recovery cannot revive it.
 
-Chat transcripts are streamed via WebSocket and archived to `Logs/Chats/<chat-id>/claude/` under the vault root (`transcripts.py`). The Claude Agent SDK is configured in `ciao/providers/claude.py` with a `fallback_model` chain (Opus to Sonnet to Haiku) and `setting_sources=["user", "project", "local"]` so `.claude/skills/`, `.claude/agents/`, and `.claude/commands/` auto-discover.
+Chat transcripts are streamed via WebSocket and archived to `Logs/Chats/<chat-id>/<provider>/` under the vault root (`transcripts.py`). Archive, delete, and new-session reclaim provider-side storage: Claude SDK JSONL blobs via `delete_session`, Codex threads via app-server `thread/delete` (fail-open). Archived `/messages` falls back to the vault markdown when the provider session is gone. The Claude Agent SDK is configured in `ciao/providers/claude.py` with a `fallback_model` chain (Opus to Sonnet to Haiku) and `setting_sources=["user", "project", "local"]` so `.claude/skills/`, `.claude/agents/`, and `.claude/commands/` auto-discover.
 
 The same server embeds a Streamable HTTP MCP endpoint at `/mcp/`.
 `CiaoControlPlane` wraps the existing project/chat, schedule, loop,

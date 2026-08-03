@@ -1443,22 +1443,20 @@ class CodexProvider(BaseSDKProvider):
             await peer.close()
 
     @classmethod
-    async def read_thread(
+    async def _with_control_peer(
         cls,
         workspace_root: Path,
-        thread_id: str,
         *,
+        name: str,
         command: Sequence[str] | None = None,
-    ) -> dict[str, Any] | None:
-        if not thread_id:
-            return None
+    ) -> StdioJsonRpcPeer | None:
         if command is None:
             binary = resolve_codex_binary()
             if not binary:
                 return None
             command = [binary, "app-server", "--stdio"]
         peer = StdioJsonRpcPeer(
-            command, cwd=workspace_root, name="codex history",
+            command, cwd=workspace_root, name=name,
             env=_codex_path_env(command[0]),
         )
         try:
@@ -1472,6 +1470,28 @@ class CodexProvider(BaseSDKProvider):
                 timeout=_CONTROL_TIMEOUT,
             )
             await peer.notify("initialized", {})
+        except Exception:
+            await peer.close()
+            raise
+        return peer
+
+    @classmethod
+    async def read_thread(
+        cls,
+        workspace_root: Path,
+        thread_id: str,
+        *,
+        command: Sequence[str] | None = None,
+    ) -> dict[str, Any] | None:
+        if not thread_id:
+            return None
+        peer: StdioJsonRpcPeer | None = None
+        try:
+            peer = await cls._with_control_peer(
+                workspace_root, name="codex history", command=command
+            )
+            if peer is None:
+                return None
             response = await peer.request(
                 "thread/read",
                 {"threadId": thread_id, "includeTurns": True},
@@ -1483,7 +1503,68 @@ class CodexProvider(BaseSDKProvider):
             logger.info("Codex thread %s is not readable", thread_id, exc_info=True)
             return None
         finally:
-            await peer.close()
+            if peer is not None:
+                await peer.close()
+
+    @classmethod
+    async def _mutate_thread(
+        cls,
+        method: str,
+        workspace_root: Path,
+        thread_id: str,
+        *,
+        command: Sequence[str] | None = None,
+    ) -> bool:
+        """Call ``thread/archive`` or ``thread/delete``. Fail-open on errors."""
+        if not thread_id or method not in {"thread/archive", "thread/delete"}:
+            return False
+        peer: StdioJsonRpcPeer | None = None
+        try:
+            peer = await cls._with_control_peer(
+                workspace_root, name=f"codex {method}", command=command
+            )
+            if peer is None:
+                return False
+            await peer.request(
+                method,
+                {"threadId": thread_id},
+                timeout=_CONTROL_TIMEOUT,
+            )
+            return True
+        except RpcError:
+            logger.info(
+                "Codex %s failed for thread %s", method, thread_id, exc_info=True
+            )
+            return False
+        finally:
+            if peer is not None:
+                await peer.close()
+
+    @classmethod
+    async def archive_thread(
+        cls,
+        workspace_root: Path,
+        thread_id: str,
+        *,
+        command: Sequence[str] | None = None,
+    ) -> bool:
+        """Soft-archive a Codex thread (``thread/archive``)."""
+        return await cls._mutate_thread(
+            "thread/archive", workspace_root, thread_id, command=command
+        )
+
+    @classmethod
+    async def delete_thread(
+        cls,
+        workspace_root: Path,
+        thread_id: str,
+        *,
+        command: Sequence[str] | None = None,
+    ) -> bool:
+        """Delete a Codex thread and reclaim its rollout (``thread/delete``)."""
+        return await cls._mutate_thread(
+            "thread/delete", workspace_root, thread_id, command=command
+        )
 
     @classmethod
     async def read_collab_tree(

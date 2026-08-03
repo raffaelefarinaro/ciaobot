@@ -162,6 +162,9 @@ for raw in sys.stdin:
                 {"type": "agentMessage", "id": "a1", "text": "world"},
             ]}],
         }}})
+    elif method in {"thread/archive", "thread/delete"}:
+        record(method, params)
+        send({"id": request_id, "result": {}})
     elif method == "turn/start":
         record("turn/start", params)
         send({"id": request_id, "result": {"turn": {"id": turn_id, "status": "inProgress", "items": []}}})
@@ -544,6 +547,26 @@ async def test_codex_provider_discovers_models_and_reads_thread(tmp_path: Path) 
     assert thread is not None
     assert thread["id"] == "thread-history"
     assert thread["turns"][0]["items"][1]["text"] == "world"
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_archives_and_deletes_threads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command, log = _fake_command(tmp_path)
+    monkeypatch.setenv("FAKE_CODEX_LOG", str(log))
+
+    assert await CodexProvider.archive_thread(
+        tmp_path, "thread-archive-me", command=command
+    )
+    assert await CodexProvider.delete_thread(
+        tmp_path, "thread-delete-me", command=command
+    )
+    assert await CodexProvider.delete_thread(tmp_path, "", command=command) is False
+
+    records = _read_log(log)
+    assert {"kind": "thread/archive", "payload": {"threadId": "thread-archive-me"}} in records
+    assert {"kind": "thread/delete", "payload": {"threadId": "thread-delete-me"}} in records
 
 
 @pytest.mark.asyncio

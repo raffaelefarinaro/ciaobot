@@ -2819,14 +2819,46 @@ def _overlay_codex_transcript_metadata(
                 entries[index][key] = source[key]
 
 
+def _messages_from_archived_transcript(
+    pcm,
+    config,
+    chat,
+) -> list[dict] | None:
+    """Parse vault markdown for an archived chat, or None when unavailable."""
+    if not getattr(chat, "archived", False) or not getattr(chat, "archive_path", ""):
+        return None
+    archive_path = Path(chat.archive_path)
+    if not archive_path.is_absolute():
+        archive_path = config.workspace_root / archive_path
+    try:
+        text = archive_path.read_text(encoding="utf-8")
+    except OSError:
+        logger.warning(
+            "Failed to read archived transcript for %s at %s",
+            getattr(chat, "chat_id", ""),
+            archive_path,
+        )
+        return None
+    parsed = pcm._parse_transcript_messages(text)
+    parsed = _normalize_handover_messages(parsed)
+    # Map transcript timestamp field to the frontend's sent_at key.
+    for parsed_entry in parsed:
+        if "timestamp" in parsed_entry and "sent_at" not in parsed_entry:
+            parsed_entry["sent_at"] = parsed_entry["timestamp"]
+    _overlay_assistant_timings(parsed, chat.user_turn_timings)
+    return parsed
+
+
 async def chat_messages(request: Request) -> JSONResponse:
     """Return conversation history for a chat.
 
     Claude chats read the SDK session file via ``get_session_messages``.
+    Codex chats read the app-server thread via ``thread/read``.
 
-    When a Claude chat is archived, its SDK session blob is deleted to reclaim
-    disk space. In that case we fall back to the durable markdown transcript in
-    the vault so the PWA can still render the conversation read-only.
+    When a chat is archived, provider-side session storage is deleted to reclaim
+    disk space (Claude SDK blob, Codex thread). In that case we fall back to the
+    durable markdown transcript in the vault so the PWA can still render the
+    conversation read-only.
     """
     pcm = request.app.state.project_chat_manager
     chat_id = request.path_params["chat_id"]
@@ -2869,6 +2901,10 @@ async def chat_messages(request: Request) -> JSONResponse:
         if current:
             _overlay_assistant_timings(current, chat.user_turn_timings)
             return JSONResponse(handover_messages + current)
+        archived = _messages_from_archived_transcript(pcm, config, chat)
+        if archived is not None:
+            return JSONResponse(handover_messages + archived)
+        return JSONResponse(handover_messages)
 
     try:
         from claude_agent_sdk import get_session_messages
@@ -2898,26 +2934,9 @@ async def chat_messages(request: Request) -> JSONResponse:
         msgs.extend(segment)
 
     if msgs is None:
-        if chat.archived and chat.archive_path:
-            archive_path = Path(chat.archive_path)
-            if not archive_path.is_absolute():
-                archive_path = config.workspace_root / archive_path
-            try:
-                text = archive_path.read_text(encoding="utf-8")
-                parsed = pcm._parse_transcript_messages(text)
-                parsed = _normalize_handover_messages(parsed)
-                # Map transcript timestamp field to the frontend's sent_at key.
-                for parsed_entry in parsed:
-                    if "timestamp" in parsed_entry and "sent_at" not in parsed_entry:
-                        parsed_entry["sent_at"] = parsed_entry["timestamp"]
-                _overlay_assistant_timings(parsed, chat.user_turn_timings)
-                return JSONResponse(handover_messages + parsed)
-            except OSError:
-                logger.warning(
-                    "Failed to read archived transcript for %s at %s",
-                    chat_id,
-                    archive_path,
-                )
+        archived = _messages_from_archived_transcript(pcm, config, chat)
+        if archived is not None:
+            return JSONResponse(handover_messages + archived)
         return JSONResponse(handover_messages)
 
     user_idx = 0
