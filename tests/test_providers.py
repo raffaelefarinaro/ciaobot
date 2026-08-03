@@ -51,7 +51,6 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
             captured["options"] = options
 
     config = SimpleNamespace(
-        memory_enabled=False,
         memory_char_limit=2200,
         user_char_limit=1375,
         vault_root=tmp_path / "memory-vault",
@@ -112,6 +111,51 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
 
 
 @pytest.mark.asyncio
+async def test_claude_injects_claude_md_memory_regions_without_opt_in_flag(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Bounded memory always injects from CLAUDE.md; there is no CIAO_MEMORY_ENABLED."""
+    from ciao.memory_tool import ensure_regions, write_region
+
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+    guide = tmp_path / "CLAUDE.md"
+    ensure_regions(guide)
+    write_region(guide, "memory", ["Prefer pytest for regressions"])
+    write_region(guide, "profile", ["User prefers concise replies"])
+
+    config = SimpleNamespace(
+        memory_char_limit=2200,
+        user_char_limit=1375,
+        vault_root=tmp_path / "memory-vault",
+    )
+    provider = ClaudeProvider(tmp_path, config=config)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="auto",
+        provider="claude",
+        control_surface="mcp",
+        mcp_url="http://127.0.0.1:8443/mcp/",
+        mcp_token="secret",
+        mcp_required=True,
+    )
+
+    await provider._ensure_connected(request)
+
+    append = captured["options"].system_prompt["append"]
+    assert "Prefer pytest for regressions" in append
+    assert "User prefers concise replies" in append
+    assert captured["options"].system_prompt.get("exclude_dynamic_sections") is True
+
+
+@pytest.mark.asyncio
 async def test_plan_mode_gets_no_control_plane_allowlist(tmp_path: Path, monkeypatch) -> None:
     """Plan mode's contract is "propose, don't act"; an allow rule would
     punch a hole in it, so the allowlist is withheld there even though the
@@ -123,7 +167,6 @@ async def test_plan_mode_gets_no_control_plane_allowlist(tmp_path: Path, monkeyp
             captured["options"] = options
 
     config = SimpleNamespace(
-        memory_enabled=False,
         memory_char_limit=2200,
         user_char_limit=1375,
         vault_root=tmp_path / "memory-vault",

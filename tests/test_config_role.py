@@ -20,13 +20,6 @@ def test_control_surface_defaults_to_mcp(tmp_path: Path) -> None:
     assert config.control_surface == "mcp"
 
 
-def test_memory_enabled_defaults_true_and_can_opt_out(tmp_path: Path) -> None:
-    config = _config(CIAO_WORKSPACE=str(tmp_path))
-    assert config.memory_enabled is True
-    disabled = _config(CIAO_WORKSPACE=str(tmp_path), CIAO_MEMORY_ENABLED="false")
-    assert disabled.memory_enabled is False
-
-
 def test_control_surface_env_override(tmp_path: Path) -> None:
     config = _config(CIAO_WORKSPACE=str(tmp_path), CIAO_CONTROL_SURFACE="legacy")
     assert config.control_surface == "legacy"

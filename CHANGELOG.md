@@ -17,7 +17,7 @@
 
 ### Fixed
 - fix(web): keep pinned-file edits when a model turn ends (`c64ba6f`)
-- fix: restore cloud transcription config and memory opt-out (`183a1e4`)
+- fix: restore VoiceTranscriber config for cloud gpt-transcribe (`183a1e4`)
 
 ### Maintenance
 - chore: bump openai to 2.52.0 (`12a65e3`)
