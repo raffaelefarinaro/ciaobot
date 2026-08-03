@@ -669,7 +669,12 @@ watch(
   () => [props.filePath, projectsStore.activeChatId, projectsStore.activeChatId ? projectsStore.streaming[projectsStore.activeChatId] : false] as const,
   ([filePath, chatId, isStreaming], oldValues) => {
     const wasStreaming = oldValues ? oldValues[2] : false
-    if (filePath && chatId && wasStreaming && !isStreaming) {
+    // Reload the file so the panel shows the model's latest version once its
+    // turn ends. Never while the user is mid-edit: `load()` resets the edit
+    // session, and wiping a half-typed edit the moment the model stops is the
+    // same class of loss the fileViewer store guards with canReplaceOpenFile.
+    // The user can hit Refresh after they Save or Cancel.
+    if (filePath && chatId && wasStreaming && !isStreaming && !isEditingText.value) {
       load()
     }
   }
@@ -1443,7 +1448,9 @@ watch(
     } else {
       const justStoppedStreaming = wasStreaming && !isStreaming
       const justFlippedModified = !wasModified && isModified
-      if (isModified && (justStoppedStreaming || justFlippedModified)) {
+      // Same guard as the stream-end reload above: the modified-file refresh
+      // must not clobber an edit the user has open in the panel.
+      if (isModified && (justStoppedStreaming || justFlippedModified) && !isEditingText.value) {
         refresh()
       }
     }
