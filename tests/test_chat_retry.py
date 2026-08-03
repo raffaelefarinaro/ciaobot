@@ -170,7 +170,7 @@ async def test_capability_error_triggers_tier_fallback(tmp_path: Path) -> None:
     # Pin OllamaSettings to the user's actual config (kimi5.2 = fable,
     # minimax-m3 = opus) so the retry target resolves to a real model.
     pcm._config.ollama = pcm._config.ollama.__class__(
-        haiku_model="deepseek-v4-flash:cloud",
+        haiku_model="deepseek-v4-flash:0731-cloud",
         sonnet_model="kimi-k2.7-code:cloud",
         opus_model="minimax-m3:cloud",
         fable_model="kimi5.2:cloud",
@@ -275,7 +275,7 @@ async def test_capability_fallback_persists_model_change(tmp_path: Path) -> None
     """After a successful capability fallback, chat.model must stick."""
     pcm = _make_manager(tmp_path)
     pcm._config.ollama = pcm._config.ollama.__class__(
-        haiku_model="deepseek-v4-flash:cloud",
+        haiku_model="deepseek-v4-flash:0731-cloud",
         sonnet_model="kimi-k2.7-code:cloud",
         opus_model="minimax-m3:cloud",
         fable_model="kimi5.2:cloud",
@@ -338,7 +338,7 @@ async def test_capability_fallback_preserves_images(tmp_path: Path) -> None:
     """Capability fallback must retry with the original images intact."""
     pcm = _make_manager(tmp_path)
     pcm._config.ollama = pcm._config.ollama.__class__(
-        haiku_model="deepseek-v4-flash:cloud",
+        haiku_model="deepseek-v4-flash:0731-cloud",
         sonnet_model="kimi-k2.7-code:cloud",
         opus_model="minimax-m3:cloud",
         fable_model="kimi5.2:cloud",
@@ -409,7 +409,7 @@ async def test_rate_limit_does_not_trigger_tier_fallback(tmp_path: Path) -> None
     """Rate limit errors are NOT capability errors — no retry, error surfaces."""
     pcm = _make_manager(tmp_path)
     pcm._config.ollama = pcm._config.ollama.__class__(
-        haiku_model="deepseek-v4-flash:cloud",
+        haiku_model="deepseek-v4-flash:0731-cloud",
         sonnet_model="kimi-k2.7-code:cloud",
         opus_model="minimax-m3:cloud",
         fable_model="kimi5.2:cloud",

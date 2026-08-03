@@ -64,20 +64,20 @@ def test_ollama_env_includes_tier_remaps_for_cloud() -> None:
     settings = OllamaSettings(
         models=("glm-5.2:cloud",),
         base_url="https://ollama.com", api_key="sk-cloud",
-        haiku_model="deepseek-v4-flash:cloud",
+        haiku_model="deepseek-v4-flash:0731-cloud",
         sonnet_model="kimi-k2.7-code:cloud",
         opus_model="glm-5.2:cloud",
         fable_model="minimax-m3:cloud",
     )
     env = ollama_env_for_model("glm-5.2:cloud", settings)
-    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "deepseek-v4-flash:cloud"
+    assert env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "deepseek-v4-flash:0731-cloud"
     assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "kimi-k2.7-code:cloud"
     assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "glm-5.2:cloud"
     assert env["ANTHROPIC_DEFAULT_FABLE_MODEL"] == "minimax-m3:cloud"
-    assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "deepseek-v4-flash:cloud"
+    assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "deepseek-v4-flash:0731-cloud"
     assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "kimi-k2.7-code:cloud"
-    assert env["CLAUDE_CODE_AUTO_MODE_MODEL"] == "deepseek-v4-flash:cloud"
-    assert env["CLAUDE_CODE_BG_CLASSIFIER_MODEL"] == "deepseek-v4-flash:cloud"
+    assert env["CLAUDE_CODE_AUTO_MODE_MODEL"] == "deepseek-v4-flash:0731-cloud"
+    assert env["CLAUDE_CODE_BG_CLASSIFIER_MODEL"] == "deepseek-v4-flash:0731-cloud"
 
 
 def test_ollama_env_remaps_control_plane_for_local_daemon() -> None:
@@ -87,7 +87,7 @@ def test_ollama_env_remaps_control_plane_for_local_daemon() -> None:
     settings = OllamaSettings(
         local_models=("llama3.1:latest",),
         local_url="http://localhost:11434",
-        haiku_model="deepseek-v4-flash:cloud",
+        haiku_model="deepseek-v4-flash:0731-cloud",
     )
     env = ollama_env_for_model("llama3.1:latest", settings)
     assert env["ANTHROPIC_BASE_URL"] == "http://localhost:11434"
@@ -166,7 +166,7 @@ def test_ciao_config_parses_ollama_env(monkeypatch, tmp_path) -> None:
     assert config.ollama.opus_model == "minimax-m3:cloud"
     assert config.ollama.fable_model == "glm-5.2:cloud"
     assert config.ollama.sonnet_model == "kimi-k2.7-code:cloud"
-    assert config.ollama.haiku_model == "deepseek-v4-flash:cloud"
+    assert config.ollama.haiku_model == "deepseek-v4-flash:0731-cloud"
 
 
 def test_ciao_config_reads_ollama_title_model(monkeypatch) -> None:
@@ -242,7 +242,7 @@ def _make_manager(
         media_root=runtime / "media",
         ollama=OllamaSettings(
             models=ollama_models, base_url=ollama_base_url, api_key=ollama_api_key,
-            haiku_model="deepseek-v4-flash:cloud",
+            haiku_model="deepseek-v4-flash:0731-cloud",
             sonnet_model="kimi-k2.7-code:cloud",
             opus_model="minimax-m3:cloud",
             fable_model="glm-5.2:cloud",

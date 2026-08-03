@@ -198,7 +198,7 @@ def test_extract_appends_section_when_archive_exists(tmp_path: Path) -> None:
             archive_path=archive,
             filtered_jsonl="dummy",
             config=_config(),
-            model="deepseek-v4-flash:cloud",
+            model="deepseek-v4-flash:0731-cloud",
         ))
 
     text = archive.read_text(encoding="utf-8")
@@ -229,7 +229,7 @@ def test_extract_is_idempotent_when_section_already_present(
             archive_path=archive,
             filtered_jsonl="dummy",
             config=_config(),
-            model="deepseek-v4-flash:cloud",
+            model="deepseek-v4-flash:0731-cloud",
         ))
 
     assert called["count"] == 0
@@ -248,7 +248,7 @@ def test_extract_skips_silently_when_archive_missing(
         archive_path=missing,
         filtered_jsonl="dummy",
         config=_config(),
-        model="deepseek-v4-flash:cloud",
+        model="deepseek-v4-flash:0731-cloud",
     ))
     assert not missing.exists()
 
@@ -274,7 +274,7 @@ def test_extract_retries_once_then_skips(
             archive_path=archive,
             filtered_jsonl="dummy",
             config=_config(),
-            model="deepseek-v4-flash:cloud",
+            model="deepseek-v4-flash:0731-cloud",
         ))
 
     assert calls["count"] == 2
@@ -308,7 +308,7 @@ def test_extract_succeeds_on_retry(
             archive_path=archive,
             filtered_jsonl="dummy",
             config=_config(),
-            model="deepseek-v4-flash:cloud",
+            model="deepseek-v4-flash:0731-cloud",
         ))
 
     assert calls["count"] == 2
@@ -331,7 +331,7 @@ def test_extract_skips_silently_on_empty_model_output(
             archive_path=archive,
             filtered_jsonl="dummy",
             config=_config(),
-            model="deepseek-v4-flash:cloud",
+            model="deepseek-v4-flash:0731-cloud",
         ))
 
     assert "## Session insights" not in archive.read_text(encoding="utf-8")
@@ -357,13 +357,13 @@ def test_call_model_uses_oneshot_runner(
         archive_path=archive,
         filtered_jsonl="dummy-jsonl",
         config=_config(),
-        model="deepseek-v4-flash:cloud",
+        model="deepseek-v4-flash:0731-cloud",
     ))
 
     text = archive.read_text(encoding="utf-8")
     assert "## Session insights" in text
     assert "via oneshot" in text
-    assert captured["model"] == "deepseek-v4-flash:cloud"
+    assert captured["model"] == "deepseek-v4-flash:0731-cloud"
     assert captured["timeout_s"] == 120.0
 
 
@@ -472,7 +472,7 @@ def test_extract_updates_project_doc_when_insights_carry_decisions(
             archive_path=archive,
             filtered_jsonl="dummy",
             config=_config(),
-            model="deepseek-v4-flash:cloud",
+            model="deepseek-v4-flash:0731-cloud",
             workspace_root=tmp_path,
             vault_root=tmp_path / "vault",
             project_doc_path="doc.md",
@@ -503,7 +503,7 @@ def test_extract_skips_project_doc_when_path_empty(
             archive_path=archive,
             filtered_jsonl="dummy",
             config=_config(),
-            model="deepseek-v4-flash:cloud",
+            model="deepseek-v4-flash:0731-cloud",
             workspace_root=tmp_path,
             vault_root=tmp_path / "vault",
         ))
@@ -553,7 +553,7 @@ def test_backfill_insights_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     config = _config()
     config.vault_root = vault_root
     config.workspace_root = workspace_root
-    config.insights_model = "deepseek-v4-flash:cloud"
+    config.insights_model = "deepseek-v4-flash:0731-cloud"
     
     calls = []
     
