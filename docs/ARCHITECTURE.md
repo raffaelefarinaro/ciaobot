@@ -29,31 +29,44 @@ ciao/                          Python backend (Starlette).
   loops.py                     In-chat loops: re-dispatch a prompt into a fixed chat every N minutes.
   dag.py                       Tiny DAG runner (Node kinds: bash / prompt / gate / subagent / retention; edges: ok / fail / always). Subprocess nodes can merge per-node env overrides for routed models. Each node is timed via `job_runs.track_sync`, so Automation page shows per-node status. Used by skill evolution and dependency review.
   sessions.py                  Session state, auth, signed cookies, JSON-backed StateStore for `.runtime/state.json`.
+  jsonio.py                    Small JSON I/O helpers.
   transcripts.py               Provider-neutral live transcripts and archives under memory-vault/Logs/Chats/.
   upgrade.py                   Self-update / deploy flow.
   voice.py                     Voice transcription: cloud (OpenAI) and local (mlx-whisper) engines, selected by `CIAO_TRANSCRIPTION_ENGINE`.
+  voice_extras.py              Self-heal optional local voice packages after upgrades (mlx-whisper, kokoro-onnx).
   app_settings.py              Runtime-mutable app settings (title, insights, and critique models, transcription engine/model), persisted at `.runtime/app_settings.json` and overlaid on CiaoConfig. Edited via Settings → Models.
   error_log.py                 Rotating file handler for server ERROR+ logs. Consumed by the error-triage schedule and the debug issue report.
   debug_report.py              Aggregate runtime issues (server error log + failed job runs) for the dev-mode `GET /api/debug/issues` endpoint and the `{{ISSUE_REPORT}}` schedule placeholder.
+  startup_triage.py            Startup error triage: harvest runtime errors into a fix-it chat through the schedule pipeline.
   job_runs.py                  Fail-open recorder for background-job runs. Appends one JSON record per run to `.runtime/job_runs.jsonl` (size-trimmed like `error_log.py`). Background tasks wrap their work in `track()`/`track_sync()`; `automation_summary()` feeds the Settings → Automation page.
   models.py                    Shared data models (ChatContext, AgentRequest, etc.).
+  model_tiers.py               Provider-neutral capability tiers (haiku / sonnet / opus / fable), mapped per provider.
   provider_service.py          Provider request builder and execution wrapper.
+  custom_providers.py          User-managed OpenAI/Anthropic-compatible endpoint registry (`.ciao/custom_providers.json`; tokens stay in the runtime dir).
   control_plane.py             Provider-neutral, scope-enforcing application operations shared by MCP and PWA-owned managers.
-  mcp_server.py                Embedded authenticated Streamable HTTP MCP adapter, scoped token registry, and project `.mcp.json` discovery (env-key status + observed/probed tools for Settings).
+  mcp_server.py                Embedded authenticated Streamable HTTP MCP adapter, scoped token registry, and project `.mcp.json` discovery (env-key status + observed/probed tools for Settings). HTTP endpoints live in ciao/web/routes_mcp.py.
   control_surfaces.py          Persist/read promoted per-provider legacy-vs-MCP decisions for Auto chats.
   control_surface_benchmark.py Paired live 8-scenario evaluator (latency, correctness, tools, tokens) and guarded winner promotion.
   signals.py                   Restart / deploy signals.
+  instance_lock.py             Process-lifetime lock for one backend per runtime directory (`.runtime/server.lock`).
   execution_modes.py           Claude permission mode normalization.
+  tool_path.py                 Resolve external CLI tools against the user's real login-shell PATH (Homebrew, nvm, `~/.local/bin`).
   git_sync.py                  Startup git pull / merge-before-push helpers.
   local_session.py             Current-branch git sync flow (LocalSessionManager): preflight, commit + pull + push, conflict chat.
+  node_state.py                Node identity and host/client role state for multi-device mode (`active`/`standby` migrated to `host`/`client`).
+  node_proxy.py                StandbyProxyMiddleware: client-mode tunnel that mirrors the host's API, WebSockets, and UI bundle.
+  network_addresses.py         Enumerate the LAN URLs the PWA is reachable at (node sharing, tray fallback).
   rate_limits.py               Rate-limit tracking and persistence.
   insights.py                  Post-archive session insights extraction.
   critique.py                  Multi-model adversarial review. Runs each reviewer through ciao/providers/oneshot.py with per-model routing (OpenRouter / Ollama / Anthropic). CLI: `python -m ciao.critique`. Used by the adversarial-review skill.
+  evals.py                     Native Agent Evals Harness for Ciaobot.
   fts_search.py                SQLite FTS5 full-text indexing and search for vault and transcripts.
   vault_index.py               Build/query memory-vault/INDEX.md from frontmatter and wikilinks. CLI: `ciao vault-index`.
   vault_lint.py                Read-only vault health validation for frontmatter, relative Markdown links, wikilinks, orphans, and duplicate stems. CLI: `ciao vault-lint`.
   os_audit.py                  Strict AI OS health audit covering required roots, vault hygiene, skill budgets, rule clashes, bounded memory, proposals, and failed jobs. CLI: `ciao os-audit`.
   trajectory_builder.py        Parse filtered session JSONL into a structured trajectory (turns, tools, skills, errors) and persist to ~/.ciao/trajectories/YYYY-MM/<session-id>.json. CLI: `python3 -m ciao.trajectory_builder --list [...]`.
+  subagent_tracking.py         Track subagent dispatches/completions from session JSONL for the background-agents pill.
+  subagent_loader.py           Subagent package loader supporting .md and folder-based packages.
   skill_evolution.py           Weekly pass: mine trajectories, flag skills tied to non-success sessions, draft edit proposals to the vault's Workspace/Skill-Proposals/. 15KB skill cap, optional test gate, no auto-apply. `run_evolution_pass` builds a per-skill DAG (has_proposal → semantic → tests → write, with a write_stub fallback for over-cap skills) via `ciao/dag.py`.
   dependency_review.py         Weekly dependency-changelog review as a `ciao/dag.py` pipeline (read_baseline gate → installed-versions gate → research subagent fanning out release checks → write_baseline gate). PyPI/npm are authoritative for installable package versions; manifest updates are rolled back and the run fails if registry validation or dependency installation fails. Trigger: `python3 -m ciao.dependency_review [--model sonnet] [--dry-run]`. Merges and gates the write to `.runtime/dependency_baseline.json` so a flaky run can't corrupt it.
   skills_inventory.py          Build the Settings skill inventory from workspace skills and skills-lock.json, with installed Claude badges.
@@ -64,18 +77,43 @@ ciao/                          Python backend (Starlette).
   memory_injector.py           Read the fenced `ciao:memory` / `ciao:profile` regions from the workspace CLAUDE.md at session start, render as a system-prompt block; also injects the baseline Ciaobot system instructions into every chat.
   memory_tool.py               Bounded memory regions: locate/read/diagnose the fenced markers in CLAUDE.md, and the one-time legacy `~/.ciao/*.md` migration. No CLI or control-plane write surface; the agent edits regions with `Edit`.
   memory_proposals.py          Scan archived `## Session insights` sections, propose memory entries to the vault's Workspace/Memory-Proposals.md.
+  project_doc_update.py        Archive-time canonical project doc updates from session insights (Decisions and Open loops).
   public_release.py            Public extraction allowlist, export copier, and private-data preflight scanner. CLI: `ciao public-preflight export <src> <dest>` then `ciao public-preflight scan <export-root> --private-patterns <file>`.
   release.py                   Release preparation: sync-bump versions across pyproject.toml, web/package.json, and package-lock.json; report dependency updates; regenerate the packaged gws-* stock skills from the installed gws CLI on `--apply`. CLI: `python -m ciao.release <version>`.
   gws_skills.py                Regenerate the curated gws-* stock skills from `gws generate-skills` and apply Ciaobot curation (profile-wrapper examples, auth notes, strip upstream openclaw metadata and See Also boilerplate). Used by `ciao/release.py`.
+  gws_auth.py                  Google Workspace OAuth helpers, token-health monitoring, and the server-managed re-login flow.
   package_version.py           Best-effort version probe: reads ciao.__version__ and queries the GitHub releases API for the latest published version. Powers GET /api/package/status.
   package_smoke.py             Wheel smoke target: build web, build wheel, install in a clean venv, and probe the installed app. CLI: `ciao package-smoke`.
+  desktop_build.py             Dev-mode rebuild/reinstall of the macOS Tauri desktop shell (CIAO_DEV_MODE deploy step).
   stock/                       Generic package-data assets for public installs: stock agents, commands, skills, launchd template, workspace docs, and system schedules.
     skills/                    Packaged generic skills (ciao-capabilities, web-research, workspace-authoring). Installed into every workspace's `.claude/skills/` by `ciao sync-skills`; a same-named workspace skill overrides the packaged copy.
     workspace/                 Agent-readable docs copied into installed workspaces (`CLAUDE.md`, `CIAO_CUSTOMIZATION.md`).
     schedules.json             System schedules (memory curation, workspace hygiene, skill evolution).
     schedules/                 Supplemental packaged schedule assets, including the legacy weekly-review template.
   web/                         PWA web server (Python routes) + static assets (built by web/).
+    app.py                     Starlette app factory: middleware, route table, SPA catch-all.
+    auth.py                    Session-cookie auth middleware and serializer.
+    security.py                Security response headers middleware.
+    routes_api.py              REST route handlers. Catch-all for handlers without a domain home.
+    routes_auth.py             Auth login/logout/check routes.
+    routes_chat.py             Chat WebSocket + events routes.
+    routes_node.py             Node/device route handlers (multi-device host/client, package status/update).
+    routes_mcp.py              MCP Settings HTTP endpoints (status, usage, env keys, project servers, tool probe).
+    routes_push.py             Web Push notification routes.
+    routes_helpers.py          Shared route helpers (api_error envelope, workspace path resolution, git sync).
+    agent_assets.py            Agent-facing instruction/subagent/command asset endpoints and OS audit.
+    commands.py                Slash-command listing and rate-limit endpoints.
+    connection_tracker.py      Tracks live WebSocket connections for the node connected-clients list.
+    chat_broker.py             Chat WebSocket broker, file-touch tagging, snapshot scheduling.
+    project_chats.py           ProjectChatManager: chat lifecycle, streaming, transcripts, archives, delegates.
+    file_snapshots.py          SnapshotStore: append-only file snapshots behind the file viewer.
+    push.py                    PushManager: bounded notification log and Web Push publishing.
+  # Route handlers live in ciao/web/routes_<domain>.py. routes_api.py is the catch-all for
+  # handlers without a domain home; new domains get their own routes_*.py rather than growing
+  # routes_api.py. mcp_server.py is the MCP adapter only; HTTP endpoints for MCP live in routes_mcp.py.
   macos_service.py             JSON launchd/service, engine-update, migration, and rollback surface used by Ciaobot.app.
+  menubar.py                   macOS menu bar companion (rumps tray): open the PWA, restart the server, view logs.
+  menubar_prefs.py             Persisted preferences for the macOS menu bar companion.
 
 web/                           Vue 3 PWA frontend.
   src/App.vue                  Root component.
@@ -128,7 +166,7 @@ skills/  subagents/  commands/ Canonical user-owned sources; `ciao sync-skills` 
 .agents/skills/                   Codex skill catalog and command/role wrappers. Locked packages installed by the upstream `skills` CLI are canonical here; Ciaobot-owned skills are linked here from `.claude/skills/`.
 .codex/{config.toml,agents/}      Generated native Codex agent registrations, role instructions, and project MCP registrations.
 memory-vault/<workspace>/      Standard per-workspace durable markdown memory: MEMORY.md, INDEX.md, entity folders, projects/{active,completed}/, Workspace/, Logs/Chats/.
-  .runtime/                      Local state: schedules.json, web_projects.json, custom_provider_tokens.json, control_surface_decision.json, MCP/provider tool telemetry JSONL, server.lock, job runs/errors, snapshots/, transcripts/, state.json. Not committed.
+  .runtime/                      Local state: schedules.json, web_projects.json, custom_provider_tokens.json, MCP/provider tool telemetry JSONL, server.lock, job runs/errors, snapshots/, transcripts/, state.json. Not committed.
   .ciao/custom_providers.json    Tracked custom endpoint definitions (URLs, runners, and model lists; never tokens).
 secrets/                       OAuth credentials (gitignored).
 ```
@@ -181,9 +219,11 @@ per-process `mcp_servers.ciaobot.*` overrides and an environment token excluded
 from its shell policy. Project servers from `.mcp.json` are also projected
 into the workspace `.codex/config.toml` during `ciao sync-skills`; user-owned
 Codex tables remain authoritative and credentials stay as environment
-references. When the MCP server is unavailable a chat degrades gracefully to
-legacy with a logged WARNING instead of failing the turn. Self-disconnecting
-operations defer until their caller chat drains. See `docs/MCP.md`.
+references. When the MCP server is unavailable a chat degrades gracefully to the legacy
+surface with a logged WARNING instead of failing the turn; that is an internal
+runtime fallback (`resolved_surface = "legacy"` on the agent request), not a
+user-facing surface. Self-disconnecting operations defer until their caller
+chat drains. See `docs/MCP.md`.
 
 MCP is the default control surface (`config.control_surface = "mcp"`) for both
 providers; `legacy` is a hidden fallback selectable via `CIAO_CONTROL_SURFACE`

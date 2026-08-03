@@ -17,7 +17,7 @@ from ciao.package_version import (
     package_status,
     running_install_present,
 )
-from ciao.web.routes_api import package_changelog_endpoint, package_status_endpoint
+from ciao.web.routes_node import package_changelog_endpoint, package_status_endpoint
 
 
 class _Response:
@@ -231,10 +231,10 @@ def test_package_changelog_handles_network_failure() -> None:
 
 
 def test_package_changelog_endpoint_combines_status_and_commits(monkeypatch) -> None:
-    import ciao.web.routes_api as routes_api
+    import ciao.web.routes_node as routes_node
 
     monkeypatch.setattr(
-        routes_api,
+        routes_node,
         "package_changelog",
         lambda **kwargs: {
             "commits": [{"sha": "abc1234", "subject": "fix: thing"}],
