@@ -59,9 +59,10 @@ class MemoryProposal:
     source_section: str
 
     def as_bullet(self) -> str:
-        from ciao.memory_tool import resolve_region
-
-        return f"- [{resolve_region(self.target)}] {self.text}  _(from: {self.source_section})_"
+        # Deliberately total: an unknown target is written through rather than
+        # raising, so one odd proposal cannot fail a whole archive batch.
+        target = "profile" if self.target == "user" else self.target
+        return f"- [{target}] {self.text}  _(from: {self.source_section})_"
 
 
 # ── Parsing ───────────────────────────────────────────────────────────────
