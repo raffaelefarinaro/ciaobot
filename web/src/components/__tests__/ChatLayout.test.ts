@@ -159,3 +159,110 @@ describe('ChatLayout', () => {
     wrapper.unmount()
   })
 })
+
+describe('ChatLayout home arrow navigation', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    if (!Element.prototype.scrollIntoView) {
+      Element.prototype.scrollIntoView = () => {}
+    }
+  })
+
+  afterEach(() => {
+    window.__CIAOBOT_DESKTOP__ = undefined
+    vi.restoreAllMocks()
+  })
+
+  async function mountHome() {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1180 })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'General',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    store.chats = Array.from({ length: 4 }, (_, i) => ({
+      chat_id: `chat-${i + 1}`,
+      project_id: 'project-1',
+      title: `Chat ${i + 1}`,
+      created_at: `2026-08-0${i + 1}T00:00:00Z`,
+      last_activity_at: `2026-08-0${i + 1}T00:00:00Z`,
+      archived: false,
+      local: true,
+    })) as unknown as typeof store.chats
+    store.activeChatId = null      // home screen: no chat open
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    taskStore.loops = [] as unknown as typeof taskStore.loops
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    // HomeRecentChats is deliberately NOT stubbed: the grid is the thing under
+    // test. Every other ChatLayout test stubs it, which is why the keyboard
+    // path here was never covered.
+    const wrapper = mount(ChatLayout, {
+      attachTo: document.body,
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+    await nextTick()
+    return wrapper
+  }
+
+  it('renders the recent-chat grid on the home screen', async () => {
+    const wrapper = await mountHome()
+    expect(wrapper.findAll('.home-recent-card').length).toBeGreaterThan(0)
+    wrapper.unmount()
+  })
+
+  it('moves focus across the grid from a window keydown', async () => {
+    const wrapper = await mountHome()
+    const cards = wrapper.findAll('.home-recent-card')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+    await nextTick()
+    expect(document.activeElement).toBe(cards[0].element)
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+    await nextTick()
+    expect(document.activeElement).toBe(cards[1].element)
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }))
+    await nextTick()
+    expect(document.activeElement).toBe(cards[0].element)
+    wrapper.unmount()
+  })
+
+  it('works in the PWA, not just the desktop app', async () => {
+    window.__CIAOBOT_DESKTOP__ = undefined
+    const wrapper = await mountHome()
+    const cards = wrapper.findAll('.home-recent-card')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+    await nextTick()
+    expect(document.activeElement).toBe(cards[0].element)
+    wrapper.unmount()
+  })
+})
