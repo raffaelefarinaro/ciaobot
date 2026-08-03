@@ -13,6 +13,7 @@
 - Merge branch 'feat/ollama-haiku-0731-default' into develop (`290381d`)
 - Skip result-ready toasts and pushes for delegate chats. (`166e3a1`)
 - refactor(memory): collapse bounded memory into CLAUDE.md regions (`6952d67`)
+- Enable Claude SDK ``exclude_dynamic_sections`` so cwd/git/OS leave the system-prompt cache prefix (`6efb45c`)
 
 ### Fixed
 - fix(web): keep pinned-file edits when a model turn ends (`c64ba6f`)
