@@ -231,7 +231,9 @@ def system_prompt_payload(
     """Build a ``SystemPromptPreset`` dict that appends Ciaobot instructions and ``memory_block``.
 
     The returned preset appends to Claude Code's default system prompt via the SDK's
-    ``SystemPromptPreset`` ``append`` field.
+    ``SystemPromptPreset`` ``append`` field. ``exclude_dynamic_sections`` moves
+    per-session cwd / git / OS / auto-memory paths into the first user message so
+    the static preset + append stay cacheable across sessions (Claude SDK ≥0.1.58).
     """
     existing_append = ""
     if isinstance(base_system_prompt, dict):
@@ -253,6 +255,7 @@ def system_prompt_payload(
         "type": "preset",
         "preset": "claude_code",
         "append": combined,
+        "exclude_dynamic_sections": True,
     }
 
 
