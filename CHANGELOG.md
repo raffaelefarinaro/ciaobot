@@ -14,6 +14,7 @@
 - Skip result-ready toasts and pushes for delegate chats. (`166e3a1`)
 - refactor(memory): collapse bounded memory into CLAUDE.md regions (`6952d67`)
 - Enable Claude SDK ``exclude_dynamic_sections`` so cwd/git/OS leave the system-prompt cache prefix (`6efb45c`)
+- Give the bounded-memory region grammar and guide diagnostics one owner in `memory_tool`, and drop dead parameters left by the region migration — including the unused `target` argument on the `memory_proposal_resolve` MCP tool and the `user_entries`/`expired_user_entries` aliases in the memory audit payload (`62a4539`)
 
 ### Fixed
 - fix(web): keep pinned-file edits when a model turn ends (`c64ba6f`)
