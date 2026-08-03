@@ -15,6 +15,7 @@
 - refactor(memory): collapse bounded memory into CLAUDE.md regions (`6952d67`)
 - Enable Claude SDK ``exclude_dynamic_sections`` so cwd/git/OS leave the system-prompt cache prefix (`6efb45c`)
 - Give the bounded-memory region grammar and guide diagnostics one owner in `memory_tool`, and drop dead parameters left by the region migration — including the unused `target` argument on the `memory_proposal_resolve` MCP tool and the `user_entries`/`expired_user_entries` aliases in the memory audit payload (`62a4539`)
+- Architecture review cleanup (#247): split the `node_*`/package handlers into `ciao/web/routes_node.py` and the MCP HTTP endpoints into `ciao/web/routes_mcp.py`, extract `SettingsAutomation.vue` and a shared `useFileComments` composable, and delete 11 dead control-plane methods. `docs/ARCHITECTURE.md` now indexes every top-level `ciao/` module, enforced by `tests/test_architecture_doc.py` (`07a7626`)
 
 ### Fixed
 - fix(web): keep pinned-file edits when a model turn ends (`c64ba6f`)
