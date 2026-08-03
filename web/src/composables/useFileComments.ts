@@ -59,11 +59,16 @@ export type UseFileCommentsOptions = {
   preCodeEl: Ref<HTMLElement | undefined>
   /** Close a pinned read popover when a compose popover opens (PinnedFilePanel). */
   closeReadPopover?: () => void
+  /** Scroll to a comment's highlight (kept per-surface: the two differ). */
+  scrollToHighlight: (id: string) => void
 }
 
 export function useFileComments(options: UseFileCommentsOptions) {
   const projectsStore = useProjectStore()
-  const { commentsForFile, containerEl, bodyEl } = options
+  const {
+    path, content, commentsForFile, isCommentable,
+    containerEl, bodyEl, mdEl, preEl, preCodeEl, closeReadPopover, scrollToHighlight,
+  } = options
 
   // ── Line & cell highlight state ────────────────────────────────────
   const DRAFT_COMMENT_ID = '__draft__'
@@ -205,6 +210,137 @@ export function useFileComments(options: UseFileCommentsOptions) {
     return line
   }
 
+  // Compute a {start, end} source line range for the active selection.
+  // Two strategies:
+  //   • <pre> branch: text-node offsets map 1:1 onto the source, so we
+  //     read range.startOffset/endOffset directly via charOffsetFrom and
+  //     count newlines. This is exact.
+  //   • markdown branch: rendered DOM doesn't map onto source, so we
+  //     substring-search the source markdown for the first ~50 chars (start
+  //     line) and the last ~50 chars (end line) of the selection. Falls back
+  //     to a single line when the second search misses.
+  function computeSelectionLines(range: Range, selectionText: string): LineRange {
+    const src = content()
+    if (!src) return null
+
+    // Plain-text branch: exact mapping via offsets into the <code> root.
+    const codeRoot = preCodeEl.value
+    if (codeRoot && codeRoot.contains(range.startContainer)) {
+      const startOff = charOffsetFrom(codeRoot, range.startContainer, range.startOffset)
+      const endOff = charOffsetFrom(codeRoot, range.endContainer, range.endOffset)
+      if (startOff != null && endOff != null) {
+        const a = Math.min(startOff, endOff)
+        const b = Math.max(startOff, endOff)
+        const start = lineAt(src, a)
+        // For end, look at the last char of the selection (b - 1) so a
+        // selection ending at the start of a line doesn't bleed into it.
+        const end = b > a ? lineAt(src, b - 1) : start
+        return { start, end: Math.max(end, start) }
+      }
+    }
+
+    // Markdown branch: best-effort substring lookup.
+    const trimmed = selectionText.trim()
+    if (!trimmed) return null
+    const head = trimmed.slice(0, 60)
+    let startIdx = src.indexOf(head)
+    if (startIdx === -1) {
+      // Try a shorter prefix from the first line of the rendered selection,
+      // which is usually the most stable token to find in source.
+      const firstLine = trimmed.split(/\n/, 1)[0].trim().slice(0, 30)
+      if (firstLine.length >= 4) startIdx = src.indexOf(firstLine)
+    }
+    if (startIdx === -1) return null
+    const start = lineAt(src, startIdx)
+
+    const tail = trimmed.slice(-60).trim()
+    if (tail.length >= 4 && tail !== head) {
+      // Search starting after the head match so identical phrases earlier in
+      // the doc don't pull the end line backwards.
+      const tailIdx = src.indexOf(tail, startIdx)
+      if (tailIdx !== -1) {
+        const end = lineAt(src, tailIdx + tail.length - 1)
+        return { start, end: Math.max(end, start) }
+      }
+    }
+    return { start, end: start }
+  }
+
+  // Position the floating comment trigger at the END of the selection
+  // (where the cursor lands after a drag-select), not at the bounding box of
+  // the whole range. Left is clamped so the pill never spills past the
+  // container's right edge (a no-op in the wide modal, required in the
+  // narrow pinned panel).
+  function updateSelectionAnchorFromRange(range: Range): void {
+    const container = containerEl.value
+    const body = bodyEl.value
+    if (!container || !body) {
+      selectionAnchor.value = null
+      return
+    }
+
+    const rects = range.getClientRects()
+    const endRect = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect()
+    const bodyRect = body.getBoundingClientRect()
+    const visible = endRect.bottom > bodyRect.top
+      && endRect.top < bodyRect.bottom
+      && endRect.right > bodyRect.left
+      && endRect.left < bodyRect.right
+    if (!visible) {
+      selectionAnchor.value = null
+      return
+    }
+
+    const containerRect = container.getBoundingClientRect()
+    const triggerWidth = 110  // approximate; matches the rendered "💬 Comment" pill
+    const panelPad = 8
+    const top = endRect.bottom - containerRect.top + 2
+    const idealLeft = endRect.right - containerRect.left + 6
+    const maxLeft = container.clientWidth - triggerWidth - panelPad
+    const left = Math.max(panelPad, Math.min(idealLeft, maxLeft))
+    selectionAnchor.value = { top, left }
+  }
+
+  // Track the live selection for the floating trigger. Only reacts to
+  // selections inside the rendered file view — selecting text in chrome
+  // (path subtitle, headers) shouldn't trigger the comment UI. While the
+  // composer is open the selection has been "captured" — don't keep
+  // retracking it (the textarea steals focus and would clear it).
+  function onSelectionChange(): void {
+    if (!isCommentable.value) {
+      lastSelectionRange = null
+      selectionAnchor.value = null
+      return
+    }
+    if (commentDraft.value) return
+    const sel = window.getSelection()
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+      lastSelectionRange = null
+      selectionAnchor.value = null
+      return
+    }
+    const range = sel.getRangeAt(0)
+    const targets: (HTMLElement | undefined)[] = [mdEl.value, preEl.value, preCodeEl.value]
+    const inside = targets.some(
+      el => el && el.contains(range.startContainer) && el.contains(range.endContainer)
+    )
+    if (!inside) {
+      lastSelectionRange = null
+      selectionAnchor.value = null
+      return
+    }
+    const text = sel.toString().trim()
+    if (!text) {
+      lastSelectionRange = null
+      selectionAnchor.value = null
+      return
+    }
+    lastSelectionText = text
+    lastSelectionLines = computeSelectionLines(range, text)
+    lastSelectionRange = range.cloneRange()
+    updateSelectionAnchorFromRange(range)
+  }
+
   // ── Markdown text highlighting ─────────────────────────────────────
   function clearHighlights(root: HTMLElement): void {
     const existing = root.querySelectorAll('.comment-highlight')
@@ -331,6 +467,81 @@ export function useFileComments(options: UseFileCommentsOptions) {
     commentDraftImages.value.splice(index, 1)
   }
 
+  function deleteFileComment(id: string): void {
+    projectsStore.removeFileComment(path(), id)
+    reapplyHighlights()
+  }
+
+  function onCsvCellActivate(cell: CsvCellRef): void {
+    const match = commentsForFile.value.find(
+      c => c.lineStart === cell.row && c.colIndex === cell.colIndex,
+    )
+    if (match) scrollToHighlight(match.id)
+  }
+
+  function openCommentForSelection(): void {
+    if (!selectionAnchor.value || !lastSelectionText) return
+    closeReadPopover?.()
+    draftAnchor.value = toViewportAnchor(selectionAnchor.value)
+    commentDraft.value = {
+      selection: lastSelectionText,
+      text: '',
+      lines: lastSelectionLines,
+      cell: null,
+    }
+    commentDraftImages.value = []
+    selectionAnchor.value = null
+    lastSelectionRange = null
+    lastCsvCell = null
+    window.getSelection()?.removeAllRanges()
+    reapplyHighlights()
+  }
+
+  function openCommentForCsvCell(): void {
+    if (!selectionAnchor.value || !lastCsvCell) return
+    closeReadPopover?.()
+    draftAnchor.value = toViewportAnchor(selectionAnchor.value)
+    commentDraft.value = {
+      selection: lastCsvCell.value,
+      text: '',
+      lines: { start: lastCsvCell.row, end: lastCsvCell.row },
+      cell: {
+        row: lastCsvCell.row,
+        colIndex: lastCsvCell.colIndex,
+        colHeader: lastCsvCell.colHeader,
+      },
+    }
+    commentDraftImages.value = []
+    selectionAnchor.value = null
+    lastSelectionRange = null
+    reapplyHighlights()
+  }
+
+  function saveComment(): void {
+    const draft = commentDraft.value
+    if (!draft) return
+    const note = draft.text.trim()
+    if (!note) return
+    projectsStore.addPendingComment({
+      path: path(),
+      selection: draft.selection,
+      comment: note,
+      lineStart: draft.lines?.start ?? null,
+      lineEnd: draft.lines?.end ?? null,
+      colIndex: draft.cell?.colIndex ?? null,
+      colHeader: draft.cell?.colHeader ?? null,
+      images: commentDraftImages.value.length ? commentDraftImages.value : undefined,
+    })
+    commentDraft.value = null
+    draftAnchor.value = null
+    commentDraftImages.value = []
+    lastSelectionText = ''
+    lastSelectionLines = null
+    lastSelectionRange = null
+    lastCsvCell = null
+    reapplyHighlights()
+  }
+
   // ── Edit existing comment ──────────────────────────────────────────
   function startEditComment(c: { id: string; comment: string; images?: string[] }, anchor?: Anchor | null): void {
     editingCommentId.value = c.id
@@ -355,6 +566,47 @@ export function useFileComments(options: UseFileCommentsOptions) {
 
   function removeEditImage(index: number): void {
     editingCommentImages.value.splice(index, 1)
+  }
+
+  function saveEditComment(id: string | null): void {
+    if (!id) return
+    const note = editDraftText.value.trim()
+    if (!note) return
+    const p = path()
+    projectsStore.updateFileComment(p, id, note)
+    // Sync images: remove existing ones that are gone, add new ones
+    const existing = projectsStore.fileCommentsFor(p).find(c => c.id === id)
+    const existingImages = existing?.images || []
+    const nextImages = editingCommentImages.value
+    for (const img of existingImages) {
+      if (!nextImages.includes(img)) projectsStore.removeFileCommentImage(p, id, img)
+    }
+    for (const img of nextImages) {
+      if (!existingImages.includes(img)) projectsStore.addFileCommentImage(p, id, img)
+    }
+    cancelEditComment()
+    reapplyHighlights()
+  }
+
+  async function handleEditImageUpload(e: Event, id: string | null): Promise<void> {
+    if (!id) return
+    const input = e.target as HTMLInputElement
+    if (!input.files?.length) return
+    const chatId = projectsStore.activeChatId
+    if (!chatId) return
+    try {
+      const refs = await projectsStore.uploadImageRefs(chatId, Array.from(input.files))
+      const p = path()
+      for (const ref of refs) {
+        projectsStore.addFileCommentImage(p, id, ref)
+      }
+      // Refresh local edit state from store
+      const c = projectsStore.fileCommentsFor(p).find(x => x.id === id)
+      if (c?.images) editingCommentImages.value = [...c.images]
+    } catch (err) {
+      console.error('Comment image upload failed:', err)
+    }
+    input.value = ''
   }
 
   return {
@@ -391,12 +643,22 @@ export function useFileComments(options: UseFileCommentsOptions) {
     clearHighlights,
     highlightInMarkdown,
     commentLineLabel,
+    computeSelectionLines,
+    updateSelectionAnchorFromRange,
+    onSelectionChange,
     onCsvCellSelect,
+    onCsvCellActivate,
+    openCommentForSelection,
+    openCommentForCsvCell,
+    deleteFileComment,
     cancelComment,
+    saveComment,
     handleDraftImageUpload,
     removeDraftImage,
     startEditComment,
     cancelEditComment,
+    saveEditComment,
+    handleEditImageUpload,
     removeEditImage,
   }
 }

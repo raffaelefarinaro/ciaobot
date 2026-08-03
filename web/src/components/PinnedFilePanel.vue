@@ -284,14 +284,13 @@ import { buildMarkdownIndex, resolveWikilinkTarget } from '../lib/wikilinks'
 import { openWorkspaceFileExternally } from '../lib/openWorkspaceFile'
 import { isCsvPath } from '../lib/csv'
 import { useHoverPinPopover } from '../composables/useHoverPinPopover'
-import { useFileComments, type LineRange } from '../composables/useFileComments'
+import { useFileComments } from '../composables/useFileComments'
 import { api } from '../lib/api'
 import PaneHeader from './PaneHeader.vue'
 import CommentComposePopover from './CommentComposePopover.vue'
 import { useFileViewerStore } from '../stores/fileViewer'
 const ExcalidrawViewer = defineAsyncComponent(() => import('./ExcalidrawViewer.vue'))
 const CsvViewer = defineAsyncComponent(() => import('./CsvViewer.vue'))
-import type { CsvCellRef } from './CsvViewer.vue'
 
 const props = defineProps<{ filePath: string }>()
 defineEmits<{ (e: 'close'): void }>()
@@ -732,14 +731,9 @@ function handlePfpBackdropClick(): void {
   closeCommentPopover()
 }
 
-function deleteFileComment(id: string): void {
-  projectsStore.removeFileComment(cleanPath.value, id)
-  nextTick(() => applyHighlights())
-}
-
 function deleteFromPopover(id: string): void {
   closeCommentPopover()
-  deleteFileComment(id)
+  comments.deleteFileComment(id)
 }
 
 function editFromPopover(c: { id: string; comment: string; images?: string[] }): void {
@@ -861,6 +855,7 @@ const comments = useFileComments({
   preEl,
   preCodeEl,
   closeReadPopover: closeCommentPopover,
+  scrollToHighlight,
 })
 // Script code reaches the shared methods/state through `comments.*`; only
 // the template-bound names are destructured here.
@@ -868,79 +863,16 @@ const {
   selectionAnchor, draftAnchor, commentDraft, composeText, csvCellComments,
   commentDraftImages, editingCommentId, editDraftText, editingCommentImages, editAnchor,
   isHighlightedLine, commentIdForLine, commentLineLabel,
-  onCsvCellSelect, cancelComment, handleDraftImageUpload, removeDraftImage,
-  cancelEditComment, removeEditImage,
+  onCsvCellSelect, onCsvCellActivate, openCommentForSelection, openCommentForCsvCell,
+  cancelComment, saveComment, handleDraftImageUpload, removeDraftImage,
+  cancelEditComment, saveEditComment, handleEditImageUpload, removeEditImage,
 } = comments
 comments.setApplyHighlights(applyHighlights)
 
-function computeSelectionLines(range: Range, selectionText: string): LineRange {
-  const src = content.value
-  if (!src) return null
-  const codeRoot = preCodeEl.value
-  if (codeRoot && codeRoot.contains(range.startContainer)) {
-    const startOff = comments.charOffsetFrom(codeRoot, range.startContainer, range.startOffset)
-    const endOff = comments.charOffsetFrom(codeRoot, range.endContainer, range.endOffset)
-    if (startOff != null && endOff != null) {
-      const a = Math.min(startOff, endOff)
-      const b = Math.max(startOff, endOff)
-      const start = comments.lineAt(src, a)
-      const end = b > a ? comments.lineAt(src, b - 1) : start
-      return { start, end: Math.max(end, start) }
-    }
-  }
-  const trimmed = selectionText.trim()
-  if (!trimmed) return null
-  const head = trimmed.slice(0, 60)
-  let startIdx = src.indexOf(head)
-  if (startIdx === -1) {
-    const firstLine = trimmed.split(/\n/, 1)[0].trim().slice(0, 30)
-    if (firstLine.length >= 4) startIdx = src.indexOf(firstLine)
-  }
-  if (startIdx === -1) return null
-  const start = comments.lineAt(src, startIdx)
-  const tail = trimmed.slice(-60).trim()
-  if (tail.length >= 4 && tail !== head) {
-    const tailIdx = src.indexOf(tail, startIdx)
-    if (tailIdx !== -1) {
-      const end = comments.lineAt(src, tailIdx + tail.length - 1)
-      return { start, end: Math.max(end, start) }
-    }
-  }
-  return { start, end: start }
-}
-
-function updateSelectionAnchorFromRange(range: Range): void {
-  const main = mainEl.value
-  const body = bodyEl.value
-  if (!main || !body) {
-    comments.selectionAnchor.value = null
-    return
-  }
-
-  // Anchor the trigger at the END of the selection (where the cursor lands
-  // after a drag-select), not at the bounding box of the whole range.
-  const rects = range.getClientRects()
-  const endRect = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect()
-  const bodyRect = body.getBoundingClientRect()
-  const visible = endRect.bottom > bodyRect.top
-    && endRect.top < bodyRect.bottom
-    && endRect.right > bodyRect.left
-    && endRect.left < bodyRect.right
-  if (!visible) {
-    comments.selectionAnchor.value = null
-    return
-  }
-
-  const mainRect = main.getBoundingClientRect()
-  const triggerWidth = 110  // approximate; matches the rendered "💬 Comment" pill
-  const panelPad = 8
-  const top = endRect.bottom - mainRect.top + 2
-  const idealLeft = endRect.right - mainRect.left + 6
-  const maxLeft = main.clientWidth - triggerWidth - panelPad
-  const left = Math.max(panelPad, Math.min(idealLeft, maxLeft))
-  comments.selectionAnchor.value = { top, left }
-}
-
+// Re-anchor the floating comment trigger on scroll, and close the hover-pin
+// read popover so it never floats detached from its highlight. Kept here (not
+// in useFileComments): the panel also suppresses re-anchoring while a
+// programmatic scroll-to-highlight is in flight.
 function onScrollReanchor(): void {
   if (isProgrammaticScrolling.value) return
   // A read popover is pinned to a highlight's screen position, so scrolling
@@ -953,156 +885,11 @@ function onScrollReanchor(): void {
       comments.selectionAnchor.value = null
       return
     }
-    updateSelectionAnchorFromRange(comments.lastSelectionRange)
+    comments.updateSelectionAnchorFromRange(comments.lastSelectionRange)
   } catch {
     comments.lastSelectionRange = null
     comments.selectionAnchor.value = null
   }
-}
-
-function onSelectionChange(): void {
-  if (!isCommentable.value) {
-    comments.lastSelectionRange = null
-    comments.selectionAnchor.value = null
-    return
-  }
-  if (comments.commentDraft.value) return
-  const sel = window.getSelection()
-  if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
-    comments.lastSelectionRange = null
-    comments.selectionAnchor.value = null
-    return
-  }
-  const range = sel.getRangeAt(0)
-  const targets: (HTMLElement | undefined)[] = [mdEl.value, preEl.value, preCodeEl.value]
-  const inside = targets.some(
-    el => el && el.contains(range.startContainer) && el.contains(range.endContainer)
-  )
-  if (!inside) {
-    comments.lastSelectionRange = null
-    comments.selectionAnchor.value = null
-    return
-  }
-  const text = sel.toString().trim()
-  if (!text) {
-    comments.lastSelectionRange = null
-    comments.selectionAnchor.value = null
-    return
-  }
-  comments.lastSelectionText = text
-  comments.lastSelectionLines = computeSelectionLines(range, text)
-  comments.lastSelectionRange = range.cloneRange()
-  updateSelectionAnchorFromRange(range)
-}
-
-function openCommentForSelection(): void {
-  if (!comments.selectionAnchor.value || !comments.lastSelectionText) return
-  closeCommentPopover()
-  comments.draftAnchor.value = comments.toViewportAnchor(comments.selectionAnchor.value)
-  comments.commentDraft.value = {
-    selection: comments.lastSelectionText,
-    text: '',
-    lines: comments.lastSelectionLines,
-    cell: null,
-  }
-  comments.commentDraftImages.value = []
-  comments.selectionAnchor.value = null
-  comments.lastSelectionRange = null
-  comments.lastCsvCell = null
-  window.getSelection()?.removeAllRanges()
-  nextTick(() => applyHighlights())
-}
-
-function onCsvCellActivate(cell: CsvCellRef): void {
-  const match = commentsForFile.value.find(
-    c => c.lineStart === cell.row && c.colIndex === cell.colIndex,
-  )
-  if (match) scrollToHighlight(match.id)
-}
-
-function openCommentForCsvCell(): void {
-  if (!comments.selectionAnchor.value || !comments.lastCsvCell) return
-  closeCommentPopover()
-  comments.draftAnchor.value = comments.toViewportAnchor(comments.selectionAnchor.value)
-  comments.commentDraft.value = {
-    selection: comments.lastCsvCell.value,
-    text: '',
-    lines: { start: comments.lastCsvCell.row, end: comments.lastCsvCell.row },
-    cell: {
-      row: comments.lastCsvCell.row,
-      colIndex: comments.lastCsvCell.colIndex,
-      colHeader: comments.lastCsvCell.colHeader,
-    },
-  }
-  comments.commentDraftImages.value = []
-  comments.selectionAnchor.value = null
-  comments.lastSelectionRange = null
-  nextTick(() => applyHighlights())
-}
-
-function saveComment(): void {
-  const draft = comments.commentDraft.value
-  if (!draft) return
-  const note = draft.text.trim()
-  if (!note) return
-  projectsStore.addPendingComment({
-    path: cleanPath.value,
-    selection: draft.selection,
-    comment: note,
-    lineStart: draft.lines?.start ?? null,
-    lineEnd: draft.lines?.end ?? null,
-    colIndex: draft.cell?.colIndex ?? null,
-    colHeader: draft.cell?.colHeader ?? null,
-    images: comments.commentDraftImages.value.length ? comments.commentDraftImages.value : undefined,
-  })
-  comments.commentDraft.value = null
-  comments.draftAnchor.value = null
-  comments.commentDraftImages.value = []
-  comments.lastSelectionText = ''
-  comments.lastSelectionLines = null
-  comments.lastCsvCell = null
-  nextTick(() => applyHighlights())
-}
-
-// ── Edit existing comment ────────────────────────────────────────────
-function saveEditComment(id: string | null): void {
-  if (!id) return
-  const note = comments.editDraftText.value.trim()
-  if (!note) return
-  const path = cleanPath.value
-  projectsStore.updateFileComment(path, id, note)
-  // Sync images: remove existing ones that are gone, add new ones
-  const existing = projectsStore.fileCommentsFor(path).find(c => c.id === id)
-  const existingImages = existing?.images || []
-  const nextImages = comments.editingCommentImages.value
-  for (const img of existingImages) {
-    if (!nextImages.includes(img)) projectsStore.removeFileCommentImage(path, id, img)
-  }
-  for (const img of nextImages) {
-    if (!existingImages.includes(img)) projectsStore.addFileCommentImage(path, id, img)
-  }
-  comments.cancelEditComment()
-}
-
-async function handleEditImageUpload(e: Event, id: string | null): Promise<void> {
-  if (!id) return
-  const input = e.target as HTMLInputElement
-  if (!input.files?.length) return
-  const chatId = projectsStore.activeChatId
-  if (!chatId) return
-  try {
-    const refs = await projectsStore.uploadImageRefs(chatId, Array.from(input.files))
-    const path = cleanPath.value
-    for (const ref of refs) {
-      projectsStore.addFileCommentImage(path, id, ref)
-    }
-    // Refresh local edit state from store
-    const c = projectsStore.fileCommentsFor(path).find(x => x.id === id)
-    if (c?.images) comments.editingCommentImages.value = [...c.images]
-  } catch (err) {
-    console.error('Comment image upload failed:', err)
-  }
-  input.value = ''
 }
 
 function onJumpPinnedCommentEvent(e: Event): void {
@@ -1117,7 +904,7 @@ function onJumpPinnedCommentEvent(e: Event): void {
 }
 
 if (typeof document !== 'undefined') {
-  document.addEventListener('selectionchange', onSelectionChange)
+  document.addEventListener('selectionchange', comments.onSelectionChange)
 }
 onMounted(() => {
   bodyEl.value?.addEventListener('scroll', onScrollReanchor, { passive: true })
@@ -1128,7 +915,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   clearHoverClose()
   if (typeof document !== 'undefined') {
-    document.removeEventListener('selectionchange', onSelectionChange)
+    document.removeEventListener('selectionchange', comments.onSelectionChange)
   }
   if (typeof window !== 'undefined') {
     window.removeEventListener('ciao:jump-pinned-comment', onJumpPinnedCommentEvent)
