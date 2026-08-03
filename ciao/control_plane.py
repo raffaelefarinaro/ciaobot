@@ -23,11 +23,18 @@ from typing import Any, Literal
 from ciao import job_runs, vault_index, vault_lint
 from ciao.fts_search import get_db_path, index_vault, init_db, search_vault
 from ciao.loops import publish_loops_changed
+from ciao.memory_tool import resolve_region
 from ciao.models import ControlSurface
 from ciao.web.project_chats import _MAX_ACTIVE_DELEGATES
 from ciao.schedules import ScheduleEntry, compute_next_run
 
 logger = logging.getLogger(__name__)
+
+# One grammar for a proposal bullet, shared by the list and dismiss paths. The
+# trailing `_(from: …)_` source tag is optional and captured when present.
+_PROPOSAL_BULLET_RE = re.compile(
+    r"^\s*-\s+\[(memory|user|profile)\]\s+(.+?)(?:\s+_\(from:\s*(.+?)\)_)?\s*$"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,17 +337,11 @@ class CiaoControlPlane:
         if not path.exists():
             return _ok([])
         rows: list[dict[str, str]] = []
-        pattern = re.compile(
-            r"^\s*-\s+\[(memory|user|profile)\]\s+(.+?)(?:\s+_\(from:\s*(.+?)\)_)?\s*$"
-        )
         for raw in path.read_text(encoding="utf-8").splitlines():
-            match = pattern.match(raw)
+            match = _PROPOSAL_BULLET_RE.match(raw)
             if match:
-                target = match.group(1)
-                if target == "user":
-                    target = "profile"
                 rows.append({
-                    "target": target,
+                    "target": resolve_region(match.group(1)),
                     "text": match.group(2).strip(),
                     "source": (match.group(3) or "").strip(),
                 })
@@ -352,7 +353,6 @@ class CiaoControlPlane:
         text: str,
         *,
         action: Literal["accept", "reject"],
-        target: str = "",
     ) -> dict[str, Any]:
         """Dismiss exactly one proposal from the queue.
 
@@ -361,7 +361,6 @@ class CiaoControlPlane:
         first, then dismiss the proposal (the reverse loses the fact if the
         turn dies between the two steps).
         """
-        del target  # retained for API compatibility; no longer used for writes
         if action not in {"accept", "reject"}:
             raise ControlPlaneError("invalid_action", "action must be accept or reject.")
         path = self._memory_proposals_path(principal)
@@ -381,15 +380,10 @@ class CiaoControlPlane:
         if len(candidates) > 1:
             raise ControlPlaneError("proposal_ambiguous", "The text matched more than one proposal; use a longer substring.")
         index, line = candidates[0]
-        match = re.match(
-            r"^\s*-\s+\[(memory|user|profile)\]\s+(.+?)(?:\s+_\(from:.*\)_)?\s*$",
-            line,
-        )
+        match = _PROPOSAL_BULLET_RE.match(line)
         if match is None:
             raise ControlPlaneError("proposal_invalid", "The matching proposal has an unsupported format.")
-        proposal_target = match.group(1)
-        if proposal_target == "user":
-            proposal_target = "profile"
+        proposal_target = resolve_region(match.group(1))
         proposal_text = match.group(2).strip()
         del lines[index]
         path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")

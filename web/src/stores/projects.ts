@@ -492,6 +492,10 @@ export const useProjectStore = defineStore('projects', () => {
     return chat.last_activity_at || chat.created_at
   }
 
+  // Built once per chats mutation so the delegate filters below stay linear
+  // instead of scanning the whole list for every chat's supervisor.
+  const chatsById = computed(() => new Map(chats.value.map(c => [c.chat_id, c])))
+
   // True when this chat is a nested delegate whose supervisor is still a
   // visible (non-archived, local) chat. Used to hide subchats from home /
   // recent surfaces so you jump back into the supervisor and reach children
@@ -499,7 +503,7 @@ export const useProjectStore = defineStore('projects', () => {
   function isNestedDelegate(chat: ChatInfo): boolean {
     const parentId = chat.spawned_from_chat_id
     if (!parentId) return false
-    const parent = chats.value.find(c => c.chat_id === parentId)
+    const parent = chatsById.value.get(parentId)
     return Boolean(parent && !parent.archived && parent.local !== false)
   }
 

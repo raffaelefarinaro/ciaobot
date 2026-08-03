@@ -135,26 +135,20 @@ def build_memory_block(
     memory_char_limit: int = DEFAULT_MEMORY_CHAR_LIMIT,
     user_char_limit: int = DEFAULT_USER_CHAR_LIMIT,
     today: datetime.date | None = None,
-    # Legacy kwarg kept for one-release call-site tolerance; ignored.
-    memory_dir: Path | None = None,
 ) -> str:
     """Read both CLAUDE.md regions and render the combined block.
 
     Expired entries are filtered out of the prompt but still count toward
     the stored usage shown in the header.
     """
-    del memory_dir  # legacy; regions live in the guide
     if guide_path is None:
         logger.warning("memory_injector: guide_path is required; returning empty")
         return ""
     try:
         mem_entries, mem_diags = read_region(guide_path, "memory")
         usr_entries, usr_diags = read_region(guide_path, "profile")
-        if mem_diags or usr_diags:
-            for diag in (*mem_diags, *usr_diags):
-                logger.info(
-                    "memory_injector: %s (%s)", diag.message, diag.code
-                )
+        for diag in (*mem_diags, *usr_diags):
+            logger.info("memory_injector: %s (%s)", diag.message, diag.code)
     except Exception:  # noqa: BLE001
         logger.exception("memory_injector: failed to load regions from %s", guide_path)
         return ""
@@ -268,16 +262,8 @@ def _mcp_system_instructions(instructions: str) -> str:
     MCP tools are self-describing and the server-level instructions already state
     the prefer-MCP policy, so repeating transport recipes in the prompt is noise.
     """
-    # Drop any leftover memory-CLI recipe sentence if present in older prompts.
-    text = instructions.replace(
-        " Edit with `ciao memory read|add|replace|remove --target memory|user --text \"…\"`.",
-        "",
-    ).replace(
-        " Edit the `ciao:memory` / `ciao:profile` regions in CLAUDE.md with Edit.",
-        "",
-    )
     # Drop the vault CLI fallback + hygiene recipe lines.
-    text = text.replace(
+    text = instructions.replace(
         "- Direct CLI fallback: `ciao vault-search \"<query>\" --limit 5`; rebuild stale search/entity data with `ciao vault-index`.\n",
         "",
     ).replace(

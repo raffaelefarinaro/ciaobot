@@ -1405,21 +1405,13 @@ class CodexProvider(BaseSDKProvider):
         cached = _MODEL_CACHE.get(key)
         if cached and not force and time.monotonic() - cached[0] < _MODEL_CACHE_TTL:
             return [dict(item) for item in cached[1]]
-        peer = StdioJsonRpcPeer(
-            command, cwd=workspace_root, name="codex model catalog",
-            env=_codex_path_env(command[0]),
-        )
+        peer: StdioJsonRpcPeer | None = None
         try:
-            await peer.start()
-            await peer.request(
-                "initialize",
-                {
-                    "clientInfo": {"name": "ciaobot", "title": "Ciaobot", "version": "0.4"},
-                    "capabilities": {"experimentalApi": True},
-                },
-                timeout=_CONTROL_TIMEOUT,
+            peer = await cls._with_control_peer(
+                workspace_root, name="codex model catalog", command=command
             )
-            await peer.notify("initialized", {})
+            if peer is None:
+                return []
             catalog: list[dict[str, Any]] = []
             cursor: str | None = None
             for _page in range(20):
@@ -1444,7 +1436,8 @@ class CodexProvider(BaseSDKProvider):
             logger.warning("Codex model discovery failed", exc_info=True)
             return []
         finally:
-            await peer.close()
+            if peer is not None:
+                await peer.close()
 
     @classmethod
     async def _with_control_peer(

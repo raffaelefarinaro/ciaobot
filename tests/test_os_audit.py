@@ -78,7 +78,7 @@ def test_audit_rules_deduplicates_linked_workspace_guides(tmp_path: Path) -> Non
     )
     (tmp_path / "AGENTS.md").symlink_to("CLAUDE.md")
 
-    res = audit_rules(tmp_path, memory_dir=tmp_path / "bounded")
+    res = audit_rules(tmp_path)
     assert res["rule_clashes_found"] == 0
     assert res["rule_overlaps_found"] == 0
     assert res["errors"] == []
@@ -89,14 +89,14 @@ def test_audit_rules_separates_overlaps_from_conflicts(tmp_path: Path) -> None:
     (tmp_path / "CLAUDE.md").write_text(same, encoding="utf-8")
     (tmp_path / "AGENTS.md").write_text(same, encoding="utf-8")
 
-    overlap = audit_rules(tmp_path, memory_dir=tmp_path / "bounded")
+    overlap = audit_rules(tmp_path)
     assert overlap["rule_overlaps_found"] == 1
     assert overlap["rule_clashes_found"] == 0
 
     (tmp_path / "CLAUDE.md").write_text("- Always use rtk for shell commands.", encoding="utf-8")
     (tmp_path / "AGENTS.md").write_text("- Never use rtk for shell commands.", encoding="utf-8")
 
-    conflict = audit_rules(tmp_path, memory_dir=tmp_path / "bounded")
+    conflict = audit_rules(tmp_path)
     assert conflict["rule_overlaps_found"] == 0
     assert conflict["rule_clashes_found"] == 1
     assert conflict["clashes"][0]["signature"] == "use rtk for shell commands"
@@ -160,7 +160,6 @@ def test_audit_memory_counts_only_canonical_proposals_in_each_workspace(
         )
 
     res = audit_memory(
-        memory_dir=tmp_path / "bounded",
         vault_root=vault,
         today=datetime.date(2026, 7, 26),
     )
@@ -177,7 +176,6 @@ def test_audit_memory_uses_explicit_external_proposal_paths(tmp_path: Path) -> N
     external.write_text("- [user] pending preference\n", encoding="utf-8")
 
     res = audit_memory(
-        memory_dir=tmp_path / "bounded",
         vault_root=vault,
         proposal_paths=[external],
         today=datetime.date(2026, 7, 26),
@@ -201,7 +199,7 @@ def test_audit_memory_surfaces_proposal_discovery_errors(
         return original_iterdir(path)
 
     monkeypatch.setattr(Path, "iterdir", failing_iterdir)
-    res = audit_memory(memory_dir=tmp_path / "bounded", vault_root=vault)
+    res = audit_memory(vault_root=vault)
 
     assert res["pending_memory_proposals"] == 0
     assert res["errors"][0]["type"] == "unreadable_proposal_root"
@@ -330,7 +328,6 @@ def test_run_os_audit_reports_unreadable_vault_markdown(tmp_path: Path) -> None:
         workspace_dir=workspace,
         vault_root=vault,
         runtime_dir=runtime,
-        memory_dir=bounded,
     )
 
     assert report["status"] == "error"
@@ -414,7 +411,6 @@ def test_run_os_audit_missing_roots_is_error(tmp_path: Path) -> None:
         workspace_dir=workspace,
         vault_root=workspace / "memory-vault",
         runtime_dir=workspace / ".runtime",
-        memory_dir=tmp_path / "bounded",
     )
     assert report["status"] == "error"
     assert report["total_errors"] == 3
@@ -479,7 +475,6 @@ def test_run_os_audit_counts_every_actionable_finding(tmp_path: Path) -> None:
         workspace_dir=workspace,
         vault_root=vault,
         runtime_dir=runtime,
-        memory_dir=bounded,
         today=datetime.date(2026, 7, 26),
     )
     assert report["status"] == "needs_attention"
@@ -504,7 +499,6 @@ def test_os_audit_counts_and_formats_new_vault_findings(tmp_path: Path) -> None:
         workspace_dir=workspace,
         vault_root=vault,
         runtime_dir=runtime,
-        memory_dir=bounded,
     )
 
     assert len(report["vault_hygiene"]["frontmatter_errors"]) == 1
@@ -527,7 +521,6 @@ def test_os_audit_counts_frontmatter_findings_without_markdown_findings(
         workspace_dir=workspace,
         vault_root=vault,
         runtime_dir=runtime,
-        memory_dir=bounded,
     )
 
     assert len(report["vault_hygiene"]["frontmatter_errors"]) == 1
@@ -552,7 +545,6 @@ def test_os_audit_counts_markdown_findings_without_frontmatter_findings(
         workspace_dir=workspace,
         vault_root=vault,
         runtime_dir=runtime,
-        memory_dir=bounded,
     )
 
     assert len(report["vault_hygiene"]["frontmatter_errors"]) == 0
@@ -579,7 +571,6 @@ def test_os_audit_source_discovery_matches_vault_lint_exclusions_and_suffixes(
         workspace_dir=workspace,
         vault_root=vault,
         runtime_dir=runtime,
-        memory_dir=bounded,
     )
 
     unreadable_paths = {
@@ -607,7 +598,6 @@ def test_os_audit_reports_vault_traversal_failure(
         workspace_dir=workspace,
         vault_root=vault,
         runtime_dir=runtime,
-        memory_dir=bounded,
     )
 
     assert report["status"] == "error"
@@ -642,7 +632,6 @@ def test_run_os_audit_preserves_distinct_errors_for_the_same_file(
         workspace_dir=workspace,
         vault_root=vault,
         runtime_dir=runtime,
-        memory_dir=bounded,
     )
 
     assert report["status"] == "error"

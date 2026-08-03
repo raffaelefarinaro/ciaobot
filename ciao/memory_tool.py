@@ -76,25 +76,34 @@ _INVISIBLE_CHARS = (
     "\u202e",  # RLO
 )
 
-_INVISIBLE_CHAR_SET = frozenset(_INVISIBLE_CHARS)
-
+# Only the heading and the advisory cap stamped into the start marker differ
+# between regions; the marker grammar itself is uniform, so derive it from the
+# region name rather than hand-writing four strings per region.
+_REGION_FACTS: dict[MemoryRegion, tuple[str, int]] = {
+    "memory": ("## Agent memory", DEFAULT_MEMORY_CHAR_LIMIT),
+    "profile": ("## User profile", DEFAULT_USER_CHAR_LIMIT),
+}
 
 _REGION_META: dict[MemoryRegion, dict[str, str]] = {
-    "memory": {
-        "start": "<!-- ciao:memory:start cap=2200 -->",
-        "end": "<!-- ciao:memory:end -->",
-        "heading": "## Agent memory",
-        "start_re": r"<!--\s*ciao:memory:start(?:\s+cap=\d+)?\s*-->",
-        "end_re": r"<!--\s*ciao:memory:end\s*-->",
-    },
-    "profile": {
-        "start": "<!-- ciao:profile:start cap=1375 -->",
-        "end": "<!-- ciao:profile:end -->",
-        "heading": "## User profile",
-        "start_re": r"<!--\s*ciao:profile:start(?:\s+cap=\d+)?\s*-->",
-        "end_re": r"<!--\s*ciao:profile:end\s*-->",
-    },
+    region: {
+        "start": f"<!-- ciao:{region}:start cap={cap} -->",
+        "end": f"<!-- ciao:{region}:end -->",
+        "heading": heading,
+        "start_re": rf"<!--\s*ciao:{region}:start(?:\s+cap=\d+)?\s*-->",
+        "end_re": rf"<!--\s*ciao:{region}:end\s*-->",
+    }
+    for region, (heading, cap) in _REGION_FACTS.items()
 }
+
+# Whole fenced blocks (markers plus body), for callers that need to scan a
+# guide body without double-counting region entries.
+_REGION_BLOCK_RE = re.compile(
+    "|".join(
+        f"{_REGION_META[region]['start_re']}.*?{_REGION_META[region]['end_re']}"
+        for region in REGIONS
+    ),
+    re.DOTALL,
+)
 
 
 # ── Legacy paths (one-release migration tolerance) ─────────────────────────
@@ -111,14 +120,6 @@ def default_memory_dir() -> Path:
     if override:
         return Path(override).expanduser()
     return Path.home() / ".ciao"
-
-
-def memory_path(memory_dir: Path | None = None) -> Path:
-    return (memory_dir or default_memory_dir()) / "memory.md"
-
-
-def user_path(memory_dir: Path | None = None) -> Path:
-    return (memory_dir or default_memory_dir()) / "user.md"
 
 
 # ── Entry parsing / serialization ─────────────────────────────────────────
@@ -152,7 +153,7 @@ def total_chars(entries: list[str]) -> int:
 
 def contains_invisible_unicode(text: str) -> bool:
     """True when *text* contains any character from ``_INVISIBLE_CHARS``."""
-    return any(ch in text for ch in _INVISIBLE_CHAR_SET)
+    return any(ch in text for ch in _INVISIBLE_CHARS)
 
 
 def region_usage(entries: list[str], limit: int) -> dict[str, Any]:
@@ -209,22 +210,15 @@ def diagnose_region(guide_text: str, region: MemoryRegion) -> list[RegionDiagnos
             )
         )
         return diags
-    if len(starts) != 1:
-        diags.append(
-            RegionDiagnostic(
-                region,
-                "duplicated" if len(starts) > 1 else "missing",
-                f"region {region!r} has {len(starts)} start marker(s); expected 1",
+    for kind, matches in (("start", starts), ("end", ends)):
+        if len(matches) != 1:
+            diags.append(
+                RegionDiagnostic(
+                    region,
+                    "duplicated" if len(matches) > 1 else "missing",
+                    f"region {region!r} has {len(matches)} {kind} marker(s); expected 1",
+                )
             )
-        )
-    if len(ends) != 1:
-        diags.append(
-            RegionDiagnostic(
-                region,
-                "duplicated" if len(ends) > 1 else "missing",
-                f"region {region!r} has {len(ends)} end marker(s); expected 1",
-            )
-        )
     if len(starts) == 1 and len(ends) == 1 and starts[0].start() > ends[0].start():
         diags.append(
             RegionDiagnostic(
@@ -234,6 +228,32 @@ def diagnose_region(guide_text: str, region: MemoryRegion) -> list[RegionDiagnos
             )
         )
     return diags
+
+
+def diagnose_guide(guide: Path) -> list[RegionDiagnostic]:
+    """Diagnose marker health for every region in *guide*.
+
+    An empty result means all regions are present and well-formed. A guide
+    that cannot be read yields a single diagnostic, so callers can treat any
+    non-empty result as "the regions are not usable".
+    """
+    try:
+        text = guide.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return [RegionDiagnostic("guide", "missing_file", f"guide not found: {guide}")]
+    except OSError as exc:
+        logger.exception("memory: failed to read guide %s", guide)
+        return [RegionDiagnostic("guide", "io_error", f"failed to read guide: {exc}")]
+    return [diag for region in REGIONS for diag in diagnose_region(text, region)]
+
+
+def strip_region_blocks(text: str) -> str:
+    """Remove every fenced memory region — markers and body — from *text*.
+
+    Region entries are audited as their own sources, so a caller scanning the
+    surrounding guide body must not count them twice.
+    """
+    return _REGION_BLOCK_RE.sub("", text)
 
 
 def _region_body(guide_text: str, region: MemoryRegion) -> tuple[str, list[RegionDiagnostic]]:
@@ -339,7 +359,7 @@ def ensure_regions(guide: Path) -> list[str]:
             + _empty_region_block("profile"),
             encoding="utf-8",
         )
-        return ["memory", "profile"]
+        return list(REGIONS)
 
     text = guide.read_text(encoding="utf-8")
     append_parts: list[str] = []

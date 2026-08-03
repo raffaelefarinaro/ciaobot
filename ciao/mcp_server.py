@@ -987,16 +987,16 @@ class CiaoMcpService:
             )
 
         @tool(name="memory_proposal_resolve", annotations=_WRITE, structured_output=True)
-        async def memory_proposal_resolve(
-            text: str,
-            action: str,
-            target: str = "",
-        ) -> dict[str, Any]:
-            """Accept or reject one proposal selected by a unique text substring."""
+        async def memory_proposal_resolve(text: str, action: str) -> dict[str, Any]:
+            """Dismiss one proposal selected by a unique text substring.
+
+            Never writes memory: Edit the matching CLAUDE.md region first, then
+            dismiss here (the reverse order can lose the fact).
+            """
             return await self._invoke(
                 "memory_proposal_resolve",
                 lambda cp, p: cp.memory_proposal_resolve(
-                    p, text, action=action, target=target  # type: ignore[arg-type]
+                    p, text, action=action  # type: ignore[arg-type]
                 ),
                 mutating=True,
             )
