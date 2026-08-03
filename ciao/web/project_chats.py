@@ -5537,19 +5537,15 @@ class ProjectChatManager:
                         chat_now.last_activity_at = _now_iso()
                         self._save()
                     title = chat_now.title if chat_now else "Ciaobot"
-                    self._events.publish({
-                        "type": "chat_result_ready",
-                        "chat_id": chat_id,
-                        "project_id": project_id,
-                        "title": title,
-                        "snippet": snippet,
-                    })
                     # Schedule the push with a small delay. If the user reads
                     # the chat on any device in the window (via /api/chats/
                     # {id}/read), the pending task is cancelled and no push
                     # fires. New replies to the same chat cancel and restart
-                    # the timer (see _schedule_push).
-                    self._schedule_push(chat_id, title, snippet)
+                    # the timer (see _schedule_push). Delegates skip both —
+                    # they wake the supervisor instead.
+                    self._announce_result_ready(
+                        chat_id, project_id, title, snippet
+                    )
 
                 # A delegate that just went idle should wake its supervisor.
                 # Deliberately outside the `not had_error` gate above: a
@@ -5646,6 +5642,34 @@ class ProjectChatManager:
         task = self._pending_push.pop(chat_id, None)
         if task is not None and not task.done():
             task.cancel()
+
+    def _announce_result_ready(
+        self, chat_id: str, project_id: str, title: str, snippet: str
+    ) -> None:
+        """Publish ``chat_result_ready`` and queue a delayed result push.
+
+        Skips both for delegate chats (``spawned_from_chat_id`` set). Delegates
+        already wake their supervisor on completion; a toast / unread / OS push
+        for the child is duplicate noise because the user follows the parent.
+        Permission and AskUserQuestion pushes still fire for delegates — those
+        need action in the child chat and are not covered by the wake path.
+        """
+        chat = self._chats.get(chat_id)
+        if chat is not None and chat.spawned_from_chat_id:
+            logger.debug(
+                "Skipping result announce for delegate %s (parent %s)",
+                chat_id,
+                chat.spawned_from_chat_id,
+            )
+            return
+        self._events.publish({
+            "type": "chat_result_ready",
+            "chat_id": chat_id,
+            "project_id": project_id,
+            "title": title,
+            "snippet": snippet,
+        })
+        self._schedule_push(chat_id, title, snippet)
 
     def _schedule_push(self, chat_id: str, title: str, snippet: str) -> None:
         """Queue a delayed push for this chat. Cancels any prior pending
@@ -6212,14 +6236,9 @@ class ProjectChatManager:
                             self._save()
                         title = chat_now.title if chat_now else "Ciaobot"
                         snippet = self._result_snippet(text)
-                        self._events.publish({
-                            "type": "chat_result_ready",
-                            "chat_id": chat_id,
-                            "project_id": project_id,
-                            "title": title,
-                            "snippet": snippet,
-                        })
-                        self._schedule_push(chat_id, title, snippet)
+                        self._announce_result_ready(
+                            chat_id, project_id, title, snippet
+                        )
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — a broken drain must not crash the app

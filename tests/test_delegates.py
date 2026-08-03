@@ -521,6 +521,100 @@ def test_finished_delegates_free_their_slot(tmp_path: Path) -> None:
     assert manager.active_delegate_count(parent.chat_id) == 0
 
 
+# ── result notifications ─────────────────────────────────────────────────
+
+
+def test_announce_result_ready_skips_delegates(tmp_path: Path, monkeypatch) -> None:
+    """Delegate replies must not toast, badge, or push — the parent wake is enough."""
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor")
+    child = _spawn_delegate(manager, parent, title="Fix #238")
+
+    published: list[dict] = []
+    pushes: list = []
+    monkeypatch.setattr(manager._events, "publish", published.append)
+    monkeypatch.setattr(
+        manager, "_schedule_push", lambda *a, **k: pushes.append(a)
+    )
+
+    manager._announce_result_ready(
+        child.chat_id,
+        project.project_id,
+        child.title,
+        "Patched routes_api.py.",
+    )
+    assert published == []
+    assert pushes == []
+
+    manager._announce_result_ready(
+        parent.chat_id,
+        project.project_id,
+        parent.title,
+        "Delegates finished; here is the summary.",
+    )
+    ready = [ev for ev in published if ev.get("type") == "chat_result_ready"]
+    assert len(ready) == 1
+    assert ready[0]["chat_id"] == parent.chat_id
+    assert len(pushes) == 1
+    assert pushes[0][0] == parent.chat_id
+
+
+async def test_delegate_turn_skips_result_announce_but_still_wakes_parent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A finishing delegate must wake the supervisor without user-facing alerts."""
+    manager = _make_manager(tmp_path)
+    project = manager.create_project("Delegates", workspace="work")
+    parent = manager.create_chat(project.project_id, title="Supervisor")
+    child = _spawn_delegate(manager, parent, title="Fix #238")
+    # Non-default title so auto-title doesn't spawn a side task.
+    child.title = "Fix #238"
+    manager._save()
+
+    async def fake_stream_chat(chat_id, prompt, images=None, **_kwargs):
+        from ciao.models import ResultEvent
+
+        yield ResultEvent(
+            type="result",
+            result="Fixed the bug in routes_api.py.",
+            session_id="sess-delegate",
+            is_error=False,
+            effective_model=child.model,
+            usage={},
+            quota={},
+            cost_usd=0.0,
+        )
+
+    manager.stream_chat = fake_stream_chat  # type: ignore[assignment]
+    manager._push_delay_seconds = 0
+
+    published: list[dict] = []
+    pushes: list = []
+    wakes: list[dict] = []
+
+    monkeypatch.setattr(manager._events, "publish", published.append)
+    monkeypatch.setattr(
+        manager, "_schedule_push", lambda *a, **k: pushes.append(a)
+    )
+
+    def capture_wake(parent_id, **kwargs):
+        wakes.append({"parent_id": parent_id, **kwargs})
+
+    monkeypatch.setattr(manager, "_queue_delegate_wake", capture_wake)
+
+    stream = manager.start_stream(child.chat_id, "fix the bug")
+    async for _ in stream.subscribe():
+        pass
+
+    assert pushes == []
+    assert not any(ev.get("type") == "chat_result_ready" for ev in published)
+    assert len(wakes) == 1
+    assert wakes[0]["parent_id"] == parent.chat_id
+    assert wakes[0]["child_chat_id"] == child.chat_id
+    assert "Fixed the bug" in wakes[0]["reply"]
+
+
 def test_delegate_spawn_rejects_an_empty_prompt(tmp_path: Path) -> None:
     manager = _make_manager(tmp_path)
     project = manager.create_project("Delegates", workspace="work")
