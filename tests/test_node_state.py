@@ -10,7 +10,7 @@ from starlette.testclient import TestClient
 from ciao.node_state import NodeStateManager
 from ciao.schedules import ScheduleEntry, ScheduleManager, ScheduleStore
 from ciao.loops import LoopEntry, LoopManager, LoopStore
-from ciao.web.routes_api import (
+from ciao.web.routes_node import (
     node_connect_endpoint,
     node_demote_endpoint,
     node_handover_endpoint,
