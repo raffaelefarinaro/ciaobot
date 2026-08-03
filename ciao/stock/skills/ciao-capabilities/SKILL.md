@@ -69,6 +69,7 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 - **Custom providers**: any OpenAI- or Anthropic-compatible endpoint can be added by the user in **Settings → Providers** — give it a name, a URL, a token, and whether it runs through the Claude or Codex runner. Ciaobot can probe the endpoint to discover its model ids, and those models then appear in the normal chat, workspace, and routine model pickers alongside the built-in backends. Tokens are stored separately in the gitignored runtime directory and are never returned by the API; only whether a token is set is exposed.
 - Per-workspace default model and model bucket (which controls how aliases like `opus`/`sonnet` resolve), per-chat override in the picker.
 - Beyond per-chat routing, one chat can **reach another model without leaving the conversation**: `adversarial_review` for an inline multi-model second opinion, or a delegate (see §1) for writable work on a different model.
+- **Voice dictation model**: cloud transcription runs on an OpenAI transcription model, shown with its per-minute price in **Settings → Models** and overridable via `CIAO_TRANSCRIPTION_MODEL` or the runtime settings store. Local `mlx-whisper` dictation is a separate path and needs no key.
 
 ### 7. Google Workspace (`gws`)
 
