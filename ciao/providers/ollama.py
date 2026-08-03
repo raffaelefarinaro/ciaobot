@@ -69,7 +69,7 @@ class OllamaSettings:
     # Anthropic alias names (haiku/sonnet/opus/fable) but the operator wants the
     # request routed through Ollama. Override with ``CIAO_OLLAMA_HAIKU_MODEL``
     # / ``_SONNET_MODEL`` / ``_OPUS_MODEL`` / ``_FABLE_MODEL``.
-    haiku_model: str = "deepseek-v4-flash:cloud"
+    haiku_model: str = "deepseek-v4-flash:0731-cloud"
     sonnet_model: str = "kimi-k2.7-code:cloud"
     opus_model: str = "minimax-m3:cloud"
     fable_model: str = "glm-5.2:cloud"

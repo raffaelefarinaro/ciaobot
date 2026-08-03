@@ -63,7 +63,7 @@ def test_insights_min_turns_defaults_to_multiturn(tmp_path: Path) -> None:
 def test_legacy_workspaces_are_exposed_as_workspace_configs(tmp_path: Path) -> None:
     config = _config(
         CIAO_WORKSPACE=str(tmp_path),
-        CLAUDE_DEFAULT_MODEL_PERSONAL="deepseek-v4-flash:cloud",
+        CLAUDE_DEFAULT_MODEL_PERSONAL="deepseek-v4-flash:0731-cloud",
         CLAUDE_DEFAULT_MODEL_WORK="opus",
         CIAO_DISALLOWED_TOOLS_WORK="Bash",
     )
@@ -72,7 +72,7 @@ def test_legacy_workspaces_are_exposed_as_workspace_configs(tmp_path: Path) -> N
     assert config.workspace("personal").vault_root == "memory-vault/personal"
     assert config.workspace("personal").model_bucket == "personal"
     assert config.workspace("work").gws_profile == "work"
-    assert config.default_model_for_workspace("personal") == "deepseek-v4-flash:cloud"
+    assert config.default_model_for_workspace("personal") == "deepseek-v4-flash:0731-cloud"
     assert config.default_model_for_workspace("work") == "opus"
     assert config.disallowed_tools_for_workspace("work") == ["Bash"]
 

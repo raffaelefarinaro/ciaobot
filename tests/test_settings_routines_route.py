@@ -71,7 +71,7 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     assert data["tier_defaults"]["openrouter"]["fable"] == "anthropic/claude-fable-latest"
     assert data["model_options"]["ollama_cloud"] == [
         "kimi-k2.7-code:cloud",
-        "deepseek-v4-flash:cloud",
+        "deepseek-v4-flash:0731-cloud",
         "minimax-m3:cloud",
         "glm-5.2:cloud",
         "gemma4:e2b-it-qat",

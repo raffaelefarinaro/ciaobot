@@ -58,7 +58,7 @@ def test_routine_env_skips_anthropic_models():
 def test_routine_env_not_gated_on_allowlist():
     # Insights default model works even with an empty cloud allowlist.
     bare = OllamaSettings(base_url="https://ollama.com", api_key="sk")
-    env = routine_env_for_model("deepseek-v4-flash:cloud", bare)
+    env = routine_env_for_model("deepseek-v4-flash:0731-cloud", bare)
     assert env["ANTHROPIC_BASE_URL"] == "https://ollama.com"
 
 

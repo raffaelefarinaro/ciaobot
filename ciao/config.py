@@ -449,7 +449,7 @@ class CiaoConfig:
     # Fallback when session insights run without workspace context (e.g.
     # ``scripts/backfill_insights.py``). Live archives use
     # :func:`ciao.insights.resolve_insights_model` instead.
-    insights_model: str = "deepseek-v4-flash:cloud"
+    insights_model: str = "deepseek-v4-flash:0731-cloud"
     # Operator override for the insights model, set from the PWA Settings →
     # Models tab (runtime settings store) or ``CIAO_INSIGHTS_MODEL``.
     # Empty = automatic routing: the workspace's sonnet-tier model.
@@ -1028,7 +1028,7 @@ class CiaoConfig:
         )
         ollama_haiku_model = (
             source.get("CIAO_OLLAMA_HAIKU_MODEL", "").strip()
-            or "deepseek-v4-flash:cloud"
+            or "deepseek-v4-flash:0731-cloud"
         )
         ollama_sonnet_model = (
             source.get("CIAO_OLLAMA_SONNET_MODEL", "").strip()
