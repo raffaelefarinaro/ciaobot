@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""Compatibility wrapper for `ciao memory`."""
+"""Deprecated: ``ciao memory`` was removed.
+
+Bounded memory now lives in the fenced ``ciao:memory`` / ``ciao:profile``
+regions of the workspace ``CLAUDE.md``. Edit those regions directly.
+"""
 
 from __future__ import annotations
 
 import sys
-from pathlib import Path
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from ciao.cli import main  # noqa: E402
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(["memory", *sys.argv[1:]]))
+    print(
+        "ciao memory was removed. Edit the ciao:memory / ciao:profile "
+        "regions in the workspace CLAUDE.md instead.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)

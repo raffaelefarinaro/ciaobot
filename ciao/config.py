@@ -476,11 +476,10 @@ class CiaoConfig:
     # OpenRouter (Anthropic-compatible) routing. Available when
     # OPENROUTER_API_KEY is set; aliases resolve to per-tier models.
     openrouter: OpenRouterSettings = field(default_factory=OpenRouterSettings)
-    # Bounded agent-managed memory files at ``~/.ciao/memory.md`` and
-    # ``~/.ciao/user.md``. Injected as a frozen snapshot into the Claude
-    # system prompt at session start; edited via the ``memory`` MCP tool.
+    # Advisory caps for the ``ciao:memory`` / ``ciao:profile`` regions in
+    # the workspace CLAUDE.md. Injected as a frozen snapshot into Claude and
+    # Codex system prompts at session start; edited with Edit on the guide.
     # See ``ciao/memory_injector.py`` and ``ciao/memory_tool.py``.
-    memory_enabled: bool = True
     memory_char_limit: int = 2200
     user_char_limit: int = 1375
     # Ciaobot's managed agent control plane. MCP is the default transport for
@@ -1210,8 +1209,6 @@ class CiaoConfig:
 
             critique_models=source.get("CIAO_REVIEW_MODELS", "").strip()
             or source.get("CIAO_ADVERSARIAL_MODELS", "").strip(),
-            memory_enabled=source.get("CIAO_MEMORY_ENABLED", "true").strip().lower()
-            not in {"0", "false", "no", "off"},
             memory_char_limit=int(
                 source.get("CIAO_MEMORY_CHAR_LIMIT", "").strip() or "2200"
             ),

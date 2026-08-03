@@ -117,14 +117,11 @@ def test_cli_dev_dispatches_module(monkeypatch: pytest.MonkeyPatch) -> None:
     ]
 
 
-def test_cli_memory_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    called = []
+def test_cli_memory_command_removed() -> None:
+    import pytest
 
-    monkeypatch.setattr(cli, "_memory_command", lambda args: called.append(args) or 0)
-
-    assert cli.main(["memory", "read", "--target", "memory"]) == 0
-    assert called[0].action == "read"
-    assert called[0].target == "memory"
+    with pytest.raises(SystemExit):
+        cli.main(["memory", "read", "--target", "memory"])
 
 
 def test_cli_vault_search_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -157,8 +154,11 @@ def test_cli_vault_lint_dispatches_command(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def _write_healthy_audit_workspace(root: Path) -> None:
+    from ciao.memory_tool import ensure_regions
+
     root.mkdir(parents=True)
     (root / "CLAUDE.md").write_text("- Use rtk for shell commands.\n", encoding="utf-8")
+    ensure_regions(root / "CLAUDE.md")
     (root / "AGENTS.md").symlink_to("CLAUDE.md")
     (root / "memory-vault").mkdir()
     (root / ".runtime").mkdir()
@@ -321,7 +321,7 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     ]
     assert (workspace / ".claude" / "agents" / "memory.md").is_file()
     assert (workspace / "commands" / "remember.md").is_file()
-    assert "memory_add" in (
+    assert "ciao:memory" in (
         workspace / "commands" / "remember.md"
     ).read_text(encoding="utf-8")
     assert (workspace / "CLAUDE.md").is_file()

@@ -26,3 +26,13 @@ Useful local files:
 When helping diagnose Ciaobot or prepare a GitHub issue, use sanitized excerpts from the runtime logs above plus reproduction steps, platform, install method/version, and expected vs actual behavior. Ask before creating or posting a public issue.
 
 If the user asks what Ciaobot can customize, start with `CIAO_CUSTOMIZATION.md`.
+
+<!-- ciao:memory:start cap=2200 -->
+## Agent memory
+
+<!-- ciao:memory:end -->
+
+<!-- ciao:profile:start cap=1375 -->
+## User profile
+
+<!-- ciao:profile:end -->

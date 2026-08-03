@@ -29,7 +29,6 @@ from pathlib import Path
 from typing import IO, Any, Callable, Iterable, Literal
 
 from ciao.loops import LoopStore
-from ciao.memory_tool import add_entry, load_entries, memory_path, remove_entry
 from ciao.schedules import ScheduleStore
 from ciao.control_surfaces import load_decision, write_decision
 
@@ -74,10 +73,6 @@ class RunContext:
     @property
     def vault(self) -> Path:
         return self.root / "memory-vault" / self.server.workspace_name
-
-    @property
-    def memory_file(self) -> Path:
-        return memory_path(self.root / ".memory")
 
 
 @dataclass(slots=True)
@@ -393,16 +388,6 @@ def _provider_block_reason(ctx: RunContext, final_text: str, error: str) -> str:
     return ""
 
 
-def _memory_contains(ctx: RunContext, value: str) -> bool:
-    return any(value == entry for entry in load_entries(ctx.memory_file))
-
-
-def _memory_cleanup(ctx: RunContext) -> None:
-    for entry in list(load_entries(ctx.memory_file)):
-        if ctx.marker in entry:
-            remove_entry(ctx.memory_file, entry, char_limit=20_000)
-
-
 def _state_json(path: Path, key: str) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -423,24 +408,6 @@ def scenarios() -> list[Scenario]:
     def marker_in_output(ctx: RunContext, output: str) -> tuple[bool, str]:
         ok = ctx.marker in output
         return ok, "marker returned" if ok else "expected marker missing from final answer"
-
-    def seed_replace(ctx: RunContext) -> None:
-        add_entry(ctx.memory_file, f"old-{ctx.marker}", char_limit=20_000)
-
-    def validate_replace(ctx: RunContext, _output: str) -> tuple[bool, str]:
-        old = _memory_contains(ctx, f"old-{ctx.marker}")
-        new = _memory_contains(ctx, f"new-{ctx.marker}")
-        return (new and not old, f"new={new}, old={old}")
-
-    def seed_remove(ctx: RunContext) -> None:
-        add_entry(ctx.memory_file, f"remove-{ctx.marker}", char_limit=20_000)
-
-    def validate_removed(ctx: RunContext, _output: str) -> tuple[bool, str]:
-        absent = not _memory_contains(ctx, f"remove-{ctx.marker}")
-        return absent, "entry removed" if absent else "entry still present"
-
-    def seed_memory_read(ctx: RunContext) -> None:
-        add_entry(ctx.memory_file, f"recall-{ctx.marker}", char_limit=20_000)
 
     def seed_vault(ctx: RunContext) -> None:
         path = ctx.vault / "benchmark" / f"{ctx.marker}.md"
@@ -524,54 +491,6 @@ def scenarios() -> list[Scenario]:
         return ok, f"matching loops={len(matches)}"
 
     return [
-        Scenario(
-            "memory_add",
-            "Add one bounded durable memory entry.",
-            lambda ctx: (
-                "Use the Ciaobot control surface assigned to this session to add exactly "
-                f"this durable memory entry: add-{ctx.marker}. Do not edit files by hand "
-                f"when a Ciaobot tool is available. Finish with {done(ctx)}"
-            ),
-            lambda ctx, _out: (
-                _memory_contains(ctx, f"add-{ctx.marker}"),
-                "entry present" if _memory_contains(ctx, f"add-{ctx.marker}") else "entry missing",
-            ),
-            cleanup=_memory_cleanup,
-        ),
-        Scenario(
-            "memory_replace",
-            "Replace a uniquely selected bounded-memory entry.",
-            lambda ctx: (
-                "Use the assigned Ciaobot control surface to replace memory entry "
-                f"old-{ctx.marker} with new-{ctx.marker}. Finish with {done(ctx)}"
-            ),
-            validate_replace,
-            fixture=seed_replace,
-            cleanup=_memory_cleanup,
-        ),
-        Scenario(
-            "memory_remove",
-            "Remove a uniquely selected bounded-memory entry.",
-            lambda ctx: (
-                "Use the assigned Ciaobot control surface to remove memory entry "
-                f"remove-{ctx.marker}. Finish with {done(ctx)}"
-            ),
-            validate_removed,
-            fixture=seed_remove,
-            cleanup=_memory_cleanup,
-        ),
-        Scenario(
-            "memory_read",
-            "Re-read bounded memory rather than relying on the injected snapshot.",
-            lambda ctx: (
-                "Re-read current Ciaobot durable memory through the assigned control surface; "
-                f"do not rely only on injected context. Report recall-{ctx.marker} and finish "
-                f"with {done(ctx)}"
-            ),
-            marker_in_output,
-            fixture=seed_memory_read,
-            cleanup=_memory_cleanup,
-        ),
         Scenario(
             "vault_read",
             "Read a known vault-relative markdown note.",
@@ -936,7 +855,7 @@ def _selected_scenarios(names: list[str], smoke: bool) -> list[Scenario]:
             raise ValueError(f"Unknown scenarios: {', '.join(unknown)}")
         return [item for item in catalog if item.name in requested]
     if smoke:
-        smoke_names = {"memory_add", "vault_read", "schedule_create"}
+        smoke_names = {"vault_read", "vault_write", "schedule_create"}
         return [item for item in catalog if item.name in smoke_names]
     return catalog
 
@@ -971,10 +890,10 @@ def promote_decision(
     smoke: bool,
 ) -> Path:
     """Persist only release-grade, decisive provider results."""
-    if smoke or selected_scenarios != 12 or repeats < 5:
+    if smoke or selected_scenarios != len(scenarios()) or repeats < 5:
         raise ValueError(
-            "Refusing to promote a partial benchmark: all 12 scenarios and at "
-            "least 5 repeats are required."
+            f"Refusing to promote a partial benchmark: all {len(scenarios())} "
+            "scenarios and at least 5 repeats are required."
         )
     provider_records: dict[str, Any] = {}
     for provider, provider_data in summary.get("providers", {}).items():
@@ -1144,7 +1063,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             "Promote decisive winners into WORKSPACE/.runtime after the full "
-            "12-scenario suite with at least 5 repeats."
+            f"{len(scenarios())}-scenario suite with at least 5 repeats."
         ),
     )
     return parser

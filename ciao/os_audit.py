@@ -18,7 +18,14 @@ from typing import Any
 
 from ciao.job_runs import JOB_RUNS_LATEST_NAME, JOB_RUNS_NAME
 from ciao.memory_injector import expiration_tag_error, is_entry_expired
-from ciao.memory_tool import default_memory_dir, memory_path, parse_entries, user_path
+from ciao.memory_tool import (
+    DEFAULT_MEMORY_CHAR_LIMIT,
+    DEFAULT_USER_CHAR_LIMIT,
+    MAX_ENTRY_CHARS,
+    contains_invisible_unicode,
+    read_region,
+    region_usage,
+)
 from ciao.vault_lint import (
     _markdown_source_paths,
     run_validation as run_vault_validation,
@@ -28,7 +35,11 @@ logger = logging.getLogger(__name__)
 
 SKILL_MAX_BYTES = 15 * 1024
 
-_PROPOSAL_BULLET_RE = re.compile(r"^\s*-\s*\[(?:memory|user)\]\s+\S", re.IGNORECASE)
+_PROPOSAL_BULLET_RE = re.compile(r"^\s*-\s*\[(?:memory|user|profile)\]\s+\S", re.IGNORECASE)
+_REGION_BLOCK_RE = re.compile(
+    r"<!--\s*ciao:(memory|profile):start(?:\s+cap=\d+)?\s*-->.*?<!--\s*ciao:\1:end\s*-->",
+    re.DOTALL,
+)
 _RULE_BULLET_RE = re.compile(r"^\s*[-*]\s+(.+?)\s*$")
 _RULE_NEGATION_RE = re.compile(
     r"\b(?:never|(?:do|does|must|should|can|cannot)\s+not|don't|doesn't|mustn't|shouldn't|can't)\b",
@@ -234,60 +245,56 @@ def _guide_rules(text: str) -> list[str]:
     return rules
 
 
+def _guide_body_without_regions(text: str) -> str:
+    """Strip ``ciao:memory``/``ciao:profile`` fenced regions from guide text.
+
+    Region entries are audited separately (as their own sources), so the
+    guide-body rule scan must not double-count them.
+    """
+    return _REGION_BLOCK_RE.sub("", text)
+
+
+def _vault_memory_md_paths(vault_root: Path) -> tuple[list[Path], list[dict[str, str]]]:
+    paths = [vault_root / "MEMORY.md"]
+    errors: list[dict[str, str]] = []
+    if vault_root.is_dir():
+        try:
+            children = sorted(vault_root.iterdir(), key=lambda path: path.name)
+        except OSError as exc:
+            errors.append(
+                _diagnostic(
+                    "unreadable_vault_root",
+                    vault_root,
+                    f"failed to discover workspace MEMORY.md files: {exc}",
+                )
+            )
+            children = []
+        for child in children:
+            if child.is_dir():
+                paths.append(child / "MEMORY.md")
+    return paths, errors
+
+
 def audit_rules(
     workspace_dir: Path,
     memory_dir: Path | None = None,
+    vault_root: Path | None = None,
+    config: Any | None = None,
 ) -> dict[str, Any]:
-    """Find exact cross-file overlaps and obvious opposite-polarity rules."""
-    sources = [
-        ("CLAUDE.md", workspace_dir / "CLAUDE.md", "guide"),
-        ("AGENTS.md", workspace_dir / "AGENTS.md", "guide"),
-        ("memory.md", memory_path(memory_dir), "memory"),
-    ]
-    occurrences: list[dict[str, str]] = []
+    """Find exact cross-file overlaps and obvious opposite-polarity rules.
+
+    ``memory_dir`` is accepted for API compatibility only; the legacy
+    ``memory.md``/``user.md`` files are no longer a rule source now that
+    bounded memory lives in fenced regions inside ``CLAUDE.md``.
+    """
+    del memory_dir
+
+    occurrences: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     seen_files: set[Path] = set()
     aliases_skipped: list[dict[str, str]] = []
 
-    for label, path, kind in sources:
-        if not path.exists():
-            continue
-        if not path.is_file():
-            errors.append(
-                _diagnostic("invalid_rule_source", path, f"{label} is not a file")
-            )
-            continue
-        try:
-            resolved = path.resolve(strict=True)
-        except OSError as exc:
-            errors.append(
-                _diagnostic(
-                    "unreadable_rule_source",
-                    path,
-                    f"failed to resolve {label}: {exc}",
-                )
-            )
-            continue
-        if resolved in seen_files:
-            aliases_skipped.append({"source": label, "target": str(resolved)})
-            continue
-        seen_files.add(resolved)
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            errors.append(
-                _diagnostic(
-                    "unreadable_rule_source",
-                    path,
-                    f"failed to read {label}: {exc}",
-                )
-            )
-            continue
-
-        if kind == "memory":
-            rules = [entry for entry in parse_entries(text) if len(entry) > 15]
-        else:
-            rules = _guide_rules(text)
+    def add_occurrences(label: str, rules: list[str], *, overlap_eligible: bool) -> None:
         for rule in rules:
             signature, polarity = _rule_signature(rule)
             if not signature:
@@ -299,13 +306,112 @@ def audit_rules(
                     "normalized": _normalized_rule(rule),
                     "signature": signature,
                     "polarity": polarity,
+                    "overlap_eligible": overlap_eligible,
                 }
             )
 
-    by_normalized: dict[str, list[dict[str, str]]] = {}
-    by_signature: dict[str, list[dict[str, str]]] = {}
-    for occurrence in occurrences:
+    def read_source_text(label: str, path: Path) -> str | None:
+        if not path.exists():
+            return None
+        if not path.is_file():
+            errors.append(
+                _diagnostic("invalid_rule_source", path, f"{label} is not a file")
+            )
+            return None
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError as exc:
+            errors.append(
+                _diagnostic(
+                    "unreadable_rule_source",
+                    path,
+                    f"failed to resolve {label}: {exc}",
+                )
+            )
+            return None
+        if resolved in seen_files:
+            aliases_skipped.append({"source": label, "target": str(resolved)})
+            return None
+        seen_files.add(resolved)
+        try:
+            return path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            errors.append(
+                _diagnostic(
+                    "unreadable_rule_source",
+                    path,
+                    f"failed to read {label}: {exc}",
+                )
+            )
+            return None
+
+    # 1. Guide bodies (CLAUDE.md, and AGENTS.md when it is a distinct file
+    # rather than a symlink/alias of CLAUDE.md), excluding region bodies.
+    guide_path = workspace_dir / "CLAUDE.md"
+    for label, path in (("CLAUDE.md", guide_path), ("AGENTS.md", workspace_dir / "AGENTS.md")):
+        text = read_source_text(label, path)
+        if text is not None:
+            add_occurrences(
+                label, _guide_rules(_guide_body_without_regions(text)), overlap_eligible=True
+            )
+
+    # 2. Each bounded-memory region as its own source.
+    for region, label in (("memory", "ciao:memory"), ("profile", "ciao:profile")):
+        entries, _diags = read_region(guide_path, region)
+        rules = [entry for entry in entries if len(entry) > 15]
+        add_occurrences(label, rules, overlap_eligible=True)
+
+    # 3. Workspace MEMORY.md files. These are large and noisy, so they only
+    # feed opposite-polarity clash detection, not exact-overlap detection.
+    memory_md_paths: list[Path] = []
+    if config is not None:
+        try:
+            from ciao.web.agent_assets import _workspace_memory_paths
+        except ImportError as exc:
+            errors.append(
+                _diagnostic(
+                    "unavailable_memory_source",
+                    workspace_dir,
+                    f"failed to import workspace MEMORY.md discovery: {exc}",
+                )
+            )
+        else:
+            vault_for_paths = vault_root
+            if vault_for_paths is None:
+                vault_for_paths = Path(
+                    getattr(config, "vault_root", workspace_dir / "memory-vault")
+                )
+            try:
+                memory_md_paths = [
+                    path
+                    for path, _title in _workspace_memory_paths(
+                        config, workspace_dir, vault_for_paths
+                    )
+                ]
+            except Exception as exc:  # noqa: BLE001 — advisory source discovery
+                errors.append(
+                    _diagnostic(
+                        "unreadable_memory_source",
+                        workspace_dir,
+                        f"failed to discover workspace MEMORY.md files: {exc}",
+                    )
+                )
+    elif vault_root is not None:
+        memory_md_paths, vault_md_errors = _vault_memory_md_paths(vault_root)
+        errors.extend(vault_md_errors)
+
+    for path in memory_md_paths:
+        text = read_source_text(f"MEMORY.md ({path})", path)
+        if text is not None:
+            add_occurrences(f"MEMORY.md ({path})", _guide_rules(text), overlap_eligible=False)
+
+    overlap_occurrences = [o for o in occurrences if o["overlap_eligible"]]
+    by_normalized: dict[str, list[dict[str, Any]]] = {}
+    for occurrence in overlap_occurrences:
         by_normalized.setdefault(occurrence["normalized"], []).append(occurrence)
+
+    by_signature: dict[str, list[dict[str, Any]]] = {}
+    for occurrence in occurrences:
         by_signature.setdefault(occurrence["signature"], []).append(occurrence)
 
     overlaps: list[dict[str, Any]] = []
@@ -347,21 +453,6 @@ def audit_rules(
     }
 
 
-def _strict_memory_entries(path: Path) -> tuple[list[str], list[dict[str, str]]]:
-    if not path.exists():
-        return [], []
-    try:
-        return parse_entries(path.read_text(encoding="utf-8")), []
-    except (OSError, UnicodeDecodeError) as exc:
-        return [], [
-            _diagnostic(
-                "unreadable_memory_file",
-                path,
-                f"failed to read bounded memory: {exc}",
-            )
-        ]
-
-
 def _proposal_paths(
     vault_root: Path,
 ) -> tuple[list[Path], list[dict[str, str]]]:
@@ -393,32 +484,82 @@ def _proposal_paths(
 
 
 def audit_memory(
+    *,
+    guide_path: Path | None = None,
     memory_dir: Path | None = None,
     vault_root: Path | None = None,
-    *,
     proposal_paths: list[Path] | None = None,
     today: datetime.date | None = None,
+    memory_char_limit: int = DEFAULT_MEMORY_CHAR_LIMIT,
+    user_char_limit: int = DEFAULT_USER_CHAR_LIMIT,
 ) -> dict[str, Any]:
-    """Audit bounded memory expiration and proposal queues."""
-    memory_root = memory_dir or default_memory_dir()
-    mem_entries, mem_errors = _strict_memory_entries(memory_path(memory_root))
-    usr_entries, usr_errors = _strict_memory_entries(user_path(memory_root))
-    current = today or datetime.date.today()
+    """Audit bounded memory regions (caps, expiry, hygiene) and proposal queues.
 
-    expired_mem = [entry for entry in mem_entries if is_entry_expired(entry, current)]
-    expired_usr = [entry for entry in usr_entries if is_entry_expired(entry, current)]
+    ``memory_dir`` is accepted for API compatibility only; the legacy
+    ``memory.md``/``user.md`` files are no longer read here. Bounded memory
+    now lives in the ``ciao:memory``/``ciao:profile`` fenced regions inside
+    ``guide_path`` (the workspace ``CLAUDE.md``).
+    """
+    del memory_dir
+    guide = guide_path or (Path.cwd() / "CLAUDE.md")
+    current = today or datetime.date.today()
+    region_limits = {"memory": memory_char_limit, "profile": user_char_limit}
+
+    region_entries: dict[str, list[str]] = {}
+    expired_by_region: dict[str, list[str]] = {}
+    marker_errors: list[dict[str, str]] = []
+    over_cap: list[dict[str, Any]] = []
+    oversize_entries: list[dict[str, Any]] = []
+    duplicate_entries: list[dict[str, Any]] = []
+    invisible_unicode: list[dict[str, Any]] = []
     invalid_expirations: list[dict[str, str]] = []
-    for target, entries in (("memory", mem_entries), ("user", usr_entries)):
+
+    for region in ("memory", "profile"):
+        entries, diagnostics = read_region(guide, region)
+        region_entries[region] = entries
+        for diag in diagnostics:
+            marker_errors.append(
+                {"region": diag.region, "code": diag.code, "message": diag.message}
+            )
+
+        limit = region_limits[region]
+        usage = region_usage(entries, limit)
+        if usage["used_chars"] > limit:
+            over_cap.append(
+                {"region": region, "used": usage["used_chars"], "limit": limit}
+            )
+
+        seen_counts: dict[str, int] = {}
+        for entry in entries:
+            if len(entry) > MAX_ENTRY_CHARS:
+                oversize_entries.append(
+                    {"region": region, "entry": entry[:160], "chars": len(entry)}
+                )
+            if contains_invisible_unicode(entry):
+                invisible_unicode.append({"region": region, "entry": entry[:160]})
+            key = _normalized_rule(entry)
+            seen_counts[key] = seen_counts.get(key, 0) + 1
+            if seen_counts[key] > 1:
+                duplicate_entries.append({"region": region, "entry": entry[:160]})
+
+        expired_by_region[region] = [
+            entry for entry in entries if is_entry_expired(entry, current)
+        ]
         for entry in entries:
             error = expiration_tag_error(entry)
             if error:
                 invalid_expirations.append(
                     {
-                        "target": target,
+                        "target": region,
                         "entry": entry[:160],
                         "message": error,
                     }
                 )
+
+    mem_entries = region_entries["memory"]
+    profile_entries = region_entries["profile"]
+    expired_mem = expired_by_region["memory"]
+    expired_profile = expired_by_region["profile"]
 
     proposals_count = 0
     proposal_files: list[dict[str, Any]] = []
@@ -460,14 +601,21 @@ def audit_memory(
 
     return {
         "memory_entries": len(mem_entries),
-        "user_entries": len(usr_entries),
+        "profile_entries": len(profile_entries),
+        "user_entries": len(profile_entries),  # compat alias for "profile"
         "expired_memory_entries": len(expired_mem),
-        "expired_user_entries": len(expired_usr),
+        "expired_profile_entries": len(expired_profile),
+        "expired_user_entries": len(expired_profile),  # compat alias
         "invalid_expiration_entries": len(invalid_expirations),
         "invalid_expirations": invalid_expirations,
+        "over_cap": over_cap,
+        "oversize_entries": oversize_entries,
+        "duplicate_entries": duplicate_entries,
+        "invisible_unicode": invisible_unicode,
+        "marker_errors": marker_errors,
         "pending_memory_proposals": proposals_count,
         "proposal_files": proposal_files,
-        "errors": [*mem_errors, *usr_errors, *proposal_errors],
+        "errors": proposal_errors,
     }
 
 
@@ -784,20 +932,30 @@ def run_os_audit(
 
     ``config`` is optional for programmatic callers. The CLI and PWA both pass
     the live registry so upgrade notices are consistent across surfaces.
+
+    ``memory_dir`` is accepted for API compatibility only; it is no longer
+    forwarded to the rule/memory audits, which read the ``ciao:memory`` /
+    ``ciao:profile`` regions inside the workspace ``CLAUDE.md`` instead.
     """
+    del memory_dir
     workspace = (workspace_dir or Path.cwd()).expanduser().resolve()
     vault = (vault_root or (workspace / "memory-vault")).expanduser().resolve()
     runtime = (runtime_dir or (workspace / ".runtime")).expanduser().resolve()
+    guide_path = workspace / "CLAUDE.md"
+    memory_char_limit = getattr(config, "memory_char_limit", DEFAULT_MEMORY_CHAR_LIMIT)
+    user_char_limit = getattr(config, "user_char_limit", DEFAULT_USER_CHAR_LIMIT)
 
     setup_result = audit_setup(workspace, vault, runtime)
     vault_result = _vault_audit(vault)
     skill_result = audit_skills(workspace)
-    rule_result = audit_rules(workspace, memory_dir)
+    rule_result = audit_rules(workspace, vault_root=vault, config=config)
     memory_result = audit_memory(
-        memory_dir,
-        vault,
+        guide_path=guide_path,
+        vault_root=vault,
         proposal_paths=proposal_paths,
         today=today,
+        memory_char_limit=memory_char_limit,
+        user_char_limit=user_char_limit,
     )
     job_result = audit_job_runs(workspace, runtime_dir=runtime)
     upgrade_result = audit_upgrade_notices(config)
@@ -842,8 +1000,13 @@ def run_os_audit(
         + len(skill_result["issues"])
         + rule_result["rule_clashes_found"]
         + memory_result["expired_memory_entries"]
-        + memory_result["expired_user_entries"]
+        + memory_result["expired_profile_entries"]
         + memory_result["invalid_expiration_entries"]
+        + len(memory_result["over_cap"])
+        + len(memory_result["oversize_entries"])
+        + len(memory_result["duplicate_entries"])
+        + len(memory_result["invisible_unicode"])
+        + len(memory_result["marker_errors"])
         + memory_result["pending_memory_proposals"]
         + job_result["failed_runs"]
         + upgrade_result["notices_found"]
@@ -940,6 +1103,11 @@ def format_audit_markdown(report: dict[str, Any]) -> str:
                 f"(expired: {memory['expired_user_entries']})"
             ),
             f"- Invalid expiration tags: {memory['invalid_expiration_entries']}",
+            f"- Regions over cap: {len(memory['over_cap'])}",
+            f"- Oversize entries: {len(memory['oversize_entries'])}",
+            f"- Duplicate entries: {len(memory['duplicate_entries'])}",
+            f"- Invisible Unicode entries: {len(memory['invisible_unicode'])}",
+            f"- Region marker errors: {len(memory['marker_errors'])}",
             f"- Pending memory proposals: {memory['pending_memory_proposals']}",
             "",
             "## 6. Background Automation",

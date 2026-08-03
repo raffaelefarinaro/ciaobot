@@ -28,7 +28,7 @@ def _result(
     return RunResult(
         provider="claude",
         surface=surface,  # type: ignore[arg-type]
-        scenario="memory_add",
+        scenario="vault_read",
         repeat=1,
         marker="marker",
         chat_id=f"chat-{surface}",
@@ -40,18 +40,18 @@ def _result(
         usage={"input_tokens": str(tokens - 10), "output_tokens": "10"},
         tokens=tokens,
         provider_tools=["tool"] * tools,
-        mcp_tools=["memory_add"] if surface == "mcp" else [],
+        mcp_tools=["vault_search"] if surface == "mcp" else [],
         mcp_errors=0,
         final_text="done",
     )
 
 
-def test_fixed_release_suite_has_twelve_unique_scenarios() -> None:
+def test_fixed_release_suite_has_eight_unique_scenarios() -> None:
     names = [scenario.name for scenario in scenarios()]
 
-    assert len(names) == 12
-    assert len(set(names)) == 12
-    assert {"memory_add", "project_chat_create", "schedule_create", "loop_create"} <= set(names)
+    assert len(names) == 8
+    assert len(set(names)) == 8
+    assert {"vault_read", "project_chat_create", "schedule_create", "loop_create"} <= set(names)
 
 
 def test_project_chat_validator_reads_ids_from_registry_keys(tmp_path) -> None:
@@ -145,7 +145,7 @@ def test_summary_excludes_blocked_pair_and_refuses_decision() -> None:
     )["providers"]["claude"]
 
     assert result["winner"] == "blocked"
-    assert result["blocked_pairs"] == [{"scenario": "memory_add", "repeat": 1}]
+    assert result["blocked_pairs"] == [{"scenario": "vault_read", "repeat": 1}]
     assert result["arms"]["legacy"]["evaluated_runs"] == 1
     assert result["arms"]["mcp"]["evaluated_runs"] == 1
 
@@ -155,8 +155,8 @@ def test_auto_surface_fails_safe_then_reads_promoted_provider(tmp_path) -> None:
     assert resolve_auto_surface(config, "claude") == "legacy"
 
     rows = [
-        *[_result("legacy", elapsed=2000, tokens=200) for _ in range(60)],
-        *[_result("mcp", elapsed=500, tokens=50) for _ in range(60)],
+        *[_result("legacy", elapsed=2000, tokens=200) for _ in range(40)],
+        *[_result("mcp", elapsed=500, tokens=50) for _ in range(40)],
     ]
     summary = summarize(rows)
     path = promote_decision(
@@ -164,7 +164,7 @@ def test_auto_surface_fails_safe_then_reads_promoted_provider(tmp_path) -> None:
         output=tmp_path / "report",
         summary=summary,
         results=rows,
-        selected_scenarios=12,
+        selected_scenarios=8,
         repeats=5,
         smoke=False,
     )

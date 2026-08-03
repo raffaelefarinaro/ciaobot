@@ -26,7 +26,6 @@ Common package CLI entry points:
 
 ```bash
 ciao setup --workspace ~/ciao --workspace-name personal --load-launchd
-ciao memory read --target memory
 ciao vault-index --workspace default --format json
 ciao vault-search "project keyword" --limit 5
 ciao vault-lint --vault-root memory-vault
@@ -288,7 +287,7 @@ tokens must never enter the model's shell environment or telemetry arguments.
 
 See `docs/MCP.md` for the catalog, Claude/Codex configuration, and the release
 benchmark/promotion rule. Smoke/partial results are diagnostic only; promotion
-requires all 12 scenarios and at least five repeats.
+requires all 8 scenarios and at least five repeats.
 
 ## Change guidelines
 

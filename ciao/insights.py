@@ -424,9 +424,9 @@ async def extract_and_append(
                 )
         # Memory proposals: scan the freshly-appended insights section and
         # write actionable candidates to ``Workspace/Memory-Proposals.md``.
-        # "User corrections" are auto-promoted to bounded memory (gated on
-        # the config's memory_enabled); everything else waits for the
-        # curator agent to promote via `ciao memory` on the next session.
+        # "User corrections" are auto-promoted straight into the CLAUDE.md
+        # ``ciao:memory``/``ciao:profile`` regions; everything else waits for
+        # the curator agent to promote via Edit on the next session.
         if (
             memory_proposals_enabled
             and proposal_vault_root is not None
@@ -442,8 +442,12 @@ async def extract_and_append(
                     proposals_result = proposals_from_archive(
                         archive_path,
                         proposal_vault_root,
-                        auto_promote_memory=bool(
-                            getattr(config, "memory_enabled", True)
+                        auto_promote_memory=True,
+                        guide_path=(
+                            Path(config.workspace_root) / "CLAUDE.md"
+                            if config is not None
+                            and getattr(config, "workspace_root", None)
+                            else None
                         ),
                     )
                     run.extra["wrote"] = bool(proposals_result)

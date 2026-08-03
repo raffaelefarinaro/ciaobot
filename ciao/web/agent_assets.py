@@ -15,7 +15,14 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ciao.memory_injector import system_prompt_payload
-from ciao.memory_tool import load_entries, memory_path, total_chars, user_path
+from ciao.memory_tool import (
+    DEFAULT_MEMORY_CHAR_LIMIT,
+    DEFAULT_USER_CHAR_LIMIT,
+    ensure_regions,
+    read_region,
+    region_usage,
+    serialize_entries,
+)
 from ciao.observability.hooks import _runtime_lines
 from ciao.sync_skills import sync_workspace_skills
 from ciao.web.commands import _parse_frontmatter
@@ -385,35 +392,45 @@ def _count_proposal_bullets(path: Path) -> int:
 
 
 def _bounded_memory_assets(config: Any) -> list[PromptAsset]:
-    """Session-start ``~/.ciao/memory.md`` and ``user.md`` rows for Settings → Context."""
-    memory_enabled = bool(getattr(config, "memory_enabled", True))
-    mem_limit = int(getattr(config, "memory_char_limit", 2200))
-    usr_limit = int(getattr(config, "user_char_limit", 1800))
+    """Bounded ``ciao:memory`` / ``ciao:profile`` region rows for Settings → Context.
+
+    Both regions live as fenced markers inside the workspace ``CLAUDE.md``, so
+    both rows point at that one file. They are edited in place with ``Edit``;
+    there is no separate memory file or CLI.
+    """
+    guide = Path(config.workspace_root) / "CLAUDE.md"
+    mem_limit = int(getattr(config, "memory_char_limit", DEFAULT_MEMORY_CHAR_LIMIT))
+    usr_limit = int(getattr(config, "user_char_limit", DEFAULT_USER_CHAR_LIMIT))
     specs = (
-        (memory_path(), "ciaobot-memory", "Agent memory", "memory.md", mem_limit),
-        (user_path(), "ciaobot-user", "User profile", "user.md", usr_limit),
+        ("memory", "ciaobot-memory", "Agent memory", mem_limit),
+        ("profile", "ciaobot-user", "User profile", usr_limit),
     )
     out: list[PromptAsset] = []
-    for path, asset_id, title, kind, limit in specs:
-        entries = load_entries(path)
-        used = total_chars(entries)
-        pct = (used / limit * 100) if limit else 0
-        if memory_enabled:
-            injection = "Injected at session start; edits apply on the next chat."
+    for region, asset_id, title, limit in specs:
+        entries, diags = read_region(guide, region)
+        if diags:
+            description = (
+                f"The `ciao:{region}` region markers are missing or malformed in "
+                f"CLAUDE.md ({'; '.join(d.message for d in diags)}). "
+                "Edit CLAUDE.md to restore them, or run sync-skills to fix issues."
+            )
+            content = _read_text(guide)
         else:
-            injection = "Injection disabled (CIAO_MEMORY_ENABLED=false)."
-        description = (
-            f"Bounded {kind} ({used:,}/{limit:,} chars, {pct:.0f}%). "
-            f"{injection} Updated by the agent via `ciao memory` or `/remember`."
-        )
+            usage = region_usage(entries, limit)
+            description = (
+                f"Bounded {title.lower()} ({usage['used_chars']:,}/{usage['char_limit']:,} "
+                f"chars, {usage['pct']:.0f}%). Injected at session start; edits apply on "
+                f"the next chat. Edit the `ciao:{region}` region on CLAUDE.md."
+            )
+            content = serialize_entries(entries)
         out.append(PromptAsset(
             id=asset_id,
             title=title,
             description=description,
             source="file",
-            path=str(path.resolve()),
-            editable=False,
-            content=_read_text(path),
+            path=str(guide.resolve()),
+            editable=True,
+            content=content,
             scope="bounded-memory",
         ))
     return out
@@ -563,6 +580,29 @@ def workspace_health(config: Any) -> dict:
             else "AGENTS.md is a separate file, so Claude Code and Codex read different workspace instructions.",
             codex_guide,
             "" if guides_linked else "Merge AGENTS.md into CLAUDE.md, delete AGENTS.md, then run sync-skills to relink.",
+        )
+
+    if claude_guide.is_file():
+        from ciao.memory_tool import diagnose_region
+
+        try:
+            guide_text = claude_guide.read_text(encoding="utf-8")
+        except OSError:
+            guide_text = ""
+        region_diags = [
+            diag
+            for region in ("memory", "profile")
+            for diag in diagnose_region(guide_text, region)
+        ]
+        add(
+            "memory-regions",
+            "Bounded memory regions",
+            "ok" if not region_diags else "warn",
+            "The `ciao:memory` and `ciao:profile` regions are present and well-formed."
+            if not region_diags
+            else "; ".join(d.message for d in region_diags),
+            claude_guide,
+            "" if not region_diags else "Run sync-skills to add any missing region markers.",
         )
 
     for source_dir, link_dir, label in [
@@ -1046,13 +1086,90 @@ async def workspace_health_endpoint(request: Request) -> JSONResponse:
         return JSONResponse({"error": "failed to scan workspace"}, status_code=500)
 
 
+def _merge_agents_into_claude(root: Path) -> bool:
+    """Fold a real, user-authored ``AGENTS.md`` into ``CLAUDE.md``, then symlink it.
+
+    A no-op unless ``AGENTS.md`` exists as a regular file (not a symlink) whose
+    content actually differs from ``CLAUDE.md`` (or ``CLAUDE.md`` is missing).
+    The prior ``AGENTS.md`` is preserved as ``AGENTS.md.bak`` before anything
+    is rewritten. Returns whether a merge happened.
+    """
+    claude = root / "CLAUDE.md"
+    agents = root / "AGENTS.md"
+    if not agents.is_file() or agents.is_symlink():
+        return False
+    try:
+        if claude.is_file() and agents.resolve() == claude.resolve():
+            return False
+    except OSError:
+        pass
+
+    try:
+        agents_text = agents.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+    if claude.is_file():
+        try:
+            claude_text = claude.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        if claude_text.strip() == agents_text.strip():
+            return False
+    else:
+        claude_text = ""
+
+    try:
+        (root / "AGENTS.md.bak").write_text(agents_text, encoding="utf-8")
+    except OSError:
+        return False
+
+    if not claude_text:
+        claude_text = agents_text
+        merged_text = claude_text
+    else:
+        existing_lines = {line.strip() for line in claude_text.splitlines() if line.strip()}
+        unique_lines = [
+            line for line in agents_text.splitlines()
+            if line.strip() and line.strip() not in existing_lines
+        ]
+        if unique_lines:
+            merged_text = (
+                claude_text.rstrip()
+                + "\n\n## Merged from AGENTS.md\n\n"
+                + "\n".join(unique_lines)
+                + "\n"
+            )
+        else:
+            merged_text = claude_text
+
+    try:
+        claude.write_text(merged_text, encoding="utf-8")
+    except OSError:
+        return False
+
+    try:
+        ensure_regions(claude)
+    except OSError:
+        pass
+
+    try:
+        agents.unlink()
+        agents.symlink_to(claude.name)
+    except OSError:
+        return False
+    return True
+
+
 def repair_workspace_health(config: Any) -> dict:
     """Apply the automatic remedies for every fixable health check.
 
     Covers exactly the actions the checks suggest in prose: create the
-    missing scaffold files/directories, then rebuild the Claude Code
-    discovery links (sync-skills, without the network-touching upstream
-    refresh). Returns the fresh health report.
+    missing scaffold files/directories, merge a stray user-authored
+    ``AGENTS.md`` into ``CLAUDE.md``, then rebuild the Claude Code discovery
+    links (sync-skills, without the network-touching upstream refresh).
+    Returns the fresh health report, with ``merged_agents_guide: True`` added
+    when the ``AGENTS.md`` merge above actually ran.
     """
     from ciao.cli import _copy_tree_if_missing, _write_if_missing
 
@@ -1070,8 +1187,12 @@ def repair_workspace_health(config: Any) -> dict:
     for asset_dir in ("subagents", "commands"):
         (root / asset_dir).mkdir(parents=True, exist_ok=True)
 
+    merged_agents_guide = _merge_agents_into_claude(root)
     sync_workspace_skills(root, refresh_upstream=False)
-    return workspace_health(config)
+    health = workspace_health(config)
+    if merged_agents_guide:
+        health["merged_agents_guide"] = True
+    return health
 
 
 async def workspace_health_fix_endpoint(request: Request) -> JSONResponse:

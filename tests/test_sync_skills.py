@@ -49,7 +49,10 @@ def test_sync_links_codex_guide_to_canonical_claude_guide(tmp_path: Path) -> Non
     assert codex_guide.is_symlink()
     assert codex_guide.readlink() == Path("CLAUDE.md")
     assert codex_guide.resolve() == claude_guide.resolve()
-    assert codex_guide.read_text(encoding="utf-8") == "# Shared workspace instructions\n"
+    text = codex_guide.read_text(encoding="utf-8")
+    assert text.startswith("# Shared workspace instructions\n")
+    assert "<!-- ciao:memory:start" in text
+    assert "<!-- ciao:profile:start" in text
 
 
 def test_sync_preserves_custom_codex_guide(tmp_path: Path) -> None:
@@ -307,7 +310,7 @@ def test_sync_workspace_skills_seeds_stock_commands_into_canonical_dir(tmp_path:
     assert remember.is_file()
     assert critique.is_file()
     assert interrogation.is_file()
-    assert "memory_add" in remember.read_text(encoding="utf-8")
+    assert "ciao:memory" in remember.read_text(encoding="utf-8")
     assert "1–3 targeted questions" in interrogation.read_text(encoding="utf-8")
     assert "adversarial_review` MCP tool" in critique.read_text(encoding="utf-8")
 
@@ -327,7 +330,7 @@ def test_sync_workspace_skills_migrates_legacy_stock_commands(tmp_path: Path) ->
     canonical = workspace / "commands" / "remember.md"
     assert canonical.is_file()
     text = canonical.read_text(encoding="utf-8")
-    assert "memory_add" in text
+    assert "ciao:memory" in text
     assert "# Old stock remember" not in text
     link = workspace / ".claude" / "commands" / "remember.md"
     assert link.is_symlink()

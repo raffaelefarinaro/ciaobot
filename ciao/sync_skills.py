@@ -1007,6 +1007,24 @@ def sync_workspace_skills(
 ) -> SyncSkillsResult:
     root = Path(workspace).expanduser().resolve()
     _ensure_linked_workspace_guides(root)
+    try:
+        from ciao.memory_tool import ensure_regions, migrate_legacy_files
+
+        ensure_regions(root / "CLAUDE.md")
+        try:
+            from ciao import job_runs
+
+            with job_runs.track_sync(
+                "memory_migration", "Legacy memory migration"
+            ) as run:
+                migration = migrate_legacy_files(root / "CLAUDE.md")
+                run.extra["migrated"] = migration.get("migrated", [])
+                if not migration.get("migrated"):
+                    run.skip("no legacy memory files to migrate")
+        except ImportError:
+            migrate_legacy_files(root / "CLAUDE.md")
+    except Exception:  # noqa: BLE001 — never block skill sync on memory regions
+        pass
 
     upstream_updated = 0
     upstream_pruned = 0

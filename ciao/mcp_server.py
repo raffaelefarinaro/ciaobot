@@ -977,8 +977,8 @@ class CiaoMcpService:
 
             return await self._invoke("context_get", _op)
 
-        # Bounded-memory read/add/replace/remove are the `ciao memory` CLI
-        # subcommands; keep only the proposal-review flow on MCP.
+        # Bounded memory is edited in CLAUDE.md regions; MCP only keeps the
+        # proposal-review flow (dismiss after the agent Edits the region).
         @tool(name="memory_proposals_list", annotations=_READ, structured_output=True)
         async def memory_proposals_list() -> dict[str, Any]:
             """List reviewable memory proposals produced from archived chats."""

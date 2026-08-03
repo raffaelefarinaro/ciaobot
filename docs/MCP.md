@@ -128,7 +128,7 @@ holds *capabilities* — orchestration and search that a shell can't cheaply
 replicate. Plain plumbing that the managed Claude Code/Codex session can do
 with its own shell and filesystem is not duplicated as an MCP tool:
 
-- **Bounded memory** read/add/replace/remove → `ciao memory read|add|replace|remove`.
+- **Bounded memory** → Edit the `ciao:memory` / `ciao:profile` regions in `CLAUDE.md`. MCP only lists/dismisses proposals (`memory_proposals_list`, `memory_proposal_resolve`).
 - **Vault maintenance** → `ciao index` (index refresh) and `ciao lint`.
   `vault_search` stays — it wraps a maintained FTS5 index a file tool can't
   replicate.
@@ -224,11 +224,13 @@ ciao benchmark-control-surfaces \
   --output benchmark-results/full
 ```
 
-This runs 12 scenarios × 5 repeats × 2 arms × 2 providers = **240 live
+This runs 8 scenarios × 5 repeats × 2 arms × 2 providers = **160 live
 turns**. Each legacy/MCP pair starts concurrently against isolated full-stack
-servers and identical fixtures. The suite covers bounded-memory CRUD/read,
-vault read/search/write, workspace file round-trip, PWA project/chat creation,
-schedule list/create, and loop creation.
+servers and identical fixtures. The suite covers vault read/search/write,
+workspace file round-trip, PWA project/chat creation, schedule list/create,
+and loop creation. Bounded memory is no longer a separate control-surface
+scenario: it's a plain `CLAUDE.md` region edited with `Edit`, not a control-plane
+write path.
 
 Every run records:
 

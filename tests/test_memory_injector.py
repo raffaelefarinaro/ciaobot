@@ -10,23 +10,46 @@ from ciao import memory_injector as mi
 from ciao import memory_tool as mt
 
 
+def write_guide(
+    path: Path,
+    memory_entries: list[str] | None = None,
+    profile_entries: list[str] | None = None,
+    body: str = "# Guide\n\n",
+) -> Path:
+    """Seed a workspace guide with bounded-memory regions for a test."""
+    path.write_text(body, encoding="utf-8")
+    mt.ensure_regions(path)
+    if memory_entries:
+        mt.write_region(path, "memory", memory_entries)
+    if profile_entries:
+        mt.write_region(path, "profile", profile_entries)
+    return path
+
+
 def test_empty_files_produce_seeding_nudge(tmp_path: Path) -> None:
     """Cold start: with no entries the block must still nudge the model to
     seed memory, otherwise a fresh install never surfaces the feature."""
-    block = mi.build_memory_block(memory_dir=tmp_path)
-    assert "ciao memory add" in block
-    assert "--target user" in block
+    guide = write_guide(tmp_path / "CLAUDE.md")
+    block = mi.build_memory_block(guide_path=guide)
+    assert "Edit" in block
+    assert "ciao:memory" in block
+    assert "ciao:profile" in block
+    # There is no memory CLI any more — bounded memory is edited in place.
+    assert "ciao memory add" not in block
     # No section headers — there is nothing to render yet.
     assert "MEMORY (your personal notes)" not in block
     assert "USER PROFILE" not in block
 
 
 def test_block_renders_both_sections(tmp_path: Path) -> None:
-    mt.add_entry(tmp_path / "memory.md", "fact one", char_limit=200)
-    mt.add_entry(tmp_path / "user.md", "user note", char_limit=200)
+    guide = write_guide(
+        tmp_path / "CLAUDE.md",
+        memory_entries=["fact one"],
+        profile_entries=["user note"],
+    )
 
     block = mi.build_memory_block(
-        memory_dir=tmp_path,
+        guide_path=guide,
         memory_char_limit=200,
         user_char_limit=200,
     )
@@ -40,9 +63,9 @@ def test_block_renders_both_sections(tmp_path: Path) -> None:
 
 
 def test_block_skips_empty_section(tmp_path: Path) -> None:
-    mt.add_entry(tmp_path / "memory.md", "only memory", char_limit=200)
+    guide = write_guide(tmp_path / "CLAUDE.md", memory_entries=["only memory"])
     block = mi.build_memory_block(
-        memory_dir=tmp_path,
+        guide_path=guide,
         memory_char_limit=200,
         user_char_limit=200,
     )
@@ -153,11 +176,10 @@ def test_system_prompt_includes_memory_and_vault_notes() -> None:
     assert "Memory-Proposals.md" in append
 
 
-def test_mcp_system_prompt_strips_legacy_control_recipes() -> None:
-    memory_block = (
-        "Edit them with `ciao memory read|add|replace|remove (--target memory|user); "
-        "CLI edits persist immediately but only appear in this block on the next session."
-    )
+def test_mcp_system_prompt_strips_legacy_control_recipes(tmp_path: Path) -> None:
+    guide = write_guide(tmp_path / "CLAUDE.md", memory_entries=["fact one"])
+    memory_block = mi.build_memory_block(guide_path=guide)
+
     legacy = mi.system_prompt_payload(memory_block)
     mcp = mi.system_prompt_payload(memory_block, control_surface="mcp")
     assert legacy is not None and mcp is not None
@@ -180,9 +202,14 @@ def test_mcp_system_prompt_strips_legacy_control_recipes() -> None:
     assert "Ciaobot MCP control plane" not in mcp_append
     assert "memory_read" not in mcp_append
 
-    # The bounded-memory block preamble is rewritten to the MCP memory tools.
-    assert "Edit them with the Ciaobot MCP memory tools;" in mcp_append
-    assert "Tool edits persist immediately" in mcp_append
+    # Bounded memory has no MCP tool surface — both arms edit the CLAUDE.md
+    # `ciao:memory` / `ciao:profile` regions in place with `Edit`. The MCP
+    # path must not fabricate a dedicated "MCP memory tools" claim.
+    assert "MCP memory tools" not in mcp_append
+    assert "there is no `ciao memory` command" in mcp_append
+    assert "there is no `ciao memory` command" in legacy_append
+    assert "Edit the `ciao:memory`" in mcp_append
+    assert "ciao:profile" in mcp_append
 
     # Stripping recipes makes the MCP prompt strictly shorter than legacy.
     assert len(mcp_append) < len(legacy_append)
@@ -213,24 +240,27 @@ def test_system_prompt_payload_preserves_existing_append() -> None:
 def test_block_handles_load_failure_gracefully(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A raise from load_entries should produce an empty string, not crash."""
+    """A raise from read_region should produce an empty string, not crash."""
 
     def boom(*_args, **_kwargs):
         raise RuntimeError("disk on fire")
 
-    monkeypatch.setattr(mi, "load_entries", boom)
-    assert mi.build_memory_block(memory_dir=tmp_path) == ""
+    guide = write_guide(tmp_path / "CLAUDE.md")
+    monkeypatch.setattr(mi, "read_region", boom)
+    assert mi.build_memory_block(guide_path=guide) == ""
 
 
 def test_expired_memory_entries_filtered(tmp_path: Path) -> None:
     import datetime
 
-    mt.add_entry(tmp_path / "memory.md", "durable fact", char_limit=200)
-    mt.add_entry(tmp_path / "memory.md", "temporary note [expires: 2026-01-01]", char_limit=200)
+    guide = write_guide(
+        tmp_path / "CLAUDE.md",
+        memory_entries=["durable fact", "temporary note [expires: 2026-01-01]"],
+    )
 
     # With reference date 2026-07-26, the 2026-01-01 entry is expired
     today = datetime.date(2026, 7, 26)
-    block = mi.build_memory_block(memory_dir=tmp_path, today=today)
+    block = mi.build_memory_block(guide_path=guide, memory_char_limit=200, today=today)
 
     assert "durable fact" in block
     assert "temporary note" not in block
@@ -241,18 +271,16 @@ def test_expired_memory_entries_filtered(tmp_path: Path) -> None:
 def test_expired_only_memory_is_not_described_as_empty(tmp_path: Path) -> None:
     import datetime
 
-    mt.add_entry(
-        tmp_path / "memory.md",
-        ("x" * 150) + " [expires: 2020-01-01]",
-        char_limit=200,
-    )
+    entry = ("x" * 150) + " [expires: 2020-01-01]"
+    guide = write_guide(tmp_path / "CLAUDE.md", memory_entries=[entry])
 
     block = mi.build_memory_block(
-        memory_dir=tmp_path,
+        guide_path=guide,
         memory_char_limit=200,
         today=datetime.date(2026, 7, 26),
     )
-    stored_chars = mt.total_chars(mt.load_entries(tmp_path / "memory.md"))
+    stored_entries, _diags = mt.read_region(guide, "memory")
+    stored_chars = mt.total_chars(stored_entries)
 
     assert "are empty" not in block
     assert "1 expired" in block
@@ -274,19 +302,16 @@ def test_noncanonical_or_ambiguous_expiration_tags_stay_visible(
 ) -> None:
     import datetime
 
-    mt.add_entry(
-        tmp_path / "memory.md",
-        "compact [expires: 20260720]",
-        char_limit=400,
-    )
-    mt.add_entry(
-        tmp_path / "memory.md",
-        "multiple [expires: 2026-07-20] [expires: someday]",
-        char_limit=400,
+    guide = write_guide(
+        tmp_path / "CLAUDE.md",
+        memory_entries=[
+            "compact [expires: 20260720]",
+            "multiple [expires: 2026-07-20] [expires: someday]",
+        ],
     )
 
     block = mi.build_memory_block(
-        memory_dir=tmp_path,
+        guide_path=guide,
         today=datetime.date(2026, 7, 26),
     )
 

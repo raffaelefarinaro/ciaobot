@@ -20,7 +20,7 @@
       "workspace": "default",
       "web_project_id": "",
       "web_chat_id": null,
-      "prompt": "Curate recent archived chats, memory proposals, and durable learnings. Use the memory agent. Prefer existing session-insights sections and update the configured vault; append durable learnings to Workspace/Learnings.md (error resolutions, non-obvious workarounds, user corrections, outdated assumptions, not routine work). Promote durable cross-session facts into bounded memory. FIRST run `ciao memory read --target memory` and `--target user` to check usage. Remove entries whose valid `[expires: YYYY-MM-DD]` date has passed, and report malformed expiration tags instead of guessing. When `pct` is at or above ~85%, consolidate BEFORE promoting: merge related entries and remove stale one-off corrections that have no reuse value (e.g. \"User said X -> assistant did Y\" single-doc edits, resolved open loops) via `ciao memory replace|remove`, so there is headroom. Then review pending batches in Workspace/Memory-Proposals.md. Route each fact by scope: promote to bounded memory ONLY facts that apply across projects, using `ciao memory add --target memory` for cross-project preferences, environment facts, and lessons learned, or `--target user` for user identity and communication style. A fact scoped to one project belongs in that project's canonical doc, and standing operating policies belong in the workspace CLAUDE.md, not memory. When consolidating, move any project-scoped entry already sitting in bounded memory out to its owning project doc rather than deleting it. Also skim the workspace guide (CLAUDE.md): if it holds remembered facts rather than standing directives, re-home them to the surfaces above. Leave genuine policies in place, and when unsure whether something is a fact or a policy, propose the move rather than editing the guide. Remove processed batches from the proposals file. Never skip a durable fact because a file is full; consolidate to make room instead. Scan recently archived chats by project: when session-insights contain Decisions, Open loops, or material status changes for a vault-backed project, update that project's canonical doc and log.md if present, only when something actually changed. If nothing new needs processing, reply with a one-line no-op and stop. Report only processed counts plus changed files."
+      "prompt": "Curate recent archived chats, memory proposals, and durable learnings. Use the memory agent. Prefer existing session-insights sections and update the configured vault; append durable learnings to `Workspace/Learnings.md` (error resolutions, non-obvious workarounds, user corrections, outdated assumptions, not routine work). Promote durable cross-session facts into the bounded memory regions of the workspace `CLAUDE.md`: the `ciao:memory` region for cross-project preferences, environment facts, and lessons learned, and the `ciao:profile` region for user identity and communication style. Both regions are already in your system prompt, and each section header carries its current usage, so read the header. There is no memory command; edit the regions with `Edit`. Remove entries whose valid `[expires: YYYY-MM-DD]` date has passed, and report malformed expiration tags instead of guessing. When a region is at or above ~85% of its cap, consolidate BEFORE promoting: merge related entries and remove stale one-off corrections that have no reuse value (e.g. \"User said X -> assistant did Y\" single-doc edits, resolved open loops), so there is headroom. Nothing enforces the cap at write time, so the cap is your responsibility. Then review pending batches in `Workspace/Memory-Proposals.md`. Route each fact by scope: put a fact in a memory region ONLY when it applies across projects. A fact scoped to one project belongs in that project's canonical doc. Standing operating directives belong in the `CLAUDE.md` body OUTSIDE the fenced regions: the regions hold remembered facts, the body holds instructions. When consolidating, move any project-scoped entry sitting in a region out to its owning project doc rather than deleting it. Also skim the guide body: if it holds remembered facts rather than standing directives, move them into the memory region. Leave genuine directives in place, and when unsure whether something is a fact or a directive, propose the move rather than editing the body. Remove processed batches from the proposals file, editing the region first and dismissing the proposal second so a failed turn cannot lose the fact. Never skip a durable fact because a region is full; consolidate to make room instead. Scan recently archived chats by project: when session-insights contain Decisions, Open loops, or material status changes for a vault-backed project, update that project's canonical doc and `log.md` if present, only when something actually changed. If nothing new needs processing, reply with a one-line no-op and stop. Report only processed counts plus changed files."
     },
     {
       "schedule_id": "system-workspace-hygiene",
@@ -32,7 +32,9 @@
       "enabled": true,
       "frequency": "weekly",
       "daily_time_utc": "01:01",
-      "days_of_week": ["sun"],
+      "days_of_week": [
+        "sun"
+      ],
       "day_of_month": null,
       "run_at_date": null,
       "timezone_name": "UTC",
@@ -47,14 +49,16 @@
     {
       "schedule_id": "system-skill-evolution",
       "title": "Skill evolution",
-      "description": "Weekly look at how your custom skills performed: reviews recent sessions for errors and corrections and drafts improvement proposals for skills that struggled. Proposals are saved for your review — nothing is applied automatically, and it does nothing if you have no custom skills.",
+      "description": "Weekly look at how your custom skills performed: reviews recent sessions for errors and corrections and drafts improvement proposals for skills that struggled. Proposals are saved for your review \u2014 nothing is applied automatically, and it does nothing if you have no custom skills.",
       "scope": "system",
       "editable": false,
       "removable": false,
       "enabled": true,
       "frequency": "weekly",
       "daily_time_utc": "00:31",
-      "days_of_week": ["sun"],
+      "days_of_week": [
+        "sun"
+      ],
       "day_of_month": null,
       "run_at_date": null,
       "timezone_name": "UTC",

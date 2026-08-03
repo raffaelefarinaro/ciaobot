@@ -22,13 +22,6 @@ from typing import Any, Literal
 
 from ciao import job_runs, vault_index, vault_lint
 from ciao.fts_search import get_db_path, index_vault, init_db, search_vault
-from ciao.memory_tool import (
-    add_entry,
-    path_for_target,
-    read_entries,
-    remove_entry,
-    replace_entry,
-)
 from ciao.loops import publish_loops_changed
 from ciao.models import ControlSurface
 from ciao.web.project_chats import _MAX_ACTIVE_DELEGATES
@@ -326,39 +319,7 @@ class CiaoControlPlane:
         limit = max(1, min(50, int(limit_per_job)))
         return _ok(job_runs.automation_summary(limit_per_job=limit))
 
-    # ---- memory --------------------------------------------------------
-
-    def _memory_path_limit(self, target: str) -> tuple[Path, int]:
-        if target not in {"memory", "user"}:
-            raise ControlPlaneError("invalid_target", "target must be 'memory' or 'user'.")
-        limit = (
-            int(getattr(self.config, "memory_char_limit", 2200))
-            if target == "memory"
-            else int(getattr(self.config, "user_char_limit", 1375))
-        )
-        return path_for_target(target), limit  # type: ignore[arg-type]
-
-    def memory_read(self, principal: McpPrincipal, target: str) -> dict[str, Any]:
-        self._workspace(principal)
-        path, limit = self._memory_path_limit(target)
-        return read_entries(path, char_limit=limit)
-
-    def memory_add(self, principal: McpPrincipal, target: str, text: str) -> dict[str, Any]:
-        self._workspace(principal)
-        path, limit = self._memory_path_limit(target)
-        return add_entry(path, text, char_limit=limit)
-
-    def memory_replace(
-        self, principal: McpPrincipal, target: str, old_text: str, new_text: str
-    ) -> dict[str, Any]:
-        self._workspace(principal)
-        path, limit = self._memory_path_limit(target)
-        return replace_entry(path, old_text, new_text, char_limit=limit)
-
-    def memory_remove(self, principal: McpPrincipal, target: str, text: str) -> dict[str, Any]:
-        self._workspace(principal)
-        path, limit = self._memory_path_limit(target)
-        return remove_entry(path, text, char_limit=limit)
+    # ---- memory proposals ----------------------------------------------
 
     def _memory_proposals_path(self, principal: McpPrincipal) -> Path:
         return self._vault_root(principal) / "Workspace" / "Memory-Proposals.md"
@@ -370,13 +331,16 @@ class CiaoControlPlane:
             return _ok([])
         rows: list[dict[str, str]] = []
         pattern = re.compile(
-            r"^\s*-\s+\[(memory|user)\]\s+(.+?)(?:\s+_\(from:\s*(.+?)\)_)?\s*$"
+            r"^\s*-\s+\[(memory|user|profile)\]\s+(.+?)(?:\s+_\(from:\s*(.+?)\)_)?\s*$"
         )
         for raw in path.read_text(encoding="utf-8").splitlines():
             match = pattern.match(raw)
             if match:
+                target = match.group(1)
+                if target == "user":
+                    target = "profile"
                 rows.append({
-                    "target": match.group(1),
+                    "target": target,
                     "text": match.group(2).strip(),
                     "source": (match.group(3) or "").strip(),
                 })
@@ -390,7 +354,14 @@ class CiaoControlPlane:
         action: Literal["accept", "reject"],
         target: str = "",
     ) -> dict[str, Any]:
-        """Accept or reject exactly one proposal while keeping the queue auditable."""
+        """Dismiss exactly one proposal from the queue.
+
+        Promotion into a CLAUDE.md region is an explicit ``Edit`` by the
+        agent — this tool never writes memory. Ordering: edit the region
+        first, then dismiss the proposal (the reverse loses the fact if the
+        turn dies between the two steps).
+        """
+        del target  # retained for API compatibility; no longer used for writes
         if action not in {"accept", "reject"}:
             raise ControlPlaneError("invalid_action", "action must be accept or reject.")
         path = self._memory_proposals_path(principal)
@@ -410,25 +381,23 @@ class CiaoControlPlane:
         if len(candidates) > 1:
             raise ControlPlaneError("proposal_ambiguous", "The text matched more than one proposal; use a longer substring.")
         index, line = candidates[0]
-        match = re.match(r"^\s*-\s+\[(memory|user)\]\s+(.+?)(?:\s+_\(from:.*\)_)?\s*$", line)
+        match = re.match(
+            r"^\s*-\s+\[(memory|user|profile)\]\s+(.+?)(?:\s+_\(from:.*\)_)?\s*$",
+            line,
+        )
         if match is None:
             raise ControlPlaneError("proposal_invalid", "The matching proposal has an unsupported format.")
-        proposal_target = target.strip() or match.group(1)
+        proposal_target = match.group(1)
+        if proposal_target == "user":
+            proposal_target = "profile"
         proposal_text = match.group(2).strip()
-        if proposal_target not in {"memory", "user"}:
-            raise ControlPlaneError("invalid_target", "target must be memory or user.")
-        memory_result: dict[str, Any] | None = None
-        if action == "accept":
-            memory_result = self.memory_add(principal, proposal_target, proposal_text)
-            if not memory_result.get("ok") and "duplicate" not in str(memory_result.get("error", "")).lower():
-                return memory_result
         del lines[index]
         path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
         return _ok({
             "action": action,
             "target": proposal_target,
             "text": proposal_text,
-            "memory": memory_result,
+            "dismissed": True,
         })
 
     # ---- vault ---------------------------------------------------------

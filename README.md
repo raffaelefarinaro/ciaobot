@@ -136,7 +136,7 @@ Pick a workspace folder, choose a provider, and work — Ciaobot is the interfac
 
 Ciaobot keeps memory in layers so the agent can recall what matters without stuffing every prompt. **Settings → Context** shows what the agent actually loads.
 
-- **Short agent memory** (`~/.ciao/memory.md` and `user.md`) — a small, capped scratchpad the model maintains for you: preferences, conventions, lessons. Updated during conversation or via `/remember`; a snapshot is injected at the start of each chat. Add `[expires: YYYY-MM-DD]` to a temporary entry to keep it active through that date. It is hidden from later snapshots, but still uses stored character budget until daily memory curation removes it.
+- **Short agent memory** (fenced `ciao:memory` / `ciao:profile` regions in workspace `CLAUDE.md`) — a small, capped scratchpad the model maintains for you: preferences, conventions, lessons, and profile. Updated with Edit or `/remember`; a snapshot is injected at the start of each Claude/Codex chat. Add `[expires: YYYY-MM-DD]` to a temporary entry to keep it active through that date. It is hidden from later snapshots, but still uses stored character budget until daily memory curation removes it. These regions are git-tracked with the workspace.
 - **Your vault** (`memory-vault/`, or a separate vault root per sidebar workspace) — durable markdown you own: people, projects, ideas. Browse it in Obsidian or any editor; it stays useful even without Ciaobot.
 - **One behavior file for the install** — `<workspace>/CLAUDE.md` (and `AGENTS.md` for Codex) applies to every chat.
 
