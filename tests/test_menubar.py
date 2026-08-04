@@ -350,7 +350,9 @@ def test_start_at_login_status_is_missing_without_launch_agent_plists(
     assert menubar.start_at_login_menu_label(status) == "Start at Login: not installed"
 
 
-def test_start_at_login_commands_target_both_launch_agents() -> None:
+def test_start_at_login_commands_target_non_host_labels() -> None:
+    # Default (no host_label): both labels are targeted, matching the legacy
+    # contract used by callers that aren't a Ciaobot launchd job.
     assert menubar.start_at_login_commands(True, uid=501) == [
         ["launchctl", "enable", "gui/501/com.ciao.server"],
         ["launchctl", "enable", "gui/501/com.ciao.menubar"],
@@ -359,11 +361,28 @@ def test_start_at_login_commands_target_both_launch_agents() -> None:
         ["launchctl", "disable", "gui/501/com.ciao.server"],
         ["launchctl", "disable", "gui/501/com.ciao.menubar"],
     ]
+    # When the caller is the menubar itself, the menubar label is dropped
+    # so the toggle can't disable its own running job.
+    assert menubar.start_at_login_commands(
+        False, uid=501, host_label=menubar.MENUBAR_LAUNCHD_LABEL
+    ) == [
+        ["launchctl", "disable", "gui/501/com.ciao.server"],
+    ]
+    assert menubar.start_at_login_commands(
+        True, uid=501, host_label=menubar.MENUBAR_LAUNCHD_LABEL
+    ) == [
+        ["launchctl", "enable", "gui/501/com.ciao.server"],
+    ]
 
 
-def test_set_start_at_login_enabled_runs_launchctl_for_both_agents(
+def test_set_start_at_login_enabled_skips_host_label_from_menubar(
     tmp_path: Path, monkeypatch
 ) -> None:
+    """Regression: disabling login from the menubar process must not issue
+    ``launchctl disable`` for ``com.ciao.menubar``. macOS rejects that on
+    recent releases and the rejection used to surface through rumps as
+    an unhandled exception that crashed the menubar process.
+    """
     for path in menubar.launch_agent_paths(tmp_path).values():
         path.write_text("<plist />", encoding="utf-8")
 
@@ -384,6 +403,45 @@ def test_set_start_at_login_enabled_runs_launchctl_for_both_agents(
         False,
         launch_agents_dir=tmp_path,
         uid=501,
+        host_label=menubar.MENUBAR_LAUNCHD_LABEL,
+    )
+
+    assert ok
+    assert error == ""
+    assert calls == [
+        ["launchctl", "disable", "gui/501/com.ciao.server"],
+    ]
+
+
+def test_set_start_at_login_enabled_targets_both_when_host_label_is_none(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When the caller has no host label, both labels are targeted.
+
+    This keeps the behavior for non-menubar call sites (tests, recovery
+    scripts) unchanged from the pre-fix contract.
+    """
+    for path in menubar.launch_agent_paths(tmp_path).values():
+        path.write_text("<plist />", encoding="utf-8")
+
+    calls: list[list[str]] = []
+
+    class Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(cmd: list[str], **kwargs):
+        calls.append(cmd)
+        return Completed()
+
+    monkeypatch.setattr(menubar.subprocess, "run", fake_run)
+
+    ok, error = menubar.set_start_at_login_enabled(
+        False,
+        launch_agents_dir=tmp_path,
+        uid=501,
+        host_label=None,
     )
 
     assert ok

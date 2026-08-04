@@ -366,10 +366,26 @@ def start_at_login_menu_label(status: StartAtLoginStatus) -> str:
     return "Start at Login: unknown"
 
 
-def start_at_login_commands(enabled: bool, uid: int | None = None) -> list[list[str]]:
+def start_at_login_commands(
+    enabled: bool,
+    uid: int | None = None,
+    *,
+    host_label: str | None = None,
+) -> list[list[str]]:
+    """Build the launchctl commands that flip Ciaobot's login items.
+
+    ``host_label`` is the launchd label of the calling process. Disabling
+    one's own running job is rejected by macOS on recent releases
+    (or hangs the AppKit run loop when the rejection surfaces through
+    rumps), so we never issue ``launchctl disable`` for that label.
+    The corresponding enable path is also skipped for symmetry: a host
+    process can't meaningfully re-enable itself mid-flight, and skipping
+    keeps the command list deterministic.
+    """
     resolved = os.getuid() if uid is None else uid
     action = "enable" if enabled else "disable"
-    return [["launchctl", action, f"gui/{resolved}/{label}"] for label in LAUNCHD_LABELS]
+    targets = [label for label in LAUNCHD_LABELS if label != host_label]
+    return [["launchctl", action, f"gui/{resolved}/{label}"] for label in targets]
 
 
 def set_start_at_login_enabled(
@@ -377,13 +393,14 @@ def set_start_at_login_enabled(
     *,
     launch_agents_dir: Path | None = None,
     uid: int | None = None,
+    host_label: str | None = MENUBAR_LAUNCHD_LABEL,
 ) -> tuple[bool, str]:
     paths = launch_agent_paths(launch_agents_dir)
     if not all(path.is_file() for path in paths.values()):
         return False, "Ciaobot's login items are not installed. Run setup again to recreate them."
 
     errors: list[str] = []
-    for command in start_at_login_commands(enabled, uid):
+    for command in start_at_login_commands(enabled, uid, host_label=host_label):
         try:
             completed = subprocess.run(command, capture_output=True, text=True, check=False)
         except OSError as exc:
@@ -1178,26 +1195,37 @@ def run_menubar(workspace: Path, port: int) -> int:
     def on_toggle_start_at_login(_sender) -> None:
         current = start_at_login_status()
         if not current.available:
-            rumps.alert(
-                title="Login item unavailable",
-                message=(
-                    "Ciaobot's login items are not installed yet. "
-                    "Run setup again to recreate them."
-                ),
-                ok="OK",
-                icon_path=_icon_if_present("CiaobotServer.icns"),
-            )
+            try:
+                rumps.alert(
+                    title="Login item unavailable",
+                    message=(
+                        "Ciaobot's login items are not installed yet. "
+                        "Run setup again to recreate them."
+                    ),
+                    ok="OK",
+                    icon_path=_icon_if_present("CiaobotServer.icns"),
+                )
+            except Exception:
+                # AppKit can refuse to instantiate NSAlert when the menubar
+                # process is in a degraded state; the status row above
+                # already tells the user the same thing.
+                pass
             refresh()
             return
 
-        ok, error = set_start_at_login_enabled(not current.enabled)
+        ok, error = set_start_at_login_enabled(
+            not current.enabled, host_label=MENUBAR_LAUNCHD_LABEL
+        )
         if not ok:
-            rumps.alert(
-                title="Could not update login item",
-                message=error or "launchctl did not accept the change.",
-                ok="OK",
-                icon_path=_icon_if_present("CiaobotServer.icns"),
-            )
+            try:
+                rumps.alert(
+                    title="Could not update login item",
+                    message=error or "launchctl did not accept the change.",
+                    ok="OK",
+                    icon_path=_icon_if_present("CiaobotServer.icns"),
+                )
+            except Exception:
+                pass
         refresh()
 
     def on_update(_sender) -> None:
