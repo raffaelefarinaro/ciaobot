@@ -506,16 +506,10 @@ def _workspace_guides_linked(workspace_root: Path) -> bool:
 
 def _memory_regions_well_formed(workspace_root: Path) -> bool:
     """True when both bounded memory regions are present and well-formed in CLAUDE.md."""
-    from ciao.memory_tool import diagnose_region
+    from ciao.memory_tool import diagnose_guide
 
     guide = workspace_root / "CLAUDE.md"
-    if not guide.is_file():
-        return False
-    try:
-        text = guide.read_text(encoding="utf-8")
-    except OSError:
-        return False
-    return not diagnose_region(text, "memory") and not diagnose_region(text, "profile")
+    return guide.is_file() and not diagnose_guide(guide)
 
 
 def setup_status(

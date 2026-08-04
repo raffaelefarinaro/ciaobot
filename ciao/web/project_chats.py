@@ -758,8 +758,8 @@ class ChatInfo:
     # Empty = provider default. Reset on handover: levels aren't portable
     # across providers.
     thinking_level: str = ""
-    # Empty inherits the application default. Persisted so experimental MCP
-    # and legacy chats can coexist without process-global configuration.
+    # Empty inherits the server default. MCP-only since the legacy/auto A/B
+    # surface was removed.
     control_surface: str = ""
     session_id: str = ""
     # SDK session ids this chat rotated through earlier in the SAME
@@ -3240,23 +3240,13 @@ class ProjectChatManager:
         rollouts under ``~/.codex/sessions`` are reclaimed the same way. Failures
         are logged inside the provider helpers and never block archive/delete.
         """
-        ids = (
-            list(session_ids)
-            if session_ids is not None
-            else ([chat.session_id] if chat.session_id else [])
-        )
+        raw_ids = session_ids if session_ids is not None else [chat.session_id]
         workspace = self._config.workspace_root
-        if chat.provider == "claude":
-            for sid in ids:
-                if sid:
-                    self._transcripts.delete_sdk_session_blob(workspace, sid)
-            return
-        if chat.provider == "codex":
-            for sid in ids:
-                if sid:
-                    asyncio.ensure_future(
-                        CodexProvider.delete_thread(workspace, sid)
-                    )
+        for sid in filter(None, raw_ids):
+            if chat.provider == "claude":
+                self._transcripts.delete_sdk_session_blob(workspace, sid)
+            elif chat.provider == "codex":
+                asyncio.ensure_future(CodexProvider.delete_thread(workspace, sid))
 
     def delete_chat(self, chat_id: str) -> bool:
         chat = self._chats.pop(chat_id, None)

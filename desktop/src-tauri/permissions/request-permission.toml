@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "request-permission"
+description = "Allows the frontend to ask the user for a native permission (microphone, notifications, camera)."
+commands.allow = ["request_permission"]

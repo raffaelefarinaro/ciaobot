@@ -707,9 +707,27 @@ def test_enrich_schedule_flags_missed():
     from ciao.web.routes_api import _enrich_schedule
     # Daily schedule created months ago, never triggered → today's fire is
     # overdue and unrecorded, so it must be flagged missed.
-    enriched = _enrich_schedule(_entry())
+    #
+    # `now` is pinned because "missed" requires the expected fire to be more
+    # than 5 minutes ago. Reading the wall clock made this fail on any run that
+    # landed in the 5 minutes right after the 08:00 Europe/Zurich slot — CI hit
+    # exactly that window at 06:05 UTC (08:05 local) and went red.
+    enriched = _enrich_schedule(
+        _entry(), now=datetime(2026, 6, 15, 12, 0, tzinfo=UTC)
+    )
     assert enriched["missed"] is True
     assert enriched["last_expected_run"] is not None
+
+
+def test_enrich_schedule_not_missed_within_the_grace_window():
+    """Just-fired schedules are not "missed": the 5-minute grace still applies."""
+    from ciao.web.routes_api import _enrich_schedule
+    # 08:00 Europe/Zurich on this date is 06:00 UTC; two minutes later is still
+    # inside the grace window.
+    enriched = _enrich_schedule(
+        _entry(), now=datetime(2026, 6, 15, 6, 2, tzinfo=UTC)
+    )
+    assert enriched["missed"] is False
 
 
 def test_enrich_schedule_manual_not_missed():

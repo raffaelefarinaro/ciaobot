@@ -11,7 +11,7 @@ from starlette.testclient import TestClient
 
 from ciao.config import CiaoConfig
 from ciao.package_version import detect_install_mode, update_package
-from ciao.web.routes_api import package_update_endpoint
+from ciao.web.routes_node import package_update_endpoint
 
 
 class _Response:
@@ -321,7 +321,7 @@ def test_package_update_endpoint_success() -> None:
     restarts = []
     app.state.request_restart = restarts.append
 
-    with patch("ciao.web.routes_api.update_package") as mock_update:
+    with patch("ciao.web.routes_node.update_package") as mock_update:
         mock_update.return_value = {
             "ok": True,
             "mode": "pip_venv",

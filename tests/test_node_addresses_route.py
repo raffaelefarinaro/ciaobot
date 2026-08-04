@@ -15,7 +15,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.network_addresses import is_loopback_url, parse_inet_addresses, server_addresses
-from ciao.web.routes_api import node_addresses_endpoint
+from ciao.web.routes_node import node_addresses_endpoint
 
 
 def _client(port: int | None = 8443) -> TestClient:
@@ -26,7 +26,7 @@ def _client(port: int | None = 8443) -> TestClient:
 
 def test_addresses_are_returned_with_loopback_flagged(monkeypatch) -> None:
     monkeypatch.setattr(
-        "ciao.web.routes_api.server_addresses",
+        "ciao.web.routes_node.server_addresses",
         lambda port: [
             f"http://localhost:{port}/",
             f"http://mac.local:{port}/",
@@ -48,7 +48,7 @@ def test_addresses_are_returned_with_loopback_flagged(monkeypatch) -> None:
 
 def test_missing_port_config_falls_back_to_the_default(monkeypatch) -> None:
     monkeypatch.setattr(
-        "ciao.web.routes_api.server_addresses", lambda port: [f"http://localhost:{port}/"]
+        "ciao.web.routes_node.server_addresses", lambda port: [f"http://localhost:{port}/"]
     )
     body = _client(None).get("/api/node/addresses").json()
     assert body["port"] == 8443

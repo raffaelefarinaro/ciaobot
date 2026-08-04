@@ -6,6 +6,7 @@ use objc2_user_notifications::{
     UNUserNotificationCenter, UNUserNotificationCenterDelegate,
 };
 use serde_json::Value;
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use uuid::Uuid;
 
@@ -91,7 +92,25 @@ impl CiaobotNotificationDelegate {
 
 static DELEGATE: OnceLock<Retained<CiaobotNotificationDelegate>> = OnceLock::new();
 
+/// True when this process runs from inside a real `.app` bundle.
+///
+/// `UNUserNotificationCenter` requires one. In an unbundled process — `cargo
+/// run`, and therefore `tauri dev` — `bundleProxyForCurrentProcess` is nil and
+/// `currentNotificationCenter()` raises an `NSException` that nothing catches,
+/// killing the process during `applicationDidFinishLaunching` before a window
+/// ever appears. Every entry point into the notification center checks this
+/// first, so an unbundled run gets inert notifications instead of a crash.
+fn is_bundled() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .is_some_and(|dir| dir.ends_with("Contents/MacOS"))
+}
+
 fn set_action_delegate() {
+    if !is_bundled() {
+        return;
+    }
     let delegate = DELEGATE.get_or_init(CiaobotNotificationDelegate::new);
     UNUserNotificationCenter::currentNotificationCenter()
         .setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&**delegate)));
@@ -160,6 +179,11 @@ impl NativeNotification {
     }
 
     pub async fn post(self) -> Result<(), String> {
+        // `send()` reaches the same notification center as the delegate, so an
+        // unbundled run has to bail here too rather than crash on delivery.
+        if !is_bundled() {
+            return Err("native notifications require a bundled .app".to_string());
+        }
         let identifier = self
             .intent
             .as_ref()
@@ -189,6 +213,14 @@ impl NativeNotification {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn unbundled_test_binary_is_not_treated_as_bundled() {
+        // The test harness runs from target/debug/deps, not Contents/MacOS, so
+        // this is the same path `tauri dev` takes. If this ever returns true
+        // the notification-center guard is not protecting unbundled runs.
+        assert!(!is_bundled());
+    }
 
     #[test]
     fn maps_chat_and_gws_payloads_to_navigation_intents() {

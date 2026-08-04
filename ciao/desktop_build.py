@@ -22,6 +22,7 @@ Three constraints shape the implementation:
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 import time
@@ -173,6 +174,48 @@ def needs_rebuild(repo: Path, *, install_dir: Path = INSTALL_DIR) -> tuple[bool,
     return False, "desktop sources unchanged since the last build"
 
 
+# Where a Rust toolchain lives when it is installed but not on PATH. rustup
+# installed via Homebrew keeps its shims under `opt/rustup/bin`, which is NOT
+# `/opt/homebrew/bin`, so `cargo` is invisible to a GUI- or launchd-started
+# engine even on a machine that has Rust. `tauri build` then dies inside cargo
+# and the failure reaches the operator as an unexplained non-zero exit.
+_CARGO_SEARCH_DIRS = (
+    Path.home() / ".cargo" / "bin",
+    Path("/opt/homebrew/opt/rustup/bin"),
+    Path("/usr/local/opt/rustup/bin"),
+)
+
+
+def ensure_cargo_on_path() -> str | None:
+    """Make `cargo` reachable for child builds; return its directory if added.
+
+    No-op when cargo is already on PATH. Prepending here keeps the knowledge of
+    where toolchains hide in the module that needs cargo, rather than requiring
+    every launch context (shell, launchd plist, Finder) to be configured.
+    """
+    if shutil.which("cargo"):
+        return None
+    for directory in _CARGO_SEARCH_DIRS:
+        if (directory / "cargo").is_file():
+            os.environ["PATH"] = f"{directory}{os.pathsep}{os.environ.get('PATH', '')}"
+            return str(directory)
+    return None
+
+
+def _missing_rust_toolchain() -> str | None:
+    """A ready-to-show message when the desktop build cannot possibly succeed."""
+    ensure_cargo_on_path()
+    if shutil.which("cargo"):
+        return None
+    searched = ", ".join(str(d) for d in _CARGO_SEARCH_DIRS)
+    return (
+        "cargo was not found on PATH, so `tauri build` cannot compile the app. "
+        "Install a Rust toolchain (`brew install rustup && rustup default stable`, "
+        "or https://rustup.rs) and restart the engine so it inherits the new "
+        f"PATH. Also searched: {searched}."
+    )
+
+
 def build_and_stage(
     repo: Path,
     *,
@@ -188,9 +231,21 @@ def build_and_stage(
     steps: list[dict] = []
 
     def record(name: str, result: subprocess.CompletedProcess) -> bool:
-        output = (result.stdout or "").strip() or (result.stderr or "").strip()
-        steps.append({"step": name, "ok": result.returncode == 0, "output": output[-500:]})
-        return result.returncode == 0
+        ok = result.returncode == 0
+        out = (result.stdout or "").strip()
+        err = (result.stderr or "").strip()
+        # On failure keep BOTH streams, stderr last. npm echoes the command it
+        # ran to stdout while the actual cause (cargo, tsc) goes to stderr, so
+        # preferring stdout reported only the echo and hid every real error --
+        # and the trailing 500-char window must not cut the cause away either.
+        detail = (out or err) if ok else "\n".join(part for part in (out, err) if part)
+        steps.append({"step": name, "ok": ok, "output": detail[-500:]})
+        return ok
+
+    missing = _missing_rust_toolchain()
+    if missing:
+        steps.append({"step": "desktop toolchain", "ok": False, "output": missing})
+        return steps, False
 
     if not (desktop / "node_modules").is_dir():
         result = runner(

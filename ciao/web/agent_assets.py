@@ -583,17 +583,9 @@ def workspace_health(config: Any) -> dict:
         )
 
     if claude_guide.is_file():
-        from ciao.memory_tool import diagnose_region
+        from ciao.memory_tool import diagnose_guide
 
-        try:
-            guide_text = claude_guide.read_text(encoding="utf-8")
-        except OSError:
-            guide_text = ""
-        region_diags = [
-            diag
-            for region in ("memory", "profile")
-            for diag in diagnose_region(guide_text, region)
-        ]
+        region_diags = diagnose_guide(claude_guide)
         add(
             "memory-regions",
             "Bounded memory regions",
@@ -1125,8 +1117,7 @@ def _merge_agents_into_claude(root: Path) -> bool:
         return False
 
     if not claude_text:
-        claude_text = agents_text
-        merged_text = claude_text
+        merged_text = agents_text
     else:
         existing_lines = {line.strip() for line in claude_text.splitlines() if line.strip()}
         unique_lines = [

@@ -59,6 +59,8 @@ class MemoryProposal:
     source_section: str
 
     def as_bullet(self) -> str:
+        # Deliberately total: an unknown target is written through rather than
+        # raising, so one odd proposal cannot fail a whole archive batch.
         target = "profile" if self.target == "user" else self.target
         return f"- [{target}] {self.text}  _(from: {self.source_section})_"
 
@@ -149,16 +151,13 @@ def promote_user_corrections(
     proposals: list[MemoryProposal],
     *,
     guide_path: Path | None = None,
-    # Legacy kwarg kept for one-release call-site tolerance; ignored.
-    memory_dir: Path | None = None,
 ) -> tuple[list[MemoryProposal], list[str]]:
     """Apply "User corrections" proposals straight to CLAUDE.md regions.
 
     Returns ``(remaining, promoted_texts)``. Exact duplicates are dropped
     from both. On any write failure the proposal stays reviewable.
     """
-    del memory_dir
-    from ciao.memory_tool import ensure_regions, read_region, write_region
+    from ciao.memory_tool import ensure_regions, read_region, resolve_region, write_region
 
     remaining: list[MemoryProposal] = []
     promoted: list[str] = []
@@ -175,8 +174,8 @@ def promote_user_corrections(
         if proposal.source_section not in _AUTO_PROMOTE_SECTIONS:
             remaining.append(proposal)
             continue
-        region = "profile" if proposal.target in {"user", "profile"} else "memory"
         try:
+            region = resolve_region(proposal.target)
             entries, diags = read_region(guide_path, region)
             if diags:
                 logger.info(
@@ -275,8 +274,6 @@ def proposals_from_archive(
     *,
     auto_promote_memory: bool = False,
     guide_path: Path | None = None,
-    # Legacy kwarg kept for one-release call-site tolerance; ignored.
-    memory_dir: Path | None = None,
 ) -> Path | None:
     """Read an archived chat, extract insights, propose, optionally promote.
 
@@ -288,7 +285,6 @@ def proposals_from_archive(
     Returns the proposals file path when something was written, else None.
     Swallows all exceptions; this runs as a fire-and-forget step.
     """
-    del memory_dir
     try:
         if not archive_path.exists():
             return None

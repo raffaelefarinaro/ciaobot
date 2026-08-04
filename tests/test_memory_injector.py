@@ -220,6 +220,7 @@ def test_system_prompt_payload_appends_to_claude_code_preset() -> None:
     assert payload is not None
     assert payload["type"] == "preset"
     assert payload["preset"] == "claude_code"
+    assert payload["exclude_dynamic_sections"] is True
     assert "Ciaobot System Instructions" in payload["append"]
     assert "hello memory" in payload["append"]
 

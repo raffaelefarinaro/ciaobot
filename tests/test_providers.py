@@ -51,7 +51,6 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
             captured["options"] = options
 
     config = SimpleNamespace(
-        memory_enabled=False,
         memory_char_limit=2200,
         user_char_limit=1375,
         vault_root=tmp_path / "memory-vault",
@@ -112,6 +111,51 @@ async def test_claude_managed_process_receives_scoped_mcp_configuration(
 
 
 @pytest.mark.asyncio
+async def test_claude_injects_claude_md_memory_regions_without_opt_in_flag(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Bounded memory always injects from CLAUDE.md; there is no CIAO_MEMORY_ENABLED."""
+    from ciao.memory_tool import ensure_regions, write_region
+
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+    guide = tmp_path / "CLAUDE.md"
+    ensure_regions(guide)
+    write_region(guide, "memory", ["Prefer pytest for regressions"])
+    write_region(guide, "profile", ["User prefers concise replies"])
+
+    config = SimpleNamespace(
+        memory_char_limit=2200,
+        user_char_limit=1375,
+        vault_root=tmp_path / "memory-vault",
+    )
+    provider = ClaudeProvider(tmp_path, config=config)
+    monkeypatch.setattr("ciao.providers.claude.get_bundled_claude_path", lambda: "/fake/claude")
+    monkeypatch.setattr("ciao.providers.claude.ClaudeSDKClient", FakeClient)
+    request = AgentRequest(
+        prompt="test",
+        model="sonnet",
+        mode="auto",
+        provider="claude",
+        control_surface="mcp",
+        mcp_url="http://127.0.0.1:8443/mcp/",
+        mcp_token="secret",
+        mcp_required=True,
+    )
+
+    await provider._ensure_connected(request)
+
+    append = captured["options"].system_prompt["append"]
+    assert "Prefer pytest for regressions" in append
+    assert "User prefers concise replies" in append
+    assert captured["options"].system_prompt.get("exclude_dynamic_sections") is True
+
+
+@pytest.mark.asyncio
 async def test_plan_mode_gets_no_control_plane_allowlist(tmp_path: Path, monkeypatch) -> None:
     """Plan mode's contract is "propose, don't act"; an allow rule would
     punch a hole in it, so the allowlist is withheld there even though the
@@ -123,7 +167,6 @@ async def test_plan_mode_gets_no_control_plane_allowlist(tmp_path: Path, monkeyp
             captured["options"] = options
 
     config = SimpleNamespace(
-        memory_enabled=False,
         memory_char_limit=2200,
         user_char_limit=1375,
         vault_root=tmp_path / "memory-vault",
@@ -449,6 +492,51 @@ def test_claude_convert_stream_event_threads_parent_tool_use_id(
     [thinking] = claude_provider._convert_stream_event(thinking_event)
     assert thinking.text == "hmm"
     assert thinking.parent_tool_use_id == parent_id
+
+
+def test_claude_stream_usage_uses_latest_input_not_cumulative(
+    claude_provider: ClaudeProvider,
+) -> None:
+    """Each message_start reports the total input tokens for that API call,
+    not a delta. Using the latest value keeps the live PWA counter near the
+    real context size; summing across a tool loop inflates it misleadingly."""
+    from claude_agent_sdk import StreamEvent as SDKStreamEvent
+
+    start1 = SDKStreamEvent(
+        uuid="u1",
+        session_id="s1",
+        event={
+            "type": "message_start",
+            "message": {"usage": {"input_tokens": 500_000, "output_tokens": 0}},
+        },
+    )
+    [usage1] = claude_provider._convert_stream_event(start1)
+    assert usage1.input_tokens == 500_000
+    assert usage1.output_tokens == 0
+
+    delta1 = SDKStreamEvent(
+        uuid="u2",
+        session_id="s1",
+        event={"type": "message_delta", "usage": {"output_tokens": 1_000}},
+    )
+    [usage2] = claude_provider._convert_stream_event(delta1)
+    assert usage2.input_tokens == 500_000
+    assert usage2.output_tokens == 1_000
+
+    # A second assistant message in the same tool loop has a slightly larger
+    # context. The input counter must reflect the latest context size, not the
+    # cumulative 1,010,000 tokens.
+    start2 = SDKStreamEvent(
+        uuid="u3",
+        session_id="s1",
+        event={
+            "type": "message_start",
+            "message": {"usage": {"input_tokens": 510_000, "output_tokens": 0}},
+        },
+    )
+    [usage3] = claude_provider._convert_stream_event(start2)
+    assert usage3.input_tokens == 510_000
+    assert usage3.output_tokens == 1_000  # previously committed output
 
 
 def test_claude_rate_limit_event_suppresses_status_and_caches_quota(

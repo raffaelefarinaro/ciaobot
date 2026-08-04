@@ -8,7 +8,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from ciao.web.connection_tracker import ConnectionTracker, _is_loopback_host
-from ciao.web.routes_api import node_connected_clients_endpoint
+from ciao.web.routes_node import node_connected_clients_endpoint
 
 
 def _make_ws(*, host: str = "192.168.0.10", port: int = 54321, user_agent: str = "", forwarded: str = "") -> SimpleNamespace:

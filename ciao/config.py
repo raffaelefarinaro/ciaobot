@@ -480,13 +480,11 @@ class CiaoConfig:
     # the workspace CLAUDE.md. Injected as a frozen snapshot into Claude and
     # Codex system prompts at session start; edited with Edit on the guide.
     # See ``ciao/memory_injector.py`` and ``ciao/memory_tool.py``.
-    memory_enabled: bool = True
     memory_char_limit: int = 2200
     user_char_limit: int = 1375
-    # Ciaobot's managed agent control plane. MCP is the default transport for
-    # both providers; the legacy CLI/direct-file path is retained as a hidden
-    # fallback (selectable via ``CIAO_CONTROL_SURFACE`` or the per-chat field)
-    # and is used automatically when the MCP server is unavailable.
+    # Ciaobot's managed agent control plane. MCP is the only control surface;
+    # the legacy CLI path survives only as a runtime degrade when the MCP
+    # server is unavailable at request time.
     mcp_enabled: bool = True
     control_surface: str = "mcp"
     # Internal evaluation mode.  It keeps the HTTP/chat stack identical while
@@ -502,7 +500,10 @@ class CiaoConfig:
         if not vault_root.is_absolute():
             vault_root = self.workspace_root / vault_root
         self.vault_root = vault_root.resolve()
-        if self.control_surface not in {"legacy", "mcp", "auto"}:
+        # "auto" was the user-facing A/B benchmark option and is gone. The
+        # runtime MCP-degrade path still sets the legacy literal internally,
+        # so legacy stays a valid config value alongside the mcp default.
+        if self.control_surface not in {"legacy", "mcp"}:
             self.control_surface = "legacy"
         if not self.workspaces:
             self.workspaces = _legacy_workspaces(
@@ -1210,8 +1211,6 @@ class CiaoConfig:
 
             critique_models=source.get("CIAO_REVIEW_MODELS", "").strip()
             or source.get("CIAO_ADVERSARIAL_MODELS", "").strip(),
-            memory_enabled=source.get("CIAO_MEMORY_ENABLED", "true").strip().lower()
-            not in {"0", "false", "no", "off"},
             memory_char_limit=int(
                 source.get("CIAO_MEMORY_CHAR_LIMIT", "").strip() or "2200"
             ),
@@ -1223,7 +1222,7 @@ class CiaoConfig:
             control_surface=(
                 source.get("CIAO_CONTROL_SURFACE", "mcp").strip().lower()
                 if source.get("CIAO_CONTROL_SURFACE", "mcp").strip().lower()
-                in {"legacy", "mcp", "auto"}
+                in {"legacy", "mcp"}
                 else "mcp"
             ),
             benchmark_mode=source.get("CIAO_BENCHMARK_MODE", "false")

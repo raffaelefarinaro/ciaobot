@@ -232,7 +232,7 @@ def _capture_host_session(request: Request | WebSocket, res: httpx.Response) -> 
     host's signing secret and leave this node holding a session the host no
     longer accepts — the tunnel would die on the next request.
     """
-    from ciao.web.routes_api import _parse_set_cookie_session
+    from ciao.web.routes_helpers import _parse_set_cookie_session
 
     # Read the raw headers rather than res.cookies: the latter needs the paired
     # request object, which a streamed or synthesized response may not carry.

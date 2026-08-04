@@ -9,7 +9,6 @@ knowledge of ``.runtime`` JSON layouts.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 import sqlite3
@@ -20,14 +19,21 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from ciao import job_runs, vault_index, vault_lint
+from ciao import vault_index
 from ciao.fts_search import get_db_path, index_vault, init_db, search_vault
 from ciao.loops import publish_loops_changed
+from ciao.memory_tool import resolve_region
 from ciao.models import ControlSurface
 from ciao.web.project_chats import _MAX_ACTIVE_DELEGATES
 from ciao.schedules import ScheduleEntry, compute_next_run
 
 logger = logging.getLogger(__name__)
+
+# One grammar for a proposal bullet, shared by the list and dismiss paths. The
+# trailing `_(from: …)_` source tag is optional and captured when present.
+_PROPOSAL_BULLET_RE = re.compile(
+    r"^\s*-\s+\[(memory|user|profile)\]\s+(.+?)(?:\s+_\(from:\s*(.+?)\)_)?\s*$"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,11 +320,6 @@ class CiaoControlPlane:
             "startup": self.startup_tracker.to_dict() if self.startup_tracker else None,
         })
 
-    def automation_runs_list(self, principal: McpPrincipal, limit_per_job: int = 10) -> dict[str, Any]:
-        self._workspace(principal)
-        limit = max(1, min(50, int(limit_per_job)))
-        return _ok(job_runs.automation_summary(limit_per_job=limit))
-
     # ---- memory proposals ----------------------------------------------
 
     def _memory_proposals_path(self, principal: McpPrincipal) -> Path:
@@ -330,17 +331,11 @@ class CiaoControlPlane:
         if not path.exists():
             return _ok([])
         rows: list[dict[str, str]] = []
-        pattern = re.compile(
-            r"^\s*-\s+\[(memory|user|profile)\]\s+(.+?)(?:\s+_\(from:\s*(.+?)\)_)?\s*$"
-        )
         for raw in path.read_text(encoding="utf-8").splitlines():
-            match = pattern.match(raw)
+            match = _PROPOSAL_BULLET_RE.match(raw)
             if match:
-                target = match.group(1)
-                if target == "user":
-                    target = "profile"
                 rows.append({
-                    "target": target,
+                    "target": resolve_region(match.group(1)),
                     "text": match.group(2).strip(),
                     "source": (match.group(3) or "").strip(),
                 })
@@ -352,7 +347,6 @@ class CiaoControlPlane:
         text: str,
         *,
         action: Literal["accept", "reject"],
-        target: str = "",
     ) -> dict[str, Any]:
         """Dismiss exactly one proposal from the queue.
 
@@ -361,7 +355,6 @@ class CiaoControlPlane:
         first, then dismiss the proposal (the reverse loses the fact if the
         turn dies between the two steps).
         """
-        del target  # retained for API compatibility; no longer used for writes
         if action not in {"accept", "reject"}:
             raise ControlPlaneError("invalid_action", "action must be accept or reject.")
         path = self._memory_proposals_path(principal)
@@ -381,15 +374,10 @@ class CiaoControlPlane:
         if len(candidates) > 1:
             raise ControlPlaneError("proposal_ambiguous", "The text matched more than one proposal; use a longer substring.")
         index, line = candidates[0]
-        match = re.match(
-            r"^\s*-\s+\[(memory|user|profile)\]\s+(.+?)(?:\s+_\(from:.*\)_)?\s*$",
-            line,
-        )
+        match = _PROPOSAL_BULLET_RE.match(line)
         if match is None:
             raise ControlPlaneError("proposal_invalid", "The matching proposal has an unsupported format.")
-        proposal_target = match.group(1)
-        if proposal_target == "user":
-            proposal_target = "profile"
+        proposal_target = resolve_region(match.group(1))
         proposal_text = match.group(2).strip()
         del lines[index]
         path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
@@ -426,9 +414,6 @@ class CiaoControlPlane:
         finally:
             conn.close()
         return _ok({"notes": len(entries), "fts_indexed": indexed, "fts_removed": removed})
-
-    def vault_lint(self, principal: McpPrincipal) -> dict[str, Any]:
-        return _ok(vault_lint.run_validation(self._vault_root(principal)))
 
     # ---- projects/chats ------------------------------------------------
 
@@ -739,11 +724,6 @@ class CiaoControlPlane:
             )
         return _ok({"chat_id": chat_id, "deleted": self.pcm.delete_chat(chat_id)})
 
-    def chat_mark_read(self, principal: McpPrincipal, chat_id: str) -> dict[str, Any]:
-        chat_id = self._chat_id(principal, chat_id)
-        chat = self.pcm.mark_read(chat_id)
-        return _ok({"chat_id": chat_id, "last_read_at": chat.last_read_at if chat else ""})
-
     async def chat_stop(self, principal: McpPrincipal, chat_id: str) -> dict[str, Any]:
         chat_id = self._chat_id(principal, chat_id)
         if chat_id == principal.chat_id:
@@ -966,12 +946,6 @@ class CiaoControlPlane:
         updated = replace(entry, **normalized)
         self.schedules.replace(updated)
         return _ok(self._schedule_payload(updated))
-
-    def schedule_pause(self, principal: McpPrincipal, schedule_id: str) -> dict[str, Any]:
-        return self.schedule_update(principal, schedule_id, enabled=False)
-
-    def schedule_resume(self, principal: McpPrincipal, schedule_id: str) -> dict[str, Any]:
-        return self.schedule_update(principal, schedule_id, enabled=True)
 
     async def schedule_run(self, principal: McpPrincipal, schedule_id: str) -> dict[str, Any]:
         self._schedule(principal, schedule_id)
@@ -1300,24 +1274,6 @@ class CiaoControlPlane:
             "health": workspace_health(self.config),
         })
 
-    def workspace_health_get(self, principal: McpPrincipal) -> dict[str, Any]:
-        self._workspace(principal)
-        from ciao.web.agent_assets import workspace_health
-
-        return _ok(workspace_health(self.config))
-
-    def workspace_health_fix(self, principal: McpPrincipal) -> dict[str, Any]:
-        self._workspace(principal)
-        from ciao.web.agent_assets import repair_workspace_health
-
-        return _ok(repair_workspace_health(self.config))
-
-    def skills_list(self, principal: McpPrincipal) -> dict[str, Any]:
-        self._workspace(principal)
-        from ciao.skills_inventory import build_skill_inventory
-
-        return _ok(build_skill_inventory(self.config.workspace_root))
-
     async def skills_sync(self, principal: McpPrincipal, refresh_upstream: bool = False) -> dict[str, Any]:
         self._workspace(principal)
         from ciao.sync_skills import sync_workspace_skills
@@ -1369,12 +1325,6 @@ class CiaoControlPlane:
         if self.local_sessions is None:
             raise ControlPlaneError("unavailable", "Local session manager is unavailable.")
         return _ok(await self.local_sessions.resync())
-
-    async def package_status_get(self, principal: McpPrincipal) -> dict[str, Any]:
-        self._workspace(principal)
-        from ciao.package_version import package_status
-
-        return _ok(await asyncio.to_thread(package_status))
 
     def lifecycle_actions_list(self, principal: McpPrincipal) -> dict[str, Any]:
         return _ok([
@@ -1441,11 +1391,3 @@ class CiaoControlPlane:
             record["error"] = str(exc)
             record["completed_at"] = datetime.now(UTC).isoformat()
 
-    def debug_issues_get(self, principal: McpPrincipal) -> dict[str, Any]:
-        self._workspace(principal)
-        from ciao.debug_report import build_issue_report
-
-        return _ok(build_issue_report(Path(self.config.workspace_root)))
-
-    def serialize_for_report(self, value: Any) -> str:
-        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
