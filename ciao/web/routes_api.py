@@ -4731,6 +4731,20 @@ def _routines_payload(config, app_settings) -> dict:
             config.primary_workspace()
         )
 
+    # On Automatic these routines resolve per workspace (resolve_title_model and
+    # resolve_insights_model take the chat's workspace), so the single
+    # *_effective value above is only the primary-workspace answer. Reporting it
+    # alone reads as a global choice and is wrong for every other workspace, so
+    # ship the whole map and let the UI say what actually varies. Empty when an
+    # override is set, because then one model really does apply everywhere.
+    title_by_workspace: dict[str, str] = {}
+    insights_by_workspace: dict[str, str] = {}
+    for name in config.workspace_names():
+        if not config.title_model_override:
+            title_by_workspace[name] = config.haiku_model_for_workspace(name)
+        if not config.insights_model_override:
+            insights_by_workspace[name] = config.sonnet_model_for_workspace(name)
+
     return {
         # Overrides as stored ("" = automatic default).
         "title_model": s.title_model,
@@ -4753,6 +4767,9 @@ def _routines_payload(config, app_settings) -> dict:
         # What actually runs right now, after defaults.
         "title_model_effective": title_effective,
         "insights_model_effective": insights_effective,
+        # Per-workspace resolution for the Automatic case; empty when overridden.
+        "title_model_by_workspace": title_by_workspace,
+        "insights_model_by_workspace": insights_by_workspace,
 
         "critique_models_effective": critique_effective,
         "tier_defaults": app_settings.tier_model_defaults(),

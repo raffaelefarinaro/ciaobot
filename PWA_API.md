@@ -492,6 +492,12 @@ curl -sS -b /tmp/ciao.jar -X POST "http://localhost:${PWA_PORT:-8443}/api/integr
 # Read internal-routine settings: title, insights, and critique model overrides
 # (plus the effective models after defaults), transcription engine + cloud
 # model, and grouped model options (anthropic / ollama_cloud / ollama_local).
+#
+# title_model_effective / insights_model_effective are the PRIMARY workspace's
+# answer only. With no override both routines resolve from the chat's own
+# workspace, so title_model_by_workspace / insights_model_by_workspace carry the
+# full {workspace: model} map. Both maps are empty when an override is set,
+# because then that one model applies everywhere.
 curl -sS -b /tmp/ciao.jar "http://localhost:${PWA_PORT:-8443}/api/settings/routines"
 
 # Update any subset. Persisted in .runtime/app_settings.json, applied to the

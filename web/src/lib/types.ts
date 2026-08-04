@@ -472,6 +472,10 @@ export interface RoutineSettings {
   // What actually runs right now, after defaults.
   title_model_effective: string
   insights_model_effective: string
+  // On Automatic these resolve from the chat's workspace, so *_effective above
+  // is only the primary workspace's answer. Empty when an override is set.
+  title_model_by_workspace?: Record<string, string>
+  insights_model_by_workspace?: Record<string, string>
 
   critique_models_effective: string
   // Env-backed models used when a tier override is cleared.

@@ -3137,9 +3137,31 @@ async function saveRoutineTier(key: RoutineModelKey, tierValue: string) {
   await saveRoutines({ [key]: provider === 'codex' ? `codex:${model}` : model })
 }
 
+// Automatic does not pick one model: resolve_title_model / resolve_insights_model
+// take the chat's workspace and read that workspace's tier. Naming a single
+// model here read as a global choice and was wrong for every workspace but the
+// primary one, so say what it follows and list the per-workspace answers.
+function routineWorkspaceModels(key: RoutineModelKey): Array<[string, string]> {
+  const settings = routines.value
+  if (!settings) return []
+  const map = key === 'title_model'
+    ? settings.title_model_by_workspace
+    : settings.insights_model_by_workspace
+  return Object.entries(map || {})
+}
+
 function routineModelSummary(key: RoutineModelKey): string {
   const provider = routineProviderValue(key)
   if (provider === 'automatic') {
+    const perWorkspace = routineWorkspaceModels(key)
+    const distinct = new Set(perWorkspace.map(([, model]) => model))
+    if (distinct.size > 1) {
+      const parts = perWorkspace.map(([ws, model]) => `${ws}: ${model || 'default'}`)
+      return `Automatic — follows each chat's workspace (${parts.join(' · ')})`
+    }
+    if (distinct.size === 1) {
+      return `Automatic — follows each chat's workspace (currently ${[...distinct][0] || 'default'} for all)`
+    }
     return `Automatic: ${routineEffectiveModel(key) || 'default'}`
   }
   if (provider === 'apple') return 'Local (free)'
