@@ -16,6 +16,35 @@ export function formatTime(iso?: string): string {
   return `${md} ${hhmm}`
 }
 
+// "3 minutes ago" / "2 days ago". Used where the question is how long ago
+// something happened, not at what wall-clock time — a status line reading
+// "Jul 26 12:38" hides that the run is months stale.
+export function formatRelative(iso?: string, now: Date = new Date()): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return ''
+  const seconds = Math.round((now.getTime() - d.getTime()) / 1000)
+  if (seconds < 0) return 'just now'
+  const units: [Intl.RelativeTimeFormatUnit, number][] = [
+    ['second', 60],
+    ['minute', 60],
+    ['hour', 24],
+    ['day', 30],
+    ['month', 12],
+    ['year', Infinity],
+  ]
+  let value = seconds
+  for (const [unit, step] of units) {
+    if (value < step || step === Infinity) {
+      if (unit === 'second' && value < 45) return 'just now'
+      const rounded = Math.round(value)
+      return `${rounded} ${unit}${rounded === 1 ? '' : 's'} ago`
+    }
+    value = value / step
+  }
+  return ''
+}
+
 export function formatDuration(ms?: number): string {
   if (ms == null || !isFinite(ms) || ms < 0) return ''
   if (ms < 1) return '<1ms'

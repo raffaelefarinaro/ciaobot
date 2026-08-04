@@ -43,7 +43,7 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 - A native scheduler dispatches recurring or one-off prompts as fresh chat turns into a target project or chat — daily/weekly/monthly/once, timezone-aware. Configure from the **Automations page** or directly in chat (the `schedule_*`/`loop_*` MCP tools carry the full field semantics in their own docstrings).
 - **Loops** are the sub-day sibling of schedules: bound to one existing chat, they re-send the same prompt every N minutes (e.g. "check my PRs every 10 minutes"), keeping the conversation's context between iterations. A loop runs with the chat's own model; loops set to start with the server resume on boot, the rest are started manually. Managed from the same Automations page.
 - Schedules that were due while the app was off are caught up on the next launch; each workspace shows how many runs it missed.
-- System maintenance schedules ship with the app; the Automation page shows background job runs.
+- System maintenance schedules ship with the app. **Settings → Automations** lists the background work Ciaobot does on its own — what each automation does, when it runs, and how its last run went — leading with anything that needs attention. Failing automations can be re-run from there; Session insights can be run over every archived chat that is missing them, optionally with a different model when the configured one keeps failing.
 
 ### 4. Files
 

@@ -81,38 +81,95 @@ class JobSpec:
     # job too; they are not inferred from the most recent telemetry record.
     uses_model: bool = False
     produces_outcome: bool = False
+    # Plain-language answer to "when does this run?". The page used to show a
+    # status badge and nothing else, which left every row unexplained.
+    trigger: str = ""
+    # System schedule that can run the job on demand ("Run now").
+    schedule_id: str = ""
+    # True when that schedule is the *only* trigger. Such a job is hidden when
+    # its schedule is not installed here — nothing would ever run it, so a
+    # permanently idle row is noise (see :func:`automation_summary`). Jobs that
+    # also fire on startup or on archive stay visible either way.
+    schedule_only: bool = False
+    # One-shot migrations: correct to keep for the record, wrong to present as
+    # a live automation once they have run.
+    one_time: bool = False
+    # Bulk/manual variant of another job. Reported nested under the parent so
+    # the page has one row per thing the user recognises.
+    parent: str = ""
 
 
 REGISTRY: tuple[JobSpec, ...] = (
     JobSpec("title", "Title generation", "content",
-            "Names a chat from its first message.", True, True),
+            "Names a chat from its first message.", True, True,
+            trigger="When a new chat gets its first message."),
     JobSpec("insights", "Session insights", "content",
-            "Extracts durable insights from an archived session transcript.", True, True),
+            "Extracts durable insights from an archived session transcript.", True, True,
+            trigger="When a chat is archived."),
+    JobSpec("project_doc_update", "Project doc update", "content",
+            "Folds a session's decisions and open loops into the project document.",
+            True, True,
+            trigger="After session insights, for chats that belong to a project."),
     JobSpec("memory_proposals", "Memory proposals", "content",
-            "Proposes durable facts from a session's insights.", False, True),
+            "Proposes durable facts from a session's insights.", False, True,
+            trigger=(
+                "After session insights. The daily system-memory-curation "
+                "schedule then promotes them."
+            ),
+            schedule_id="system-memory-curation"),
     JobSpec("trajectory", "Trajectory capture", "content",
-            "Records a structured trajectory of the session for skill mining.", False, True),
+            "Records a structured trajectory of the session for skill mining.", False, True,
+            trigger="When a chat is archived. Feeds Skill evolution."),
     JobSpec("skill_evolution", "Skill evolution", "content",
-            "Weekly: proposes skill edits from underperforming trajectories.", True, True),
+            "Weekly: proposes skill edits from underperforming trajectories.", True, True,
+            trigger="Weekly, via the system-skill-evolution schedule.",
+            schedule_id="system-skill-evolution", schedule_only=True),
     JobSpec("dependency_review", "Dependency review", "content",
-            "Weekly: reviews tracked dependency releases against the baseline.", True, True),
+            "Weekly: reviews tracked dependency releases against the baseline.", True, True,
+            trigger="Weekly, via the system-dependency-review schedule.",
+            schedule_id="system-dependency-review", schedule_only=True),
     JobSpec("schedule_dispatch", "Scheduled dispatch", "content",
-            "Fires scheduled chat turns and evaluates auto-archival.", True, True),
+            "Fires scheduled chat turns and evaluates auto-archival.", True, True,
+            trigger="Every time a schedule or routine is due."),
     JobSpec("schedule_attention_classifier", "Schedule attention classifier", "content",
-            "Decides whether an auto-archive schedule result needs user attention.", True, False),
+            "Decides whether an auto-archive schedule result needs user attention.", True, False,
+            trigger="After a scheduled run that auto-archives its chat."),
     JobSpec("startup_sync", "Startup git sync", "system",
-            "Commits and pulls the workspace on server startup.", False, False),
+            "Commits and pulls the workspace on server startup.", False, False,
+            trigger="On server startup."),
     JobSpec("vault_index", "Vault index refresh", "system",
-            "Regenerates memory-vault/INDEX.md from frontmatter.", False, False),
+            "Regenerates memory-vault/INDEX.md from frontmatter.", False, False,
+            trigger="On server startup, and weekly via system-workspace-hygiene.",
+            schedule_id="system-workspace-hygiene"),
     JobSpec("skills_update", "Skills update", "system",
-            "Updates installed agent skills.", False, False),
+            "Updates installed agent skills.", False, False,
+            trigger="On server startup."),
     JobSpec("branch_backup", "Device-branch backup", "system",
-            "Pushes the per-device working branch for backup.", False, False),
+            "Pushes the per-device working branch for backup.", False, False,
+            trigger="Periodically while the server runs."),
     JobSpec("gws_health", "Google Workspace token health", "system",
-            "Pings each configured Google profile's token and alerts on revocation.", False, False),
+            "Pings each configured Google profile's token and alerts on revocation.",
+            False, False,
+            trigger="Periodically while the server runs, for each Google profile."),
+    JobSpec("memory_migration", "Legacy memory migration", "system",
+            "One-time move of legacy memory files into the CLAUDE.md memory regions.",
+            False, True,
+            trigger="Once, on the first skills sync after upgrading. A no-op afterwards.",
+            one_time=True),
     JobSpec("backfill_insights", "Insights backfill", "system",
-            "Backfills missing session insights on server startup.", True, True),
+            "Runs session insights over every archive that is missing them.", True, True,
+            trigger="On server startup, and on demand from this page.",
+            parent="insights"),
 )
+
+# Jobs that no longer exist in the code. ``job_runs_latest.json`` keeps the
+# last run of every job it ever saw, so without this a retired job (e.g. the
+# startup PWA rebuild, dropped in favour of the boot screen) haunts the
+# Automation page forever with a stale green badge.
+RETIRED_JOBS: frozenset[str] = frozenset({
+    "pwa_rebuild",       # startup PWA rebuild phase, removed
+    "insights_backfill",  # renamed to backfill_insights
+})
 
 # StartupTracker phase name -> registry job id (phases not listed are skipped,
 # e.g. the connect_* health checks, which are not automations).
@@ -355,7 +412,7 @@ def _duration_ms(started_iso: str, ended_iso: str) -> int:
 # ── Reading ──────────────────────────────────────────────────────────────
 
 
-def load_runs(limit_per_job: int = 10) -> dict[str, dict]:
+def load_runs(limit_per_job: int = 10, *, keep_retired: bool = False) -> dict[str, dict]:
     """Group recorded runs by job id -> {last_run, recent, stats}. The log
     is append-only chronological, so the last line for a job is its most
     recent run. ``recent`` is newest-first and capped at *limit_per_job*."""
@@ -373,12 +430,18 @@ def load_runs(limit_per_job: int = 10) -> dict[str, dict]:
                     except json.JSONDecodeError:
                         continue
                     job = rec.get("job")
-                    if isinstance(job, str) and job:
-                        runs_by_job.setdefault(job, []).append(rec)
+                    if not isinstance(job, str) or not job:
+                        continue
+                    if not keep_retired and job in RETIRED_JOBS:
+                        continue
+                    runs_by_job.setdefault(job, []).append(rec)
     except Exception:  # noqa: BLE001
         logger.debug("Failed to load job runs", exc_info=True)
 
-    _merge_latest_runs(runs_by_job, _load_latest_runs())
+    latest = _load_latest_runs()
+    if not keep_retired:
+        latest = {job: rec for job, rec in latest.items() if job not in RETIRED_JOBS}
+    _merge_latest_runs(runs_by_job, latest)
 
     grouped: dict[str, dict] = {}
     for job, runs in runs_by_job.items():
@@ -447,10 +510,23 @@ def _run_ts(run: dict) -> datetime | None:
         return None
 
 
-def automation_summary(limit_per_job: int = 10) -> list[dict]:
-    """Final view for the ``/api/automation`` endpoint: every registry job
-    (so never-run jobs still appear) merged with its recorded runs, plus any
-    recorded jobs not in the registry (forward-compat)."""
+def automation_summary(
+    limit_per_job: int = 10,
+    *,
+    installed_schedules: set[str] | None = None,
+) -> list[dict]:
+    """Final view for the ``/api/automation`` endpoint: one row per automation
+    the user can actually have, merged with its recorded runs.
+
+    Registry jobs appear even when they never ran, so the page can explain
+    them. Recorded jobs missing from the registry are kept for forward
+    compatibility. Three things are deliberately *not* reported as rows:
+
+    * retired jobs (:data:`RETIRED_JOBS`) — the code that ran them is gone;
+    * a schedule-only job whose schedule is not installed here, when
+      *installed_schedules* is supplied — nothing can trigger it;
+    * bulk variants of another job — reported as the parent's ``sub_jobs``.
+    """
     grouped = load_runs(limit_per_job)
     empty_stats = {
         "total_runs": 0,
@@ -458,22 +534,51 @@ def automation_summary(limit_per_job: int = 10) -> list[dict]:
         "avg_duration_ms": 0,
         "last_error": None,
     }
-    out: list[dict] = []
-    seen: set[str] = set()
-    for spec in REGISTRY:
-        seen.add(spec.job)
-        g = grouped.get(spec.job)
-        out.append({
+
+    def entry(spec: JobSpec, g: dict | None) -> dict:
+        return {
             "job": spec.job,
             "label": spec.label,
             "category": spec.category,
             "description": spec.description,
             "uses_model": spec.uses_model,
             "produces_outcome": spec.produces_outcome,
+            "trigger": spec.trigger,
+            "schedule_id": spec.schedule_id,
+            "schedule_only": spec.schedule_only,
+            "one_time": spec.one_time,
             "last_run": g["last_run"] if g else None,
             "recent": g["recent"] if g else [],
             "stats": g["stats"] if g else dict(empty_stats),
-        })
+        }
+
+    out: list[dict] = []
+    by_job: dict[str, dict] = {}
+    seen: set[str] = set()
+    children: list[tuple[JobSpec, dict | None]] = []
+    for spec in REGISTRY:
+        seen.add(spec.job)
+        g = grouped.get(spec.job)
+        if spec.parent:
+            children.append((spec, g))
+            continue
+        if (
+            spec.schedule_only
+            and installed_schedules is not None
+            and spec.schedule_id not in installed_schedules
+        ):
+            continue
+        row = entry(spec, g)
+        by_job[spec.job] = row
+        out.append(row)
+    for spec, g in children:
+        parent = by_job.get(spec.parent)
+        if parent is None:
+            # Parent hidden (or unknown): keep the child visible on its own
+            # rather than silently dropping its telemetry.
+            out.append(entry(spec, g))
+            continue
+        parent.setdefault("sub_jobs", []).append(entry(spec, g))
     for job, g in grouped.items():
         if job in seen:
             continue
@@ -492,6 +597,10 @@ def automation_summary(limit_per_job: int = 10) -> list[dict]:
                 bool(run.get("extra")) or bool(run.get("error"))
                 for run in g["recent"]
             ),
+            "trigger": "",
+            "schedule_id": "",
+            "schedule_only": False,
+            "one_time": False,
             "last_run": g["last_run"],
             "recent": g["recent"],
             "stats": g["stats"],

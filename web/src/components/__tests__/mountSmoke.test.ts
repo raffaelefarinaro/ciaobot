@@ -339,6 +339,103 @@ vi.mock('../../lib/api', () => {
         { value: 'openrouter', label: 'OpenRouter (via Claude Code)' },
       ],
     },
+    '/api/automation': [
+      {
+        job: 'insights',
+        label: 'Session insights',
+        category: 'content',
+        description: 'Extracts durable insights from an archived session transcript.',
+        uses_model: true,
+        produces_outcome: true,
+        trigger: 'When a chat is archived.',
+        schedule_id: '',
+        one_time: false,
+        last_run: {
+          job: 'insights',
+          label: 'Session insights',
+          category: 'content',
+          started_at: '2026-08-03T20:00:00+00:00',
+          ended_at: '2026-08-03T20:06:14+00:00',
+          duration_ms: 374000,
+          status: 'error',
+          model: 'deepseek-v4-flash:cloud',
+          provider: 'ollama',
+          error: 'TimeoutError',
+          extra: {},
+        },
+        recent: [],
+        stats: {
+          total_runs: 4,
+          success_rate: 0.25,
+          avg_duration_ms: 300000,
+          last_error: { error: 'TimeoutError', ts: '2026-08-03T20:06:14+00:00' },
+        },
+        sub_jobs: [
+          {
+            job: 'backfill_insights',
+            label: 'Insights backfill',
+            category: 'system',
+            description: 'Runs session insights over every archive that is missing them.',
+            trigger: 'On server startup, and on demand from this page.',
+            last_run: null,
+            recent: [],
+            stats: { total_runs: 0, success_rate: null, avg_duration_ms: 0, last_error: null },
+          },
+        ],
+      },
+      {
+        job: 'title',
+        label: 'Title generation',
+        category: 'content',
+        description: 'Names a chat from its first message.',
+        uses_model: true,
+        produces_outcome: true,
+        trigger: 'When a new chat gets its first message.',
+        schedule_id: '',
+        one_time: false,
+        last_run: {
+          job: 'title',
+          label: 'Title generation',
+          category: 'content',
+          started_at: '2026-08-04T09:38:40+00:00',
+          ended_at: '2026-08-04T09:38:45+00:00',
+          duration_ms: 5000,
+          status: 'ok',
+          model: 'haiku',
+          provider: 'claude',
+          error: null,
+          extra: {},
+        },
+        recent: [],
+        stats: { total_runs: 9, success_rate: 1, avg_duration_ms: 5000, last_error: null },
+      },
+      {
+        job: 'memory_migration',
+        label: 'Legacy memory migration',
+        category: 'system',
+        description: 'One-time move of legacy memory files into the CLAUDE.md memory regions.',
+        uses_model: false,
+        produces_outcome: true,
+        trigger: 'Once, on the first skills sync after upgrading.',
+        schedule_id: '',
+        one_time: true,
+        last_run: {
+          job: 'memory_migration',
+          label: 'Legacy memory migration',
+          category: 'system',
+          started_at: '2026-08-03T16:44:54+00:00',
+          ended_at: '2026-08-03T16:44:54+00:00',
+          duration_ms: 12,
+          status: 'ok',
+          model: '',
+          provider: '',
+          error: null,
+          extra: {},
+        },
+        recent: [],
+        stats: { total_runs: 1, success_rate: 1, avg_duration_ms: 12, last_error: null },
+      },
+    ],
   }
   // Default to an empty array — most list endpoints return arrays and a
   // bare `{}` breaks `.reduce`/`.map` calls in stores during the smoke test.
@@ -538,7 +635,9 @@ describe('component mount smoke', () => {
     expect(instructionRow!.findAll('.inline-path-button').map((button) => button.text())).toEqual([
       'CLAUDE.md / AGENTS.md',
     ])
-    expect(instructionRow!.text()).toContain('AGENTS.md is linked to CLAUDE.md, so every CLI reads the same instructions.')
+    // One guide, not one per CLI: say CLAUDE.md and mention the symlink once.
+    expect(instructionRow!.text()).toContain('your user-level CLAUDE.md')
+    expect(instructionRow!.text()).toContain('AGENTS.md is a symlink to it')
 
     const systemRow = wrapper.findAll('.skill-list > .instruction-row')
       .find((row) => row.text().includes('Ciaobot system instructions'))
@@ -581,6 +680,59 @@ describe('component mount smoke', () => {
     expect(wrapper.text()).toContain('commands')
     expect(wrapper.text()).toContain('/remember')
     expect(wrapper.text()).toContain('Store a durable memory')
+    wrapper.unmount()
+  })
+
+  it('SettingsView leads the automations tab with what is broken', async () => {
+    const router = makeRouter()
+    await router.push('/settings/automations')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    // The headline answers "is anything broken?" without expanding a row.
+    expect(wrapper.text()).toContain('1 of 2 automations needs attention: Session insights.')
+    // Failing row explains itself: when it runs, and what went wrong.
+    const failing = wrapper.findAll('.automation-row--error')
+    expect(failing).toHaveLength(1)
+    expect(failing[0].text()).toContain('When a chat is archived.')
+    expect(failing[0].text()).toContain('TimeoutError')
+    // The old separate "Insights backfill" row is gone; it is this row's action.
+    expect(wrapper.text()).not.toContain('Insights backfill —')
+    expect(failing[0].find('.btn-run').text()).toBe('Run for all sessions')
+    // A settled one-time migration is folded away, not presented as live work.
+    expect(wrapper.find('.automation-settled').text()).toContain('Legacy memory migration')
+    wrapper.unmount()
+  })
+
+  it('SettingsView retries failing insights with a different model', async () => {
+    const router = makeRouter()
+    await router.push('/settings/automations')
+    await router.isReady()
+    const mod = await import('../SettingsView.vue')
+    const wrapper = mount(mod.default as never, {
+      global: { plugins: [router], stubs: { Teleport: true } },
+    })
+    await flushPromises()
+    await nextTick()
+
+    const failing = wrapper.find('.automation-row--error')
+    const select = failing.find('select')
+    expect(select.exists()).toBe(true)
+    // Default keeps the configured model; options are concrete model ids.
+    expect(select.findAll('option')[0].text()).toContain('Configured')
+    await select.setValue('anthropic/claude-sonnet-4.5')
+    await failing.find('.btn-run').trigger('click')
+    await flushPromises()
+
+    expect(api.post).toHaveBeenCalledWith(
+      '/api/automation/backfill-insights',
+      { model: 'anthropic/claude-sonnet-4.5' },
+    )
     wrapper.unmount()
   })
 

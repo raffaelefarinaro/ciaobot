@@ -941,11 +941,8 @@
           :automation-error="automationError"
           :fetch-automation="fetchAutomation"
           :notify-saved="notifySaved"
-          :get-job-badge-class="getJobBadgeClass"
-          :get-job-status="getJobStatus"
-          :get-job-last-run-label="getJobLastRunLabel"
-          :get-job-duration="getJobDuration"
-          :get-telemetry-badge-class="getTelemetryBadgeClass"
+          :routines="routines"
+          :provider-labels="aliasProviderLabels"
         />
       </template>
 
@@ -1509,8 +1506,8 @@
                     <div v-if="item.id === 'cli-instruction-chain'" class="runtime-context-summary">
                       <p class="hint hint--compact">At chat start, the active CLI discovers the applicable instruction files:</p>
                       <ul>
-                        <li><strong>Global instructions:</strong> the user-level instruction file (<code>CLAUDE.md</code> for Claude Code, <code>AGENTS.md</code> for Codex), when present.</li>
-                        <li><strong>Workspace instructions:</strong> the workspace guide. <code>AGENTS.md</code> is linked to <code>CLAUDE.md</code>, so every CLI reads the same instructions.</li>
+                        <li><strong>Global instructions:</strong> your user-level <code>CLAUDE.md</code>, when present.</li>
+                        <li><strong>Workspace instructions:</strong> the workspace <code>CLAUDE.md</code>. It is the single guide — <code>AGENTS.md</code> is a symlink to it, so Claude Code and Codex read the same file.</li>
                         <li><strong>Local, override, and nested instructions:</strong> local overrides, imported Markdown files, and more specific instruction files each CLI discovers for the working directory.</li>
                       </ul>
                     </div>
@@ -1556,7 +1553,8 @@
           </div>
 
           <p class="hint hint--info skill-scope-note">
-            Ciaobot runs chats through Claude Code or Codex. Ciaobot-managed skills are synchronized into both CLIs where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed custom and GitHub/package skills.
+            Ciaobot runs chats through Claude Code or Codex. Ciaobot-managed skills are synchronized into both CLIs where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed custom and GitHub/package skills — see
+            <RouterLink to="/settings/providers">Providers</RouterLink> for what each CLI brings on its own.
           </p>
 
           <!-- Add Github Skill Form -->
@@ -2904,6 +2902,14 @@ const tierProviderSections = computed<AliasProviderSection[]>(() => {
       available: (provider.models || []).length > 0,
     })),
   ]
+})
+
+// Provider key -> human label, for components that render model ids from the
+// routing table (Automations offers a one-off retry model).
+const aliasProviderLabels = computed<Record<string, string>>(() => {
+  const labels: Record<string, string> = { claude: 'Anthropic (via Claude Code)' }
+  for (const section of aliasProviderSections.value) labels[section.key] = section.label
+  return labels
 })
 
 const selectedTierProvider = ref<RoutingProviderKey>('codex')
