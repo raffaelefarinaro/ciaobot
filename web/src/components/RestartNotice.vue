@@ -26,7 +26,7 @@
 
     <div class="restart-body">
       <span class="restart-spinner" aria-hidden="true">{{ spinnerFrame }}</span>
-      <p class="restart-message">{{ message || 'Restarting Ciaobot…' }}</p>
+      <p class="restart-message">{{ message || DEFAULT_RESTART_MESSAGE }}</p>
     </div>
 
     <div class="restart-foot">
@@ -39,8 +39,11 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { DEFAULT_RESTART_MESSAGE } from '../lib/serverRestart'
 
 defineProps<{
+  // Already normalised and length-capped by restartMessageForDisplay(); the
+  // line clamp below is the visual backstop, not the limit.
   message?: string
 }>()
 
@@ -244,9 +247,18 @@ onUnmounted(() => {
 }
 .restart-message {
   margin: 0;
+  min-width: 0;
   color: var(--fg2);
   font-size: var(--text-sm);
   line-height: 1.4;
+  /* A URL or stack frame with no spaces would otherwise widen the card past
+     its max-width instead of wrapping. */
+  overflow-wrap: anywhere;
+  /* Hard stop on height, in case a message arrives longer than we expect. */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .restart-foot {

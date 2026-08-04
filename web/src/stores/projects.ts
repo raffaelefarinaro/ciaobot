@@ -8,9 +8,9 @@ import { isPlausibleFilePath } from '../lib/filePaths'
 import { useFileViewerStore } from './fileViewer'
 import { isRateLimitTelemetry } from '../lib/rateLimit'
 import {
-  DEFAULT_RESTART_MESSAGE,
   isRestartDrainMessage,
   reloadWhenServerReady,
+  restartMessageForDisplay,
 } from '../lib/serverRestart'
 import type {
   ProjectInfo,
@@ -2144,7 +2144,7 @@ export const useProjectStore = defineStore('projects', () => {
   function beginServerRestart(message?: string) {
     if (serverRestarting.value) return
     serverRestarting.value = true
-    serverRestartMessage.value = (message && message.trim()) || DEFAULT_RESTART_MESSAGE
+    serverRestartMessage.value = restartMessageForDisplay(message)
     void reloadWhenServerReady()
   }
 
