@@ -3,7 +3,6 @@
 ## v0.7.1 - 2026-08-04
 
 ### Added
-- feat(ollama): default ollama haiku + insights to deepseek-v4-flash:0731-cloud (`9dfbae9`)
 - feat(voice): switch cloud transcription to gpt-transcribe and surface model in Settings (`2e2e4b6`)
 - Native macOS permission checks for microphone, notifications, and camera, so dictation can tell "not yet asked" from "denied" instead of failing opaquely (`ad37753`)
 - Chat header chip naming the routing provider, model, and thinking level at a glance — the full pill on desktop, the brain button alone on narrow screens (`b7d1656`, `f61ee89`, `ca37d4e`)
@@ -17,6 +16,7 @@
 - refactor(memory): collapse bounded memory into CLAUDE.md regions (`6952d67`)
 - Enable Claude SDK ``exclude_dynamic_sections`` so cwd/git/OS leave the system-prompt cache prefix (`6efb45c`)
 - Give the bounded-memory region grammar and guide diagnostics one owner in `memory_tool`, and drop dead parameters left by the region migration — including the unused `target` argument on the `memory_proposal_resolve` MCP tool and the `user_entries`/`expired_user_entries` aliases in the memory audit payload (`62a4539`)
+- Ollama's haiku tier moves to `deepseek-v4-flash:0731-cloud`, as does the insights fallback used when a caller has no workspace context (the backfill script). Session insights on Automatic are unaffected: they follow the chat's workspace sonnet tier, which for Ollama is `kimi-k2.7-code:cloud` (`9dfbae9`)
 - Remove the 100%/120% font-scale preset buttons; the font baseline is set once and no longer toggled from the UI (`3e68489`)
 - Settings → Automation no longer names a single model for an Automatic routine. Chat titles and Session insights both resolve from the chat's workspace, so the summary now says so and lists the per-workspace models; `/api/settings/routines` gained `title_model_by_workspace` / `insights_model_by_workspace` (`ccb0108`)
 - Architecture review cleanup (#247): split the `node_*`/package handlers into `ciao/web/routes_node.py` and the MCP HTTP endpoints into `ciao/web/routes_mcp.py`, extract `SettingsAutomation.vue` and a shared `useFileComments` composable, and delete 11 dead control-plane methods. `docs/ARCHITECTURE.md` now indexes every top-level `ciao/` module, enforced by `tests/test_architecture_doc.py` (`07a7626`)
