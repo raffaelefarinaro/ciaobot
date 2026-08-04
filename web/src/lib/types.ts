@@ -275,7 +275,7 @@ export type WsEvent =
   // connection state, not a chat/model failure, so the PWA renders one
   // reconnecting card instead of appending an error to conversation history.
   | { type: 'host_unreachable' }
-  // Server is draining for restart; client should show RestartOverlay, not
+  // Server is draining for restart; client should show RestartNotice, not
   // treat this as a chat failure.
   | { type: 'server_restarting'; message: string }
   | { type: 'chat_retry'; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number }
