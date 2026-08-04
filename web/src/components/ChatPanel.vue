@@ -116,9 +116,9 @@
             v-if="chat.provider"
             type="button"
             class="model-picker-summary desktop-only"
-            :title="`${routingProviderLabel(chat.model_bucket, chat.provider)} · ${activeModelId}${chat.thinking_level ? ' · ' + chat.thinking_level : ''}`"
+            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${activeModelId}${chat.thinking_level ? ' · ' + chat.thinking_level : ''}`"
             @click.stop="toggleModelPicker"
-          >{{ routingProviderLabel(chat.model_bucket, chat.provider) }} · {{ activeModelId }}<template v-if="chat.thinking_level"> · {{ chat.thinking_level }}</template></button>
+          >{{ routingProviderLabel(activeBucket, chat.provider) }} · {{ activeModelId }}<template v-if="chat.thinking_level"> · {{ chat.thinking_level }}</template></button>
           <ModelSelector
             v-if="showModelPicker"
             triggerless
@@ -3344,6 +3344,11 @@ function routingBucketLabel(bucket: string | undefined, provider: string): strin
 // Capitalize the provider for the header chip (Ollama / Anthropic / OpenRouter /
 // Codex / custom name). Falls back to the bucket label when the bucket is not
 // one of the known routes.
+// Takes a NORMALISED bucket (activeBucket), not the raw ChatInfo.model_bucket.
+// The raw field carries legacy values like 'work' / 'personal' / '' that match
+// none of the cases below, so passing it through printed the workspace name
+// ("Work") where the provider belongs. activeBucket already folds those into
+// claude_work / claude_personal / openrouter / codex / custom:<id>.
 function routingProviderLabel(bucket: string | undefined, provider: string): string {
   const lower = routingBucketLabel(bucket, provider)
   if (!lower) return ''
@@ -3878,11 +3883,16 @@ defineExpose({ toggleDictation, archiveActiveChat })
 }
 
 /* Header */
-.desktop-only { display: inline-flex; }
-.mobile-only { display: none; }
+/* Doubled class = specificity (0,2,0), so these beat a plain single-class
+   `display` on the same element regardless of source order. Written as one
+   class they lost to .model-picker-btn / .model-picker-summary further down the
+   stylesheet (equal specificity, later wins), which showed the brain button on
+   desktop and the summary pill on mobile — both at once. */
+.desktop-only.desktop-only { display: inline-flex; }
+.mobile-only.mobile-only { display: none; }
 @media (max-width: 768px) {
-  .desktop-only { display: none; }
-  .mobile-only { display: inline-flex; }
+  .desktop-only.desktop-only { display: none; }
+  .mobile-only.mobile-only { display: inline-flex; }
 }
 
 .header-left {
