@@ -26,7 +26,6 @@ Common package CLI entry points:
 
 ```bash
 ciao setup --workspace ~/ciao --workspace-name personal --load-launchd
-ciao memory read --target memory
 ciao vault-index --workspace default --format json
 ciao vault-search "project keyword" --limit 5
 ciao vault-lint --vault-root memory-vault
@@ -41,7 +40,6 @@ ciao package-smoke --skip-frontend
 ciao auth claude --print-only              # show terminal OAuth command
 ciao auth codex --print-only               # show Codex / ChatGPT login command
 ciao auth ollama                           # run provider login helper
-ciao benchmark-control-surfaces --smoke   # 3 paired live MCP/legacy scenarios
 ```
 
 ### macOS venv workarounds
@@ -192,7 +190,6 @@ ciao vault-index --workspace default --format json  # Query the vault index
 ciao vault-search "keyword" --limit 5 # FTS search over the configured vault
 ciao vault-lint --vault-root memory-vault # Vault hygiene lint
 ciao os-audit --json # Strict AI OS setup and context-hygiene audit
-ciao benchmark-control-surfaces --provider claude --provider codex --repeats 5 # 240-turn release evaluation
 cd web && npm test             # Frontend unit tests
 cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 ```
@@ -274,7 +271,7 @@ Canonical example: `ciao/skill_evolution.py:_process_skill_dag`. Use a DAG when 
 
 `ScheduleManager.catch_up()` runs once at server startup. It dispatches only the latest missed occurrence for each enabled schedule, leaves the prompt unchanged, and records the missed occurrence's local date so a later slot on the startup day can still fire normally. Cover changes to this behavior in `tests/test_schedules.py`.
 
-Delegates are normal chats carrying `spawned_from_chat_id`; the wake-on-completion path lives in `ProjectChatManager` (`_queue_delegate_wake` / `_flush_delegate_wake`). Cover changes in `tests/test_delegates.py`.
+Delegates are normal chats carrying `spawned_from_chat_id`; the wake-on-completion path lives in `ProjectChatManager` (`_queue_delegate_wake` / `_flush_delegate_wake`). Result-ready toasts and pushes are skipped for delegates via `_announce_result_ready`; permission / question pushes are not. Cover changes in `tests/test_delegates.py`.
 
 ## MCP control plane
 
@@ -288,7 +285,7 @@ tokens must never enter the model's shell environment or telemetry arguments.
 
 See `docs/MCP.md` for the catalog, Claude/Codex configuration, and the release
 benchmark/promotion rule. Smoke/partial results are diagnostic only; promotion
-requires all 12 scenarios and at least five repeats.
+requires all 8 scenarios and at least five repeats.
 
 ## Change guidelines
 

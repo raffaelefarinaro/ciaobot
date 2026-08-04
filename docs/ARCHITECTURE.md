@@ -29,31 +29,43 @@ ciao/                          Python backend (Starlette).
   loops.py                     In-chat loops: re-dispatch a prompt into a fixed chat every N minutes.
   dag.py                       Tiny DAG runner (Node kinds: bash / prompt / gate / subagent / retention; edges: ok / fail / always). Subprocess nodes can merge per-node env overrides for routed models. Each node is timed via `job_runs.track_sync`, so Automation page shows per-node status. Used by skill evolution and dependency review.
   sessions.py                  Session state, auth, signed cookies, JSON-backed StateStore for `.runtime/state.json`.
+  jsonio.py                    Small JSON I/O helpers.
   transcripts.py               Provider-neutral live transcripts and archives under memory-vault/Logs/Chats/.
   upgrade.py                   Self-update / deploy flow.
   voice.py                     Voice transcription: cloud (OpenAI) and local (mlx-whisper) engines, selected by `CIAO_TRANSCRIPTION_ENGINE`.
+  voice_extras.py              Self-heal optional local voice packages after upgrades (mlx-whisper, kokoro-onnx).
   app_settings.py              Runtime-mutable app settings (title, insights, and critique models, transcription engine/model), persisted at `.runtime/app_settings.json` and overlaid on CiaoConfig. Edited via Settings → Models.
   error_log.py                 Rotating file handler for server ERROR+ logs. Consumed by the error-triage schedule and the debug issue report.
   debug_report.py              Aggregate runtime issues (server error log + failed job runs) for the dev-mode `GET /api/debug/issues` endpoint and the `{{ISSUE_REPORT}}` schedule placeholder.
+  startup_triage.py            Startup error triage: harvest runtime errors into a fix-it chat through the schedule pipeline.
   job_runs.py                  Fail-open recorder for background-job runs. Appends one JSON record per run to `.runtime/job_runs.jsonl` (size-trimmed like `error_log.py`). Background tasks wrap their work in `track()`/`track_sync()`; `automation_summary()` feeds the Settings → Automation page.
   models.py                    Shared data models (ChatContext, AgentRequest, etc.).
+  model_tiers.py               Provider-neutral capability tiers (haiku / sonnet / opus / fable), mapped per provider.
   provider_service.py          Provider request builder and execution wrapper.
+  custom_providers.py          User-managed OpenAI/Anthropic-compatible endpoint registry (`.ciao/custom_providers.json`; tokens stay in the runtime dir).
   control_plane.py             Provider-neutral, scope-enforcing application operations shared by MCP and PWA-owned managers.
-  mcp_server.py                Embedded authenticated Streamable HTTP MCP adapter, scoped token registry, and project `.mcp.json` discovery (env-key status + observed/probed tools for Settings).
-  control_surfaces.py          Persist/read promoted per-provider legacy-vs-MCP decisions for Auto chats.
-  control_surface_benchmark.py Paired live 12-scenario evaluator (latency, correctness, tools, tokens) and guarded winner promotion.
+  mcp_server.py                Embedded authenticated Streamable HTTP MCP adapter, scoped token registry, and project `.mcp.json` discovery (env-key status + observed/probed tools for Settings). HTTP endpoints live in ciao/web/routes_mcp.py.
+  control_surfaces.py          Read previously promoted per-provider legacy-vs-MCP decisions for per-chat Auto.
   signals.py                   Restart / deploy signals.
+  instance_lock.py             Process-lifetime lock for one backend per runtime directory (`.runtime/server.lock`).
   execution_modes.py           Claude permission mode normalization.
+  tool_path.py                 Resolve external CLI tools against the user's real login-shell PATH (Homebrew, nvm, `~/.local/bin`).
   git_sync.py                  Startup git pull / merge-before-push helpers.
   local_session.py             Current-branch git sync flow (LocalSessionManager): preflight, commit + pull + push, conflict chat.
+  node_state.py                Node identity and host/client role state for multi-device mode (`active`/`standby` migrated to `host`/`client`).
+  node_proxy.py                StandbyProxyMiddleware: client-mode tunnel that mirrors the host's API, WebSockets, and UI bundle.
+  network_addresses.py         Enumerate the LAN URLs the PWA is reachable at (node sharing, tray fallback).
   rate_limits.py               Rate-limit tracking and persistence.
   insights.py                  Post-archive session insights extraction.
   critique.py                  Multi-model adversarial review. Runs each reviewer through ciao/providers/oneshot.py with per-model routing (OpenRouter / Ollama / Anthropic). CLI: `python -m ciao.critique`. Used by the adversarial-review skill.
+  evals.py                     Native Agent Evals Harness for Ciaobot.
   fts_search.py                SQLite FTS5 full-text indexing and search for vault and transcripts.
   vault_index.py               Build/query memory-vault/INDEX.md from frontmatter and wikilinks. CLI: `ciao vault-index`.
   vault_lint.py                Read-only vault health validation for frontmatter, relative Markdown links, wikilinks, orphans, and duplicate stems. CLI: `ciao vault-lint`.
   os_audit.py                  Strict AI OS health audit covering required roots, vault hygiene, skill budgets, rule clashes, bounded memory, proposals, and failed jobs. CLI: `ciao os-audit`.
   trajectory_builder.py        Parse filtered session JSONL into a structured trajectory (turns, tools, skills, errors) and persist to ~/.ciao/trajectories/YYYY-MM/<session-id>.json. CLI: `python3 -m ciao.trajectory_builder --list [...]`.
+  subagent_tracking.py         Track subagent dispatches/completions from session JSONL for the background-agents pill.
+  subagent_loader.py           Subagent package loader supporting .md and folder-based packages.
   skill_evolution.py           Weekly pass: mine trajectories, flag skills tied to non-success sessions, draft edit proposals to the vault's Workspace/Skill-Proposals/. 15KB skill cap, optional test gate, no auto-apply. `run_evolution_pass` builds a per-skill DAG (has_proposal → semantic → tests → write, with a write_stub fallback for over-cap skills) via `ciao/dag.py`.
   dependency_review.py         Weekly dependency-changelog review as a `ciao/dag.py` pipeline (read_baseline gate → installed-versions gate → research subagent fanning out release checks → write_baseline gate). PyPI/npm are authoritative for installable package versions; manifest updates are rolled back and the run fails if registry validation or dependency installation fails. Trigger: `python3 -m ciao.dependency_review [--model sonnet] [--dry-run]`. Merges and gates the write to `.runtime/dependency_baseline.json` so a flaky run can't corrupt it.
   skills_inventory.py          Build the Settings skill inventory from workspace skills and skills-lock.json, with installed Claude badges.
@@ -61,21 +73,46 @@ ciao/                          Python backend (Starlette).
   skills_sync.py               Change-detect upstream skills in skills-lock.json so `ciao sync-skills` updates only moved repos. CLI: `ciao skills-sync`.
   cleanup_sdk_blobs.py         Maintenance: drop archived Claude SDK JSONL blobs. CLI: `ciao cleanup-sdk-blobs`.
   label_hygiene.py             Audit open GitHub issue labels against the title-prefix convention in `ciao/system_prompt.md` and add missing classification labels. Pure decision function (`plan_label_actions`) separated from the `gh`-shelling side-effecting layer; only ever adds a label, never removes one; idempotent. `[Agent]` and unrecognized/retired prefixes (e.g. `[Report]`) are reported for human decision, not auto-labeled. CLI: `ciao label-hygiene` (dry-run by default, `--apply` writes, `--json` for automation). Not yet wired to a schedule or loop.
-  memory_injector.py           Read ~/.ciao/memory.md and ~/.ciao/user.md at session start, render as a system-prompt block; also injects the baseline Ciaobot system instructions into every chat.
-  memory_tool.py               Bounded memory-file validation and CRUD used by CLI and the application control plane.
+  memory_injector.py           Read the fenced `ciao:memory` / `ciao:profile` regions from the workspace CLAUDE.md at session start, render as a system-prompt block; also injects the baseline Ciaobot system instructions into every chat.
+  memory_tool.py               Bounded memory regions: locate/read/diagnose the fenced markers in CLAUDE.md, and the one-time legacy `~/.ciao/*.md` migration. No CLI or control-plane write surface; the agent edits regions with `Edit`.
   memory_proposals.py          Scan archived `## Session insights` sections, propose memory entries to the vault's Workspace/Memory-Proposals.md.
+  project_doc_update.py        Archive-time canonical project doc updates from session insights (Decisions and Open loops).
   public_release.py            Public extraction allowlist, export copier, and private-data preflight scanner. CLI: `ciao public-preflight export <src> <dest>` then `ciao public-preflight scan <export-root> --private-patterns <file>`.
   release.py                   Release preparation: sync-bump versions across pyproject.toml, web/package.json, and package-lock.json; report dependency updates; regenerate the packaged gws-* stock skills from the installed gws CLI on `--apply`. CLI: `python -m ciao.release <version>`.
   gws_skills.py                Regenerate the curated gws-* stock skills from `gws generate-skills` and apply Ciaobot curation (profile-wrapper examples, auth notes, strip upstream openclaw metadata and See Also boilerplate). Used by `ciao/release.py`.
+  gws_auth.py                  Google Workspace OAuth helpers, token-health monitoring, and the server-managed re-login flow.
   package_version.py           Best-effort version probe: reads ciao.__version__ and queries the GitHub releases API for the latest published version. Powers GET /api/package/status.
   package_smoke.py             Wheel smoke target: build web, build wheel, install in a clean venv, and probe the installed app. CLI: `ciao package-smoke`.
+  desktop_build.py             Dev-mode rebuild/reinstall of the macOS Tauri desktop shell (CIAO_DEV_MODE deploy step).
   stock/                       Generic package-data assets for public installs: stock agents, commands, skills, launchd template, workspace docs, and system schedules.
     skills/                    Packaged generic skills (ciao-capabilities, web-research, workspace-authoring). Installed into every workspace's `.claude/skills/` by `ciao sync-skills`; a same-named workspace skill overrides the packaged copy.
     workspace/                 Agent-readable docs copied into installed workspaces (`CLAUDE.md`, `CIAO_CUSTOMIZATION.md`).
     schedules.json             System schedules (memory curation, workspace hygiene, skill evolution).
     schedules/                 Supplemental packaged schedule assets, including the legacy weekly-review template.
   web/                         PWA web server (Python routes) + static assets (built by web/).
+    app.py                     Starlette app factory: middleware, route table, SPA catch-all.
+    auth.py                    Session-cookie auth middleware and serializer.
+    security.py                Security response headers middleware.
+    routes_api.py              REST route handlers. Catch-all for handlers without a domain home.
+    routes_auth.py             Auth login/logout/check routes.
+    routes_chat.py             Chat WebSocket + events routes.
+    routes_node.py             Node/device route handlers (multi-device host/client, package status/update).
+    routes_mcp.py              MCP Settings HTTP endpoints (status, usage, env keys, project servers, tool probe).
+    routes_push.py             Web Push notification routes.
+    routes_helpers.py          Shared route helpers (api_error envelope, workspace path resolution, git sync).
+    agent_assets.py            Agent-facing instruction/subagent/command asset endpoints and OS audit.
+    commands.py                Slash-command listing and rate-limit endpoints.
+    connection_tracker.py      Tracks live WebSocket connections for the node connected-clients list.
+    chat_broker.py             Chat WebSocket broker, file-touch tagging, snapshot scheduling.
+    project_chats.py           ProjectChatManager: chat lifecycle, streaming, transcripts, archives, delegates.
+    file_snapshots.py          SnapshotStore: append-only file snapshots behind the file viewer.
+    push.py                    PushManager: bounded notification log and Web Push publishing.
+  # Route handlers live in ciao/web/routes_<domain>.py. routes_api.py is the catch-all for
+  # handlers without a domain home; new domains get their own routes_*.py rather than growing
+  # routes_api.py. mcp_server.py is the MCP adapter only; HTTP endpoints for MCP live in routes_mcp.py.
   macos_service.py             JSON launchd/service, engine-update, migration, and rollback surface used by Ciaobot.app.
+  menubar.py                   macOS menu bar companion (rumps tray): open the PWA, restart the server, view logs.
+  menubar_prefs.py             Persisted preferences for the macOS menu bar companion.
 
 web/                           Vue 3 PWA frontend.
   src/App.vue                  Root component.
@@ -106,7 +143,6 @@ scripts/
   vault_index.py               Compatibility wrapper for `ciao vault-index`.
   vault-search.py              Compatibility wrapper for `ciao vault-search`.
   vault-lint.py                Compatibility wrapper for `ciao vault-lint`.
-  memory-cli.py                Compatibility wrapper for `ciao memory` on the legacy control surface.
   cleanup_sdk_blobs.py         Compatibility wrapper for `ciao cleanup-sdk-blobs`.
   backfill_insights.py         One-off: backfill session insights for existing archives.
   prepare-release              Release helper wrapper.
@@ -129,7 +165,7 @@ skills/  subagents/  commands/ Canonical user-owned sources; `ciao sync-skills` 
 .agents/skills/                   Codex skill catalog and command/role wrappers. Locked packages installed by the upstream `skills` CLI are canonical here; Ciaobot-owned skills are linked here from `.claude/skills/`.
 .codex/{config.toml,agents/}      Generated native Codex agent registrations, role instructions, and project MCP registrations.
 memory-vault/<workspace>/      Standard per-workspace durable markdown memory: MEMORY.md, INDEX.md, entity folders, projects/{active,completed}/, Workspace/, Logs/Chats/.
-  .runtime/                      Local state: schedules.json, web_projects.json, custom_provider_tokens.json, control_surface_decision.json, MCP/provider tool telemetry JSONL, server.lock, job runs/errors, snapshots/, transcripts/, state.json. Not committed.
+  .runtime/                      Local state: schedules.json, web_projects.json, custom_provider_tokens.json, MCP/provider tool telemetry JSONL, server.lock, job runs/errors, snapshots/, transcripts/, state.json. Not committed.
   .ciao/custom_providers.json    Tracked custom endpoint definitions (URLs, runners, and model lists; never tokens).
 secrets/                       OAuth credentials (gitignored).
 ```
@@ -168,7 +204,7 @@ when a surviving provider session or a non-deleted audit record proves they
 were active. Explicit deletion clears provider state, normalized transcripts,
 and session state so recovery cannot revive it.
 
-Chat transcripts are streamed via WebSocket and archived to `Logs/Chats/<chat-id>/claude/` under the vault root (`transcripts.py`). The Claude Agent SDK is configured in `ciao/providers/claude.py` with a `fallback_model` chain (Opus to Sonnet to Haiku) and `setting_sources=["user", "project", "local"]` so `.claude/skills/`, `.claude/agents/`, and `.claude/commands/` auto-discover.
+Chat transcripts are streamed via WebSocket and archived to `Logs/Chats/<chat-id>/<provider>/` under the vault root (`transcripts.py`). Archive, delete, and new-session reclaim provider-side storage: Claude SDK JSONL blobs via `delete_session`, Codex threads via app-server `thread/delete` (fail-open). Archived `/messages` falls back to the vault markdown when the provider session is gone. The Claude Agent SDK is configured in `ciao/providers/claude.py` with a `fallback_model` chain (Opus to Sonnet to Haiku) and `setting_sources=["user", "project", "local"]` so `.claude/skills/`, `.claude/agents/`, and `.claude/commands/` auto-discover.
 
 The same server embeds a Streamable HTTP MCP endpoint at `/mcp/`.
 `CiaoControlPlane` wraps the existing project/chat, schedule, loop,
@@ -182,19 +218,26 @@ per-process `mcp_servers.ciaobot.*` overrides and an environment token excluded
 from its shell policy. Project servers from `.mcp.json` are also projected
 into the workspace `.codex/config.toml` during `ciao sync-skills`; user-owned
 Codex tables remain authoritative and credentials stay as environment
-references. When the MCP server is unavailable a chat degrades gracefully to
-legacy with a logged WARNING instead of failing the turn. Self-disconnecting
-operations defer until their caller chat drains. See `docs/MCP.md`.
+references. When the MCP server is unavailable a chat degrades gracefully to the legacy
+surface with a logged WARNING instead of failing the turn; that is an internal
+runtime fallback (`resolved_surface = "legacy"` on the agent request), not a
+user-facing surface. Self-disconnecting operations defer until their caller
+chat drains. See `docs/MCP.md`.
 
-MCP is the default control surface (`config.control_surface = "mcp"`) for both
-providers; `legacy` is a hidden fallback selectable via `CIAO_CONTROL_SURFACE`
-or the per-chat `ChatInfo.control_surface` escape hatch (the PWA no longer
-exposes a selector). `ChatInfo.control_surface` still permits legacy and MCP
-chats to coexist. `auto` reads a guarded, provider-specific decision from
-`.runtime/control_surface_decision.json`; missing, partial, tied, or malformed
-decisions resolve to legacy. `ciao benchmark-control-surfaces` produces the
-decision evidence from paired isolated full-stack runs and only promotes a
-complete 12-scenario, five-repeat result.
+MCP is the control surface (`config.control_surface = "mcp"`) for both
+providers; `legacy` survives as a hidden fallback selectable via
+`CIAO_CONTROL_SURFACE` or the per-chat `ChatInfo.control_surface` escape hatch
+(the PWA never exposed a selector), and as the automatic degrade when the MCP
+server is unavailable at request time. `ChatInfo.control_surface` still permits
+legacy and MCP chats to coexist. Accepted config/env values are `legacy` and
+`mcp` only: the `auto` A/B option and the paired `ciao
+benchmark-control-surfaces` evaluator that produced its evidence were removed
+once the evaluation had settled on MCP. The per-chat `auto` path in
+`ProjectChatManager` still resolves through `control_surfaces.resolve_auto_surface`,
+which reads `.runtime/control_surface_decision.json` and falls back to legacy
+for missing, partial, tied, or malformed decisions — but nothing writes that
+file any more, so an existing chat pinned to `auto` resolves from a stale
+decision or degrades to legacy.
 
 Server restart requests drain chat work before shutting down: active broker streams, already-queued follow-up turns, and background-subagent watchers are allowed to settle, while brand-new turns are rejected once draining begins. When drain starts, `ProjectChatManager.begin_restart_drain` publishes `server_restarting` on `/ws/events` (and the connect snapshot carries `restarting: true`) so every open PWA shows the full-screen restart overlay instead of treating turn rejection as a chat error. Shutdown starts only after several consecutive idle observations so the handoff from a completed parent turn to its background-agent watcher or synthesis stream cannot create a false-idle race. The macOS menu-bar action uses `/api/active-chats` as a guard before its direct launchd restart and asks the operator to retry once active chats finish.
 
@@ -210,7 +253,7 @@ When a chat is archived, the raw session JSONL is filtered and passed through a 
 
 In the same archive hook, `ciao/trajectory_builder.py` writes a structured trajectory JSON (turns, tool counts, skills loaded, errors) to `~/.ciao/trajectories/YYYY-MM/<session-id>.json`; a weekly schedule runs `ciao/skill_evolution.py` to mine those trajectories and draft skill-edit proposals under the vault's `Workspace/Skill-Proposals/` (gated by `CIAO_TRAJECTORIES_DISABLED`, `CIAO_TRAJECTORY_RETENTION_MONTHS`, `CIAO_SKILL_EVOLUTION_DISABLED`). The per-skill pipeline inside `run_evolution_pass` is a small DAG executed by `ciao/dag.py`, so each step (proposal generation, semantic check, test gate, write) shows up in the Automation page with its own timing and error.
 
-Each session injects a bounded memory layer at the top of the system prompt: `~/.ciao/memory.md` (env facts, conventions, lessons) and `~/.ciao/user.md` (identity, preferences) are rendered as a labeled block by `ciao/memory_injector.py`. `ciao/memory_tool.py` owns validated, char-limited CRUD; the CLI (`ciao memory …`) and control-plane `memory_*` methods call that same implementation. The embedded Ciaobot MCP surface does **not** expose memory CRUD — it only lists and resolves reviewable proposals (`memory_proposals_list`, `memory_proposal_resolve`); accepting a proposal writes through `memory_add` into `~/.ciao/memory.md` or `user.md`. A bounded entry tagged `[expires: YYYY-MM-DD]` remains active through that date, then is omitted from later prompt snapshots. The stored entry still counts against its file's character limit until daily memory curation removes it. Curation removes only entries with valid, passed dates and reports malformed tags instead of guessing. `ciao/memory_proposals.py` mines archived `## Session insights` into the vault's `Workspace/Memory-Proposals.md` for human or next-session promotion. Daily memory curation also appends durable learnings to the vault's `Workspace/Learnings.md`.
+Each session injects a bounded memory layer at the top of the system prompt for Claude and Codex (Ollama/OpenRouter chats do not receive it): the fenced `ciao:memory` and `ciao:profile` regions in the workspace `CLAUDE.md` are rendered as a labeled block by `ciao/memory_injector.py`. Caps are advisory (`CIAO_MEMORY_CHAR_LIMIT` / `CIAO_USER_CHAR_LIMIT`); `os_audit` reports over-cap, oversize, duplicate, and invisible-Unicode issues, and nightly curation consolidates. There is no `ciao memory` CLI and no control-plane memory CRUD — the agent edits the regions with `Edit`. The embedded Ciaobot MCP surface only lists and dismisses reviewable proposals (`memory_proposals_list`, `memory_proposal_resolve`); promotion is an explicit region Edit first, then dismiss. A bounded entry tagged `[expires: YYYY-MM-DD]` remains active through that date, then is omitted from later prompt snapshots. The stored entry still counts against its region's character budget until daily memory curation removes it. Curation removes only entries with valid, passed dates and reports malformed tags instead of guessing. `ciao/memory_proposals.py` mines archived `## Session insights` into the vault's `Workspace/Memory-Proposals.md` for human or next-session promotion (rare "User corrections" auto-append into the matching region at archive time). Daily memory curation also appends durable learnings to the vault's `Workspace/Learnings.md`. Startup `ensure_regions` + legacy `~/.ciao/memory.md`/`user.md` migration folds old files into the regions once. Region contents are git-tracked with the workspace.
 
 The server registers Claude SDK hooks in `ciao/observability/hooks.py`. `UserPromptSubmit` injects today's date, the per-turn `CIAO_ACTIVE_WORKSPACE`, GWS profile, and any vault entities mentioned in the prompt; entity matching is index-backed via `INDEX.md` under the vault root and is scoped to the active workspace plus `shared/...` roots. A `PreToolUse` hook rewrites only Claude `Bash` calls with `run_in_background: true` to run in the foreground. The managed SDK CLI owns background shell processes and stops them when the turn ends, while their terminal notification is delayed until a later turn resumes the session. Keeping these calls in the active turn makes the real shell result part of the same streamed response.
 
@@ -228,7 +271,7 @@ Schedules carry an `archive_policy`: `manual` or `auto`. All schedules execute t
 
 **Automatic behavior.** Ciaobot automatically archives chat transcripts, runs the configured session-insights model on archived session JSONL when insights are enabled, appends `## Session insights`, records a structured trajectory JSON, and then runs a heuristic pass over those insights to draft memory proposals. It also dispatches enabled schedules, records background-job telemetry, refreshes the vault index, updates configured skill mirrors, and backs up the device branch according to the startup/system automation configuration. The Settings → Models page only exposes routines that have a selectable model; heuristic follow-on jobs such as memory proposals and trajectory capture are tracked in Settings → Automation instead.
 
-**Not automatic.** Memory proposals are not promoted into `~/.ciao/memory.md` or `~/.ciao/user.md` without review. Skill-evolution output is a draft proposal under the vault's `Workspace/Skill-Proposals/`; Ciaobot does not apply those edits automatically. Scheduled chats still run through the normal provider pipeline and permission flow. A schedule with `archive_policy: auto` is archived only when the post-run classifier says the result does not need user attention; failed, blocked, retrying, or useful runs remain visible. Routine-model choices do not change an active chat's selected provider/model.
+**Not automatic.** Memory proposals are not promoted into the `CLAUDE.md` regions without review (except rare archive-time "User corrections"). Skill-evolution output is a draft proposal under the vault's `Workspace/Skill-Proposals/`; Ciaobot does not apply those edits automatically. Scheduled chats still run through the normal provider pipeline and permission flow. A schedule with `archive_policy: auto` is archived only when the post-run classifier says the result does not need user attention; failed, blocked, retrying, or useful runs remain visible. Routine-model choices do not change an active chat's selected provider/model.
 
 ## Providers
 
@@ -275,7 +318,7 @@ Archived chats are read-only but can be continued into a new active chat via the
 
 Background subagents (Agent tool dispatches with `run_in_background`) stay visible after the parent turn ends. Unlike background Bash, Agent calls are not rewritten by the foreground Bash hook. `ciao/subagent_tracking.py` parses the parent session JSONL for async dispatches and their `<task-notification>` completions; a per-chat watcher in `ProjectChatManager` publishes `chat_subagents_ready {remaining}` on `/ws/events` whenever the running count changes (the connect snapshot carries `background_agents` so reloads heal stale counts). While agents run, the PWA shows a pulsing "N agents" pill in the chat header and a dimmed sidebar dot, polls `/api/chats/{id}/subagents` for a near-live feed, and renders each transcript in a `SubagentPanel` anchored under the dispatching turn via the server-computed `turn_index`. Between turns the manager also drains the idle SDK stream (`ClaudeProvider.drain_events`): when a finished agent triggers a CLI-initiated parent follow-up turn, its events are forwarded live on a background `ChatStream` and announced like a normal result. Without the drain, those buffered messages would silently corrupt the next turn's `receive_response()`.
 
-Delegates let a chat's agent spawn writable child chats (`delegate_spawn`) to work in parallel on a model it picks. A delegate is an ordinary chat carrying `spawned_from_chat_id`, so it keeps its own resumable session, full tool access, and permission cards in its own chat. When a delegate's turn ends, `ProjectChatManager._queue_delegate_wake` records the completion and `_flush_delegate_wake` delivers one wake turn to the supervisor after a 5s coalescing window, via `queue_message` (supervisor mid-turn) or `start_stream` (idle, or cold after a restart). Failures wake the supervisor too. Delegates cannot nest and are capped at 6 live per supervisor; the PWA nests them under their supervisor in the sidebar and emits `chat_delegates_reported` on `/ws/events`.
+Delegates let a chat's agent spawn writable child chats (`delegate_spawn`) to work in parallel on a model it picks. A delegate is an ordinary chat carrying `spawned_from_chat_id`, so it keeps its own resumable session, full tool access, and permission cards in its own chat. When a delegate's turn ends, `ProjectChatManager._queue_delegate_wake` records the completion and `_flush_delegate_wake` delivers one wake turn to the supervisor after a 5s coalescing window, via `queue_message` (supervisor mid-turn) or `start_stream` (idle, or cold after a restart). Failures wake the supervisor too. Delegate result-ready announcements (`chat_result_ready`, delayed Web Push / tray) are suppressed — the parent wake is the user-facing signal — but permission and AskUserQuestion pushes still fire for the child. Delegates cannot nest and are capped at 6 live per supervisor; the PWA nests them under their supervisor in the sidebar and emits `chat_delegates_reported` on `/ws/events`.
 
 
 Settings tabs (sidebar labels): Home (deploy, notifications, theme and font scaling, local session, PWA password, workspace health, package updates, and a dev-mode Debug card; in client mode every card here is the host's, labeled with the host node name, and the device-scoped controls live on the separate `/device` route), Models (provider/tier controls for title, insights, critique, Ollama/OpenRouter tier routing, visible main workspace/vault roots, and the voice transcription engine, read/written via `GET`/`PATCH /api/settings/routines`, persisted in `.runtime/app_settings.json` by `ciao/app_settings.py` and overlaid on the live config without a restart), Providers (Claude Code/Codex CLI authentication plus Ollama, OpenRouter, and OpenAI cloud voice credentials), Workspaces (logical workspace registry plus the Google Workspace / `gws` install, OAuth, and profile cards), Context (a project/workspace-independent context-building guide ordered to match the provider pipeline: one CLI instructions block — the workspace `CLAUDE.md` and `AGENTS.md` are linked, so there is no per-CLI switch — then Ciaobot system instructions, memory layers, and per-turn context; `workspace_health` and `setup_status` both check that `AGENTS.md` resolves to `CLAUDE.md` and warn without blocking when a custom AGENTS.md diverges), Assets (route `/settings/skills`: expandable skill/agent/command inventory with Claude/Codex install badges, plus an **MCP servers** card that creates/updates/deletes project entries in `.mcp.json`, writes env-key secrets into `.env`, and probes tools), and Automations (per-process status, last-run time, duration, model/provider, recent history, and error text, split into Content automations and System, fed by `GET /api/automation`). `GET /api/agent-assets` surfaces the underlying context inventory with provider/workspace metadata plus generated Ciaobot system/runtime prompt blocks, subagents, and slash commands; draft memory proposals remain available to backend workflows but are not shown as a Context-tab review queue. `POST /api/agent-assets/subagents` and `POST /api/agent-assets/commands` create workspace-owned assets under `subagents/` or `commands/`, mirror a note into `memory-vault/Workspace/`, and sync Claude `.claude/` links, Codex `.agents/skills/` compatibility wrappers, and native `.codex/agents/` registrations.

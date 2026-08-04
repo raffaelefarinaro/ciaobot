@@ -358,18 +358,6 @@
                 <button class="btn-small" @click="adjustFontScale(0.05)" :disabled="fontScale >= 1.5">Increase</button>
                 <button class="btn-small font-reset" @click="resetFontScale" :disabled="fontScale === DEFAULT_FONT_SCALE">Reset</button>
               </div>
-              <div class="font-scale-presets">
-                <button
-                  class="btn-small"
-                  :class="{ active: fontScale === DEFAULT_FONT_SCALE }"
-                  @click="setFontScale(DEFAULT_FONT_SCALE)"
-                >100%</button>
-                <button
-                  class="btn-small"
-                  :class="{ active: Math.abs(fontScale - LARGE_FONT_SCALE) < 0.001 }"
-                  @click="setFontScale(LARGE_FONT_SCALE)"
-                >120%</button>
-              </div>
             </div>
           </div>
         </div>
@@ -629,7 +617,8 @@
                     The first transcription downloads the model.
                   </template>
                   <template v-else>
-                    Dictation uses the OpenAI transcription API (needs <code>OPENAI_API_KEY</code>, ~$0.003/min).
+                    Dictation uses OpenAI <code>{{ routines.transcription.cloud_model }}</code> (needs <code>OPENAI_API_KEY</code>, ~$0.0045/min).
+                    <a href="https://developers.openai.com/api/docs/pricing" target="_blank" rel="noopener">Check current pricing</a>.
                   </template>
                 </span>
               </div>
@@ -946,161 +935,18 @@
 
       <!-- AUTOMATIONS TAB -->
       <template v-if="currentTab === 'automations'">
-        <div class="card">
-          <div class="settings-card-header settings-card-header--split">
-            <div>
-              <div class="settings-label-row">
-                <p class="section-title">Background Automations</p>
-                <button class="btn-small" :disabled="!automationLoaded" @click="fetchAutomation">Refresh</button>
-              </div>
-              <p class="hint">
-                Status and logs of background tasks (git sync, memory curation, skills update, title generation).
-                Tasks wrapped in telemetry are recorded here.
-              </p>
-              <div class="automation-legend" aria-label="Automation capability legend">
-                <span class="automation-legend-item">
-                  <span class="automation-capability automation-capability--model">MODEL</span>
-                  invokes a language model
-                </span>
-                <span class="automation-legend-item">
-                  <span class="automation-capability automation-capability--outcome">OUTCOME</span>
-                  creates a durable or user-visible result
-                </span>
-                <span class="automation-legend-item">
-                  <span class="automation-capability automation-capability--muted">STATUS ONLY</span>
-                  records operational health
-                </span>
-              </div>
-            </div>
-          </div>
-
-          <div v-if="!automationLoaded" class="card"><span class="loading">Loading&hellip;</span></div>
-          <p v-else-if="automationError" class="hint hint--warn">{{ automationError }}</p>
-          <template v-else-if="automationItems">
-            <p v-if="automationItems.length === 0" class="hint hint--info">
-              No automation runs recorded yet.
-            </p>
-            <div v-else class="automation-list">
-              <div v-for="item in visibleAutomationItems" :key="item.job" class="automation-row-container">
-                <!-- Header of job run -->
-                <div class="automation-job-header" @click="expandedAutomations[item.job] = !expandedAutomations[item.job]">
-                  <div class="job-meta-left">
-                    <span class="expand-icon">{{ expandedAutomations[item.job] ? '▼' : '▶' }}</span>
-                    <span class="job-title">{{ item.label }}</span>
-                    <span
-                      class="automation-capability"
-                      :class="jobUsesModel(item) ? 'automation-capability--model' : 'automation-capability--muted'"
-                      :title="jobUsesModel(item) ? 'This automation invokes a language model.' : 'This automation does not invoke a language model.'"
-                    >
-                      {{ jobUsesModel(item) ? 'MODEL' : 'NO MODEL' }}
-                    </span>
-                    <span
-                      class="automation-capability"
-                      :class="jobProducesOutcome(item) ? 'automation-capability--outcome' : 'automation-capability--muted'"
-                      :title="jobProducesOutcome(item) ? 'This automation creates a durable or user-visible result.' : 'This automation records operational health only.'"
-                    >
-                      {{ jobProducesOutcome(item) ? 'OUTCOME' : 'STATUS ONLY' }}
-                    </span>
-                  </div>
-                  <div class="job-meta-right">
-                    <!-- Stats summary -->
-                    <span v-if="item.stats.total_runs" class="job-stat-summary">
-                      {{ Math.round((item.stats.success_rate || 0) * 100) }}% ok &middot; {{ item.stats.total_runs }} runs
-                    </span>
-                    <!-- Status badge -->
-                    <span class="badge" :class="getJobBadgeClass(item.job)">
-                      {{ getJobStatus(item.job) }}
-                    </span>
-                    <!-- Trigger button -->
-                    <button
-                      v-if="getJobSchedule(item.job)"
-                      class="btn-small btn-run"
-                      :disabled="triggeringJobs[item.job]"
-                      @click.stop="triggerJob(item.job)"
-                    >
-                      {{ triggeringJobs[item.job] ? 'Running...' : 'Run now' }}
-                    </button>
-                    <button
-                      v-else-if="item.job === 'backfill_insights' || item.job === 'insights_backfill'"
-                      class="btn-small btn-run"
-                      :disabled="backfillRunning"
-                      @click.stop="triggerBackfill"
-                    >
-                      {{ backfillRunning ? 'Backfilling...' : 'Backfill insights' }}
-                    </button>
-                  </div>
-                </div>
-
-                <!-- Expanded details (Runs log) -->
-                <div v-if="expandedAutomations[item.job]" class="automation-job-detail">
-                  <div class="automation-job-description">
-                    <p class="automation-job-description-label">What it does</p>
-                    <p>{{ item.description || 'No description available.' }}</p>
-                  </div>
-
-                  <!-- Last run meta -->
-                  <div v-if="item.last_run" class="last-run-info">
-                    <div class="detail-row">
-                      <span class="detail-label">Last Run:</span>
-                      <span class="detail-val">{{ getJobLastRunLabel(item.job) }} ({{ getJobDuration(item.job) }})</span>
-                    </div>
-                    <div v-if="item.last_run.model" class="detail-row">
-                      <span class="detail-label">Model:</span>
-                      <span class="detail-val">{{ item.last_run.provider }}/{{ item.last_run.model }}</span>
-                    </div>
-                  </div>
-
-                  <!-- Last error banner -->
-                  <div v-if="item.stats.last_error" class="error-banner">
-                    <div class="error-banner-header">
-                      <span>Last Error ({{ formatTime(item.stats.last_error.ts) }})</span>
-                    </div>
-                    <pre class="error-text">{{ item.stats.last_error.error }}</pre>
-                  </div>
-
-                  <!-- Recent runs history -->
-                  <div class="runs-history">
-                    <p class="history-title">Recent Runs History</p>
-                    <div v-if="item.recent.length === 0" class="empty-history">No runs logged in this session.</div>
-                    <table v-else class="history-table">
-                      <thead>
-                        <tr>
-                          <th>Finished</th>
-                          <th>Status</th>
-                          <th>Duration</th>
-                          <th>Details / Errors</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        <tr v-for="run in item.recent" :key="run.started_at + run.ended_at">
-                          <td class="td-time">{{ formatTime(run.ended_at || run.started_at) }}</td>
-                          <td>
-                            <span class="badge" :class="getTelemetryBadgeClass(run.status)">
-                              {{ run.status }}
-                            </span>
-                          </td>
-                          <td class="td-dur">{{ formatDuration(run.duration_ms) || 'unknown' }}</td>
-                          <td class="td-details">
-                            <span v-if="run.model" class="run-model-info">{{ run.provider }}/{{ run.model }}</span>
-                            <span v-if="run.extra?.summary || run.extra?.message" class="run-summary-info">
-                              {{ run.extra?.summary || run.extra?.message }}
-                            </span>
-                            <span v-if="run.status === 'skipped' && run.extra?.skip_reason" class="run-skip-info">
-                              Skipped: {{ run.extra.skip_reason }}
-                            </span>
-                            <div v-if="run.error && run.error !== run.extra?.summary" class="run-error-details" :title="run.error">
-                              {{ run.error }}
-                            </div>
-                          </td>
-                        </tr>
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </template>
-        </div>
+        <SettingsAutomation
+          :automation-items="automationItems"
+          :automation-loaded="automationLoaded"
+          :automation-error="automationError"
+          :fetch-automation="fetchAutomation"
+          :notify-saved="notifySaved"
+          :get-job-badge-class="getJobBadgeClass"
+          :get-job-status="getJobStatus"
+          :get-job-last-run-label="getJobLastRunLabel"
+          :get-job-duration="getJobDuration"
+          :get-telemetry-badge-class="getTelemetryBadgeClass"
+        />
       </template>
 
       <!-- WORKSPACES TAB -->
@@ -2340,9 +2186,9 @@ import { currentSubscription, disablePush, enablePush, isPushEnabled, pushSuppor
 import { askConfirm } from '../lib/confirm'
 import { useFileViewerStore } from '../stores/fileViewer'
 import { useProjectStore } from '../stores/projects'
-import { useTaskStore } from '../stores/tasks'
 import PaneHeader from './PaneHeader.vue'
 import ModelSelector from './ModelSelector.vue'
+import SettingsAutomation from './settings/SettingsAutomation.vue'
 import { providerModelBadges, sectionsFromModelsResponse, type ModelSection } from '../lib/modelSections'
 
 // The tray owns package updates and native notifications in the desktop app.
@@ -2360,7 +2206,6 @@ const route = useRoute()
 const router = useRouter()
 const fileViewer = useFileViewerStore()
 const projectStore = useProjectStore()
-const taskStore = useTaskStore()
 const currentTab = computed(() => {
   const tab = (route.params.tab as string) || 'home'
   if (tab === 'mcp') return 'skills'
@@ -2702,10 +2547,9 @@ async function deleteCustomMcpServer(name: string) {
 // ── Appearance settings ────────────────────────────────────────────────────
 const activeTheme = ref('system')
 // The font scale is anchored to the pre-rescale UI: DEFAULT_FONT_SCALE (1.2)
-// displays as "100%" and LARGE_FONT_SCALE (1.44) as "120%". The raw multiplier
-// still drives --font-scale; only the displayed percentage is rescaled.
+// displays as "100%". The raw multiplier still drives --font-scale; only the
+// displayed percentage is rescaled.
 const DEFAULT_FONT_SCALE = 1.2
-const LARGE_FONT_SCALE = 1.44
 const fontScale = ref(DEFAULT_FONT_SCALE)
 const fontScalePercent = computed(() => Math.round((fontScale.value / DEFAULT_FONT_SCALE) * 100))
 
@@ -3293,9 +3137,31 @@ async function saveRoutineTier(key: RoutineModelKey, tierValue: string) {
   await saveRoutines({ [key]: provider === 'codex' ? `codex:${model}` : model })
 }
 
+// Automatic does not pick one model: resolve_title_model / resolve_insights_model
+// take the chat's workspace and read that workspace's tier. Naming a single
+// model here read as a global choice and was wrong for every workspace but the
+// primary one, so say what it follows and list the per-workspace answers.
+function routineWorkspaceModels(key: RoutineModelKey): Array<[string, string]> {
+  const settings = routines.value
+  if (!settings) return []
+  const map = key === 'title_model'
+    ? settings.title_model_by_workspace
+    : settings.insights_model_by_workspace
+  return Object.entries(map || {})
+}
+
 function routineModelSummary(key: RoutineModelKey): string {
   const provider = routineProviderValue(key)
   if (provider === 'automatic') {
+    const perWorkspace = routineWorkspaceModels(key)
+    const distinct = new Set(perWorkspace.map(([, model]) => model))
+    if (distinct.size > 1) {
+      const parts = perWorkspace.map(([ws, model]) => `${ws}: ${model || 'default'}`)
+      return `Automatic — follows each chat's workspace (${parts.join(' · ')})`
+    }
+    if (distinct.size === 1) {
+      return `Automatic — follows each chat's workspace (currently ${[...distinct][0] || 'default'} for all)`
+    }
     return `Automatic: ${routineEffectiveModel(key) || 'default'}`
   }
   if (provider === 'apple') return 'Local (free)'
@@ -4336,51 +4202,6 @@ const automationItems = ref<AutomationProcess[]>([])
 const automationLoaded = ref(false)
 const automationError = ref('')
 
-const visibleAutomationItems = computed(() => {
-  // Older runtimes used `insights_backfill`; current runtimes use
-  // `backfill_insights`. If both are present in the retained run log, show
-  // the canonical job once rather than presenting duplicate backfills.
-  const hasCanonicalBackfill = automationItems.value.some(
-    (item) => item.job === 'backfill_insights',
-  )
-  if (!hasCanonicalBackfill) return automationItems.value
-  return automationItems.value.filter((item) => item.job !== 'insights_backfill')
-})
-
-// Keep the capability badges correct while a desktop engine is still serving
-// an older API response. Newer servers provide these flags explicitly.
-const modelBackedAutomationJobs = new Set([
-  'title',
-  'insights',
-  'skill_evolution',
-  'dependency_review',
-  'schedule_dispatch',
-  'schedule_attention_classifier',
-  'backfill_insights',
-])
-const outcomeAutomationJobs = new Set([
-  'title',
-  'insights',
-  'memory_proposals',
-  'trajectory',
-  'skill_evolution',
-  'dependency_review',
-  'schedule_dispatch',
-  'backfill_insights',
-])
-
-function jobUsesModel(item: AutomationProcess): boolean {
-  if (typeof item.uses_model === 'boolean') return item.uses_model
-  return modelBackedAutomationJobs.has(item.job)
-    || !!item.last_run?.model
-    || item.recent.some((run) => !!run.model)
-}
-
-function jobProducesOutcome(item: AutomationProcess): boolean {
-  if (typeof item.produces_outcome === 'boolean') return item.produces_outcome
-  return outcomeAutomationJobs.has(item.job)
-}
-
 function getJobTelemetry(job: string): AutomationProcess | undefined {
   return automationItems.value.find((i) => i.job === job)
 }
@@ -4433,48 +4254,6 @@ async function fetchAutomation() {
     automationLoaded.value = true
   }
 }
-
-const expandedAutomations = ref<Record<string, boolean>>({})
-const triggeringJobs = ref<Record<string, boolean>>({})
-const jobScheduleMap: Record<string, string> = {
-  memory_proposals: 'system-memory-curation',
-  vault_index: 'system-workspace-hygiene',
-  skill_evolution: 'system-skill-evolution'
-}
-
-async function triggerJob(jobId: string) {
-  const scheduleId = jobScheduleMap[jobId]
-  if (!scheduleId) return
-  triggeringJobs.value[jobId] = true
-  try {
-    await taskStore.runScheduleNow(scheduleId)
-    notifySaved(`Triggered automation job "${jobId}" via schedule "${scheduleId}".`, 'Automations')
-    await fetchAutomation()
-  } catch (e) {
-    alert(`Failed to trigger job: ${errorMessage(e)}`)
-  } finally {
-    triggeringJobs.value[jobId] = false
-  }
-}
-
-function getJobSchedule(jobId: string): string | undefined {
-  return jobScheduleMap[jobId]
-}
-
-const backfillRunning = ref(false)
-async function triggerBackfill() {
-  backfillRunning.value = true
-  try {
-    await api.post('/api/automation/backfill-insights', {})
-    notifySaved('Insights backfill started in the background.', 'Automations')
-    setTimeout(fetchAutomation, 2000)
-  } catch (e) {
-    alert(`Failed to start backfill: ${errorMessage(e)}`)
-  } finally {
-    backfillRunning.value = false
-  }
-}
-
 
 const pushSupportedFlag = ref(false)
 const pushEnabledFlag = ref(false)
@@ -6971,105 +6750,6 @@ a.btn-secondary {
   letter-spacing: 0.04em;
 }
 
-/* Automation tab */
-.auto-intro {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 12px;
-}
-.auto-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: var(--space-3);
-}
-.auto-row {
-  padding: 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-  cursor: pointer;
-}
-.auto-row:hover {
-  border-color: var(--accent);
-}
-.auto-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-.auto-chevron {
-  font-size: var(--text-xs);
-  color: var(--fg2);
-  flex-shrink: 0;
-}
-.auto-name {
-  color: var(--fg);
-  font-size: var(--text-sm);
-  font-weight: 600;
-}
-.auto-when {
-  margin-left: auto;
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  white-space: nowrap;
-}
-.auto-sub {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-top: 6px;
-}
-.auto-meta {
-  color: var(--fg2);
-  font-size: var(--text-xs);
-}
-.auto-desc {
-  margin: 6px 0 0;
-  color: var(--fg2);
-  font-size: var(--text-xs);
-  line-height: 1.35;
-}
-.auto-error {
-  margin-top: 8px;
-  padding: 8px;
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--error) 12%, transparent);
-  color: var(--error);
-  font-size: var(--text-xs);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.auto-detail {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.auto-run {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  font-size: var(--text-xs);
-  color: var(--fg2);
-}
-.auto-run-when,
-.auto-run-model {
-  color: var(--fg2);
-}
-.auto-run-error {
-  width: 100%;
-  color: var(--error);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
 .font-scale-row {
   display: flex;
   align-items: center;
@@ -7087,21 +6767,6 @@ a.btn-secondary {
   color: var(--fg);
   flex: 0 0 56px;
   text-align: center;
-}
-.font-scale-presets {
-  display: flex;
-  gap: var(--space-2);
-  margin-top: var(--space-2);
-  width: 100%;
-}
-.font-scale-presets .btn-small {
-  flex: 1 1 0;
-  min-width: 0;
-}
-.font-scale-presets .btn-small.active {
-  background: var(--accent);
-  color: #fff;
-  border-color: var(--accent);
 }
 .ws-label {
   font-size: var(--text-sm);
@@ -7217,306 +6882,6 @@ a.btn-secondary {
 }
 .usage-table tbody tr:hover .usage-td {
   background: var(--bg2);
-}
-
-/* Background Automations Tab */
-.automation-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2) var(--space-4);
-  margin-top: var(--space-3);
-  color: var(--fg3);
-  font-size: var(--text-xs);
-}
-
-.automation-legend-item {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.automation-capability {
-  display: inline-flex;
-  align-items: center;
-  flex: 0 0 auto;
-  padding: 2px 6px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  line-height: 1.3;
-  white-space: nowrap;
-}
-
-.automation-capability--model {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-}
-
-.automation-capability--outcome {
-  color: var(--success);
-  border-color: color-mix(in srgb, var(--success) 55%, var(--border));
-  background: color-mix(in srgb, var(--success) 10%, transparent);
-}
-
-.automation-capability--muted {
-  color: var(--fg3);
-  background: var(--bg3);
-}
-
-.automation-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  margin-top: var(--space-4);
-}
-
-.automation-row-container {
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
-  transition: border-color 0.15s var(--ease);
-}
-
-.automation-row-container:hover {
-  border-color: var(--border-strong);
-}
-
-.automation-job-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: var(--space-3);
-  cursor: pointer;
-  user-select: none;
-  background: var(--bg2);
-}
-
-.job-meta-left {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-3);
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.expand-icon {
-  font-size: 10px;
-  color: var(--fg3);
-  width: 12px;
-  text-align: center;
-}
-
-.job-title {
-  font-weight: 600;
-  color: var(--fg);
-  white-space: nowrap;
-}
-
-.job-meta-right {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  flex: 0 0 auto;
-}
-
-@media (max-width: 768px) {
-  .automation-job-header {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-
-  .job-meta-left,
-  .job-meta-right {
-    width: 100%;
-  }
-
-  .job-meta-right {
-    justify-content: flex-end;
-  }
-
-}
-
-.job-stat-summary {
-  font-size: var(--text-xs);
-  color: var(--fg3);
-  font-variant-numeric: tabular-nums;
-  margin-right: var(--space-2);
-}
-
-.btn-run {
-  background: var(--accent2);
-  color: #fff;
-  border: none;
-}
-
-.btn-run:hover:not(:disabled) {
-  background: var(--accent-strong);
-}
-
-.automation-job-detail {
-  padding: var(--space-4);
-  background: var(--bg);
-  border-top: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-}
-
-.automation-job-description {
-  max-width: 70ch;
-  color: var(--fg2);
-  font-size: var(--text-sm);
-  line-height: 1.6;
-}
-
-.automation-job-description p {
-  margin: 0;
-}
-
-.automation-job-description-label {
-  margin-bottom: var(--space-1) !important;
-  color: var(--fg3);
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: var(--text-xs);
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.last-run-info {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-4);
-  font-size: var(--text-sm);
-}
-
-.detail-row {
-  display: flex;
-  gap: var(--space-2);
-}
-
-.detail-label {
-  color: var(--fg2);
-  font-weight: 500;
-}
-
-.detail-val {
-  color: var(--fg);
-  font-variant-numeric: tabular-nums;
-}
-
-.error-banner {
-  background: rgba(244, 67, 54, 0.08);
-  border: 1px solid var(--error);
-  border-radius: var(--radius-sm);
-  padding: var(--space-3);
-}
-
-.error-banner-header {
-  font-weight: 600;
-  color: var(--error);
-  margin-bottom: var(--space-2);
-  font-size: var(--text-xs);
-}
-
-.error-text {
-  margin: 0;
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: var(--text-xs);
-  color: var(--fg);
-  white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 200px;
-  overflow-y: auto;
-}
-
-.runs-history {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.history-title {
-  font-weight: 600;
-  font-size: var(--text-xs);
-  color: var(--fg2);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.empty-history {
-  font-size: var(--text-xs);
-  color: var(--fg3);
-}
-
-.history-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: var(--text-xs);
-}
-
-.history-table th {
-  text-align: left;
-  padding: var(--space-2);
-  color: var(--fg3);
-  font-weight: 600;
-  border-bottom: 1px solid var(--border);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.history-table td {
-  padding: var(--space-2);
-  border-bottom: 1px solid var(--border);
-  color: var(--fg);
-  vertical-align: middle;
-}
-
-.history-table tbody tr:last-child td {
-  border-bottom: none;
-}
-
-.td-time {
-  white-space: nowrap;
-  font-variant-numeric: tabular-nums;
-}
-
-.td-dur {
-  font-variant-numeric: tabular-nums;
-  color: var(--fg2);
-}
-
-.run-model-info {
-  background: var(--bg2);
-  padding: 1px 4px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  color: var(--fg2);
-  font-size: 10px;
-  margin-right: var(--space-2);
-}
-
-.run-summary-info {
-  color: var(--fg2);
-}
-
-.run-skip-info {
-  color: var(--warning);
-}
-
-.run-error-details {
-  color: var(--error);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 350px;
 }
 
 /* Provider & Workspace MCP Connectors Bar */

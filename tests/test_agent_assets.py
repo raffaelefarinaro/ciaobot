@@ -31,9 +31,8 @@ def _config(root: Path, *, state_path: Path | None = None) -> SimpleNamespace:
         workspace_root=root,
         vault_root=vault,
         state_path=state_path,
-        memory_enabled=False,
         memory_char_limit=2200,
-        user_char_limit=1800,
+        user_char_limit=1375,
     )
 
 
@@ -160,19 +159,21 @@ def test_agent_assets_respects_codex_override_precedence(
 def test_agent_assets_lists_bounded_memory_and_splits_system_prompt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    mem_dir = tmp_path / ".ciao"
-    mem_dir.mkdir()
-    (mem_dir / "memory.md").write_text("prefers bullet lists\n", encoding="utf-8")
-    (mem_dir / "user.md").write_text("name: Alice\n", encoding="utf-8")
-    monkeypatch.setenv("CIAO_MEMORY_DIR", str(mem_dir))
-    (tmp_path / "CLAUDE.md").write_text("# Local\n", encoding="utf-8")
+    from ciao.memory_tool import ensure_regions, write_region
+
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text("# Local\n", encoding="utf-8")
+    ensure_regions(guide)
+    write_region(guide, "memory", ["prefers bullet lists"])
+    write_region(guide, "profile", ["name: Alice"])
 
     resp = _client(tmp_path).get("/api/agent-assets")
 
     assert resp.status_code == 200
     by_id = {item["id"]: item for item in resp.json()["context"]}
-    assert by_id["ciaobot-memory"]["content"] == "prefers bullet lists\n"
-    assert by_id["ciaobot-user"]["content"] == "name: Alice\n"
+    assert "prefers bullet lists" in by_id["ciaobot-memory"]["content"]
+    assert "name: Alice" in by_id["ciaobot-user"]["content"]
+    assert by_id["ciaobot-memory"]["editable"] is True
     assert "prefers bullet lists" not in by_id["ciaobot-system-prompt"]["content"]
     assert "Ciaobot System Instructions" in by_id["ciaobot-system-prompt"]["content"]
 

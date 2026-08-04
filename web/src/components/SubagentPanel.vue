@@ -1,6 +1,6 @@
 <template>
   <div v-if="subs.length" class="subagent-panel" :class="{ open: panelOpen }">
-    <div class="subagent-summary" @click="togglePanel">
+    <div class="subagent-summary" @click.stop="togglePanel">
       <span class="chevron">{{ panelOpen ? '\u25BE' : '\u25B8' }}</span>
       <span v-if="runningCount" class="running-spinner" aria-hidden="true"></span>
       <span v-else class="icon">&#129302;</span>
@@ -16,7 +16,7 @@
         class="subagent-block"
         :class="{ open: !!openAgents[i] }"
       >
-        <div class="subagent-head" @click="toggleAgent(i)">
+        <div class="subagent-head" @click.stop="toggleAgent(i)">
           <span class="chevron">{{ openAgents[i] ? '\u25BE' : '\u25B8' }}</span>
           <span class="agent-id">
             <template v-if="sub.subagent_type">[{{ sub.subagent_type }}]&nbsp;</template>{{ sub.description || shortId(sub.agent_id) }}

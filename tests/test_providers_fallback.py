@@ -113,7 +113,7 @@ def test_next_tier_resolves_ollama_configured_ids() -> None:
     # minimax-m3 — exactly the screenshot scenario.
     cfg = SimpleNamespace(
         ollama=SimpleNamespace(
-            haiku_model="deepseek-v4-flash:cloud",
+            haiku_model="deepseek-v4-flash:0731-cloud",
             sonnet_model="kimi-k2.7-code:cloud",
             opus_model="minimax-m3:cloud",
             fable_model="kimi5.2:cloud",
@@ -122,8 +122,8 @@ def test_next_tier_resolves_ollama_configured_ids() -> None:
     )
     assert next_tier_for_failure("kimi5.2:cloud", cfg) == "minimax-m3:cloud"
     assert next_tier_for_failure("minimax-m3:cloud", cfg) == "kimi-k2.7-code:cloud"
-    assert next_tier_for_failure("kimi-k2.7-code:cloud", cfg) == "deepseek-v4-flash:cloud"
-    assert next_tier_for_failure("deepseek-v4-flash:cloud", cfg) == "kimi-k2.7-code:cloud"
+    assert next_tier_for_failure("kimi-k2.7-code:cloud", cfg) == "deepseek-v4-flash:0731-cloud"
+    assert next_tier_for_failure("deepseek-v4-flash:0731-cloud", cfg) == "kimi-k2.7-code:cloud"
 
 
 def test_next_tier_resolves_openrouter_configured_ids() -> None:
@@ -157,7 +157,7 @@ def test_next_tier_returns_none_for_unknown_model() -> None:
     # error instead of guessing.
     cfg = SimpleNamespace(
         ollama=SimpleNamespace(
-            haiku_model="deepseek-v4-flash:cloud",
+            haiku_model="deepseek-v4-flash:0731-cloud",
             sonnet_model="kimi-k2.7-code:cloud",
             opus_model="minimax-m3:cloud",
             fable_model="kimi5.2:cloud",
@@ -203,6 +203,6 @@ def test_model_supports_vision() -> None:
     assert model_supports_vision("claude-3-5-sonnet") is True
     assert model_supports_vision("minimax-m3:cloud") is True
     assert model_supports_vision("kimi-k2.7-code:cloud") is False
-    assert model_supports_vision("deepseek-v4-flash:cloud") is False
+    assert model_supports_vision("deepseek-v4-flash:0731-cloud") is False
     assert model_supports_vision("glm-5.2:cloud") is False
 

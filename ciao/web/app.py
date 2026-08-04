@@ -13,7 +13,7 @@ from starlette.responses import FileResponse, Response
 
 from ciao.node_proxy import StandbyProxyMiddleware
 from ciao.package_version import make_cached_package_status
-from ciao.mcp_server import (
+from ciao.web.routes_mcp import (
     mcp_env_keys_endpoint,
     mcp_server_item_endpoint,
     mcp_server_tools_endpoint,
@@ -76,12 +76,6 @@ from ciao.web.routes_api import (
     local_preflight,
     local_resync,
     local_status,
-    node_connected_clients_endpoint,
-    node_demote_endpoint,
-    node_handover_endpoint,
-    node_connect_endpoint,
-    node_peers_endpoint,
-    node_status_endpoint,
     list_all_chats,
     list_models,
     delete_workspace_setting,
@@ -114,10 +108,6 @@ from ciao.web.routes_api import (
     project_complete,
     project_detail,
     reorder_projects,
-    package_changelog_endpoint,
-    node_addresses_endpoint,
-    package_status_endpoint,
-    package_update_endpoint,
     tts_install_local_endpoint,
     voice_install_local_endpoint,
     libreoffice_status_endpoint,
@@ -146,6 +136,18 @@ from ciao.web.routes_api import (
     workspace_open,
 )
 from ciao.web.routes_chat import ws_chat, ws_events
+from ciao.web.routes_node import (
+    node_addresses_endpoint,
+    node_connected_clients_endpoint,
+    node_connect_endpoint,
+    node_demote_endpoint,
+    node_handover_endpoint,
+    node_peers_endpoint,
+    node_status_endpoint,
+    package_changelog_endpoint,
+    package_status_endpoint,
+    package_update_endpoint,
+)
 from ciao.web.routes_push import (
     push_notification_feed,
     push_public_key,

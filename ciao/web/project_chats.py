@@ -758,8 +758,8 @@ class ChatInfo:
     # Empty = provider default. Reset on handover: levels aren't portable
     # across providers.
     thinking_level: str = ""
-    # Empty inherits the application default. Persisted so experimental MCP
-    # and legacy chats can coexist without process-global configuration.
+    # Empty inherits the server default. MCP-only since the legacy/auto A/B
+    # surface was removed.
     control_surface: str = ""
     session_id: str = ""
     # SDK session ids this chat rotated through earlier in the SAME
@@ -1615,9 +1615,9 @@ class ProjectChatManager:
                 f"Your task is to onboard the user and adapt this existing folder into what Ciaobot requires:\n"
                 f"1. **Analyze Folder**: Scan the existing vault directory to see what directories and files are present.\n"
                 f"2. **Structure Verification**: Check if the standard directories (`personal/`, `work/`, `Templates/`) exist. If not, plan to create them.\n"
-                f"3. **Hygiene & Scaffolding**: Verify if `CLAUDE.md` (defining identity, memory, styles) and `MEMORY.md` exist. If missing, plan to create them using clean Markdown structures (no em-dashes, no horizontal rules `---` as section dividers).\n"
+                f"3. **Hygiene & Scaffolding**: Verify if `CLAUDE.md` (defining identity, memory, styles) and `MEMORY.md` exist. If missing, plan to create them using clean Markdown structures (no em-dashes, no horizontal rules `---` as section dividers). `CLAUDE.md` MUST contain both bounded memory regions with their exact fenced markers: `<!-- ciao:memory:start cap=2200 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`. They are mandatory, not optional — add any that are missing.\n"
                 f"4. **Workspace Git Check**: Verify the workspace is a git repository with a `.gitignore` covering `.env` and `.runtime/`, and that the vault is inside a git repo (the workspace repo by default, or its own when it lives elsewhere). If not, fix it (`git init`, append the missing entries) and report what you did.\n"
-                f"5. **Onboarding Interview**: Ask the user 2-3 important questions to collect basic info (their name, their role/work context, key people, and active projects) to populate `CLAUDE.md` and `MEMORY.md` correctly.\n"
+                f"5. **Onboarding Interview**: Ask the user 2-3 important questions to collect basic info (their name, their role/work context, key people, and active projects) to populate `CLAUDE.md` and `MEMORY.md` correctly. Identity and communication-style answers go into the `ciao:profile` region of `CLAUDE.md`; cross-project environment facts and lessons learned go into the `ciao:memory` region.\n"
                 f"6. **Capabilities Tour**: Once the interview is done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
                 f"Introduce yourself to the user, tell them you've scanned their vault at `{vault_root}`, outline your findings, and ask the first onboarding questions to fill out their profile."
             )
@@ -1636,9 +1636,9 @@ class ProjectChatManager:
                 f"`{vault_root}`\n\n"
                 f"Your task is to bootstrap the vault structure and core documentation:\n"
                 f"1. **Create Directory Structure**: Plan to create: `personal/`, `work/`, and `Templates/` (scaffold markdown templates for logs, projects, and people).\n"
-                f"2. **Generate Core Files**: Plan to generate clean initial templates for `CLAUDE.md` (defining instructions, memory rules, styles) and `MEMORY.md`.\n"
+                f"2. **Generate Core Files**: Plan to generate clean initial templates for `CLAUDE.md` (defining instructions, memory rules, styles) and `MEMORY.md`. `CLAUDE.md` MUST contain both bounded memory regions with their exact fenced markers: `<!-- ciao:memory:start cap=2200 -->` / `<!-- ciao:memory:end -->` and `<!-- ciao:profile:start cap=1375 -->` / `<!-- ciao:profile:end -->`. They are mandatory, not optional — add any that are missing.\n"
                 f"3. **Workspace Git Check**: Verify the workspace is a git repository with a `.gitignore` covering `.env` and `.runtime/`, and that the vault is inside a git repo (the workspace repo by default, or its own when it lives elsewhere). If not, fix it (`git init`, append the missing entries) and report what you did.\n"
-                f"4. **Onboarding Interview**: Ask the user 2-3 important questions to collect basic info (their name, GWS profiles, key projects) to customize `CLAUDE.md` and `MEMORY.md`.\n"
+                f"4. **Onboarding Interview**: Ask the user 2-3 important questions to collect basic info (their name, GWS profiles, key projects) to customize `CLAUDE.md` and `MEMORY.md`. Identity and communication-style answers go into the `ciao:profile` region of `CLAUDE.md`; cross-project environment facts and lessons learned go into the `ciao:memory` region.\n"
                 f"5. **Capabilities Tour**: Once the interview is done, offer a short guided tour of what Ciaobot can do (use the `ciao-capabilities` skill). Mention they can ask \"what can Ciaobot do?\" in any chat, anytime.\n\n"
                 f"Introduce yourself to the user, explain that you are starting fresh at `{vault_root}`, and ask the first onboarding questions to bootstrap your profile."
             )
@@ -3229,6 +3229,25 @@ class ProjectChatManager:
         chat.handover_context_pending = False
         self._save()
 
+    def _reclaim_provider_sessions(
+        self,
+        chat: ChatInfo,
+        session_ids: list[str] | None = None,
+    ) -> None:
+        """Drop provider-side session blobs/threads for abandoned chats.
+
+        Claude deletes the SDK JSONL blob. Codex calls ``thread/delete`` so
+        rollouts under ``~/.codex/sessions`` are reclaimed the same way. Failures
+        are logged inside the provider helpers and never block archive/delete.
+        """
+        raw_ids = session_ids if session_ids is not None else [chat.session_id]
+        workspace = self._config.workspace_root
+        for sid in filter(None, raw_ids):
+            if chat.provider == "claude":
+                self._transcripts.delete_sdk_session_blob(workspace, sid)
+            elif chat.provider == "codex":
+                asyncio.ensure_future(CodexProvider.delete_thread(workspace, sid))
+
     def delete_chat(self, chat_id: str) -> bool:
         chat = self._chats.pop(chat_id, None)
         if chat is None:
@@ -3243,10 +3262,7 @@ class ProjectChatManager:
         provider = self._providers.pop(chat_id, None)
         if provider:
             asyncio.ensure_future(provider.disconnect())
-        if chat.session_id and chat.provider == "claude":
-            self._transcripts.delete_sdk_session_blob(
-                self._config.workspace_root, chat.session_id
-            )
+        self._reclaim_provider_sessions(chat)
         # Explicit deletion is a tombstone, not merely a sidebar mutation.
         # Remove every recovery signal so startup repair cannot revive it.
         self._state.delete_context(ctx)
@@ -3270,9 +3286,9 @@ class ProjectChatManager:
     def archive_chat(self, chat_id: str) -> ArchiveOutcome | None:
         """Archive a chat's transcript and mark it as archived.
 
-        Also disconnects any live SDK provider and deletes the Claude Code
-        session JSONL blob to reclaim disk space. The markdown transcript in
-        the vault is the durable record.
+        Also disconnects any live provider and reclaims provider-side session
+        storage (Claude SDK JSONL blob, Codex ``thread/delete``). The markdown
+        transcript in the vault is the durable record.
 
         Returns an ArchiveOutcome carrying the archive path plus a
         pre-filtered JSONL string captured before blob deletion, so the
@@ -3317,10 +3333,7 @@ class ProjectChatManager:
         provider = self._providers.pop(chat_id, None)
         if provider:
             asyncio.ensure_future(provider.disconnect())
-        if chat.session_id and chat.provider == "claude":
-            self._transcripts.delete_sdk_session_blob(
-                self._config.workspace_root, chat.session_id
-            )
+        self._reclaim_provider_sessions(chat)
         self._unlink_chat_images(chat)
         chat.archived = True
         if result is not None:
@@ -3462,15 +3475,12 @@ class ProjectChatManager:
             session_id=chat.session_id,
             provider=chat.provider,
         )
-        # Delete the SDK session blob for the now-archived session, plus any
+        # Reclaim provider sessions for the archived transcript, plus any
         # earlier ones this chat rotated through (autocompact/resume-fallback)
         # before this reset — they're all being abandoned together.
-        if chat.provider == "claude":
-            for sid in [*chat.previous_session_ids, chat.session_id]:
-                if sid:
-                    self._transcripts.delete_sdk_session_blob(
-                        self._config.workspace_root, sid
-                    )
+        self._reclaim_provider_sessions(
+            chat, [*chat.previous_session_ids, chat.session_id]
+        )
         # Drop attached images: they belong to the archived transcript.
         self._unlink_chat_images(chat)
         # Reset session
@@ -5517,19 +5527,15 @@ class ProjectChatManager:
                         chat_now.last_activity_at = _now_iso()
                         self._save()
                     title = chat_now.title if chat_now else "Ciaobot"
-                    self._events.publish({
-                        "type": "chat_result_ready",
-                        "chat_id": chat_id,
-                        "project_id": project_id,
-                        "title": title,
-                        "snippet": snippet,
-                    })
                     # Schedule the push with a small delay. If the user reads
                     # the chat on any device in the window (via /api/chats/
                     # {id}/read), the pending task is cancelled and no push
                     # fires. New replies to the same chat cancel and restart
-                    # the timer (see _schedule_push).
-                    self._schedule_push(chat_id, title, snippet)
+                    # the timer (see _schedule_push). Delegates skip both —
+                    # they wake the supervisor instead.
+                    self._announce_result_ready(
+                        chat_id, project_id, title, snippet
+                    )
 
                 # A delegate that just went idle should wake its supervisor.
                 # Deliberately outside the `not had_error` gate above: a
@@ -5626,6 +5632,34 @@ class ProjectChatManager:
         task = self._pending_push.pop(chat_id, None)
         if task is not None and not task.done():
             task.cancel()
+
+    def _announce_result_ready(
+        self, chat_id: str, project_id: str, title: str, snippet: str
+    ) -> None:
+        """Publish ``chat_result_ready`` and queue a delayed result push.
+
+        Skips both for delegate chats (``spawned_from_chat_id`` set). Delegates
+        already wake their supervisor on completion; a toast / unread / OS push
+        for the child is duplicate noise because the user follows the parent.
+        Permission and AskUserQuestion pushes still fire for delegates — those
+        need action in the child chat and are not covered by the wake path.
+        """
+        chat = self._chats.get(chat_id)
+        if chat is not None and chat.spawned_from_chat_id:
+            logger.debug(
+                "Skipping result announce for delegate %s (parent %s)",
+                chat_id,
+                chat.spawned_from_chat_id,
+            )
+            return
+        self._events.publish({
+            "type": "chat_result_ready",
+            "chat_id": chat_id,
+            "project_id": project_id,
+            "title": title,
+            "snippet": snippet,
+        })
+        self._schedule_push(chat_id, title, snippet)
 
     def _schedule_push(self, chat_id: str, title: str, snippet: str) -> None:
         """Queue a delayed push for this chat. Cancels any prior pending
@@ -6192,14 +6226,9 @@ class ProjectChatManager:
                             self._save()
                         title = chat_now.title if chat_now else "Ciaobot"
                         snippet = self._result_snippet(text)
-                        self._events.publish({
-                            "type": "chat_result_ready",
-                            "chat_id": chat_id,
-                            "project_id": project_id,
-                            "title": title,
-                            "snippet": snippet,
-                        })
-                        self._schedule_push(chat_id, title, snippet)
+                        self._announce_result_ready(
+                            chat_id, project_id, title, snippet
+                        )
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — a broken drain must not crash the app
@@ -7157,7 +7186,8 @@ class ProjectChatManager:
             duration_sec = max(size / 16000, 1.0)
         except OSError:
             duration_sec = 1.0
-        cost = duration_sec / 60 * 0.003
+        # gpt-transcribe is $0.0045/min of audio (per OpenAI pricing).
+        cost = duration_sec / 60 * 0.0045
         return text, cost
 
     async def synthesize_speech(self, text: str) -> tuple[bytes, str, float]:

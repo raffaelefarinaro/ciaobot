@@ -226,7 +226,7 @@ def test_setup_token_rejects_invalid_token(tmp_path) -> None:
 def _handover_app(host_url: str = "http://100.1.2.3:8443", host_session=None):
     """App exposing /api/node/handover over a stubbed NodeStateManager."""
     from ciao.node_state import NodeStateManager
-    from ciao.web.routes_api import node_handover_endpoint
+    from ciao.web.routes_node import node_handover_endpoint
 
     serializer = URLSafeTimedSerializer("test-secret")
     app = Starlette(

@@ -120,7 +120,7 @@ export interface ChatInfo {
   // Ciaobot control surface. Engine-controlled now (MCP by default, with a
   // legacy fallback); no longer user-set from the PWA. Kept on ChatInfo
   // because the engine still returns/persists it, preserving round-trip typing.
-  control_surface?: '' | 'legacy' | 'mcp' | 'auto'
+  control_surface?: '' | 'legacy' | 'mcp'
   session_id: string
   created_at: string
   archived: boolean
@@ -472,6 +472,10 @@ export interface RoutineSettings {
   // What actually runs right now, after defaults.
   title_model_effective: string
   insights_model_effective: string
+  // On Automatic these resolve from the chat's workspace, so *_effective above
+  // is only the primary workspace's answer. Empty when an override is set.
+  title_model_by_workspace?: Record<string, string>
+  insights_model_by_workspace?: Record<string, string>
 
   critique_models_effective: string
   // Env-backed models used when a tier override is cleared.
@@ -481,6 +485,7 @@ export interface RoutineSettings {
   apfel_available?: boolean
   transcription: {
     engine: 'cloud' | 'local'
+    cloud_model: string
     local_model: string
     local_available: boolean
     cloud_available: boolean

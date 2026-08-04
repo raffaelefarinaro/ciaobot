@@ -380,6 +380,9 @@ class CiaoConfig:
     # Runtime-overridable from the PWA Settings → Models tab.
     transcription_engine: str = "cloud"
     transcription_local_model: str = "mlx-community/whisper-large-v3-turbo"
+    # Cloud transcription model (OpenAI ``gpt-transcribe``). Overridable
+    # via ``CIAO_TRANSCRIPTION_MODEL`` (e.g. ``gpt-4o-mini-transcribe``).
+    transcription_model: str = "gpt-transcribe"
     # Speech synthesis (read a message aloud): ``cloud`` (OpenAI
     # ``gpt-4o-mini-tts``, needs OPENAI_API_KEY) or ``local`` (Kokoro via
     # kokoro-onnx, free/offline). Runtime-overridable from the PWA
@@ -446,7 +449,7 @@ class CiaoConfig:
     # Fallback when session insights run without workspace context (e.g.
     # ``scripts/backfill_insights.py``). Live archives use
     # :func:`ciao.insights.resolve_insights_model` instead.
-    insights_model: str = "deepseek-v4-flash:cloud"
+    insights_model: str = "deepseek-v4-flash:0731-cloud"
     # Operator override for the insights model, set from the PWA Settings →
     # Models tab (runtime settings store) or ``CIAO_INSIGHTS_MODEL``.
     # Empty = automatic routing: the workspace's sonnet-tier model.
@@ -473,17 +476,15 @@ class CiaoConfig:
     # OpenRouter (Anthropic-compatible) routing. Available when
     # OPENROUTER_API_KEY is set; aliases resolve to per-tier models.
     openrouter: OpenRouterSettings = field(default_factory=OpenRouterSettings)
-    # Bounded agent-managed memory files at ``~/.ciao/memory.md`` and
-    # ``~/.ciao/user.md``. Injected as a frozen snapshot into the Claude
-    # system prompt at session start; edited via the ``memory`` MCP tool.
+    # Advisory caps for the ``ciao:memory`` / ``ciao:profile`` regions in
+    # the workspace CLAUDE.md. Injected as a frozen snapshot into Claude and
+    # Codex system prompts at session start; edited with Edit on the guide.
     # See ``ciao/memory_injector.py`` and ``ciao/memory_tool.py``.
-    memory_enabled: bool = True
     memory_char_limit: int = 2200
     user_char_limit: int = 1375
-    # Ciaobot's managed agent control plane. MCP is the default transport for
-    # both providers; the legacy CLI/direct-file path is retained as a hidden
-    # fallback (selectable via ``CIAO_CONTROL_SURFACE`` or the per-chat field)
-    # and is used automatically when the MCP server is unavailable.
+    # Ciaobot's managed agent control plane. MCP is the only control surface;
+    # the legacy CLI path survives only as a runtime degrade when the MCP
+    # server is unavailable at request time.
     mcp_enabled: bool = True
     control_surface: str = "mcp"
     # Internal evaluation mode.  It keeps the HTTP/chat stack identical while
@@ -499,7 +500,10 @@ class CiaoConfig:
         if not vault_root.is_absolute():
             vault_root = self.workspace_root / vault_root
         self.vault_root = vault_root.resolve()
-        if self.control_surface not in {"legacy", "mcp", "auto"}:
+        # "auto" was the user-facing A/B benchmark option and is gone. The
+        # runtime MCP-degrade path still sets the legacy literal internally,
+        # so legacy stays a valid config value alongside the mcp default.
+        if self.control_surface not in {"legacy", "mcp"}:
             self.control_surface = "legacy"
         if not self.workspaces:
             self.workspaces = _legacy_workspaces(
@@ -1025,7 +1029,7 @@ class CiaoConfig:
         )
         ollama_haiku_model = (
             source.get("CIAO_OLLAMA_HAIKU_MODEL", "").strip()
-            or "deepseek-v4-flash:cloud"
+            or "deepseek-v4-flash:0731-cloud"
         )
         ollama_sonnet_model = (
             source.get("CIAO_OLLAMA_SONNET_MODEL", "").strip()
@@ -1138,6 +1142,10 @@ class CiaoConfig:
                 "CIAO_TRANSCRIPTION_LOCAL_MODEL", ""
             ).strip()
             or "mlx-community/whisper-large-v3-turbo",
+            transcription_model=source.get(
+                "CIAO_TRANSCRIPTION_MODEL", ""
+            ).strip()
+            or "gpt-transcribe",
             tts_engine=(
                 source.get("CIAO_TTS_ENGINE", "").strip().lower()
                 if source.get("CIAO_TTS_ENGINE", "").strip().lower()
@@ -1203,8 +1211,6 @@ class CiaoConfig:
 
             critique_models=source.get("CIAO_REVIEW_MODELS", "").strip()
             or source.get("CIAO_ADVERSARIAL_MODELS", "").strip(),
-            memory_enabled=source.get("CIAO_MEMORY_ENABLED", "true").strip().lower()
-            not in {"0", "false", "no", "off"},
             memory_char_limit=int(
                 source.get("CIAO_MEMORY_CHAR_LIMIT", "").strip() or "2200"
             ),
@@ -1216,7 +1222,7 @@ class CiaoConfig:
             control_surface=(
                 source.get("CIAO_CONTROL_SURFACE", "mcp").strip().lower()
                 if source.get("CIAO_CONTROL_SURFACE", "mcp").strip().lower()
-                in {"legacy", "mcp", "auto"}
+                in {"legacy", "mcp"}
                 else "mcp"
             ),
             benchmark_mode=source.get("CIAO_BENCHMARK_MODE", "false")

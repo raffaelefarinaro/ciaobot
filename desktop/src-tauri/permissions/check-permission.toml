@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "check-permission"
+description = "Allows the frontend to query the current native permission state."
+commands.allow = ["check_permission"]

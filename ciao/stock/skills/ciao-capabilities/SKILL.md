@@ -34,9 +34,9 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 
 ### 2. Memory and the vault (second brain)
 
-- Chats are **archived into a markdown vault** (e.g. `memory-vault/Logs/Chats/`). From archived sessions Ciaobot extracts insights and drafts **memory proposals** — the user reviews and approves them before anything is promoted into bounded durable memory (`~/.ciao/memory.md` for env/conventions/lessons, `~/.ciao/user.md` for identity and preferences). Accept/reject via the `memory_proposal_resolve` MCP tool (or `ciao memory …` on the CLI). Nothing is memorized silently.
-- The vault is standard, open markdown: notes, project folders, `CLAUDE.md`, a vault `MEMORY.md` (curator notes — separate from bounded `~/.ciao` memory), a generated `INDEX.md` from frontmatter and wikilinks. It is agent-agnostic and remains useful without Ciaobot.
-- Vault tooling: search (`vault_search`) before adding duplicate facts, and refresh the index (`ciao index`) after larger edits. Read-only recall (search, read matches, admit when nothing is found) is inline system-prompt policy, not a separate skill. For the live list of typed Ciaobot tools (projects, chats, delegates, schedules, loops), read the MCP `tools/list` rather than reciting a static tool list; bounded-memory CRUD and vault-maintenance edits are the `ciao` CLI (`ciao memory …`, `ciao index`, `ciao lint`).
+- Chats are **archived into a markdown vault** (e.g. `memory-vault/Logs/Chats/`). From archived sessions Ciaobot extracts insights and drafts **memory proposals** — the user reviews and approves them before anything is promoted into the bounded `ciao:memory` (env/conventions/lessons) and `ciao:profile` (identity, preferences) regions fenced inside the workspace `CLAUDE.md`. Accept/reject via the `memory_proposal_resolve` MCP tool. Nothing is memorized silently.
+- The vault is standard, open markdown: notes, project folders, `CLAUDE.md` (which also holds the bounded memory regions), a vault `MEMORY.md` (curator notes — separate from the bounded regions), a generated `INDEX.md` from frontmatter and wikilinks. It is agent-agnostic and remains useful without Ciaobot.
+- Vault tooling: search (`vault_search`) before adding duplicate facts, and refresh the index (`ciao index`) after larger edits. Read-only recall (search, read matches, admit when nothing is found) is inline system-prompt policy, not a separate skill. For the live list of typed Ciaobot tools (projects, chats, delegates, schedules, loops), read the MCP `tools/list` rather than reciting a static tool list; the bounded memory regions are edited directly with `Edit` on `CLAUDE.md` — there is no memory CLI or command. Vault-maintenance edits are the `ciao` CLI (`ciao index`, `ciao lint`).
 
 ### 3. Schedules, loops, and automations
 
@@ -69,6 +69,7 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 - **Custom providers**: any OpenAI- or Anthropic-compatible endpoint can be added by the user in **Settings → Providers** — give it a name, a URL, a token, and whether it runs through the Claude or Codex runner. Ciaobot can probe the endpoint to discover its model ids, and those models then appear in the normal chat, workspace, and routine model pickers alongside the built-in backends. Tokens are stored separately in the gitignored runtime directory and are never returned by the API; only whether a token is set is exposed.
 - Per-workspace default model and model bucket (which controls how aliases like `opus`/`sonnet` resolve), per-chat override in the picker.
 - Beyond per-chat routing, one chat can **reach another model without leaving the conversation**: `adversarial_review` for an inline multi-model second opinion, or a delegate (see §1) for writable work on a different model.
+- **Voice dictation model**: cloud transcription runs on an OpenAI transcription model, shown with its per-minute price in **Settings → Models** and overridable via `CIAO_TRANSCRIPTION_MODEL` or the runtime settings store. Local `mlx-whisper` dictation is a separate path and needs no key.
 
 ### 7. Google Workspace (`gws`)
 

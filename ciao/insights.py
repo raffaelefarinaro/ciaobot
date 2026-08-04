@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -63,6 +64,85 @@ _RETRY_DELAY_S = 30
 _READ_TOOL_TRUNCATE_CHARS = 200
 _KEEP_FULL_TOOLS = frozenset({"Edit", "Write", "Bash", "Task", "NotebookEdit"})
 _TRUNCATE_TOOLS = frozenset({"Read", "Glob", "Grep", "WebFetch", "WebSearch"})
+
+# The insights model is operator-chosen and may be a slow local/cloud GGUF:
+# measured end-to-end calls on such a backend run 214-253s, so the old flat
+# 120s budget turned tail latency into a guaranteed TimeoutError and the job
+# failed ~79% of the time. Generous by default, tunable for fast models.
+_DEFAULT_TIMEOUT_S = 600.0
+
+# Per-transcript input ceiling. Long sessions otherwise exceed the model's
+# context window outright (observed: 131k / 200k / 262k tokens against a
+# 125,952-token window), and a flat retry re-sends the same oversized payload
+# and fails identically. Chars, not tokens, because we cannot tokenize for an
+# arbitrary backend; ~3.5 chars/token puts this near 90k tokens and leaves
+# headroom for the system prompt.
+_DEFAULT_MAX_INPUT_CHARS = 320_000
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("Ignoring invalid %s=%r; using %s", name, raw, default)
+        return default
+    return value if value > 0 else default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Ignoring invalid %s=%r; using %s", name, raw, default)
+        return default
+    return value if value > 0 else default
+
+
+def _insights_timeout_s() -> float:
+    return _env_float("CIAO_INSIGHTS_TIMEOUT_S", _DEFAULT_TIMEOUT_S)
+
+
+def _max_input_chars() -> int:
+    return _env_int("CIAO_INSIGHTS_MAX_INPUT_CHARS", _DEFAULT_MAX_INPUT_CHARS)
+
+
+def _fit_transcript(filtered_jsonl: str) -> tuple[str, int]:
+    """Trim a transcript to the input budget, dropping oldest lines first.
+
+    Returns ``(payload, dropped_line_count)``. Newest turns are kept because
+    they carry the session's conclusions; the surviving lines keep their
+    original ``idx`` values, so the citations the prompt demands stay valid.
+    """
+    budget = _max_input_chars()
+    if len(filtered_jsonl) <= budget:
+        return filtered_jsonl, 0
+    lines = filtered_jsonl.splitlines()
+    kept: list[str] = []
+    total = 0
+    for line in reversed(lines):
+        total += len(line) + 1
+        if total > budget:
+            break
+        kept.append(line)
+    kept.reverse()
+    return "\n".join(kept), len(lines) - len(kept)
+
+
+def _is_context_overflow(exc: Exception) -> bool:
+    """True for a deterministic oversized-input rejection.
+
+    These fail identically on retry, so re-sending only burns another slow
+    call plus the retry wait. Matched on message text because the providers
+    surface it as a plain 400 rather than a typed error.
+    """
+    text = str(exc).lower()
+    return "too long" in text or "context window" in text or "context_length_exceeded" in text
 
 
 _INSIGHTS_SYSTEM_PROMPT = """\
@@ -424,9 +504,9 @@ async def extract_and_append(
                 )
         # Memory proposals: scan the freshly-appended insights section and
         # write actionable candidates to ``Workspace/Memory-Proposals.md``.
-        # "User corrections" are auto-promoted to bounded memory (gated on
-        # the config's memory_enabled); everything else waits for the
-        # curator agent to promote via `ciao memory` on the next session.
+        # "User corrections" are auto-promoted straight into the CLAUDE.md
+        # ``ciao:memory``/``ciao:profile`` regions; everything else waits for
+        # the curator agent to promote via Edit on the next session.
         if (
             memory_proposals_enabled
             and proposal_vault_root is not None
@@ -442,8 +522,12 @@ async def extract_and_append(
                     proposals_result = proposals_from_archive(
                         archive_path,
                         proposal_vault_root,
-                        auto_promote_memory=bool(
-                            getattr(config, "memory_enabled", True)
+                        auto_promote_memory=True,
+                        guide_path=(
+                            Path(config.workspace_root) / "CLAUDE.md"
+                            if config is not None
+                            and getattr(config, "workspace_root", None)
+                            else None
                         ),
                     )
                     run.extra["wrote"] = bool(proposals_result)
@@ -494,17 +578,37 @@ async def _run_model_with_retry(
     provider: str = "claude",
     cwd: Path | None = None,
 ) -> tuple[str, str]:
-    """Call the model; on failure, wait 30s and retry once."""
+    """Call the model; on a transient failure, wait 30s and retry once.
+
+    An oversized-input rejection is not retried: the payload is already
+    trimmed to the configured budget before the first call, so a second
+    identical request would fail the same way.
+    """
+    payload, dropped = _fit_transcript(filtered_jsonl)
+    if dropped:
+        logger.info(
+            "Insights transcript over the %d-char budget; dropped %d oldest line(s)",
+            _max_input_chars(),
+            dropped,
+        )
+
     async def call() -> str:
         if provider == "claude":
-            return await _call_model(filtered_jsonl, model, env)
-        return await _call_model(
-            filtered_jsonl, model, env, provider=provider, cwd=cwd
-        )
+            return await _call_model(payload, model, env)
+        return await _call_model(payload, model, env, provider=provider, cwd=cwd)
 
     try:
         return await call(), ""
     except Exception as exc:  # noqa: BLE001
+        if _is_context_overflow(exc):
+            logger.error(
+                "Insights input still exceeds the model's context window (%s); "
+                "not retrying. Lower CIAO_INSIGHTS_MAX_INPUT_CHARS (currently %d) "
+                "or pick a model with a larger window.",
+                exc,
+                _max_input_chars(),
+            )
+            return "", str(exc).strip() or type(exc).__name__
         logger.info("Insights model call failed (%s); retrying in %ds", exc, _RETRY_DELAY_S)
 
     await asyncio.sleep(_RETRY_DELAY_S)
@@ -536,7 +640,7 @@ async def _call_model(
         "system_prompt": _INSIGHTS_SYSTEM_PROMPT,
         "model": model,
         "env": env,
-        "timeout_s": 120.0,
+        "timeout_s": _insights_timeout_s(),
     }
     if provider != "claude":
         kwargs.update({"provider": provider, "cwd": cwd})
@@ -739,7 +843,7 @@ async def backfill_insights_task(
                             system_prompt=_TEXT_MODE_SYSTEM_PROMPT,
                             model=effective_model,
                             env=env,
-                            timeout_s=120.0,
+                            timeout_s=_insights_timeout_s(),
                             cwd=config.workspace_root,
                             provider=text_provider,
                         )

@@ -18,16 +18,17 @@ class FakeConfig:
     def __init__(self) -> None:
         self.title_model_override = ""
         self.insights_model_override = ""
-        self.insights_model = "deepseek-v4-flash:cloud"
+        self.insights_model = "deepseek-v4-flash:0731-cloud"
 
         self.transcription_engine = "cloud"
         self.transcription_local_model = "mlx-community/whisper-large-v3-turbo"
+        self.transcription_model = "gpt-transcribe"
         self.tts_engine = "cloud"
         self.tts_cloud_voice = "nova"
         self.tts_local_voice = "af_heart"
         self.critique_models = ""
         self.ollama = OllamaSettings(
-            haiku_model="deepseek-v4-flash:cloud",
+            haiku_model="deepseek-v4-flash:0731-cloud",
             sonnet_model="kimi-k2.7-code:cloud",
             opus_model="minimax-m3:cloud",
             fable_model="glm-5.2:cloud",
@@ -169,7 +170,7 @@ def test_tier_model_overrides_apply_and_clear(tmp_path):
     store.apply_to_config(config)
     assert store.tier_model_defaults() == {
         "ollama": {
-            "haiku": "deepseek-v4-flash:cloud",
+            "haiku": "deepseek-v4-flash:0731-cloud",
             "sonnet": "kimi-k2.7-code:cloud",
             "opus": "minimax-m3:cloud",
             "fable": "glm-5.2:cloud",

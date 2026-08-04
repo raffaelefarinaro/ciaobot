@@ -5,6 +5,23 @@ from __future__ import annotations
 from pathlib import Path
 
 from ciao import memory_proposals as mp
+from ciao import memory_tool as mt
+
+
+def write_guide(
+    path: Path,
+    memory_entries: list[str] | None = None,
+    profile_entries: list[str] | None = None,
+    body: str = "# Guide\n\n",
+) -> Path:
+    """Seed a workspace guide with bounded-memory regions for a test."""
+    path.write_text(body, encoding="utf-8")
+    mt.ensure_regions(path)
+    if memory_entries:
+        mt.write_region(path, "memory", memory_entries)
+    if profile_entries:
+        mt.write_region(path, "profile", profile_entries)
+    return path
 
 
 _SAMPLE_INSIGHTS = """
@@ -34,12 +51,12 @@ def test_propose_pulls_corrections_and_decisions() -> None:
     assert any("Chose OpenRouter over Anthropic" in t for t in texts)
 
 
-def test_propose_routes_user_self_to_user_md() -> None:
+def test_propose_routes_user_self_to_profile_region() -> None:
     proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
-    user_proposals = [p for p in proposals if p.target == "user"]
-    # Only the self-user entry should end up in user.md.
-    assert len(user_proposals) == 1
-    assert "User Example" in user_proposals[0].text
+    profile_proposals = [p for p in proposals if p.target == "profile"]
+    # Only the self-user entry should end up in the ciao:profile region.
+    assert len(profile_proposals) == 1
+    assert "User Example" in profile_proposals[0].text
 
 
 def test_propose_strips_idx_citations() -> None:
@@ -160,16 +177,22 @@ def test_proposals_from_archive_returns_none_when_no_insights(tmp_path: Path) ->
 
 
 # ── Auto-promotion of user corrections ────────────────────────────────────
+#
+# Promotion now writes straight into the fenced `ciao:memory` / `ciao:profile`
+# regions of a CLAUDE.md guide (``guide_path=``), not a legacy `memory.md`.
+# There is no write-time cap enforcement any more — the only fallback path is
+# a guide with missing/malformed region markers.
 
 
 def test_promote_writes_corrections_and_keeps_the_rest(tmp_path: Path) -> None:
+    guide = write_guide(tmp_path / "CLAUDE.md")
     proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
-    remaining, promoted = mp.promote_user_corrections(proposals, memory_dir=tmp_path)
+    remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
 
     assert len(promoted) == 1
     assert "no em dashes" in promoted[0]
-    mem_text = (tmp_path / "memory.md").read_text(encoding="utf-8")
-    assert "no em dashes" in mem_text
+    mem_entries, _diags = mt.read_region(guide, "memory")
+    assert any("no em dashes" in entry for entry in mem_entries)
     # Decisions and entities are untouched and still reviewable.
     remaining_texts = [p.text for p in remaining]
     assert any("Chose OpenRouter over Anthropic" in t for t in remaining_texts)
@@ -177,30 +200,40 @@ def test_promote_writes_corrections_and_keeps_the_rest(tmp_path: Path) -> None:
 
 
 def test_promote_drops_exact_duplicates(tmp_path: Path) -> None:
-    from ciao import memory_tool as mt
-
     proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
     correction = next(p for p in proposals if p.source_section == "User corrections")
-    mt.add_entry(tmp_path / "memory.md", correction.text, char_limit=2200)
+    guide = write_guide(tmp_path / "CLAUDE.md", memory_entries=[correction.text])
 
-    remaining, promoted = mp.promote_user_corrections(proposals, memory_dir=tmp_path)
+    remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
 
     assert promoted == []
     # Already remembered: not promoted, not proposed again.
     assert all(p.source_section != "User corrections" for p in remaining)
 
 
-def test_promote_falls_back_to_proposals_when_memory_full(
-    tmp_path: Path, monkeypatch,
-) -> None:
-    from ciao import memory_tool as mt
+def test_promote_falls_back_to_proposals_when_no_guide(tmp_path: Path) -> None:
+    """No ``guide_path`` at all is the simplest fallback path."""
+    proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
+    remaining, promoted = mp.promote_user_corrections(proposals, guide_path=None)
 
-    filler = "x" * 500
-    mt.add_entry(tmp_path / "memory.md", filler, char_limit=2200)
-    monkeypatch.setenv("CIAO_MEMORY_CHAR_LIMIT", str(len(filler) + 10))
+    assert promoted == []
+    assert remaining == proposals
+
+
+def test_promote_falls_back_to_proposals_when_markers_malformed(tmp_path: Path) -> None:
+    """A guide with duplicated markers refuses the write; the fact stays reviewable."""
+    guide = tmp_path / "CLAUDE.md"
+    guide.write_text(
+        "<!-- ciao:memory:start cap=2200 -->\n"
+        "<!-- ciao:memory:start cap=2200 -->\n"
+        "<!-- ciao:memory:end -->\n"
+        "<!-- ciao:profile:start cap=1375 -->\n"
+        "<!-- ciao:profile:end -->\n",
+        encoding="utf-8",
+    )
 
     proposals = mp.propose_from_insights(_SAMPLE_INSIGHTS)
-    remaining, promoted = mp.promote_user_corrections(proposals, memory_dir=tmp_path)
+    remaining, promoted = mp.promote_user_corrections(proposals, guide_path=guide)
 
     assert promoted == []
     # The correction stays reviewable instead of being lost.
@@ -209,7 +242,7 @@ def test_promote_falls_back_to_proposals_when_memory_full(
 
 def test_proposals_from_archive_auto_promotes_corrections(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
-    memory_dir = tmp_path / "ciao-home"
+    guide = write_guide(tmp_path / "CLAUDE.md")
     archive = tmp_path / "chat.md"
     archive.write_text(
         f"# chat\n\nturns.\n\n## Session insights\n{_SAMPLE_INSIGHTS}",
@@ -217,11 +250,11 @@ def test_proposals_from_archive_auto_promotes_corrections(tmp_path: Path) -> Non
     )
 
     out = mp.proposals_from_archive(
-        archive, vault, auto_promote_memory=True, memory_dir=memory_dir
+        archive, vault, auto_promote_memory=True, guide_path=guide
     )
 
-    mem_text = (memory_dir / "memory.md").read_text(encoding="utf-8")
-    assert "no em dashes" in mem_text
+    mem_entries, _diags = mt.read_region(guide, "memory")
+    assert any("no em dashes" in entry for entry in mem_entries)
     # The promoted correction is not duplicated into the proposals file.
     assert out is not None
     proposals_text = out.read_text(encoding="utf-8")
@@ -231,15 +264,16 @@ def test_proposals_from_archive_auto_promotes_corrections(tmp_path: Path) -> Non
 
 def test_proposals_from_archive_default_leaves_memory_untouched(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
-    memory_dir = tmp_path / "ciao-home"
+    guide = write_guide(tmp_path / "CLAUDE.md")
     archive = tmp_path / "chat.md"
     archive.write_text(
         f"# chat\n\nturns.\n\n## Session insights\n{_SAMPLE_INSIGHTS}",
         encoding="utf-8",
     )
 
-    out = mp.proposals_from_archive(archive, vault, memory_dir=memory_dir)
+    out = mp.proposals_from_archive(archive, vault, guide_path=guide)
 
     assert out is not None
-    assert not (memory_dir / "memory.md").exists()
+    mem_entries, _diags = mt.read_region(guide, "memory")
+    assert mem_entries == []
     assert "no em dashes" in out.read_text(encoding="utf-8")

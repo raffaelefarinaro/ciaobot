@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from ciao.jsonio import read_json_dict
 import os
 import re
@@ -16,6 +17,8 @@ from pathlib import Path
 from typing import Sequence
 
 from ciao import skills_sync
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -1007,6 +1010,30 @@ def sync_workspace_skills(
 ) -> SyncSkillsResult:
     root = Path(workspace).expanduser().resolve()
     _ensure_linked_workspace_guides(root)
+    try:
+        from ciao import job_runs
+        from ciao.memory_tool import default_memory_dir, ensure_regions, migrate_legacy_files
+
+        guide = root / "CLAUDE.md"
+        # The legacy fold-in can only ever succeed once, so only pay for it
+        # (and record a job run) while the old files are actually there.
+        legacy_dir = default_memory_dir()
+        if any((legacy_dir / name).is_file() for name in ("memory.md", "user.md")):
+            with job_runs.track_sync(
+                "memory_migration", "Legacy memory migration"
+            ) as run:
+                # migrate_legacy_files ensures the regions itself.
+                migration = migrate_legacy_files(guide)
+                run.extra["migrated"] = migration.get("migrated", [])
+                if not migration.get("migrated"):
+                    run.skip("no legacy memory files to migrate")
+        else:
+            ensure_regions(guide)
+    except Exception:  # noqa: BLE001 — never block skill sync on memory regions
+        logger.exception(
+            "memory region ensure/migrate failed for %s; continuing skill sync",
+            root,
+        )
 
     upstream_updated = 0
     upstream_pruned = 0

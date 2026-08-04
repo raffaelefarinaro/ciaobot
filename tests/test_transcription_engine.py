@@ -22,6 +22,7 @@ def test_engine_defaults_to_cloud(tmp_path):
     config = _config(tmp_path=tmp_path)
     assert config.transcription_engine == "cloud"
     assert config.transcription_local_model == "mlx-community/whisper-large-v3-turbo"
+    assert config.transcription_model == "gpt-transcribe"
 
 
 def test_engine_env_selection(tmp_path):
@@ -39,6 +40,52 @@ def test_local_model_env_override(tmp_path):
         {"CIAO_TRANSCRIPTION_LOCAL_MODEL": "mlx-community/whisper-tiny"}, tmp_path
     )
     assert config.transcription_local_model == "mlx-community/whisper-tiny"
+
+
+def test_cloud_model_env_override(tmp_path):
+    config = _config(
+        {"CIAO_TRANSCRIPTION_MODEL": "gpt-4o-mini-transcribe"}, tmp_path
+    )
+    assert config.transcription_model == "gpt-4o-mini-transcribe"
+
+
+@pytest.mark.asyncio
+async def test_voice_transcriber_uses_config_model(tmp_path, monkeypatch):
+    """Regression: VoiceTranscriber must keep config so model isn't AttributeError."""
+    from types import SimpleNamespace
+    from pathlib import Path
+
+    captured: dict = {}
+
+    class FakeResponse:
+        text = "hello from cloud"
+
+    class FakeTranscriptions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return FakeResponse()
+
+    class FakeAudio:
+        transcriptions = FakeTranscriptions()
+
+    class FakeClient:
+        audio = FakeAudio()
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(voice, "AsyncOpenAI", FakeClient)
+    config = SimpleNamespace(
+        openai_api_key="sk-test",
+        transcription_model="gpt-transcribe",
+    )
+    transcriber = voice.VoiceTranscriber(config)
+    audio_path = Path(tmp_path) / "clip.webm"
+    audio_path.write_bytes(b"fake-audio")
+    text = await transcriber.transcribe(audio_path)
+    assert text == "hello from cloud"
+    assert captured["model"] == "gpt-transcribe"
+    assert captured["response_format"] == "json"
 
 
 def test_mlx_transcriber_requires_package(monkeypatch):
@@ -145,3 +192,50 @@ async def test_transcribe_voice_local_fails(tmp_path, monkeypatch):
     assert "Local voice transcription failed" in str(exc_info.value)
     assert "Out of memory on GPU" in str(exc_info.value)
     assert "Settings → Models" in str(exc_info.value)
+
+
+async def test_transcribe_voice_cloud_model_and_cost(tmp_path, monkeypatch):
+    from pathlib import Path
+    from ciao.web.project_chats import ProjectChatManager
+    from ciao.sessions import StateStore
+    from ciao.transcripts import TranscriptStore
+
+    monkeypatch.setattr(voice, "mlx_whisper_available", lambda: False)
+
+    class FakeTranscriber:
+        def __init__(self, config):
+            self._config = config
+
+        async def transcribe(self, path):
+            return "transcribed text"
+
+    monkeypatch.setattr(voice, "VoiceTranscriber", FakeTranscriber)
+
+    runtime = tmp_path / ".runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    config = CiaoConfig(
+        pwa_auth_token="test-token",
+        workspace_root=tmp_path,
+        state_path=runtime / "state.json",
+        media_root=runtime / "media",
+        transcription_engine="cloud",
+        transcription_model="gpt-transcribe",
+        openai_api_key="sk-test",
+    )
+    state = StateStore(config.state_path, tmp_path, config.media_root)
+    transcripts = TranscriptStore(runtime, tmp_path / "transcripts")
+    pcm = ProjectChatManager(
+        config,
+        state_store=state,
+        transcript_store=transcripts,
+        path=runtime / "web_projects.json",
+    )
+
+    audio_path = tmp_path / "test.webm"
+    # 160000 bytes ≈ 10 s at the 16000 B/s OGG duration heuristic.
+    audio_path.write_bytes(b"x" * 160000)
+
+    text, cost = await pcm.transcribe_voice(audio_path)
+    assert text == "transcribed text"
+    # gpt-transcribe at $0.0045/min: 10 s → 10/60 * 0.0045.
+    assert cost == pytest.approx(10 / 60 * 0.0045)

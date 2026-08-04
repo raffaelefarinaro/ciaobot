@@ -329,3 +329,84 @@ def test_archive_chat_publishes_event(tmp_path: Path) -> None:
     assert len(archived) == 1
     assert archived[0]["chat_id"] == chat.chat_id
     assert archived[0]["project_id"] == project.project_id
+
+
+def test_delete_and_archive_reclaim_codex_threads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("codex-reclaim", workspace="work")
+    deleted_ids: list[str] = []
+
+    async def _fake_delete(_workspace, thread_id: str, command=None) -> bool:
+        deleted_ids.append(thread_id)
+        return True
+
+    monkeypatch.setattr(
+        "ciao.web.project_chats.CodexProvider.delete_thread",
+        _fake_delete,
+    )
+
+    chat = pcm.create_chat(project.project_id, title="to-delete")
+    chat.provider = "codex"
+    chat.session_id = "thread-delete"
+    chat.user_turn_count = 1
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        assert pcm.delete_chat(chat.chat_id) is True
+        loop.run_until_complete(asyncio.sleep(0))
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+    assert deleted_ids == ["thread-delete"]
+
+    archived = pcm.create_chat(project.project_id, title="to-archive")
+    archived.provider = "codex"
+    archived.session_id = "thread-archive"
+    deleted_ids.clear()
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        pcm.archive_chat(archived.chat_id)
+        loop.run_until_complete(asyncio.sleep(0))
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+    assert deleted_ids == ["thread-archive"]
+
+
+def test_new_session_reclaims_codex_thread_lineage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("codex-new-session", workspace="work")
+    chat = pcm.create_chat(project.project_id, title="rotate")
+    chat.provider = "codex"
+    chat.session_id = "thread-current"
+    chat.previous_session_ids = ["thread-old"]
+    chat.user_turn_count = 1
+
+    deleted_ids: list[str] = []
+
+    async def _fake_delete(_workspace, thread_id: str, command=None) -> bool:
+        deleted_ids.append(thread_id)
+        return True
+
+    monkeypatch.setattr(
+        "ciao.web.project_chats.CodexProvider.delete_thread",
+        _fake_delete,
+    )
+
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        pcm.new_session(chat.chat_id)
+        loop.run_until_complete(asyncio.sleep(0))
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+
+    assert deleted_ids == ["thread-old", "thread-current"]
+    assert chat.session_id == ""
+    assert chat.previous_session_ids == []

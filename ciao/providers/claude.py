@@ -454,9 +454,9 @@ class ClaudeProvider(BaseSDKProvider):
         """Pull memory knobs off CiaoConfig with safe fallbacks for tests."""
         cfg = getattr(self, "config", None)
         return {
-            "enabled": bool(getattr(cfg, "memory_enabled", True)),
             "memory_limit": int(getattr(cfg, "memory_char_limit", 2200)),
             "user_limit": int(getattr(cfg, "user_char_limit", 1375)),
+            "guide_path": self.workspace_root / "CLAUDE.md",
         }
 
     @property
@@ -511,23 +511,21 @@ class ClaudeProvider(BaseSDKProvider):
         logger.info("Using bundled Claude Code CLI: %s", system_cli)
 
 
-        # Bounded agent-managed memory: frozen snapshot of ~/.ciao/memory.md
-        # and ~/.ciao/user.md appended to Claude Code's default system prompt.
-        # Edits go through `ciao memory` (via the script wrapper or control
-        # plane) instead of an MCP tool, so the write path stays in sync.
-        # Edits persist immediately but only appear in this block on the next
+        # Bounded memory regions from CLAUDE.md appended to Claude Code's
+        # default system prompt. Edits go through Edit on the guide; they
+        # persist immediately but only appear in this block on the next
         # session, which keeps the prefix cache stable.
         memory_cfg = self._memory_config()
         memory_block = ""
-        if memory_cfg["enabled"]:
-            try:
-                memory_block = build_memory_block(
-                    memory_char_limit=memory_cfg["memory_limit"],
-                    user_char_limit=memory_cfg["user_limit"],
-                )
-            except Exception:  # noqa: BLE001 — never block a chat on memory wiring
-                logger.exception("memory block failed; continuing without it")
-                memory_block = ""
+        try:
+            memory_block = build_memory_block(
+                guide_path=memory_cfg["guide_path"],
+                memory_char_limit=memory_cfg["memory_limit"],
+                user_char_limit=memory_cfg["user_limit"],
+            )
+        except Exception:  # noqa: BLE001 — never block a chat on memory wiring
+            logger.exception("memory block failed; continuing without it")
+            memory_block = ""
         system_prompt = system_prompt_payload(
             memory_block, control_surface=request.control_surface
         )
@@ -1197,8 +1195,13 @@ class ClaudeProvider(BaseSDKProvider):
             self._turn_output_committed += self._cur_msg_output
             self._cur_msg_output = 0
             input_tokens = usage.get("input_tokens")
+            # Each message_start reports the total input tokens for that API
+            # call (the full context, including prior messages and tool
+            # results). Using the latest value keeps the live counter close to
+            # the actual context size; summing across a tool loop inflates it
+            # into millions and makes the PWA label misleading.
             if isinstance(input_tokens, int):
-                self._turn_input_tokens += input_tokens
+                self._turn_input_tokens = input_tokens
             out = usage.get("output_tokens")
             if isinstance(out, int):
                 self._cur_msg_output = out

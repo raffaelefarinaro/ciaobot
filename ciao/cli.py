@@ -1396,57 +1396,6 @@ def _resolve_vault_root(raw: Path | str | None = None) -> Path:
     return root.resolve()
 
 
-def _memory_command(args: argparse.Namespace) -> int:
-    from ciao.memory_tool import (
-        DEFAULT_MEMORY_CHAR_LIMIT,
-        DEFAULT_USER_CHAR_LIMIT,
-        add_entry,
-        memory_path,
-        read_entries,
-        remove_entry,
-        replace_entry,
-        user_path,
-    )
-
-    if args.target == "memory":
-        path = memory_path()
-        limit = int(os.environ.get("CIAO_MEMORY_CHAR_LIMIT", DEFAULT_MEMORY_CHAR_LIMIT))
-    else:
-        path = user_path()
-        limit = int(os.environ.get("CIAO_USER_CHAR_LIMIT", DEFAULT_USER_CHAR_LIMIT))
-
-    if args.action == "read":
-        result = read_entries(path, char_limit=limit)
-    elif args.action == "add":
-        result = add_entry(path, args.text, char_limit=limit)
-    elif args.action == "replace":
-        result = replace_entry(path, args.old_text, args.new_text, char_limit=limit)
-    elif args.action == "remove":
-        result = remove_entry(path, args.text, char_limit=limit)
-    else:
-        raise SystemExit(f"unknown memory action {args.action!r}")
-
-    if args.plain:
-        if result.get("ok"):
-            for key in ("added", "replaced", "removed"):
-                if key in result:
-                    print(
-                        f"ok: {key} {result[key]!r}  "
-                        f"({result.get('used_chars', '?')}/{result.get('char_limit', '?')} chars)"
-                    )
-                    break
-            else:
-                for entry in result.get("entries", []):
-                    print(entry)
-                    print("§")
-        else:
-            print(f"error: {result.get('error', 'unknown')}", file=sys.stderr)
-    else:
-        json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
-        sys.stdout.write("\n")
-    return 0 if result.get("ok") else 1
-
-
 def _vault_search_command(args: argparse.Namespace) -> int:
     from ciao import fts_search
 
@@ -2134,45 +2083,6 @@ def build_parser() -> argparse.ArgumentParser:
     release_parser.add_argument("args", nargs=argparse.REMAINDER)
     release_parser.set_defaults(func=lambda args: release.main(args.args))
 
-    benchmark_parser = subparsers.add_parser(
-        "benchmark-control-surfaces",
-        help="Run the paired live legacy-vs-MCP evaluation suite.",
-    )
-    benchmark_parser.add_argument("args", nargs=argparse.REMAINDER)
-    benchmark_parser.set_defaults(
-        func=lambda args: __import__(
-            "ciao.control_surface_benchmark", fromlist=["main"]
-        ).main(args.args)
-    )
-
-    memory_parser = subparsers.add_parser(
-        "memory",
-        help="Read or edit bounded memory files.",
-    )
-    memory_parser.add_argument(
-        "--plain", action="store_true", help="Human-readable output instead of JSON."
-    )
-    memory_sub = memory_parser.add_subparsers(dest="action", required=True)
-    memory_read = memory_sub.add_parser("read", help="Return all entries and usage stats.")
-    memory_read.add_argument("--target", required=True, choices=["memory", "user"])
-    memory_read.set_defaults(func=_memory_command)
-
-    memory_add = memory_sub.add_parser("add", help="Append a new entry.")
-    memory_add.add_argument("--target", required=True, choices=["memory", "user"])
-    memory_add.add_argument("--text", required=True)
-    memory_add.set_defaults(func=_memory_command)
-
-    memory_replace = memory_sub.add_parser("replace", help="Replace an existing entry.")
-    memory_replace.add_argument("--target", required=True, choices=["memory", "user"])
-    memory_replace.add_argument("--old", required=True, dest="old_text")
-    memory_replace.add_argument("--new", required=True, dest="new_text")
-    memory_replace.set_defaults(func=_memory_command)
-
-    memory_remove = memory_sub.add_parser("remove", help="Remove an existing entry.")
-    memory_remove.add_argument("--target", required=True, choices=["memory", "user"])
-    memory_remove.add_argument("--text", required=True)
-    memory_remove.set_defaults(func=_memory_command)
-
     search_parser = subparsers.add_parser(
         "vault-search",
         help="Full-text search over the vault or transcript logs.",
@@ -2496,10 +2406,6 @@ def main(argv: list[str] | None = None) -> int:
         return package_smoke.main(argv_list[1:])
     if argv_list[:1] == ["prepare-release"]:
         return release.main(argv_list[1:])
-    if argv_list[:1] == ["benchmark-control-surfaces"]:
-        from ciao.control_surface_benchmark import main as benchmark_main
-
-        return benchmark_main(argv_list[1:])
     parser = build_parser()
     args = parser.parse_args(argv_list)
     if not hasattr(args, "func"):

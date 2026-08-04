@@ -167,3 +167,74 @@ async def test_archived_chat_returns_handover_when_transcript_missing(tmp_path: 
     payload = response.body.decode()
 
     assert '"content":"seed"' in payload
+
+
+_CODEX_TRANSCRIPT = """---
+provider: codex
+context: archived fallback test
+selected_model: gpt-test
+active_model: gpt-test
+last_effective_model: gpt-test
+session_id: thread-archived
+started: 2026-06-19T10:00:00Z
+ended: 2026-06-19T10:05:00Z
+turn_count: 1
+---
+
+# Chat Transcript (codex)
+
+## Turn 1
+
+- Time: 2026-06-19T10:00:00Z
+- Input kind: text
+- Mode: auto
+- Effective model: gpt-test
+- Images: 0
+
+### User
+
+```text
+hello archived codex
+```
+
+### Assistant
+
+```text
+reply from archived codex
+```
+"""
+
+
+@pytest.mark.asyncio
+async def test_archived_codex_chat_falls_back_to_transcript(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the Codex thread is gone, archived chats render the vault transcript."""
+    pcm = _make_manager(tmp_path)
+    project = pcm.create_project("Codex archive fallback", workspace="personal")
+    chat = pcm.create_chat(project.project_id, title="codex-archived-fallback")
+    chat.provider = "codex"
+    chat.session_id = "thread-archived"
+
+    chats_dir = tmp_path / "memory-vault" / "Logs" / "Chats" / chat.chat_id / "codex"
+    chats_dir.mkdir(parents=True, exist_ok=True)
+    transcript_path = chats_dir / "2026-06-19T10-00-00Z-thread-archived.md"
+    transcript_path.write_text(_CODEX_TRANSCRIPT, encoding="utf-8")
+
+    chat.archived = True
+    chat.archive_path = str(transcript_path.relative_to(tmp_path))
+    pcm._save()
+
+    async def _missing_thread(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "ciao.web.routes_api.CodexProvider.read_thread",
+        _missing_thread,
+    )
+
+    response = await chat_messages(_request(pcm, pcm._config, chat.chat_id))
+    payload = response.body.decode()
+
+    assert '"content":"hello archived codex"' in payload
+    assert '"content":"reply from archived codex"' in payload

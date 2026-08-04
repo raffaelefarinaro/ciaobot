@@ -1,17 +1,18 @@
-"""Render ``~/.ciao/memory.md`` and ``~/.ciao/user.md`` into the system prompt.
+"""Render bounded memory regions from the workspace ``CLAUDE.md`` into the system prompt.
 
-Used by :class:`ciao.providers.claude.ClaudeProvider` at session start. The
-returned block is appended to Claude Code's default system prompt via the SDK's
-``SystemPromptPreset`` ``append`` field, so CLAUDE.md, skills, and agent
-discovery keep working untouched.
+Used by Claude and Codex providers at session start. The returned block is
+appended to Claude Code's default system prompt via the SDK's
+``SystemPromptPreset`` ``append`` field, so CLAUDE.md body, skills, and agent
+discovery keep working untouched. Codex receives the same block as appended
+instructions.
 
-Frozen-snapshot rule: this block is captured once per session. The
-:mod:`ciao.memory_tool` writes change disk immediately, but the model only
-sees the new state on the next session. Keeping the block stable preserves
-the SDK's prefix cache across turns.
+Frozen-snapshot rule: this block is captured once per session. In-session
+``Edit`` of the regions lands on disk immediately, but the model only sees
+the new state on the next session. Both CLIs already read ``CLAUDE.md`` once
+at session start, so region edits follow the same rule.
 
 Failure mode: any error in loading or formatting returns an empty string. We
-never want a malformed memory file to kill a chat.
+never want a malformed region to kill a chat.
 """
 
 from __future__ import annotations
@@ -26,11 +27,9 @@ from ciao.memory_tool import (
     DEFAULT_MEMORY_CHAR_LIMIT,
     DEFAULT_USER_CHAR_LIMIT,
     SECTION_SEP,
-    load_entries,
-    memory_path,
+    read_region,
     serialize_entries,
     total_chars,
-    user_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,16 +39,17 @@ _RULE = "═" * 46
 _MEMORY_HEADER = "MEMORY (your personal notes)"
 _USER_HEADER = "USER PROFILE"
 
-# Rendered when both memory files are empty. Without this, a fresh install
+# Rendered when both regions are empty. Without this, a fresh install
 # never shows the memory block at all, so the model has no visible cue to
 # seed entry #1 (the block itself is the reinforcement loop once non-empty).
 _EMPTY_STATE_NUDGE = (
-    "Your bounded memory files (~/.ciao/memory.md and ~/.ciao/user.md) are "
-    "empty. When you learn a durable fact this session, save it: "
-    '`ciao memory add --target memory --text "…"` for preferences, '
-    "environment facts, and lessons learned; `--target user` for the user's "
-    "identity, role, and communication style. Entries persist immediately "
-    "and appear in this block from the next session on."
+    "Your bounded memory regions in the workspace CLAUDE.md "
+    "(`ciao:memory` and `ciao:profile`) are empty. When you learn a durable "
+    "fact this session, Edit the matching region: `ciao:memory` for "
+    "preferences, environment facts, and lessons learned; `ciao:profile` for "
+    f"the user's identity, role, and communication style. Separate entries "
+    f"with '{SECTION_SEP}' on its own line. Edits persist immediately and "
+    "appear in this block from the next session on."
 )
 
 _EXPIRATION_TAG_RE = re.compile(r"\[expires:\s*([^\]]*)\]", re.IGNORECASE)
@@ -104,7 +104,7 @@ def _section(
     stored_entries: list[str] | None = None,
     expired_count: int = 0,
 ) -> str | None:
-    """Render one labeled memory section. Empty files return None."""
+    """Render one labeled memory section. Empty regions return None."""
     stored = entries if stored_entries is None else stored_entries
     if not stored:
         return None
@@ -123,25 +123,34 @@ def _section(
     else:
         body = (
             "All stored entries in this section are expired and omitted from "
-            "the prompt. Use the memory tools to remove expired entries and "
-            "reclaim their stored character budget."
+            "the prompt. Edit the matching CLAUDE.md region to remove expired "
+            "entries and reclaim their stored character budget."
         )
     return f"{_RULE}\n{header}\n{_RULE}\n{body}"
 
 
 def build_memory_block(
     *,
-    memory_dir: Path | None = None,
+    guide_path: Path | None = None,
     memory_char_limit: int = DEFAULT_MEMORY_CHAR_LIMIT,
     user_char_limit: int = DEFAULT_USER_CHAR_LIMIT,
     today: datetime.date | None = None,
 ) -> str:
-    """Read both files and render the combined block. Expired entries are filtered out."""
+    """Read both CLAUDE.md regions and render the combined block.
+
+    Expired entries are filtered out of the prompt but still count toward
+    the stored usage shown in the header.
+    """
+    if guide_path is None:
+        logger.warning("memory_injector: guide_path is required; returning empty")
+        return ""
     try:
-        mem_entries = load_entries(memory_path(memory_dir))
-        usr_entries = load_entries(user_path(memory_dir))
+        mem_entries, mem_diags = read_region(guide_path, "memory")
+        usr_entries, usr_diags = read_region(guide_path, "profile")
+        for diag in (*mem_diags, *usr_diags):
+            logger.info("memory_injector: %s (%s)", diag.message, diag.code)
     except Exception:  # noqa: BLE001
-        logger.exception("memory_injector: failed to load files")
+        logger.exception("memory_injector: failed to load regions from %s", guide_path)
         return ""
 
     stored_mem_entries = mem_entries
@@ -175,14 +184,15 @@ def build_memory_block(
         return _EMPTY_STATE_NUDGE
 
     # Short preamble so the model knows what this block is and that the
-    # state is read-only until next session. Editing is via `ciao memory`
-    # (documented in system_prompt.md); see tests/test_memory_injector.py.
+    # state is read-only until next session. Editing is via Edit on CLAUDE.md.
     preamble = (
-        "The block below is a frozen snapshot of your bounded memory files at "
-        "session start. Edit them with `ciao memory read|add|replace|remove "
-        f"(--target memory|user); entries are separated by '{SECTION_SEP}' "
-        "on its own line. CLI edits persist immediately but only appear in this "
-        "block on the next session.\n"
+        "The block below is a frozen snapshot of the bounded memory regions "
+        "in the workspace CLAUDE.md at session start. Edit the `ciao:memory` "
+        "and `ciao:profile` regions with Edit; entries are separated by "
+        f"'{SECTION_SEP}' on its own line. Edits persist immediately but only "
+        "appear in this block on the next session. Each section header carries "
+        "current usage — that is the only usage signal; there is no memory "
+        "command.\n"
     )
     return preamble + "\n\n".join(sections)
 
@@ -215,7 +225,9 @@ def system_prompt_payload(
     """Build a ``SystemPromptPreset`` dict that appends Ciaobot instructions and ``memory_block``.
 
     The returned preset appends to Claude Code's default system prompt via the SDK's
-    ``SystemPromptPreset`` ``append`` field.
+    ``SystemPromptPreset`` ``append`` field. ``exclude_dynamic_sections`` moves
+    per-session cwd / git / OS / auto-memory paths into the first user message so
+    the static preset + append stay cacheable across sessions (Claude SDK ≥0.1.58).
     """
     existing_append = ""
     if isinstance(base_system_prompt, dict):
@@ -230,23 +242,14 @@ def system_prompt_payload(
         instructions = _mcp_system_instructions(instructions)
     parts.append(instructions)
     if memory_block:
-        block = memory_block.strip()
-        if control_surface == "mcp":
-            block = block.replace(
-                "Edit them with `ciao memory read|add|replace|remove "
-                "(--target memory|user);",
-                "Edit them with the Ciaobot MCP memory tools;",
-            ).replace(
-                "CLI edits persist immediately but only appear in this block on the next session.",
-                "Tool edits persist immediately but only appear in this block on the next session.",
-            )
-        parts.append(block)
+        parts.append(memory_block.strip())
 
     combined = "\n\n".join(parts).strip()
     return {
         "type": "preset",
         "preset": "claude_code",
         "append": combined,
+        "exclude_dynamic_sections": True,
     }
 
 
@@ -259,13 +262,8 @@ def _mcp_system_instructions(instructions: str) -> str:
     MCP tools are self-describing and the server-level instructions already state
     the prefer-MCP policy, so repeating transport recipes in the prompt is noise.
     """
-    # Drop the bounded-memory CLI recipe sentence.
-    text = instructions.replace(
-        " Edit with `ciao memory read|add|replace|remove --target memory|user --text \"…\"`.",
-        "",
-    )
     # Drop the vault CLI fallback + hygiene recipe lines.
-    text = text.replace(
+    text = instructions.replace(
         "- Direct CLI fallback: `ciao vault-search \"<query>\" --limit 5`; rebuild stale search/entity data with `ciao vault-index`.\n",
         "",
     ).replace(
@@ -273,7 +271,6 @@ def _mcp_system_instructions(instructions: str) -> str:
         "",
     )
     # Replace the legacy "Other agent CLIs" recipe block with a single MCP nudge.
-    # The typed tools carry their own usage; gws security lives in its own section.
     mcp_nudge = (
         "Use the authenticated Ciaobot MCP tools; prefer them over curl, the "
         "ciao CLI, or direct `.runtime` edits.\n\n"

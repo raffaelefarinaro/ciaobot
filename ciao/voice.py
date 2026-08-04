@@ -2,7 +2,8 @@
 
 Two engines each, selected independently:
 
-* Hear **cloud** — OpenAI ``gpt-4o-mini-transcribe`` (needs ``OPENAI_API_KEY``).
+* Hear **cloud** — OpenAI ``gpt-transcribe`` (needs ``OPENAI_API_KEY``;
+  model overridable via ``CIAO_TRANSCRIPTION_MODEL``).
 * Hear **local** — `mlx-whisper <https://pypi.org/project/mlx-whisper/>`_ on
   Apple Silicon, free and offline. Optional dependency
   (``pip install 'ciao[voice-local]'``).
@@ -50,14 +51,16 @@ class VoiceTranscriber:
     def __init__(self, config: BridgeConfig) -> None:
         if not config.openai_api_key:
             raise ValueError("OPENAI_API_KEY is required for voice transcription")
+        self._config = config
         self._client = AsyncOpenAI(api_key=config.openai_api_key)
 
     async def transcribe(self, path: Path) -> str:
         """Transcribe one saved audio file."""
         with path.open("rb") as handle:
             response = await self._client.audio.transcriptions.create(
-                model="gpt-4o-mini-transcribe",
+                model=self._config.transcription_model,
                 file=handle,
+                response_format="json",
             )
         text = getattr(response, "text", "").strip()
         if not text:

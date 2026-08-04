@@ -1,6 +1,6 @@
 [package]
 name = "ciaobot-desktop"
-version = "0.7.0"
+version = "0.7.1"
 description = "Native macOS shell for Ciaobot"
 edition = "2024"
 rust-version = "1.90"
@@ -19,6 +19,7 @@ dirs = "6"
 mac-usernotifications = "=0.3.1"
 block2 = "=0.6.2"
 objc2 = "=0.6.4"
+objc2-av-foundation = "=0.3.2"
 objc2-foundation = "=0.3.2"
 objc2-user-notifications = { version = "=0.3.2", features = [
   "UNNotification",

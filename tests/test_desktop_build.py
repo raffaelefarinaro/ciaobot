@@ -5,8 +5,25 @@ import subprocess
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 from ciao import desktop_build
 from ciao.web.routes_api import _checkout_problem, _resolve_codebase_root
+
+# Captured before the autouse stub below replaces it, so the probe's own tests
+# can restore the real implementation.
+_REAL_MISSING_TOOLCHAIN = desktop_build._missing_rust_toolchain
+
+
+@pytest.fixture(autouse=True)
+def _assume_toolchain_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the build tests independent of whether this host has cargo.
+
+    CI runs pytest before it sets up Rust, so a real toolchain probe here would
+    make these pass or fail on runner-image trivia. The probe has its own tests
+    below, which drive it explicitly.
+    """
+    monkeypatch.setattr(desktop_build, "_missing_rust_toolchain", lambda: None)
 
 
 class FakeRunner:
@@ -423,3 +440,92 @@ def test_checkout_with_git_file_and_web_package_passes(tmp_path: Path) -> None:
     (repo / ".git").write_text("gitdir: /elsewhere", encoding="utf-8")
     (repo / "web" / "package.json").write_text("{}", encoding="utf-8")
     assert _checkout_problem(repo) == ""
+
+
+# ── Toolchain probe and failure reporting ─────────────────────────────────
+
+
+def test_missing_cargo_is_reported_with_the_fix_instead_of_a_doomed_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No cargo anywhere: stop before `tauri build` dies inside cargo."""
+    monkeypatch.setattr(desktop_build, "_missing_rust_toolchain", _REAL_MISSING_TOOLCHAIN)
+    monkeypatch.setattr(desktop_build.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(desktop_build, "_CARGO_SEARCH_DIRS", (tmp_path / "nowhere",))
+    repo = _make_repo(tmp_path)
+    (repo / "desktop" / "node_modules").mkdir()
+    install_dir = tmp_path / "Applications"
+    install_dir.mkdir()
+    runner = FakeRunner()
+
+    steps, staged = desktop_build.build_and_stage(
+        repo, runner=runner, install_dir=install_dir
+    )
+
+    assert staged is False
+    assert steps == [{
+        "step": "desktop toolchain",
+        "ok": False,
+        "output": steps[0]["output"],
+    }]
+    assert "cargo was not found" in steps[0]["output"]
+    assert "rustup" in steps[0]["output"]
+    assert runner.calls == [], "must not start a build that cannot succeed"
+
+
+def test_cargo_outside_path_is_found_and_prepended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Homebrew's rustup keeps cargo in opt/rustup/bin, not /opt/homebrew/bin."""
+    hidden = tmp_path / "opt" / "rustup" / "bin"
+    hidden.mkdir(parents=True)
+    (hidden / "cargo").write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(desktop_build, "_CARGO_SEARCH_DIRS", (hidden,))
+    monkeypatch.setattr(desktop_build.shutil, "which", lambda _name: None)
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    added = desktop_build.ensure_cargo_on_path()
+
+    assert added == str(hidden)
+    import os
+    assert os.environ["PATH"].startswith(f"{hidden}:")
+
+
+def test_ensure_cargo_on_path_is_a_noop_when_cargo_already_resolves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(desktop_build.shutil, "which", lambda _name: "/usr/bin/cargo")
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    assert desktop_build.ensure_cargo_on_path() is None
+    import os
+    assert os.environ["PATH"] == "/usr/bin"
+
+
+def test_failure_output_keeps_stderr_when_stdout_has_the_npm_echo(
+    tmp_path: Path,
+) -> None:
+    """The real cause is on stderr; npm's command echo is on stdout.
+
+    Reporting only stdout is what turned every desktop build failure into an
+    unexplained `> tauri build --bundles app ...` with no reason attached.
+    """
+    repo = _make_repo(tmp_path)
+    (repo / "desktop" / "node_modules").mkdir()
+    install_dir = tmp_path / "Applications"
+    install_dir.mkdir()
+    runner = FakeRunner({
+        "npm run": subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout="> ciaobot-desktop@0.7.1 tauri\n> tauri build --bundles app",
+            stderr="error: linker `cc` not found",
+        ),
+    })
+
+    steps, staged = desktop_build.build_and_stage(
+        repo, runner=runner, install_dir=install_dir
+    )
+
+    assert staged is False
+    assert "linker `cc` not found" in steps[-1]["output"]

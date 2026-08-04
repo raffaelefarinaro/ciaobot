@@ -105,13 +105,20 @@
         </button>
         <div class="model-picker-wrap" ref="modelPickerRef">
           <button
-            class="model-picker-btn touch-hit"
-            :title="chat.model + (chat.thinking_level ? ' · ' + chat.thinking_level : '')"
+            class="model-picker-btn touch-hit mobile-only"
+            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${activeModelId}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
             @click.stop="toggleModelPicker"
             aria-label="Model"
           >
             <span aria-hidden="true">🧠</span>
           </button>
+          <button
+            v-if="chat.provider"
+            type="button"
+            class="model-picker-summary desktop-only"
+            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${activeModelId}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
+            @click.stop="toggleModelPicker"
+          >{{ routingProviderLabel(activeBucket, chat.provider) }} · {{ activeModelId }}<template v-if="chipThinkingLabel"> · {{ chipThinkingLabel }}</template></button>
           <ModelSelector
             v-if="showModelPicker"
             triggerless
@@ -156,6 +163,42 @@
         </button>
       </template>
     </PaneHeader>
+
+    <!-- Delegate parent banner: this chat was spawned from a supervisor chat -->
+    <div v-if="delegateParent" class="loop-banner">
+      <div class="loop-banner-row">
+        <span class="loop-banner-ico" aria-hidden="true">&#8627;</span>
+        <span class="loop-banner-text">
+          Delegate of <strong>{{ delegateParent.title || 'parent chat' }}</strong>
+        </span>
+        <router-link
+          :to="`/chat/${delegateParent.chat_id}`"
+          class="btn-small loop-banner-manage"
+        >Open parent</router-link>
+      </div>
+    </div>
+
+    <!-- Delegate children banner: this chat spawned one or more subchats -->
+    <div v-if="delegateChildren.length" class="loop-banner">
+      <div
+        v-for="child in delegateChildren"
+        :key="child.chat_id"
+        class="loop-banner-row"
+      >
+        <span class="loop-banner-ico" aria-hidden="true">&#8627;</span>
+        <span class="loop-banner-text">
+          Subchat <strong>{{ child.title || 'untitled' }}</strong>
+          <template v-if="store.isChatStreaming(child.chat_id)"> · working</template>
+          <template v-else-if="store.chatHasBackgroundAgents(child.chat_id)"> · agents running</template>
+          <template v-else-if="store.chatNeedsInput(child.chat_id)"> · needs input</template>
+          <template v-else-if="store.chatUnread(child.chat_id) > 0"> · unread</template>
+        </span>
+        <router-link
+          :to="`/chat/${child.chat_id}`"
+          class="btn-small loop-banner-manage"
+        >Open</router-link>
+      </div>
+    </div>
 
     <!-- Loop banner: this chat is driven by one or more loops -->
     <div v-if="chatLoops.length" class="loop-banner">
@@ -214,7 +257,7 @@
             </span>
             <span class="sr-only">, {{ openTraces[i] ? 'expanded' : 'collapsed' }}</span>
           </button>
-          <div v-if="openTraces[i]" class="trace-body">
+          <div v-if="openTraces[i]" class="trace-body" @click="onTraceBodyClick(i, $event)">
             <template v-for="(step, j) in item.steps" :key="j">
               <div v-if="step.tool_name === '_activity'" class="trace-tools">
                 <div
@@ -498,6 +541,7 @@
         <div
           v-if="liveTraceOpen && (store.currentTimeline.length || store.currentStreamingText || store.currentStreamingThinking || liveSubagents.length)"
           class="trace-body"
+          @click="onLiveTraceBodyClick"
         >
           <template v-for="(entry, j) in store.currentTimeline" :key="j">
             <div v-if="entry.kind === 'tool'" class="trace-tools">
@@ -1205,6 +1249,22 @@ const chatSchedules = computed(() => {
     (sid && s.schedule_id === sid) || (cid && s.web_chat_id === cid),
   )
 })
+
+// Delegate lineage banners (same visual language as loop/schedule banners).
+// Parent link when this chat was spawned; children list when this chat is a
+// supervisor. Archived children stay out of the strip.
+const delegateParent = computed(() => {
+  const parentId = chat.value?.spawned_from_chat_id
+  if (!parentId) return null
+  return store.chats.find(c => c.chat_id === parentId) || null
+})
+const delegateChildren = computed(() => {
+  const cid = chat.value?.chat_id
+  if (!cid) return []
+  return store.chats.filter(
+    c => c.spawned_from_chat_id === cid && !c.archived && c.local !== false,
+  )
+})
 onMounted(() => {
   taskStore.fetchLoops().catch(() => {})
   taskStore.fetchSchedules().catch(() => {})
@@ -1467,6 +1527,37 @@ function toggleLiveTrace() {
   liveTraceOpen.value = !liveTraceOpen.value
 }
 
+// Click on an expanded activity/thinking bubble body collapses it, unless the
+// click landed on an interactive descendant (a link, file card/chip, subagent
+// panel, inline code, copy button, or anything stopPropagation-bearing).
+// Selection drags that happen to end inside the body are ignored so users
+// can highlight text without accidentally closing the bubble.
+function isInteractiveTraceChild(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false
+  if (target.closest('a')) return true
+  if (target.closest('button, [role="button"]')) return true
+  if (target.closest('.file-card, .file-chip')) return true
+  if (target.closest('.subagent-panel')) return true
+  if (target.closest('code, pre, kbd')) return true
+  return false
+}
+
+function onTraceBodyClick(i: number, e: MouseEvent): void {
+  if (e.defaultPrevented) return
+  if (isInteractiveTraceChild(e.target)) return
+  if (window.getSelection()?.toString()) return
+  if (!openTraces.value[i]) return
+  openTraces.value = { ...openTraces.value, [i]: false }
+}
+
+function onLiveTraceBodyClick(e: MouseEvent): void {
+  if (e.defaultPrevented) return
+  if (isInteractiveTraceChild(e.target)) return
+  if (window.getSelection()?.toString()) return
+  if (!liveTraceOpen.value) return
+  liveTraceOpen.value = false
+}
+
 function checkScroll() {
   const el = messagesEl.value
   if (!el) return
@@ -1702,6 +1793,17 @@ const chatModelSections = computed(() => {
   })
 })
 
+// The exact model id the chat is running on. When the chat is on a tier alias
+// (e.g. "sonnet") it would otherwise render as that bare alias in the header
+// chip; resolve it through the active bucket so the user sees the actual
+// provider-native model (e.g. "minimax-m3:cloud") instead of the alias.
+const activeModelId = computed(() => {
+  const c = chat.value
+  if (!c) return ''
+  const resolved = effectiveModelForBucket(c.model, activeBucket.value)
+  return resolved || c.model
+})
+
 const activeModelHighlights = computed(() => {
   const c = chat.value
   if (!c) return []
@@ -1752,6 +1854,18 @@ const filteredThinkingLevels = computed(() => {
 const showThinkingLevels = computed(() => {
   if (!filteredThinkingLevels.value.length) return false
   return !isFableSelection(chat.value?.model, chat.value?.thinking_level)
+})
+
+// Thinking level for the header chip. An empty thinking_level is a real,
+// selectable state — the picker renders it as "auto" (let the provider decide)
+// — so the chip has to name it too. Omitting the segment made "no level set"
+// indistinguishable from "the chip doesn't report levels". Blank only when the
+// model exposes no levels at all (e.g. Fable), where the segment is noise; a
+// level that is somehow set is always shown even then.
+const chipThinkingLabel = computed(() => {
+  const level = chat.value?.thinking_level || ''
+  if (level) return level
+  return showThinkingLevels.value ? 'auto' : ''
 })
 
 const inputPlaceholder = computed(() => {
@@ -3053,6 +3167,9 @@ function handleKeydown(e: KeyboardEvent) {
     }
     if (e.key === 'Escape') {
       e.preventDefault()
+      // Claim the key: Esc now closes the chat even while typing, so without
+      // this the same press would dismiss the picker AND close the chat.
+      e.stopPropagation()
       inputText.value = ''
       return
     }
@@ -3222,6 +3339,45 @@ function canonicalTier(model: string): string {
   if (model === CODEX_FABLE_PSEUDO_MODEL) return model
   const resolvedAlias = tierForModel(model, activeBucket.value)
   return resolvedAlias || model
+}
+
+// Render the routing backend (Ollama / Anthropic / OpenRouter / Codex / custom)
+// as the operator in the brain chip. Falls back to the CLI provider when no
+// bucket is set, so chats in the legacy / auto state still show something
+// sensible ('claude' or 'codex') instead of going blank.
+function routingBucketLabel(bucket: string | undefined, provider: string): string {
+  if (!bucket) return provider
+  if (bucket === 'claude_personal') return 'ollama'
+  if (bucket === 'claude_work') return 'anthropic'
+  if (bucket.startsWith('custom:')) return 'custom'
+  return bucket
+}
+
+// Capitalize the provider for the header chip (Ollama / Anthropic / OpenRouter /
+// Codex / custom name). Falls back to the bucket label when the bucket is not
+// one of the known routes.
+// Takes a NORMALISED bucket (activeBucket), not the raw ChatInfo.model_bucket.
+// The raw field carries legacy values like 'work' / 'personal' / '' that match
+// none of the cases below, so passing it through printed the workspace name
+// ("Work") where the provider belongs. activeBucket already folds those into
+// claude_work / claude_personal / openrouter / codex / custom:<id>.
+function routingProviderLabel(bucket: string | undefined, provider: string): string {
+  const lower = routingBucketLabel(bucket, provider)
+  if (!lower) return ''
+  if (lower === 'ollama') return 'Ollama'
+  if (lower === 'anthropic') return 'Anthropic'
+  if (lower === 'openrouter') return 'OpenRouter'
+  if (lower === 'codex') return 'Codex'
+  if (lower === 'claude') return 'Claude'
+  if (lower === 'custom') {
+    if (bucket?.startsWith('custom:')) {
+      const id = bucket.slice('custom:'.length)
+      const cp = modelsResponse.value?.custom_providers?.find((item) => item.id === id)
+      return cp?.name || 'Custom'
+    }
+    return 'Custom'
+  }
+  return lower.charAt(0).toUpperCase() + lower.slice(1)
 }
 
 function modelBucketForBucket(bucket: BucketKey): ModelBucketValue {
@@ -3739,8 +3895,17 @@ defineExpose({ toggleDictation, archiveActiveChat })
 }
 
 /* Header */
-.desktop-only { display: inline-flex; }
-@media (max-width: 768px) { .desktop-only { display: none; } }
+/* Doubled class = specificity (0,2,0), so these beat a plain single-class
+   `display` on the same element regardless of source order. Written as one
+   class they lost to .model-picker-btn / .model-picker-summary further down the
+   stylesheet (equal specificity, later wins), which showed the brain button on
+   desktop and the summary pill on mobile — both at once. */
+.desktop-only.desktop-only { display: inline-flex; }
+.mobile-only.mobile-only { display: none; }
+@media (max-width: 768px) {
+  .desktop-only.desktop-only { display: none; }
+  .mobile-only.mobile-only { display: inline-flex; }
+}
 
 .header-left {
   display: flex;
@@ -5723,6 +5888,37 @@ details[open] > .activity-summary::before {
 }
 .model-picker-btn:active { transform: scale(0.96); }
 
+.model-picker-summary {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elev);
+  color: var(--fg2);
+  font-size: 11px;
+  line-height: 1.4;
+  font-family: var(--font);
+  white-space: nowrap;
+  /* Three segments now (provider · model · thinking). The thinking level is
+     last, so a 220px clip ellipsised away the very thing the chip exists to
+     report; a long custom-provider name plus a tagged model id already filled
+     that budget on its own. Still bounded so the pill cannot crowd out the
+     chat title. */
+  max-width: min(320px, calc(100vw - 200px));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: background 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease);
+}
+.model-picker-summary:hover {
+  background: var(--bg3);
+  color: var(--fg);
+  border-color: var(--border-strong);
+}
+.model-picker-summary:active { transform: scale(0.97); }
+
 .thinking-levels {
   display: flex;
   flex-direction: column;
@@ -5899,6 +6095,7 @@ details[open] > .activity-summary::before {
     flex-shrink: 0;
     gap: 6px;
   }
+  .model-picker-wrap { min-width: 0; }
   .model-picker-dropdown {
     right: 0;
     min-width: auto;

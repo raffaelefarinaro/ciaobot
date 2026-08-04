@@ -71,7 +71,7 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     assert data["tier_defaults"]["openrouter"]["fable"] == "anthropic/claude-fable-latest"
     assert data["model_options"]["ollama_cloud"] == [
         "kimi-k2.7-code:cloud",
-        "deepseek-v4-flash:cloud",
+        "deepseek-v4-flash:0731-cloud",
         "minimax-m3:cloud",
         "glm-5.2:cloud",
         "gemma4:e2b-it-qat",
@@ -82,6 +82,7 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
         "vault_root": str(config.vault_root),
     }
     assert data["transcription"]["engine"] == "cloud"
+    assert data["transcription"]["cloud_model"] == "gpt-transcribe"
     assert data["transcription"]["cloud_available"] is True
     assert data["speech"]["engine"] == "cloud"
     assert data["speech"]["cloud_available"] is True
@@ -220,3 +221,46 @@ def test_route_503s_without_store(tmp_path):
     client, _config = _make_client(tmp_path)
     client.app.state.app_settings = None
     assert client.get("/api/settings/routines").status_code == 503
+
+
+def test_automatic_routines_report_every_workspace_not_just_the_primary(
+    monkeypatch, tmp_path
+):
+    """Automatic resolves per workspace, so one model must not be presented as global.
+
+    resolve_title_model / resolve_insights_model both read the chat's workspace,
+    so *_effective (the primary workspace's answer) is wrong for every other
+    workspace. The UI needs the whole map to say so.
+    """
+    monkeypatch.setattr("shutil.which", lambda cmd: None)
+    client, config = _make_client(tmp_path)
+
+    data = client.get("/api/settings/routines").json()
+    names = config.workspace_names()
+    assert names, "fixture should register at least one workspace"
+
+    for key, resolve in (
+        ("title_model_by_workspace", config.haiku_model_for_workspace),
+        ("insights_model_by_workspace", config.sonnet_model_for_workspace),
+    ):
+        assert set(data[key]) == set(names), f"{key} must cover every workspace"
+        for name in names:
+            assert data[key][name] == resolve(name)
+
+
+def test_an_override_clears_the_per_workspace_maps(monkeypatch, tmp_path):
+    """With an explicit override one model really does apply everywhere."""
+    monkeypatch.setattr("shutil.which", lambda cmd: None)
+    client, _config = _make_client(tmp_path)
+
+    client.patch(
+        "/api/settings/routines",
+        json={"title_model": "gemma4:12b-it-qat", "insights_model": "gemma4:12b-it-qat"},
+    )
+    data = client.get("/api/settings/routines").json()
+
+    assert data["title_model_effective"] == "gemma4:12b-it-qat"
+    assert data["insights_model_effective"] == "gemma4:12b-it-qat"
+    # Empty signals "not workspace-dependent" to the UI.
+    assert data["title_model_by_workspace"] == {}
+    assert data["insights_model_by_workspace"] == {}

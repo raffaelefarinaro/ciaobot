@@ -773,11 +773,15 @@ class CodexProvider(BaseSDKProvider):
             return self._developer_instructions
         cfg = self.config
         memory = ""
-        if bool(getattr(cfg, "memory_enabled", True)):
+        try:
             memory = build_memory_block(
+                guide_path=self.workspace_root / "CLAUDE.md",
                 memory_char_limit=int(getattr(cfg, "memory_char_limit", 2200)),
                 user_char_limit=int(getattr(cfg, "user_char_limit", 1375)),
             )
+        except Exception:  # noqa: BLE001 — never block a chat on memory wiring
+            logger.exception("memory block failed; continuing without it")
+            memory = ""
         payload = system_prompt_payload(
             memory,
             control_surface=request.control_surface if request is not None else "legacy",
@@ -1401,21 +1405,13 @@ class CodexProvider(BaseSDKProvider):
         cached = _MODEL_CACHE.get(key)
         if cached and not force and time.monotonic() - cached[0] < _MODEL_CACHE_TTL:
             return [dict(item) for item in cached[1]]
-        peer = StdioJsonRpcPeer(
-            command, cwd=workspace_root, name="codex model catalog",
-            env=_codex_path_env(command[0]),
-        )
+        peer: StdioJsonRpcPeer | None = None
         try:
-            await peer.start()
-            await peer.request(
-                "initialize",
-                {
-                    "clientInfo": {"name": "ciaobot", "title": "Ciaobot", "version": "0.4"},
-                    "capabilities": {"experimentalApi": True},
-                },
-                timeout=_CONTROL_TIMEOUT,
+            peer = await cls._with_control_peer(
+                workspace_root, name="codex model catalog", command=command
             )
-            await peer.notify("initialized", {})
+            if peer is None:
+                return []
             catalog: list[dict[str, Any]] = []
             cursor: str | None = None
             for _page in range(20):
@@ -1440,25 +1436,24 @@ class CodexProvider(BaseSDKProvider):
             logger.warning("Codex model discovery failed", exc_info=True)
             return []
         finally:
-            await peer.close()
+            if peer is not None:
+                await peer.close()
 
     @classmethod
-    async def read_thread(
+    async def _with_control_peer(
         cls,
         workspace_root: Path,
-        thread_id: str,
         *,
+        name: str,
         command: Sequence[str] | None = None,
-    ) -> dict[str, Any] | None:
-        if not thread_id:
-            return None
+    ) -> StdioJsonRpcPeer | None:
         if command is None:
             binary = resolve_codex_binary()
             if not binary:
                 return None
             command = [binary, "app-server", "--stdio"]
         peer = StdioJsonRpcPeer(
-            command, cwd=workspace_root, name="codex history",
+            command, cwd=workspace_root, name=name,
             env=_codex_path_env(command[0]),
         )
         try:
@@ -1472,6 +1467,28 @@ class CodexProvider(BaseSDKProvider):
                 timeout=_CONTROL_TIMEOUT,
             )
             await peer.notify("initialized", {})
+        except Exception:
+            await peer.close()
+            raise
+        return peer
+
+    @classmethod
+    async def read_thread(
+        cls,
+        workspace_root: Path,
+        thread_id: str,
+        *,
+        command: Sequence[str] | None = None,
+    ) -> dict[str, Any] | None:
+        if not thread_id:
+            return None
+        peer: StdioJsonRpcPeer | None = None
+        try:
+            peer = await cls._with_control_peer(
+                workspace_root, name="codex history", command=command
+            )
+            if peer is None:
+                return None
             response = await peer.request(
                 "thread/read",
                 {"threadId": thread_id, "includeTurns": True},
@@ -1483,7 +1500,68 @@ class CodexProvider(BaseSDKProvider):
             logger.info("Codex thread %s is not readable", thread_id, exc_info=True)
             return None
         finally:
-            await peer.close()
+            if peer is not None:
+                await peer.close()
+
+    @classmethod
+    async def _mutate_thread(
+        cls,
+        method: str,
+        workspace_root: Path,
+        thread_id: str,
+        *,
+        command: Sequence[str] | None = None,
+    ) -> bool:
+        """Call ``thread/archive`` or ``thread/delete``. Fail-open on errors."""
+        if not thread_id or method not in {"thread/archive", "thread/delete"}:
+            return False
+        peer: StdioJsonRpcPeer | None = None
+        try:
+            peer = await cls._with_control_peer(
+                workspace_root, name=f"codex {method}", command=command
+            )
+            if peer is None:
+                return False
+            await peer.request(
+                method,
+                {"threadId": thread_id},
+                timeout=_CONTROL_TIMEOUT,
+            )
+            return True
+        except RpcError:
+            logger.info(
+                "Codex %s failed for thread %s", method, thread_id, exc_info=True
+            )
+            return False
+        finally:
+            if peer is not None:
+                await peer.close()
+
+    @classmethod
+    async def archive_thread(
+        cls,
+        workspace_root: Path,
+        thread_id: str,
+        *,
+        command: Sequence[str] | None = None,
+    ) -> bool:
+        """Soft-archive a Codex thread (``thread/archive``)."""
+        return await cls._mutate_thread(
+            "thread/archive", workspace_root, thread_id, command=command
+        )
+
+    @classmethod
+    async def delete_thread(
+        cls,
+        workspace_root: Path,
+        thread_id: str,
+        *,
+        command: Sequence[str] | None = None,
+    ) -> bool:
+        """Delete a Codex thread and reclaim its rollout (``thread/delete``)."""
+        return await cls._mutate_thread(
+            "thread/delete", workspace_root, thread_id, command=command
+        )
 
     @classmethod
     async def read_collab_tree(

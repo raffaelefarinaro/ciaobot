@@ -56,7 +56,7 @@ async def _client_mode_login(request: Request, password: str) -> JSONResponse:
     """Authenticate to the remote host and store its session for the tunnel."""
     import httpx
 
-    from ciao.web.routes_api import _parse_set_cookie_session
+    from ciao.web.routes_helpers import _parse_set_cookie_session
 
     node_mgr = request.app.state.node_state_manager
     host_url = node_mgr.get_host_url()

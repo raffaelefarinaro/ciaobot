@@ -11,22 +11,24 @@ Read-only recall is handled inline by the system prompt (`vault_search`, answer 
 
 Curation targets:
 - Vault pages for projects, people, ideas, resources, and logs.
-- `<vault>/Workspace/Memory-Proposals.md` — the review queue for durable facts. You promote, reject, or merge these; the app never applies them itself. Facts also land here when bounded memory is full (auto-promotion falls back to this queue), so a growing proposals file is a signal that memory needs consolidating.
-- Bounded memory (`~/.ciao/memory.md`, `~/.ciao/user.md`) for cross-session preferences and profile facts.
+- `<vault>/Workspace/Memory-Proposals.md` — the review queue for durable facts. You promote, reject, or merge these; the app never applies them itself. Growing proposals are a signal that memory needs consolidating.
+- Bounded memory regions in the workspace `CLAUDE.md`: `ciao:memory` (cross-session preferences, environment, lessons) and `ciao:profile` (identity, communication style).
 
 Routing — where a durable fact belongs (decide by scope, not convenience):
-- **A specific project** → that project's canonical vault doc (and its `log.md` if present), NOT bounded memory. This covers project decisions, status, open loops, corrections about how the project works, and project-specific setup/environment facts (build & run commands, branch conventions, service wiring, credentials location). Most "User corrections" are project-scoped and belong here. Rule of thumb: if a fact names a project, it is not a bounded-memory fact.
-- **Cross-project preferences / environment / lessons that apply broadly** → `~/.ciao/memory.md`. Only facts that are true regardless of which project is open.
-- **Who the user is** (identity, role, communication and style preferences) → `~/.ciao/user.md`. Never project or task facts.
-- **Reusable how-to knowledge that spans projects** (error resolutions, non-obvious workarounds, outdated assumptions) → `<vault>/Workspace/Learnings.md`.
-- **Standing operating instructions / policies for the whole workspace** ("always/never do X", where things live, how to verify) → the workspace guide `CLAUDE.md` (`AGENTS.md` is a symlink to it) and `CIAO_CUSTOMIZATION.md`. These are human-curated *directives* injected into every chat, not an auto-memory sink — edit them only when the operator changes a standing policy, and prefer them over stuffing behavioral rules into bounded memory. Conversely, if you find a remembered *fact* (not a directive) misfiled inside `CLAUDE.md`, re-home it to the right surface above and leave `CLAUDE.md` to directives; when it's ambiguous whether something is a fact or a policy, propose the move rather than silently editing the guide.
+- **A specific project** → that project's canonical vault doc (and its `log.md` if present), NOT a memory region. Rule of thumb: if a fact names a project, it is not a bounded-memory fact.
+- **Cross-project preferences / environment / lessons** → the `ciao:memory` region. Only facts that are true regardless of which project is open.
+- **Who the user is** (identity, role, communication and style preferences) → the `ciao:profile` region, and durable identity notes also on `People/User.md`. Never project or task facts.
+- **Reusable how-to knowledge that spans projects** → `<vault>/Workspace/Learnings.md`.
+- **Standing operating directives** ("always/never do X") → the `CLAUDE.md` body OUTSIDE the fenced regions, plus `CIAO_CUSTOMIZATION.md`. Regions hold remembered facts; the body holds instructions. If you find a remembered fact misfiled in the body, move it into `ciao:memory`; leave genuine directives in place; when unsure, propose the move.
 
-When consolidating, MOVE any project-scoped entry you find in bounded memory out to its owning project's canonical doc rather than deleting it — don't just trim, re-home it.
+When consolidating, MOVE any project-scoped entry you find in a region out to its owning project's canonical doc rather than deleting it.
 
-Bounded memory is char-capped (memory.md ~2200, user.md ~1375) because it is injected into every system prompt — keep it small and high-signal:
-- Check usage with `ciao memory read --target <memory|user>`; it returns `used_chars`, `char_limit`, and `pct`.
-- At/above ~85% `pct`, consolidate BEFORE adding: merge related entries and drop stale one-off corrections with no reuse value (e.g. "User said X -> assistant did Y" single-doc edits, resolved open loops) via `ciao memory replace|remove`.
-- Never drop a durable fact because a file is full — make room by consolidating, or leave it in the proposals queue for review.
+Regions are char-capped (~2200 memory / ~1375 profile) because they are injected into every Claude/Codex system prompt — keep them small and high-signal:
+- Each injected section header already carries `used/limit/pct`. That is the only usage signal; there is no memory command.
+- At/above ~85%, consolidate BEFORE adding: merge related entries and drop stale one-off corrections with no reuse value.
+- Edit regions with `Edit`. Nothing enforces the cap at write time — the cap is your responsibility.
+- Never drop a durable fact because a region is full — make room by consolidating, or leave it in the proposals queue.
+- When promoting from proposals: edit the region first, then dismiss with `memory_proposal_resolve` (the reverse can lose the fact).
 
 Rules:
 - Search local memory before external sources.

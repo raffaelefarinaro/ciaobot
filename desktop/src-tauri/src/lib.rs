@@ -1,6 +1,7 @@
 mod capture;
 mod native_notifications;
 mod notification_log;
+mod permissions;
 mod runtime;
 mod service;
 mod settings;
@@ -1192,9 +1193,23 @@ fn start_runtime_watcher(app: AppHandle) {
     });
 }
 
+#[tauri::command]
+fn check_permission(kind: permissions::PermissionKind) -> permissions::PermissionState {
+    permissions::query(kind)
+}
+
+#[tauri::command]
+fn request_permission(kind: permissions::PermissionKind) -> permissions::PermissionState {
+    permissions::request(kind)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![
+            check_permission,
+            request_permission
+        ])
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_window(app, "main");
             tauri::async_runtime::spawn(try_apply_pending_navigation(app.clone()));

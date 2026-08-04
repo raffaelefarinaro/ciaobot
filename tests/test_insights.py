@@ -198,7 +198,7 @@ def test_extract_appends_section_when_archive_exists(tmp_path: Path) -> None:
             archive_path=archive,
             filtered_jsonl="dummy",
             config=_config(),
-            model="deepseek-v4-flash:cloud",
+            model="deepseek-v4-flash:0731-cloud",
         ))
 
     text = archive.read_text(encoding="utf-8")
@@ -229,7 +229,7 @@ def test_extract_is_idempotent_when_section_already_present(
             archive_path=archive,
             filtered_jsonl="dummy",
             config=_config(),
-            model="deepseek-v4-flash:cloud",
+            model="deepseek-v4-flash:0731-cloud",
         ))
 
     assert called["count"] == 0
@@ -248,7 +248,7 @@ def test_extract_skips_silently_when_archive_missing(
         archive_path=missing,
         filtered_jsonl="dummy",
         config=_config(),
-        model="deepseek-v4-flash:cloud",
+        model="deepseek-v4-flash:0731-cloud",
     ))
     assert not missing.exists()
 
@@ -274,7 +274,7 @@ def test_extract_retries_once_then_skips(
             archive_path=archive,
             filtered_jsonl="dummy",
             config=_config(),
-            model="deepseek-v4-flash:cloud",
+            model="deepseek-v4-flash:0731-cloud",
         ))
 
     assert calls["count"] == 2
@@ -308,7 +308,7 @@ def test_extract_succeeds_on_retry(
             archive_path=archive,
             filtered_jsonl="dummy",
             config=_config(),
-            model="deepseek-v4-flash:cloud",
+            model="deepseek-v4-flash:0731-cloud",
         ))
 
     assert calls["count"] == 2
@@ -331,7 +331,7 @@ def test_extract_skips_silently_on_empty_model_output(
             archive_path=archive,
             filtered_jsonl="dummy",
             config=_config(),
-            model="deepseek-v4-flash:cloud",
+            model="deepseek-v4-flash:0731-cloud",
         ))
 
     assert "## Session insights" not in archive.read_text(encoding="utf-8")
@@ -357,14 +357,16 @@ def test_call_model_uses_oneshot_runner(
         archive_path=archive,
         filtered_jsonl="dummy-jsonl",
         config=_config(),
-        model="deepseek-v4-flash:cloud",
+        model="deepseek-v4-flash:0731-cloud",
     ))
 
     text = archive.read_text(encoding="utf-8")
     assert "## Session insights" in text
     assert "via oneshot" in text
-    assert captured["model"] == "deepseek-v4-flash:cloud"
-    assert captured["timeout_s"] == 120.0
+    assert captured["model"] == "deepseek-v4-flash:0731-cloud"
+    # Was a flat 120.0, which the slow operator-chosen models this path allows
+    # could not meet (measured 214-253s). Now configurable, default 600s.
+    assert captured["timeout_s"] == insights._DEFAULT_TIMEOUT_S
 
 
 def test_run_oneshot_error_handling(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -472,7 +474,7 @@ def test_extract_updates_project_doc_when_insights_carry_decisions(
             archive_path=archive,
             filtered_jsonl="dummy",
             config=_config(),
-            model="deepseek-v4-flash:cloud",
+            model="deepseek-v4-flash:0731-cloud",
             workspace_root=tmp_path,
             vault_root=tmp_path / "vault",
             project_doc_path="doc.md",
@@ -503,7 +505,7 @@ def test_extract_skips_project_doc_when_path_empty(
             archive_path=archive,
             filtered_jsonl="dummy",
             config=_config(),
-            model="deepseek-v4-flash:cloud",
+            model="deepseek-v4-flash:0731-cloud",
             workspace_root=tmp_path,
             vault_root=tmp_path / "vault",
         ))
@@ -553,7 +555,7 @@ def test_backfill_insights_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     config = _config()
     config.vault_root = vault_root
     config.workspace_root = workspace_root
-    config.insights_model = "deepseek-v4-flash:cloud"
+    config.insights_model = "deepseek-v4-flash:0731-cloud"
     
     calls = []
     
@@ -596,3 +598,111 @@ def test_backfill_insights_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     text_text = text_archive.read_text(encoding="utf-8")
     assert "## Session insights" in text_text
     assert "Text mode decisions" in text_text
+
+
+# ── Input budget and non-retryable overflow (issue #248) ──────────────────
+
+
+def test_fit_transcript_leaves_a_small_payload_untouched() -> None:
+    payload = "\n".join(f'{{"idx":{i}}}' for i in range(5))
+    fitted, dropped = insights._fit_transcript(payload)
+    assert fitted == payload
+    assert dropped == 0
+
+
+def test_fit_transcript_drops_oldest_lines_and_keeps_the_newest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Ten 10-char lines; a 25-char budget only fits the last two.
+    lines = [f"{i:09d}" for i in range(10)]
+    monkeypatch.setenv("CIAO_INSIGHTS_MAX_INPUT_CHARS", "25")
+    fitted, dropped = insights._fit_transcript("\n".join(lines))
+    kept = fitted.splitlines()
+    assert kept == lines[-len(kept):], "must keep a suffix, i.e. the newest turns"
+    assert dropped == len(lines) - len(kept)
+    assert len(fitted) <= 25
+
+
+def test_max_input_chars_ignores_junk_and_nonpositive_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for bad in ("abc", "0", "-5", ""):
+        monkeypatch.setenv("CIAO_INSIGHTS_MAX_INPUT_CHARS", bad)
+        assert insights._max_input_chars() == insights._DEFAULT_MAX_INPUT_CHARS
+    monkeypatch.setenv("CIAO_INSIGHTS_MAX_INPUT_CHARS", "1234")
+    assert insights._max_input_chars() == 1234
+
+
+def test_insights_timeout_defaults_generously_and_is_tunable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CIAO_INSIGHTS_TIMEOUT_S", raising=False)
+    # The old flat 120s was below the 214-253s this path really takes.
+    assert insights._insights_timeout_s() == insights._DEFAULT_TIMEOUT_S
+    assert insights._insights_timeout_s() > 200
+    monkeypatch.setenv("CIAO_INSIGHTS_TIMEOUT_S", "45.5")
+    assert insights._insights_timeout_s() == 45.5
+
+
+def test_context_overflow_is_distinguished_from_a_transient_timeout() -> None:
+    overflow = Exception(
+        "API Error 400 Message too long: 262183 > 125952 maximum context length"
+    )
+    assert insights._is_context_overflow(overflow)
+    assert insights._is_context_overflow(Exception("context_length_exceeded"))
+    # Transient failures must stay retryable.
+    assert not insights._is_context_overflow(asyncio.TimeoutError())
+    assert not insights._is_context_overflow(Exception("429 rate limit"))
+
+
+def test_oversized_input_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 400 overflow must fail fast: the retry would send the same payload."""
+    calls = 0
+
+    async def fake_call_model(*args: object, **kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        raise Exception("400 Message too long: 200328 > 125952")
+
+    monkeypatch.setattr(insights, "_call_model", fake_call_model)
+    slept: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(insights.asyncio, "sleep", fake_sleep)
+    out, err = asyncio.run(
+        insights._run_model_with_retry(
+            filtered_jsonl='{"idx":0}', model="some-model", env={}
+        )
+    )
+    assert out == ""
+    assert "too long" in err.lower()
+    assert calls == 1, "overflow must not be retried"
+    assert slept == [], "must not burn the 30s retry wait on a deterministic failure"
+
+
+def test_transient_failure_still_retries_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    async def flaky(*args: object, **kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise asyncio.TimeoutError()
+        return "## Errors\n- boom [idx=1]"
+
+    monkeypatch.setattr(insights, "_call_model", flaky)
+
+    async def fake_sleep(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(insights.asyncio, "sleep", fake_sleep)
+    out, err = asyncio.run(
+        insights._run_model_with_retry(
+            filtered_jsonl='{"idx":0}', model="some-model", env={}
+        )
+    )
+    assert err == ""
+    assert "boom" in out
+    assert calls == 2

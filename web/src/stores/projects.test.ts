@@ -412,6 +412,61 @@ describe('ephemeral status events', () => {
   })
 })
 
+describe('subagent thinking deltas', () => {
+  test('do not leak a subagent thinking delta into the parent turn trace or messages', () => {
+    // Regression: thinking deltas fired from inside a Task subagent arrive
+    // with parent_tool_use_id set. The PWA already renders the subagent's
+    // transcript in its own "Subagent activity" box, so accumulating the
+    // delta into the parent's thinking buffer used to produce a stray
+    // _thinking message at the end of the parent turn's trace block and
+    // persist it into the chat history after the result event.
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'c-subagent-thinking'
+    store.activeChatId = chatId
+    store.messages[chatId] = [
+      { role: 'user', content: 'run the audit', timestamp: '' },
+    ]
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+
+    // Subagent-emitted thinking delta: must be dropped, not appended.
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'thinking',
+        text: 'subagent reasoning that should not appear in the parent trace',
+        parent_tool_use_id: 'task-1',
+      }),
+    })
+    // Top-level thinking delta on the same chat: must accumulate as before.
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'thinking',
+        text: 'parent reasoning stays in the trace',
+      }),
+    })
+    // Mid-stream: the parent's thinking buffer holds only the parent text;
+    // the subagent delta was discarded.
+    expect(store.streamingThinking[chatId]).toBe('parent reasoning stays in the trace')
+
+    // End-of-turn flush: the parent thinking is persisted as a _thinking
+    // system message; the subagent text must not appear anywhere in messages.
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'result',
+        text: 'done',
+        is_error: false,
+        effective_model: 'claude-test',
+        usage: {},
+        session_id: 'sess-1',
+      }),
+    })
+
+    const thinkingMsgs = (store.messages[chatId] || []).filter(m => m.tool_name === '_thinking')
+    expect(thinkingMsgs.map(m => m.content)).toEqual(['parent reasoning stays in the trace'])
+  })
+})
+
 describe('pinned file dismissal', () => {
   const surfacedEvent = {
     type: 'tool_use',
@@ -2026,5 +2081,44 @@ describe('projectChatRows (delegate grouping)', () => {
 
     expect(rows.map(r => r.chat.chat_id)).toEqual(['a', 'b'])
     expect(rows.every(r => !r.isDelegate)).toBe(true)
+  })
+})
+
+describe('activeChatsAll (hide nested delegates)', () => {
+  function seed(store: ReturnType<typeof useProjectStore>, chats: Partial<ChatInfo>[]) {
+    store.projects = [
+      { project_id: 'p1', name: 'Proj', workspace: 'personal' } as unknown as ProjectInfo,
+    ]
+    store.chats = chats.map((c, i) => ({
+      project_id: 'p1',
+      title: c.title || c.chat_id,
+      archived: false,
+      local: true,
+      created_at: `2026-07-31T00:0${i}:00Z`,
+      last_activity_at: `2026-07-31T01:0${i}:00Z`,
+      ...c,
+    })) as unknown as ChatInfo[]
+  }
+
+  test('nested delegates are omitted from jump-back-in', () => {
+    const store = useProjectStore()
+    seed(store, [
+      { chat_id: 'boss', title: 'Architecture Review' },
+      { chat_id: 'other', title: 'Other' },
+      { chat_id: 'd1', title: 'Arch review: a', spawned_from_chat_id: 'boss' },
+      { chat_id: 'd2', title: 'Arch review: b', spawned_from_chat_id: 'boss' },
+    ])
+
+    expect(store.activeChatsAll.map(c => c.chat_id)).toEqual(['other', 'boss'])
+  })
+
+  test('orphaned delegates remain listed when the supervisor is gone', () => {
+    const store = useProjectStore()
+    seed(store, [
+      { chat_id: 'boss', archived: true },
+      { chat_id: 'orphan', spawned_from_chat_id: 'boss' },
+    ])
+
+    expect(store.activeChatsAll.map(c => c.chat_id)).toEqual(['orphan'])
   })
 })
