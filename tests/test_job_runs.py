@@ -185,9 +185,13 @@ def test_record_startup_phase_maps_and_skips(tmp_path: Path) -> None:
 def test_summary_includes_never_run_jobs(tmp_path: Path) -> None:
     jr.record_run(jr.JobRun(job="title", label="Title", status="ok", duration_ms=5))
     summary = {item["job"]: item for item in jr.automation_summary()}
-    # every registry job is present
+    # every registry job is present, except bulk variants (nested under their
+    # parent) — a never-installed schedule only filters when the caller says so
     for spec in jr.REGISTRY:
-        assert spec.job in summary
+        if spec.parent:
+            assert spec.job not in summary
+        else:
+            assert spec.job in summary
     assert summary["title"]["last_run"]["status"] == "ok"
     # a job that never ran has empty stats
     assert summary["skill_evolution"]["last_run"] is None
@@ -198,3 +202,54 @@ def test_summary_includes_never_run_jobs(tmp_path: Path) -> None:
     assert summary["title"]["produces_outcome"] is True
     assert summary["startup_sync"]["uses_model"] is False
     assert summary["startup_sync"]["produces_outcome"] is False
+    # every row can answer "when does this run?"
+    assert summary["title"]["trigger"]
+    assert summary["trajectory"]["trigger"]
+
+
+def test_summary_hides_retired_jobs(tmp_path: Path) -> None:
+    """A job removed from the code must not linger on the Automation page."""
+    jr.record_run(jr.JobRun(job="pwa_rebuild", label="PWA rebuild", status="ok",
+                            category="system", duration_ms=5))
+    jr.record_run(jr.JobRun(job="title", label="Title", status="ok", duration_ms=5))
+
+    assert "pwa_rebuild" not in {item["job"] for item in jr.automation_summary()}
+    # the record itself is untouched on disk, and readable on request
+    assert "pwa_rebuild" in {r["job"] for r in _read_lines(tmp_path)}
+    assert "pwa_rebuild" in jr.load_runs(keep_retired=True)
+
+
+def test_summary_hides_jobs_whose_only_schedule_is_not_installed(tmp_path: Path) -> None:
+    installed = {"system-skill-evolution"}
+    summary = {
+        item["job"]: item
+        for item in jr.automation_summary(installed_schedules=installed)
+    }
+    assert "skill_evolution" in summary
+    # no system-dependency-review schedule here, so nothing can trigger it
+    assert "dependency_review" not in summary
+    # jobs with another trigger stay visible even without their schedule
+    assert "insights" in summary
+    assert "vault_index" in summary  # also runs on startup
+    assert "memory_proposals" in summary  # also runs after insights
+
+
+def test_summary_keeps_a_recorded_run_for_an_uninstalled_schedule(tmp_path: Path) -> None:
+    """History stays reachable even when the row is hidden."""
+    jr.record_run(jr.JobRun(job="dependency_review", label="depcheck:installed",
+                            status="ok", duration_ms=5))
+    summary = {
+        item["job"]: item for item in jr.automation_summary(installed_schedules=set())
+    }
+    assert "dependency_review" not in summary
+    assert jr.load_runs()["dependency_review"]["stats"]["total_runs"] == 1
+
+
+def test_summary_nests_the_insights_backfill_under_session_insights(tmp_path: Path) -> None:
+    jr.record_run(jr.JobRun(job="backfill_insights", label="Insights backfill",
+                            category="system", status="ok", duration_ms=7))
+    summary = {item["job"]: item for item in jr.automation_summary()}
+    assert "backfill_insights" not in summary
+    subs = summary["insights"]["sub_jobs"]
+    assert [s["job"] for s in subs] == ["backfill_insights"]
+    assert subs[0]["last_run"]["status"] == "ok"

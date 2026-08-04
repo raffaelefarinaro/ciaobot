@@ -779,6 +779,14 @@ export interface AutomationProcess {
   // metadata was added to GET /api/automation.
   uses_model?: boolean
   produces_outcome?: boolean
+  // Plain-language "when does this run?", the system schedule that fires it,
+  // and whether it is a one-shot migration. Optional: older servers omit them.
+  trigger?: string
+  schedule_id?: string
+  one_time?: boolean
+  // Bulk/manual variants of this job (Session insights carries the backfill),
+  // reported nested so the page keeps one row per automation.
+  sub_jobs?: AutomationProcess[]
   last_run: JobRun | null
   recent: JobRun[]
   stats: AutomationStats

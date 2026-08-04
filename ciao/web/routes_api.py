@@ -4207,35 +4207,63 @@ async def list_schedules(request: Request) -> JSONResponse:
 async def list_automation(request: Request) -> JSONResponse:
     """Status of background automations for the Settings → Automation page.
 
-    Reads the job-run log and returns one entry per known job (jobs that
-    never ran still appear), each with its last run, recent history, and
-    aggregate stats. Read-only.
+    Reads the job-run log and returns one entry per automation this machine
+    can actually run (jobs that never ran still appear), each with its last
+    run, recent history, and aggregate stats. Scheduled jobs whose schedule is
+    not installed here are omitted — nothing would ever trigger them.
+    Read-only.
     """
     from ciao import job_runs
 
-    return JSONResponse(job_runs.automation_summary())
+    installed: set[str] | None = None
+    try:
+        sm = request.app.state.schedule_manager
+        installed = {entry.schedule_id for entry in sm.list_entries()}
+    except Exception:  # noqa: BLE001 — no schedule manager: filter nothing
+        installed = None
+
+    return JSONResponse(job_runs.automation_summary(installed_schedules=installed))
 
 
 async def trigger_backfill_insights(request: Request) -> JSONResponse:
-    """Trigger the insights backfill process in the background."""
+    """Run session insights over every archive that is missing them.
+
+    Accepts an optional ``model`` for a one-off run with a different model —
+    the recovery path when the configured insights model keeps failing (it
+    times out on slow local backends). The stored Settings → Models choice is
+    left alone.
+    """
     import asyncio
     from ciao.job_runs import track
     from ciao.insights import backfill_insights_task, format_backfill_summary
 
     config = request.app.state.config
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 — empty body means "use the configured model"
+        body = {}
+    model = (body or {}).get("model")
+    model = model.strip() if isinstance(model, str) else ""
 
     async def _run_backfill():
-        async with track("backfill_insights", "Insights backfill", category="system") as handle:
-            result = await backfill_insights_task(config, mode="both")
+        async with track(
+            "backfill_insights", "Insights backfill", category="system",
+            model=model,
+        ) as handle:
+            result = await backfill_insights_task(
+                config, mode="both", model_override=model,
+            )
             handle.extra.update(result)
             summary = format_backfill_summary(result)
             handle.extra["summary"] = summary
+            if model:
+                handle.extra["model_override"] = model
             if result["errors"]:
                 handle.status = "error"
                 handle.error = summary
 
     asyncio.create_task(_run_backfill())
-    return JSONResponse({"status": "started"}, status_code=202)
+    return JSONResponse({"status": "started", "model": model}, status_code=202)
 
 
 async def create_schedule(request: Request) -> JSONResponse:

@@ -730,8 +730,14 @@ async def backfill_insights_task(
     dry_run: bool = False,
     concurrency: int = 2,
     workspace: str = "",
+    model_override: str = "",
 ) -> dict[str, int]:
-    """Scan archived transcripts and return counts for the completed run."""
+    """Scan archived transcripts and return counts for the completed run.
+
+    *model_override* runs this pass with an explicit model instead of the
+    configured one, without changing the stored setting — the retry path when
+    the configured insights model keeps failing.
+    """
     stats = _empty_backfill_stats()
     vault_root = config.vault_root
     base = vault_root / "memory-vault" / "Logs" / "Chats"
@@ -791,7 +797,7 @@ async def backfill_insights_task(
     async def worker(archive_path: Path, session_id: str, has_jsonl: bool) -> str:
         async with sem:
             try:
-                insights_model = resolve_insights_model(config)
+                insights_model = model_override or resolve_insights_model(config)
                 if has_jsonl:
                     filtered = filter_session_jsonl(config.workspace_root, session_id)
                     if not filtered:

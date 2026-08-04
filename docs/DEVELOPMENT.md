@@ -194,10 +194,16 @@ cd web && npm test             # Frontend unit tests
 cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 ```
 
-The Settings → Automations list uses the registry-backed `uses_model` and
-`produces_outcome` fields from `GET /api/automation` for its capability badges;
-do not infer those labels from a job's latest run because never-run jobs are
-intentionally included in the response.
+The Settings → Automations list is registry-driven: `GET /api/automation` carries
+each job's static `trigger` sentence, `schedule_id`, `one_time`, `uses_model`,
+and `produces_outcome`. Do not infer those from a job's latest run — never-run
+jobs are intentionally included in the response. When adding a job to
+`job_runs.REGISTRY`, give it a `trigger` (the page's answer to "when does this
+run?"); when removing one, add its id to `job_runs.RETIRED_JOBS`, because
+`job_runs_latest.json` keeps the last run of every job it ever saw and the row
+would otherwise linger with a stale badge. Set `schedule_only=True` only when a
+schedule is the job's *sole* trigger: such a job is hidden on machines where
+that schedule is not installed.
 
 For chat rendering changes, verify the compact `Activity` disclosure, `Outputs` placement, readable token labels, keyboard operation, and 44px touch targets at both desktop and narrow-phone widths. Markdown tables should shrink-wrap on desktop and keep readable first-column labels inside a horizontally scrollable table viewport on narrow screens.
 For composer drag-and-drop changes, test both local host and remote client roles:
