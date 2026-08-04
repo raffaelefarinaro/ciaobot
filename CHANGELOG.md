@@ -5,6 +5,8 @@
 ### Added
 - feat(ollama): default ollama haiku + insights to deepseek-v4-flash:0731-cloud (`9dfbae9`)
 - feat(voice): switch cloud transcription to gpt-transcribe and surface model in Settings (`2e2e4b6`)
+- Native macOS permission checks for microphone, notifications, and camera, so dictation can tell "not yet asked" from "denied" instead of failing opaquely (`ad37753`)
+- Chat header chip naming the routing provider, model, and thinking level at a glance — the full pill on desktop, the brain button alone on narrow screens (`b7d1656`, `f61ee89`, `ca37d4e`)
 
 ### Changed
 - Merge pull request #245 from raffaelefarinaro/chore/sync-develop-v0.7.0 (`95298a0`)
@@ -15,16 +17,22 @@
 - refactor(memory): collapse bounded memory into CLAUDE.md regions (`6952d67`)
 - Enable Claude SDK ``exclude_dynamic_sections`` so cwd/git/OS leave the system-prompt cache prefix (`6efb45c`)
 - Give the bounded-memory region grammar and guide diagnostics one owner in `memory_tool`, and drop dead parameters left by the region migration — including the unused `target` argument on the `memory_proposal_resolve` MCP tool and the `user_entries`/`expired_user_entries` aliases in the memory audit payload (`62a4539`)
+- Remove the 100%/120% font-scale preset buttons; the font baseline is set once and no longer toggled from the UI (`3e68489`)
+- Settings → Automation no longer names a single model for an Automatic routine. Chat titles and Session insights both resolve from the chat's workspace, so the summary now says so and lists the per-workspace models; `/api/settings/routines` gained `title_model_by_workspace` / `insights_model_by_workspace` (`ccb0108`)
 - Architecture review cleanup (#247): split the `node_*`/package handlers into `ciao/web/routes_node.py` and the MCP HTTP endpoints into `ciao/web/routes_mcp.py`, extract `SettingsAutomation.vue` and a shared `useFileComments` composable, and delete 11 dead control-plane methods. `docs/ARCHITECTURE.md` now indexes every top-level `ciao/` module, enforced by `tests/test_architecture_doc.py` (`07a7626`)
 
 ### Fixed
 - Fix the dev-mode desktop rebuild (Settings → Restart) failing with an unexplained `tauri build` error: the build now locates a Rust toolchain that is installed but off `PATH` (Homebrew's rustup keeps `cargo` in `opt/rustup/bin`, invisible to a launchd- or Finder-started engine), refuses up front with install instructions when there is genuinely no toolchain, and reports a failed step's stderr instead of only npm's command echo
 - Stop session insights and the schedule attention classifier failing on slow or large-context sessions (#248): the per-call timeout is now `CIAO_INSIGHTS_TIMEOUT_S` (default 600s, was a flat 120s against a path measured at 214–253s), transcripts are trimmed to `CIAO_INSIGHTS_MAX_INPUT_CHARS` oldest-first so they fit the model's context window, and an oversized-input 400 is no longer retried with the identical payload
+- Home-screen arrow keys moved two cards per press in the desktop app (the keys were handled by two listeners at once) and Esc did nothing in the browser (it was bound desktop-only). Both now work in the PWA and the app, and Esc closes a chat even while typing in the composer (`bd681fe`, `8558806`)
+- The live token counter no longer sums the same context once per tool call, which inflated it into the millions; it reports the latest context size (`9b6bcb9`)
+- A Task subagent's thinking no longer leaks into the parent turn's trace or persists as a stray message after the subagent ends, and expanding a subagent panel no longer collapses the activity bubble around it (`b11476d`, `4b0c4d4`)
 - fix(web): keep pinned-file edits when a model turn ends (`c64ba6f`)
 - fix: restore VoiceTranscriber config for cloud gpt-transcribe (`183a1e4`)
 
 ### Maintenance
 - chore: bump openai to 2.52.0 (`12a65e3`)
+- `npm run tauri dev` works again: vite now binds the port `tauri.conf.json`'s `devUrl` expects, and the notification-center delegate is skipped in an unbundled process where macOS raises an uncaught `NSException` (`5a15dd0`)
 - Remove the dead control-surface A/B benchmark: `ciao/control_surface_benchmark.py`, its test, and the `benchmark-control-surfaces` CLI subcommand. `control_surface` now accepts `legacy` and `mcp`; an `auto` value falls back to `mcp`, which is what the pre-decided evaluation already resolved to (`04deda3`)
 
 ## v0.7.0 - 2026-08-02
