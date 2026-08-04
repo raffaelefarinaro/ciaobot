@@ -412,6 +412,61 @@ describe('ephemeral status events', () => {
   })
 })
 
+describe('subagent thinking deltas', () => {
+  test('do not leak a subagent thinking delta into the parent turn trace or messages', () => {
+    // Regression: thinking deltas fired from inside a Task subagent arrive
+    // with parent_tool_use_id set. The PWA already renders the subagent's
+    // transcript in its own "Subagent activity" box, so accumulating the
+    // delta into the parent's thinking buffer used to produce a stray
+    // _thinking message at the end of the parent turn's trace block and
+    // persist it into the chat history after the result event.
+    apiGet.mockResolvedValue([])
+    const store = useProjectStore()
+    const chatId = 'c-subagent-thinking'
+    store.activeChatId = chatId
+    store.messages[chatId] = [
+      { role: 'user', content: 'run the audit', timestamp: '' },
+    ]
+    store.connectWs(chatId)
+    const socket = fakeSockets[0]
+
+    // Subagent-emitted thinking delta: must be dropped, not appended.
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'thinking',
+        text: 'subagent reasoning that should not appear in the parent trace',
+        parent_tool_use_id: 'task-1',
+      }),
+    })
+    // Top-level thinking delta on the same chat: must accumulate as before.
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'thinking',
+        text: 'parent reasoning stays in the trace',
+      }),
+    })
+    // Mid-stream: the parent's thinking buffer holds only the parent text;
+    // the subagent delta was discarded.
+    expect(store.streamingThinking[chatId]).toBe('parent reasoning stays in the trace')
+
+    // End-of-turn flush: the parent thinking is persisted as a _thinking
+    // system message; the subagent text must not appear anywhere in messages.
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'result',
+        text: 'done',
+        is_error: false,
+        effective_model: 'claude-test',
+        usage: {},
+        session_id: 'sess-1',
+      }),
+    })
+
+    const thinkingMsgs = (store.messages[chatId] || []).filter(m => m.tool_name === '_thinking')
+    expect(thinkingMsgs.map(m => m.content)).toEqual(['parent reasoning stays in the trace'])
+  })
+})
+
 describe('pinned file dismissal', () => {
   const surfacedEvent = {
     type: 'tool_use',

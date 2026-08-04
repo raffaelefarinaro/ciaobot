@@ -3510,6 +3510,13 @@ export const useProjectStore = defineStore('projects', () => {
       }
 
       case 'thinking':
+        // Thinking deltas fired from inside a Task subagent arrive with
+        // parent_tool_use_id set. The subagent's transcript is rendered in its
+        // own "Subagent activity" box (SubagentPanel), so accumulating these
+        // deltas into the parent's thinking buffer would leak the subagent's
+        // reasoning into the parent turn's trace and end up in the persisted
+        // history as a stray _thinking message long after the subagent ended.
+        if (event.parent_tool_use_id) break
         // Accumulate into the thinking buffer. Committed to the timeline
         // when the model switches to visible text or fires a tool_use
         // (those signal the end of this thinking block). For Anthropic
