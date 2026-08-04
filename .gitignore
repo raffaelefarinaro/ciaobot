@@ -48,3 +48,8 @@ secrets/
 /.agents/
 /.codex/
 /commands/
+
+# npm/vite/vitest caches created when a command is run from the repo root
+# instead of web/ or desktop/. There is no root package.json, so this is only
+# ever accidental.
+/node_modules/

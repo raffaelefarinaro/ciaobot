@@ -106,7 +106,7 @@
         <div class="model-picker-wrap" ref="modelPickerRef">
           <button
             class="model-picker-btn touch-hit mobile-only"
-            :title="chat.model + (chat.thinking_level ? ' · ' + chat.thinking_level : '')"
+            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${activeModelId}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
             @click.stop="toggleModelPicker"
             aria-label="Model"
           >
@@ -116,9 +116,9 @@
             v-if="chat.provider"
             type="button"
             class="model-picker-summary desktop-only"
-            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${activeModelId}${chat.thinking_level ? ' · ' + chat.thinking_level : ''}`"
+            :title="`${routingProviderLabel(activeBucket, chat.provider)} · ${activeModelId}${chipThinkingLabel ? ' · ' + chipThinkingLabel : ''}`"
             @click.stop="toggleModelPicker"
-          >{{ routingProviderLabel(activeBucket, chat.provider) }} · {{ activeModelId }}<template v-if="chat.thinking_level"> · {{ chat.thinking_level }}</template></button>
+          >{{ routingProviderLabel(activeBucket, chat.provider) }} · {{ activeModelId }}<template v-if="chipThinkingLabel"> · {{ chipThinkingLabel }}</template></button>
           <ModelSelector
             v-if="showModelPicker"
             triggerless
@@ -1854,6 +1854,18 @@ const filteredThinkingLevels = computed(() => {
 const showThinkingLevels = computed(() => {
   if (!filteredThinkingLevels.value.length) return false
   return !isFableSelection(chat.value?.model, chat.value?.thinking_level)
+})
+
+// Thinking level for the header chip. An empty thinking_level is a real,
+// selectable state — the picker renders it as "auto" (let the provider decide)
+// — so the chip has to name it too. Omitting the segment made "no level set"
+// indistinguishable from "the chip doesn't report levels". Blank only when the
+// model exposes no levels at all (e.g. Fable), where the segment is noise; a
+// level that is somehow set is always shown even then.
+const chipThinkingLabel = computed(() => {
+  const level = chat.value?.thinking_level || ''
+  if (level) return level
+  return showThinkingLevels.value ? 'auto' : ''
 })
 
 const inputPlaceholder = computed(() => {
@@ -5889,7 +5901,12 @@ details[open] > .activity-summary::before {
   line-height: 1.4;
   font-family: var(--font);
   white-space: nowrap;
-  max-width: min(220px, calc(100vw - 200px));
+  /* Three segments now (provider · model · thinking). The thinking level is
+     last, so a 220px clip ellipsised away the very thing the chip exists to
+     report; a long custom-provider name plus a tagged model id already filled
+     that budget on its own. Still bounded so the pill cannot crowd out the
+     chat title. */
+  max-width: min(320px, calc(100vw - 200px));
   overflow: hidden;
   text-overflow: ellipsis;
   cursor: pointer;
