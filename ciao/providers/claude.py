@@ -1195,8 +1195,13 @@ class ClaudeProvider(BaseSDKProvider):
             self._turn_output_committed += self._cur_msg_output
             self._cur_msg_output = 0
             input_tokens = usage.get("input_tokens")
+            # Each message_start reports the total input tokens for that API
+            # call (the full context, including prior messages and tool
+            # results). Using the latest value keeps the live counter close to
+            # the actual context size; summing across a tool loop inflates it
+            # into millions and makes the PWA label misleading.
             if isinstance(input_tokens, int):
-                self._turn_input_tokens += input_tokens
+                self._turn_input_tokens = input_tokens
             out = usage.get("output_tokens")
             if isinstance(out, int):
                 self._cur_msg_output = out

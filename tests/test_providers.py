@@ -494,6 +494,51 @@ def test_claude_convert_stream_event_threads_parent_tool_use_id(
     assert thinking.parent_tool_use_id == parent_id
 
 
+def test_claude_stream_usage_uses_latest_input_not_cumulative(
+    claude_provider: ClaudeProvider,
+) -> None:
+    """Each message_start reports the total input tokens for that API call,
+    not a delta. Using the latest value keeps the live PWA counter near the
+    real context size; summing across a tool loop inflates it misleadingly."""
+    from claude_agent_sdk import StreamEvent as SDKStreamEvent
+
+    start1 = SDKStreamEvent(
+        uuid="u1",
+        session_id="s1",
+        event={
+            "type": "message_start",
+            "message": {"usage": {"input_tokens": 500_000, "output_tokens": 0}},
+        },
+    )
+    [usage1] = claude_provider._convert_stream_event(start1)
+    assert usage1.input_tokens == 500_000
+    assert usage1.output_tokens == 0
+
+    delta1 = SDKStreamEvent(
+        uuid="u2",
+        session_id="s1",
+        event={"type": "message_delta", "usage": {"output_tokens": 1_000}},
+    )
+    [usage2] = claude_provider._convert_stream_event(delta1)
+    assert usage2.input_tokens == 500_000
+    assert usage2.output_tokens == 1_000
+
+    # A second assistant message in the same tool loop has a slightly larger
+    # context. The input counter must reflect the latest context size, not the
+    # cumulative 1,010,000 tokens.
+    start2 = SDKStreamEvent(
+        uuid="u3",
+        session_id="s1",
+        event={
+            "type": "message_start",
+            "message": {"usage": {"input_tokens": 510_000, "output_tokens": 0}},
+        },
+    )
+    [usage3] = claude_provider._convert_stream_event(start2)
+    assert usage3.input_tokens == 510_000
+    assert usage3.output_tokens == 1_000  # previously committed output
+
+
 def test_claude_rate_limit_event_suppresses_status_and_caches_quota(
     claude_provider: ClaudeProvider,
 ) -> None:
