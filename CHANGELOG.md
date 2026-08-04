@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.7.1 - 2026-08-03
+## v0.7.1 - 2026-08-04
 
 ### Added
 - feat(ollama): default ollama haiku + insights to deepseek-v4-flash:0731-cloud (`9dfbae9`)
