@@ -39,10 +39,7 @@ def test_auth_settings_enable_password(tmp_path: Path) -> None:
     app = _app(tmp_path, auth_required=False, token="")
     client = TestClient(app, client=("127.0.0.1", 5555))
 
-    res = client.post(
-        "/api/auth/settings",
-        json={"auth_required": True, "password": "hunter2"},
-    )
+    res = client.post("/api/auth/settings", json={"password": "hunter2"})
     assert res.status_code == 200
     body = res.json()
     assert body["auth_required"] is True
@@ -60,16 +57,46 @@ def test_auth_settings_change_requires_current_password(tmp_path: Path) -> None:
 
     bad = client.post(
         "/api/auth/settings",
-        json={"auth_required": True, "password": "new-secret", "current_password": "wrong"},
+        json={"password": "new-secret", "current_password": "wrong"},
     )
     assert bad.status_code == 401
 
     ok = client.post(
         "/api/auth/settings",
-        json={"auth_required": True, "password": "new-secret", "current_password": "old-secret"},
+        json={"password": "new-secret", "current_password": "old-secret"},
     )
     assert ok.status_code == 200
     assert ok.json()["auth_required"] is True
+
+
+def test_auth_settings_cannot_disable_protection(tmp_path: Path) -> None:
+    """Protection is the default: Settings changes the password, and only an
+    explicit PWA_AUTH_REQUIRED=false in the workspace .env turns it off."""
+    app = _app(tmp_path, auth_required=True, token="old-secret")
+    client = TestClient(app, client=("127.0.0.1", 5555))
+
+    res = client.post(
+        "/api/auth/settings",
+        json={"auth_required": False, "current_password": "old-secret"},
+    )
+
+    assert res.status_code == 400
+    assert "PWA_AUTH_REQUIRED=false" in res.json()["error"]
+    assert app.state.config.pwa_auth_required is True
+    assert not (tmp_path / ".env").exists()
+
+
+def test_auth_settings_rejects_a_too_short_password(tmp_path: Path) -> None:
+    app = _app(tmp_path, auth_required=True, token="old-secret")
+    client = TestClient(app, client=("127.0.0.1", 5555))
+
+    res = client.post(
+        "/api/auth/settings",
+        json={"password": "ab", "current_password": "old-secret"},
+    )
+
+    assert res.status_code == 400
+    assert app.state.config.pwa_auth_token == "old-secret"
 
 
 def test_auth_settings_enable_allowed_from_remote_peer(tmp_path: Path) -> None:
@@ -83,7 +110,7 @@ def test_auth_settings_enable_allowed_from_remote_peer(tmp_path: Path) -> None:
 
     res = client.post(
         "/api/auth/settings",
-        json={"auth_required": True, "password": "hunter2"},
+        json={"password": "hunter2"},
     )
     assert res.status_code == 200
     assert app.state.config.pwa_auth_required is True
@@ -97,7 +124,7 @@ def test_auth_settings_change_from_remote_peer_still_works(tmp_path: Path) -> No
 
     res = client.post(
         "/api/auth/settings",
-        json={"auth_required": True, "password": "new-secret", "current_password": "old-secret"},
+        json={"password": "new-secret", "current_password": "old-secret"},
     )
     assert res.status_code == 200
     assert app.state.config.pwa_auth_token == "new-secret"

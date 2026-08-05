@@ -315,8 +315,11 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     )
 
     assert rc == 0
-    assert (workspace / ".env").read_text(encoding="utf-8").splitlines()[:2] == [
+    assert (workspace / ".env").read_text(encoding="utf-8").splitlines()[:3] == [
         "PWA_AUTH_TOKEN=test-token",
+        # Password protection is the default and is pinned explicitly, so an
+        # unset value never has to be guessed at on the next start.
+        "PWA_AUTH_REQUIRED=true",
         "CIAO_PUSH_CONTACT=mailto:owner@example.com",
     ]
     assert (workspace / ".claude" / "agents" / "memory.md").is_file()
@@ -418,6 +421,32 @@ def test_setup_scaffolds_workspace_from_stock(tmp_path: Path) -> None:
     assert 'if [ -L "$PY" ]; then PY="$(readlink "$PY")"; fi' in menubar_script
     assert 'exec "$PY" -m ciao.cli menubar' in menubar_script
     assert (menubar_app_exe.parent / "python").is_symlink()
+
+
+def test_setup_no_auth_opts_out_of_password_protection(tmp_path: Path) -> None:
+    """`--no-auth` is the only way a scripted setup gets an unprotected
+    dashboard, and it must be pinned in .env — an unset value now means on."""
+    workspace = tmp_path / "workspace"
+
+    rc = cli.main(
+        [
+            "setup",
+            "--workspace",
+            str(workspace),
+            "--auth-token",
+            "test-token",
+            "--no-auth",
+            "--launch-agents-dir",
+            str(tmp_path / "LaunchAgents"),
+            "--app-dir",
+            str(tmp_path / "Applications"),
+        ]
+    )
+
+    assert rc == 0
+    env_lines = (workspace / ".env").read_text(encoding="utf-8").splitlines()
+    assert "PWA_AUTH_REQUIRED=false" in env_lines
+    assert "PWA_AUTH_REQUIRED=true" not in env_lines
 
 
 def _isolate_app_roots(monkeypatch, *roots: Path) -> None:

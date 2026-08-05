@@ -8,6 +8,12 @@ import { useProjectStore } from '../../stores/projects'
 
 const FILE_CONTENT = '# Title\n\nbody text'
 
+/** How many times the panel has fetched the file (i.e. loaded or reloaded). */
+function fileFetchCount(): number {
+  const mock = globalThis.fetch as unknown as { mock: { calls: unknown[][] } }
+  return mock.mock.calls.filter(c => String(c[0]).startsWith('/api/workspace-file')).length
+}
+
 describe('PinnedFilePanel', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -17,7 +23,7 @@ describe('PinnedFilePanel', () => {
     vi.unstubAllGlobals()
   })
 
-  async function mountPanel(): Promise<VueWrapper> {
+  async function mountPanel(options: { attach?: boolean } = {}): Promise<VueWrapper> {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
       if (url.startsWith('/api/workspace-file')) {
@@ -44,6 +50,9 @@ describe('PinnedFilePanel', () => {
     const { default: PinnedFilePanel } = await import('../PinnedFilePanel.vue')
     const wrapper = mount(PinnedFilePanel, {
       props: { filePath: '/vault/note.md' },
+      // Selection APIs only work on nodes that are in the document, so the
+      // comment test needs a real attachment point.
+      ...(options.attach ? { attachTo: document.body } : {}),
     })
     await flushPromises()
     await nextTick()
@@ -72,6 +81,70 @@ describe('PinnedFilePanel', () => {
 
     const stillEditing = wrapper.get('textarea.pfp-edit-textarea')
     expect((stillEditing.element as HTMLTextAreaElement).value).toContain('my edit while streaming')
+
+    // The skipped reload is not dropped, just deferred: cancelling the edit
+    // releases it, so the panel stops showing a version the model moved past.
+    const reloadsBefore = fileFetchCount()
+    const cancel = wrapper.findAll('button').find(b => b.text() === 'Cancel')!
+    await cancel.trigger('click')
+    await nextTick()
+    await flushPromises()
+    expect(wrapper.find('textarea.pfp-edit-textarea').exists()).toBe(false)
+    expect(fileFetchCount()).toBe(reloadsBefore + 1)
+    wrapper.unmount()
+  })
+
+  it('stages a comment while the model is working and keeps it past stream end', async () => {
+    const wrapper = await mountPanel({ attach: true })
+    const store = useProjectStore()
+
+    // The model is mid-turn: commenting used to be blocked outright here.
+    store.streaming = { 'chat-1': true }
+    await nextTick()
+
+    // jsdom reports every rect as 0×0, which the selection-anchor math reads as
+    // "off-screen" and refuses to place the trigger for. Give it real geometry.
+    const rect = {
+      top: 0, left: 0, bottom: 20, right: 100, width: 100, height: 20, x: 0, y: 0,
+      toJSON: () => ({}),
+    } as DOMRect
+    const elementRects = vi
+      .spyOn(Element.prototype, 'getBoundingClientRect')
+      .mockReturnValue(rect)
+    // jsdom's Range has no getClientRects at all, so define rather than spy.
+    const rangeProto = Range.prototype as unknown as Record<string, unknown>
+    rangeProto.getClientRects = () => [rect] as unknown as DOMRectList
+
+    const target = wrapper.get('.pfp-md').element
+    const range = document.createRange()
+    range.selectNodeContents(target)
+    const selection = window.getSelection()!
+    selection.removeAllRanges()
+    selection.addRange(range)
+    document.dispatchEvent(new Event('selectionchange'))
+    await nextTick()
+
+    await wrapper.get('button.pfp-comment-trigger').trigger('click')
+    await nextTick()
+    // The composer is teleported to <body>, so it is queried off the document.
+    const note = document.querySelector('.compose .compose-input') as HTMLTextAreaElement
+    expect(note).not.toBeNull()
+    note.value = 'please rename this heading'
+    note.dispatchEvent(new Event('input'))
+    await nextTick()
+
+    // The turn ends: the auto-reload must not throw the open draft away.
+    store.streaming = { 'chat-1': false }
+    await nextTick()
+    await flushPromises()
+    expect(document.querySelector('.compose .compose-input')).not.toBeNull()
+
+    const save = document.querySelector('.compose .compose-btn.primary') as HTMLButtonElement
+    save.click()
+    await nextTick()
+    expect(store.pendingComments.map(c => c.comment)).toContain('please rename this heading')
+    elementRects.mockRestore()
+    delete rangeProto.getClientRects
     wrapper.unmount()
   })
 

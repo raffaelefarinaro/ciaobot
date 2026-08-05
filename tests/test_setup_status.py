@@ -236,6 +236,8 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     # after the endpoint mutates os.environ directly.
     monkeypatch.setenv("CIAO_WORKSPACE", "")
     monkeypatch.setenv("PWA_PORT", "")
+    monkeypatch.setenv("PWA_AUTH_TOKEN", "")
+    monkeypatch.setenv("PWA_AUTH_REQUIRED", "")
     config = CiaoConfig.from_env({"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")})
     serializer = URLSafeTimedSerializer("test-secret")
     restarts: list[int] = []
@@ -254,6 +256,7 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     resp = TestClient(app, base_url="http://localhost:8443").post(
         "/api/setup/finish",
         json={
+            "password": "wizard-pass",
             "workspace": str(workspace),
             "vault_root": str(notes),
             "push_contact": "mailto:owner@example.com",
@@ -273,8 +276,14 @@ def test_setup_finish_writes_real_workspace_and_requests_restart(tmp_path, monke
     # relaunched process boots back into bootstrap mode.
     assert os.environ["CIAO_WORKSPACE"] == str(workspace.resolve())
     assert os.environ["PWA_PORT"] == "9443"
+    # The wizard's password becomes the dashboard password, and it must reach the
+    # relaunched process through the environment too: load_dotenv would not
+    # override a PWA_AUTH_TOKEN already set for the bootstrap run.
+    assert os.environ["PWA_AUTH_TOKEN"] == "wizard-pass"
+    assert os.environ["PWA_AUTH_REQUIRED"] == "true"
     env_text = (workspace / ".env").read_text(encoding="utf-8")
-    assert f"PWA_AUTH_TOKEN={config.pwa_auth_token}" in env_text
+    assert "PWA_AUTH_TOKEN=wizard-pass" in env_text
+    assert "PWA_AUTH_REQUIRED=true" in env_text
     assert "CIAO_PUSH_CONTACT=mailto:owner@example.com" in env_text
     assert f"CIAO_VAULT_ROOT={notes}" in env_text
     assert (notes / "MEMORY.md").is_file()
@@ -306,6 +315,7 @@ def test_setup_finish_autodetects_scratch_for_empty_folder(tmp_path) -> None:
     resp = _finish_client(tmp_path).post(
         "/api/setup/finish",
         json={
+            "password": "wizard-pass",
             "workspace": str(ws),
             "workspace_name": "life",
             "launch_agents_dir": str(tmp_path / "LaunchAgents"),
@@ -332,6 +342,7 @@ def test_setup_finish_rejects_a_traversal_workspace_name(tmp_path) -> None:
     response = _finish_client(tmp_path).post(
         "/api/setup/finish",
         json={
+            "password": "wizard-pass",
             "workspace": str(workspace),
             "workspace_name": "../outside",
             "launch_agents_dir": str(tmp_path / "LaunchAgents"),
@@ -352,6 +363,7 @@ def test_setup_finish_persists_codex_as_first_workspace_provider(tmp_path) -> No
     resp = _finish_client(tmp_path).post(
         "/api/setup/finish",
         json={
+            "password": "wizard-pass",
             "workspace": str(ws),
             "workspace_name": "personal",
             "provider": "codex",
@@ -379,6 +391,7 @@ def test_setup_finish_autodetects_existing_notes_folder(tmp_path) -> None:
     resp = _finish_client(tmp_path).post(
         "/api/setup/finish",
         json={
+            "password": "wizard-pass",
             "workspace": str(ws),
             "launch_agents_dir": str(tmp_path / "LaunchAgents"),
             "app_dir": str(tmp_path / "Applications"),
@@ -409,9 +422,9 @@ def test_setup_finish_autodetects_existing_notes_folder(tmp_path) -> None:
 
 def test_auth_check_reports_unauthenticated_in_bootstrap(tmp_path) -> None:
     """Bootstrap mode returns 401 from /api/auth/check so the SPA routes to
-    the login view, where the first-run wizard renders. With auth off by
-    default nothing else ever routes there — a fresh install would open
-    straight into the app on the throwaway bootstrap workspace."""
+    the login view, where the first-run wizard renders — even for a caller that
+    already carries a valid session cookie for the throwaway workspace."""
+    from ciao.web.auth import SESSION_COOKIE
     from ciao.web.routes_api import auth_check
 
     serializer = URLSafeTimedSerializer("test-secret")
@@ -421,16 +434,21 @@ def test_auth_check_reports_unauthenticated_in_bootstrap(tmp_path) -> None:
     )
     app.state.serializer = serializer
     client = TestClient(app, base_url="http://localhost:8443")
+    client.cookies.set(SESSION_COOKIE, serializer.dumps({"user": "owner"}))
 
     app.state.config = CiaoConfig.from_env(
         {"CIAO_BOOTSTRAP_WORKSPACE": str(tmp_path / "boot")}
     )
     assert client.get("/api/auth/check").status_code == 401
 
+    # Configured workspace: the session cookie is what makes it a 200, since a
+    # token in .env means password protection is on.
     app.state.config = CiaoConfig.from_env(
         {"PWA_AUTH_TOKEN": "tok", "CIAO_WORKSPACE": str(tmp_path / "ws")}
     )
     assert client.get("/api/auth/check").status_code == 200
+    client.cookies.clear()
+    assert client.get("/api/auth/check").status_code == 401
 
 
 def test_auth_check_requires_session_when_password_enabled(tmp_path) -> None:
@@ -509,6 +527,7 @@ def test_setup_finish_foreground_handoff_to_launchd(tmp_path, monkeypatch) -> No
     resp = TestClient(app, base_url="http://localhost:8443").post(
         "/api/setup/finish",
         json={
+            "password": "wizard-pass",
             "workspace": str(tmp_path / "workspace"),
             "app_dir": str(tmp_path / "Applications"),
         },
@@ -542,6 +561,7 @@ def test_setup_finish_accepts_empty_push_contact(tmp_path) -> None:
     resp = TestClient(app, base_url="http://localhost:8443").post(
         "/api/setup/finish",
         json={
+            "password": "wizard-pass",
             "workspace": str(workspace),
             "push_contact": "",
             "launch_agents_dir": str(tmp_path / "LaunchAgents"),
@@ -558,6 +578,41 @@ def test_setup_finish_accepts_empty_push_contact(tmp_path) -> None:
         line.startswith("CIAO_PUSH_CONTACT=") and line != "CIAO_PUSH_CONTACT="
         for line in env_lines
     )
+
+
+def test_setup_finish_requires_a_password(tmp_path) -> None:
+    """Password protection is the default, so the wizard cannot skip it: the
+    bootstrap token it would otherwise inherit is machine-generated and unusable
+    from a second device."""
+    resp = _finish_client(tmp_path).post(
+        "/api/setup/finish",
+        json={
+            "workspace": str(tmp_path / "workspace"),
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+            "restart": False,
+        },
+    )
+
+    assert resp.status_code == 400
+    assert "password" in resp.json()["error"]
+    assert not (tmp_path / "workspace" / ".env").exists()
+
+
+def test_setup_finish_rejects_a_too_short_password(tmp_path) -> None:
+    resp = _finish_client(tmp_path).post(
+        "/api/setup/finish",
+        json={
+            "workspace": str(tmp_path / "workspace"),
+            "password": "ab",
+            "launch_agents_dir": str(tmp_path / "LaunchAgents"),
+            "app_dir": str(tmp_path / "Applications"),
+            "restart": False,
+        },
+    )
+
+    assert resp.status_code == 400
+    assert "at least" in resp.json()["error"]
 
 
 def test_setup_finish_requires_workspace(tmp_path) -> None:
@@ -596,6 +651,7 @@ def test_setup_finish_defaults_vault_inside_workspace(tmp_path) -> None:
     resp = TestClient(app, base_url="http://localhost:8443").post(
         "/api/setup/finish",
         json={
+            "password": "wizard-pass",
             "workspace": str(workspace),
             "launch_agents_dir": str(tmp_path / "LaunchAgents"),
             "app_dir": str(tmp_path / "Applications"),
@@ -627,6 +683,7 @@ def test_setup_finish_accepts_0000_host(tmp_path) -> None:
     resp = TestClient(app, base_url="http://0.0.0.0:8443").post(
         "/api/setup/finish",
         json={
+            "password": "wizard-pass",
             "workspace": str(tmp_path / "workspace"),
             "vault_root": str(tmp_path / "brain"),
             "launch_agents_dir": str(tmp_path / "LaunchAgents"),
@@ -671,6 +728,7 @@ def test_setup_finish_is_localhost_only(tmp_path) -> None:
     resp = TestClient(app, base_url="https://ciao.example").post(
         "/api/setup/finish",
         json={
+            "password": "wizard-pass",
             "workspace": str(tmp_path / "workspace"),
             "push_contact": "mailto:owner@example.com",
         },

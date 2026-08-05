@@ -5322,10 +5322,27 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
             status_code=400,
         )
 
+    # Password protection is not optional: the wizard collects the password, and
+    # the bootstrap token it would otherwise inherit is a machine-generated
+    # value nobody could type on a second device.
+    from ciao.web.auth import MIN_PWA_PASSWORD_LENGTH
+
+    password = str(body.get("password") or body.get("auth_token") or "").strip()
+    if len(password) < MIN_PWA_PASSWORD_LENGTH:
+        return JSONResponse(
+            {
+                "error": (
+                    "password is required and must be at least "
+                    f"{MIN_PWA_PASSWORD_LENGTH} characters"
+                )
+            },
+            status_code=400,
+        )
+
     written = setup_workspace(
         workspace,
-        auth_token=str(body.get("auth_token", "")).strip() or config.pwa_auth_token,
-        auth_required=bool(body.get("auth_required", False)),
+        auth_token=password,
+        auth_required=True,
         push_contact=push_contact,
         vault_root=str(body.get("vault_root", "")).strip() or None,
         vault_mode=vault_mode,
@@ -5342,6 +5359,11 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     # this it boots straight back into the bootstrap wizard.
     os.environ["CIAO_WORKSPACE"] = str(Path(workspace).expanduser().resolve())
     os.environ["PWA_PORT"] = str(port)
+    # Same reason for the credentials: `load_dotenv` does not override values
+    # already in the environment, so a stale PWA_AUTH_TOKEN inherited from the
+    # bootstrap process would outrank the password just written to .env.
+    os.environ["PWA_AUTH_TOKEN"] = password
+    os.environ["PWA_AUTH_REQUIRED"] = "true"
     # Best-effort: bring the menu bar companion up right away so setup ends
     # with the icon visible instead of waiting for the next login. Only for
     # the real per-user LaunchAgents dir — scripted/test setups pass a custom

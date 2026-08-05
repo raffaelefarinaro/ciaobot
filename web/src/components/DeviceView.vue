@@ -363,7 +363,7 @@ async function connectAsClient() {
   if (!password) {
     nodeActionError.value = true
     nodeActionResult.value =
-      'Enter the host password. If the host has none yet, enable PWA password protection on that machine first.'
+      'Enter the host password. If the host has none yet, set one in Settings → PWA password on that machine first.'
     return
   }
   if (!await askConfirm(

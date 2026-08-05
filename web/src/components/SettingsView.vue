@@ -83,7 +83,8 @@
                   Changing it here keeps this device connected; other clients have to log in again.
                 </template>
                 <template v-else>
-                  Protect this Ciaobot with a password. Required before other devices can connect as clients.
+                  Ciaobot is always password-protected — this is the password you type to open it,
+                  and the one another device needs to connect as a client.
                 </template>
               </p>
             </div>
@@ -98,10 +99,10 @@
           <div v-if="!authSettings" class="action-row"><span class="loading">Loading&hellip;</span></div>
           <template v-else>
             <div class="settings-form-panel node-peer-form">
-              <label class="choice-label checkbox-row">
-                <input type="checkbox" v-model="authRequiredDraft" :disabled="authSettingsSaving" />
-                Require password for PWA access
-              </label>
+              <p v-if="!authSettings.auth_required" class="hint hint--warn">
+                This instance is running unprotected because PWA_AUTH_REQUIRED=false is set in the
+                workspace .env. Setting a password here turns protection back on.
+              </p>
               <label v-if="authSettings.auth_required" class="settings-field">
                 <span class="ws-label">Current password</span>
                 <input
@@ -113,12 +114,12 @@
                 />
               </label>
               <label class="settings-field">
-                <span class="ws-label">{{ authSettings.auth_required ? 'New password (optional)' : 'Password' }}</span>
+                <span class="ws-label">New password</span>
                 <input
                   v-model="authNewPassword"
                   type="password"
                   class="routine-input"
-                  :placeholder="authSettings.auth_required ? 'Leave blank to keep current' : 'Choose a password'"
+                  placeholder="at least 4 characters"
                   autocomplete="new-password"
                   :disabled="authSettingsSaving"
                 />
@@ -4862,29 +4863,24 @@ interface AuthSettings {
 }
 
 const authSettings = ref<AuthSettings | null>(null)
-const authRequiredDraft = ref(false)
 const authCurrentPassword = ref('')
 const authNewPassword = ref('')
 const authSettingsSaving = ref(false)
 const authSettingsResult = ref('')
 const authSettingsError = ref(false)
 
+// Protection is the default and cannot be switched off from here (the server
+// rejects `auth_required: false`), so this card only changes the password.
 const canSaveAuthSettings = computed(() => {
   if (!authSettings.value) return false
-  const turningOn = authRequiredDraft.value && !authSettings.value.auth_required
-  const turningOff = !authRequiredDraft.value && authSettings.value.auth_required
-  const changingPassword = Boolean(authNewPassword.value.trim())
-  if (!(turningOn || turningOff || changingPassword)) return false
-  if (turningOn && !authNewPassword.value.trim()) return false
+  if (!authNewPassword.value.trim()) return false
   if (authSettings.value.auth_required && !authCurrentPassword.value) return false
   return true
 })
 
 async function fetchAuthSettings() {
   try {
-    const res = await api.get<AuthSettings>('/api/auth/settings')
-    authSettings.value = res
-    authRequiredDraft.value = res.auth_required
+    authSettings.value = await api.get<AuthSettings>('/api/auth/settings')
   } catch {
     authSettings.value = null
   }
@@ -4897,7 +4893,6 @@ async function saveAuthSettings() {
   authSettingsError.value = false
   try {
     const res = await api.post<AuthSettings & { ok?: boolean }>('/api/auth/settings', {
-      auth_required: authRequiredDraft.value,
       password: authNewPassword.value,
       current_password: authCurrentPassword.value,
     })
@@ -4905,12 +4900,9 @@ async function saveAuthSettings() {
       auth_required: res.auth_required,
       password_configured: res.password_configured,
     }
-    authRequiredDraft.value = res.auth_required
     authCurrentPassword.value = ''
     authNewPassword.value = ''
-    authSettingsResult.value = res.auth_required
-      ? 'Password protection is on.'
-      : 'Password protection is off.'
+    authSettingsResult.value = 'Password saved. Other devices have to log in again.'
   } catch (e) {
     authSettingsError.value = true
     authSettingsResult.value = apiErrorMessage(e, 'Could not save password settings')

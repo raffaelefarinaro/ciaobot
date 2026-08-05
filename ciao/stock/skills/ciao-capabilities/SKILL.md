@@ -48,7 +48,7 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 ### 4. Files
 
 - Create, preview, edit, and **restore** workspace and vault files from the PWA, with history — no terminal needed.
-- **In chat**: agent file touches surface as inline cards; open the viewer, pin beside the chat, and add line comments on selections. Freshly written `.md`/`.csv` files auto-surface in the pinned panel so you see them without hunting.
+- **In chat**: agent file touches surface as inline cards; open the viewer, pin beside the chat, and add line comments on selections — including while the agent is still working, in which case the comment rides along on your next message. Freshly written `.md`/`.csv` files auto-surface in the pinned panel so you see them without hunting.
 - **Drag to attach**: drag a file into the composer to insert an agent-accessible absolute path. On the host, Ciaobot uses the desktop path when the webview exposes it; from a client (or a sandboxed browser), it uploads the file into the active project folder on the host first. Images dropped this way upload as visual attachments.
 - **Per-chat drafts**: unsent composer text is cached locally per chat and restored after switching chats or reloading. Sending clears only the active chat's draft.
 - **Chat annotations**: select text in any message and attach a comment that rides on your next send.

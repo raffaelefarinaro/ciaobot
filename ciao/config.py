@@ -347,6 +347,8 @@ class CiaoConfig:
     workspace_root: Path
     state_path: Path
     media_root: Path
+    # Real installs get this from ``from_env``, which defaults it to True (see
+    # there); the field default only covers configs built directly in code.
     pwa_auth_required: bool = False
     # Extra origins accepted for state-changing HTTP + WebSocket handshakes when
     # the app is reached under a host it doesn't bind to (reverse proxy / tunnel
@@ -933,9 +935,6 @@ class CiaoConfig:
 
         source = env if env is not None else os.environ
 
-        pwa_auth_required_raw = source.get("PWA_AUTH_REQUIRED", "").strip().lower()
-        pwa_auth_required = pwa_auth_required_raw in {"true", "1", "yes", "y"}
-
         pwa_allowed_origins = tuple(
             o.strip()
             for o in source.get("CIAO_ALLOWED_ORIGINS", "").split(",")
@@ -943,6 +942,21 @@ class CiaoConfig:
         )
 
         pwa_auth_token = source.get("PWA_AUTH_TOKEN", "").strip()
+        pwa_auth_required_raw = source.get("PWA_AUTH_REQUIRED", "").strip().lower()
+        if pwa_auth_required_raw:
+            pwa_auth_required = pwa_auth_required_raw in {"true", "1", "yes", "y"}
+        else:
+            # Password protection is the default: setup asks for a password and
+            # writes PWA_AUTH_REQUIRED explicitly, so an unset value means either
+            # a workspace .env that predates the default or a hand-rolled one.
+            # Those are protected as soon as a token exists — the token *is* the
+            # password, readable in the workspace .env, and `ciao setup-url`
+            # mints a one-time localhost login for whoever no longer knows it.
+            # Without a token there is nothing a human could type, and enforcing
+            # would lock the owner out of their own install (the session secret
+            # is machine-generated), so protection stays off until a password is
+            # set in Settings.
+            pwa_auth_required = bool(pwa_auth_token)
         bootstrap_mode = not (
             (bool(pwa_auth_token) or not pwa_auth_required)
             and (bool(source.get("CIAO_WORKSPACE")) or bool(source.get("TELEGRAM_BRIDGE_WORKSPACE")))

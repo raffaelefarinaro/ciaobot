@@ -939,7 +939,7 @@ def setup_workspace(
     workspace: Path | str,
     *,
     auth_token: str | None = None,
-    auth_required: bool = False,
+    auth_required: bool = True,
     push_contact: str | None = None,
     vault_root: Path | str | None = None,
     vault_mode: str = "scratch",
@@ -1008,9 +1008,13 @@ def setup_workspace(
     # Empty contact = Web Push disabled until configured in Settings;
     # never invent a fake default.
     contact = (push_contact or "").strip()
-    desired_env: list[tuple[str, str]] = [("PWA_AUTH_TOKEN", token)]
-    if auth_required:
-        desired_env.append(("PWA_AUTH_REQUIRED", "true"))
+    # Always pin PWA_AUTH_REQUIRED: an unset value is read as "protect when a
+    # token exists" (see CiaoConfig.from_env), and a setup that deliberately
+    # opted out must survive that default.
+    desired_env: list[tuple[str, str]] = [
+        ("PWA_AUTH_TOKEN", token),
+        ("PWA_AUTH_REQUIRED", "true" if auth_required else "false"),
+    ]
     desired_env.extend([
         ("CIAO_PUSH_CONTACT", contact),
         ("CIAO_WORKSPACE", "."),
@@ -1290,9 +1294,16 @@ def _setup_command(args: argparse.Namespace) -> int:
             )
             return 1
 
+    auth_required = not args.no_auth
+    env_path = root / ".env"
+    try:
+        had_token = "PWA_AUTH_TOKEN=" in env_path.read_text(encoding="utf-8")
+    except OSError:
+        had_token = False
     written = setup_workspace(
         args.workspace,
         auth_token=args.auth_token,
+        auth_required=auth_required,
         push_contact=args.push_contact,
         workspace_name=args.workspace_name,
         python_path=args.python,
@@ -1302,6 +1313,13 @@ def _setup_command(args: argparse.Namespace) -> int:
     )
     for path in written:
         print(path)
+    if auth_required and not args.auth_token and not had_token:
+        print(
+            "\nPassword protection is on. No --auth-token was given, so a random "
+            f"password was written to {root / '.env'} (PWA_AUTH_TOKEN).\n"
+            "Open Ciaobot with the login URL below and change it in "
+            "Settings -> PWA password."
+        )
     plists = [
         Path(args.launch_agents_dir).expanduser() / name
         for name in ("com.ciao.server.plist", "com.ciao.menubar.plist")
@@ -1949,7 +1967,21 @@ def build_parser() -> argparse.ArgumentParser:
             "(default: personal)."
         ),
     )
-    setup_parser.add_argument("--auth-token", help="PWA auth token to write when .env is new.")
+    setup_parser.add_argument(
+        "--auth-token",
+        help=(
+            "PWA password to write when .env is new (a random one is generated "
+            "when omitted)."
+        ),
+    )
+    setup_parser.add_argument(
+        "--no-auth",
+        action="store_true",
+        help=(
+            "Write PWA_AUTH_REQUIRED=false instead of protecting the dashboard "
+            "with a password. Only for a machine nobody else can reach."
+        ),
+    )
     setup_parser.add_argument("--push-contact", help="Web Push contact to write when .env is new.")
     setup_parser.add_argument(
         "--python",

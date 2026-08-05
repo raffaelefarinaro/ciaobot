@@ -247,7 +247,7 @@
       >
         <div class="pfp-pop-header">
           <span class="pfp-sidebar-card-line" v-if="commentLineLabel(popoverComment)">{{ commentLineLabel(popoverComment) }}</span>
-          <div v-if="!projectsStore.isStreaming" class="pfp-sidebar-card-actions pfp-pop-actions">
+          <div class="pfp-sidebar-card-actions pfp-pop-actions">
             <button class="pfp-sidebar-card-edit" @click.stop="editFromPopover(popoverComment)" title="Edit">✎</button>
             <button class="pfp-sidebar-card-remove" @click.stop="deleteFromPopover(popoverComment.id)" title="Delete">×</button>
           </div>
@@ -662,6 +662,10 @@ async function openExternally(): Promise<void> {
   projectsStore.pushErrorToast('Could not open file', result.error)
 }
 
+// Set when an auto-reload was skipped because the user had unsaved work open;
+// applied as soon as the panel goes idle (see the isBusyAuthoring watcher).
+const deferredReload = ref(false)
+
 watch(() => props.filePath, () => load(), { immediate: true })
 
 watch(
@@ -669,12 +673,13 @@ watch(
   ([filePath, chatId, isStreaming], oldValues) => {
     const wasStreaming = oldValues ? oldValues[2] : false
     // Reload the file so the panel shows the model's latest version once its
-    // turn ends. Never while the user is mid-edit: `load()` resets the edit
-    // session, and wiping a half-typed edit the moment the model stops is the
-    // same class of loss the fileViewer store guards with canReplaceOpenFile.
-    // The user can hit Refresh after they Save or Cancel.
-    if (filePath && chatId && wasStreaming && !isStreaming && !isEditingText.value) {
-      load()
+    // turn ends. Never while the user is mid-edit or mid-comment: `load()`
+    // resets the edit session, and wiping half-typed work the moment the model
+    // stops is the same class of loss the fileViewer store guards with
+    // canReplaceOpenFile. The reload is deferred until they save or cancel.
+    if (filePath && chatId && wasStreaming && !isStreaming) {
+      if (isBusyAuthoring.value) deferredReload.value = true
+      else load()
     }
   }
 )
@@ -842,7 +847,10 @@ watch(
 // (shared with FileViewerModal). Only the surface-specific inputs are wired
 // here: the path/content sources, the anchor coordinate root (mainEl), and
 // closing this panel's hover-pin read popover when a compose opens.
-const isCommentable = computed(() => !loading.value && !error.value && kind.value !== 'image' && kind.value !== 'pdf' && !projectsStore.isStreaming)
+// Commenting stays available while the model works, matching FileViewerModal:
+// a comment is staged locally and rides along on the next message the user
+// sends (queued or steered), so there is nothing to wait for.
+const isCommentable = computed(() => !loading.value && !error.value && kind.value !== 'image' && kind.value !== 'pdf')
 
 const comments = useFileComments({
   path: () => cleanPath.value,
@@ -868,6 +876,19 @@ const {
   cancelEditComment, saveEditComment, handleEditImageUpload, removeEditImage,
 } = comments
 comments.setApplyHighlights(applyHighlights)
+
+// Anything the user has half-written in the panel: a text edit, a new comment,
+// or an edit of an existing one. Auto-reloads hold off while it is true, so a
+// model turn finishing mid-sentence never throws the work away — and then run
+// once the panel is idle again, so the view never stays silently stale.
+const isBusyAuthoring = computed(
+  () => isEditingText.value || commentDraft.value !== null || editingCommentId.value !== null,
+)
+watch(isBusyAuthoring, (busy) => {
+  if (busy || !deferredReload.value) return
+  deferredReload.value = false
+  refresh()
+})
 
 // Re-anchor the floating comment trigger on scroll, and close the hover-pin
 // read popover so it never floats detached from its highlight. Kept here (not
@@ -972,18 +993,15 @@ const isModifiedInLastTurn = computed(() => {
 watch(
   [() => projectsStore.isStreaming, () => isModifiedInLastTurn.value],
   ([isStreaming, isModified], [wasStreaming, wasModified]) => {
-    if (isStreaming) {
-      comments.cancelComment()
-      comments.editingCommentId.value = null
-      closeCommentPopover()
-    } else {
-      const justStoppedStreaming = wasStreaming && !isStreaming
-      const justFlippedModified = !wasModified && isModified
-      // Same guard as the stream-end reload above: the modified-file refresh
-      // must not clobber an edit the user has open in the panel.
-      if (isModified && (justStoppedStreaming || justFlippedModified) && !isEditingText.value) {
-        refresh()
-      }
+    if (isStreaming) return
+    const justStoppedStreaming = wasStreaming && !isStreaming
+    const justFlippedModified = !wasModified && isModified
+    // Same guard as the stream-end reload above: the modified-file refresh must
+    // not clobber an edit — or a comment the user is mid-way through writing
+    // while the model works — so it waits for them to finish.
+    if (isModified && (justStoppedStreaming || justFlippedModified)) {
+      if (isBusyAuthoring.value) deferredReload.value = true
+      else refresh()
     }
   }
 )
@@ -1001,6 +1019,7 @@ watch(() => props.filePath, () => {
   isEditingText.value = false
   editBuffer.value = ''
   editError.value = ''
+  deferredReload.value = false
 })
 </script>
 
