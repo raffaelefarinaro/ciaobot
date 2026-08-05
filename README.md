@@ -78,11 +78,12 @@ python3.13 -m venv ~/.ciaobot-venv
 Then open `http://localhost:8443` and follow the setup wizard:
 
 - **Workspace folder** (default `~/ciaobot`) — your second brain (`memory-vault/`) plus app config and runtime state. Sync this folder (GitHub, Drive, iCloud, …) so your vault follows you across machines.
+- **Dashboard password** — Ciaobot is password-protected by default: this is what you type to open it, and what another device needs to connect as a client. Change it later in Settings → PWA password.
 - **Model provider** — Claude Code, Codex, or another configured backend.
 
 The wizard writes config, initializes the workspace as a git repo (with a `.gitignore` for secrets and runtime state), and installs the macOS engine LaunchAgent. A cask installation uses `Ciaobot.app`; package-only installs retain the legacy recovery launcher during the migration release.
 
-For scripted setups: `ciao setup --workspace <dir>`. If a setup link returns `invalid setup token`, mint a fresh one with `ciao setup-url --workspace <dir>`.
+For scripted setups: `ciao setup --workspace <dir> --auth-token <password>` (a random password is generated into `.env` when omitted; `--no-auth` opts out of protection entirely). If a setup link returns `invalid setup token`, mint a fresh one with `ciao setup-url --workspace <dir>`.
 
 Contributors running from a git checkout: see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
@@ -148,7 +149,7 @@ When your message mentions a name that appears in the vault index, the agent get
 
 - Sidebar workspaces per life area (personal, work, a client) — each with its own vault, projects, and default model.
 - Projects group related chats and inject durable notes and context into every turn.
-- Comment on any passage of a reply — select text, attach a note, and it rides along with your next prompt; queue follow-ups while the agent is still working.
+- Comment on any passage of a reply — select text, attach a note (typed or dictated), and it rides along with your next prompt; queue follow-ups while the agent is still working.
 - Per-chat model picker with provider thinking levels on top of per-workspace defaults.
 - Fork conversation: create a new independent chat in the same project starting from any completed agent answer, preserving history.
 - Delegates: a chat's agent spawns writable delegate chats (own model, own resumable session, full tool access) to work in parallel, and is woken with a fresh turn when each finishes. Capped at 6 per chat; delegates cannot nest.
@@ -161,7 +162,7 @@ When your message mentions a name that appears in the vault index, the agent get
 **Files and documents**
 
 - Completed turns surface touched files as clickable `Outputs` chips below the final reply. Expand `Activity` to inspect the chronological notes, tool calls, and file cards; click a file for history, diff, and restore.
-- Pin a document beside the chat and add line-level comments on the preview (attached to your next message, like chat comments).
+- Pin a document beside the chat and add line-level comments on the preview, dictated or typed (attached to your next message, like chat comments).
 - Rich previews: images inline, PDFs in a built-in viewer, PowerPoint (`.pptx`) converted to PDF for display (requires LibreOffice on the machine running Ciaobot).
 - Create, edit, and restore vault files from the UI, with snapshots behind every agent edit.
 
