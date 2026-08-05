@@ -158,6 +158,67 @@ describe('ChatLayout', () => {
     expect(event.defaultPrevented).toBe(true)
     wrapper.unmount()
   })
+
+  it('routes Alt+D to the active chat composer in the web PWA', async () => {
+    window.__CIAOBOT_DESKTOP__ = undefined
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      value: 1180,
+    })
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/', component: EmptyStub }],
+    })
+    await router.push('/')
+    await router.isReady()
+
+    const store = useProjectStore()
+    store.projects = [{
+      project_id: 'project-1',
+      name: 'General',
+      workspace: 'personal',
+    }] as unknown as typeof store.projects
+    store.chats = [{
+      chat_id: 'chat-1',
+      project_id: 'project-1',
+      title: 'Test chat',
+    }] as unknown as typeof store.chats
+    store.activeChatId = 'chat-1'
+    store.bootstrapped = true
+    vi.spyOn(store, 'fetchAll').mockResolvedValue()
+
+    const taskStore = useTaskStore()
+    vi.spyOn(taskStore, 'fetchSchedules').mockResolvedValue()
+    vi.spyOn(taskStore, 'fetchLoops').mockResolvedValue()
+
+    const { default: ChatLayout } = await import('../ChatLayout.vue')
+    const wrapper = mount(ChatLayout, {
+      global: {
+        plugins: [router],
+        stubs: {
+          ChatPanel: ChatPanelStub,
+          ProjectSidebar: EmptyStub,
+          ProjectView: EmptyStub,
+          SchedulePanel: EmptyStub,
+          SettingsView: EmptyStub,
+          FileViewerModal: EmptyStub,
+          PinnedFilePanel: EmptyStub,
+          PaneHeader: EmptyStub,
+          HomeRecentChats: EmptyStub,
+        },
+      },
+    })
+    await flushPromises()
+
+    const event = new KeyboardEvent('keydown', { key: 'd', altKey: true, cancelable: true })
+    window.dispatchEvent(event)
+
+    expect(toggleDictation).toHaveBeenCalledOnce()
+    expect(event.defaultPrevented).toBe(true)
+    wrapper.unmount()
+  })
+
 })
 
 describe('ChatLayout home arrow navigation', () => {

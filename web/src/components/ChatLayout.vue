@@ -610,32 +610,33 @@ function onShortcutKeydown(e: KeyboardEvent) {
   // Arrow keys and Esc are handled by onUnreservedKeydown, which is bound in
   // both the PWA and the desktop app. Handling them here too made the desktop
   // app run them twice.
+  const isDesktop = isDesktopApp()
   const mod = e.metaKey || e.ctrlKey
+  const alt = e.altKey
 
-  // Cmd+T: new chat in the default General project.
-  if (mod && (e.key === 't' || e.key === 'T')) {
+  // New Chat: Cmd+T (Desktop) or Option+N (Web/PWA).
+  if ((isDesktop && mod && (e.key === 't' || e.key === 'T')) || (!isDesktop && alt && (e.key === 'n' || e.key === 'N'))) {
     e.preventDefault()
     void store.newChatInGeneral()
     return
   }
 
-  // Cmd+D: toggle dictation in the active chat's composer (start/stop).
-  if (mod && (e.key === 'd' || e.key === 'D')) {
+  // Dictation: Cmd+D (Desktop) or Option+D (Web/PWA).
+  if ((isDesktop && mod && (e.key === 'd' || e.key === 'D')) || (!isDesktop && alt && (e.key === 'd' || e.key === 'D'))) {
     if (!store.activeChat) return
     e.preventDefault()
     chatPanelRef.value?.toggleDictation()
     return
   }
 
-  // Cmd+A: archive the active chat. Skip while typing so Cmd+A keeps its
+  // Archive: Cmd+A (Desktop) or Option+A (Web/PWA). Skip while typing so Cmd+A/Alt+A keeps its
   // select-all meaning inside text fields.
-  if (mod && (e.key === 'a' || e.key === 'A')) {
+  if ((isDesktop && mod && (e.key === 'a' || e.key === 'A')) || (!isDesktop && alt && (e.key === 'a' || e.key === 'A'))) {
     if (isTypingTarget(e.target) || !store.activeChat) return
     e.preventDefault()
     chatPanelRef.value?.archiveActiveChat()
     return
   }
-
 }
 
 function closeProject() {
@@ -698,9 +699,7 @@ onMounted(() => {
   window.addEventListener('touchcancel', onTouchEnd, { passive: true })
   // Arrow keys and Esc are not browser-reserved, so they bind in the PWA too.
   window.addEventListener('keydown', onUnreservedKeydown)
-  // Global keyboard shortcuts (Cmd+T, Cmd+A, Cmd+D) live in the desktop app
-  // only: in a browser tab those combos are owned by the browser.
-  if (isDesktopApp()) window.addEventListener('keydown', onShortcutKeydown)
+  window.addEventListener('keydown', onShortcutKeydown)
 })
 
 onBeforeUnmount(() => {
@@ -710,7 +709,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('touchend', onTouchEnd)
   window.removeEventListener('touchcancel', onTouchEnd)
   window.removeEventListener('keydown', onUnreservedKeydown)
-  if (isDesktopApp()) window.removeEventListener('keydown', onShortcutKeydown)
+  window.removeEventListener('keydown', onShortcutKeydown)
   window.removeEventListener('mousemove', handleSidebarDrag)
   window.removeEventListener('mouseup', stopSidebarDrag)
   window.removeEventListener('mousemove', handleSplitDrag)

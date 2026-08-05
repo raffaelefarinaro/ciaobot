@@ -56,16 +56,28 @@
           </div>
         </div>
 
-        <!-- Keyboard shortcuts (desktop app only) -->
-        <div v-if="inDesktopApp" class="card">
+        <!-- Keyboard shortcuts -->
+        <div class="card">
           <div class="settings-card-header">
             <p class="section-title">keyboard shortcuts</p>
-            <p class="hint">Global combos that work while a chat is open. Text fields keep their normal meaning: Cmd+A still selects all, and Esc inside the composer closes the slash-command picker instead of the chat.</p>
+            <p class="hint">Global combos that work while a chat is open. Text fields keep their normal meaning: Cmd+A/Alt+A still selects all, and Esc inside the composer closes the slash-command picker instead of the chat.</p>
           </div>
           <ul class="shortcut-list">
-            <li><kbd>&#8984;T</kbd><span>Open a new chat in the default General project</span></li>
-            <li><kbd>&#8984;D</kbd><span>Toggle voice dictation (start / stop)</span></li>
-            <li><kbd>&#8984;A</kbd><span>Archive the open chat (asks to confirm)</span></li>
+            <li>
+              <kbd v-if="inDesktopApp">&#8984;T</kbd>
+              <kbd v-else>&#8224;N</kbd>
+              <span>Open a new chat in the default General project</span>
+            </li>
+            <li>
+              <kbd v-if="inDesktopApp">&#8984;D</kbd>
+              <kbd v-else>&#8224;D</kbd>
+              <span>Toggle voice dictation (start / stop)</span>
+            </li>
+            <li>
+              <kbd v-if="inDesktopApp">&#8984;A</kbd>
+              <kbd v-else>&#8224;A</kbd>
+              <span>Archive the open chat (asks to confirm)</span>
+            </li>
             <li><kbd>Esc</kbd><span>Close the open chat (when not typing)</span></li>
             <li><kbd>&#8593;&#8595;&#8592;&#8594;</kbd><span>On the home screen: move between recent chats</span></li>
             <li><kbd>&#8629;</kbd><span>On the home screen: open the highlighted chat</span></li>
