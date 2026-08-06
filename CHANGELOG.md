@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.7.2 - 2026-08-06
+
+### Added
+- feat(web): dictation in comment composer (`9773344`)
+- feat(web): enable keyboard shortcuts in PWA with non-conflicting combos (`a3c2a44`)
+
+### Changed
+- Merge pull request #249 from raffaelefarinaro/chore/sync-develop-v0.7.1 (`3a94e6c`)
+- Merge fix/automation-page-clarity into develop (`591fa4b`)
+- Merge fix/login-toggle-crash into develop (`de7fc32`)
+- Merge pull request #250 from raffaelefarinaro/feat/comment-dictation (`346ef15`)
+- auto-commit: accumulated develop changes (`2cb10f4`)
+- macOS: quarantine-free install, native voice + on-device titles, drop 4 dependencies (#251) (`90afd6f`)
+- Merge branch 'develop' of https://github.com/raffaelefarinaro/ciaobot into develop (`9c4fa9c`)
+- changes (`91eda03`)
+
+### Fixed
+- fix(web): make Settings → Automations answer what a user asks it (`cd9d266`)
+- fix(menubar): skip host label when toggling launch-at-login (`3d30473`)
+- fix(web): make the restart notice a movable card, not a full-screen takeover (`78b83bd`)
+- fix(web): bound the restart message the notice card renders (`e85ceee`)
+- fix(setup): stop resurrecting the retired menu-bar LaunchAgent (`75b6555`)
+
+### Maintenance
+- docs(license): add copyright line and Apache appendix (`aa4c919`)
+- chore(deps): sync uv.lock to 0.7.1 (`e823ec9`)
+
 ## v0.7.1 - 2026-08-04
 
 ### Added
