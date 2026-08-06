@@ -104,13 +104,23 @@ npm run build        # typecheck + Vite build, outputs to ciao/web/static/
 
 ## macOS desktop development
 
-The Tauri 2 shell requires macOS 13+, Node 22.x, and Rust 1.90.0 with
-`aarch64-apple-darwin` and `x86_64-apple-darwin` targets:
+The Tauri 2 shell requires macOS 13+, Node 22.x, Rust 1.90.0 with
+`aarch64-apple-darwin` and `x86_64-apple-darwin` targets, and `swiftc` from the
+Xcode Command Line Tools (it builds the `ciaobot-speech` voice sidecar).
+
+`./scripts/check-desktop.sh` runs the whole gate — the same commands CI's
+`build-desktop` job does — and asserts the sidecar ends up bundled, universal,
+signed, and runnable inside the built app. Run it after any change under
+`desktop/`; `--fast` skips the bundle build when you have not touched
+`desktop/speech/` or `tauri.conf.json`. `prepare-release` runs it too.
+
+The individual steps, if you need them separately:
 
 ```bash
 cd desktop
 npm ci
-npm run build
+npm run build            # desktop frontend (vite) only
+npm run build:speech     # Swift sidecar -> src-tauri/binaries/ (also runs via pretauri)
 cd src-tauri
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
