@@ -9,9 +9,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "build:speech": "./speech/build.sh",
+    "build:native": "./native/build.sh",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",
-    "pretauri": "npm run build:speech",
+    "pretauri": "npm run build:native",
     "tauri": "tauri"
   },
   "dependencies": {

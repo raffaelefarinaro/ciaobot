@@ -1,24 +1,31 @@
-// ciaobot-speech — the native macOS voice sidecar.
+// ciaobot-native — a bridge to the macOS frameworks Python cannot reach.
 //
-// Ciaobot's engine is Python, but the two APIs this wraps are not reachable from
-// it. Apple's on-device dictation (`SpeechAnalyzer` / `DictationTranscriber`,
-// macOS 26+) is a Swift-only API: the classes are not ObjC-visible, so pyobjc
-// cannot see them, and the `SFSpeechAnalyzer` ObjC class that backs them is not
-// in the public headers. `AVSpeechSynthesizer` *is* ObjC, but reaching it from
-// Python would mean adding a pyobjc-framework-AVFoundation dependency purely to
-// pick a voice, so it lives here too and the engine ships no voice dependencies
-// at all.
+// Ciaobot's engine is Python, and none of the three APIs wrapped here are
+// usable from it. Apple's on-device dictation (`SpeechAnalyzer` /
+// `DictationTranscriber`, macOS 26+) and the on-device LLM (`FoundationModels`,
+// macOS 26+) are Swift-only: their types are not ObjC-visible, so pyobjc cannot
+// see them, and the `SFSpeechAnalyzer` ObjC class backing the former is not in
+// the public headers. `AVSpeechSynthesizer` *is* ObjC, but reaching it from
+// Python would mean a pyobjc-framework-AVFoundation dependency purely to pick a
+// voice, so it lives here too and the engine ships no voice dependencies at all.
 //
-// This binary replaced mlx-whisper (hear) and kokoro-onnx (speak). Both were
-// optional pip installs that downloaded model weights on first use — 340 MB in
-// Kokoro's case. Apple's models are part of the OS.
+// This binary replaced three third-party dependencies with frameworks that are
+// already part of the OS: mlx-whisper (hear), kokoro-onnx (speak), and the
+// `apfel` Homebrew CLI (respond). The first two downloaded model weights on
+// first use — 340 MB in Kokoro's case.
 //
-// Three subcommands, all one-shot and file/stdio based so the engine can treat
+// `respond` deliberately calls FoundationModels directly rather than shelling
+// out to Apple's `fm` CLI: `fm` only ships with macOS 27, while the framework it
+// wraps has been present since macOS 26, so going straight to the framework
+// works a full OS release earlier and depends on no external binary.
+//
+// Four subcommands, all one-shot and file/stdio based so the engine can treat
 // it as a plain subprocess:
 //
-//   ciaobot-speech probe                     -> JSON: what this machine supports
-//   ciaobot-speech hear <file> [--locale L]  -> stdout: the transcript
-//   ciaobot-speech speak [--voice V] [--locale L] < text -> stdout: WAV bytes
+//   ciaobot-native probe                     -> JSON: what this machine supports
+//   ciaobot-native hear <file> [--locale L]  -> stdout: the transcript
+//   ciaobot-native speak [--voice V] [--locale L] < text -> stdout: WAV bytes
+//   ciaobot-native respond [--instructions S] < prompt   -> stdout: the reply
 //
 // `hear` reads a file rather than the microphone on purpose: the PWA already
 // records audio in the browser and hands the engine a path. Never opening an
@@ -26,6 +33,7 @@
 // signed bundle's permission grants reset on every update.
 import AVFoundation
 import Foundation
+import FoundationModels
 import Speech
 
 // MARK: - Exit and output helpers
@@ -40,6 +48,7 @@ enum ExitCode: Int32 {
     case audioUnreadable = 67
     case emptyResult = 68
     case failure = 69
+    case modelUnavailable = 70
 }
 
 func fail(_ code: ExitCode, _ message: String) -> Never {
@@ -144,7 +153,19 @@ func runProbe() async {
         "best_quality": voices.first?["quality"] ?? "none",
     ]
 
-    let payload: [String: Any] = ["hear": hear, "speak": speak]
+    var model: [String: Any] = ["available": false, "reason": "requires macOS 26 or newer"]
+    if #available(macOS 26.0, *) {
+        switch SystemLanguageModel.default.availability {
+        case .available:
+            model = ["available": true]
+        case .unavailable(let reason):
+            model = ["available": false, "reason": modelUnavailableReason(reason)]
+        @unknown default:
+            model = ["available": false, "reason": "the on-device model is unavailable"]
+        }
+    }
+
+    let payload: [String: Any] = ["hear": hear, "speak": speak, "model": model]
     guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
         fail(.failure, "could not serialize the probe result")
     }
@@ -372,13 +393,63 @@ func runSpeak(requested: String, explicit: String) {
     FileHandle.standardOutput.write(wavContainer(pcm: pcm, sampleRate: rate))
 }
 
+// MARK: - respond (on-device LLM)
+
+/// Why the model cannot be used, phrased for a settings screen.
+@available(macOS 26.0, *)
+func modelUnavailableReason(_ reason: SystemLanguageModel.Availability.UnavailableReason) -> String {
+    switch reason {
+    case .deviceNotEligible:
+        return "this Mac does not support Apple Intelligence"
+    case .appleIntelligenceNotEnabled:
+        return "Apple Intelligence is off; enable it in System Settings > Apple Intelligence & Siri"
+    case .modelNotReady:
+        return "the on-device model is still downloading; try again shortly"
+    @unknown default:
+        return "the on-device model is unavailable"
+    }
+}
+
+@available(macOS 26.0, *)
+func runRespond(instructions: String) async {
+    let input = FileHandle.standardInput.readDataToEndOfFile()
+    guard let prompt = String(data: input, encoding: .utf8)?
+        .trimmingCharacters(in: .whitespacesAndNewlines), !prompt.isEmpty
+    else {
+        fail(.usage, "respond expects the prompt on stdin")
+    }
+
+    let model = SystemLanguageModel.default
+    if case .unavailable(let reason) = model.availability {
+        // Its own exit code: "Apple Intelligence is switched off" is a
+        // different problem from "the model errored", and the engine falls
+        // back to a cloud model quietly in the first case.
+        fail(.modelUnavailable, modelUnavailableReason(reason))
+    }
+
+    let session = instructions.isEmpty
+        ? LanguageModelSession()
+        : LanguageModelSession(instructions: instructions)
+    do {
+        let response = try await session.respond(to: prompt)
+        let text = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty {
+            fail(.emptyResult, "the model returned no text")
+        }
+        emit(text)
+    } catch {
+        fail(.failure, "the on-device model failed: \(error.localizedDescription)")
+    }
+}
+
 // MARK: - Entry point
 
 let usage = """
 usage:
-  ciaobot-speech probe
-  ciaobot-speech hear <audio-file> [--locale en-US]
-  ciaobot-speech speak [--locale en-US] [--voice <identifier-or-name>] < text
+  ciaobot-native probe
+  ciaobot-native hear <audio-file> [--locale en-US]
+  ciaobot-native speak [--locale en-US] [--voice <identifier-or-name>] < text
+  ciaobot-native respond [--instructions <system prompt>] < prompt
 """
 
 /// Runs an async body from synchronous `main`, keeping the main thread free.
@@ -396,7 +467,7 @@ func runBlocking(_ body: @escaping @Sendable () async -> Void) {
 }
 
 @main
-struct CiaobotSpeech {
+struct CiaobotNative {
     static func main() {
         let arguments = Arguments(Array(CommandLine.arguments.dropFirst()))
         switch arguments.command {
@@ -416,6 +487,12 @@ struct CiaobotSpeech {
                 requested: arguments.option("locale", default: "en-US"),
                 explicit: arguments.option("voice")
             )
+        case "respond":
+            guard #available(macOS 26.0, *) else {
+                fail(.unsupportedOS, "the on-device model requires macOS 26 or newer")
+            }
+            let instructions = arguments.option("instructions")
+            runBlocking { await runRespond(instructions: instructions) }
         default:
             fail(.usage, usage)
         }

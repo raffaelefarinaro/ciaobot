@@ -379,7 +379,7 @@ class CiaoConfig:
     title_model_override: str = ""
     # Voice transcription engine: ``cloud`` (OpenAI API, needs
     # OPENAI_API_KEY) or ``local`` (Apple on-device dictation via the
-    # ciaobot-speech sidecar, macOS 26+). Runtime-overridable from the PWA
+    # ciaobot-native sidecar, macOS 26+). Runtime-overridable from the PWA
     # Settings → Models tab, which hides ``local`` where it cannot run.
     transcription_engine: str = "cloud"
     # BCP-47 language for the on-device engines. Dictation needs a matching

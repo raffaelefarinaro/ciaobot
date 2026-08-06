@@ -72,15 +72,22 @@ opencli list   # see available adapters
 
 Note: many adapters require the Browser Bridge Chrome extension and an logged-in Chrome session.
 
-### `apfel`: Apple Intelligence CLI
+### Apple Intelligence (on-device chat titles)
 
-Provides local-first chat title generation using macOS on-device models.
+Nothing to install. Selecting **Apple** as the Chat titles model in Settings →
+Models generates titles with Apple's on-device Foundation Model through the
+`ciaobot-native` sidecar bundled in `Ciaobot.app` — no API key, no network, no
+per-title cost.
 
-```bash
-# Install: https://github.com/Arthur-Ficial/apfel
-brew install apfel
-```
-No API key or network setup is needed; it queries the macOS on-device Apple Foundation Models via the Neural Engine.
+This replaced the `apfel` Homebrew CLI, which did the same job through the same
+Apple models but had to be installed and kept up to date separately. Ciaobot
+calls `FoundationModels` directly rather than Apple's `fm` CLI, because `fm`
+only ships with macOS 27 while the framework behind it has been present since
+macOS 26.
+
+Requires macOS 26+, the desktop app, and Apple Intelligence switched on in
+System Settings → Apple Intelligence & Siri. When any of those is missing,
+Settings says which one and titles fall back to the configured cloud model.
 
 
 ### Python 3 + `google-cloud-bigquery`
@@ -233,7 +240,7 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CIAO_OLLAMA_LOCAL_URL`: base URL of the *local* Ollama daemon used for locally-installed models, independent of `CIAO_OLLAMA_URL` (which may point at ollama.com when a cloud key is set). Default `http://localhost:11434`. Local models route here with the literal `ollama` token; cloud models keep going to `CIAO_OLLAMA_URL`. For local routes, Ciaobot maps Claude Code's internal haiku/sonnet/opus/subagent/classifier slots to the selected local model so those background calls do not fall back to unsupported `claude-*` IDs.
 - `CIAO_OLLAMA_LOCAL_MODELS`: comma-separated list of local-daemon model IDs to pin into the pickers (e.g. `gemma4:12b-it-qat`). Usually unnecessary: at startup Ciaobot auto-discovers installed models via `GET <local_url>/api/tags` and merges them in (models already in `CIAO_OLLAMA_MODELS` keep their cloud routing). Local models appear in the personal Claude bucket, badged as local.
 - `CIAO_OLLAMA_LOCAL_DISCOVERY`: set to `false`/`0` to disable the startup auto-discovery of local daemon models. Default enabled; discovery is best-effort with a 2s timeout, so a missing daemon just means no local models.
-- `CIAO_OLLAMA_TITLE_MODEL`: cheap model used to auto-title Ollama-routed chats (the chat's own `:cloud` model is usually subscription-gated and overkill for 50-token titles). Default `gemma4:e2b-it-qat`. Other free-tier-friendly options: `gemma3:4b`, `qwen3:8b`, `gpt-oss:20b`, `nemotron-3-nano:30b`. Anthropic chats keep titling via `CIAO_TITLE_MODEL` (default `haiku`) and ignore this knob. When the `apfel` CLI is on PATH, the title call uses it first. If `apfel` is unavailable or fails, Ciaobot falls back to the Claude Agent SDK with the same Ollama env injection used for chats.
+- `CIAO_OLLAMA_TITLE_MODEL`: cheap model used to auto-title Ollama-routed chats (the chat's own `:cloud` model is usually subscription-gated and overkill for 50-token titles). Default `gemma4:e2b-it-qat`. Other free-tier-friendly options: `gemma3:4b`, `qwen3:8b`, `gpt-oss:20b`, `nemotron-3-nano:30b`. Anthropic chats keep titling via `CIAO_TITLE_MODEL` (default `haiku`) and ignore this knob. Selecting **Apple** as the title model uses the on-device Foundation Model instead; if it is unavailable or fails, Ciaobot falls back to the Claude Agent SDK with the same Ollama env injection used for chats.
 - `CIAO_OLLAMA_WEBSEARCH_HOOK`: kill switch for the PostToolUse hook that backfills WebSearch on Ollama-cloud-routed chats. Ollama's Anthropic-compat layer doesn't execute the server-side `web_search` tool, so Claude Code's built-in WebSearch returns an empty boilerplate; the hook reruns the query against Ollama's standalone `POST /api/web_search` and injects the real results as `additionalContext`. Default `1` (enabled). Set `0` to disable. No-op on the Anthropic path (where WebSearch works natively) and on local-daemon routes. See `ciao/observability/hooks.py`.
 - `CIAO_OLLAMA_AUTO_CLASSIFIER`: **removed**. Auto mode is now always live for Ollama-routed chats because the bundled `claude` CLI's permission classifier resolves to an Ollama-served model. Previously this was an opt-in flag because the classifier targeted Anthropic's server-side gate, which ollama.com and local daemons do not expose; the tier-remap env now injected on Ollama routes (`ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS,FABLE}_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`, `CLAUDE_CODE_AUTO_MODE_MODEL`, `CLAUDE_CODE_BG_CLASSIFIER_MODEL`) fixes that. Delete `CIAO_OLLAMA_AUTO_CLASSIFIER` from your `.env` if it is still there.
 - `CIAO_INSIGHTS_DISABLED`: set to `true`/`yes`/`on` to disable post-archive session insights extraction. Default is enabled (false). When enabled, after a chat is archived, raw JSONL is filtered and run through a model to extract errors, dead ends, new entities, decisions, and reusable code, then appended as a `## Session insights` section to the archive markdown.
@@ -270,10 +277,10 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CLAUDE_MODELS`: comma-separated list of Anthropic models in the picker. Default `opus,sonnet,haiku`.
 - `CIAO_TITLE_MODEL`: model used to auto-title Anthropic chats. Default `haiku`.
 - `CIAO_TITLE_MODEL_OVERRIDE`: env-level default for the title-model override normally set from the PWA (Settings → Models tab, persisted in `.runtime/app_settings.json`). When set (either way), it wins over both `CIAO_OLLAMA_TITLE_MODEL` and `CIAO_TITLE_MODEL` and is routed per model: local daemon, Ollama cloud, or Anthropic alias. Empty = automatic routing.
-- `CIAO_TRANSCRIPTION_ENGINE`: voice dictation engine, `cloud` (default; OpenAI API, needs `OPENAI_API_KEY`) or `local` (Apple on-device dictation via the `ciaobot-speech` sidecar in `Ciaobot.app`; free, nothing to download, needs macOS 26+ and a dictation language installed in System Settings → Keyboard → Dictation). Settings → Models hides `local` where it cannot run.
-- `CIAO_SPEECH_SIDECAR`: absolute path to the `ciaobot-speech` binary that backs both on-device voice engines. Normally unset — the engine finds it inside the installed `Ciaobot.app`. Point it at `desktop/src-tauri/binaries/ciaobot-speech-aarch64-apple-darwin` to test a locally built sidecar (`npm run build:speech` in `desktop/`) without installing the app.
+- `CIAO_TRANSCRIPTION_ENGINE`: voice dictation engine, `cloud` (default; OpenAI API, needs `OPENAI_API_KEY`) or `local` (Apple on-device dictation via the `ciaobot-native` sidecar in `Ciaobot.app`; free, nothing to download, needs macOS 26+ and a dictation language installed in System Settings → Keyboard → Dictation). Settings → Models hides `local` where it cannot run.
+- `CIAO_NATIVE_SIDECAR`: absolute path to the `ciaobot-native` binary that backs both on-device voice engines. Normally unset — the engine finds it inside the installed `Ciaobot.app`. Point it at `desktop/src-tauri/binaries/ciaobot-native-aarch64-apple-darwin` to test a locally built sidecar (`npm run build:native` in `desktop/`) without installing the app.
 - `CIAO_TRANSCRIPTION_LOCALE`: BCP-47 language for both on-device engines — dictation matches it against the installed dictation languages, and the synthesizer picks a voice for it. Default `en-US`.
-- `CIAO_TTS_ENGINE`: read-aloud (speech synthesis) engine, `cloud` (default; OpenAI `gpt-4o-mini-tts`, needs `OPENAI_API_KEY`) or `local` (the macOS system synthesizer via the `ciaobot-speech` sidecar; free, on-device, nothing to download). Runtime-overridable from Settings → Models.
+- `CIAO_TTS_ENGINE`: read-aloud (speech synthesis) engine, `cloud` (default; OpenAI `gpt-4o-mini-tts`, needs `OPENAI_API_KEY`) or `local` (the macOS system synthesizer via the `ciaobot-native` sidecar; free, on-device, nothing to download). Runtime-overridable from Settings → Models.
 - `CIAO_TTS_CLOUD_VOICE`: OpenAI voice preset for the cloud engine. Default `nova`.
 - `CIAO_TTS_LOCAL_VOICE`: macOS voice identifier or name for the local engine (e.g. `com.apple.voice.compact.en-US.Samantha`). Empty by default, which means the highest-quality installed voice for `CIAO_TRANSCRIPTION_LOCALE` — preferring premium, then enhanced, then default. The stock voices are all the basic tier; voices marked **Premium** (then Enhanced) sound markedly better and are a free download under System Settings → Accessibility → Read & Speak → System voice → Manage Voices ([Apple's guide](https://support.apple.com/guide/mac-help/mchlp2290/mac)). Ciaobot picks the best installed voice automatically, so downloading one is enough. Siri's voices are not available to third-party apps.
 - `CIAO_MAX_IMAGE_BYTES` / `CIAO_MAX_VOICE_BYTES`: upload size caps. Defaults 10 MB / 25 MB.

@@ -24,7 +24,7 @@
     ],
     "createUpdaterArtifacts": true,
     "externalBin": [
-      "binaries/ciaobot-speech"
+      "binaries/ciaobot-native"
     ],
     "icon": [
       "../../ciao/stock/deploy/face_template.png",

@@ -5,14 +5,14 @@ Two engines each, selected independently:
 * Hear **cloud** — OpenAI ``gpt-transcribe`` (needs ``OPENAI_API_KEY``;
   model overridable via ``CIAO_TRANSCRIPTION_MODEL``).
 * Hear **local** — Apple's on-device dictation (macOS 26+), through the
-  ``ciaobot-speech`` sidecar bundled in ``Ciaobot.app``.
+  ``ciaobot-native`` sidecar bundled in ``Ciaobot.app``.
 * Speak **cloud** — OpenAI ``gpt-4o-mini-tts`` (same ``OPENAI_API_KEY``).
 * Speak **local** — ``AVSpeechSynthesizer``, through the same sidecar.
 
 The local engines used to be mlx-whisper and kokoro-onnx: optional pip installs
 that pulled model weights on first use, 340 MB in Kokoro's case. Both are gone.
 Apple ships equivalents inside the OS, so local voice now costs no download and
-no dependency — see ``desktop/speech/main.swift`` for why a Swift sidecar is
+no dependency — see ``desktop/native/main.swift`` for why a Swift sidecar is
 required rather than calling those frameworks from Python.
 
 The trade is reach, not just size. Dictation needs macOS 26 or newer, and both
@@ -27,95 +27,30 @@ Engine selection lives in ``CiaoConfig.transcription_engine`` /
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
-import os
 import re
-import shutil
-import sys
-from functools import lru_cache
 from pathlib import Path
 
 from openai import AsyncOpenAI
 
+from ciao import native_sidecar
 from ciao.config import BridgeConfig
 
 logger = logging.getLogger(__name__)
 
-SIDECAR_NAME = "ciaobot-speech"
+# The sidecar plumbing (locating the binary, probing, running a subcommand)
+# is shared with chat titles, so it lives in ciao/native_sidecar.py.
+SIDECAR_EXIT_UNSUPPORTED_OS = native_sidecar.EXIT_UNSUPPORTED_OS
+SIDECAR_EXIT_LOCALE_UNAVAILABLE = native_sidecar.EXIT_LOCALE_UNAVAILABLE
+SIDECAR_EXIT_AUDIO_UNREADABLE = native_sidecar.EXIT_AUDIO_UNREADABLE
+SIDECAR_EXIT_EMPTY_RESULT = native_sidecar.EXIT_EMPTY_RESULT
 
-# Exit codes the sidecar uses; mirrored from desktop/speech/main.swift so a
-# failure can be reported as something the user can act on.
-SIDECAR_EXIT_UNSUPPORTED_OS = 65
-SIDECAR_EXIT_LOCALE_UNAVAILABLE = 66
-SIDECAR_EXIT_AUDIO_UNREADABLE = 67
-SIDECAR_EXIT_EMPTY_RESULT = 68
-
-# Transcribing a long recording is the slow path; synthesis is bounded by
-# MAX_SPEECH_CHARS. Both are generous enough that only a wedged process trips.
-SIDECAR_TIMEOUT_S = 300.0
-
-
-def _app_bundle_roots() -> tuple[Path, ...]:
-    """Where Ciaobot.app may live, per-user first (mirrors cli._app_search_roots)."""
-    return (Path.home() / "Applications", Path("/Applications"))
-
-
-def sidecar_path() -> Path | None:
-    """Locate the ``ciaobot-speech`` binary, or None when it is not installed.
-
-    Tauri places an ``externalBin`` beside the app executable, so the bundled
-    copy is the normal case. ``CIAO_SPEECH_SIDECAR`` overrides for development,
-    where the binary sits in the checkout rather than in an installed app.
-    """
-    override = (os.environ.get("CIAO_SPEECH_SIDECAR") or "").strip()
-    if override:
-        candidate = Path(override).expanduser()
-        return candidate if candidate.is_file() else None
-    for root in _app_bundle_roots():
-        candidate = root / "Ciaobot.app" / "Contents" / "MacOS" / SIDECAR_NAME
-        if candidate.is_file():
-            return candidate
-    found = shutil.which(SIDECAR_NAME)
-    return Path(found) if found else None
-
-
-@lru_cache(maxsize=1)
-def _sidecar_probe() -> dict:
-    """Ask the sidecar what this machine supports. Cached: it shells out.
-
-    Never raises. A missing binary, an old macOS, or a broken probe all resolve
-    to "nothing is available", because the only consumers are availability
-    checks that must not take the app down with them.
-    """
-    empty = {"hear": {"available": False}, "speak": {"available": False}}
-    if sys.platform != "darwin":
-        return empty
-    binary = sidecar_path()
-    if binary is None:
-        return empty
-    try:
-        import subprocess
-
-        result = subprocess.run(
-            [str(binary), "probe"], capture_output=True, timeout=30, text=True
-        )
-    except (OSError, ValueError, Exception) as exc:  # noqa: BLE001 - probe must not raise
-        logger.debug("speech sidecar probe failed: %s", exc)
-        return empty
-    if result.returncode != 0:
-        return empty
-    try:
-        parsed = json.loads(result.stdout or "{}")
-    except json.JSONDecodeError:
-        return empty
-    return parsed if isinstance(parsed, dict) else empty
+sidecar_path = native_sidecar.sidecar_path
 
 
 def reset_voice_probe_cache() -> None:
-    """Forget the cached probe, for tests and after installing the app."""
-    _sidecar_probe.cache_clear()
+    """Forget the cached sidecar probe, for tests and after installing the app."""
+    native_sidecar.reset_probe_cache()
 
 
 def apple_dictation_available() -> bool:
@@ -125,55 +60,27 @@ def apple_dictation_available() -> bool:
     user has no dictation language installed — each of which the sidecar
     reports rather than this module guessing.
     """
-    return bool(_sidecar_probe().get("hear", {}).get("available"))
+    return bool(native_sidecar.section("hear").get("available"))
 
 
 def apple_speech_available() -> bool:
     """True when the system synthesizer can be used for playback."""
-    return bool(_sidecar_probe().get("speak", {}).get("available"))
+    return bool(native_sidecar.section("speak").get("available"))
 
 
 def dictation_unavailable_reason() -> str:
     """Why local dictation is off, phrased for Settings. Empty when available."""
-    hear = _sidecar_probe().get("hear", {})
-    if hear.get("available"):
-        return ""
-    reason = str(hear.get("reason") or "").strip()
-    if reason:
-        return reason
-    if sys.platform != "darwin":
-        return "on-device dictation is only available on macOS"
-    if sidecar_path() is None:
-        return "Ciaobot.app is not installed; run `ciao desktop install`"
-    return "on-device dictation is unavailable on this machine"
+    return native_sidecar.unavailable_reason("hear", subject="on-device dictation")
 
 
 async def _run_sidecar(
     args: list[str], *, stdin: bytes | None = None
 ) -> tuple[int, bytes, str]:
-    """Run one sidecar subcommand. Returns (exit code, stdout, stderr text)."""
-    binary = sidecar_path()
-    if binary is None:
-        raise ValueError(
-            "the ciaobot-speech helper is not installed; "
-            "install the desktop app with `ciao desktop install`"
-        )
-    process = await asyncio.create_subprocess_exec(
-        str(binary),
-        *args,
-        stdin=asyncio.subprocess.PIPE if stdin is not None else None,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    """Run one sidecar subcommand, as a ValueError-raising wrapper."""
     try:
-        out, err = await asyncio.wait_for(
-            process.communicate(input=stdin), timeout=SIDECAR_TIMEOUT_S
-        )
-    except TimeoutError:
-        process.kill()
-        await process.wait()
-        raise ValueError("the speech helper timed out") from None
-    return process.returncode or 0, out, (err or b"").decode("utf-8", "replace").strip()
+        return await native_sidecar.run(args, stdin=stdin)
+    except native_sidecar.SidecarError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 class VoiceTranscriber:
@@ -302,7 +209,7 @@ def system_voices() -> list[dict[str, str]]:
     voice picker; the ordering is the synthesizer's own preference, so the first
     entry is what an unset voice resolves to.
     """
-    voices = _sidecar_probe().get("speak", {}).get("voices") or []
+    voices = native_sidecar.section("speak").get("voices") or []
     return [voice for voice in voices if isinstance(voice, dict)]
 
 

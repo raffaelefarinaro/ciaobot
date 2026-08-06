@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the native voice sidecar (ciaobot-speech) for Tauri to bundle.
+# Build the native macOS sidecar (ciaobot-native) for Tauri to bundle.
 #
 # Tauri's externalBin looks for `<name>-<target-triple>` next to the configured
 # path, so every triple a build might ask for gets its own copy: the two native
@@ -7,15 +7,15 @@
 # ~150 KB each, so shipping all three costs less than getting the naming wrong.
 #
 # Deployment target is 13.0, matching tauri.conf.json's minimumSystemVersion.
-# The binary therefore loads on every Mac the app supports; `hear` reports
-# exit code 65 on anything older than macOS 26, which is what the engine turns
-# into "dictation needs a newer macOS" instead of a crash.
+# The binary therefore loads on every Mac the app supports; the subcommands that
+# need newer frameworks (`hear`, `respond`) report exit code 65 on anything older
+# than macOS 26, which the engine turns into a clear message instead of a crash.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT_DIR="$HERE/../src-tauri/binaries"
 DEPLOYMENT_TARGET="13.0"
-NAME="ciaobot-speech"
+NAME="ciaobot-native"
 
 if ! command -v swiftc >/dev/null 2>&1; then
   echo "swiftc not found. Install the Xcode Command Line Tools: xcode-select --install" >&2

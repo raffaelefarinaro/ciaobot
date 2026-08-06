@@ -3732,19 +3732,6 @@ async def libreoffice_install_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "output": result.stdout})
 
 
-async def apfel_install_endpoint(request: Request) -> JSONResponse:
-    """Install apfel (Apple Intelligence CLI) via Homebrew. No server restart
-    needed — routines probe for the apfel binary fresh on each run, so titles
-    switch from the cloud fallback to on-device on the next run."""
-    from ciao.upgrade import upgrade_apfel
-
-    result = await upgrade_apfel()
-    if not result.success:
-        error = result.stderr.strip() or "Install failed."
-        return JSONResponse({"ok": False, "error": error}, status_code=500)
-    return JSONResponse({"ok": True, "output": result.stdout})
-
-
 async def workspace_binary(request: Request) -> Response:
     """Serve an allowlisted binary file from the workspace."""
     config = request.app.state.config
@@ -4738,6 +4725,7 @@ async def list_models(request: Request) -> JSONResponse:
 def _routines_payload(config, app_settings) -> dict:
     """Shared GET/PATCH response: overrides, effective values, options."""
     import shutil
+    from ciao import native_sidecar
     from ciao.voice import (
         apple_dictation_available,
         apple_speech_available,
@@ -4750,7 +4738,8 @@ def _routines_payload(config, app_settings) -> dict:
     if config.title_model_override:
         title_effective = config.title_model_override
     else:
-        # Automatic resolves to the workspace haiku tier — apfel is opt-in
+        # Automatic resolves to the workspace haiku tier — Apple's on-device
+        # model is opt-in
         # (choose "Apple" explicitly), not the auto default just because the
         # binary is on PATH (it fails when Apple Intelligence is disabled).
         title_effective = config.haiku_model_for_workspace(config.primary_workspace())
@@ -4831,9 +4820,11 @@ def _routines_payload(config, app_settings) -> dict:
                 for provider in load_custom_providers(config)
             },
         },
-        # The "apple"/apfel title option only works when the CLI is on PATH;
-        # the Chat titles row warns instead of silently falling back.
-        "apfel_available": shutil.which("apfel") is not None,
+        # The "apple" title option needs macOS 26+, the desktop app, and Apple
+        # Intelligence switched on; the Chat titles row explains which is
+        # missing instead of silently falling back to a cloud model.
+        "apple_model_available": native_sidecar.apple_model_available(),
+        "apple_model_unavailable_reason": native_sidecar.apple_model_unavailable_reason(),
         "transcription": {
             "engine": config.transcription_engine,
             "cloud_model": config.transcription_model,

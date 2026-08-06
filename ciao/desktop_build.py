@@ -68,7 +68,7 @@ WATCHED_SOURCES = (
     # The native voice sidecar. `npm run tauri build` rebuilds it via the
     # pretauri hook, but the freshness check has to see the Swift source or a
     # voice-only change would be skipped as "sources unchanged".
-    "desktop/speech",
+    "desktop/native",
     "ciao/stock/deploy/face_template.png",
     "ciao/stock/deploy/Ciaobot.icns",
 )

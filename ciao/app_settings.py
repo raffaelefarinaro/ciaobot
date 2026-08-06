@@ -36,7 +36,7 @@ class AppSettings:
     insights_model: str = ""
 
     # Voice transcription engine: "cloud" (OpenAI) or "local" (Apple
-    # on-device dictation via the ciaobot-speech sidecar).
+    # on-device dictation via the ciaobot-native sidecar).
     transcription_engine: str = ""
     # BCP-47 language for both on-device engines.
     transcription_locale: str = ""

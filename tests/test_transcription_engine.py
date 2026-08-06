@@ -117,11 +117,11 @@ def test_probe_is_empty_without_a_sidecar(monkeypatch):
 
 
 def test_sidecar_path_honours_the_dev_override(tmp_path, monkeypatch):
-    binary = tmp_path / "ciaobot-speech"
+    binary = tmp_path / "ciaobot-native"
     binary.write_text("#!/bin/sh\n")
-    monkeypatch.setenv("CIAO_SPEECH_SIDECAR", str(binary))
+    monkeypatch.setenv("CIAO_NATIVE_SIDECAR", str(binary))
     assert voice.sidecar_path() == binary
-    monkeypatch.setenv("CIAO_SPEECH_SIDECAR", str(tmp_path / "missing"))
+    monkeypatch.setenv("CIAO_NATIVE_SIDECAR", str(tmp_path / "missing"))
     assert voice.sidecar_path() is None
 
 

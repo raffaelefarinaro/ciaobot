@@ -484,19 +484,14 @@
                 </select>
                 <span class="routine-model-hint">
                   <template v-if="routineProviderValue('title_model') === 'apple'">
-                    Runs on-device for free via <a :href="APFEL_REPO_URL" target="_blank" rel="noopener">apfel</a> (Apple Intelligence CLI).
-                    <template v-if="routines && routines.apfel_available === false">
-                      <span class="hint--warn">
-                        apfel is not installed on this machine — titles currently fall back to a cloud model.
-                      </span>
-                      <button
-                        class="btn-primary btn-small voice-install-btn"
-                        :disabled="apfelInstalling"
-                        @click="installApfel"
-                      >
-                        {{ apfelInstalling ? 'Installing…' : 'Install apfel' }}
-                      </button>
-                    </template>
+                    Runs on-device for free using Apple Intelligence. Nothing to install.
+                    <!-- Nothing to offer when it is unavailable: it needs macOS 26+,
+                         the desktop app, and Apple Intelligence switched on, none of
+                         which a button here can fix. Say why and let the user choose. -->
+                    <span v-if="routines && routines.apple_model_available === false" class="hint--warn">
+                      Unavailable: {{ routines.apple_model_unavailable_reason || 'not supported on this machine' }} —
+                      titles currently fall back to a cloud model.
+                    </span>
                   </template>
                   <template v-else>{{ routineModelSummary('title_model') }}</template>
                 </span>
@@ -2706,7 +2701,6 @@ type TierKey = 'haiku' | 'sonnet' | 'opus' | 'fable'
 type RoutineModelKey = 'title_model' | 'insights_model'
 type RoutineProviderValue = 'automatic' | 'apple' | 'custom' | AliasProviderKey
 
-const APFEL_REPO_URL = 'https://github.com/Arthur-Ficial/apfel'
 type AliasProviderSection = {
   key: AliasProviderKey
   label: string
@@ -3077,7 +3071,8 @@ function routineEffectiveModel(key: RoutineModelKey): string {
 function inferRoutineModel(model: string): { provider: RoutineProviderValue; tier: TierKey } {
   const raw = model.trim()
   if (!raw) return { provider: 'automatic', tier: 'sonnet' }
-  if (raw === 'apfel') return { provider: 'apple', tier: 'haiku' }
+  // 'apfel' is the legacy id from when this shelled out to the apfel CLI.
+  if (raw === 'apple' || raw === 'apfel') return { provider: 'apple', tier: 'haiku' }
   if (raw.startsWith('codex:')) {
     const codexModel = raw.slice('codex:'.length)
     const codexTiers = workspaceModels.value?.alias_tiers?.codex || {}
@@ -3151,7 +3146,7 @@ async function saveRoutineProvider(key: RoutineModelKey, providerValue: string) 
     return
   }
   if (provider === 'apple') {
-    await saveRoutines({ [key]: 'apfel' })
+    await saveRoutines({ [key]: 'apple' })
     return
   }
   if (provider === 'custom') return
@@ -3616,27 +3611,6 @@ async function saveProviderKeys() {
 }
 
 
-const apfelInstalling = ref(false)
-
-async function installApfel() {
-  apfelInstalling.value = true
-  routinesResult.value = 'Installing apfel (Apple Intelligence CLI)…'
-  try {
-    const res = await api.post<{ ok: boolean; output?: string; error?: string }>('/api/apfel/install', {})
-    if (res.ok) {
-      routinesResult.value = 'apfel installed — on-device titles apply from the next run.'
-      // No restart needed: routines probe for the apfel binary per run.
-      // Refresh so the "not installed" hint clears immediately.
-      await fetchRoutines()
-    } else {
-      routinesResult.value = `apfel install failed: ${res.error || 'unknown error'}`
-    }
-  } catch (e) {
-    routinesResult.value = `Error installing apfel: ${errorMessage(e)}`
-  } finally {
-    apfelInstalling.value = false
-  }
-}
 
 async function fetchSkills() {
   try {

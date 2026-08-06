@@ -14,7 +14,6 @@ Ciaobot is glue around a lot of excellent open tools.
 - [Google Workspace CLI (`gws`)](https://github.com/googleworkspace/cli)
 - [NotebookLM CLI (`notebooklm-py`)](https://pypi.org/project/notebooklm-py/)
 - [opencli](https://www.npmjs.com/package/@jackwener/opencli)
-- [apfel](https://github.com/Arthur-Ficial/apfel)
 - [LibreOffice](https://www.libreoffice.org) — `.pptx` slide rendering
 
 ## Frameworks and libraries

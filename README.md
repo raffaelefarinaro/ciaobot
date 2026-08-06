@@ -214,7 +214,7 @@ When your message mentions a name that appears in the vault index, the agent get
 
 - Claude Code or OpenAI Codex with the subscription login you already have; Ollama (cloud or local) and OpenRouter as API backends.
 - Claude shell commands stay attached to the active turn until they return a result. Background subagents remain asynchronous and visible in the chat while they run.
-- haiku/sonnet/opus tier routing mapped across providers; background tasks (titles, insights) routable to cheaper or on-device models ([apfel](https://github.com/Arthur-Ficial/apfel)).
+- haiku/sonnet/opus tier routing mapped across providers; background tasks (titles, insights) routable to cheaper or on-device models (Apple Intelligence, no install required).
 
 **Google Workspace**
 
@@ -271,7 +271,7 @@ Use the access you already have:
 - **OpenAI Codex** — `codex login`, including eligible ChatGPT subscription accounts.
 - **Ollama** — cloud or local daemon.
 - **OpenRouter** — `OPENROUTER_API_KEY`.
-- **On-device models** — for lightweight tasks where available: titles via [apfel](https://github.com/Arthur-Ficial/apfel), dictation and read-aloud via the built-in macOS speech frameworks, and similar.
+- **On-device models** — for lightweight tasks where available: chat titles via Apple's on-device Foundation Model, dictation and read-aloud via the built-in macOS speech frameworks. All of it ships with macOS; none of it needs installing.
 
 See [INTEGRATIONS.md](INTEGRATIONS.md) for env vars, OAuth, and per-task model routing (titles, insights, voice).
 

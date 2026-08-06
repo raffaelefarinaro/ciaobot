@@ -481,8 +481,10 @@ export interface RoutineSettings {
   // Env-backed models used when a tier override is cleared.
   tier_defaults?: Record<string, Record<string, string>>
   alias_tiers?: Record<string, Record<string, string>>
-  // Whether the apfel CLI (the "Local (free)" title engine) is installed.
-  apfel_available?: boolean
+  // The "apple" title option: needs macOS 26+, the desktop app, and Apple
+  // Intelligence on. Nothing installable, so Settings shows the reason.
+  apple_model_available?: boolean
+  apple_model_unavailable_reason?: string
   transcription: {
     engine: 'cloud' | 'local'
     cloud_model: string

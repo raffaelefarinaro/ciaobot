@@ -13,7 +13,7 @@
 #
 # The bundle step is what catches externalBin/sidecar mistakes: a wrong
 # target-triple suffix only shows up when Tauri actually assembles the .app.
-# Skip it only when you have not touched desktop/speech/ or tauri.conf.json.
+# Skip it only when you have not touched desktop/native/ or tauri.conf.json.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -44,7 +44,7 @@ fi
 step() { printf '\n=== %s ===\n' "$1"; }
 
 step "sidecar build (swiftc, universal)"
-"$DESKTOP/speech/build.sh"
+"$DESKTOP/native/build.sh"
 
 step "cargo fmt --check"
 (cd "$DESKTOP/src-tauri" && cargo fmt --check)
@@ -72,7 +72,7 @@ step "tauri build (app bundle, universal)"
   --config '{"bundle":{"createUpdaterArtifacts":false}}')
 
 APP="$DESKTOP/src-tauri/target/universal-apple-darwin/release/bundle/macos/Ciaobot.app"
-SIDECAR="$APP/Contents/MacOS/ciaobot-speech"
+SIDECAR="$APP/Contents/MacOS/ciaobot-native"
 
 step "bundle contents"
 [[ -x "$SIDECAR" ]] || { echo "FAIL: $SIDECAR missing — externalBin did not bundle the sidecar" >&2; exit 1; }
