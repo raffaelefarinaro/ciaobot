@@ -46,7 +46,7 @@ def test_tts_engine_defaults_to_cloud(tmp_path):
     config = _config(tmp_path=tmp_path)
     assert config.tts_engine == "cloud"
     assert config.tts_cloud_voice == "onyx"
-    assert config.tts_local_voice == "am_michael"
+    assert config.tts_local_voice == ""
 
 
 def test_tts_engine_env_selection(tmp_path):
@@ -61,21 +61,27 @@ def test_tts_engine_env_garbage_falls_back_to_cloud(tmp_path):
 
 def test_tts_voice_env_overrides(tmp_path):
     config = _config(
-        {"CIAO_TTS_CLOUD_VOICE": "alloy", "CIAO_TTS_LOCAL_VOICE": "im_nicola"},
+        {"CIAO_TTS_CLOUD_VOICE": "alloy", "CIAO_TTS_LOCAL_VOICE": "com.apple.voice.x"},
         tmp_path,
     )
     assert config.tts_cloud_voice == "alloy"
-    assert config.tts_local_voice == "im_nicola"
+    assert config.tts_local_voice == "com.apple.voice.x"
 
 
-def test_kokoro_speaker_requires_package(monkeypatch):
-    monkeypatch.setattr(voice, "kokoro_available", lambda: False)
-    with pytest.raises(ValueError, match="kokoro-onnx is not installed"):
-        voice.KokoroSpeaker("af_heart")
+def test_local_voice_defaults_to_empty(tmp_path):
+    """Empty means "best installed voice for the locale". A hardcoded default
+    would name a voice that need not exist on the machine."""
+    assert _config(tmp_path=tmp_path).tts_local_voice == ""
 
 
-def test_kokoro_available_is_bool():
-    assert isinstance(voice.kokoro_available(), bool)
+def test_system_speaker_refuses_without_the_sidecar(monkeypatch):
+    monkeypatch.setattr(voice, "apple_speech_available", lambda: False)
+    with pytest.raises(ValueError, match="ciao desktop install"):
+        voice.SystemSpeaker("", "en-US")
+
+
+def test_system_voices_is_a_list():
+    assert isinstance(voice.system_voices(), list)
 
 
 def test_speech_text_strips_markdown():
@@ -104,59 +110,55 @@ def test_speech_text_truncates_long_input():
     assert text.endswith(".")
 
 
-def test_kokoro_lang_follows_voice_prefix(monkeypatch):
-    monkeypatch.setattr(voice, "kokoro_available", lambda: True)
-    assert voice.KokoroSpeaker("im_nicola")._lang == "it"
-    assert voice.KokoroSpeaker("af_heart")._lang == "en-us"
-    assert voice.KokoroSpeaker("xx_unknown")._lang == "en-us"
-
-
 async def test_synthesize_speech_local_not_installed(tmp_path, monkeypatch):
-    monkeypatch.setattr(voice, "kokoro_available", lambda: False)
+    monkeypatch.setattr(voice, "apple_speech_available", lambda: False)
     pcm = _pcm(tmp_path, tts_engine="local")
 
     with pytest.raises(ValueError) as exc_info:
         await pcm.synthesize_speech("Hello there")
-    assert "kokoro-onnx is not installed" in str(exc_info.value)
+    assert "ciao desktop install" in str(exc_info.value)
     assert "Settings → Models" in str(exc_info.value)
 
 
 async def test_synthesize_speech_local_fails(tmp_path, monkeypatch):
-    monkeypatch.setattr(voice, "kokoro_available", lambda: True)
+    monkeypatch.setattr(voice, "apple_speech_available", lambda: True)
 
     class FailingSpeaker:
         mime_type = "audio/wav"
 
-        def __init__(self, voice_id):
+        def __init__(self, voice_id, locale):
             pass
 
         async def speak(self, text):
-            raise RuntimeError("model download interrupted")
+            raise RuntimeError("the speech helper timed out")
 
-    monkeypatch.setattr(voice, "KokoroSpeaker", FailingSpeaker)
+    monkeypatch.setattr(voice, "SystemSpeaker", FailingSpeaker)
     pcm = _pcm(tmp_path, tts_engine="local")
 
     with pytest.raises(ValueError) as exc_info:
         await pcm.synthesize_speech("Hello there")
-    assert "Local speech synthesis failed" in str(exc_info.value)
-    assert "model download interrupted" in str(exc_info.value)
+    assert "System speech synthesis failed" in str(exc_info.value)
+    assert "the speech helper timed out" in str(exc_info.value)
     assert "Settings → Models" in str(exc_info.value)
 
 
 async def test_synthesize_speech_local_success(tmp_path, monkeypatch):
-    monkeypatch.setattr(voice, "kokoro_available", lambda: True)
+    monkeypatch.setattr(voice, "apple_speech_available", lambda: True)
 
     class FakeSpeaker:
         mime_type = "audio/wav"
 
-        def __init__(self, voice_id):
-            assert voice_id == "am_michael"
+        def __init__(self, voice_id, locale):
+            # Empty voice and the configured locale reach the sidecar, which is
+            # what lets it pick the best installed voice.
+            assert voice_id == ""
+            assert locale == "en-US"
 
         async def speak(self, text):
             assert "Hello" in text
             return b"RIFFfake"
 
-    monkeypatch.setattr(voice, "KokoroSpeaker", FakeSpeaker)
+    monkeypatch.setattr(voice, "SystemSpeaker", FakeSpeaker)
     pcm = _pcm(tmp_path, tts_engine="local")
 
     audio, mime, cost = await pcm.synthesize_speech("Hello **there**")

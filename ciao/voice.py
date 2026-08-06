@@ -4,14 +4,21 @@ Two engines each, selected independently:
 
 * Hear **cloud** — OpenAI ``gpt-transcribe`` (needs ``OPENAI_API_KEY``;
   model overridable via ``CIAO_TRANSCRIPTION_MODEL``).
-* Hear **local** — `mlx-whisper <https://pypi.org/project/mlx-whisper/>`_ on
-  Apple Silicon, free and offline. Optional dependency
-  (``pip install 'ciao[voice-local]'``).
+* Hear **local** — Apple's on-device dictation (macOS 26+), through the
+  ``ciaobot-speech`` sidecar bundled in ``Ciaobot.app``.
 * Speak **cloud** — OpenAI ``gpt-4o-mini-tts`` (same ``OPENAI_API_KEY``).
-* Speak **local** — `kokoro-onnx <https://pypi.org/project/kokoro-onnx/>`_,
-  the 82M-parameter open-weight Kokoro model on ONNX Runtime, free and
-  offline. Optional dependency (``pip install 'ciao[tts-local]'``); the
-  first playback downloads the model files (~340 MB) into the cache dir.
+* Speak **local** — ``AVSpeechSynthesizer``, through the same sidecar.
+
+The local engines used to be mlx-whisper and kokoro-onnx: optional pip installs
+that pulled model weights on first use, 340 MB in Kokoro's case. Both are gone.
+Apple ships equivalents inside the OS, so local voice now costs no download and
+no dependency — see ``desktop/speech/main.swift`` for why a Swift sidecar is
+required rather than calling those frameworks from Python.
+
+The trade is reach, not just size. Dictation needs macOS 26 or newer, and both
+local engines need ``Ciaobot.app`` installed, so on Linux, Windows, and older
+macOS there is no local option at all and only the cloud engines appear. The
+availability probes below are what Settings uses to hide what cannot work.
 
 Engine selection lives in ``CiaoConfig.transcription_engine`` /
 ``CiaoConfig.tts_engine`` (env defaults ``CIAO_TRANSCRIPTION_ENGINE`` /
@@ -21,11 +28,13 @@ Engine selection lives in ``CiaoConfig.transcription_engine`` /
 from __future__ import annotations
 
 import asyncio
-import importlib.util
-import io
+import json
 import logging
+import os
 import re
-import wave
+import shutil
+import sys
+from functools import lru_cache
 from pathlib import Path
 
 from openai import AsyncOpenAI
@@ -34,15 +43,137 @@ from ciao.config import BridgeConfig
 
 logger = logging.getLogger(__name__)
 
+SIDECAR_NAME = "ciaobot-speech"
 
-def mlx_whisper_available() -> bool:
-    """True when the optional ``mlx_whisper`` package is importable."""
-    return importlib.util.find_spec("mlx_whisper") is not None
+# Exit codes the sidecar uses; mirrored from desktop/speech/main.swift so a
+# failure can be reported as something the user can act on.
+SIDECAR_EXIT_UNSUPPORTED_OS = 65
+SIDECAR_EXIT_LOCALE_UNAVAILABLE = 66
+SIDECAR_EXIT_AUDIO_UNREADABLE = 67
+SIDECAR_EXIT_EMPTY_RESULT = 68
+
+# Transcribing a long recording is the slow path; synthesis is bounded by
+# MAX_SPEECH_CHARS. Both are generous enough that only a wedged process trips.
+SIDECAR_TIMEOUT_S = 300.0
 
 
-def kokoro_available() -> bool:
-    """True when the optional ``kokoro_onnx`` package is importable."""
-    return importlib.util.find_spec("kokoro_onnx") is not None
+def _app_bundle_roots() -> tuple[Path, ...]:
+    """Where Ciaobot.app may live, per-user first (mirrors cli._app_search_roots)."""
+    return (Path.home() / "Applications", Path("/Applications"))
+
+
+def sidecar_path() -> Path | None:
+    """Locate the ``ciaobot-speech`` binary, or None when it is not installed.
+
+    Tauri places an ``externalBin`` beside the app executable, so the bundled
+    copy is the normal case. ``CIAO_SPEECH_SIDECAR`` overrides for development,
+    where the binary sits in the checkout rather than in an installed app.
+    """
+    override = (os.environ.get("CIAO_SPEECH_SIDECAR") or "").strip()
+    if override:
+        candidate = Path(override).expanduser()
+        return candidate if candidate.is_file() else None
+    for root in _app_bundle_roots():
+        candidate = root / "Ciaobot.app" / "Contents" / "MacOS" / SIDECAR_NAME
+        if candidate.is_file():
+            return candidate
+    found = shutil.which(SIDECAR_NAME)
+    return Path(found) if found else None
+
+
+@lru_cache(maxsize=1)
+def _sidecar_probe() -> dict:
+    """Ask the sidecar what this machine supports. Cached: it shells out.
+
+    Never raises. A missing binary, an old macOS, or a broken probe all resolve
+    to "nothing is available", because the only consumers are availability
+    checks that must not take the app down with them.
+    """
+    empty = {"hear": {"available": False}, "speak": {"available": False}}
+    if sys.platform != "darwin":
+        return empty
+    binary = sidecar_path()
+    if binary is None:
+        return empty
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            [str(binary), "probe"], capture_output=True, timeout=30, text=True
+        )
+    except (OSError, ValueError, Exception) as exc:  # noqa: BLE001 - probe must not raise
+        logger.debug("speech sidecar probe failed: %s", exc)
+        return empty
+    if result.returncode != 0:
+        return empty
+    try:
+        parsed = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        return empty
+    return parsed if isinstance(parsed, dict) else empty
+
+
+def reset_voice_probe_cache() -> None:
+    """Forget the cached probe, for tests and after installing the app."""
+    _sidecar_probe.cache_clear()
+
+
+def apple_dictation_available() -> bool:
+    """True when on-device dictation can actually run here.
+
+    False on non-macOS, without the app bundle, before macOS 26, and when the
+    user has no dictation language installed — each of which the sidecar
+    reports rather than this module guessing.
+    """
+    return bool(_sidecar_probe().get("hear", {}).get("available"))
+
+
+def apple_speech_available() -> bool:
+    """True when the system synthesizer can be used for playback."""
+    return bool(_sidecar_probe().get("speak", {}).get("available"))
+
+
+def dictation_unavailable_reason() -> str:
+    """Why local dictation is off, phrased for Settings. Empty when available."""
+    hear = _sidecar_probe().get("hear", {})
+    if hear.get("available"):
+        return ""
+    reason = str(hear.get("reason") or "").strip()
+    if reason:
+        return reason
+    if sys.platform != "darwin":
+        return "on-device dictation is only available on macOS"
+    if sidecar_path() is None:
+        return "Ciaobot.app is not installed; run `ciao desktop install`"
+    return "on-device dictation is unavailable on this machine"
+
+
+async def _run_sidecar(
+    args: list[str], *, stdin: bytes | None = None
+) -> tuple[int, bytes, str]:
+    """Run one sidecar subcommand. Returns (exit code, stdout, stderr text)."""
+    binary = sidecar_path()
+    if binary is None:
+        raise ValueError(
+            "the ciaobot-speech helper is not installed; "
+            "install the desktop app with `ciao desktop install`"
+        )
+    process = await asyncio.create_subprocess_exec(
+        str(binary),
+        *args,
+        stdin=asyncio.subprocess.PIPE if stdin is not None else None,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        out, err = await asyncio.wait_for(
+            process.communicate(input=stdin), timeout=SIDECAR_TIMEOUT_S
+        )
+    except TimeoutError:
+        process.kill()
+        await process.wait()
+        raise ValueError("the speech helper timed out") from None
+    return process.returncode or 0, out, (err or b"").decode("utf-8", "replace").strip()
 
 
 class VoiceTranscriber:
@@ -68,32 +199,38 @@ class VoiceTranscriber:
         return text
 
 
-class MlxWhisperTranscriber:
-    """Local mlx-whisper transcription (Apple Silicon, free, offline).
+class AppleDictationTranscriber:
+    """On-device transcription via Apple's dictation models (macOS 26+).
 
-    ``mlx_whisper.transcribe`` is synchronous and saturates the GPU for a
-    few seconds, so it runs in a worker thread. The first call per model
-    downloads the checkpoint from Hugging Face into the local cache.
+    Runs the bundled sidecar against the recording the PWA already saved. It
+    uses ``DictationTranscriber``, which reuses the assets the OS downloaded for
+    system dictation, so there is no model to fetch and no first-run delay.
     """
 
-    def __init__(self, model: str) -> None:
-        if not mlx_whisper_available():
+    def __init__(self, locale: str = "en-US") -> None:
+        if not apple_dictation_available():
             raise ValueError(
-                "mlx-whisper is not installed; "
-                "run: pip install 'ciao[voice-local]'"
+                f"on-device dictation is unavailable: {dictation_unavailable_reason()}"
             )
-        self._model = model
+        self._locale = locale or "en-US"
 
     async def transcribe(self, path: Path) -> str:
-        import mlx_whisper
-
-        def _run() -> str:
-            result = mlx_whisper.transcribe(
-                str(path), path_or_hf_repo=self._model
+        code, out, err = await _run_sidecar(
+            ["hear", str(path), "--locale", self._locale]
+        )
+        if code == SIDECAR_EXIT_UNSUPPORTED_OS:
+            raise ValueError("On-device dictation requires macOS 26 or newer")
+        if code == SIDECAR_EXIT_LOCALE_UNAVAILABLE:
+            raise ValueError(
+                err or f"No dictation language is installed for {self._locale}"
             )
-            return (result.get("text") or "").strip()
-
-        text = await asyncio.to_thread(_run)
+        if code == SIDECAR_EXIT_AUDIO_UNREADABLE:
+            raise ValueError("The recording could not be read")
+        if code == SIDECAR_EXIT_EMPTY_RESULT:
+            raise ValueError("Voice transcription returned empty text")
+        if code != 0:
+            raise ValueError(err or "Voice transcription failed")
+        text = out.decode("utf-8", "replace").strip()
         if not text:
             raise ValueError("Voice transcription returned empty text")
         return text
@@ -101,29 +238,9 @@ class MlxWhisperTranscriber:
 
 # ── Speech synthesis (speak) ─────────────────────────────────────────────
 
-# OpenAI caps speech input at 4096 chars; Kokoro gets the same budget so
-# both engines speak the same excerpt of a long message.
+# OpenAI caps speech input at 4096 chars; the system synthesizer gets the same
+# budget so both engines speak the same excerpt of a long message.
 MAX_SPEECH_CHARS = 4096
-
-_KOKORO_RELEASE = (
-    "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
-)
-KOKORO_MODEL_URL = f"{_KOKORO_RELEASE}/kokoro-v1.0.onnx"
-KOKORO_VOICES_URL = f"{_KOKORO_RELEASE}/voices-v1.0.bin"
-
-# Kokoro voice ids encode the language in their first letter
-# (``af_heart`` → American English, ``im_nicola`` → Italian, …).
-_KOKORO_LANGS = {
-    "a": "en-us",
-    "b": "en-gb",
-    "e": "es",
-    "f": "fr-fr",
-    "h": "hi",
-    "i": "it",
-    "j": "ja",
-    "p": "pt-br",
-    "z": "cmn",
-}
 
 
 def speech_text(markdown: str) -> str:
@@ -178,88 +295,51 @@ class OpenAISpeaker:
         return data
 
 
-def kokoro_cache_dir() -> Path:
-    """Directory holding the downloaded Kokoro model files."""
-    return Path.home() / ".cache" / "ciaobot" / "kokoro"
+def system_voices() -> list[dict[str, str]]:
+    """Installed synthesizer voices, best quality first.
+
+    Empty when the sidecar is unavailable. Settings uses this to populate the
+    voice picker; the ordering is the synthesizer's own preference, so the first
+    entry is what an unset voice resolves to.
+    """
+    voices = _sidecar_probe().get("speak", {}).get("voices") or []
+    return [voice for voice in voices if isinstance(voice, dict)]
 
 
-def _download_kokoro_file(url: str, target: Path) -> None:
-    """Stream one model file to disk; atomic via a .part rename."""
-    import httpx
+class SystemSpeaker:
+    """Local speech synthesis via ``AVSpeechSynthesizer``, through the sidecar.
 
-    part = target.with_suffix(target.suffix + ".part")
-    logger.info("Downloading Kokoro model file %s", url)
-    with httpx.stream(
-        "GET", url, follow_redirects=True, timeout=httpx.Timeout(600, connect=30)
-    ) as response:
-        response.raise_for_status()
-        with part.open("wb") as handle:
-            for chunk in response.iter_bytes(1 << 20):
-                handle.write(chunk)
-    part.replace(target)
-
-
-def ensure_kokoro_models() -> tuple[Path, Path]:
-    """Download the Kokoro model + voices files if missing; returns paths."""
-    cache = kokoro_cache_dir()
-    cache.mkdir(parents=True, exist_ok=True)
-    model = cache / "kokoro-v1.0.onnx"
-    voices = cache / "voices-v1.0.bin"
-    if not model.exists():
-        _download_kokoro_file(KOKORO_MODEL_URL, model)
-    if not voices.exists():
-        _download_kokoro_file(KOKORO_VOICES_URL, voices)
-    return model, voices
-
-
-# Loaded Kokoro instance, kept across requests: constructing it maps the
-# ~310 MB ONNX graph, too slow to redo per utterance.
-_kokoro_instance = None
-
-
-class KokoroSpeaker:
-    """Local Kokoro TTS (82M open-weight model on ONNX Runtime, free, offline).
-
-    ``Kokoro.create`` is synchronous and CPU-heavy for a few seconds, so it
-    runs in a worker thread. The first call downloads the model files
-    (~340 MB) from the kokoro-onnx GitHub release into the cache dir.
+    Voice selection is by identifier or name; leaving it empty lets the sidecar
+    pick the highest-quality installed voice for the locale (premium, then
+    enhanced, then default). That ordering matters: Apple's better voices are an
+    opt-in download in System Settings and Siri's voices are not exposed to
+    third-party apps at all, so most machines only have the default tier today
+    and will silently improve if that changes.
     """
 
     mime_type = "audio/wav"
 
-    def __init__(self, voice: str) -> None:
-        if not kokoro_available():
+    def __init__(self, voice: str = "", locale: str = "en-US") -> None:
+        if not apple_speech_available():
             raise ValueError(
-                "kokoro-onnx is not installed; "
-                "run: pip install 'ciao[tts-local]'"
+                "system speech synthesis is unavailable; "
+                "install the desktop app with `ciao desktop install`"
             )
-        self._voice = voice
-        self._lang = _KOKORO_LANGS.get(voice[:1], "en-us")
+        self._voice = (voice or "").strip()
+        self._locale = locale or "en-US"
 
     async def speak(self, text: str) -> bytes:
         """Synthesize one utterance; returns WAV bytes."""
-
-        def _run() -> bytes:
-            global _kokoro_instance
-            import numpy as np
-            from kokoro_onnx import Kokoro
-
-            if _kokoro_instance is None:
-                model, voices = ensure_kokoro_models()
-                _kokoro_instance = Kokoro(str(model), str(voices))
-            samples, sample_rate = _kokoro_instance.create(
-                text, voice=self._voice, speed=1.0, lang=self._lang
-            )
-            pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype("<i2")
-            buffer = io.BytesIO()
-            with wave.open(buffer, "wb") as wav:
-                wav.setnchannels(1)
-                wav.setsampwidth(2)
-                wav.setframerate(sample_rate)
-                wav.writeframes(pcm.tobytes())
-            return buffer.getvalue()
-
-        data = await asyncio.to_thread(_run)
-        if not data:
+        args = ["speak", "--locale", self._locale]
+        if self._voice:
+            args += ["--voice", self._voice]
+        code, out, err = await _run_sidecar(args, stdin=text.encode("utf-8"))
+        if code == SIDECAR_EXIT_LOCALE_UNAVAILABLE:
+            raise ValueError(err or f"No installed voice matches {self._locale}")
+        if code == SIDECAR_EXIT_EMPTY_RESULT:
             raise ValueError("Speech synthesis returned no audio")
-        return data
+        if code != 0:
+            raise ValueError(err or "Speech synthesis failed")
+        if not out:
+            raise ValueError("Speech synthesis returned no audio")
+        return out

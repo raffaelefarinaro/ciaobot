@@ -106,8 +106,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/device/package-status` | Same as `/api/package/status`, but never proxied: in client mode this reports *this* machine's install while `/api/package/status` reports the host's |
 | GET | `/api/device/changelog` | Commits between this machine's installed version and the latest release (never proxied) |
 | POST | `/api/device/update` | Upgrade and restart *this* machine, not the host it mirrors (never proxied) |
-| POST | `/api/voice/install-local` | Install local voice transcription dependencies and restart |
-| POST | `/api/tts/install-local` | Install local speech synthesis dependencies (kokoro-onnx) and restart |
 | POST | `/api/setup/finish` | Finish first-run setup from bootstrap mode |
 | GET | `/api/setup/list-dirs` | List local subdirectories for the setup wizard folder picker (bootstrap mode, localhost only) |
 | GET | `/api/setup/inspect-folder` | Probe a candidate workspace folder for vault mode and any nested workspaces (bootstrap mode, localhost only) |

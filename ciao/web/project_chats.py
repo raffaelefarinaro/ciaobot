@@ -7147,33 +7147,35 @@ class ProjectChatManager:
         """Transcribe an audio file. Returns (text, cost_usd).
 
         Engine selection follows ``config.transcription_engine``: ``local``
-        runs mlx-whisper on-device (free); anything else uses the OpenAI
-        cloud API. If the local engine fails or is not installed, it raises
-        a ValueError.
+        runs Apple's on-device dictation through the bundled sidecar (free,
+        macOS 26+); anything else uses the OpenAI cloud API. If the local
+        engine is unavailable it raises a ValueError naming the reason.
         """
         from ciao.voice import (
-            MlxWhisperTranscriber,
+            AppleDictationTranscriber,
             VoiceTranscriber,
-            mlx_whisper_available,
+            apple_dictation_available,
+            dictation_unavailable_reason,
         )
 
         if self._config.transcription_engine == "local":
-            if mlx_whisper_available():
+            if apple_dictation_available():
                 try:
-                    transcriber = MlxWhisperTranscriber(
-                        self._config.transcription_local_model
+                    transcriber = AppleDictationTranscriber(
+                        self._config.transcription_locale
                     )
                     text = await transcriber.transcribe(audio_path)
                     return text, 0.0
                 except Exception as exc:
                     raise ValueError(
-                        f"Local voice transcription failed: {exc}. "
-                        "Ensure mlx-whisper is properly configured or change the engine in Settings → Models."
+                        f"On-device dictation failed: {exc}. "
+                        "Change the engine to Cloud in Settings → Models to use OpenAI instead."
                     ) from exc
             else:
                 raise ValueError(
-                    "Local voice transcription is selected but mlx-whisper is not installed. "
-                    "Install the dependency or change the engine to Cloud in Settings → Models."
+                    "On-device dictation is selected but unavailable: "
+                    f"{dictation_unavailable_reason()}. "
+                    "Change the engine to Cloud in Settings → Models."
                 )
 
         if not self._config.openai_api_key:
@@ -7193,14 +7195,15 @@ class ProjectChatManager:
     async def synthesize_speech(self, text: str) -> tuple[bytes, str, float]:
         """Read a message aloud. Returns (audio_bytes, mime_type, cost_usd).
 
-        Engine selection follows ``config.tts_engine``: ``local`` runs
-        Kokoro on-device via kokoro-onnx (free); anything else uses the
-        OpenAI cloud API. Markdown is reduced to speakable text first.
+        Engine selection follows ``config.tts_engine``: ``local`` runs the
+        macOS system synthesizer through the bundled sidecar (free); anything
+        else uses the OpenAI cloud API. Markdown is reduced to speakable text
+        first.
         """
         from ciao.voice import (
-            KokoroSpeaker,
             OpenAISpeaker,
-            kokoro_available,
+            SystemSpeaker,
+            apple_speech_available,
             speech_text,
         )
 
@@ -7209,20 +7212,24 @@ class ProjectChatManager:
             raise ValueError("Nothing to read aloud in this message")
 
         if self._config.tts_engine == "local":
-            if kokoro_available():
+            if apple_speech_available():
                 try:
-                    speaker = KokoroSpeaker(self._config.tts_local_voice)
+                    speaker = SystemSpeaker(
+                        self._config.tts_local_voice,
+                        self._config.transcription_locale,
+                    )
                     audio = await speaker.speak(spoken)
                     return audio, speaker.mime_type, 0.0
                 except Exception as exc:
                     raise ValueError(
-                        f"Local speech synthesis failed: {exc}. "
-                        "Ensure kokoro-onnx is properly configured or change the engine in Settings → Models."
+                        f"System speech synthesis failed: {exc}. "
+                        "Change the engine to Cloud in Settings → Models to use OpenAI instead."
                     ) from exc
             else:
                 raise ValueError(
-                    "Local speech synthesis is selected but kokoro-onnx is not installed. "
-                    "Install the dependency or change the engine to Cloud in Settings → Models."
+                    "System speech synthesis is selected but unavailable. "
+                    "Install the desktop app with `ciao desktop install`, "
+                    "or change the engine to Cloud in Settings → Models."
                 )
 
         if not self._config.openai_api_key:

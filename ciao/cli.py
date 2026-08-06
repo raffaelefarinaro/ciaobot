@@ -561,6 +561,48 @@ def _desktop_app_installed(app_dir: Path | None = None) -> bool:
     )
 
 
+def _install_desktop_app_quietly(app_dir: Path) -> bool:
+    """Install ``Ciaobot.app`` during setup. Returns whether it is now present.
+
+    Best effort by design: setup runs on a laptop that may be offline or behind
+    a proxy, and a failed download must not cost the user their workspace. Every
+    failure prints the manual command and falls through to the launcher bundle,
+    which is a working install without the native window.
+
+    Skipped on non-macOS, when ``CIAO_SKIP_DESKTOP_APP`` is set (release smoke
+    tests install the cask instead), and in dev mode, where the bundle is built
+    from the checkout by ``desktop_build`` rather than downloaded.
+    """
+
+    if sys.platform != "darwin":
+        return False
+    if os.environ.get("CIAO_SKIP_DESKTOP_APP", "").strip():
+        return False
+    if os.environ.get("CIAO_DEV_MODE", "").strip():
+        return False
+
+    from ciao import desktop_install
+
+    print("Installing Ciaobot.app (verifying its signature)...")
+    try:
+        result = desktop_install.install_desktop_app(
+            app_dir=app_dir,
+            # The LaunchAgent is not written yet and the app starts the engine
+            # on launch; opening it here would race the rest of setup.
+            open_after_install=False,
+        )
+    except (desktop_install.InstallError, desktop_install.SignatureError, OSError) as exc:
+        print(f"Could not install Ciaobot.app: {exc}", file=sys.stderr)
+        print(
+            "Setup will continue without it. To install it later, run: "
+            "ciao desktop install",
+            file=sys.stderr,
+        )
+        return False
+    print(f"Installed Ciaobot {result['version']} to {result['path']}")
+    return True
+
+
 def refresh_app_bundle_if_stale(
     workspace: Path, port: int, *, python_path: str | None = None
 ) -> Path | None:
@@ -949,6 +991,7 @@ def setup_workspace(
     port: int = 8443,
     launch_agents_dir: Path | str | None = None,
     app_dir: Path | str | None = None,
+    install_desktop_app: bool = True,
 ) -> list[Path]:
     requested_name = (workspace_name or "").strip()
     if workspace_name is not None and not _WORKSPACE_NAME_RE.fullmatch(
@@ -1184,6 +1227,13 @@ def setup_workspace(
     desktop_installed = _desktop_app_installed(app_root_dir) or (
         app_dir is None and _desktop_app_installed()
     )
+    # Make the desktop app the default outcome of setup, so `brew install` plus
+    # one run is the whole install. Only on a real machine: an explicit app_dir
+    # means tests, CI, or a headless install, none of which should reach out to
+    # GitHub. Failure here is not a setup failure — the legacy launcher branch
+    # below is still a working install.
+    if install_desktop_app and not desktop_installed and app_dir is None:
+        desktop_installed = _install_desktop_app_quietly(app_root_dir)
     app_root: Path | None = None
     menubar_executable = ""
     plist_names = ["com.ciao.server.plist"]
@@ -1310,6 +1360,7 @@ def _setup_command(args: argparse.Namespace) -> int:
         port=args.port,
         launch_agents_dir=args.launch_agents_dir,
         app_dir=args.app_dir,
+        install_desktop_app=not args.no_desktop_app,
     )
     for path in written:
         print(path)
@@ -1893,6 +1944,60 @@ def _desktop_service_command(args: argparse.Namespace) -> int:
     return macos_service.print_result(result, as_json=bool(args.as_json))
 
 
+def _desktop_command(args: argparse.Namespace) -> int:
+    from ciao import desktop_install
+
+    as_json = bool(getattr(args, "as_json", False))
+    action = args.desktop_action
+    explicit_dir = getattr(args, "app_dir", None)
+    app_dir = Path(explicit_dir).expanduser() if explicit_dir else _default_app_dir()
+
+    def report(payload: dict[str, object], lines: list[str]) -> int:
+        if as_json:
+            print(json.dumps(payload, indent=2))
+        else:
+            for line in lines:
+                print(line)
+        return 0
+
+    try:
+        if action == "install":
+            # desktop_install refuses to overwrite a bundle in its own target
+            # directory; this catches the split-root case, where the app sits in
+            # ~/Applications while /Applications is writable (or vice versa).
+            if explicit_dir is None and _desktop_app_installed():
+                raise desktop_install.InstallError(
+                    "Ciaobot.app is already installed. Update it from the app "
+                    "(menu bar -> Update), or run `ciao desktop uninstall` first."
+                )
+            result = desktop_install.install_desktop_app(
+                app_dir=app_dir, version=getattr(args, "version", "") or ""
+            )
+            return report(
+                result,
+                [
+                    f"Installed Ciaobot {result['version']} to {result['path']}",
+                    f"Signature verified ({result['trusted_comment']})",
+                    "No Gatekeeper approval needed; the app should already be open.",
+                ],
+            )
+        result = desktop_install.uninstall_desktop_app(app_dir=app_dir)
+        return report(
+            result,
+            [
+                f"Removed {result['path']}"
+                if result["removed"]
+                else f"Nothing to remove at {result['path']}"
+            ],
+        )
+    except (desktop_install.InstallError, desktop_install.SignatureError) as exc:
+        if as_json:
+            print(json.dumps({"ok": False, "error": str(exc)}, indent=2))
+        else:
+            print(str(exc), file=sys.stderr)
+        return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ciao", description="Ciaobot local assistant CLI.")
     subparsers = parser.add_subparsers(dest="command")
@@ -1947,6 +2052,39 @@ def build_parser() -> argparse.ArgumentParser:
     login_parser.add_argument("login_action", choices=("enable", "disable"))
     login_parser.add_argument("--json", action="store_true", dest="as_json")
     login_parser.set_defaults(func=_desktop_service_command)
+
+    # Separate from `desktop-service`, which controls the launchd engine. This
+    # group manages the Ciaobot.app bundle itself, which used to be a Homebrew
+    # cask; installing it here instead avoids the download quarantine that made
+    # Gatekeeper block first launch. See ciao/desktop_install.py.
+    desktop_parser = subparsers.add_parser(
+        "desktop",
+        help="Install or remove the Ciaobot.app desktop bundle.",
+    )
+    desktop_sub = desktop_parser.add_subparsers(dest="desktop_action", required=True)
+    desktop_install_parser = desktop_sub.add_parser(
+        "install",
+        help="Download, verify and install Ciaobot.app (no Gatekeeper prompt).",
+    )
+    desktop_install_parser.add_argument(
+        "--version",
+        default="",
+        help="Release to install (defaults to the latest stable release).",
+    )
+    desktop_uninstall_parser = desktop_sub.add_parser(
+        "uninstall",
+        help="Remove the installed Ciaobot.app bundle.",
+    )
+    for action_parser in (desktop_install_parser, desktop_uninstall_parser):
+        action_parser.add_argument(
+            "--app-dir",
+            type=Path,
+            default=None,
+            help="Directory holding Ciaobot.app (defaults to /Applications, "
+            "or ~/Applications on a non-admin account).",
+        )
+        action_parser.add_argument("--json", action="store_true", dest="as_json")
+        action_parser.set_defaults(func=_desktop_command)
 
     setup_parser = subparsers.add_parser(
         "setup",
@@ -2007,6 +2145,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Directory where Ciaobot Server.app is written. Defaults to "
             "/Applications when writable, else ~/Applications."
+        ),
+    )
+    setup_parser.add_argument(
+        "--no-desktop-app",
+        action="store_true",
+        help=(
+            "Skip downloading and installing Ciaobot.app. Setup falls back to "
+            "the menu-bar launcher; install the app later with "
+            "`ciao desktop install`."
         ),
     )
     setup_parser.add_argument(

@@ -8,7 +8,6 @@ Ciaobot is glue around a lot of excellent open tools.
 - [OpenAI Codex CLI](https://developers.openai.com/codex/cli/)
 - [Ollama](https://ollama.com) and [OpenRouter](https://openrouter.ai)
 - [OpenAI](https://openai.com) — cloud voice transcription
-- [mlx-whisper](https://pypi.org/project/mlx-whisper/) — on-device speech on Apple Silicon
 
 ## Integrations and CLIs
 

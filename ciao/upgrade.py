@@ -110,7 +110,7 @@ async def upgrade_project_deps(project_root: str) -> dict[str, tuple[str, str]]:
     # We do not use --upgrade or install untracked explicit packages,
     # because they are strictly pinned in pyproject.toml now.
     proc = await asyncio.create_subprocess_exec(
-        sys.executable, "-m", "pip", "install", "-e", f"{project_root}[test,voice-local]",
+        sys.executable, "-m", "pip", "install", "-e", f"{project_root}[test]",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     await proc.communicate()

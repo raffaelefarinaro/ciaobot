@@ -35,15 +35,18 @@ class AppSettings:
     # Model used by post-archive session-insights extraction.
     insights_model: str = ""
 
-    # Voice transcription engine: "cloud" (OpenAI) or "local" (mlx-whisper).
+    # Voice transcription engine: "cloud" (OpenAI) or "local" (Apple
+    # on-device dictation via the ciaobot-speech sidecar).
     transcription_engine: str = ""
-    # Whisper checkpoint for the local engine (HF repo id).
-    transcription_local_model: str = ""
+    # BCP-47 language for both on-device engines.
+    transcription_locale: str = ""
     # OpenAI model for the cloud engine (default "gpt-transcribe").
     transcription_model: str = ""
-    # Speech synthesis engine: "cloud" (OpenAI) or "local" (Kokoro).
+    # Speech synthesis engine: "cloud" (OpenAI) or "local"
+    # (AVSpeechSynthesizer via the same sidecar).
     tts_engine: str = ""
-    # Voice preset per engine (OpenAI voice name / Kokoro voice id).
+    # Voice preset per engine (OpenAI voice name / system voice identifier;
+    # empty means the sidecar picks the best installed voice).
     tts_cloud_voice: str = ""
     tts_local_voice: str = ""
     # Comma-separated list of models for the adversarial_review MCP tool.
@@ -176,7 +179,7 @@ class AppSettingsStore:
                 "insights_model_override": config.insights_model_override,
 
                 "transcription_engine": config.transcription_engine,
-                "transcription_local_model": config.transcription_local_model,
+                "transcription_locale": config.transcription_locale,
                 "transcription_model": config.transcription_model,
                 "tts_engine": config.tts_engine,
                 "tts_cloud_voice": config.tts_cloud_voice,
@@ -203,8 +206,8 @@ class AppSettingsStore:
         config.transcription_engine = (
             s.transcription_engine or d["transcription_engine"]
         )
-        config.transcription_local_model = (
-            s.transcription_local_model or d["transcription_local_model"]
+        config.transcription_locale = (
+            s.transcription_locale or d["transcription_locale"]
         )
         config.transcription_model = (
             s.transcription_model or d["transcription_model"]

@@ -378,24 +378,29 @@ class CiaoConfig:
     # Empty = automatic routing: the workspace's haiku-tier model.
     title_model_override: str = ""
     # Voice transcription engine: ``cloud`` (OpenAI API, needs
-    # OPENAI_API_KEY) or ``local`` (mlx-whisper on Apple Silicon).
-    # Runtime-overridable from the PWA Settings → Models tab.
+    # OPENAI_API_KEY) or ``local`` (Apple on-device dictation via the
+    # ciaobot-speech sidecar, macOS 26+). Runtime-overridable from the PWA
+    # Settings → Models tab, which hides ``local`` where it cannot run.
     transcription_engine: str = "cloud"
-    transcription_local_model: str = "mlx-community/whisper-large-v3-turbo"
+    # BCP-47 language for the on-device engines. Dictation needs a matching
+    # language installed in System Settings → Keyboard → Dictation; the
+    # synthesizer uses it to choose a voice.
+    transcription_locale: str = "en-US"
     # Cloud transcription model (OpenAI ``gpt-transcribe``). Overridable
     # via ``CIAO_TRANSCRIPTION_MODEL`` (e.g. ``gpt-4o-mini-transcribe``).
     transcription_model: str = "gpt-transcribe"
     # Speech synthesis (read a message aloud): ``cloud`` (OpenAI
-    # ``gpt-4o-mini-tts``, needs OPENAI_API_KEY) or ``local`` (Kokoro via
-    # kokoro-onnx, free/offline). Runtime-overridable from the PWA
-    # Settings → Models tab.
+    # ``gpt-4o-mini-tts``, needs OPENAI_API_KEY) or ``local``
+    # (``AVSpeechSynthesizer`` via the same sidecar, free/offline).
+    # Runtime-overridable from the PWA Settings → Models tab.
     tts_engine: str = "cloud"
-    # Default to a male voice to match the Ciaobot avatar. OpenAI ``onyx`` and
-    # Kokoro ``am_michael`` (``am_`` = American Male) are the male counterparts
-    # of the former ``nova`` / ``af_heart`` defaults. Overridable in Settings /
-    # via CIAO_TTS_CLOUD_VOICE and CIAO_TTS_LOCAL_VOICE.
+    # Default to a male voice to match the Ciaobot avatar; OpenAI ``onyx`` is
+    # the male counterpart of the former ``nova`` default. An empty local voice
+    # means "let the sidecar pick the best installed voice for the locale",
+    # which is right for a voice list that differs on every machine.
+    # Overridable in Settings / via CIAO_TTS_CLOUD_VOICE and CIAO_TTS_LOCAL_VOICE.
     tts_cloud_voice: str = "onyx"
-    tts_local_voice: str = "am_michael"
+    tts_local_voice: str = ""
     claude_models: list[str] = field(default_factory=lambda: ["opus", "sonnet", "haiku"])
     claude_default_model: str = "opus"
     # Per-workspace default models. Empty string falls back to
@@ -1152,10 +1157,8 @@ class CiaoConfig:
                 in {"cloud", "local"}
                 else "cloud"
             ),
-            transcription_local_model=source.get(
-                "CIAO_TRANSCRIPTION_LOCAL_MODEL", ""
-            ).strip()
-            or "mlx-community/whisper-large-v3-turbo",
+            transcription_locale=source.get("CIAO_TRANSCRIPTION_LOCALE", "").strip()
+            or "en-US",
             transcription_model=source.get(
                 "CIAO_TRANSCRIPTION_MODEL", ""
             ).strip()
@@ -1167,8 +1170,9 @@ class CiaoConfig:
                 else "cloud"
             ),
             tts_cloud_voice=source.get("CIAO_TTS_CLOUD_VOICE", "").strip() or "onyx",
-            tts_local_voice=source.get("CIAO_TTS_LOCAL_VOICE", "").strip()
-            or "am_michael",
+            # No default: an empty voice means "best installed voice for the
+            # locale", and the right identifier differs on every machine.
+            tts_local_voice=source.get("CIAO_TTS_LOCAL_VOICE", "").strip(),
             ollama_local_discovery=source.get(
                 "CIAO_OLLAMA_LOCAL_DISCOVERY", ""
             ).strip().lower()

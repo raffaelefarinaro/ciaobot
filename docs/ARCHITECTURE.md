@@ -32,8 +32,7 @@ ciao/                          Python backend (Starlette).
   jsonio.py                    Small JSON I/O helpers.
   transcripts.py               Provider-neutral live transcripts and archives under memory-vault/Logs/Chats/.
   upgrade.py                   Self-update / deploy flow.
-  voice.py                     Voice transcription: cloud (OpenAI) and local (mlx-whisper) engines, selected by `CIAO_TRANSCRIPTION_ENGINE`.
-  voice_extras.py              Self-heal optional local voice packages after upgrades (mlx-whisper, kokoro-onnx).
+  voice.py                     Voice transcription and read-aloud: cloud (OpenAI) and local engines, selected by `CIAO_TRANSCRIPTION_ENGINE` / `CIAO_TTS_ENGINE`. The local engines shell out to the `ciaobot-speech` sidecar bundled in Ciaobot.app (Apple on-device dictation, macOS 26+; AVSpeechSynthesizer for playback), so they need no Python dependency and download no models.
   app_settings.py              Runtime-mutable app settings (title, insights, and critique models, transcription engine/model), persisted at `.runtime/app_settings.json` and overlaid on CiaoConfig. Edited via Settings → Models.
   error_log.py                 Rotating file handler for server ERROR+ logs. Consumed by the error-triage schedule and the debug issue report.
   debug_report.py              Aggregate runtime issues (server error log + failed job runs) for the dev-mode `GET /api/debug/issues` endpoint and the `{{ISSUE_REPORT}}` schedule placeholder.
@@ -84,6 +83,7 @@ ciao/                          Python backend (Starlette).
   package_version.py           Best-effort version probe: reads ciao.__version__ and queries the GitHub releases API for the latest published version. Powers GET /api/package/status.
   package_smoke.py             Wheel smoke target: build web, build wheel, install in a clean venv, and probe the installed app. CLI: `ciao package-smoke`.
   desktop_build.py             Dev-mode rebuild/reinstall of the macOS Tauri desktop shell (CIAO_DEV_MODE deploy step).
+  desktop_install.py           First install of Ciaobot.app from a GitHub release: downloads the signed .app.tar.gz, verifies its minisign signature, and extracts it without a download quarantine flag, so Gatekeeper never blocks first launch. Used by `ciao desktop install` and by setup; updates go through the in-app Tauri updater instead.
   stock/                       Generic package-data assets for public installs: stock agents, commands, skills, launchd template, workspace docs, and system schedules.
     skills/                    Packaged generic skills (ciao-capabilities, web-research, workspace-authoring). Installed into every workspace's `.claude/skills/` by `ciao sync-skills`; a same-named workspace skill overrides the packaged copy.
     workspace/                 Agent-readable docs copied into installed workspaces (`CLAUDE.md`, `CIAO_CUSTOMIZATION.md`).

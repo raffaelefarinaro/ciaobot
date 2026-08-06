@@ -21,7 +21,7 @@ class FakeConfig:
         self.insights_model = "deepseek-v4-flash:0731-cloud"
 
         self.transcription_engine = "cloud"
-        self.transcription_local_model = "mlx-community/whisper-large-v3-turbo"
+        self.transcription_locale = "en-US"
         self.transcription_model = "gpt-transcribe"
         self.tts_engine = "cloud"
         self.tts_cloud_voice = "nova"

@@ -943,22 +943,6 @@ async def _run_server_locked(config: CiaoConfig) -> int:
     if not getattr(config, "benchmark_mode", False):
         asyncio.create_task(_startup_error_triage())
 
-    # ── Voice extras self-heal ───────────────────────────────
-    # `brew upgrade` replaces the app's private venv, dropping optional
-    # local-voice packages the user installed from Settings. Reinstall
-    # them (once per version) when the saved settings still select the
-    # local engines, then restart to load them.
-    async def _heal_voice_extras() -> None:
-        try:
-            from ciao.voice_extras import heal_voice_extras
-
-            await heal_voice_extras(config, request_restart)
-        except Exception:
-            logger.exception("Voice extras self-heal failed")
-
-    if not getattr(config, "benchmark_mode", False):
-        asyncio.create_task(_heal_voice_extras())
-
     # ── Stale-install self-heal ──────────────────────────────
     # Two upgrade shapes leave this process running old code after a bare
     # `brew upgrade ciaobot` / `pip install -U` outside the app's own Update

@@ -65,6 +65,10 @@ WATCHED_SOURCES = (
     "desktop/src-tauri/Cargo.toml",
     "desktop/src-tauri/Cargo.lock",
     "desktop/src-tauri/tauri.conf.json",
+    # The native voice sidecar. `npm run tauri build` rebuilds it via the
+    # pretauri hook, but the freshness check has to see the Swift source or a
+    # voice-only change would be skipped as "sources unchanged".
+    "desktop/speech",
     "ciao/stock/deploy/face_template.png",
     "ciao/stock/deploy/Ciaobot.icns",
 )
@@ -81,6 +85,30 @@ QUIT_TIMEOUT_S = 20.0
 # missing binary or a timeout into a failed CompletedProcess instead of an
 # exception, so a deploy reports a structured step rather than a 500.
 Runner = Callable[..., subprocess.CompletedProcess]
+
+
+def run_step(args: list[str], *, cwd: str, timeout: int) -> subprocess.CompletedProcess:
+    """Default ``Runner`` for callers outside the web deploy handler.
+
+    Same contract as ``routes_api._run_step``: a missing binary or a timeout
+    becomes a failed CompletedProcess rather than an exception, so a caller
+    reports a structured step instead of a traceback. Exists here so the CLI
+    install path can reuse the swap logic below without importing the web layer.
+    """
+    try:
+        return subprocess.run(
+            args, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+        )
+    except FileNotFoundError as exc:
+        return subprocess.CompletedProcess(
+            args=args, returncode=127, stdout="",
+            stderr=f"{args[0]} not found on PATH: {exc}",
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args=args, returncode=124, stdout="",
+            stderr=f"{args[0]} timed out after {timeout}s",
+        )
 
 
 def desktop_dir(repo: Path) -> Path:

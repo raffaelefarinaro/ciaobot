@@ -4738,7 +4738,12 @@ async def list_models(request: Request) -> JSONResponse:
 def _routines_payload(config, app_settings) -> dict:
     """Shared GET/PATCH response: overrides, effective values, options."""
     import shutil
-    from ciao.voice import kokoro_available, mlx_whisper_available
+    from ciao.voice import (
+        apple_dictation_available,
+        apple_speech_available,
+        dictation_unavailable_reason,
+        system_voices,
+    )
 
     s = app_settings.settings
     ollama = config.ollama
@@ -4832,15 +4837,22 @@ def _routines_payload(config, app_settings) -> dict:
         "transcription": {
             "engine": config.transcription_engine,
             "cloud_model": config.transcription_model,
-            "local_model": config.transcription_local_model,
-            "local_available": mlx_whisper_available(),
+            "locale": config.transcription_locale,
+            # On-device dictation needs macOS 26+, the installed app, and a
+            # dictation language. Settings hides the local option entirely when
+            # it cannot run, and shows the reason when the user asks.
+            "local_available": apple_dictation_available(),
+            "local_unavailable_reason": dictation_unavailable_reason(),
             "cloud_available": bool(config.openai_api_key),
         },
         "speech": {
             "engine": config.tts_engine,
             "cloud_voice": config.tts_cloud_voice,
             "local_voice": config.tts_local_voice,
-            "local_available": kokoro_available(),
+            "local_available": apple_speech_available(),
+            # Voices differ per machine, so the picker is populated from the
+            # system rather than a hardcoded list, best quality first.
+            "local_voices": system_voices(),
             "cloud_available": bool(config.openai_api_key),
         },
         # Grouped options for the routine model selectors.
@@ -5106,56 +5118,6 @@ async def setup_status_endpoint(request: Request) -> JSONResponse:
     """Return first-run setup readiness for the onboarding wizard."""
     return JSONResponse(setup_status(request.app.state.config))
 
-
-async def voice_install_local_endpoint(request: Request) -> JSONResponse:
-    """Install local voice transcription dependencies (mlx-whisper)."""
-    from ciao.voice_extras import VOICE_LOCAL_REQUIREMENT
-
-    return await _pip_install_and_restart(request, VOICE_LOCAL_REQUIREMENT)
-
-
-async def tts_install_local_endpoint(request: Request) -> JSONResponse:
-    """Install local speech synthesis dependencies (kokoro-onnx)."""
-    from ciao.voice_extras import TTS_LOCAL_REQUIREMENT
-
-    return await _pip_install_and_restart(request, TTS_LOCAL_REQUIREMENT)
-
-
-async def _pip_install_and_restart(request: Request, requirement: str) -> JSONResponse:
-    """pip-install one requirement into the running env, then restart."""
-    import sys
-    import subprocess
-
-    cmd = [sys.executable, "-m", "pip", "install", requirement]
-    try:
-        result = await asyncio.to_thread(
-            subprocess.run,
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        output = (result.stdout.strip() + "\n" + result.stderr.strip()).strip()
-        if result.returncode == 0:
-            config = request.app.state.config
-            async def _do_restart():
-                await asyncio.sleep(2)
-                fn = getattr(request.app.state, "request_restart", None)
-                if callable(fn):
-                    fn(config.restart_exit_code)
-                else:
-                    from ciao.signals import RestartRequested
-                    raise RestartRequested(config.restart_exit_code)
-
-            asyncio.create_task(_do_restart())
-            return JSONResponse({"ok": True, "output": output})
-        else:
-            return JSONResponse(
-                {"ok": False, "error": f"Command exited with code {result.returncode}", "output": output},
-                status_code=500,
-            )
-    except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
 
 
 def _host_name(value: str) -> str:

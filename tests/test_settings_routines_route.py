@@ -87,7 +87,11 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
     assert data["speech"]["engine"] == "cloud"
     assert data["speech"]["cloud_available"] is True
     assert data["speech"]["cloud_voice"] == "onyx"
-    assert data["speech"]["local_voice"] == "am_michael"
+    # Empty local voice = "best installed voice for the locale"; the picker is
+    # populated from the machine rather than a hardcoded default.
+    assert data["speech"]["local_voice"] == ""
+    assert isinstance(data["speech"]["local_voices"], list)
+    assert data["transcription"]["locale"] == "en-US"
 
 
 def test_get_title_effective_is_haiku_not_apfel_when_no_override(monkeypatch, tmp_path):

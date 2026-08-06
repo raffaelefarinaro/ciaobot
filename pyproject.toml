@@ -39,14 +39,6 @@ test = [
   "mypy>=1.10.0",
   "pip-audit>=2.7.0",
 ]
-# Local on-device voice transcription (Apple Silicon only).
-voice-local = [
-  "mlx-whisper==0.4.3",
-]
-# Local on-device speech synthesis (Kokoro on ONNX Runtime; any platform).
-tts-local = [
-  "kokoro-onnx==0.5.0",
-]
 # Optional web-scraping fallback for the web-research skill (JS-rendered
 # pages defuddle cannot read). Browser binaries are installed separately
 # with `scrapling install`, keeping the base install light.

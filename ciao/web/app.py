@@ -108,8 +108,6 @@ from ciao.web.routes_api import (
     project_complete,
     project_detail,
     reorder_projects,
-    tts_install_local_endpoint,
-    voice_install_local_endpoint,
     libreoffice_status_endpoint,
     libreoffice_install_endpoint,
     apfel_install_endpoint,
@@ -325,8 +323,6 @@ def create_app(config, app_settings=None, mcp_service=None) -> Starlette:
         Route("/api/device/package-status", package_status_endpoint, methods=["GET"]),
         Route("/api/device/changelog", package_changelog_endpoint, methods=["GET"]),
         Route("/api/device/update", package_update_endpoint, methods=["POST"]),
-        Route("/api/voice/install-local", voice_install_local_endpoint, methods=["POST"]),
-        Route("/api/tts/install-local", tts_install_local_endpoint, methods=["POST"]),
         # Node & Handover (Multi-device Active-Standby)
         Route("/api/node/status", node_status_endpoint, methods=["GET"]),
         Route("/api/node/connect", node_connect_endpoint, methods=["POST"]),

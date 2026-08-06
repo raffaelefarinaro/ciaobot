@@ -609,13 +609,16 @@
                   :disabled="routinesSaving"
                   @change="saveRoutines({ transcription_engine: ($event.target as HTMLSelectElement).value })"
                 >
-                  <option value="local">Local (free)</option>
+                  <!-- Hidden rather than disabled where it cannot run: on-device
+                       dictation needs macOS 26+ and the desktop app, and there is
+                       nothing the user can install to change that. -->
+                  <option v-if="routines.transcription.local_available" value="local">On-device (free)</option>
                   <option value="cloud" :disabled="!routines.transcription.cloud_available">Cloud (OpenAI)</option>
                 </select>
                 <span class="routine-model-hint">
                   <template v-if="routines.transcription.engine === 'local'">
-                    Dictation runs on-device via mlx-whisper (<code>{{ routines.transcription.local_model }}</code>).
-                    The first transcription downloads the model.
+                    Dictation runs on-device using macOS speech recognition
+                    (<code>{{ routines.transcription.locale }}</code>). Nothing to download.
                   </template>
                   <template v-else>
                     Dictation uses OpenAI <code>{{ routines.transcription.cloud_model }}</code> (needs <code>OPENAI_API_KEY</code>, ~$0.0045/min).
@@ -624,20 +627,18 @@
                 </span>
               </div>
             </div>
-            <p v-if="!routines.transcription.local_available" class="hint hint--warn voice-warning">
+            <p
+              v-if="!routines.transcription.local_available && routines.transcription.local_unavailable_reason"
+              class="hint voice-warning"
+              :class="{ 'hint--warn': routines.transcription.engine === 'local' }"
+            >
               <span v-if="routines.transcription.engine === 'local'">
-                <strong>Local Whisper engine is selected but not installed.</strong> Run <code>pip install 'ciao[voice-local]'</code> or install now:
+                <strong>On-device dictation is selected but unavailable:</strong>
+                {{ routines.transcription.local_unavailable_reason }}
               </span>
               <span v-else>
-                Local engine is available for Apple Silicon (requires installing <code>mlx-whisper</code>).
+                On-device dictation is unavailable: {{ routines.transcription.local_unavailable_reason }}
               </span>
-              <button
-                class="btn-primary btn-small voice-install-btn"
-                :disabled="voiceInstalling"
-                @click="installLocalVoice"
-              >
-                {{ voiceInstalling ? 'Installing...' : 'Install engine' }}
-              </button>
             </p>
             <div class="routine-row routine-row--flush">
               <div class="routine-info">
@@ -650,13 +651,12 @@
                   :disabled="routinesSaving"
                   @change="saveRoutines({ tts_engine: ($event.target as HTMLSelectElement).value })"
                 >
-                  <option value="local">Local (free)</option>
+                  <option v-if="routines.speech.local_available" value="local">On-device (free)</option>
                   <option value="cloud" :disabled="!routines.speech.cloud_available">Cloud (OpenAI)</option>
                 </select>
                 <span class="routine-model-hint">
                   <template v-if="routines.speech.engine === 'local'">
-                    Read-aloud runs on-device via Kokoro (voice <code>{{ routines.speech.local_voice }}</code>).
-                    The first playback downloads the model (~340 MB).
+                    Read-aloud uses the macOS system voice. Nothing to download.
                   </template>
                   <template v-else>
                     Read-aloud uses the OpenAI speech API (needs <code>OPENAI_API_KEY</code>, voice <code>{{ routines.speech.cloud_voice }}</code>, ~$0.015/min).
@@ -664,20 +664,48 @@
                 </span>
               </div>
             </div>
-            <p v-if="!routines.speech.local_available" class="hint hint--warn voice-warning">
-              <span v-if="routines.speech.engine === 'local'">
-                <strong>Local Kokoro engine is selected but not installed.</strong> Run <code>pip install 'ciao[tts-local]'</code> or install now:
-              </span>
-              <span v-else>
-                Local speech engine is available (requires installing <code>kokoro-onnx</code>).
-              </span>
-              <button
-                class="btn-primary btn-small voice-install-btn"
-                :disabled="ttsInstalling"
-                @click="installLocalTts"
-              >
-                {{ ttsInstalling ? 'Installing...' : 'Install engine' }}
-              </button>
+            <!-- The installed voice list differs per machine, so it is served by
+                 the engine rather than hardcoded, best quality first. Empty
+                 means "let macOS pick the best one for the language". -->
+            <div
+              v-if="routines.speech.engine === 'local' && routines.speech.local_available"
+              class="routine-row routine-row--flush"
+            >
+              <div class="routine-info">
+                <span class="routine-name routine-name--sub">Voice</span>
+              </div>
+              <div class="routine-model-controls routine-model-controls--single">
+                <select
+                  class="routine-select"
+                  :value="routines.speech.local_voice"
+                  :disabled="routinesSaving"
+                  @change="saveRoutines({ tts_local_voice: ($event.target as HTMLSelectElement).value })"
+                >
+                  <option value="">Best available for the language</option>
+                  <option v-for="voice in routines.speech.local_voices || []" :key="voice.id" :value="voice.id">
+                    {{ voice.name }} ({{ voice.locale }}{{ voice.quality === 'default' ? '' : ', ' + voice.quality }})
+                  </option>
+                </select>
+                <span class="routine-model-hint">
+                  The stock voices are the basic tier. Look for ones marked
+                  <strong>Premium</strong> (then Enhanced) &mdash; they are a free download under
+                  System Settings &rsaquo; Accessibility &rsaquo; Read &amp; Speak &rsaquo;
+                  System voice &rsaquo; Manage Voices, and Ciaobot picks the best installed one
+                  automatically.
+                  <a
+                    href="https://support.apple.com/guide/mac-help/mchlp2290/mac"
+                    target="_blank"
+                    rel="noopener"
+                  >How to add a voice</a>.
+                </span>
+              </div>
+            </div>
+            <p
+              v-if="!routines.speech.local_available && routines.speech.engine === 'local'"
+              class="hint hint--warn voice-warning"
+            >
+              <strong>On-device speech is selected but unavailable.</strong>
+              Install the desktop app with <code>ciao desktop install</code>, or switch to Cloud.
             </p>
           </div>
           <div v-if="routinesResult" class="action-result">{{ routinesResult }}</div>
@@ -3588,26 +3616,6 @@ async function saveProviderKeys() {
 }
 
 
-const voiceInstalling = ref(false)
-
-async function installLocalVoice() {
-  voiceInstalling.value = true
-  routinesResult.value = 'Installing local whisper engine...'
-  try {
-    const res = await api.post<{ ok: boolean; output?: string }>('/api/voice/install-local', {})
-    if (res.ok) {
-      routinesResult.value = ''
-      await restartAndReload('Local whisper engine installed. Restarting Ciaobot to load the model…')
-    } else {
-      routinesResult.value = 'Installation failed.'
-    }
-  } catch (e) {
-    routinesResult.value = `Error installing engine: ${errorMessage(e)}`
-  } finally {
-    voiceInstalling.value = false
-  }
-}
-
 const apfelInstalling = ref(false)
 
 async function installApfel() {
@@ -3627,26 +3635,6 @@ async function installApfel() {
     routinesResult.value = `Error installing apfel: ${errorMessage(e)}`
   } finally {
     apfelInstalling.value = false
-  }
-}
-
-const ttsInstalling = ref(false)
-
-async function installLocalTts() {
-  ttsInstalling.value = true
-  routinesResult.value = 'Installing local Kokoro engine...'
-  try {
-    const res = await api.post<{ ok: boolean; output?: string }>('/api/tts/install-local', {})
-    if (res.ok) {
-      routinesResult.value = ''
-      await restartAndReload('Local Kokoro engine installed. Restarting Ciaobot to load the model…')
-    } else {
-      routinesResult.value = 'Installation failed.'
-    }
-  } catch (e) {
-    routinesResult.value = `Error installing engine: ${errorMessage(e)}`
-  } finally {
-    ttsInstalling.value = false
   }
 }
 

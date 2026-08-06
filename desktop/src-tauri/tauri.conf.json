@@ -23,6 +23,9 @@
       "dmg"
     ],
     "createUpdaterArtifacts": true,
+    "externalBin": [
+      "binaries/ciaobot-speech"
+    ],
     "icon": [
       "../../ciao/stock/deploy/face_template.png",
       "../../ciao/stock/deploy/Ciaobot.icns"

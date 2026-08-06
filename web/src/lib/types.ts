@@ -486,15 +486,22 @@ export interface RoutineSettings {
   transcription: {
     engine: 'cloud' | 'local'
     cloud_model: string
-    local_model: string
+    // BCP-47 language for the on-device engines.
+    locale: string
+    // 'local' is Apple on-device dictation: macOS 26+, desktop app installed,
+    // and a dictation language present. Unavailable is not fixable by
+    // installing a package, so the reason is shown instead of an install button.
     local_available: boolean
+    local_unavailable_reason: string
     cloud_available: boolean
   }
   speech: {
     engine: 'cloud' | 'local'
     cloud_voice: string
+    // Empty = let macOS pick the best installed voice for the language.
     local_voice: string
     local_available: boolean
+    local_voices?: { id: string; name: string; locale: string; quality: string }[]
     cloud_available: boolean
   }
   model_options: {

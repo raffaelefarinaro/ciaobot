@@ -1,4 +1,4 @@
-"""Tests for transcription engine config and the local mlx-whisper path."""
+"""Transcription engine config and the Apple on-device dictation path."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ def _config(env_extra: dict[str, str] | None = None, tmp_path=None) -> CiaoConfi
 def test_engine_defaults_to_cloud(tmp_path):
     config = _config(tmp_path=tmp_path)
     assert config.transcription_engine == "cloud"
-    assert config.transcription_local_model == "mlx-community/whisper-large-v3-turbo"
+    assert config.transcription_locale == "en-US"
     assert config.transcription_model == "gpt-transcribe"
 
 
@@ -35,11 +35,9 @@ def test_engine_env_garbage_falls_back_to_cloud(tmp_path):
     assert config.transcription_engine == "cloud"
 
 
-def test_local_model_env_override(tmp_path):
-    config = _config(
-        {"CIAO_TRANSCRIPTION_LOCAL_MODEL": "mlx-community/whisper-tiny"}, tmp_path
-    )
-    assert config.transcription_local_model == "mlx-community/whisper-tiny"
+def test_locale_env_override(tmp_path):
+    config = _config({"CIAO_TRANSCRIPTION_LOCALE": "it-IT"}, tmp_path)
+    assert config.transcription_locale == "it-IT"
 
 
 def test_cloud_model_env_override(tmp_path):
@@ -88,14 +86,43 @@ async def test_voice_transcriber_uses_config_model(tmp_path, monkeypatch):
     assert captured["response_format"] == "json"
 
 
-def test_mlx_transcriber_requires_package(monkeypatch):
-    monkeypatch.setattr(voice, "mlx_whisper_available", lambda: False)
-    with pytest.raises(ValueError, match="mlx-whisper is not installed"):
-        voice.MlxWhisperTranscriber("mlx-community/whisper-tiny")
+def test_apple_transcriber_refuses_when_dictation_is_unavailable(monkeypatch):
+    monkeypatch.setattr(voice, "apple_dictation_available", lambda: False)
+    monkeypatch.setattr(
+        voice, "dictation_unavailable_reason", lambda: "requires macOS 26 or newer"
+    )
+    with pytest.raises(ValueError, match="requires macOS 26 or newer"):
+        voice.AppleDictationTranscriber("en-US")
 
 
-def test_mlx_whisper_available_is_bool():
-    assert isinstance(voice.mlx_whisper_available(), bool)
+def test_availability_probes_return_bools():
+    """They shell out to the sidecar, so they must never raise — Settings calls
+    them on every load, including on Linux where there is no sidecar at all."""
+    assert isinstance(voice.apple_dictation_available(), bool)
+    assert isinstance(voice.apple_speech_available(), bool)
+    assert isinstance(voice.dictation_unavailable_reason(), str)
+
+
+def test_probe_is_empty_without_a_sidecar(monkeypatch):
+    monkeypatch.setattr(voice, "sidecar_path", lambda: None)
+    voice.reset_voice_probe_cache()
+    try:
+        assert voice.apple_dictation_available() is False
+        assert voice.apple_speech_available() is False
+        assert "Ciaobot.app" in voice.dictation_unavailable_reason() or (
+            "macOS" in voice.dictation_unavailable_reason()
+        )
+    finally:
+        voice.reset_voice_probe_cache()
+
+
+def test_sidecar_path_honours_the_dev_override(tmp_path, monkeypatch):
+    binary = tmp_path / "ciaobot-speech"
+    binary.write_text("#!/bin/sh\n")
+    monkeypatch.setenv("CIAO_SPEECH_SIDECAR", str(binary))
+    assert voice.sidecar_path() == binary
+    monkeypatch.setenv("CIAO_SPEECH_SIDECAR", str(tmp_path / "missing"))
+    assert voice.sidecar_path() is None
 
 
 def test_ollama_local_env_parsing(tmp_path):
@@ -121,8 +148,11 @@ async def test_transcribe_voice_local_not_installed(tmp_path, monkeypatch):
     from ciao.sessions import StateStore
     from ciao.transcripts import TranscriptStore
 
-    monkeypatch.setattr(voice, "mlx_whisper_available", lambda: False)
-    
+    monkeypatch.setattr(voice, "apple_dictation_available", lambda: False)
+    monkeypatch.setattr(
+        voice, "dictation_unavailable_reason", lambda: "requires macOS 26 or newer"
+    )
+
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     config = CiaoConfig(
@@ -146,7 +176,7 @@ async def test_transcribe_voice_local_not_installed(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError) as exc_info:
         await pcm.transcribe_voice(audio_path)
-    assert "mlx-whisper is not installed" in str(exc_info.value)
+    assert "requires macOS 26 or newer" in str(exc_info.value)
     assert "Settings → Models" in str(exc_info.value)
 
 
@@ -156,15 +186,16 @@ async def test_transcribe_voice_local_fails(tmp_path, monkeypatch):
     from ciao.sessions import StateStore
     from ciao.transcripts import TranscriptStore
 
-    monkeypatch.setattr(voice, "mlx_whisper_available", lambda: True)
-    
+    monkeypatch.setattr(voice, "apple_dictation_available", lambda: True)
+
     class FailingTranscriber:
-        def __init__(self, model):
+        def __init__(self, locale):
             pass
+
         async def transcribe(self, path):
-            raise RuntimeError("Out of memory on GPU")
-            
-    monkeypatch.setattr(voice, "MlxWhisperTranscriber", FailingTranscriber)
+            raise RuntimeError("the recording could not be read")
+
+    monkeypatch.setattr(voice, "AppleDictationTranscriber", FailingTranscriber)
 
     runtime = tmp_path / ".runtime"
     runtime.mkdir(parents=True, exist_ok=True)
@@ -189,8 +220,8 @@ async def test_transcribe_voice_local_fails(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError) as exc_info:
         await pcm.transcribe_voice(audio_path)
-    assert "Local voice transcription failed" in str(exc_info.value)
-    assert "Out of memory on GPU" in str(exc_info.value)
+    assert "On-device dictation failed" in str(exc_info.value)
+    assert "the recording could not be read" in str(exc_info.value)
     assert "Settings → Models" in str(exc_info.value)
 
 
@@ -200,7 +231,7 @@ async def test_transcribe_voice_cloud_model_and_cost(tmp_path, monkeypatch):
     from ciao.sessions import StateStore
     from ciao.transcripts import TranscriptStore
 
-    monkeypatch.setattr(voice, "mlx_whisper_available", lambda: False)
+    monkeypatch.setattr(voice, "apple_dictation_available", lambda: False)
 
     class FakeTranscriber:
         def __init__(self, config):
