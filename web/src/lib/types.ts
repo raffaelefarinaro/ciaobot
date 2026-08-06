@@ -485,26 +485,21 @@ export interface RoutineSettings {
   // Intelligence on. Nothing installable, so Settings shows the reason.
   apple_model_available?: boolean
   apple_model_unavailable_reason?: string
+  // Voice is on-device only: Apple dictation (macOS 26+) and
+  // AVSpeechSynthesizer, both via the bundled sidecar. There is no engine to
+  // choose any more, so the payload reports availability and a reason rather
+  // than a selection.
   transcription: {
-    engine: 'cloud' | 'local'
-    cloud_model: string
     // BCP-47 language for the on-device engines.
     locale: string
-    // 'local' is Apple on-device dictation: macOS 26+, desktop app installed,
-    // and a dictation language present. Unavailable is not fixable by
-    // installing a package, so the reason is shown instead of an install button.
-    local_available: boolean
-    local_unavailable_reason: string
-    cloud_available: boolean
+    available: boolean
+    unavailable_reason: string
   }
   speech: {
-    engine: 'cloud' | 'local'
-    cloud_voice: string
     // Empty = let macOS pick the best installed voice for the language.
     local_voice: string
-    local_available: boolean
+    available: boolean
     local_voices?: { id: string; name: string; locale: string; quality: string }[]
-    cloud_available: boolean
   }
   model_options: {
     anthropic: string[]

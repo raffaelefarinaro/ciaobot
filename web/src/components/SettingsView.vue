@@ -596,79 +596,41 @@
               <p class="section-title">voice</p>
               <p class="hint">Choose the engines used to hear you (dictation) and to speak messages aloud.</p>
             </div>
+            <!-- No engine picker: voice is on-device only now. Both engines are
+                 free and need no key, so the only thing worth saying is whether
+                 this machine can run them and, if not, why. -->
             <div class="routine-row routine-row--flush">
               <div class="routine-info">
                 <span class="routine-name">Hear</span>
               </div>
               <div class="routine-model-controls routine-model-controls--single">
-                <select
-                  class="routine-select"
-                  :value="routines.transcription.engine"
-                  :disabled="routinesSaving"
-                  @change="saveRoutines({ transcription_engine: ($event.target as HTMLSelectElement).value })"
-                >
-                  <!-- Disabled, not hidden. Hiding it while :value still points
-                       at 'local' leaves the browser with selectedIndex -1 and a
-                       blank control, so a user whose saved engine became
-                       unavailable could not see what was selected. -->
-                  <option
-                    value="local"
-                    :disabled="!routines.transcription.local_available"
-                  >
-                    On-device (free){{ routines.transcription.local_available ? '' : ' — unavailable' }}
-                  </option>
-                  <option value="cloud" :disabled="!routines.transcription.cloud_available">Cloud (OpenAI)</option>
-                </select>
                 <span class="routine-model-hint">
-                  <template v-if="routines.transcription.engine === 'local'">
+                  <template v-if="routines.transcription.available">
                     Dictation runs on-device using macOS speech recognition
-                    (<code>{{ routines.transcription.locale }}</code>). Nothing to download.
+                    (<code>{{ routines.transcription.locale }}</code>). Free, nothing to download.
                   </template>
                   <template v-else>
-                    Dictation uses OpenAI <code>{{ routines.transcription.cloud_model }}</code> (needs <code>OPENAI_API_KEY</code>, ~$0.0045/min).
-                    <a href="https://developers.openai.com/api/docs/pricing" target="_blank" rel="noopener">Check current pricing</a>.
+                    <span class="hint--warn">
+                      Dictation is unavailable: {{ routines.transcription.unavailable_reason }}
+                    </span>
                   </template>
                 </span>
               </div>
             </div>
-            <p
-              v-if="!routines.transcription.local_available && routines.transcription.local_unavailable_reason"
-              class="hint voice-warning"
-              :class="{ 'hint--warn': routines.transcription.engine === 'local' }"
-            >
-              <span v-if="routines.transcription.engine === 'local'">
-                <strong>On-device dictation is selected but unavailable:</strong>
-                {{ routines.transcription.local_unavailable_reason }}
-              </span>
-              <span v-else>
-                On-device dictation is unavailable: {{ routines.transcription.local_unavailable_reason }}
-              </span>
-            </p>
             <div class="routine-row routine-row--flush">
               <div class="routine-info">
                 <span class="routine-name">Speak</span>
               </div>
               <div class="routine-model-controls routine-model-controls--single">
-                <select
-                  class="routine-select"
-                  :value="routines.speech.engine"
-                  :disabled="routinesSaving"
-                  @change="saveRoutines({ tts_engine: ($event.target as HTMLSelectElement).value })"
-                >
-                  <option
-                    value="local"
-                    :disabled="!routines.speech.local_available"
-                  >
-                    On-device (free){{ routines.speech.local_available ? '' : ' — unavailable' }}
-                  </option>
-                  <option value="cloud" :disabled="!routines.speech.cloud_available">Cloud (OpenAI)</option>
-                </select>
                 <span class="routine-model-hint">
-                  <template v-if="routines.speech.engine === 'local'">
-                    Read-aloud uses the macOS system voice. Nothing to download.
+                  <template v-if="routines.speech.available">
+                    Read-aloud uses the macOS system voice. Free, nothing to download.
                   </template>
                   <template v-else>
-                    Read-aloud uses the OpenAI speech API (needs <code>OPENAI_API_KEY</code>, voice <code>{{ routines.speech.cloud_voice }}</code>, ~$0.015/min).
+                    <span class="hint--warn">
+                      Read-aloud is unavailable. Install the desktop app with
+                      <code>ciao desktop install</code>.
+                    </span>
                   </template>
                 </span>
               </div>
@@ -677,7 +639,7 @@
                  the engine rather than hardcoded, best quality first. Empty
                  means "let macOS pick the best one for the language". -->
             <div
-              v-if="routines.speech.engine === 'local' && routines.speech.local_available"
+              v-if="routines.speech.available"
               class="routine-row routine-row--flush"
             >
               <div class="routine-info">
@@ -709,13 +671,6 @@
                 </span>
               </div>
             </div>
-            <p
-              v-if="!routines.speech.local_available && routines.speech.engine === 'local'"
-              class="hint hint--warn voice-warning"
-            >
-              <strong>On-device speech is selected but unavailable.</strong>
-              Install the desktop app with <code>ciao desktop install</code>, or switch to Cloud.
-            </p>
           </div>
           <div v-if="routinesResult" class="action-result">{{ routinesResult }}</div>
         </template>

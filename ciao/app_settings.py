@@ -18,7 +18,6 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_VALID_ENGINES = {"", "cloud", "local"}
 
 
 @dataclass(slots=True)
@@ -35,19 +34,10 @@ class AppSettings:
     # Model used by post-archive session-insights extraction.
     insights_model: str = ""
 
-    # Voice transcription engine: "cloud" (OpenAI) or "local" (Apple
-    # on-device dictation via the ciaobot-native sidecar).
-    transcription_engine: str = ""
-    # BCP-47 language for both on-device engines.
+    # BCP-47 language for the on-device voice engines.
     transcription_locale: str = ""
-    # OpenAI model for the cloud engine (default "gpt-transcribe").
-    transcription_model: str = ""
-    # Speech synthesis engine: "cloud" (OpenAI) or "local"
-    # (AVSpeechSynthesizer via the same sidecar).
-    tts_engine: str = ""
-    # Voice preset per engine (OpenAI voice name / system voice identifier;
-    # empty means the sidecar picks the best installed voice).
-    tts_cloud_voice: str = ""
+    # macOS voice identifier for read-aloud; empty means the sidecar picks the
+    # best installed voice for the locale.
     tts_local_voice: str = ""
     # Comma-separated list of models for the adversarial_review MCP tool.
     critique_models: str = ""
@@ -149,8 +139,6 @@ class AppSettingsStore:
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
             value = value.strip()
-            if key in {"transcription_engine", "tts_engine"} and value not in _VALID_ENGINES:
-                raise ValueError(f"{key} must be 'cloud' or 'local'")
             setattr(self.settings, key, value)
         self._save()
         return self.settings
@@ -178,11 +166,7 @@ class AppSettingsStore:
                 "title_model_override": config.title_model_override,
                 "insights_model_override": config.insights_model_override,
 
-                "transcription_engine": config.transcription_engine,
                 "transcription_locale": config.transcription_locale,
-                "transcription_model": config.transcription_model,
-                "tts_engine": config.tts_engine,
-                "tts_cloud_voice": config.tts_cloud_voice,
                 "tts_local_voice": config.tts_local_voice,
                 "critique_models": config.critique_models,
                 "ollama_haiku_model": config.ollama.haiku_model,
@@ -203,17 +187,9 @@ class AppSettingsStore:
         config.title_model_override = s.title_model or d["title_model_override"]
         config.insights_model_override = s.insights_model or d["insights_model_override"]
 
-        config.transcription_engine = (
-            s.transcription_engine or d["transcription_engine"]
-        )
         config.transcription_locale = (
             s.transcription_locale or d["transcription_locale"]
         )
-        config.transcription_model = (
-            s.transcription_model or d["transcription_model"]
-        )
-        config.tts_engine = s.tts_engine or d["tts_engine"]
-        config.tts_cloud_voice = s.tts_cloud_voice or d["tts_cloud_voice"]
         config.tts_local_voice = s.tts_local_voice or d["tts_local_voice"]
         config.critique_models = s.critique_models or d["critique_models"]
         config.ollama = replace(

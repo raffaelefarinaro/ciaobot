@@ -370,36 +370,19 @@ class CiaoConfig:
     max_image_size_bytes: int = 10 * 1024 * 1024
     max_voice_size_bytes: int = 25 * 1024 * 1024
     media_ttl_hours: int = 72
-    openai_api_key: str | None = None
     # Titling uses the Claude Agent SDK's one-shot query(); default Haiku.
     title_model: str = "haiku"
     # Operator override for the titling model, set from the PWA Settings →
     # Models tab (runtime settings store) or ``CIAO_TITLE_MODEL_OVERRIDE``.
     # Empty = automatic routing: the workspace's haiku-tier model.
     title_model_override: str = ""
-    # Voice transcription engine: ``cloud`` (OpenAI API, needs
-    # OPENAI_API_KEY) or ``local`` (Apple on-device dictation via the
-    # ciaobot-native sidecar, macOS 26+). Runtime-overridable from the PWA
-    # Settings → Models tab, which hides ``local`` where it cannot run.
-    transcription_engine: str = "cloud"
-    # BCP-47 language for the on-device engines. Dictation needs a matching
-    # language installed in System Settings → Keyboard → Dictation; the
-    # synthesizer uses it to choose a voice.
+    # BCP-47 language for the on-device voice engines. Dictation needs a
+    # matching language installed in System Settings → Keyboard → Dictation;
+    # the synthesizer uses it to choose a voice.
     transcription_locale: str = "en-US"
-    # Cloud transcription model (OpenAI ``gpt-transcribe``). Overridable
-    # via ``CIAO_TRANSCRIPTION_MODEL`` (e.g. ``gpt-4o-mini-transcribe``).
-    transcription_model: str = "gpt-transcribe"
-    # Speech synthesis (read a message aloud): ``cloud`` (OpenAI
-    # ``gpt-4o-mini-tts``, needs OPENAI_API_KEY) or ``local``
-    # (``AVSpeechSynthesizer`` via the same sidecar, free/offline).
-    # Runtime-overridable from the PWA Settings → Models tab.
-    tts_engine: str = "cloud"
-    # Default to a male voice to match the Ciaobot avatar; OpenAI ``onyx`` is
-    # the male counterpart of the former ``nova`` default. An empty local voice
-    # means "let the sidecar pick the best installed voice for the locale",
-    # which is right for a voice list that differs on every machine.
-    # Overridable in Settings / via CIAO_TTS_CLOUD_VOICE and CIAO_TTS_LOCAL_VOICE.
-    tts_cloud_voice: str = "onyx"
+    # macOS voice identifier or name for read-aloud. Empty means "the best
+    # installed voice for transcription_locale" -- the right default when the
+    # available voices differ on every machine.
     tts_local_voice: str = ""
     claude_models: list[str] = field(default_factory=lambda: ["opus", "sonnet", "haiku"])
     claude_default_model: str = "opus"
@@ -1148,30 +1131,10 @@ class CiaoConfig:
             media_ttl_hours=int(
                 _env(source, "CIAO_MEDIA_TTL_HOURS", "TELEGRAM_BRIDGE_MEDIA_TTL_HOURS", "72")
             ),
-            openai_api_key=source.get("OPENAI_API_KEY", "").strip() or None,
             title_model=source.get("CIAO_TITLE_MODEL", "").strip() or "haiku",
             title_model_override=source.get("CIAO_TITLE_MODEL_OVERRIDE", "").strip(),
-            transcription_engine=(
-                source.get("CIAO_TRANSCRIPTION_ENGINE", "").strip().lower()
-                if source.get("CIAO_TRANSCRIPTION_ENGINE", "").strip().lower()
-                in {"cloud", "local"}
-                else "cloud"
-            ),
             transcription_locale=source.get("CIAO_TRANSCRIPTION_LOCALE", "").strip()
             or "en-US",
-            transcription_model=source.get(
-                "CIAO_TRANSCRIPTION_MODEL", ""
-            ).strip()
-            or "gpt-transcribe",
-            tts_engine=(
-                source.get("CIAO_TTS_ENGINE", "").strip().lower()
-                if source.get("CIAO_TTS_ENGINE", "").strip().lower()
-                in {"cloud", "local"}
-                else "cloud"
-            ),
-            tts_cloud_voice=source.get("CIAO_TTS_CLOUD_VOICE", "").strip() or "onyx",
-            # No default: an empty voice means "best installed voice for the
-            # locale", and the right identifier differs on every machine.
             tts_local_voice=source.get("CIAO_TTS_LOCAL_VOICE", "").strip(),
             ollama_local_discovery=source.get(
                 "CIAO_OLLAMA_LOCAL_DISCOVERY", ""

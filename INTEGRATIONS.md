@@ -17,7 +17,7 @@ ciao auth codex --device-auth # device-code flow for a headless machine
 codex login status           # credential-free readiness check
 ```
 
-The bundled CLI inside the ChatGPT desktop app is detected on macOS as well. Its updates follow the desktop app; standalone installs use `codex update`. `CIAO_CODEX_BIN` can point at an absolute Codex binary when launchd cannot discover it. Readiness also generates the installed app-server schema in a temporary directory and verifies the protocol methods Ciaobot needs, so a logged-in but incompatible CLI is reported as needing an update. Ciaobot gets the account-specific model catalog and reasoning efforts from `model/list`; no OpenAI API key is required for Codex subscription chats. The Ciaobot `fable` preset selects the discovered Sol-family Codex model with Ultra reasoning effort. `OPENAI_API_KEY` remains a separate optional credential for voice and other API-backed features.
+The bundled CLI inside the ChatGPT desktop app is detected on macOS as well. Its updates follow the desktop app; standalone installs use `codex update`. `CIAO_CODEX_BIN` can point at an absolute Codex binary when launchd cannot discover it. Readiness also generates the installed app-server schema in a temporary directory and verifies the protocol methods Ciaobot needs, so a logged-in but incompatible CLI is reported as needing an update. Ciaobot gets the account-specific model catalog and reasoning efforts from `model/list`; no OpenAI API key is required for Codex subscription chats. The Ciaobot `fable` preset selects the discovered Sol-family Codex model with Ultra reasoning effort. Ciaobot itself no longer uses an OpenAI API key at all — voice moved on-device and nothing else read it.
 
 ### `gws`: Google Workspace CLI
 
@@ -148,7 +148,7 @@ The embedded server pins the Python MCP SDK at `mcp>=1.29.0,<2.0`, bumped for th
 
 **Internal command markers:** `CIAO_COMMAND_BEGIN`, `CIAO_COMMAND_INSTRUCTIONS`, and `CIAO_COMMAND_END` are reserved transcript markers used when Ciaobot expands a Claude-style slash command for Codex. They are not environment variables and should not be configured.
 
-**Optional direct-service keys:** `OPENAI_API_KEY` for Ciaobot cloud voice features and `CIAO_OLLAMA_API_KEY` for Ollama Cloud. Claude Code and Codex own their authentication through their respective CLIs.
+**Optional direct-service keys:** `CIAO_OLLAMA_API_KEY` for Ollama Cloud. Claude Code and Codex own their authentication through their respective CLIs, and Ciaobot no longer consumes an OpenAI key of its own.
 
 Workspace-specific integrations can still be set in `.env`, but the public `.env.example` does not ship private/work examples. Use user-owned credentials for each integration:
 
@@ -160,7 +160,7 @@ Workspace-specific integrations can still be set in `.env`, but the public `.env
 
 **BigQuery:** `GOOGLE_APPLICATION_CREDENTIALS`
 
-**OpenAI:** `OPENAI_API_KEY` (used by cloud voice transcription and read-aloud, and other OpenAI-integrated features). Cloud transcription defaults to `gpt-transcribe`; override the model with `CIAO_TRANSCRIPTION_MODEL` (e.g. `gpt-4o-mini-transcribe`).
+**OpenAI:** Ciaobot does not use an OpenAI API key. Codex chats authenticate through the Codex CLI's own subscription login, and voice is on-device. A custom compatible provider may still carry its own token, which is stored per provider rather than as a global key.
 
 **n8n MCP:** `N8N_MCP_TOKEN` (bearer token for the self-hosted `n8n_mcp` HTTP server in `.mcp.json`). Lives in `.env` only, value redacted. Settings → Assets → MCP servers shows the key status and can write it into `.env`.
 
@@ -276,11 +276,8 @@ Runtime config for the Ciaobot server itself (PWA, schedules, deploy).
 - `CLAUDE_MODELS`: comma-separated list of Anthropic models in the picker. Default `opus,sonnet,haiku`.
 - `CIAO_TITLE_MODEL`: model used to auto-title Anthropic chats. Default `haiku`.
 - `CIAO_TITLE_MODEL_OVERRIDE`: env-level default for the title-model override normally set from the PWA (Settings → Models tab, persisted in `.runtime/app_settings.json`). When set (either way), it wins over both `CIAO_OLLAMA_TITLE_MODEL` and `CIAO_TITLE_MODEL` and is routed per model: local daemon, Ollama cloud, or Anthropic alias. Empty = automatic routing.
-- `CIAO_TRANSCRIPTION_ENGINE`: voice dictation engine, `cloud` (default; OpenAI API, needs `OPENAI_API_KEY`) or `local` (Apple on-device dictation via the `ciaobot-native` sidecar in `Ciaobot.app`; free, nothing to download, needs macOS 26+ and a dictation language installed in System Settings → Keyboard → Dictation). Settings → Models hides `local` where it cannot run.
 - `CIAO_NATIVE_SIDECAR`: absolute path to the `ciaobot-native` binary that backs both on-device voice engines. Normally unset — the engine finds it inside the installed `Ciaobot.app`. Point it at `desktop/src-tauri/binaries/ciaobot-native-aarch64-apple-darwin` to test a locally built sidecar (`npm run build:native` in `desktop/`) without installing the app.
 - `CIAO_TRANSCRIPTION_LOCALE`: BCP-47 language for both on-device engines — dictation matches it against the installed dictation languages, and the synthesizer picks a voice for it. Default `en-US`.
-- `CIAO_TTS_ENGINE`: read-aloud (speech synthesis) engine, `cloud` (default; OpenAI `gpt-4o-mini-tts`, needs `OPENAI_API_KEY`) or `local` (the macOS system synthesizer via the `ciaobot-native` sidecar; free, on-device, nothing to download). Runtime-overridable from Settings → Models.
-- `CIAO_TTS_CLOUD_VOICE`: OpenAI voice preset for the cloud engine. Default `nova`.
 - `CIAO_TTS_LOCAL_VOICE`: macOS voice identifier or name for the local engine (e.g. `com.apple.voice.compact.en-US.Samantha`). Empty by default, which means the highest-quality installed voice for `CIAO_TRANSCRIPTION_LOCALE` — preferring premium, then enhanced, then default. The stock voices are all the basic tier; voices marked **Premium** (then Enhanced) sound markedly better and are a free download under System Settings → Accessibility → Read & Speak → System voice → Manage Voices ([Apple's guide](https://support.apple.com/guide/mac-help/mchlp2290/mac)). Ciaobot picks the best installed voice automatically, so downloading one is enough. Siri's voices are not available to third-party apps.
 - `CIAO_MAX_IMAGE_BYTES` / `CIAO_MAX_VOICE_BYTES`: upload size caps. Defaults 10 MB / 25 MB.
 - `CIAO_MEDIA_TTL_HOURS`: auto-cleanup age for uploaded media. Default `72`.

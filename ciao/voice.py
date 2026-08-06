@@ -1,28 +1,26 @@
 """Voice helpers: transcription (hear) and speech synthesis (speak).
 
-Two engines each, selected independently:
+One engine each, both on-device and both free:
 
-* Hear **cloud** — OpenAI ``gpt-transcribe`` (needs ``OPENAI_API_KEY``;
-  model overridable via ``CIAO_TRANSCRIPTION_MODEL``).
-* Hear **local** — Apple's on-device dictation (macOS 26+), through the
-  ``ciaobot-native`` sidecar bundled in ``Ciaobot.app``.
-* Speak **cloud** — OpenAI ``gpt-4o-mini-tts`` (same ``OPENAI_API_KEY``).
-* Speak **local** — ``AVSpeechSynthesizer``, through the same sidecar.
+* Hear — Apple's dictation models (macOS 26+), via ``DictationTranscriber``.
+* Speak — ``AVSpeechSynthesizer``.
 
-The local engines used to be mlx-whisper and kokoro-onnx: optional pip installs
-that pulled model weights on first use, 340 MB in Kokoro's case. Both are gone.
-Apple ships equivalents inside the OS, so local voice now costs no download and
-no dependency — see ``desktop/native/main.swift`` for why a Swift sidecar is
-required rather than calling those frameworks from Python.
+Both run through the ``ciaobot-native`` sidecar bundled in ``Ciaobot.app``; see
+``desktop/native/main.swift`` for why a Swift helper is required rather than
+calling those frameworks from Python.
 
-The trade is reach, not just size. Dictation needs macOS 26 or newer, and both
-local engines need ``Ciaobot.app`` installed, so on Linux, Windows, and older
-macOS there is no local option at all and only the cloud engines appear. The
-availability probes below are what Settings uses to hide what cannot work.
+This module used to carry four engines. The cloud pair (OpenAI ``gpt-transcribe``
+and ``gpt-4o-mini-tts``) went when the on-device pair became free and needed no
+setup: keeping them meant an API key, two engine pickers, per-minute billing and
+a second code path, to duplicate something the OS already does. Their removal
+takes the ``openai`` dependency and ``OPENAI_API_KEY`` with it.
 
-Engine selection lives in ``CiaoConfig.transcription_engine`` /
-``CiaoConfig.tts_engine`` (env defaults ``CIAO_TRANSCRIPTION_ENGINE`` /
-``CIAO_TTS_ENGINE``, runtime-overridable from the PWA Settings → Models tab).
+The cost is reach, and it is real. Voice now needs a macOS 26+ host with the
+desktop app installed. On Linux, Windows, older macOS, or a package-only
+install there is no voice at all -- the availability probes below are what
+Settings uses to say so plainly instead of failing at the point of use. Note
+the constraint is on the *host*: the PWA uploads audio to the engine, so a
+phone or iPad talking to a Mac host is unaffected.
 """
 
 from __future__ import annotations
@@ -31,10 +29,7 @@ import logging
 import re
 from pathlib import Path
 
-from openai import AsyncOpenAI
-
 from ciao import native_sidecar
-from ciao.config import BridgeConfig
 
 logger = logging.getLogger(__name__)
 
@@ -81,29 +76,6 @@ async def _run_sidecar(
         return await native_sidecar.run(args, stdin=stdin)
     except native_sidecar.SidecarError as exc:
         raise ValueError(str(exc)) from exc
-
-
-class VoiceTranscriber:
-    """OpenAI-backed voice transcription."""
-
-    def __init__(self, config: BridgeConfig) -> None:
-        if not config.openai_api_key:
-            raise ValueError("OPENAI_API_KEY is required for voice transcription")
-        self._config = config
-        self._client = AsyncOpenAI(api_key=config.openai_api_key)
-
-    async def transcribe(self, path: Path) -> str:
-        """Transcribe one saved audio file."""
-        with path.open("rb") as handle:
-            response = await self._client.audio.transcriptions.create(
-                model=self._config.transcription_model,
-                file=handle,
-                response_format="json",
-            )
-        text = getattr(response, "text", "").strip()
-        if not text:
-            raise ValueError("Voice transcription returned empty text")
-        return text
 
 
 class AppleDictationTranscriber:
@@ -175,31 +147,6 @@ def speech_text(markdown: str) -> str:
             cut = cut[: boundary + 1]
         text = cut.strip()
     return text
-
-
-class OpenAISpeaker:
-    """OpenAI-backed speech synthesis (``gpt-4o-mini-tts``)."""
-
-    mime_type = "audio/mpeg"
-
-    def __init__(self, config: BridgeConfig) -> None:
-        if not config.openai_api_key:
-            raise ValueError("OPENAI_API_KEY is required for speech synthesis")
-        self._client = AsyncOpenAI(api_key=config.openai_api_key)
-        self._voice = config.tts_cloud_voice
-
-    async def speak(self, text: str) -> bytes:
-        """Synthesize one utterance; returns MP3 bytes."""
-        response = await self._client.audio.speech.create(
-            model="gpt-4o-mini-tts",
-            voice=self._voice,
-            input=text,
-            response_format="mp3",
-        )
-        data = response.content
-        if not data:
-            raise ValueError("Speech synthesis returned no audio")
-        return data
 
 
 def system_voices() -> list[dict[str, str]]:

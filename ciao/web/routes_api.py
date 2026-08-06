@@ -136,12 +136,10 @@ _PROVIDER_KEY_META = {
         "description": "Optional key for critique/review model routing.",
     },
 }
-_SERVICE_KEY_META = {
-    "OPENAI_API_KEY": {
-        "label": "OpenAI voice API key",
-        "description": "Used directly by Ciaobot for cloud transcription and speech, not for Codex login.",
-    },
-}
+# Keys Ciaobot itself consumes, as opposed to provider logins. Empty since
+# voice moved on-device: OPENAI_API_KEY lived here for cloud transcription and
+# speech, and nothing else in the app ever read it.
+_SERVICE_KEY_META: dict[str, dict[str, str]] = {}
 _GWS_BUILTIN_PROFILES = ("personal", "work")
 _GWS_PROFILE_META = {
     "personal": {
@@ -1141,8 +1139,6 @@ def _provider_key_auth_method(config, key: str) -> str:
     file_value = _read_env_value(_env_path(config), key)
     if file_value:
         return "api_key"
-    if key == "OPENAI_API_KEY" and bool(getattr(config, "openai_api_key", None)):
-        return "api_key"
     if key == "CIAO_OLLAMA_API_KEY" and getattr(config.ollama, "api_key", "ollama") != "ollama":
         return "api_key"
     if key == "ANTHROPIC_API_KEY" and _claude_oauth_ready():
@@ -1260,9 +1256,7 @@ def _apply_provider_key_updates(config, updates: dict[str, str]) -> None:
             os.environ[key] = value
         else:
             os.environ.pop(key, None)
-        if key == "OPENAI_API_KEY":
-            config.openai_api_key = value or None
-        elif key == "CIAO_OLLAMA_API_KEY":
+        if key == "CIAO_OLLAMA_API_KEY":
             if value:
                 base_url = os.environ.get("CIAO_OLLAMA_URL", "").strip() or "https://ollama.com"
                 config.ollama = replace(config.ollama, api_key=value, base_url=base_url)
@@ -4827,25 +4821,19 @@ def _routines_payload(config, app_settings) -> dict:
         "apple_model_available": native_sidecar.apple_model_available(),
         "apple_model_unavailable_reason": native_sidecar.apple_model_unavailable_reason(),
         "transcription": {
-            "engine": config.transcription_engine,
-            "cloud_model": config.transcription_model,
             "locale": config.transcription_locale,
             # On-device dictation needs macOS 26+, the installed app, and a
             # dictation language. Settings hides the local option entirely when
             # it cannot run, and shows the reason when the user asks.
-            "local_available": apple_dictation_available(),
-            "local_unavailable_reason": dictation_unavailable_reason(),
-            "cloud_available": bool(config.openai_api_key),
+            "available": apple_dictation_available(),
+            "unavailable_reason": dictation_unavailable_reason(),
         },
         "speech": {
-            "engine": config.tts_engine,
-            "cloud_voice": config.tts_cloud_voice,
             "local_voice": config.tts_local_voice,
-            "local_available": apple_speech_available(),
+            "available": apple_speech_available(),
             # Voices differ per machine, so the picker is populated from the
             # system rather than a hardcoded list, best quality first.
             "local_voices": system_voices(),
-            "cloud_available": bool(config.openai_api_key),
         },
         # Grouped options for the routine model selectors.
         "model_options": {

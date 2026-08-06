@@ -333,3 +333,34 @@ def test_uninstall_leaves_a_browser_installed_pwa_alone(tmp_path: Path) -> None:
     with pytest.raises(InstallError, match="not the Ciaobot desktop app"):
         desktop_install.uninstall_desktop_app(app_dir=app_dir)
     assert (pwa / "app_mode_loader").exists()
+
+
+# --- CI ordering -------------------------------------------------------------
+
+
+def test_ci_builds_the_sidecar_before_running_cargo() -> None:
+    """tauri.conf.json declares the sidecar as an externalBin, so cargo's build
+    script fails with "resource path ... doesn't exist" when the binary is
+    absent. The binaries are gitignored build output, and `npm run tauri build`
+    only produces them via its pretauri hook -- clippy, fmt and test call cargo
+    directly and never trigger it.
+
+    scripts/check-desktop.sh cannot catch this: it always builds the sidecar as
+    its first step, so a bare-cargo run never happens there. This asserts the
+    ordering in CI instead, which is where the gap actually bit.
+    """
+    workflow = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+    if not workflow.exists():  # pragma: no cover - running from an installed wheel
+        pytest.skip(".github/workflows/ci.yml is not present")
+    text = workflow.read_text()
+    build = text.find("npm run build:native")
+    assert build != -1, "CI never builds the native sidecar"
+    first_cargo = min(
+        (pos for pos in (text.find(cmd) for cmd in ("cargo fmt", "cargo clippy", "cargo test")) if pos != -1),
+        default=-1,
+    )
+    assert first_cargo != -1, "CI no longer runs cargo; update this test"
+    assert build < first_cargo, (
+        "the native sidecar must be built before the first cargo step, or the "
+        "externalBin build script fails"
+    )

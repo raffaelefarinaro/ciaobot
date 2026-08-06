@@ -7142,109 +7142,55 @@ class ProjectChatManager:
     async def transcribe_voice(self, audio_path: Path) -> tuple[str, float]:
         """Transcribe an audio file. Returns (text, cost_usd).
 
-        Engine selection follows ``config.transcription_engine``: ``local``
-        runs Apple's on-device dictation through the bundled sidecar (free,
-        macOS 26+); anything else uses the OpenAI cloud API. If the local
-        engine is unavailable it raises a ValueError naming the reason.
+        On-device only, and free -- the cost is always 0.0, kept in the return
+        shape because callers record it. Raises ValueError naming the reason
+        when dictation is unavailable (pre-macOS 26, no desktop app, or no
+        dictation language installed).
         """
         from ciao.voice import (
             AppleDictationTranscriber,
-            VoiceTranscriber,
             apple_dictation_available,
             dictation_unavailable_reason,
         )
 
-        if self._config.transcription_engine == "local":
-            if await asyncio.to_thread(apple_dictation_available):
-                try:
-                    transcriber = AppleDictationTranscriber(
-                        self._config.transcription_locale
-                    )
-                    text = await transcriber.transcribe(audio_path)
-                    return text, 0.0
-                except Exception as exc:
-                    raise ValueError(
-                        f"On-device dictation failed: {exc}. "
-                        "Change the engine to Cloud in Settings → Models to use OpenAI instead."
-                    ) from exc
-            else:
-                raise ValueError(
-                    "On-device dictation is selected but unavailable: "
-                    f"{dictation_unavailable_reason()}. "
-                    "Change the engine to Cloud in Settings → Models."
-                )
-
-        if not self._config.openai_api_key:
-            raise ValueError("OPENAI_API_KEY is required for voice transcription")
-        cloud_transcriber = VoiceTranscriber(self._config)
-        text = await cloud_transcriber.transcribe(audio_path)
-        # Estimate cost from file duration (rough: file_size / ~16000 bytes per second for OGG)
+        if not await asyncio.to_thread(apple_dictation_available):
+            raise ValueError(
+                f"Dictation is unavailable: {dictation_unavailable_reason()}."
+            )
         try:
-            size = audio_path.stat().st_size
-            duration_sec = max(size / 16000, 1.0)
-        except OSError:
-            duration_sec = 1.0
-        # gpt-transcribe is $0.0045/min of audio (per OpenAI pricing).
-        cost = duration_sec / 60 * 0.0045
-        return text, cost
+            transcriber = AppleDictationTranscriber(self._config.transcription_locale)
+            text = await transcriber.transcribe(audio_path)
+        except Exception as exc:
+            raise ValueError(f"Dictation failed: {exc}") from exc
+        return text, 0.0
 
     async def synthesize_speech(self, text: str) -> tuple[bytes, str, float]:
         """Read a message aloud. Returns (audio_bytes, mime_type, cost_usd).
 
-        Engine selection follows ``config.tts_engine``: ``local`` runs the
-        macOS system synthesizer through the bundled sidecar (free); anything
-        else uses the OpenAI cloud API. Markdown is reduced to speakable text
-        first.
+        The macOS system synthesizer through the bundled sidecar. Free, so the
+        cost is always 0.0. Markdown is reduced to speakable text first.
         """
-        from ciao.voice import (
-            OpenAISpeaker,
-            SystemSpeaker,
-            apple_speech_available,
-            speech_text,
-        )
+        from ciao.voice import SystemSpeaker, apple_speech_available, speech_text
 
         spoken = speech_text(text)
         if not spoken:
             raise ValueError("Nothing to read aloud in this message")
 
-        if self._config.tts_engine == "local":
-            if await asyncio.to_thread(apple_speech_available):
-                try:
-                    speaker = SystemSpeaker(
-                        self._config.tts_local_voice,
-                        self._config.transcription_locale,
-                    )
-                    audio = await speaker.speak(spoken)
-                    return audio, speaker.mime_type, 0.0
-                except Exception as exc:
-                    raise ValueError(
-                        f"System speech synthesis failed: {exc}. "
-                        "Change the engine to Cloud in Settings → Models to use OpenAI instead."
-                    ) from exc
-            else:
-                # `ciao desktop install` installs a macOS app bundle, so it is
-                # not advice a Linux or Windows user can act on -- and local
-                # read-aloud used to work there via Kokoro.
-                if sys.platform != "darwin":
-                    raise ValueError(
-                        "On-device speech synthesis is macOS-only. "
-                        "Change the engine to Cloud in Settings → Models."
-                    )
-                raise ValueError(
-                    "System speech synthesis is selected but unavailable. "
-                    "Install the desktop app with `ciao desktop install`, "
-                    "or change the engine to Cloud in Settings → Models."
-                )
-
-        if not self._config.openai_api_key:
-            raise ValueError("OPENAI_API_KEY is required for speech synthesis")
-        cloud_speaker = OpenAISpeaker(self._config)
-        audio = await cloud_speaker.speak(spoken)
-        # Estimate cost from text length (rough: ~1000 chars per spoken
-        # minute at ~$0.015/min for gpt-4o-mini-tts).
-        cost = len(spoken) / 1000 * 0.015
-        return audio, cloud_speaker.mime_type, cost
-
+        if not await asyncio.to_thread(apple_speech_available):
+            if sys.platform != "darwin":
+                raise ValueError("Read-aloud is macOS-only.")
+            raise ValueError(
+                "Read-aloud is unavailable. Install the desktop app with "
+                "`ciao desktop install`."
+            )
+        try:
+            speaker = SystemSpeaker(
+                self._config.tts_local_voice, self._config.transcription_locale
+            )
+            audio = await speaker.speak(spoken)
+        except Exception as exc:
+            raise ValueError(f"Read-aloud failed: {exc}") from exc
+        return audio, speaker.mime_type, 0.0
     def save_voice_upload(self, data: bytes, filename: str) -> Path:
         """Save an uploaded voice file and return its path."""
         ext = Path(filename).suffix.lower() or ".webm"
