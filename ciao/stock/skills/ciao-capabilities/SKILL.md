@@ -43,18 +43,19 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 - A native scheduler dispatches recurring or one-off prompts as fresh chat turns into a target project or chat — daily/weekly/monthly/once, timezone-aware. Configure from the **Automations page** or directly in chat (the `schedule_*`/`loop_*` MCP tools carry the full field semantics in their own docstrings).
 - **Loops** are the sub-day sibling of schedules: bound to one existing chat, they re-send the same prompt every N minutes (e.g. "check my PRs every 10 minutes"), keeping the conversation's context between iterations. A loop runs with the chat's own model; loops set to start with the server resume on boot, the rest are started manually. Managed from the same Automations page.
 - Schedules that were due while the app was off are caught up on the next launch; each workspace shows how many runs it missed.
-- System maintenance schedules ship with the app; the Automation page shows background job runs.
+- System maintenance schedules ship with the app. **Settings → Automations** lists the background work Ciaobot does on its own — what each automation does, when it runs, and how its last run went — leading with anything that needs attention. Failing automations can be re-run from there; Session insights can be run over every archived chat that is missing them, optionally with a different model when the configured one keeps failing.
 
 ### 4. Files
 
 - Create, preview, edit, and **restore** workspace and vault files from the PWA, with history — no terminal needed.
-- **In chat**: agent file touches surface as inline cards; open the viewer, pin beside the chat, and add line comments on selections. Freshly written `.md`/`.csv` files auto-surface in the pinned panel so you see them without hunting.
+- **In chat**: agent file touches surface as inline cards; open the viewer, pin beside the chat, and add line comments on selections — including while the agent is still working, in which case the comment rides along on your next message. Freshly written `.md`/`.csv` files auto-surface in the pinned panel so you see them without hunting.
 - **Drag to attach**: drag a file into the composer to insert an agent-accessible absolute path. On the host, Ciaobot uses the desktop path when the webview exposes it; from a client (or a sandboxed browser), it uploads the file into the active project folder on the host first. Images dropped this way upload as visual attachments.
 - **Per-chat drafts**: unsent composer text is cached locally per chat and restored after switching chats or reloading. Sending clears only the active chat's draft.
 - **Chat annotations**: select text in any message and attach a comment that rides on your next send.
 - **Rich previews**: images inline; PDFs in the viewer; `.pptx` slides rendered as PDF (LibreOffice on the server).
 - **CSV tables**: `.csv` files render as an editable table in the viewer, and you can attach comments to individual cells (anchored by row and column) the same way you annotate document lines.
 - **Backlinks**: the markdown viewer has a Backlinks tab listing other vault notes that link to the open note via wikilinks (`[[Note]]`) — the incoming half of the wikilink graph.
+- **Keyboard shortcuts** work in the browser as well as the desktop app, on whichever modifier is actually free: new chat, dictation, and archive are `Cmd+T` / `Cmd+D` / `Cmd+A` in the app, and `Option+N` / `Option+D` / `Option+A` in the PWA, where the browser has already claimed the Cmd versions for new-tab, bookmark, and select-all. Arrow keys roam the home screen's recent chats and Esc closes the open chat in both. **Settings → Shortcuts** lists the set with the labels for how you are running it.
 
 ### 5. Skills, subagents, and commands (extensibility)
 
@@ -69,7 +70,7 @@ Ciaobot is a local-first UI and UX layer for using Claude Code (and other backen
 - **Custom providers**: any OpenAI- or Anthropic-compatible endpoint can be added by the user in **Settings → Providers** — give it a name, a URL, a token, and whether it runs through the Claude or Codex runner. Ciaobot can probe the endpoint to discover its model ids, and those models then appear in the normal chat, workspace, and routine model pickers alongside the built-in backends. Tokens are stored separately in the gitignored runtime directory and are never returned by the API; only whether a token is set is exposed.
 - Per-workspace default model and model bucket (which controls how aliases like `opus`/`sonnet` resolve), per-chat override in the picker.
 - Beyond per-chat routing, one chat can **reach another model without leaving the conversation**: `adversarial_review` for an inline multi-model second opinion, or a delegate (see §1) for writable work on a different model.
-- **Voice dictation model**: cloud transcription runs on an OpenAI transcription model, shown with its per-minute price in **Settings → Models** and overridable via `CIAO_TRANSCRIPTION_MODEL` or the runtime settings store. Local `mlx-whisper` dictation is a separate path and needs no key.
+- **Voice** is on-device and free — one engine each, with no API key, no per-minute billing, and no engine picker: dictation uses Apple's dictation models and speech uses `AVSpeechSynthesizer`, both through the `ciaobot-native` sidecar bundled in `Ciaobot.app`. It needs a **macOS 26+ host with the desktop app installed**; on Linux, Windows, older macOS, or a package-only install there is no voice, and Settings says so instead of failing when you press record. The constraint is on the *host* only — a phone or iPad talking to a Mac host gets voice, because the PWA uploads the audio to the host to transcribe.
 
 ### 7. Google Workspace (`gws`)
 

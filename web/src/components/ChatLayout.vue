@@ -393,6 +393,19 @@ const viewMode = computed<'chat' | 'project' | 'schedules' | 'settings'>(() => {
   if (projectIdParam.value) return 'project'
   return 'chat'
 })
+// Whether the chat-surface keyboard shortcuts apply. Only the full-screen
+// views own the keyboard: `viewMode` is 'project' on /project/:projectId --
+// the same ChatLayout, sidebar and open chat as /chat/:id -- so gating those
+// shortcuts on `=== 'chat'` silently killed Esc and the arrow keys for anyone
+// who reached a chat through a project. It read as "Esc only works after I
+// click somewhere else", because clicking a chat in the sidebar navigates to
+// /chat/:id and revived the handler. One predicate, so the next view mode
+// added has a single place to declare itself.
+const shortcutsActive = computed(() =>
+  viewMode.value !== 'settings'
+  && viewMode.value !== 'schedules'
+  && !pendingConfirm.value,
+)
 const sidebarCollapsed = ref(false)
 const showNewSchedule = ref(false)
 const isMobile = ref(window.innerWidth < 768)
@@ -561,18 +574,18 @@ function closeChat() {
 }
 
 // ── Global keyboard shortcuts ───────────────────────────────────────
-// Desktop-only (the PWA in a browser would fight the OS for Cmd+T etc.).
-// These run inside the Tauri webview, where those combos are free.
+// Bound in both the PWA and the desktop app, but on different modifiers: the
+// Tauri webview owns Cmd+T / Cmd+D / Cmd+A, while a browser tab has already
+// spent them on new-tab / bookmark / select-all, so the PWA uses Option
+// instead. See onShortcutKeydown for the pairs.
 function isTypingTarget(el: EventTarget | null): boolean {
   if (!(el instanceof HTMLElement)) return false
   return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable
 }
 
-// Keys the browser does not reserve, so they can be bound in the PWA as well
-// as the desktop app: arrow keys roam the home recent-chat grid (Enter opens
-// the focused card natively) and Esc closes the open chat. Anything with a
-// modifier stays in onShortcutKeydown, which is desktop-only because a browser
-// tab owns Cmd+T / Cmd+A.
+// Unmodified keys, which no browser reserves: arrow keys roam the home
+// recent-chat grid (Enter opens the focused card natively) and Esc closes the
+// open chat. Anything carrying a modifier stays in onShortcutKeydown.
 //
 // These must live in exactly ONE listener. They were previously handled here
 // AND again in onShortcutKeydown; in the desktop app both listeners are bound,
@@ -580,8 +593,7 @@ function isTypingTarget(el: EventTarget | null): boolean {
 // time. The PWA, with only this listener, behaved correctly -- which is why the
 // breakage looked desktop-specific.
 function onUnreservedKeydown(e: KeyboardEvent) {
-  if (viewMode.value !== 'chat') return
-  if (pendingConfirm.value) return
+  if (!shortcutsActive.value) return
 
   if (e.key.startsWith('Arrow')) {
     // Arrows keep deferring to text fields, or they would break caret movement.
@@ -603,39 +615,38 @@ function onUnreservedKeydown(e: KeyboardEvent) {
 }
 
 function onShortcutKeydown(e: KeyboardEvent) {
-  // Defer to full-screen views (settings, schedules) and the confirm dialog.
-  if (viewMode.value !== 'chat') return
-  if (pendingConfirm.value) return
+  if (!shortcutsActive.value) return
 
   // Arrow keys and Esc are handled by onUnreservedKeydown, which is bound in
   // both the PWA and the desktop app. Handling them here too made the desktop
   // app run them twice.
+  const isDesktop = isDesktopApp()
   const mod = e.metaKey || e.ctrlKey
+  const alt = e.altKey
 
-  // Cmd+T: new chat in the default General project.
-  if (mod && (e.key === 't' || e.key === 'T')) {
+  // New Chat: Cmd+T (Desktop) or Option+N (Web/PWA).
+  if ((isDesktop && mod && (e.key === 't' || e.key === 'T')) || (!isDesktop && alt && (e.key === 'n' || e.key === 'N'))) {
     e.preventDefault()
     void store.newChatInGeneral()
     return
   }
 
-  // Cmd+D: toggle dictation in the active chat's composer (start/stop).
-  if (mod && (e.key === 'd' || e.key === 'D')) {
+  // Dictation: Cmd+D (Desktop) or Option+D (Web/PWA).
+  if ((isDesktop && mod && (e.key === 'd' || e.key === 'D')) || (!isDesktop && alt && (e.key === 'd' || e.key === 'D'))) {
     if (!store.activeChat) return
     e.preventDefault()
     chatPanelRef.value?.toggleDictation()
     return
   }
 
-  // Cmd+A: archive the active chat. Skip while typing so Cmd+A keeps its
+  // Archive: Cmd+A (Desktop) or Option+A (Web/PWA). Skip while typing so Cmd+A/Alt+A keeps its
   // select-all meaning inside text fields.
-  if (mod && (e.key === 'a' || e.key === 'A')) {
+  if ((isDesktop && mod && (e.key === 'a' || e.key === 'A')) || (!isDesktop && alt && (e.key === 'a' || e.key === 'A'))) {
     if (isTypingTarget(e.target) || !store.activeChat) return
     e.preventDefault()
     chatPanelRef.value?.archiveActiveChat()
     return
   }
-
 }
 
 function closeProject() {
@@ -698,9 +709,7 @@ onMounted(() => {
   window.addEventListener('touchcancel', onTouchEnd, { passive: true })
   // Arrow keys and Esc are not browser-reserved, so they bind in the PWA too.
   window.addEventListener('keydown', onUnreservedKeydown)
-  // Global keyboard shortcuts (Cmd+T, Cmd+A, Cmd+D) live in the desktop app
-  // only: in a browser tab those combos are owned by the browser.
-  if (isDesktopApp()) window.addEventListener('keydown', onShortcutKeydown)
+  window.addEventListener('keydown', onShortcutKeydown)
 })
 
 onBeforeUnmount(() => {
@@ -710,7 +719,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('touchend', onTouchEnd)
   window.removeEventListener('touchcancel', onTouchEnd)
   window.removeEventListener('keydown', onUnreservedKeydown)
-  if (isDesktopApp()) window.removeEventListener('keydown', onShortcutKeydown)
+  window.removeEventListener('keydown', onShortcutKeydown)
   window.removeEventListener('mousemove', handleSidebarDrag)
   window.removeEventListener('mouseup', stopSidebarDrag)
   window.removeEventListener('mousemove', handleSplitDrag)

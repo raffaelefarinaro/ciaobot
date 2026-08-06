@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 SESSION_COOKIE = "ciao_session"
 SESSION_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
+# Shortest PWA password the first-run wizard and Settings accept.
+MIN_PWA_PASSWORD_LENGTH = 4
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
 _LOOPBACK_ADDRESSES = {"127.0.0.1", "::1", "localhost"}
 

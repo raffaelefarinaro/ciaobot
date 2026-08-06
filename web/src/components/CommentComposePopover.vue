@@ -32,6 +32,17 @@
           <input type="file" accept="image/*" multiple hidden @change="onUpload" />
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
         </label>
+        <div class="compose-voice">
+          <VoiceRecorder
+            v-if="!transcribing"
+            ref="voiceRecorderRef"
+            @recorded="handleVoice"
+            @error="handleVoiceError"
+          />
+          <span v-else class="voice-transcribing" title="Transcribing...">
+            <span class="transcribe-spinner"></span>
+          </span>
+        </div>
         <button class="compose-btn" @click="emit('cancel')" type="button">Cancel</button>
         <button
           class="compose-btn primary"
@@ -60,6 +71,9 @@ import { computed, nextTick, ref, watch } from 'vue'
 
 import { useViewportHeight } from '../composables/useViewportHeight'
 import { clampAnchorLeft, clampAnchorTop } from '../lib/popoverAnchor'
+import { useProjectStore } from '../stores/projects'
+import { errorMessage } from '../lib/errorMessage'
+import VoiceRecorder from './VoiceRecorder.vue'
 
 export type ComposeAnchor = { top: number; left: number }
 
@@ -87,9 +101,12 @@ const emit = defineEmits<{
 const images = computed(() => props.images ?? [])
 const inputEl = ref<HTMLTextAreaElement>()
 const rootEl = ref<HTMLElement>()
+const voiceRecorderRef = ref<InstanceType<typeof VoiceRecorder> | null>(null)
+const transcribing = ref(false)
 // Measured height, once rendered. Null until then, so the first paint uses the
 // COMPOSE_H estimate rather than jumping.
 const measuredH = ref<number | null>(null)
+const store = useProjectStore()
 
 // Reactive on purpose. Opening this popover focuses the textarea, so on a phone
 // the keyboard comes up a moment later and shrinks the viewport under a box that
@@ -149,7 +166,52 @@ watch(
   },
 )
 
-defineExpose({ focus })
+function insertTextAtCursor(text: string): void {
+  const el = inputEl.value
+  if (!el) return
+  const start = el.selectionStart ?? 0
+  const end = el.selectionEnd ?? start
+  const before = props.modelValue.slice(0, start)
+  const after = props.modelValue.slice(end)
+  const next = before + text + after
+  emit('update:modelValue', next)
+  nextTick(() => {
+    el.focus()
+    const pos = start + text.length
+    el.setSelectionRange(pos, pos)
+  })
+}
+
+async function handleVoice(blob: Blob): Promise<void> {
+  const chatId = store.activeChatId
+  if (!chatId) {
+    store.pushErrorToast('Voice dictation unavailable', 'No active chat')
+    return
+  }
+  transcribing.value = true
+  try {
+    const text = await store.transcribeVoice(chatId, blob)
+    if (text.trim()) {
+      insertTextAtCursor(text.trimEnd())
+    }
+  } catch (e) {
+    console.error('Voice error:', e)
+    store.pushErrorToast('Voice transcription failed', `${errorMessage(e)}`)
+  } finally {
+    transcribing.value = false
+  }
+}
+
+function handleVoiceError(message: string): void {
+  store.pushErrorToast('Voice dictation unavailable', message)
+}
+
+// Allow the parent (and a future global shortcut) to toggle recording.
+function toggleDictation(): void {
+  voiceRecorderRef.value?.toggleRecording()
+}
+
+defineExpose({ focus, toggleDictation })
 </script>
 
 <style scoped>
@@ -264,6 +326,39 @@ defineExpose({ focus })
 .compose-btn.primary:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+.compose-voice {
+  display: flex;
+  align-items: center;
+}
+.compose-voice :deep(.voice-btn) {
+  min-width: 28px;
+  min-height: 28px;
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+}
+.compose-voice :deep(.voice-btn svg) {
+  width: 16px;
+  height: 16px;
+}
+.voice-transcribing {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+}
+.transcribe-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent, #60a5fa);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 @media (max-width: 640px) {

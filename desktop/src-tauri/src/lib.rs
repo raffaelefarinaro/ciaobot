@@ -318,7 +318,7 @@ fn run_full_update(app: AppHandle, force: bool) {
         for window in app.webview_windows().values() {
             let _ = window.hide();
         }
-        set_dock_visible(&app, false);
+        hide_dock_unless_pinned(&app);
         let extra = if force { &["--force"][..] } else { &[][..] };
         let engine_updated = match service::invoke(&binary, "update-engine", extra) {
             Ok(result) if result.ok => true,
@@ -397,6 +397,24 @@ fn set_dock_visible(app: &AppHandle, visible: bool) {
         tauri::ActivationPolicy::Accessory
     };
     let _ = app.set_activation_policy(policy);
+}
+
+// Whether the Dock tile should disappear along with the last window. Reading the
+// setting through a poisoned-lock-tolerant helper keeps the window-close path
+// from panicking on a lock another thread died holding; defaulting to true there
+// preserves the behaviour this preference replaced.
+fn hide_dock_icon_enabled(app: &AppHandle) -> bool {
+    app.state::<DesktopModel>()
+        .settings
+        .lock()
+        .map(|settings| settings.hide_dock_icon)
+        .unwrap_or(true)
+}
+
+fn hide_dock_unless_pinned(app: &AppHandle) {
+    if hide_dock_icon_enabled(app) {
+        set_dock_visible(app, false);
+    }
 }
 
 fn show_window(app: &AppHandle, label: &str) {
@@ -648,10 +666,11 @@ fn build_windows(
                 }
                 WindowEvent::CloseRequested { api, .. } => {
                     // Closing the window leaves Ciaobot running in the menu bar;
-                    // quitting is a tray action. Drop the Dock tile with it.
+                    // quitting is a tray action. Drop the Dock tile with it,
+                    // unless the user unchecked Hide Dock Icon.
                     api.prevent_close();
                     let _ = window.hide();
-                    set_dock_visible(&window.app_handle().clone(), false);
+                    hide_dock_unless_pinned(&window.app_handle().clone());
                 }
                 _ => {}
             }
@@ -800,11 +819,10 @@ fn refresh_tray(app: &AppHandle) -> Result<(), String> {
         .read()
         .map_err(|error| error.to_string())?
         .clone();
-    let notifications = model
-        .settings
-        .lock()
-        .map_err(|error| error.to_string())?
-        .notifications_enabled;
+    let (notifications, hide_dock_icon) = {
+        let settings = model.settings.lock().map_err(|error| error.to_string())?;
+        (settings.notifications_enabled, settings.hide_dock_icon)
+    };
     let login = app.autolaunch().is_enabled().unwrap_or(false);
     let built = tray::build_menu(
         app,
@@ -812,6 +830,7 @@ fn refresh_tray(app: &AppHandle) -> Result<(), String> {
         notifications,
         notification_permission_state().contains("denied"),
         login,
+        hide_dock_icon,
     )
     .map_err(|e| e.to_string())?;
     let working_rows = built.working_items.len();
@@ -855,6 +874,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         settings.notifications_enabled,
         notification_permission_state().contains("denied"),
         app.autolaunch().is_enabled().unwrap_or(false),
+        settings.hide_dock_icon,
     )?
     .menu;
     let icon = Image::from_bytes(include_bytes!(
@@ -908,6 +928,26 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                     // The bundled settings window used to own the permission
                     // prompt, so turning the toggle on has to ask for it now.
                     maybe_request_notification_permission(app, enabled);
+                    let _ = refresh_tray(app);
+                }
+                "hide-dock-icon" => {
+                    let model = app.state::<DesktopModel>();
+                    let mut hide = true;
+                    if let Ok(mut settings) = model.settings.lock() {
+                        settings.hide_dock_icon = !settings.hide_dock_icon;
+                        hide = settings.hide_dock_icon;
+                        if let Err(error) = model.store.save(&settings) {
+                            show_error(app, "Could not save Dock setting", error.to_string());
+                        }
+                    }
+                    // Apply immediately rather than at the next window close, so
+                    // the checkbox visibly does something: unchecking it while
+                    // no window is open should bring the tile back right away.
+                    let showing = app
+                        .webview_windows()
+                        .values()
+                        .any(|window| window.is_visible().unwrap_or(false));
+                    set_dock_visible(app, showing || !hide);
                     let _ = refresh_tray(app);
                 }
                 "start-at-login" => {
@@ -1264,7 +1304,10 @@ pub fn run() {
                 .get_webview_window("main")
                 .and_then(|window| window.is_visible().ok())
                 .unwrap_or(false);
-            set_dock_visible(app.handle(), main_visible);
+            // With Hide Dock Icon off, the tile stays put even on a windowless
+            // menu-bar-only launch.
+            let keep_dock = !hide_dock_icon_enabled(app.handle());
+            set_dock_visible(app.handle(), main_visible || keep_dock);
             Ok(())
         })
         .build(tauri::generate_context!())

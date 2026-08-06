@@ -12,7 +12,7 @@ ciao setup --workspace /tmp/ciao-workspace
 ciao run
 ```
 
-`ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies the editable `CLAUDE.md` workspace guide, links `AGENTS.md` to that same guide for Codex, copies `CIAO_CUSTOMIZATION.md`, and renders the server plist under `~/Library/LaunchAgents/`. When the real Tauri `Ciaobot.app` is installed, setup does not generate or load the legacy rumps agent or `Ciaobot Server.app`; package-only installs retain those assets for the migration/rollback window. Existing custom `AGENTS.md` files are preserved. By default setup does not load launchd; add `--load-launchd` when you want it to run `launchctl`.
+`ciao setup` is idempotent. It writes the initial `.env`, seeds stock workspace files, copies the editable `CLAUDE.md` workspace guide, links `AGENTS.md` to that same guide for Codex, copies `CIAO_CUSTOMIZATION.md`, and renders the server plist under `~/Library/LaunchAgents/`. Setup no longer generates the retired rumps agent or `Ciaobot Server.app`; it removes them when an older install left them behind. Existing custom `AGENTS.md` files are preserved. By default setup does not load launchd; add `--load-launchd` when you want it to run `launchctl`.
 
 Provider settings for custom compatible endpoints are persisted in the tracked workspace file `.ciao/custom_providers.json`; bearer tokens are kept separately in the gitignored `.runtime/custom_provider_tokens.json` and are never committed or returned by the API. Focused provider tests belong in `tests/test_custom_providers.py`.
 
@@ -104,13 +104,23 @@ npm run build        # typecheck + Vite build, outputs to ciao/web/static/
 
 ## macOS desktop development
 
-The Tauri 2 shell requires macOS 13+, Node 22.x, and Rust 1.90.0 with
-`aarch64-apple-darwin` and `x86_64-apple-darwin` targets:
+The Tauri 2 shell requires macOS 13+, Node 22.x, Rust 1.90.0 with
+`aarch64-apple-darwin` and `x86_64-apple-darwin` targets, and `swiftc` from the
+Xcode Command Line Tools (it builds the `ciaobot-native` sidecar).
+
+`./scripts/check-desktop.sh` runs the whole gate — the same commands CI's
+`build-desktop` job does — and asserts the sidecar ends up bundled, universal,
+signed, and runnable inside the built app. Run it after any change under
+`desktop/`; `--fast` skips the bundle build when you have not touched
+`desktop/native/` or `tauri.conf.json`. `prepare-release` runs it too.
+
+The individual steps, if you need them separately:
 
 ```bash
 cd desktop
 npm ci
-npm run build
+npm run build            # desktop frontend (vite) only
+npm run build:native     # Swift sidecar -> src-tauri/binaries/ (also runs via pretauri)
 cd src-tauri
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
@@ -194,10 +204,16 @@ cd web && npm test             # Frontend unit tests
 cd web && npm run build        # Typecheck + Vite build (frontend smoke test)
 ```
 
-The Settings → Automations list uses the registry-backed `uses_model` and
-`produces_outcome` fields from `GET /api/automation` for its capability badges;
-do not infer those labels from a job's latest run because never-run jobs are
-intentionally included in the response.
+The Settings → Automations list is registry-driven: `GET /api/automation` carries
+each job's static `trigger` sentence, `schedule_id`, `one_time`, `uses_model`,
+and `produces_outcome`. Do not infer those from a job's latest run — never-run
+jobs are intentionally included in the response. When adding a job to
+`job_runs.REGISTRY`, give it a `trigger` (the page's answer to "when does this
+run?"); when removing one, add its id to `job_runs.RETIRED_JOBS`, because
+`job_runs_latest.json` keeps the last run of every job it ever saw and the row
+would otherwise linger with a stale badge. Set `schedule_only=True` only when a
+schedule is the job's *sole* trigger: such a job is hidden on machines where
+that schedule is not installed.
 
 For chat rendering changes, verify the compact `Activity` disclosure, `Outputs` placement, readable token labels, keyboard operation, and 44px touch targets at both desktop and narrow-phone widths. Markdown tables should shrink-wrap on desktop and keep readable first-column labels inside a horizontally scrollable table viewport on narrow screens.
 For composer drag-and-drop changes, test both local host and remote client roles:
@@ -292,7 +308,7 @@ requires all 8 scenarios and at least five repeats.
 - **Doc the change.** After any change to `ciao/`, `web/`, `scripts/`, `deploy/`, or `pyproject.toml`, refresh `docs/ARCHITECTURE.md`, this file, `CLAUDE.md`, and `INTEGRATIONS.md` against actual repo state before declaring the task complete. Skip only for pure bugfixes that touch nothing in layout, capabilities, install steps, env vars, endpoints, or commands.
 - **New API routes must be documented.** Add the route to `PWA_API.md`; state-changing routes also need an Agent recipe or an allowlist entry in `tests/test_pwa_api_docs.py`. New `CIAO_*` env vars must land in `INTEGRATIONS.md` or the allowlist in `tests/test_env_vars_documented.py`. Both are test-enforced.
 - **Never restart the ciao service yourself** from inside the PWA. Apply code changes and ask the operator to hit Deploy.
-- **Never commit `.env` or API keys.** `.env` minimum: `PWA_AUTH_TOKEN`.
+- **Never commit `.env` or API keys.** `.env` minimum: `PWA_AUTH_TOKEN` (the dashboard password; protection is on unless `PWA_AUTH_REQUIRED=false`).
 - **Keep edits minimal and consistent with existing patterns.** Don't refactor unrelated code; if unrelated changes appear, pause and ask.
 - **Avoid destructive git** (force push, hard reset on shared branches) unless explicitly asked.
 - **Use the branch model in `CONTRIBUTING.md`.** Day-to-day PRs target `develop`; release PRs target `main`.

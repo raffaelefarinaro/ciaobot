@@ -36,7 +36,6 @@ def _make_client(tmp_path, env_extra: dict[str, str] | None = None):
         # Keep tests off the network: the settings GET re-discovers local
         # daemon models when this is enabled.
         "CIAO_OLLAMA_LOCAL_DISCOVERY": "0",
-        "OPENAI_API_KEY": "sk-openai",
     }
     env.update(env_extra or {})
     config = CiaoConfig.from_env(env)
@@ -57,7 +56,7 @@ def _make_client(tmp_path, env_extra: dict[str, str] | None = None):
 
 
 def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
-    monkeypatch.setattr("shutil.which", lambda cmd: None)
+    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
     client, config = _make_client(tmp_path)
     data = client.get("/api/settings/routines").json()
     assert data["title_model"] == ""  # no override stored
@@ -81,20 +80,22 @@ def test_get_returns_effective_models_and_options(monkeypatch, tmp_path):
         "workspace_root": str(config.workspace_root),
         "vault_root": str(config.vault_root),
     }
-    assert data["transcription"]["engine"] == "cloud"
-    assert data["transcription"]["cloud_model"] == "gpt-transcribe"
-    assert data["transcription"]["cloud_available"] is True
-    assert data["speech"]["engine"] == "cloud"
-    assert data["speech"]["cloud_available"] is True
-    assert data["speech"]["cloud_voice"] == "onyx"
-    assert data["speech"]["local_voice"] == "am_michael"
+    # Voice is on-device only: availability and a reason, no engine to pick.
+    assert data["transcription"]["locale"] == "en-US"
+    assert isinstance(data["transcription"]["available"], bool)
+    assert isinstance(data["transcription"]["unavailable_reason"], str)
+    assert isinstance(data["speech"]["available"], bool)
+    # Empty local voice = "best installed voice for the locale"; the picker is
+    # populated from the machine rather than a hardcoded default.
+    assert data["speech"]["local_voice"] == ""
+    assert isinstance(data["speech"]["local_voices"], list)
 
 
 def test_get_title_effective_is_haiku_not_apfel_when_no_override(monkeypatch, tmp_path):
     # apfel is opt-in, not the Automatic default: even with the binary on PATH,
     # Automatic resolves to the workspace haiku tier (apfel fails when Apple
     # Intelligence is disabled). See issue: "Automatic: apfel" mislabel.
-    monkeypatch.setattr("shutil.which", lambda cmd: "/opt/homebrew/bin/apfel" if cmd == "apfel" else None)
+    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
     client, config = _make_client(tmp_path)
     data = client.get("/api/settings/routines").json()
     assert data["title_model"] == ""  # no override stored
@@ -103,7 +104,7 @@ def test_get_title_effective_is_haiku_not_apfel_when_no_override(monkeypatch, tm
 
 
 def test_get_title_effective_is_apfel_when_explicitly_chosen(monkeypatch, tmp_path):
-    monkeypatch.setattr("shutil.which", lambda cmd: "/opt/homebrew/bin/apfel" if cmd == "apfel" else None)
+    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
     client, config = _make_client(tmp_path)
     resp = client.patch("/api/settings/routines", json={"title_model": "apfel"})
     assert resp.status_code == 200
@@ -183,40 +184,6 @@ def test_patch_clearing_restores_defaults(tmp_path):
     assert config.insights_model_override == ""
 
 
-def test_patch_rejects_bad_engine(tmp_path):
-    client, config = _make_client(tmp_path)
-    resp = client.patch(
-        "/api/settings/routines", json={"transcription_engine": "telepathy"}
-    )
-    assert resp.status_code == 400
-    assert config.transcription_engine == "cloud"
-
-
-def test_patch_engine_local(tmp_path):
-    client, config = _make_client(tmp_path)
-    resp = client.patch(
-        "/api/settings/routines", json={"transcription_engine": "local"}
-    )
-    assert resp.status_code == 200
-    assert config.transcription_engine == "local"
-    assert resp.json()["transcription"]["engine"] == "local"
-
-
-def test_patch_tts_engine_local(tmp_path):
-    client, config = _make_client(tmp_path)
-    resp = client.patch("/api/settings/routines", json={"tts_engine": "local"})
-    assert resp.status_code == 200
-    assert config.tts_engine == "local"
-    assert resp.json()["speech"]["engine"] == "local"
-
-
-def test_patch_rejects_bad_tts_engine(tmp_path):
-    client, config = _make_client(tmp_path)
-    resp = client.patch("/api/settings/routines", json={"tts_engine": "megaphone"})
-    assert resp.status_code == 400
-    assert config.tts_engine == "cloud"
-
-
 def test_route_503s_without_store(tmp_path):
     client, _config = _make_client(tmp_path)
     client.app.state.app_settings = None
@@ -232,7 +199,7 @@ def test_automatic_routines_report_every_workspace_not_just_the_primary(
     so *_effective (the primary workspace's answer) is wrong for every other
     workspace. The UI needs the whole map to say so.
     """
-    monkeypatch.setattr("shutil.which", lambda cmd: None)
+    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
     client, config = _make_client(tmp_path)
 
     data = client.get("/api/settings/routines").json()
@@ -250,7 +217,7 @@ def test_automatic_routines_report_every_workspace_not_just_the_primary(
 
 def test_an_override_clears_the_per_workspace_maps(monkeypatch, tmp_path):
     """With an explicit override one model really does apply everywhere."""
-    monkeypatch.setattr("shutil.which", lambda cmd: None)
+    monkeypatch.setattr("shutil.which", lambda cmd, path=None: None)
     client, _config = _make_client(tmp_path)
 
     client.patch(
@@ -264,3 +231,18 @@ def test_an_override_clears_the_per_workspace_maps(monkeypatch, tmp_path):
     # Empty signals "not workspace-dependent" to the UI.
     assert data["title_model_by_workspace"] == {}
     assert data["insights_model_by_workspace"] == {}
+
+
+def test_patch_persists_the_voice_locale_and_voice(tmp_path):
+    """What is left to configure once the engine choice is gone: the language
+    the on-device engines use, and which installed voice reads aloud."""
+    client, config = _make_client(tmp_path)
+    resp = client.patch(
+        "/api/settings/routines",
+        json={"transcription_locale": "it-IT", "tts_local_voice": "com.apple.voice.x"},
+    )
+    assert resp.status_code == 200
+    assert config.transcription_locale == "it-IT"
+    assert config.tts_local_voice == "com.apple.voice.x"
+    assert not hasattr(config, "transcription_engine")
+    assert not hasattr(config, "tts_engine")

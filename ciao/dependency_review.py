@@ -67,7 +67,6 @@ KNOWN_REPOS = {
     "gws": "https://github.com/googleworkspace/cli/releases",
     "defuddle": "https://github.com/kepano/defuddle/releases",
     "claude-code": "https://github.com/anthropics/claude-code/releases",
-    "apfel": "https://github.com/Arthur-Ficial/apfel/releases",
     "scrapling": "https://github.com/D4Vinci/Scrapling/releases",
     "starlette": "https://github.com/encode/starlette/releases",
     "uvicorn": "https://github.com/encode/uvicorn/releases",
@@ -79,7 +78,6 @@ KNOWN_REPOS = {
     "python-pptx": "https://github.com/scanny/python-pptx/releases",
     "pytest": "https://github.com/pytest-dev/pytest/releases",
     "pytest-asyncio": "https://github.com/pytest-dev/pytest-asyncio/releases",
-    "mlx-whisper": "https://github.com/ml-explore/mlx-examples/releases",
     "vue": "https://github.com/vuejs/core/releases",
     "vue-router": "https://github.com/vuejs/router/releases",
     "pinia": "https://github.com/vuejs/pinia/releases",
@@ -232,7 +230,7 @@ def compile_tracked_tools(workspace_root: Path) -> list[dict[str, str]]:
     python_deps = parse_pyproject_dependencies(pyproject_path)
     npm_deps = parse_npm_dependencies(package_json_path)
 
-    always_tracked = ["gws", "claude-code", "defuddle", "apfel"]
+    always_tracked = ["gws", "claude-code", "defuddle"]
     all_keys = set(always_tracked) | set(python_deps.keys()) | set(npm_deps.keys())
 
     tools = []
@@ -262,7 +260,6 @@ DEFAULT_TRACKED_TOOLS = (
     {"key": "gws", "repo": "https://github.com/googleworkspace/cli/releases"},
     {"key": "defuddle", "repo": "https://github.com/kepano/defuddle/releases"},
     {"key": "claude-code", "repo": "https://github.com/anthropics/claude-code/releases"},
-    {"key": "apfel", "repo": "https://github.com/Arthur-Ficial/apfel/releases"},
 )
 
 # Populated dynamically where possible
@@ -613,7 +610,7 @@ def _focused_tracked_tools(
     Focus on the curated fallback list, the manually-always-tracked tools, and
     any tools that were previously added to the baseline.
     """
-    always = {"gws", "claude-code", "defuddle", "apfel"}
+    always = {"gws", "claude-code", "defuddle"}
     base_keys = set(baseline.get("tools", {}).keys())
     curated = {t["key"]: t for t in DEFAULT_TRACKED_TOOLS}
     for key in always | base_keys:
@@ -832,8 +829,6 @@ def build_review_dag(
                 versions[key] = get_installed_cli_version("claude")
             elif key == "defuddle":
                 versions[key] = get_installed_cli_version("defuddle")
-            elif key == "apfel":
-                versions[key] = get_installed_cli_version("apfel")
             elif key in npm_deps:
                 versions[key] = get_installed_npm_version(workspace_root, key)
             else:

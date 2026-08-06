@@ -347,6 +347,8 @@ class CiaoConfig:
     workspace_root: Path
     state_path: Path
     media_root: Path
+    # Real installs get this from ``from_env``, which defaults it to True (see
+    # there); the field default only covers configs built directly in code.
     pwa_auth_required: bool = False
     # Extra origins accepted for state-changing HTTP + WebSocket handshakes when
     # the app is reached under a host it doesn't bind to (reverse proxy / tunnel
@@ -368,32 +370,20 @@ class CiaoConfig:
     max_image_size_bytes: int = 10 * 1024 * 1024
     max_voice_size_bytes: int = 25 * 1024 * 1024
     media_ttl_hours: int = 72
-    openai_api_key: str | None = None
     # Titling uses the Claude Agent SDK's one-shot query(); default Haiku.
     title_model: str = "haiku"
     # Operator override for the titling model, set from the PWA Settings →
     # Models tab (runtime settings store) or ``CIAO_TITLE_MODEL_OVERRIDE``.
     # Empty = automatic routing: the workspace's haiku-tier model.
     title_model_override: str = ""
-    # Voice transcription engine: ``cloud`` (OpenAI API, needs
-    # OPENAI_API_KEY) or ``local`` (mlx-whisper on Apple Silicon).
-    # Runtime-overridable from the PWA Settings → Models tab.
-    transcription_engine: str = "cloud"
-    transcription_local_model: str = "mlx-community/whisper-large-v3-turbo"
-    # Cloud transcription model (OpenAI ``gpt-transcribe``). Overridable
-    # via ``CIAO_TRANSCRIPTION_MODEL`` (e.g. ``gpt-4o-mini-transcribe``).
-    transcription_model: str = "gpt-transcribe"
-    # Speech synthesis (read a message aloud): ``cloud`` (OpenAI
-    # ``gpt-4o-mini-tts``, needs OPENAI_API_KEY) or ``local`` (Kokoro via
-    # kokoro-onnx, free/offline). Runtime-overridable from the PWA
-    # Settings → Models tab.
-    tts_engine: str = "cloud"
-    # Default to a male voice to match the Ciaobot avatar. OpenAI ``onyx`` and
-    # Kokoro ``am_michael`` (``am_`` = American Male) are the male counterparts
-    # of the former ``nova`` / ``af_heart`` defaults. Overridable in Settings /
-    # via CIAO_TTS_CLOUD_VOICE and CIAO_TTS_LOCAL_VOICE.
-    tts_cloud_voice: str = "onyx"
-    tts_local_voice: str = "am_michael"
+    # BCP-47 language for the on-device voice engines. Dictation needs a
+    # matching language installed in System Settings → Keyboard → Dictation;
+    # the synthesizer uses it to choose a voice.
+    transcription_locale: str = "en-US"
+    # macOS voice identifier or name for read-aloud. Empty means "the best
+    # installed voice for transcription_locale" -- the right default when the
+    # available voices differ on every machine.
+    tts_local_voice: str = ""
     claude_models: list[str] = field(default_factory=lambda: ["opus", "sonnet", "haiku"])
     claude_default_model: str = "opus"
     # Per-workspace default models. Empty string falls back to
@@ -420,11 +410,11 @@ class CiaoConfig:
     )
     claude_mode: BridgeMode = "auto"
     restart_exit_code: int = 75
-    auto_sync_on_start: bool = True
+    auto_sync_on_start: bool = False
     auto_vault_index: bool = True
     auto_update_github_skills: bool = False
     pwa_port: int = 8443
-    pwa_host: str = "0.0.0.0"
+    pwa_host: str = "127.0.0.1"
     gws_default_profile: str = "personal"
     # Models in `ollama.models` get rerouted to a local Ollama daemon via
     # the Anthropic-compatible API. Empty allowlist disables the routing.
@@ -933,9 +923,6 @@ class CiaoConfig:
 
         source = env if env is not None else os.environ
 
-        pwa_auth_required_raw = source.get("PWA_AUTH_REQUIRED", "").strip().lower()
-        pwa_auth_required = pwa_auth_required_raw in {"true", "1", "yes", "y"}
-
         pwa_allowed_origins = tuple(
             o.strip()
             for o in source.get("CIAO_ALLOWED_ORIGINS", "").split(",")
@@ -943,6 +930,21 @@ class CiaoConfig:
         )
 
         pwa_auth_token = source.get("PWA_AUTH_TOKEN", "").strip()
+        pwa_auth_required_raw = source.get("PWA_AUTH_REQUIRED", "").strip().lower()
+        if pwa_auth_required_raw:
+            pwa_auth_required = pwa_auth_required_raw in {"true", "1", "yes", "y"}
+        else:
+            # Password protection is the default: setup asks for a password and
+            # writes PWA_AUTH_REQUIRED explicitly, so an unset value means either
+            # a workspace .env that predates the default or a hand-rolled one.
+            # Those are protected as soon as a token exists — the token *is* the
+            # password, readable in the workspace .env, and `ciao setup-url`
+            # mints a one-time localhost login for whoever no longer knows it.
+            # Without a token there is nothing a human could type, and enforcing
+            # would lock the owner out of their own install (the session secret
+            # is machine-generated), so protection stays off until a password is
+            # set in Settings.
+            pwa_auth_required = bool(pwa_auth_token)
         bootstrap_mode = not (
             (bool(pwa_auth_token) or not pwa_auth_required)
             and (bool(source.get("CIAO_WORKSPACE")) or bool(source.get("TELEGRAM_BRIDGE_WORKSPACE")))
@@ -1129,32 +1131,11 @@ class CiaoConfig:
             media_ttl_hours=int(
                 _env(source, "CIAO_MEDIA_TTL_HOURS", "TELEGRAM_BRIDGE_MEDIA_TTL_HOURS", "72")
             ),
-            openai_api_key=source.get("OPENAI_API_KEY", "").strip() or None,
             title_model=source.get("CIAO_TITLE_MODEL", "").strip() or "haiku",
             title_model_override=source.get("CIAO_TITLE_MODEL_OVERRIDE", "").strip(),
-            transcription_engine=(
-                source.get("CIAO_TRANSCRIPTION_ENGINE", "").strip().lower()
-                if source.get("CIAO_TRANSCRIPTION_ENGINE", "").strip().lower()
-                in {"cloud", "local"}
-                else "cloud"
-            ),
-            transcription_local_model=source.get(
-                "CIAO_TRANSCRIPTION_LOCAL_MODEL", ""
-            ).strip()
-            or "mlx-community/whisper-large-v3-turbo",
-            transcription_model=source.get(
-                "CIAO_TRANSCRIPTION_MODEL", ""
-            ).strip()
-            or "gpt-transcribe",
-            tts_engine=(
-                source.get("CIAO_TTS_ENGINE", "").strip().lower()
-                if source.get("CIAO_TTS_ENGINE", "").strip().lower()
-                in {"cloud", "local"}
-                else "cloud"
-            ),
-            tts_cloud_voice=source.get("CIAO_TTS_CLOUD_VOICE", "").strip() or "onyx",
-            tts_local_voice=source.get("CIAO_TTS_LOCAL_VOICE", "").strip()
-            or "am_michael",
+            transcription_locale=source.get("CIAO_TRANSCRIPTION_LOCALE", "").strip()
+            or "en-US",
+            tts_local_voice=source.get("CIAO_TTS_LOCAL_VOICE", "").strip(),
             ollama_local_discovery=source.get(
                 "CIAO_OLLAMA_LOCAL_DISCOVERY", ""
             ).strip().lower()

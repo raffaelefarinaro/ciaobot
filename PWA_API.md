@@ -6,12 +6,13 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 
 ## Auth And Browser Security
 
+- Password protection is on by default. `PWA_AUTH_TOKEN` is the dashboard password: the first-run wizard asks for it, `POST /api/auth/settings` changes it, and only `PWA_AUTH_REQUIRED=false` in the workspace `.env` turns protection off.
 - `POST /api/auth` accepts `{"token": "<PWA_AUTH_TOKEN>"}` and returns an HttpOnly `ciao_session` cookie.
 - `GET /?setup=<token>` is the local first-launch shortcut path. It is accepted only on `localhost`, `127.0.0.1`, or `::1`; when the token matches `.runtime/setup-token`, the server sets the same signed `ciao_session` cookie, deletes the token file, and redirects to `/`.
 - Production cookies are `Secure`, `SameSite=Lax`, and host-only (scoped to the exact host that served them).
 - `POST /api/auth/logout` clears the same host-only cookie.
 - All `/api/*` routes except `POST /api/auth`, `GET /api/startup-status`, `GET /api/active-chats`, `GET /api/setup-status`, `POST /api/setup/finish`, `GET /api/setup/list-dirs`, `GET /api/setup/inspect-folder`, and `POST /api/setup/mkdir` require the signed session cookie. All `/ws/*` routes require the signed session cookie.
-- `POST /api/setup/finish` is only accepted in bootstrap mode from localhost with a matching browser origin/referer (off-localhost requests get a 403 pointing at `http://localhost:<port>`). Body: `workspace` (required — the root folder holding the vault plus app data), `vault_root` (optional, default `<workspace>/memory-vault`; absolute or `~` paths are honored for an existing notes folder elsewhere), plus optional `vault_mode`, `workspace_name`, `push_contact`, `port`, `python`, `auth_required`, `launch_agents_dir`, `app_dir`, and `restart`. It writes the real workspace config, ensures workspace and vault are (in) git repos, creates local launch artifacts, and asks the supervisor to restart into the configured workspace. When the chosen folder already contains nested workspace directories (`memory-vault/<name>/` with a `MEMORY.md` inside), those are adopted as the workspace registry and `workspace_name` is ignored.
+- `POST /api/setup/finish` is only accepted in bootstrap mode from localhost with a matching browser origin/referer (off-localhost requests get a 403 pointing at `http://localhost:<port>`). Body: `workspace` (required — the root folder holding the vault plus app data), `vault_root` (optional, default `<workspace>/memory-vault`; absolute or `~` paths are honored for an existing notes folder elsewhere), `password` (required — the dashboard password, at least 4 characters; setup always enables protection), plus optional `vault_mode`, `workspace_name`, `push_contact`, `port`, `python`, `launch_agents_dir`, `app_dir`, and `restart`. It writes the real workspace config, ensures workspace and vault are (in) git repos, creates local launch artifacts, and asks the supervisor to restart into the configured workspace. When the chosen folder already contains nested workspace directories (`memory-vault/<name>/` with a `MEMORY.md` inside), those are adopted as the workspace registry and `workspace_name` is ignored.
 - `GET /api/setup/list-dirs`, `POST /api/setup/mkdir`, and `GET /api/setup/inspect-folder` back the setup wizard. They are only accepted in bootstrap mode from localhost with a matching browser origin/referer (404 outside bootstrap mode, 403 off-localhost). The folder picker (`list-dirs`, `mkdir`) lists directories only and never reads file contents. `inspect-folder?path=<dir>` returns `{mode: "scratch"|"existing", vault_root, existing_workspaces, has_env}` so the wizard can hide the "First Workspace" text field when nested workspaces are already present.
 - State-changing `/api/*` requests with an `Origin` or `Referer` header must match the request host. Missing headers are accepted for non-browser clients.
 - HTTP responses include baseline security headers, including CSP, `X-Content-Type-Options`, `Referrer-Policy`, and frame denial.
@@ -24,7 +25,7 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | POST | `/api/auth` | Login with `PWA_AUTH_TOKEN` |
 | POST | `/api/auth/logout` | Clear session cookie |
 | GET | `/api/auth/check` | Verify current session |
-| GET, POST | `/api/auth/settings` | Read or update PWA password protection settings |
+| GET, POST | `/api/auth/settings` | Read protection state, or set/change the PWA password (cannot disable protection) |
 | GET | `/api/projects` | List projects |
 | POST | `/api/projects` | Create project |
 | PATCH, DELETE | `/api/projects/{project_id}` | Update or delete project |
@@ -36,8 +37,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET, POST | `/api/projects/{project_id}/files` | List or upload project files |
 | POST | `/api/desktop-drop` | Consume a native app's single-use Finder-drop grant (local node only) |
 | GET | `/api/chats` | List all chats |
-| GET | `/api/menubar-chats` | Compact chat list for the macOS tray / menubar |
-| GET | `/api/menubar-notifications` | Notification feed for the macOS tray (`?after=<epoch>`, inclusive; proxied to the host in client mode) |
+| GET | `/api/menubar-chats` | Compact chat list for the `Ciaobot.app` tray |
+| GET | `/api/menubar-notifications` | Notification feed for the `Ciaobot.app` tray (`?after=<epoch>`, inclusive; proxied to the host in client mode) |
 | POST | `/api/chats/read-all` | Mark all chats read |
 | PATCH, DELETE | `/api/chats/{chat_id}` | Update or delete chat |
 | POST | `/api/chats/{chat_id}/new` | Start a new provider session |
@@ -61,7 +62,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/workspace-binary` | Read allowed binary file |
 | GET | `/api/libreoffice-status` | Whether LibreOffice (`soffice`) is available to render `.pptx` previews |
 | POST | `/api/libreoffice-install` | Install LibreOffice via Homebrew Cask (macOS); no restart needed |
-| POST | `/api/apfel/install` | Install apfel (Apple Intelligence CLI) via Homebrew (macOS); no restart needed |
 | POST | `/api/workspace-open` | Open a workspace file with the OS default app on the machine running Ciao |
 | GET | `/api/file-history` | List snapshots for a `(chat_id, file_path)` |
 | GET | `/api/file-content` | Read one snapshot's content |
@@ -74,8 +74,8 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET, POST | `/api/loops` | List or create in-chat loops (re-dispatch a prompt into a fixed chat every N minutes) |
 | POST | `/api/loop-run/{loop_id}` | Fire one loop iteration now (409 when the chat has a turn in flight) |
 | PATCH, DELETE | `/api/loops/{loop_id}` | Update, start/stop (`{"running": bool}`), or delete a loop |
-| GET | `/api/automation` | Background-job status (Settings → Automation): last run, duration, model, errors per process |
-| POST | `/api/automation/backfill-insights` | Trigger background backfill of Session Insights into old archived chats |
+| GET | `/api/automation` | Background-job status (Settings → Automations): per job its trigger, last run, duration, model, errors, and bulk `sub_jobs`. Omits retired jobs and schedule-only jobs whose schedule is not installed |
+| POST | `/api/automation/backfill-insights` | Run Session insights over every archived chat missing them. Optional `{"model": "<model-id>"}` runs this pass with a different model without changing the stored setting |
 | GET | `/api/debug/issues` | Runtime issue report (server error log tail + failed job runs) for the dev-mode "Fix issues in chat" flow; 404 unless `CIAO_DEV_MODE` is set |
 | GET | `/api/commands` | List slash commands |
 | GET | `/api/agent-assets` | List instruction sources, subagents, slash commands, and workspace health for Settings |
@@ -105,8 +105,6 @@ The route source of truth is `ciao/web/app.py`. This file is kept in sync by `te
 | GET | `/api/device/package-status` | Same as `/api/package/status`, but never proxied: in client mode this reports *this* machine's install while `/api/package/status` reports the host's |
 | GET | `/api/device/changelog` | Commits between this machine's installed version and the latest release (never proxied) |
 | POST | `/api/device/update` | Upgrade and restart *this* machine, not the host it mirrors (never proxied) |
-| POST | `/api/voice/install-local` | Install local voice transcription dependencies and restart |
-| POST | `/api/tts/install-local` | Install local speech synthesis dependencies (kokoro-onnx) and restart |
 | POST | `/api/setup/finish` | Finish first-run setup from bootstrap mode |
 | GET | `/api/setup/list-dirs` | List local subdirectories for the setup wizard folder picker (bootstrap mode, localhost only) |
 | GET | `/api/setup/inspect-folder` | Probe a candidate workspace folder for vault mode and any nested workspaces (bootstrap mode, localhost only) |

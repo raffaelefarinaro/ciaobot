@@ -613,6 +613,7 @@
 
       </Teleport>
       <CommentComposePopover
+        ref="commentComposeDraftRef"
         :anchor="commentDraft && draftAnchor ? draftAnchor : null"
         v-model="composeText"
         :images="commentDraftImages"
@@ -625,6 +626,7 @@
            opened it rather than to a selection, since the text it annotates may
            be scrolled out of view. -->
       <CommentComposePopover
+        ref="commentComposeEditRef"
         :anchor="editingChatCommentId ? chipEditAnchor : null"
         v-model="editingChatCommentText"
         :images="editingChatCommentImages"
@@ -1365,6 +1367,8 @@ function toggleMessageActions(key: string, e: MouseEvent): void {
 }
 const transcribing = ref(false)
 const voiceRecorderRef = ref<InstanceType<typeof VoiceRecorder> | null>(null)
+const commentComposeDraftRef = ref<InstanceType<typeof CommentComposePopover> | null>(null)
+const commentComposeEditRef = ref<InstanceType<typeof CommentComposePopover> | null>(null)
 const isNearBottom = ref(true)
 let messagesResizeObserver: ResizeObserver | null = null
 const showScrollBtn = computed(() => Boolean(messagesEl.value && store.activeMessages.length > 0 && !isNearBottom.value))
@@ -3180,6 +3184,22 @@ function handleKeydown(e: KeyboardEvent) {
       return
     }
   }
+  // Esc closes the chat from the composer. ChatLayout also binds Esc globally,
+  // but that handler is gated on the route, so closing from here means it works
+  // wherever the composer does. Losing the half-typed message is fine: drafts
+  // are persisted per chat and restored when it reopens. The slash-command
+  // picker above claims Esc first (and stops propagation) so it can dismiss
+  // itself without also closing the chat.
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    // Claim it: ChatLayout's global handler would otherwise close the chat a
+    // second time off the same press. Arrow keys already taught us what two
+    // listeners on one key costs.
+    e.stopPropagation()
+    emit('close')
+    return
+  }
+
   // Cmd+Enter (mac) / Ctrl+Enter (linux/win) sends the message. Bare Enter
   // inserts a newline: this avoids accidental sends, especially on phones
   // where Enter is the default virtual-keyboard action. Mid-stream sends are
@@ -3827,7 +3847,17 @@ function insertImageRef(n: number) {
 
 // Cmd+D toggles a voice recording from the composer: first press starts,
 // second press stops (same as the on-screen mic/stop button).
+// When a comment compose popover is open, the shortcut is routed there instead
+// of the main chat composer.
 function toggleDictation() {
+  if (commentComposeDraftRef.value) {
+    commentComposeDraftRef.value.toggleDictation()
+    return
+  }
+  if (commentComposeEditRef.value) {
+    commentComposeEditRef.value.toggleDictation()
+    return
+  }
   voiceRecorderRef.value?.toggleRecording()
 }
 

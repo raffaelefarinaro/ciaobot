@@ -6,6 +6,28 @@ export const RESTART_DRAIN_MESSAGE =
 export const DEFAULT_RESTART_MESSAGE =
   'Ciaobot is restarting… Waiting for active chats to finish.'
 
+/**
+ * Longest restart message the notice card will show. The card is ~400px wide,
+ * so this is about three lines — enough for every message we send, and a bound
+ * on the ones we don't control.
+ */
+export const MAX_RESTART_MESSAGE_CHARS = 200
+
+/**
+ * Normalise a restart message for display.
+ *
+ * Most callers pass a fixed literal, but a drain rejection can arrive as an
+ * arbitrary server/host error string that merely contains the drain phrase, so
+ * this collapses whitespace (a multi-line traceback would otherwise stack up
+ * the card) and truncates rather than trusting the length.
+ */
+export function restartMessageForDisplay(message: string | undefined | null): string {
+  const collapsed = (message || '').replace(/\s+/g, ' ').trim()
+  if (!collapsed) return DEFAULT_RESTART_MESSAGE
+  if (collapsed.length <= MAX_RESTART_MESSAGE_CHARS) return collapsed
+  return `${collapsed.slice(0, MAX_RESTART_MESSAGE_CHARS - 1).trimEnd()}…`
+}
+
 export function isRestartDrainMessage(message: string | undefined | null): boolean {
   if (!message) return false
   return message.includes('waiting for active chats to finish before restarting')

@@ -56,16 +56,28 @@
           </div>
         </div>
 
-        <!-- Keyboard shortcuts (desktop app only) -->
-        <div v-if="inDesktopApp" class="card">
+        <!-- Keyboard shortcuts -->
+        <div class="card">
           <div class="settings-card-header">
             <p class="section-title">keyboard shortcuts</p>
-            <p class="hint">Global combos that work while a chat is open. Text fields keep their normal meaning: Cmd+A still selects all, and Esc inside the composer closes the slash-command picker instead of the chat.</p>
+            <p class="hint">Global combos that work while a chat is open. Text fields keep their normal meaning: Cmd+A/Alt+A still selects all, and Esc inside the composer closes the slash-command picker instead of the chat.</p>
           </div>
           <ul class="shortcut-list">
-            <li><kbd>&#8984;T</kbd><span>Open a new chat in the default General project</span></li>
-            <li><kbd>&#8984;D</kbd><span>Toggle voice dictation (start / stop)</span></li>
-            <li><kbd>&#8984;A</kbd><span>Archive the open chat (asks to confirm)</span></li>
+            <li>
+              <kbd v-if="inDesktopApp">&#8984;T</kbd>
+              <kbd v-else>&#8224;N</kbd>
+              <span>Open a new chat in the default General project</span>
+            </li>
+            <li>
+              <kbd v-if="inDesktopApp">&#8984;D</kbd>
+              <kbd v-else>&#8224;D</kbd>
+              <span>Toggle voice dictation (start / stop)</span>
+            </li>
+            <li>
+              <kbd v-if="inDesktopApp">&#8984;A</kbd>
+              <kbd v-else>&#8224;A</kbd>
+              <span>Archive the open chat (asks to confirm)</span>
+            </li>
             <li><kbd>Esc</kbd><span>Close the open chat (when not typing)</span></li>
             <li><kbd>&#8593;&#8595;&#8592;&#8594;</kbd><span>On the home screen: move between recent chats</span></li>
             <li><kbd>&#8629;</kbd><span>On the home screen: open the highlighted chat</span></li>
@@ -83,7 +95,8 @@
                   Changing it here keeps this device connected; other clients have to log in again.
                 </template>
                 <template v-else>
-                  Protect this Ciaobot with a password. Required before other devices can connect as clients.
+                  Ciaobot is always password-protected — this is the password you type to open it,
+                  and the one another device needs to connect as a client.
                 </template>
               </p>
             </div>
@@ -98,10 +111,10 @@
           <div v-if="!authSettings" class="action-row"><span class="loading">Loading&hellip;</span></div>
           <template v-else>
             <div class="settings-form-panel node-peer-form">
-              <label class="choice-label checkbox-row">
-                <input type="checkbox" v-model="authRequiredDraft" :disabled="authSettingsSaving" />
-                Require password for PWA access
-              </label>
+              <p v-if="!authSettings.auth_required" class="hint hint--warn">
+                This instance is running unprotected because PWA_AUTH_REQUIRED=false is set in the
+                workspace .env. Setting a password here turns protection back on.
+              </p>
               <label v-if="authSettings.auth_required" class="settings-field">
                 <span class="ws-label">Current password</span>
                 <input
@@ -113,12 +126,12 @@
                 />
               </label>
               <label class="settings-field">
-                <span class="ws-label">{{ authSettings.auth_required ? 'New password (optional)' : 'Password' }}</span>
+                <span class="ws-label">New password</span>
                 <input
                   v-model="authNewPassword"
                   type="password"
                   class="routine-input"
-                  :placeholder="authSettings.auth_required ? 'Leave blank to keep current' : 'Choose a password'"
+                  placeholder="at least 4 characters"
                   autocomplete="new-password"
                   :disabled="authSettingsSaving"
                 />
@@ -483,19 +496,17 @@
                 </select>
                 <span class="routine-model-hint">
                   <template v-if="routineProviderValue('title_model') === 'apple'">
-                    Runs on-device for free via <a :href="APFEL_REPO_URL" target="_blank" rel="noopener">apfel</a> (Apple Intelligence CLI).
-                    <template v-if="routines && routines.apfel_available === false">
-                      <span class="hint--warn">
-                        apfel is not installed on this machine — titles currently fall back to a cloud model.
-                      </span>
-                      <button
-                        class="btn-primary btn-small voice-install-btn"
-                        :disabled="apfelInstalling"
-                        @click="installApfel"
-                      >
-                        {{ apfelInstalling ? 'Installing…' : 'Install apfel' }}
-                      </button>
-                    </template>
+                    Runs on-device for free using Apple Intelligence. Nothing to install.
+                    <!-- The on-device model does not honour "reply in the same language";
+                         it returns English titles regardless of the chat's language. -->
+                    Titles are written in English.
+                    <!-- Nothing to offer when it is unavailable: it needs macOS 26+,
+                         the desktop app, and Apple Intelligence switched on, none of
+                         which a button here can fix. Say why and let the user choose. -->
+                    <span v-if="routines && routines.apple_model_available === false" class="hint--warn">
+                      Unavailable: {{ routines.apple_model_unavailable_reason || 'not supported on this machine' }} —
+                      titles currently fall back to a cloud model.
+                    </span>
                   </template>
                   <template v-else>{{ routineModelSummary('title_model') }}</template>
                 </span>
@@ -597,87 +608,81 @@
               <p class="section-title">voice</p>
               <p class="hint">Choose the engines used to hear you (dictation) and to speak messages aloud.</p>
             </div>
+            <!-- No engine picker: voice is on-device only now. Both engines are
+                 free and need no key, so the only thing worth saying is whether
+                 this machine can run them and, if not, why. -->
             <div class="routine-row routine-row--flush">
               <div class="routine-info">
                 <span class="routine-name">Hear</span>
               </div>
               <div class="routine-model-controls routine-model-controls--single">
-                <select
-                  class="routine-select"
-                  :value="routines.transcription.engine"
-                  :disabled="routinesSaving"
-                  @change="saveRoutines({ transcription_engine: ($event.target as HTMLSelectElement).value })"
-                >
-                  <option value="local">Local (free)</option>
-                  <option value="cloud" :disabled="!routines.transcription.cloud_available">Cloud (OpenAI)</option>
-                </select>
                 <span class="routine-model-hint">
-                  <template v-if="routines.transcription.engine === 'local'">
-                    Dictation runs on-device via mlx-whisper (<code>{{ routines.transcription.local_model }}</code>).
-                    The first transcription downloads the model.
+                  <template v-if="routines.transcription.available">
+                    Dictation runs on-device using macOS speech recognition
+                    (<code>{{ routines.transcription.locale }}</code>). Free, nothing to download.
                   </template>
                   <template v-else>
-                    Dictation uses OpenAI <code>{{ routines.transcription.cloud_model }}</code> (needs <code>OPENAI_API_KEY</code>, ~$0.0045/min).
-                    <a href="https://developers.openai.com/api/docs/pricing" target="_blank" rel="noopener">Check current pricing</a>.
+                    <span class="hint--warn">
+                      Dictation is unavailable: {{ routines.transcription.unavailable_reason }}
+                    </span>
                   </template>
                 </span>
               </div>
             </div>
-            <p v-if="!routines.transcription.local_available" class="hint hint--warn voice-warning">
-              <span v-if="routines.transcription.engine === 'local'">
-                <strong>Local Whisper engine is selected but not installed.</strong> Run <code>pip install 'ciao[voice-local]'</code> or install now:
-              </span>
-              <span v-else>
-                Local engine is available for Apple Silicon (requires installing <code>mlx-whisper</code>).
-              </span>
-              <button
-                class="btn-primary btn-small voice-install-btn"
-                :disabled="voiceInstalling"
-                @click="installLocalVoice"
-              >
-                {{ voiceInstalling ? 'Installing...' : 'Install engine' }}
-              </button>
-            </p>
             <div class="routine-row routine-row--flush">
               <div class="routine-info">
                 <span class="routine-name">Speak</span>
               </div>
               <div class="routine-model-controls routine-model-controls--single">
-                <select
-                  class="routine-select"
-                  :value="routines.speech.engine"
-                  :disabled="routinesSaving"
-                  @change="saveRoutines({ tts_engine: ($event.target as HTMLSelectElement).value })"
-                >
-                  <option value="local">Local (free)</option>
-                  <option value="cloud" :disabled="!routines.speech.cloud_available">Cloud (OpenAI)</option>
-                </select>
                 <span class="routine-model-hint">
-                  <template v-if="routines.speech.engine === 'local'">
-                    Read-aloud runs on-device via Kokoro (voice <code>{{ routines.speech.local_voice }}</code>).
-                    The first playback downloads the model (~340 MB).
+                  <template v-if="routines.speech.available">
+                    Read-aloud uses the macOS system voice. Free, nothing to download.
                   </template>
                   <template v-else>
-                    Read-aloud uses the OpenAI speech API (needs <code>OPENAI_API_KEY</code>, voice <code>{{ routines.speech.cloud_voice }}</code>, ~$0.015/min).
+                    <span class="hint--warn">
+                      Read-aloud is unavailable. Install the desktop app with
+                      <code>ciao desktop install</code>.
+                    </span>
                   </template>
                 </span>
               </div>
             </div>
-            <p v-if="!routines.speech.local_available" class="hint hint--warn voice-warning">
-              <span v-if="routines.speech.engine === 'local'">
-                <strong>Local Kokoro engine is selected but not installed.</strong> Run <code>pip install 'ciao[tts-local]'</code> or install now:
-              </span>
-              <span v-else>
-                Local speech engine is available (requires installing <code>kokoro-onnx</code>).
-              </span>
-              <button
-                class="btn-primary btn-small voice-install-btn"
-                :disabled="ttsInstalling"
-                @click="installLocalTts"
-              >
-                {{ ttsInstalling ? 'Installing...' : 'Install engine' }}
-              </button>
-            </p>
+            <!-- The installed voice list differs per machine, so it is served by
+                 the engine rather than hardcoded, best quality first. Empty
+                 means "let macOS pick the best one for the language". -->
+            <div
+              v-if="routines.speech.available"
+              class="routine-row routine-row--flush"
+            >
+              <div class="routine-info">
+                <span class="routine-name routine-name--sub">Voice</span>
+              </div>
+              <div class="routine-model-controls routine-model-controls--single">
+                <select
+                  class="routine-select"
+                  :value="routines.speech.local_voice"
+                  :disabled="routinesSaving"
+                  @change="saveRoutines({ tts_local_voice: ($event.target as HTMLSelectElement).value })"
+                >
+                  <option value="">Best available for the language</option>
+                  <option v-for="voice in routines.speech.local_voices || []" :key="voice.id" :value="voice.id">
+                    {{ voice.name }} ({{ voice.locale }}{{ voice.quality === 'default' ? '' : ', ' + voice.quality }})
+                  </option>
+                </select>
+                <span class="routine-model-hint">
+                  The stock voices are the basic tier. Look for ones marked
+                  <strong>Premium</strong> (then Enhanced) &mdash; they are a free download under
+                  System Settings &rsaquo; Accessibility &rsaquo; Read &amp; Speak &rsaquo;
+                  System voice &rsaquo; Manage Voices, and Ciaobot picks the best installed one
+                  automatically.
+                  <a
+                    href="https://support.apple.com/guide/mac-help/mchlp2290/mac"
+                    target="_blank"
+                    rel="noopener"
+                  >How to add a voice</a>.
+                </span>
+              </div>
+            </div>
           </div>
           <div v-if="routinesResult" class="action-result">{{ routinesResult }}</div>
         </template>
@@ -941,11 +946,8 @@
           :automation-error="automationError"
           :fetch-automation="fetchAutomation"
           :notify-saved="notifySaved"
-          :get-job-badge-class="getJobBadgeClass"
-          :get-job-status="getJobStatus"
-          :get-job-last-run-label="getJobLastRunLabel"
-          :get-job-duration="getJobDuration"
-          :get-telemetry-badge-class="getTelemetryBadgeClass"
+          :routines="routines"
+          :provider-labels="aliasProviderLabels"
         />
       </template>
 
@@ -1509,8 +1511,8 @@
                     <div v-if="item.id === 'cli-instruction-chain'" class="runtime-context-summary">
                       <p class="hint hint--compact">At chat start, the active CLI discovers the applicable instruction files:</p>
                       <ul>
-                        <li><strong>Global instructions:</strong> the user-level instruction file (<code>CLAUDE.md</code> for Claude Code, <code>AGENTS.md</code> for Codex), when present.</li>
-                        <li><strong>Workspace instructions:</strong> the workspace guide. <code>AGENTS.md</code> is linked to <code>CLAUDE.md</code>, so every CLI reads the same instructions.</li>
+                        <li><strong>Global instructions:</strong> your user-level <code>CLAUDE.md</code>, when present.</li>
+                        <li><strong>Workspace instructions:</strong> the workspace <code>CLAUDE.md</code>. It is the single guide — <code>AGENTS.md</code> is a symlink to it, so Claude Code and Codex read the same file.</li>
                         <li><strong>Local, override, and nested instructions:</strong> local overrides, imported Markdown files, and more specific instruction files each CLI discovers for the working directory.</li>
                       </ul>
                     </div>
@@ -1556,7 +1558,8 @@
           </div>
 
           <p class="hint hint--info skill-scope-note">
-            Ciaobot runs chats through Claude Code or Codex. Ciaobot-managed skills are synchronized into both CLIs where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed custom and GitHub/package skills.
+            Ciaobot runs chats through Claude Code or Codex. Ciaobot-managed skills are synchronized into both CLIs where supported. Skills, plugins, and MCP servers you install directly in a CLI also remain available to Ciaobot when that provider runs the chat; provider-specific assets stay with that provider. This page lists only the shared, Ciaobot-managed custom and GitHub/package skills — see
+            <RouterLink to="/settings/providers">Providers</RouterLink> for what each CLI brings on its own.
           </p>
 
           <!-- Add Github Skill Form -->
@@ -2679,7 +2682,6 @@ type TierKey = 'haiku' | 'sonnet' | 'opus' | 'fable'
 type RoutineModelKey = 'title_model' | 'insights_model'
 type RoutineProviderValue = 'automatic' | 'apple' | 'custom' | AliasProviderKey
 
-const APFEL_REPO_URL = 'https://github.com/Arthur-Ficial/apfel'
 type AliasProviderSection = {
   key: AliasProviderKey
   label: string
@@ -2906,6 +2908,14 @@ const tierProviderSections = computed<AliasProviderSection[]>(() => {
   ]
 })
 
+// Provider key -> human label, for components that render model ids from the
+// routing table (Automations offers a one-off retry model).
+const aliasProviderLabels = computed<Record<string, string>>(() => {
+  const labels: Record<string, string> = { claude: 'Anthropic (via Claude Code)' }
+  for (const section of aliasProviderSections.value) labels[section.key] = section.label
+  return labels
+})
+
 const selectedTierProvider = ref<RoutingProviderKey>('codex')
 const selectedTierProviderSection = computed(() =>
   tierProviderSections.value.find((section) => section.key === selectedTierProvider.value)
@@ -3042,7 +3052,8 @@ function routineEffectiveModel(key: RoutineModelKey): string {
 function inferRoutineModel(model: string): { provider: RoutineProviderValue; tier: TierKey } {
   const raw = model.trim()
   if (!raw) return { provider: 'automatic', tier: 'sonnet' }
-  if (raw === 'apfel') return { provider: 'apple', tier: 'haiku' }
+  // 'apfel' is the legacy id from when this shelled out to the apfel CLI.
+  if (raw === 'apple' || raw === 'apfel') return { provider: 'apple', tier: 'haiku' }
   if (raw.startsWith('codex:')) {
     const codexModel = raw.slice('codex:'.length)
     const codexTiers = workspaceModels.value?.alias_tiers?.codex || {}
@@ -3116,7 +3127,7 @@ async function saveRoutineProvider(key: RoutineModelKey, providerValue: string) 
     return
   }
   if (provider === 'apple') {
-    await saveRoutines({ [key]: 'apfel' })
+    await saveRoutines({ [key]: 'apple' })
     return
   }
   if (provider === 'custom') return
@@ -3581,67 +3592,6 @@ async function saveProviderKeys() {
 }
 
 
-const voiceInstalling = ref(false)
-
-async function installLocalVoice() {
-  voiceInstalling.value = true
-  routinesResult.value = 'Installing local whisper engine...'
-  try {
-    const res = await api.post<{ ok: boolean; output?: string }>('/api/voice/install-local', {})
-    if (res.ok) {
-      routinesResult.value = ''
-      await restartAndReload('Local whisper engine installed. Restarting Ciaobot to load the model…')
-    } else {
-      routinesResult.value = 'Installation failed.'
-    }
-  } catch (e) {
-    routinesResult.value = `Error installing engine: ${errorMessage(e)}`
-  } finally {
-    voiceInstalling.value = false
-  }
-}
-
-const apfelInstalling = ref(false)
-
-async function installApfel() {
-  apfelInstalling.value = true
-  routinesResult.value = 'Installing apfel (Apple Intelligence CLI)…'
-  try {
-    const res = await api.post<{ ok: boolean; output?: string; error?: string }>('/api/apfel/install', {})
-    if (res.ok) {
-      routinesResult.value = 'apfel installed — on-device titles apply from the next run.'
-      // No restart needed: routines probe for the apfel binary per run.
-      // Refresh so the "not installed" hint clears immediately.
-      await fetchRoutines()
-    } else {
-      routinesResult.value = `apfel install failed: ${res.error || 'unknown error'}`
-    }
-  } catch (e) {
-    routinesResult.value = `Error installing apfel: ${errorMessage(e)}`
-  } finally {
-    apfelInstalling.value = false
-  }
-}
-
-const ttsInstalling = ref(false)
-
-async function installLocalTts() {
-  ttsInstalling.value = true
-  routinesResult.value = 'Installing local Kokoro engine...'
-  try {
-    const res = await api.post<{ ok: boolean; output?: string }>('/api/tts/install-local', {})
-    if (res.ok) {
-      routinesResult.value = ''
-      await restartAndReload('Local Kokoro engine installed. Restarting Ciaobot to load the model…')
-    } else {
-      routinesResult.value = 'Installation failed.'
-    }
-  } catch (e) {
-    routinesResult.value = `Error installing engine: ${errorMessage(e)}`
-  } finally {
-    ttsInstalling.value = false
-  }
-}
 
 async function fetchSkills() {
   try {
@@ -4856,29 +4806,24 @@ interface AuthSettings {
 }
 
 const authSettings = ref<AuthSettings | null>(null)
-const authRequiredDraft = ref(false)
 const authCurrentPassword = ref('')
 const authNewPassword = ref('')
 const authSettingsSaving = ref(false)
 const authSettingsResult = ref('')
 const authSettingsError = ref(false)
 
+// Protection is the default and cannot be switched off from here (the server
+// rejects `auth_required: false`), so this card only changes the password.
 const canSaveAuthSettings = computed(() => {
   if (!authSettings.value) return false
-  const turningOn = authRequiredDraft.value && !authSettings.value.auth_required
-  const turningOff = !authRequiredDraft.value && authSettings.value.auth_required
-  const changingPassword = Boolean(authNewPassword.value.trim())
-  if (!(turningOn || turningOff || changingPassword)) return false
-  if (turningOn && !authNewPassword.value.trim()) return false
+  if (!authNewPassword.value.trim()) return false
   if (authSettings.value.auth_required && !authCurrentPassword.value) return false
   return true
 })
 
 async function fetchAuthSettings() {
   try {
-    const res = await api.get<AuthSettings>('/api/auth/settings')
-    authSettings.value = res
-    authRequiredDraft.value = res.auth_required
+    authSettings.value = await api.get<AuthSettings>('/api/auth/settings')
   } catch {
     authSettings.value = null
   }
@@ -4891,7 +4836,6 @@ async function saveAuthSettings() {
   authSettingsError.value = false
   try {
     const res = await api.post<AuthSettings & { ok?: boolean }>('/api/auth/settings', {
-      auth_required: authRequiredDraft.value,
       password: authNewPassword.value,
       current_password: authCurrentPassword.value,
     })
@@ -4899,12 +4843,9 @@ async function saveAuthSettings() {
       auth_required: res.auth_required,
       password_configured: res.password_configured,
     }
-    authRequiredDraft.value = res.auth_required
     authCurrentPassword.value = ''
     authNewPassword.value = ''
-    authSettingsResult.value = res.auth_required
-      ? 'Password protection is on.'
-      : 'Password protection is off.'
+    authSettingsResult.value = 'Password saved. Other devices have to log in again.'
   } catch (e) {
     authSettingsError.value = true
     authSettingsResult.value = apiErrorMessage(e, 'Could not save password settings')
@@ -5773,12 +5714,6 @@ a.btn-secondary {
   align-items: flex-start;
   gap: var(--space-2);
   margin-top: var(--space-3);
-}
-.voice-install-btn {
-  flex: 0 0 auto;
-  margin-top: 1px;
-  padding: 4px 10px;
-  font-size: var(--text-xs);
 }
 .critique-model-picker {
   width: 100%;

@@ -275,7 +275,7 @@ export type WsEvent =
   // connection state, not a chat/model failure, so the PWA renders one
   // reconnecting card instead of appending an error to conversation history.
   | { type: 'host_unreachable' }
-  // Server is draining for restart; client should show RestartOverlay, not
+  // Server is draining for restart; client should show RestartNotice, not
   // treat this as a chat failure.
   | { type: 'server_restarting'; message: string }
   | { type: 'chat_retry'; status: 'pending' | 'stopped' | ''; next_at?: string; last_error?: string; attempts?: number; interval_seconds?: number }
@@ -481,21 +481,25 @@ export interface RoutineSettings {
   // Env-backed models used when a tier override is cleared.
   tier_defaults?: Record<string, Record<string, string>>
   alias_tiers?: Record<string, Record<string, string>>
-  // Whether the apfel CLI (the "Local (free)" title engine) is installed.
-  apfel_available?: boolean
+  // The "apple" title option: needs macOS 26+, the desktop app, and Apple
+  // Intelligence on. Nothing installable, so Settings shows the reason.
+  apple_model_available?: boolean
+  apple_model_unavailable_reason?: string
+  // Voice is on-device only: Apple dictation (macOS 26+) and
+  // AVSpeechSynthesizer, both via the bundled sidecar. There is no engine to
+  // choose any more, so the payload reports availability and a reason rather
+  // than a selection.
   transcription: {
-    engine: 'cloud' | 'local'
-    cloud_model: string
-    local_model: string
-    local_available: boolean
-    cloud_available: boolean
+    // BCP-47 language for the on-device engines.
+    locale: string
+    available: boolean
+    unavailable_reason: string
   }
   speech: {
-    engine: 'cloud' | 'local'
-    cloud_voice: string
+    // Empty = let macOS pick the best installed voice for the language.
     local_voice: string
-    local_available: boolean
-    cloud_available: boolean
+    available: boolean
+    local_voices?: { id: string; name: string; locale: string; quality: string }[]
   }
   model_options: {
     anthropic: string[]
@@ -779,6 +783,14 @@ export interface AutomationProcess {
   // metadata was added to GET /api/automation.
   uses_model?: boolean
   produces_outcome?: boolean
+  // Plain-language "when does this run?", the system schedule that fires it,
+  // and whether it is a one-shot migration. Optional: older servers omit them.
+  trigger?: string
+  schedule_id?: string
+  one_time?: boolean
+  // Bulk/manual variants of this job (Session insights carries the backfill),
+  // reported nested so the page keeps one row per automation.
+  sub_jobs?: AutomationProcess[]
   last_run: JobRun | null
   recent: JobRun[]
   stats: AutomationStats

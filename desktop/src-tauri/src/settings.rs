@@ -12,6 +12,11 @@ pub struct DesktopSettings {
     pub notifications_enabled: bool,
     pub auth_bootstrapped: bool,
     pub migration_notice_shown: bool,
+    /// Drop the Dock tile once every window is closed, leaving Ciaobot in the
+    /// menu bar. Defaults to true because that was the only behaviour before
+    /// this became a preference. `#[serde(default)]` on the struct means a
+    /// settings file written by an older build simply gets the default.
+    pub hide_dock_icon: bool,
 }
 
 impl Default for DesktopSettings {
@@ -21,6 +26,7 @@ impl Default for DesktopSettings {
             notifications_enabled: true,
             auth_bootstrapped: false,
             migration_notice_shown: false,
+            hide_dock_icon: true,
         }
     }
 }
@@ -81,6 +87,34 @@ mod tests {
         fs::write(&legacy, r#"{"notifications_enabled":false}"#).unwrap();
         let store = SettingsStore::new(temp.path());
         assert!(!store.load(Some(&legacy)).notifications_enabled);
+    }
+
+    #[test]
+    fn hide_dock_icon_defaults_on_for_settings_written_before_the_preference() {
+        let temp = tempdir().unwrap();
+        let store = SettingsStore::new(temp.path());
+        // A file from a build that had no such field: serde(default) fills it,
+        // so the Dock keeps behaving the way it always did.
+        fs::write(
+            temp.path().join("desktop-settings.json"),
+            r#"{"schema_version":1,"notifications_enabled":false}"#,
+        )
+        .unwrap();
+        let settings = store.load(None);
+        assert!(settings.hide_dock_icon);
+        assert!(!settings.notifications_enabled);
+    }
+
+    #[test]
+    fn hide_dock_icon_round_trips_when_switched_off() {
+        let temp = tempdir().unwrap();
+        let store = SettingsStore::new(temp.path());
+        let settings = DesktopSettings {
+            hide_dock_icon: false,
+            ..DesktopSettings::default()
+        };
+        store.save(&settings).unwrap();
+        assert!(!store.load(None).hide_dock_icon);
     }
 
     #[test]

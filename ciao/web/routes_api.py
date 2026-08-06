@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import mimetypes
@@ -25,6 +26,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response
 
 from ciao import subagent_tracking
+from ciao import desktop_build
 from ciao.config import (
     WorkspaceConfig,
     CLAUDE_AI_CONNECTORS,
@@ -134,12 +136,10 @@ _PROVIDER_KEY_META = {
         "description": "Optional key for critique/review model routing.",
     },
 }
-_SERVICE_KEY_META = {
-    "OPENAI_API_KEY": {
-        "label": "OpenAI voice API key",
-        "description": "Used directly by Ciaobot for cloud transcription and speech, not for Codex login.",
-    },
-}
+# Keys Ciaobot itself consumes, as opposed to provider logins. Empty since
+# voice moved on-device: OPENAI_API_KEY lived here for cloud transcription and
+# speech, and nothing else in the app ever read it.
+_SERVICE_KEY_META: dict[str, dict[str, str]] = {}
 _GWS_BUILTIN_PROFILES = ("personal", "work")
 _GWS_PROFILE_META = {
     "personal": {
@@ -1139,8 +1139,6 @@ def _provider_key_auth_method(config, key: str) -> str:
     file_value = _read_env_value(_env_path(config), key)
     if file_value:
         return "api_key"
-    if key == "OPENAI_API_KEY" and bool(getattr(config, "openai_api_key", None)):
-        return "api_key"
     if key == "CIAO_OLLAMA_API_KEY" and getattr(config.ollama, "api_key", "ollama") != "ollama":
         return "api_key"
     if key == "ANTHROPIC_API_KEY" and _claude_oauth_ready():
@@ -1258,9 +1256,7 @@ def _apply_provider_key_updates(config, updates: dict[str, str]) -> None:
             os.environ[key] = value
         else:
             os.environ.pop(key, None)
-        if key == "OPENAI_API_KEY":
-            config.openai_api_key = value or None
-        elif key == "CIAO_OLLAMA_API_KEY":
+        if key == "CIAO_OLLAMA_API_KEY":
             if value:
                 base_url = os.environ.get("CIAO_OLLAMA_URL", "").strip() or "https://ollama.com"
                 config.ollama = replace(config.ollama, api_key=value, base_url=base_url)
@@ -3732,19 +3728,6 @@ async def libreoffice_install_endpoint(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "output": result.stdout})
 
 
-async def apfel_install_endpoint(request: Request) -> JSONResponse:
-    """Install apfel (Apple Intelligence CLI) via Homebrew. No server restart
-    needed — routines probe for the apfel binary fresh on each run, so titles
-    switch from the cloud fallback to on-device on the next run."""
-    from ciao.upgrade import upgrade_apfel
-
-    result = await upgrade_apfel()
-    if not result.success:
-        error = result.stderr.strip() or "Install failed."
-        return JSONResponse({"ok": False, "error": error}, status_code=500)
-    return JSONResponse({"ok": True, "output": result.stdout})
-
-
 async def workspace_binary(request: Request) -> Response:
     """Serve an allowlisted binary file from the workspace."""
     config = request.app.state.config
@@ -4207,35 +4190,63 @@ async def list_schedules(request: Request) -> JSONResponse:
 async def list_automation(request: Request) -> JSONResponse:
     """Status of background automations for the Settings → Automation page.
 
-    Reads the job-run log and returns one entry per known job (jobs that
-    never ran still appear), each with its last run, recent history, and
-    aggregate stats. Read-only.
+    Reads the job-run log and returns one entry per automation this machine
+    can actually run (jobs that never ran still appear), each with its last
+    run, recent history, and aggregate stats. Scheduled jobs whose schedule is
+    not installed here are omitted — nothing would ever trigger them.
+    Read-only.
     """
     from ciao import job_runs
 
-    return JSONResponse(job_runs.automation_summary())
+    installed: set[str] | None = None
+    try:
+        sm = request.app.state.schedule_manager
+        installed = {entry.schedule_id for entry in sm.list_entries()}
+    except Exception:  # noqa: BLE001 — no schedule manager: filter nothing
+        installed = None
+
+    return JSONResponse(job_runs.automation_summary(installed_schedules=installed))
 
 
 async def trigger_backfill_insights(request: Request) -> JSONResponse:
-    """Trigger the insights backfill process in the background."""
+    """Run session insights over every archive that is missing them.
+
+    Accepts an optional ``model`` for a one-off run with a different model —
+    the recovery path when the configured insights model keeps failing (it
+    times out on slow local backends). The stored Settings → Models choice is
+    left alone.
+    """
     import asyncio
     from ciao.job_runs import track
     from ciao.insights import backfill_insights_task, format_backfill_summary
 
     config = request.app.state.config
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 — empty body means "use the configured model"
+        body = {}
+    model = (body or {}).get("model")
+    model = model.strip() if isinstance(model, str) else ""
 
     async def _run_backfill():
-        async with track("backfill_insights", "Insights backfill", category="system") as handle:
-            result = await backfill_insights_task(config, mode="both")
+        async with track(
+            "backfill_insights", "Insights backfill", category="system",
+            model=model,
+        ) as handle:
+            result = await backfill_insights_task(
+                config, mode="both", model_override=model,
+            )
             handle.extra.update(result)
             summary = format_backfill_summary(result)
             handle.extra["summary"] = summary
+            if model:
+                handle.extra["model_override"] = model
             if result["errors"]:
                 handle.status = "error"
                 handle.error = summary
 
     asyncio.create_task(_run_backfill())
-    return JSONResponse({"status": "started"}, status_code=202)
+    return JSONResponse({"status": "started", "model": model}, status_code=202)
 
 
 async def create_schedule(request: Request) -> JSONResponse:
@@ -4709,15 +4720,21 @@ async def list_models(request: Request) -> JSONResponse:
 
 def _routines_payload(config, app_settings) -> dict:
     """Shared GET/PATCH response: overrides, effective values, options."""
-    import shutil
-    from ciao.voice import kokoro_available, mlx_whisper_available
+    from ciao import native_sidecar
+    from ciao.voice import (
+        apple_dictation_available,
+        apple_speech_available,
+        dictation_unavailable_reason,
+        system_voices,
+    )
 
     s = app_settings.settings
     ollama = config.ollama
     if config.title_model_override:
         title_effective = config.title_model_override
     else:
-        # Automatic resolves to the workspace haiku tier — apfel is opt-in
+        # Automatic resolves to the workspace haiku tier — Apple's on-device
+        # model is opt-in
         # (choose "Apple" explicitly), not the auto default just because the
         # binary is on PATH (it fails when Apple Intelligence is disabled).
         title_effective = config.haiku_model_for_workspace(config.primary_workspace())
@@ -4798,22 +4815,25 @@ def _routines_payload(config, app_settings) -> dict:
                 for provider in load_custom_providers(config)
             },
         },
-        # The "apple"/apfel title option only works when the CLI is on PATH;
-        # the Chat titles row warns instead of silently falling back.
-        "apfel_available": shutil.which("apfel") is not None,
+        # The "apple" title option needs macOS 26+, the desktop app, and Apple
+        # Intelligence switched on; the Chat titles row explains which is
+        # missing instead of silently falling back to a cloud model.
+        "apple_model_available": native_sidecar.apple_model_available(),
+        "apple_model_unavailable_reason": native_sidecar.apple_model_unavailable_reason(),
         "transcription": {
-            "engine": config.transcription_engine,
-            "cloud_model": config.transcription_model,
-            "local_model": config.transcription_local_model,
-            "local_available": mlx_whisper_available(),
-            "cloud_available": bool(config.openai_api_key),
+            "locale": config.transcription_locale,
+            # On-device dictation needs macOS 26+, the installed app, and a
+            # dictation language. Settings hides the local option entirely when
+            # it cannot run, and shows the reason when the user asks.
+            "available": apple_dictation_available(),
+            "unavailable_reason": dictation_unavailable_reason(),
         },
         "speech": {
-            "engine": config.tts_engine,
-            "cloud_voice": config.tts_cloud_voice,
             "local_voice": config.tts_local_voice,
-            "local_available": kokoro_available(),
-            "cloud_available": bool(config.openai_api_key),
+            "available": apple_speech_available(),
+            # Voices differ per machine, so the picker is populated from the
+            # system rather than a hardcoded list, best quality first.
+            "local_voices": system_voices(),
         },
         # Grouped options for the routine model selectors.
         "model_options": {
@@ -4880,7 +4900,10 @@ async def settings_routines(request: Request) -> JSONResponse:
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         app_settings.apply_to_config(config)
-    return JSONResponse(_routines_payload(config, app_settings))
+    # _routines_payload probes the native sidecar, which spawns a subprocess on
+    # first call. Off the event loop: the availability checks it replaced were
+    # in-process find_spec/which calls, so this used to be free.
+    return JSONResponse(await asyncio.to_thread(_routines_payload, config, app_settings))
 
 
 # ── Status ───────────────────────────────────────────────────────────────
@@ -5079,56 +5102,6 @@ async def setup_status_endpoint(request: Request) -> JSONResponse:
     return JSONResponse(setup_status(request.app.state.config))
 
 
-async def voice_install_local_endpoint(request: Request) -> JSONResponse:
-    """Install local voice transcription dependencies (mlx-whisper)."""
-    from ciao.voice_extras import VOICE_LOCAL_REQUIREMENT
-
-    return await _pip_install_and_restart(request, VOICE_LOCAL_REQUIREMENT)
-
-
-async def tts_install_local_endpoint(request: Request) -> JSONResponse:
-    """Install local speech synthesis dependencies (kokoro-onnx)."""
-    from ciao.voice_extras import TTS_LOCAL_REQUIREMENT
-
-    return await _pip_install_and_restart(request, TTS_LOCAL_REQUIREMENT)
-
-
-async def _pip_install_and_restart(request: Request, requirement: str) -> JSONResponse:
-    """pip-install one requirement into the running env, then restart."""
-    import sys
-    import subprocess
-
-    cmd = [sys.executable, "-m", "pip", "install", requirement]
-    try:
-        result = await asyncio.to_thread(
-            subprocess.run,
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        output = (result.stdout.strip() + "\n" + result.stderr.strip()).strip()
-        if result.returncode == 0:
-            config = request.app.state.config
-            async def _do_restart():
-                await asyncio.sleep(2)
-                fn = getattr(request.app.state, "request_restart", None)
-                if callable(fn):
-                    fn(config.restart_exit_code)
-                else:
-                    from ciao.signals import RestartRequested
-                    raise RestartRequested(config.restart_exit_code)
-
-            asyncio.create_task(_do_restart())
-            return JSONResponse({"ok": True, "output": output})
-        else:
-            return JSONResponse(
-                {"ok": False, "error": f"Command exited with code {result.returncode}", "output": output},
-                status_code=500,
-            )
-    except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
-
 
 def _host_name(value: str) -> str:
     host = value.strip()
@@ -5294,19 +5267,42 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
             status_code=400,
         )
 
-    written = setup_workspace(
-        workspace,
-        auth_token=str(body.get("auth_token", "")).strip() or config.pwa_auth_token,
-        auth_required=bool(body.get("auth_required", False)),
-        push_contact=push_contact,
-        vault_root=str(body.get("vault_root", "")).strip() or None,
-        vault_mode=vault_mode,
-        workspace_name=workspace_name,
-        default_provider=default_provider,
-        python_path=str(body.get("python", "")).strip() or None,
-        port=port,
-        launch_agents_dir=str(body.get("launch_agents_dir", "")).strip() or None,
-        app_dir=str(body.get("app_dir", "")).strip() or None,
+    # Password protection is not optional: the wizard collects the password, and
+    # the bootstrap token it would otherwise inherit is a machine-generated
+    # value nobody could type on a second device.
+    from ciao.web.auth import MIN_PWA_PASSWORD_LENGTH
+
+    password = str(body.get("password") or body.get("auth_token") or "").strip()
+    if len(password) < MIN_PWA_PASSWORD_LENGTH:
+        return JSONResponse(
+            {
+                "error": (
+                    "password is required and must be at least "
+                    f"{MIN_PWA_PASSWORD_LENGTH} characters"
+                )
+            },
+            status_code=400,
+        )
+
+    # setup_workspace installs Ciaobot.app, which downloads ~13 MB with a
+    # 300s timeout. On the loop that freezes the wizard's own polling and
+    # every open chat socket for the duration.
+    written = await asyncio.to_thread(
+        functools.partial(
+            setup_workspace,
+            workspace,
+            auth_token=password,
+            auth_required=True,
+            push_contact=push_contact,
+            vault_root=str(body.get("vault_root", "")).strip() or None,
+            vault_mode=vault_mode,
+            workspace_name=workspace_name,
+            default_provider=default_provider,
+            python_path=str(body.get("python", "")).strip() or None,
+            port=port,
+            launch_agents_dir=str(body.get("launch_agents_dir", "")).strip() or None,
+            app_dir=str(body.get("app_dir", "")).strip() or None,
+        )
     )
     # Hand the chosen workspace to the relaunched process. A foreground
     # `ciao run` restarts by re-execing itself with the current environment,
@@ -5314,29 +5310,19 @@ async def setup_finish_endpoint(request: Request) -> JSONResponse:
     # this it boots straight back into the bootstrap wizard.
     os.environ["CIAO_WORKSPACE"] = str(Path(workspace).expanduser().resolve())
     os.environ["PWA_PORT"] = str(port)
-    # Best-effort: bring the menu bar companion up right away so setup ends
-    # with the icon visible instead of waiting for the next login. Only for
-    # the real per-user LaunchAgents dir — scripted/test setups pass a custom
-    # dir and must not register anything with launchd.
+    # Same reason for the credentials: `load_dotenv` does not override values
+    # already in the environment, so a stale PWA_AUTH_TOKEN inherited from the
+    # bootstrap process would outrank the password just written to .env.
+    os.environ["PWA_AUTH_TOKEN"] = password
+    os.environ["PWA_AUTH_REQUIRED"] = "true"
+    # Only the real per-user LaunchAgents dir may be registered with launchd —
+    # scripted/test setups pass a custom dir and must not touch it. Nothing
+    # menu-bar related happens here any more: Ciaobot.app is the menu bar, and
+    # setup_workspace above has just retired the old `com.ciao.menubar` agent.
     real_launch_agents = (
         sys.platform == "darwin"
         and not str(body.get("launch_agents_dir", "")).strip()
     )
-    if real_launch_agents:
-        menubar_plist = Path.home() / "Library" / "LaunchAgents" / "com.ciao.menubar.plist"
-        if menubar_plist.exists():
-            try:
-                loaded = subprocess.run(
-                    ["launchctl", "kickstart", f"gui/{os.getuid()}/com.ciao.menubar"],
-                    capture_output=True, timeout=10,
-                )
-                if loaded.returncode != 0:
-                    subprocess.run(
-                        ["launchctl", "load", "-w", str(menubar_plist)],
-                        capture_output=True, timeout=10,
-                    )
-            except (OSError, subprocess.SubprocessError):
-                logger.info("Could not start the menu bar agent; it will load at next login.")
 
     restart = bool(body.get("restart", True))
     # An interactive foreground `ciao run` (the documented install flow) hands
@@ -5579,27 +5565,6 @@ async def admin_snapshot(request: Request) -> JSONResponse:
 
 
 
-def _run_step(args: list[str], *, cwd: str, timeout: int) -> subprocess.CompletedProcess:
-    """Run a deploy step, turning missing-binary and timeout errors into a
-    failed CompletedProcess so the handler reports a structured error instead
-    of crashing with a 500. Under launchd the server PATH may omit Homebrew,
-    so a bare ``npm`` can raise FileNotFoundError before ``run`` returns."""
-    try:
-        return subprocess.run(
-            args, cwd=cwd, capture_output=True, text=True, timeout=timeout,
-        )
-    except FileNotFoundError as exc:
-        return subprocess.CompletedProcess(
-            args=args, returncode=127, stdout="",
-            stderr=f"{args[0]} not found on PATH: {exc}",
-        )
-    except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(
-            args=args, returncode=124, stdout="",
-            stderr=f"{args[0]} timed out after {timeout}s",
-        )
-
-
 def _resolve_codebase_root(config) -> Path:
     """Where the deploy steps run git, pip, and npm.
 
@@ -5637,7 +5602,7 @@ def _run_root_npm_install(codebase_root: Path) -> subprocess.CompletedProcess:
             stdout="skipped: no root package.json",
             stderr="",
         )
-    return _run_step(args, cwd=str(codebase_root), timeout=180)
+    return desktop_build.run_step(args, cwd=str(codebase_root), timeout=180)
 
 
 async def admin_deploy(request: Request) -> JSONResponse:
@@ -5712,7 +5677,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
     # 2. pip install
     import sys
     result = await asyncio.to_thread(
-        _run_step, [sys.executable, "-m", "pip", "install", "-e", "."],
+        desktop_build.run_step, [sys.executable, "-m", "pip", "install", "-e", "."],
         cwd=str(codebase_root), timeout=120,
     )
     steps.append(_record("pip install", result))
@@ -5733,7 +5698,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
     # 3. npm build
     web_dir = codebase_root / "web"
     result = await asyncio.to_thread(
-        _run_step, ["npm", "run", "build"],
+        desktop_build.run_step, ["npm", "run", "build"],
         cwd=str(web_dir), timeout=120,
     )
     steps.append(_record("npm build", result))
@@ -5748,7 +5713,6 @@ async def admin_deploy(request: Request) -> JSONResponse:
     # restart below. Released installs skip this: no checkout, no cargo. The
     # rebuild is minutes long, hence the staleness check rather than doing it on
     # every restart.
-    from ciao import desktop_build
 
     relaunch_desktop = False
     if getattr(config, "dev_mode", False):
@@ -5758,7 +5722,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
         else:
             steps.append({"step": "desktop app", "ok": True, "output": f"rebuilding: {reason}"})
             desktop_steps, relaunch_desktop = await asyncio.to_thread(
-                desktop_build.build_and_stage, codebase_root, runner=_run_step,
+                desktop_build.build_and_stage, codebase_root, runner=desktop_build.run_step,
             )
             steps.extend(desktop_steps)
             failed = next((s for s in desktop_steps if not s["ok"]), None)
@@ -5786,7 +5750,7 @@ async def admin_deploy(request: Request) -> JSONResponse:
         if relaunch_desktop:
             try:
                 installed = await asyncio.to_thread(
-                    desktop_build.install_staged_and_relaunch, runner=_run_step,
+                    desktop_build.install_staged_and_relaunch, runner=desktop_build.run_step,
                 )
                 for step in installed:
                     if step["ok"]:

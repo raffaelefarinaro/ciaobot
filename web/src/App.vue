@@ -35,7 +35,7 @@
         @skip="skipped = true"
       />
     </Transition>
-    <RestartOverlay
+    <RestartNotice
       v-if="projectStore.serverRestarting"
       :message="projectStore.serverRestartMessage"
     />
@@ -51,7 +51,7 @@ import { useRoute } from 'vue-router'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import { errorMessage } from './lib/errorMessage'
 import InAppToast from './components/InAppToast.vue'
-import RestartOverlay from './components/RestartOverlay.vue'
+import RestartNotice from './components/RestartNotice.vue'
 import StartupView from './components/StartupView.vue'
 import { askConfirm } from './lib/confirm'
 import { normalizeWorkspaceColor } from './lib/workspaceColors'

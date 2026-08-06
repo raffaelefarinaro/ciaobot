@@ -196,7 +196,7 @@ async def node_connect_endpoint(request: Request) -> JSONResponse:
                     {
                         "error": (
                             "Host has no password set. On that machine open "
-                            "Settings → PWA password, enable protection, then connect again."
+                            "Settings → PWA password, set a password, then connect again."
                         ),
                         "auth_required": False,
                         "password_required_on_host": True,
