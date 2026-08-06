@@ -2,30 +2,38 @@
 
 ## v0.7.2 - 2026-08-06
 
+### Removed
+- **`ciao menubar` is gone.** `Ciaobot.app` is the menu bar now, so the old rumps status-bar helper and its `com.ciao.menubar` LaunchAgent are retired: `ciao setup` unloads and deletes that plist on upgrade, because leaving it registered means launchd retrying an executable that no longer ships. Nothing to do by hand (`90afd6f`)
+- **The `voice-local` and `tts-local` extras are gone**, along with the `POST /api/voice/install-local`, `POST /api/tts/install-local`, and `POST /api/apfel/install` routes. On-device voice needs no install step any more, so there is nothing for them to install. An existing `pip install 'ciaobot[voice-local]'` becomes a plain install (`90afd6f`)
+- Four dependencies dropped: `openai`, `rumps`, `mlx-whisper`, and `kokoro-onnx`. `OPENAI_API_KEY` is no longer read for voice — using Codex as a provider is unaffected (`90afd6f`)
+
 ### Added
-- feat(web): dictation in comment composer (`9773344`)
-- feat(web): enable keyboard shortcuts in PWA with non-conflicting combos (`a3c2a44`)
+- **`ciao desktop install`** downloads and installs `Ciaobot.app` without a Gatekeeper prompt. macOS only assesses bundles carrying a download quarantine flag, which browsers and Homebrew casks set but a command-line download does not — so the ad-hoc signed app launches directly, with no "Apple could not verify" dance. Because Apple's notary check is therefore not what guards the download, the installer verifies the release's minisign signature against the same key the in-app updater uses and refuses to install anything that fails. `ciao desktop uninstall` removes it. The first-run wizard now runs the install for you (`--no-desktop-app` on `ciao setup` opts out), and a failed download degrades to the menu-bar launcher rather than failing setup (`90afd6f`)
+- **Chat titles are generated on-device** through the bundled `ciaobot-native` sidecar instead of shelling out to the `apfel` Homebrew CLI, with a cloud model as fallback. Existing `apple`/`apfel` title settings keep working (`90afd6f`)
+- **Dictation in the comment composer** — annotate a file or a message by voice, including while the agent is still working, in which case the comment rides along on your next message (`9773344`)
+- **Keyboard shortcuts now work in the browser**, not just the desktop app, on whichever modifier is actually free: new chat, dictation, and archive are `Cmd+T`/`Cmd+D`/`Cmd+A` in the app and `Option+N`/`Option+D`/`Option+A` in the PWA, where the browser has already spent the Cmd versions on new-tab, bookmark, and select-all. Settings → Shortcuts is shown to everyone with the labels for how you are running it (`a3c2a44`)
+- `scripts/check-desktop.sh` runs the same desktop checks CI does — Swift sidecar build, `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, a universal `tauri build` — and asserts the sidecar ends up bundled, universal, signed, and runnable inside the built app. Previously nothing compiled the Rust shell locally, so those failures only appeared in CI (`90afd6f`)
 
 ### Changed
-- Merge pull request #249 from raffaelefarinaro/chore/sync-develop-v0.7.1 (`3a94e6c`)
-- Merge fix/automation-page-clarity into develop (`591fa4b`)
-- Merge fix/login-toggle-crash into develop (`de7fc32`)
-- Merge pull request #250 from raffaelefarinaro/feat/comment-dictation (`346ef15`)
-- auto-commit: accumulated develop changes (`2cb10f4`)
-- macOS: quarantine-free install, native voice + on-device titles, drop 4 dependencies (#251) (`90afd6f`)
-- Merge branch 'develop' of https://github.com/raffaelefarinaro/ciaobot into develop (`9c4fa9c`)
-- changes (`91eda03`)
+- **Voice is one on-device engine each, and free**: Apple's dictation models for hearing and `AVSpeechSynthesizer` for speaking, both through the `ciaobot-native` sidecar bundled in `Ciaobot.app`. The cloud pair went with them — keeping it meant an API key, two engine pickers, per-minute billing, and a second code path to duplicate what the OS already does. The cost is reach and it is real: voice now needs a **macOS 26+ host with the desktop app installed**, and Settings says so plainly instead of failing when you press record. The constraint is on the *host* only, so a phone or iPad talking to a Mac host still gets voice (`90afd6f`)
+- **The documented install is now `brew install …/ciaobot` then `ciao run`**, with the wizard installing the app. The `ciaobot-desktop` cask remains as a fallback and still hits the Gatekeeper block, so its caveats still describe the Open Anyway steps (`90afd6f`)
+- **Password protection is on by default and can no longer be switched off from Settings.** The first-run wizard asks for the dashboard password (confirmed, minimum 4 characters); `POST /api/auth/settings` sets or changes it but rejects `auth_required: false` rather than ignoring it. The only way out is `PWA_AUTH_REQUIRED=false` in the workspace `.env` — an explicit operator decision made on the machine itself (`2cb10f4`)
+- Settings → Automations is now readable: a headline says whether anything is broken and names it, failing automations sort first, and every row states what it does and when it runs instead of carrying capability chips and a success rate. Rows are actionable — a failing Session insights can be re-run over every archive that is missing them, with a one-off model override for when the configured model is the problem (`POST /api/automation/backfill-insights` accepts `{"model": …}`), and the separate "Insights backfill" row is gone: it is that action. Settled one-time migrations fold away behind a disclosure (`cd9d266`)
+- Settings → Context no longer describes the workspace guide as one instruction file per CLI. There is a single `CLAUDE.md`; `AGENTS.md` is a symlink to it (`cd9d266`)
+- Settings → Skills links to Providers for the skills, plugins, and MCP servers each CLI brings on its own (`cd9d266`)
+- The restart notice is a movable card instead of a full-screen takeover, so it no longer blocks the app while a restart finishes (`78b83bd`)
 
 ### Fixed
-- fix(web): make Settings → Automations answer what a user asks it (`cd9d266`)
-- fix(menubar): skip host label when toggling launch-at-login (`3d30473`)
-- fix(web): make the restart notice a movable card, not a full-screen takeover (`78b83bd`)
-- fix(web): bound the restart message the notice card renders (`e85ceee`)
-- fix(setup): stop resurrecting the retired menu-bar LaunchAgent (`75b6555`)
+- Settings → Automations stops listing automations that cannot run here. `job_runs_latest.json` never expires an entry, so a job removed from the code (the startup PWA rebuild, dropped in v0.6.x) kept a stale green row forever; retired ids are now filtered out. Weekly Dependency review is hidden unless its `system-dependency-review` schedule is actually installed — it is no longer a stock schedule, so nothing triggered it on a fresh install (`cd9d266`)
+- First-run setup no longer re-registered the retired `com.ciao.menubar` LaunchAgent immediately after deleting it. Normally the plist was already gone and the block did nothing, but when the unlink failed it left launchd retrying a missing executable forever — the exact state the cleanup exists to prevent (`75b6555`)
+- The restart notice bounds the message it renders, so a long server error can no longer stretch the card off-screen (`e85ceee`)
+- Toggling launch-at-login no longer mislabels which machine it applies to when viewing a host's Settings from a client (`3d30473`)
 
 ### Maintenance
-- docs(license): add copyright line and Apache appendix (`aa4c919`)
-- chore(deps): sync uv.lock to 0.7.1 (`e823ec9`)
+- `claude-agent-sdk` 0.2.128 → 0.2.131
+- LICENSE carries an explicit copyright line and the full Apache appendix (`aa4c919`)
+- `uv.lock` synced (`e823ec9`)
+- Corrected two stale in-code docs this release falsified: the capabilities skill still advertised cloud OpenAI transcription and `mlx-whisper` with a `CIAO_TRANSCRIPTION_MODEL` override, and `ChatLayout` still called the modifier shortcuts desktop-only (`75b6555`)
 
 ## v0.7.1 - 2026-08-04
 
@@ -47,12 +55,8 @@
 - Remove the 100%/120% font-scale preset buttons; the font baseline is set once and no longer toggled from the UI (`3e68489`)
 - Settings → Automation no longer names a single model for an Automatic routine. Chat titles and Session insights both resolve from the chat's workspace, so the summary now says so and lists the per-workspace models; `/api/settings/routines` gained `title_model_by_workspace` / `insights_model_by_workspace` (`ccb0108`)
 - Architecture review cleanup (#247): split the `node_*`/package handlers into `ciao/web/routes_node.py` and the MCP HTTP endpoints into `ciao/web/routes_mcp.py`, extract `SettingsAutomation.vue` and a shared `useFileComments` composable, and delete 11 dead control-plane methods. `docs/ARCHITECTURE.md` now indexes every top-level `ciao/` module, enforced by `tests/test_architecture_doc.py` (`07a7626`)
-- Settings → Automations is now readable: a headline says whether anything is broken and names it, failing automations sort first, and every row states what it does and when it runs instead of carrying capability chips and a success rate. Rows are actionable — a failing Session insights can be re-run over every archive that is missing them, with a one-off model override for when the configured model is the problem (`POST /api/automation/backfill-insights` accepts `{"model": …}`), and the separate "Insights backfill" row is gone: it is that action. Settled one-time migrations fold away behind a disclosure
-- Settings → Context no longer describes the workspace guide as one instruction file per CLI. There is a single `CLAUDE.md`; `AGENTS.md` is a symlink to it
-- Settings → Skills links to Providers for the skills, plugins, and MCP servers each CLI brings on its own
 
 ### Fixed
-- Settings → Automations stops listing automations that cannot run here. `job_runs_latest.json` never expires an entry, so a job removed from the code (the startup PWA rebuild, dropped in v0.6.x) kept a stale green row forever; retired ids are now filtered out. Weekly Dependency review is hidden unless its `system-dependency-review` schedule is actually installed — it is no longer a stock schedule, so nothing triggered it on a fresh install
 - Fix the dev-mode desktop rebuild (Settings → Restart) failing with an unexplained `tauri build` error: the build now locates a Rust toolchain that is installed but off `PATH` (Homebrew's rustup keeps `cargo` in `opt/rustup/bin`, invisible to a launchd- or Finder-started engine), refuses up front with install instructions when there is genuinely no toolchain, and reports a failed step's stderr instead of only npm's command echo
 - Stop session insights and the schedule attention classifier failing on slow or large-context sessions (#248): the per-call timeout is now `CIAO_INSIGHTS_TIMEOUT_S` (default 600s, was a flat 120s against a path measured at 214–253s), transcripts are trimmed to `CIAO_INSIGHTS_MAX_INPUT_CHARS` oldest-first so they fit the model's context window, and an oversized-input 400 is no longer retried with the identical payload
 - Home-screen arrow keys moved two cards per press in the desktop app (the keys were handled by two listeners at once) and Esc did nothing in the browser (it was bound desktop-only). Both now work in the PWA and the app, and Esc closes a chat even while typing in the composer (`bd681fe`, `8558806`)
