@@ -410,11 +410,11 @@ class CiaoConfig:
     )
     claude_mode: BridgeMode = "auto"
     restart_exit_code: int = 75
-    auto_sync_on_start: bool = True
+    auto_sync_on_start: bool = False
     auto_vault_index: bool = True
     auto_update_github_skills: bool = False
     pwa_port: int = 8443
-    pwa_host: str = "0.0.0.0"
+    pwa_host: str = "127.0.0.1"
     gws_default_profile: str = "personal"
     # Models in `ollama.models` get rerouted to a local Ollama daemon via
     # the Anthropic-compatible API. Empty allowlist disables the routing.
